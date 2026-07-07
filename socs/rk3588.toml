@@ -8,6 +8,19 @@ dt_dir      = "rockchip"                 # arch/arm64/boot/dts/<dt_dir>
 # they are guaranteed present on first boot.
 modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket"]
 
+# Non-free firmware the RK3588 loads at runtime, from Debian's non-free-firmware
+# component (already enabled in the rootfs sources.list) and snapshot-pinned like
+# every other package -- so no linux-firmware tarball is fetched or extracted.
+#   firmware-misc-nonfree -- the panthor Mali CSF blob the G610 GPU needs
+#     (/usr/lib/firmware/arm/mali/arch10.8/mali_csffw.bin) plus the rockchip/
+#     display firmware (e.g. rockchip/dptx.bin for USB-C DisplayPort alt-mode).
+#   firmware-realtek -- rtl_nic/ blobs for Realtek USB/PCIe NICs. Defensive: the
+#     RK3588's own GMAC + RTL8211F PHY needs no firmware, but a board or USB dongle
+#     with a Realtek NIC does.
+# The RK3588 has no integrated wifi/BT radio, so no wireless firmware is staged
+# here; a board that adds a wifi module pulls its firmware on its device layer.
+packages = ["firmware-misc-nonfree", "firmware-realtek"]
+
 # Media-accel userspace source trees, shared across the RK35xx family.
 # `ref` is the default constraint; the exact commit is pinned in the lock. mpp
 # pins the durable upstream release tag, and the contiguous-CMA allocator fix the

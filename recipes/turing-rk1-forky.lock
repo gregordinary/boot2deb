@@ -37,6 +37,7 @@ commit = "f66f2f804627e4464c2d1b10181772b5437bb991"
 [rootfs]
 suite = "forky"
 manifest = "turing-rk1-forky.pkgs.lock"
+manifest_sha256 = "b7aab7c08b017e3cdaef22bdbf1484cbb5f1c839fb47ce3d7923de64ce714dbf"
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"

@@ -27,9 +27,11 @@
 //! installed set from dpkg status. mmdebstrap's own cleanup still empties the
 //! cache afterward, so the tarball stays lean.
 //!
-//! **Known follow-up** (tracked, not silently skipped): board firmware
-//! (linux-firmware rockchip/rtl_nic/mali) is not yet staged — a headless VPU
-//! transcode boots without it, but a NIC/GPU that needs a blob will want it.
+//! Board firmware (rockchip display, panthor Mali, Realtek NIC) is staged as
+//! Debian `non-free-firmware` packages declared on the SoC layer (for RK3588:
+//! `firmware-misc-nonfree` + `firmware-realtek` in `socs/rk3588.toml`), not
+//! extracted from a linux-firmware tarball — so it is snapshot-pinned like every
+//! other package and needs no separate fetch step.
 
 use crate::bootstrap::{StagingRoot, COMPONENTS};
 use crate::error::EngineError;
