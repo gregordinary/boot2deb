@@ -1,0 +1,15 @@
+# kernels/rk3588-mainline-7.1.toml — a kernel is its own versioned entity that
+# owns everything version-coupled: source ref, config fragments, patch profile.
+flavor           = "mainline"
+source           = "linux-stable"        # 7.1.x stable releases live in linux-stable
+track            = "7.1.y"               # resolved to an exact tag/SHA in the lock (v7.1.1)
+base_defconfig   = "defconfig"           # in-tree arm64 base; fragments merge onto it
+# Merge order (base first, device appended by the device layer): the generated
+# Debian-generic baseline, then the curated rockchip SoC + accel slices.
+config_fragments = ["base/debian-arm64", "soc/rk3588", "accel/full"]
+patch_profile    = "rk3588-accel"        # -> patches repo, kernel-version-scoped
+# Clone URL of the patches repo, so a build with no local checkout auto-fetches
+# the series at the lock-pinned commit. Override with --patches-url, or point
+# --patches-path at a local checkout to co-develop the series.
+patches_url      = "https://github.com/gregordinary/patches.git"
+supported_socs   = ["rk3588"]

@@ -1,0 +1,21 @@
+# devices/turing-rk1.toml — Turing RK1 (RK3588) compute module.
+# Hardware invariants + defaults; a device states only its deltas.
+description             = "Turing RK1 (RK3588) compute module"
+soc                     = "rk3588"                 # -> arch, dt_dir, modules
+boot_method             = "rockchip-rkbin"         # default within supported_boot_methods
+supported_boot_methods  = ["rockchip-rkbin"]
+uboot_defconfig         = "turing-rk1-rk3588_defconfig"
+kernel_dtb              = "rockchip/rk3588-turing-rk1.dtb"
+device_config_fragments = ["device/turing-rk1"]    # board-specific kconfig only
+supported_kernels       = ["rk3588-mainline-7.1"]
+default_kernel          = "rk3588-mainline-7.1"
+default_suite           = "forky"                  # validated, supported suite for this board
+default_layout          = "combined"               # combined | split
+hostname                = "turing-rk1"
+image_size              = "2G"
+
+# DDR TPL is board-memory-specific, so the rkbin blob set lives at the device
+# layer (not the soc layer) for the RK1's LPDDR configuration.
+[rkbin]
+atf = "rk3588_bl31_v1.51.elf"
+tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"

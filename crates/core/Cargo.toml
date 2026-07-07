@@ -1,0 +1,16 @@
+[package]
+name = "boot2deb-core"
+description = "boot2deb config model, layer resolution, and lock/kconfig formats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+semver.workspace = true
+
+[dev-dependencies]
+# Fixture config roots for resolution tests, decoupled from the shipped layers.
+tempfile.workspace = true

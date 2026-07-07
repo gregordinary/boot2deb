@@ -1,0 +1,18 @@
+[package]
+name = "boot2deb-cli"
+description = "boot2deb command-line interface: resolve, update, verify, and build device images"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "boot2deb"
+path = "src/main.rs"
+
+[dependencies]
+boot2deb-core.workspace = true
+boot2deb-engine.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

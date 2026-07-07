@@ -1,0 +1,296 @@
+//! Typed configuration errors.
+//!
+//! Every failure of loading or resolving config is one of these variants, so the
+//! whole "is this build well-formed?" question is answered — with an actionable
+//! message — *before* any build work starts.
+
+/// An error from loading a config layer or resolving a build.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// A referenced config file does not exist. `kind` is the layer kind
+    /// (`"device"`, `"kernel"`, …) for a readable message.
+    #[error("{kind} '{name}' not found (looked at {path})")]
+    NotFound {
+        /// Layer kind, e.g. `"device"`.
+        kind: &'static str,
+        /// The name that was looked up.
+        name: String,
+        /// The path that was tried.
+        path: String,
+    },
+
+    /// A layer/recipe name (from a CLI argument or a config cross-reference) is
+    /// not a bare identifier, so it cannot be trusted to join into a filesystem
+    /// path. Names must match `[A-Za-z0-9._-]`, be non-empty, not start with a dot,
+    /// and contain no path separators or `..` — this stops a `../` traversal or an
+    /// absolute path from escaping the config root (both a read *and*, via
+    /// `lock_path`, a write target).
+    #[error("invalid {kind} name '{name}': must be a bare identifier ([A-Za-z0-9._-], no separators or '..')")]
+    InvalidName {
+        /// Layer kind, e.g. `"device"`.
+        kind: &'static str,
+        /// The offending name.
+        name: String,
+    },
+
+    /// An overlay ships a copy of a *trust anchor* asset (the Debian archive
+    /// keyring) that the shipped root also provides. Overlays are operator-supplied
+    /// but not necessarily audited line-by-line, and honoring an overlay's archive
+    /// keyring silently changes which `Release` signatures apt accepts — a
+    /// trust-anchor swap (TRUST-1). Resolution fails closed rather than pick the
+    /// overlay's copy; `--unsafe-overlay-keyring` opts into the overlay explicitly.
+    #[error(
+        "overlay trust-anchor conflict: an overlay ships '{asset}', which shadows the \
+         shipped archive keyring — refusing to trust an unaudited keyring. Pass \
+         --unsafe-overlay-keyring to use the overlay's copy, or remove it from the overlay."
+    )]
+    OverlayTrustAnchor {
+        /// The repo-relative asset path an overlay tried to shadow.
+        asset: String,
+    },
+
+    /// A config file exists but could not be read (permissions, etc.).
+    #[error("failed to read {path}: {source}")]
+    Io {
+        /// The file that failed to read.
+        path: String,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A config file was read but is not valid TOML for its type (bad syntax,
+    /// unknown field, wrong value type).
+    #[error("failed to parse {path}: {source}")]
+    Parse {
+        /// The file that failed to parse.
+        path: String,
+        /// Underlying deserialization error.
+        #[source]
+        source: toml::de::Error,
+    },
+
+    /// A generated artifact (e.g. a lockfile) could not be serialized to TOML.
+    #[error("failed to serialize {what}: {source}")]
+    Serialize {
+        /// What was being serialized.
+        what: &'static str,
+        /// Underlying serialization error.
+        #[source]
+        source: toml::ser::Error,
+    },
+
+    /// The chosen kernel is not in the device's `supported_kernels`.
+    #[error("device '{device}' does not support kernel '{kernel}' (supported: {supported})")]
+    UnknownKernelForDevice {
+        /// The device being resolved.
+        device: String,
+        /// The requested kernel id.
+        kernel: String,
+        /// Comma-separated list of what the device does support.
+        supported: String,
+    },
+
+    /// The chosen kernel does not list the device's SoC in `supported_socs`.
+    #[error("kernel '{kernel}' does not support soc '{soc}' (supported: {supported})")]
+    SocMismatch {
+        /// The kernel id.
+        kernel: String,
+        /// The device's SoC.
+        soc: String,
+        /// Comma-separated SoCs the kernel supports.
+        supported: String,
+    },
+
+    /// The chosen boot method is not in the device's `supported_boot_methods`.
+    #[error("device '{device}' does not support boot method '{boot_method}' (supported: {supported})")]
+    UnsupportedBootMethod {
+        /// The device being resolved.
+        device: String,
+        /// The requested boot method.
+        boot_method: String,
+        /// Comma-separated boot methods the device supports.
+        supported: String,
+    },
+
+    /// A required blob field (e.g. `rkbin.atf`) is empty.
+    #[error("device '{device}' is missing a required blob: {what}")]
+    MissingBlob {
+        /// The device being resolved.
+        device: String,
+        /// Which blob field is missing.
+        what: String,
+    },
+
+    /// A patch profile's `applies_to_kernel` is not a valid semver requirement.
+    #[error("profile '{profile}' has invalid applies_to_kernel '{value}': {source}")]
+    InvalidVersionReq {
+        /// The profile whose range failed to parse.
+        profile: String,
+        /// The offending `applies_to_kernel` string.
+        value: String,
+        /// Underlying semver parse error.
+        #[source]
+        source: semver::Error,
+    },
+
+    /// A size / offset string could not be parsed to bytes (bad number, missing
+    /// or unknown unit, or overflow) — see [`parse_size`](crate::size::parse_size).
+    #[error("invalid size '{value}' (expected e.g. '512', '32KiB', '8MiB', '2G')")]
+    InvalidSize {
+        /// The offending size string.
+        value: String,
+    },
+
+    /// A kernel version string could not be parsed as a semver version.
+    #[error("kernel version '{value}' is not a valid version: {source}")]
+    InvalidKernelVersion {
+        /// The offending version string.
+        value: String,
+        /// Underlying semver parse error.
+        #[source]
+        source: semver::Error,
+    },
+
+    /// The resolved kernel version falls outside the profile's declared range —
+    /// the "declared intent" mismatch caught before the verify gate runs.
+    #[error(
+        "profile '{profile}' does not target kernel {kernel_version} \
+         (applies_to_kernel = '{applies_to}')"
+    )]
+    KernelOutsideProfileRange {
+        /// The patch profile.
+        profile: String,
+        /// The resolved kernel version that is out of range.
+        kernel_version: String,
+        /// The profile's declared range.
+        applies_to: String,
+    },
+
+    /// A selected feature does not support the resolved SoC.
+    #[error("feature '{feature}' does not support soc '{soc}' (supported socs: {supported})")]
+    IncompatibleFeatureSoc {
+        /// The feature being validated.
+        feature: String,
+        /// The resolved SoC.
+        soc: String,
+        /// Comma-separated SoCs the feature's `requires_soc` lists.
+        supported: String,
+    },
+
+    /// A selected feature does not support the resolved arch. The arch gate
+    /// for a discrete-GPU capability feature, orthogonal to the SoC gate.
+    #[error("feature '{feature}' does not support arch '{arch}' (supported arches: {supported})")]
+    IncompatibleFeatureArch {
+        /// The feature being validated.
+        feature: String,
+        /// The resolved arch.
+        arch: String,
+        /// Comma-separated arches the feature's `requires_arch` lists.
+        supported: String,
+    },
+
+    /// Two selected features contribute an apt source with the same `name` but
+    /// differing definitions, so the rootfs solve cannot tell which repo to
+    /// activate. Identical duplicates are fine (de-duplicated); a genuine
+    /// clash is rejected.
+    #[error(
+        "features '{feature}' and '{other}' both define apt source '{name}' with \
+         different settings"
+    )]
+    ConflictingAptSource {
+        /// One feature defining the source.
+        feature: String,
+        /// The other feature defining a clashing source of the same name.
+        other: String,
+        /// The apt-source name that clashes.
+        name: String,
+    },
+
+    /// The same feature was selected more than once. Features apply their overlay
+    /// and packages, so a duplicate would apply an overlay twice — rejected rather
+    /// than silently deduplicated.
+    #[error("feature '{feature}' selected more than once")]
+    DuplicateFeature {
+        /// The repeated feature name.
+        feature: String,
+    },
+
+    /// Two selected features declare a mutual conflict, so they cannot be
+    /// combined in one build.
+    #[error("features '{feature}' and '{conflicts_with}' cannot be combined")]
+    ConflictingFeatures {
+        /// One feature in the conflicting pair.
+        feature: String,
+        /// The other feature it conflicts with.
+        conflicts_with: String,
+    },
+
+    /// The resolved suite (device `default_suite` or a `--suite` override) is not a
+    /// well-formed Debian codename: it must be a bare token starting with an
+    /// alphanumeric and drawn from `[A-Za-z0-9._-]`. Rejected at resolve so an
+    /// invalid suite fails immediately instead of deep in `mmdebstrap`, and so a
+    /// leading `-` can never reach the bootstrap as a positional (CFG-3, pairs with
+    /// SUB-2's `--` hardening).
+    #[error("invalid suite '{value}': must be a Debian codename (a bare token in [A-Za-z0-9._-] starting with an alphanumeric)")]
+    InvalidSuite {
+        /// The offending suite string.
+        value: String,
+    },
+
+    /// An `extra_debs` entry does not set exactly one locator: it must carry either
+    /// a `url` or a `path`, not both and not neither. The sha256
+    /// identifies the offending entry.
+    #[error("extra_deb (sha256 {sha256}) must set exactly one of `url` or `path`")]
+    ExtraDebLocator {
+        /// The content hash of the malformed entry.
+        sha256: String,
+    },
+
+    /// An `extra_debs` entry's sha256 is not a 64-character lowercase-hex string,
+    /// so it cannot be the content pin the build verifies the fetched bytes against.
+    #[error("extra_deb sha256 '{value}' is not 64 lowercase hex characters")]
+    ExtraDebBadHash {
+        /// The offending sha256 string.
+        value: String,
+    },
+
+    /// An `extra_debs` `path` locator escapes the config root: it is absolute or
+    /// contains a `..` component. A `path` deb is resolved relative to a config root
+    /// (an overlay may ship it), so it must stay within one — an out-of-root
+    /// read is a config-containment breach, not a valid source.
+    #[error("extra_deb path '{value}' must be a relative path within the config root (no leading `/`, no `..`)")]
+    ExtraDebUnsafePath {
+        /// The offending path string.
+        value: String,
+    },
+
+    /// A patch handed to `patch import` had no content to normalize.
+    #[error("patch is empty")]
+    PatchEmpty,
+
+    /// A patch handed to `patch import` carried no diff payload — a
+    /// metadata-only mail or prose, which would be written as an empty patch.
+    #[error("patch has no diff (no `diff --git`/`--- a/…` payload found)")]
+    PatchNoDiff,
+
+    /// A patch handed to `patch import` has no subject and none could be
+    /// derived — a bare diff whose changed file could not be named, or an mbox
+    /// missing its `Subject:` header. Pass `--subject`.
+    #[error("patch has no subject and none could be derived (pass --subject)")]
+    PatchMissingSubject,
+
+    /// `patch import` could not choose a numeric filename prefix that sorts the new
+    /// patch at the requested position: its integer neighbors leave no gap. Pass an
+    /// explicit destination label with `--as`.
+    #[error(
+        "no integer filename-prefix gap at this position (between {before} and {after}); \
+         pass an explicit label with --as"
+    )]
+    PatchPrefixNoGap {
+        /// The prefix of the entry that would precede the new patch.
+        before: u32,
+        /// The prefix of the entry that would follow it.
+        after: u32,
+    },
+}

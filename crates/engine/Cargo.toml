@@ -1,0 +1,51 @@
+[package]
+name = "boot2deb-engine"
+description = "boot2deb engine: compile/patch/rootfs/image stages and host preflight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+boot2deb-core.workspace = true
+serde.workspace = true
+# Serializes the diffable build-signature stamp (`<tree>.sig`) that `why-rebuild`
+# diffs. Pure Rust, already in the tree via core.
+toml.workspace = true
+# Format-preserving TOML editing for `patch import`: slot a patch into a
+# profile's scope list without disturbing the file's comments/layout. Already in
+# the tree as toml's own parser backend.
+toml_edit = "0.22"
+thiserror.workspace = true
+sha2.workspace = true
+# Pure-Rust image assembly: GPT tables, ext4 mkfs, and .xz compression —
+# no C deps. lzma-rust2's `optimization` feature (its only `unsafe`) is left off.
+gpt = "4"
+arcbox-ext4 = "0.1"
+# Deterministic ext4 UUID + GPT disk/partition GUIDs derived from the lock, so the
+# image carries no `/dev/urandom` identifiers. Same major as gpt/arcbox-ext4.
+uuid.workspace = true
+lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "xz", "encoder"] }
+# Randomly-named, fail-if-exists staging dirs for the rootless bootstraps,
+# so a local user cannot pre-create and own the acquire-phase inputs.
+tempfile.workspace = true
+# HTTP(S) fetch of pre-built `extra_debs` from a vendor URL. Pure-Rust
+# TLS via rustls with bundled roots (no system OpenSSL / cert store), aligning with
+# the pure-Rust orchestrator goal and the rustls direction; blocking, no async
+# runtime pulled in.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+# Pure-Rust clone of the `patches` repo at the lock-pinned commit, so a
+# build with no local checkout auto-fetches the series. Blocking HTTP/S transport
+# over reqwest + rustls (no libcurl / OpenSSL), plus `worktree-mutation` for the
+# detached checkout of the exact pinned commit into the cache.
+gix = { version = "0.85", default-features = false, features = [
+    "sha1",
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-rust-tls",
+    "worktree-mutation",
+] }
+# Process-group kill for the wall-clock-bounded `verify-sources` durability probe:
+# on timeout, SIGKILL git's whole process group so its network-helper
+# children die too and release the captured pipes, rather than hanging on a
+# huge-history repo. Already in the tree transitively; the engine is Linux-only,
+# so the Unix `killpg` is idiomatic here.
+libc = "0.2"

@@ -1,0 +1,11 @@
+[book]
+title = "boot2deb"
+description = "Turn a device into a Debian device — a Rust-native, typed, testable image builder."
+authors = ["gregordinary"]
+src = "src"
+language = "en"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/gregordinary/boot2deb"

@@ -1,0 +1,16 @@
+# recipes/turing-rk1-jellyfin.toml — the "accelerated Jellyfin on a Turing RK1"
+# use case. The scenario lives in the recipe name; the reusable building blocks
+# are the features it composes: the `jellyfin` application feature plus the
+# `media-accel-rockchip` capability feature that provides HW transcode on RK35xx.
+# Same device and kernel as turing-rk1-forky, just a different feature set.
+#
+# NOTE: `jellyfin` pulls from a third-party apt repo whose engine-side activation
+# (mmdebstrap) and signing-key vendoring ride the physical boot gate; see
+# features/jellyfin/README.md. `boot2deb resolve turing-rk1-jellyfin` validates
+# the composition today. The sibling .lock is written by `boot2deb update`.
+device     = "turing-rk1"
+kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
+suite      = "forky"                     # omit -> device default_suite
+features   = ["jellyfin", "media-accel-rockchip"]
+layout     = "combined"                  # omit -> device default_layout
+image_size = "3G"                         # Jellyfin + media-accel over the base

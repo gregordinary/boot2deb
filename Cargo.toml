@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/engine", "crates/cli"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "2"
+semver = "1"
+sha2 = "0.10"
+# Matches the major used by gpt + arcbox-ext4 so their `Uuid`-typed APIs accept
+# the deterministic identifiers the image node derives from the lock.
+uuid = "1"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+boot2deb-core = { path = "crates/core" }
+boot2deb-engine = { path = "crates/engine" }

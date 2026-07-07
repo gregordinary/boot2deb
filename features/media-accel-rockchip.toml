@@ -1,0 +1,19 @@
+# features/media-accel-rockchip.toml — the Rockchip hardware video-transcode
+# stack (MPP codec + RGA 2D + ffmpeg-rk), a capability feature. It is
+# named for what it *is* (a media-accel provider on Rockchip), not for any one
+# app that uses it: an accelerated Jellyfin/Plex/Emby recipe, or a bare-ffmpeg
+# box, all compose this same feature. Use-case bundling belongs to a recipe
+# (e.g. recipes/turing-rk1-jellyfin.toml), not to this feature's name.
+#
+# Capability features carry a hardware compatibility gate — here `requires_soc`,
+# since the stack is SoC-integrated (VEPU/VDPU/RGA). A cross-arch sibling (an
+# Intel/AMD `media-accel-vaapi`, an NVIDIA `media-accel-nvenc`) would be a
+# separate feature gated on `requires_arch`; the user picks the one matching
+# their hardware — there is no provider auto-resolution (non-goal).
+#
+# An overlay tree at features/media-accel-rockchip/overlay/ is merged if present;
+# this feature ships none (it adds packages only), so that directory does not
+# currently exist.
+description  = "Rockchip HW video transcode (MPP + RGA + ffmpeg-rk) for RK35xx"
+packages     = ["ffmpeg-rk", "librockchip-mpp1", "librga2"]
+requires_soc = ["rk3588", "rk3576", "rk3566"]

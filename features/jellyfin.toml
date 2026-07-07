@@ -1,0 +1,29 @@
+# features/jellyfin.toml — the Jellyfin media server, an *application* feature.
+# Named for the app, not for any hardware: it is portable (no
+# `requires_soc` / `requires_arch` gate) and carries no transcode stack of its
+# own. Hardware-accelerated transcode comes from composing this with a capability
+# feature that matches the target — e.g. `media-accel-rockchip` on an RK35xx board
+# (see recipes/turing-rk1-jellyfin.toml). Without one, Jellyfin still installs and
+# runs; transcode falls back to software.
+#
+# Jellyfin is not in the Debian mirror, so this feature adds its signed upstream
+# apt repository (`[[apt_sources]]`) — apt then resolves `jellyfin` and its
+# dependencies during the rootfs solve, rather than a post-install `dpkg -i` that
+# resolves nothing. The repo's signing key is a build-host prerequisite,
+# vendored under blobs/keyrings/ like the Debian archive keyring; see
+# blobs/keyrings/README.md. An overlay tree at features/jellyfin/overlay/ is
+# merged if present; this feature ships none today — Jellyfin runs with its
+# bundled ffmpeg, and pointing it at the system HW ffmpeg is a documented
+# refinement (see features/jellyfin/README.md).
+description = "Jellyfin media server (composes with a media-accel-* capability feature)"
+packages    = ["jellyfin"]
+
+# Jellyfin keys its pockets on the base OS codename. `forky` (the RK1's suite) is
+# not yet a published Jellyfin pocket; `trixie` is the closest published stable
+# base and installs cleanly on a forky rootfs. Retarget when a forky pocket ships.
+[[apt_sources]]
+name       = "jellyfin"
+uri        = "https://repo.jellyfin.org/debian"
+suite      = "trixie"
+components = ["main"]
+signed_by  = "jellyfin.gpg"

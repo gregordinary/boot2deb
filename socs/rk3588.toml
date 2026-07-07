@@ -1,0 +1,41 @@
+# socs/rk3588.toml — RK3588 SoC invariants shared across RK3588 boards.
+description = "Rockchip RK3588 (4x Cortex-A76 + 4x Cortex-A55)"
+arch        = "arm64"
+dt_dir      = "rockchip"                 # arch/arm64/boot/dts/<dt_dir>
+
+# Accel modules force-loaded on the RK3588 media stack via
+# /etc/modules-load.d/. Auto-probed via DT compat strings; listed here so
+# they are guaranteed present on first boot.
+modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket"]
+
+# Media-accel userspace source trees, shared across the RK35xx family.
+# `ref` is the default constraint; the exact commit is pinned in the lock. mpp
+# pins the durable upstream release tag, and the contiguous-CMA allocator fix the
+# VEPU580 encoder needs is applied from the profile's `userspace` scope as a
+# `git am` patch — a durable base plus a versioned patch, not a
+# locally-authored commit.
+[userspace.mpp]
+git = "https://github.com/tsukumijima/mpp-rockchip.git"
+ref = "v1.5.0-1-20260121-750e76e"
+
+[userspace.librga]
+git = "https://github.com/tsukumijima/librga-rockchip.git"
+ref = "master"
+
+[userspace.libmali]
+git = "https://github.com/tsukumijima/libmali-rockchip.git"
+ref = "master"
+
+# ffmpeg source pair: mainline V4L2-request decode base (Kwiboo) plus the Rockchip
+# rkmpp-encode / rkrga-filter graft (nyanmisaka). The graft is materialized as an
+# ordered `git am` series in the rk3588-accel profile's `ffmpeg` scope — one
+# graft commit (the RKMPP hwcontext) needs a 3-way conflict resolution a plain
+# cherry-pick cannot reproduce — so `rockchip` here is recorded as provenance and
+# is not fetched at build time. The two refs are a matched FFmpeg-8.1 pair.
+[ffmpeg.base]
+git = "https://code.ffmpeg.org/Kwiboo/FFmpeg.git"
+ref = "v4l2-request-n8.1"
+
+[ffmpeg.rockchip]
+git = "https://github.com/nyanmisaka/ffmpeg-rockchip.git"
+ref = "8.1"

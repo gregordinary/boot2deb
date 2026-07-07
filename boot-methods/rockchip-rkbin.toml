@@ -1,0 +1,14 @@
+# boot-methods/rockchip-rkbin.toml — Rockchip idbloader + u-boot.itb written to
+# the raw gap ahead of the rootfs partition, with rkbin ATF (BL31) + DDR TPL.
+description = "Rockchip idbloader + u-boot.itb in the raw gap (rkbin ATF/TPL)"
+
+uboot_source = "https://source.denx.de/u-boot/u-boot.git"
+uboot_ref    = "v2026.04"                # default constraint; pinned exactly in the lock
+
+# Raw-gap layout (byte offsets, outside any filesystem):
+#   idbloader   @ 32 KiB
+#   u-boot.itb  @ 8 MiB
+#   rootfs partition starts @ 16 MiB
+idbloader_offset = "32KiB"
+uboot_itb_offset = "8MiB"
+rootfs_offset    = "16MiB"

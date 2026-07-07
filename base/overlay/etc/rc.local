@@ -1,0 +1,42 @@
+#!/bin/sh
+set -e
+this=$(realpath $0)
+perm=$(stat -c %a $this)
+if [ 774 -eq $perm ]; then
+    # second phase (armed by the first): grow the filesystem to fill the resized
+    # partition, then retire this script.
+    resize2fs "$(findmnt -no source /)"
+    rm "$this"
+    systemctl stop rc-local.service
+else
+    # first phase: regenerate ssh host keys, grow the root partition, give the
+    # rootfs a fresh UUID, run any board-specific first-boot hooks, then reboot
+    # into the second phase.
+    dpkg-reconfigure openssh-server
+    systemctl enable ssh.service
+    # expand root partition & change its uuid
+    rp="$(findmnt -no source /)"
+    rpn="$(echo "$rp" | grep -Eo '[[:digit:]]*$')"
+    rd="/dev/$(lsblk -no pkname "$rp")"
+    uuid="$(cat /proc/sys/kernel/random/uuid)"
+    echo "size=+, uuid=$uuid" | sfdisk -f -N "$rpn" "$rd"
+    # change rootfs uuid
+    uuid="$(cat /proc/sys/kernel/random/uuid)"
+    echo "changing rootfs uuid: $uuid"
+    tune2fs -U "$uuid" "$rp"
+    sed -i "s|$(findmnt -fsno source '/')|UUID=$uuid|" '/etc/fstab'
+
+    # Board-specific first-boot steps (bootloader-config regeneration, network
+    # naming, ...) are drop-ins the boot-method and device overlays supply, so the
+    # generic base stays portable: a non-rkbin / non-Rockchip target simply has no
+    # hooks here rather than aborting on a hardcoded step.
+    if [ -d /etc/boot2deb/first-boot.d ]; then
+        for hook in /etc/boot2deb/first-boot.d/*; do
+            [ -x "$hook" ] && "$hook"
+        done
+    fi
+
+    # arm the second phase and reboot into it
+    chmod 774 "$this"
+    reboot
+fi

@@ -1,0 +1,22 @@
+# base.toml — the distro-generic rootfs substrate: the base Debian package
+# set every boot2deb image installs, plus packages excluded from the base system.
+# Layer-specific packages (soc/boot-method/device) and feature packages stack on
+# top at resolution; overlay files live in each layer's overlay/ tree.
+packages = [
+    "initramfs-tools",
+    "dbus",
+    "dhcpcd",
+    "libpam-systemd",
+    "openssh-server",
+    "systemd-timesyncd",
+    "curl",
+    "pciutils",
+    "sudo",
+    "unzip",
+    "wget",
+    "xxd",
+    "xz-utils",
+    "zip",
+    "zstd",
+]
+exclude = ["isc-dhcp-client"]

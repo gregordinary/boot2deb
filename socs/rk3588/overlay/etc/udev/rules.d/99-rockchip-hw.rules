@@ -1,0 +1,31 @@
+# Rockchip RK3588 hardware acceleration device permissions.
+# Installed to /etc/udev/rules.d/ — pairs with 'video' and 'render' group
+# membership for the default user (set when the rootfs is built).
+#
+# These rules grant the video/render groups access to V4L2 codecs, the
+# media controller, DRM render nodes, DMA-buf heaps, the accel framework
+# (NPU), and the RKVENC mpp_service. Jellyfin / FFmpeg need these
+# to open the decoder and encoder devices.
+
+# V4L2 codec / capture devices (rkvdec, hantro_vpu, rkvenc, ...)
+SUBSYSTEM=="video4linux", GROUP="video", MODE="0660"
+
+# Media controller (request API for V4L2 stateless decode)
+SUBSYSTEM=="media", GROUP="video", MODE="0660"
+
+# DRM render nodes (Mali G610 via panthor) — keep card* root-owned
+SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="render", MODE="0660"
+
+# DMA-buf heaps
+SUBSYSTEM=="dma_heap", GROUP="video", MODE="0660"
+
+# Accel framework (NPU via rocket driver)
+SUBSYSTEM=="accel", GROUP="render", MODE="0660"
+
+# VEPU580 RKVENC — registered as a misc device by the MPP service
+KERNEL=="mpp_service", GROUP="video", MODE="0660"
+
+# Vendor multicore RGA — registered as a misc device by rga3.ko (the OOT
+# driver carried in 070-rga-multicore-vendor-oot.patch + 071-rga-multicore-7.1-fixups.patch).
+# librga2 / scale_rkrga / vpp_rkrga open this directly.
+KERNEL=="rga", GROUP="video", MODE="0660"

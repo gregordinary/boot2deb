@@ -1,0 +1,5 @@
+# arches/arm64.toml — invariants shared by every arm64 target.
+kernel_arch   = "arm64"                  # ARCH= for kbuild
+uboot_arch    = "arm"                    # RK3588 u-boot builds as ARCH=arm + CONFIG_ARM64=y
+kbuild_image  = "arch/arm64/boot/Image"  # KBUILD_IMAGE
+cross_compile = "aarch64-linux-gnu-"     # used only when host arch != arm64

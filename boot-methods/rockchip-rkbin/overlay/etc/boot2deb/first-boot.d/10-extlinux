@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+# rkbin/extlinux boot flow: regenerate /boot/extlinux/extlinux.conf so the kernel
+# cmdline picks up the rootfs UUID the base first-boot step just assigned.
+/boot/mk_extlinux

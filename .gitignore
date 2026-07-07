@@ -1,0 +1,10 @@
+/target
+/build
+# Rendered mdBook output; the sources live in docs/src/.
+/docs/book
+# Durable build-host caches, not committed config: the content-addressed store for
+# pre-built extra_debs and the commit-addressed patches checkouts the
+# build auto-fetches at the pinned commit.
+/cache
+**/*.rs.bk
+Cargo.lock.orig
