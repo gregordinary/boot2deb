@@ -1,4 +1,6 @@
 # boot2deb
+## Status
+Work in progress. Does not yet produce working image.
 
 ## AI Disclosure
 
