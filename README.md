@@ -1,6 +1,6 @@
 # boot2deb
 ## Status
-Work in progress. Does not yet produce working image.
+Work in progress. RK1 boots the built Debian image successfully. Image missing mali_csffw.bin.
 
 ## AI Disclosure
 
