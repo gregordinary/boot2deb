@@ -285,8 +285,11 @@ pub fn tool_checks(target: Arch, cross_compile: &str) -> Vec<Check> {
     }
 
     // Image assembly path: the ext4 filesystem is formatted in pure Rust
-    // (arcbox-ext4), so the only host tool is `tune2fs` for the journal step.
-    checks.push(exe(pm, target, "tune2fs", &["tune2fs"], "ext4 journal on the image", true, Pkg::E2fsprogs));
+    // (arcbox-ext4); host e2fsprogs tools finish it — `tune2fs` adds the journal,
+    // `debugfs` clears sparse_super2 (so the image is online-resizable), and
+    // `dumpe2fs`/`e2fsck` verify. All four ship in e2fsprogs, so the `tune2fs`
+    // probe already guarantees them.
+    checks.push(exe(pm, target, "tune2fs", &["tune2fs"], "ext4 journal + feature edit on the image", true, Pkg::E2fsprogs));
 
     checks
 }

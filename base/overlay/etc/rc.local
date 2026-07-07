@@ -12,8 +12,13 @@ else
     # first phase: regenerate ssh host keys, grow the root partition, give the
     # rootfs a fresh UUID, run any board-specific first-boot hooks, then reboot
     # into the second phase.
-    dpkg-reconfigure openssh-server
-    systemctl enable ssh.service
+    #
+    # ssh-keygen -A generates only the missing host keys (the image ships with none
+    # -- the build strips them so every device gets unique keys). It is best-effort:
+    # a failure here must not abort the partition grow + phase-2 arming below, so
+    # under `set -e` both ssh steps are guarded with `|| true`.
+    ssh-keygen -A || true
+    systemctl enable ssh.service || true
     # expand root partition & change its uuid
     rp="$(findmnt -no source /)"
     rpn="$(echo "$rp" | grep -Eo '[[:digit:]]*$')"

@@ -8,6 +8,11 @@
 //! e2fsprogs shell-out with no mount. Teaching arcbox-ext4 mkfs-time
 //! journaling would drop this step.
 //!
+//! arcbox-ext4 also writes the filesystem with the `sparse_super2` feature, which
+//! the kernel's online resize cannot grow. First-boot expands the rootfs while it
+//! is mounted as `/`, so a second host step (`debugfs` clears the feature, then
+//! `e2fsck` verifies) makes the image online-resizable.
+//!
 //! The output is a standalone ext4 image the [image orchestrator](super) splices
 //! into the whole-disk image at the rootfs partition offset.
 
@@ -55,6 +60,7 @@ pub(crate) fn build_rootfs_ext4(
     ));
     format_and_unpack(dest, size, tarball, label, uuid)?;
     add_journal(dest, step)?;
+    make_online_resizable(dest, step)?;
     Ok(())
 }
 
@@ -87,6 +93,70 @@ fn add_journal(image: &Path, step: &Step) -> Result<(), EngineError> {
     let mut cmd = Command::new("tune2fs");
     cmd.arg("-O").arg("has_journal").arg(image);
     build::run(cmd, "tune2fs", "tune2fs -O has_journal", step)
+}
+
+/// Clear the ext4 `sparse_super2` feature so first-boot can grow the rootfs while
+/// it is mounted as `/`. `arcbox-ext4` writes the filesystem with `sparse_super2`
+/// (a compact two-backup-superblock layout), but the kernel's online resize
+/// (`EXT4_IOC_RESIZE_FS`) does not support that layout — a mounted `resize2fs`
+/// fails with "kernel does not support online resize with sparse_super2". Since
+/// first-boot expands the rootfs into the enlarged partition while it is the live
+/// root, the shipped image must not carry the feature.
+///
+/// `tune2fs -O ^sparse_super2` cannot clear it ("not supported"), but `debugfs`
+/// can: it relocates the backup superblocks to the standard `sparse_super`
+/// positions and updates the superblock checksum, leaving a filesystem `e2fsck`
+/// reports as clean. `debugfs` exits 0 even when its scripted command fails, so the
+/// clear is verified explicitly rather than trusted, and a final `e2fsck` confirms
+/// consistency.
+fn make_online_resizable(image: &Path, step: &Step) -> Result<(), EngineError> {
+    step.log("clearing ext4 sparse_super2 for online resize (debugfs feature -sparse_super2)");
+    let mut clear = Command::new("debugfs");
+    clear.arg("-w").arg("-R").arg("feature -sparse_super2").arg(image);
+    build::run(clear, "debugfs", "debugfs feature -sparse_super2", step)?;
+
+    ensure_sparse_super2_cleared(image)?;
+
+    step.log("verifying ext4 image after feature change (e2fsck -fy)");
+    let mut fsck = Command::new("e2fsck");
+    fsck.arg("-fy").arg(image);
+    // e2fsck exit 1 = "filesystem errors corrected"; tolerated in case the clear
+    // leaves anything for e2fsck to rewrite (debugfs leaves it clean in practice).
+    build::run_allowing(fsck, "e2fsck", "e2fsck -fy", &[1], step)
+}
+
+/// Confirm `debugfs` actually removed `sparse_super2` — it returns 0 even when its
+/// scripted command fails, so a silent failure would otherwise ship a
+/// non-online-resizable image. Reads the feature list with `dumpe2fs -h` and errors
+/// if the feature is still present.
+fn ensure_sparse_super2_cleared(image: &Path) -> Result<(), EngineError> {
+    let out = Command::new("dumpe2fs")
+        .arg("-h")
+        .arg(image)
+        .output()
+        .map_err(|source| EngineError::CommandSpawn {
+            command: "dumpe2fs".to_string(),
+            context: "dumpe2fs -h (verify sparse_super2 cleared)".to_string(),
+            source,
+        })?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // A missing features line means dumpe2fs did not read the superblock — treat that
+    // as "could not verify" (a failure), not as "feature absent".
+    let features = text
+        .lines()
+        .find_map(|l| l.strip_prefix("Filesystem features:"))
+        .ok_or_else(|| EngineError::Ext4 {
+            context: "clear sparse_super2".to_string(),
+            detail: "dumpe2fs -h printed no feature list; could not verify the clear".to_string(),
+        })?;
+    if features.split_whitespace().any(|f| f == "sparse_super2") {
+        return Err(EngineError::Ext4 {
+            context: "clear sparse_super2".to_string(),
+            detail: "sparse_super2 still set after debugfs; image would not be online-resizable"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Map an `arcbox_ext4` error into a typed [`EngineError::Ext4`].
