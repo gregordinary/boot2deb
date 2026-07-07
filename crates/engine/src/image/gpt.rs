@@ -121,8 +121,8 @@ mod tests {
             uboot_itb: "8MiB".into(),
             rootfs: "16MiB".into(),
         };
-        let size = 48 * 1024 * 1024;
-        let geom = Geometry::resolve(&offsets, "48MiB").unwrap();
+        let size = 192 * 1024 * 1024;
+        let geom = Geometry::resolve(&offsets, "192MiB").unwrap();
         let disk_guid = Uuid::from_bytes([0xa1; 16]);
         let part_guid = Uuid::from_bytes([0xb2; 16]);
 

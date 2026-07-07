@@ -19,9 +19,20 @@ use boot2deb_core::size::parse_size;
 pub(crate) const SECTOR: u64 = 512;
 
 /// ext4 block size arcbox-ext4 formats at (its only supported value). The rootfs
-/// partition size is floored to a multiple of this so the filesystem fills whole
-/// blocks.
+/// filesystem is a whole number of these, further grouped into [`EXT4_BLOCK_GROUP`]s.
 pub(crate) const EXT4_BLOCK: u64 = 4096;
+
+/// One ext4 block group in bytes: 128 MiB. At [`EXT4_BLOCK`] the group's block
+/// bitmap is a single block, mapping `EXT4_BLOCK * 8` (32768) blocks, so a group
+/// spans `EXT4_BLOCK * 8 * EXT4_BLOCK` bytes.
+///
+/// The rootfs filesystem size is floored to a multiple of this. arcbox-ext4 rounds
+/// a filesystem *up* to a whole number of block groups — growing its backing file
+/// to match — so a size that is only [`EXT4_BLOCK`]-aligned would format larger
+/// than the partition sized to hold it and refuse to mount ("bad geometry: block
+/// count N exceeds size of device"). A group-aligned size formats to exactly the
+/// partition size.
+pub(crate) const EXT4_BLOCK_GROUP: u64 = EXT4_BLOCK * 8 * EXT4_BLOCK;
 
 /// Sectors the primary GPT reserves at the front: protective MBR (LBA 0), the
 /// GPT header (LBA 1), and the 128-entry × 128-byte partition array (32 sectors,
@@ -35,9 +46,11 @@ const GPT_BACK_SECTORS: u64 = 33;
 /// The resolved byte/LBA layout of one image.
 ///
 /// All offsets are byte counts from the start of the medium. `rootfs_first_lba`
-/// / `rootfs_length_lba` are the exact GPT partition bounds, and `rootfs_bytes`
-/// (`= rootfs_length_lba * SECTOR`, a multiple of [`EXT4_BLOCK`]) is the size of
-/// the ext4 filesystem that fills that partition.
+/// / `rootfs_length_lba` are the exact GPT partition bounds — the partition fills
+/// the usable disk after the raw gap and GPT reservations. `rootfs_bytes` (a
+/// multiple of [`EXT4_BLOCK_GROUP`], `<= rootfs_length_lba * SECTOR`) is the size
+/// of the ext4 filesystem placed in that partition; it is smaller than the
+/// partition by up to one block group and is grown to fill it on first boot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Geometry {
     /// Whole-disk size in bytes (the resolved `image_size`).
@@ -50,9 +63,12 @@ pub(crate) struct Geometry {
     pub(crate) rootfs_off: u64,
     /// Rootfs partition first LBA (`rootfs_off / SECTOR`).
     pub(crate) rootfs_first_lba: u64,
-    /// Rootfs partition length in sectors.
+    /// Rootfs partition length in sectors — the partition spans the whole usable
+    /// disk after the raw gap and GPT reservations.
     pub(crate) rootfs_length_lba: u64,
-    /// ext4 filesystem size in bytes (`rootfs_length_lba * SECTOR`).
+    /// ext4 filesystem size in bytes: a multiple of [`EXT4_BLOCK_GROUP`], at most
+    /// `rootfs_length_lba * SECTOR`. Smaller than the partition by up to one block
+    /// group; a first-boot resize grows it to fill the partition.
     pub(crate) rootfs_bytes: u64,
 }
 
@@ -113,15 +129,23 @@ impl Geometry {
                 ))
             })?;
 
-        // Fill the usable range, floored to whole ext4 blocks.
         let available_bytes = (last_usable_lba - rootfs_first_lba + 1) * SECTOR;
-        let rootfs_bytes = (available_bytes / EXT4_BLOCK) * EXT4_BLOCK;
+        // The GPT partition fills the usable range (floored to a whole ext4 block) —
+        // one rootfs partition spanning the disk, as the reference image lays out.
+        let partition_bytes = (available_bytes / EXT4_BLOCK) * EXT4_BLOCK;
+        // The ext4 filesystem is floored to a whole 128 MiB block group, not merely a
+        // block: arcbox-ext4 rounds a filesystem *up* to whole groups, so only a
+        // group-aligned size is guaranteed not to overflow the partition (see
+        // [`EXT4_BLOCK_GROUP`]). A group multiple is necessarily <= the block-floored
+        // partition, so the filesystem always fits; first-boot resize grows it to
+        // fill the partition (and, past the image, the physical medium).
+        let rootfs_bytes = (available_bytes / EXT4_BLOCK_GROUP) * EXT4_BLOCK_GROUP;
         if rootfs_bytes == 0 {
             return Err(geom(format!(
-                "usable rootfs area ({available_bytes} bytes) is smaller than one ext4 block"
+                "usable rootfs area ({available_bytes} bytes) is smaller than one ext4 block group ({EXT4_BLOCK_GROUP} bytes)"
             )));
         }
-        let rootfs_length_lba = rootfs_bytes / SECTOR;
+        let rootfs_length_lba = partition_bytes / SECTOR;
 
         Ok(Geometry {
             total_size,
@@ -198,10 +222,14 @@ mod tests {
         assert_eq!(g.uboot_itb_off, 8 * 1024 * 1024);
         assert_eq!(g.rootfs_off, 16 * 1024 * 1024);
         assert_eq!(g.rootfs_first_lba, 16 * 1024 * 1024 / SECTOR); // 32768
-        // ext4 fills from 16MiB to the last usable LBA, floored to 4 KiB.
-        assert!(g.rootfs_bytes.is_multiple_of(EXT4_BLOCK));
-        assert_eq!(g.rootfs_length_lba, g.rootfs_bytes / SECTOR);
-        // The partition ends before the backup GPT (last 33 sectors).
+        // The ext4 filesystem is floored to a whole 128 MiB block group so
+        // arcbox-ext4's round-up-to-groups cannot exceed the partition. For 2 GiB the
+        // usable ~1.98 GiB floors to 15 groups = 1.875 GiB.
+        assert!(g.rootfs_bytes.is_multiple_of(EXT4_BLOCK_GROUP));
+        assert_eq!(g.rootfs_bytes, 15 * EXT4_BLOCK_GROUP);
+        // The partition fills the usable disk, so it is at least the filesystem (a
+        // first-boot resize grows the fs into it) and ends before the backup GPT.
+        assert!(g.rootfs_bytes <= g.rootfs_length_lba * SECTOR);
         let end_lba = g.rootfs_first_lba + g.rootfs_length_lba;
         assert!(end_lba <= g.total_size / SECTOR - GPT_BACK_SECTORS);
     }
@@ -235,6 +263,13 @@ mod tests {
     fn rejects_image_too_small_for_the_rootfs() {
         // 8 MiB total cannot hold a rootfs starting at 16 MiB.
         assert!(Geometry::resolve(&rk1_offsets(), "8MiB").is_err());
+    }
+
+    #[test]
+    fn rejects_image_too_small_for_one_block_group() {
+        // The rootfs clears the 16 MiB gap, but the ~84 MiB left is under one 128 MiB
+        // ext4 block group, so no valid group-aligned filesystem fits.
+        assert!(Geometry::resolve(&rk1_offsets(), "100MiB").is_err());
     }
 
     #[test]

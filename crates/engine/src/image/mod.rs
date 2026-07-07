@@ -590,7 +590,7 @@ mod tests {
         std::fs::write(&idb, b"IDBLOADER-PAYLOAD").unwrap();
         std::fs::write(&itb, b"UBOOT-ITB-PAYLOAD").unwrap();
 
-        let build = small_rk1_build("48MiB");
+        let build = small_rk1_build("192MiB");
         let sink = |_: crate::event::Event| {};
         let image = build_bootloader_image(&build, &idb, &itb, &out, &sink).unwrap();
 
@@ -625,8 +625,9 @@ mod tests {
         std::fs::write(&idb, b"IDBLOADER-PAYLOAD").unwrap();
         std::fs::write(&itb, b"UBOOT-ITB-PAYLOAD").unwrap();
 
-        // 48 MiB total: rootfs at 16 MiB leaves ~32 MiB for ext4 — plenty.
-        let build = small_rk1_build("48MiB");
+        // 192 MiB total: rootfs at 16 MiB leaves ~176 MiB, which floors to one 128 MiB
+        // ext4 block group — the smallest filesystem arcbox-ext4 can format.
+        let build = small_rk1_build("192MiB");
         let opts = ImageOptions {
             rootfs_tar: &rootfs_tar,
             idbloader: &idb,
@@ -647,7 +648,7 @@ mod tests {
         assert!(arts.compressed.is_empty());
 
         // Whole-disk image is exactly the resolved size.
-        assert_eq!(std::fs::metadata(&image).unwrap().len(), 48 * 1024 * 1024);
+        assert_eq!(std::fs::metadata(&image).unwrap().len(), 192 * 1024 * 1024);
 
         // Payloads land at their raw-gap byte offsets.
         let bytes = std::fs::read(&image).unwrap();
@@ -658,6 +659,24 @@ mod tests {
         assert_eq!(&bytes[510..512], &[0x55, 0xAA]);
         let ext4_magic = 16 * 1024 * 1024 + 0x438;
         assert_eq!(&bytes[ext4_magic..ext4_magic + 2], &[0x53, 0xEF]);
+
+        // Regression: the formatted filesystem must not claim more blocks than its
+        // GPT partition holds. arcbox-ext4 rounds a filesystem up to whole 128 MiB
+        // block groups, so sizing the partition to a non-group multiple (the earlier
+        // bug) shipped a filesystem larger than its device — "bad geometry: block
+        // count N exceeds size of device" — that would not mount. The geometry now
+        // floors the rootfs to a whole group; assert the on-disk superblock agrees.
+        // s_blocks_count_lo is a little-endian u32 at superblock offset 0x04, and the
+        // superblock starts 1024 bytes into the partition.
+        let geom = Geometry::resolve(&build.offsets, &build.image_size).unwrap();
+        let sb = 16 * 1024 * 1024 + 1024;
+        let blocks_count = u32::from_le_bytes(bytes[sb + 4..sb + 8].try_into().unwrap()) as u64;
+        assert_eq!(blocks_count, geom.rootfs_bytes / 4096, "fs block count matches geometry");
+        assert!(
+            blocks_count * 4096 <= geom.rootfs_length_lba * 512,
+            "filesystem ({blocks_count} blocks) must fit its partition ({} sectors)",
+            geom.rootfs_length_lba,
+        );
 
         // If `sfdisk` is around, the GPT must be parseable and name the partition —
         // an sfdisk *failure* means a corrupt table and fails the test (MNT-8).
@@ -701,7 +720,7 @@ mod tests {
                 compress: true,
                 keep_raw,
             };
-            build_image(&small_rk1_build("48MiB"), &opts, &sink).unwrap()
+            build_image(&small_rk1_build("192MiB"), &opts, &sink).unwrap()
         };
 
         // Default: raw deleted, only .xz remains.
@@ -739,7 +758,7 @@ mod tests {
         std::fs::write(&idb, b"IDB").unwrap();
         std::fs::write(&itb, b"ITB").unwrap();
 
-        let mut build = small_rk1_build("48MiB");
+        let mut build = small_rk1_build("192MiB");
         build.layout = Layout::Split;
         let opts = ImageOptions {
             rootfs_tar: &rootfs_tar,
@@ -763,7 +782,7 @@ mod tests {
                 assert_eq!(&boot[8 * 1024 * 1024..8 * 1024 * 1024 + 3], b"ITB");
                 // Rootfs image is full-size with the ext4 magic, no bootloader in the gap.
                 let rf = std::fs::metadata(rootfs).unwrap().len();
-                assert_eq!(rf, 48 * 1024 * 1024);
+                assert_eq!(rf, 192 * 1024 * 1024);
                 let rfbytes = std::fs::read(rootfs).unwrap();
                 assert_eq!(&rfbytes[32 * 1024..32 * 1024 + 3], b"\0\0\0"); // gap empty
                 let m = 16 * 1024 * 1024 + 0x438;
