@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 /// logic changes in a way that alters the produced tree for unchanged inputs (e.g.
 /// the overlay merge order or the generated-config shape), so a logic change forces
 /// a fresh bootstrap rather than a stale hit.
-const ROOTFS_STAGE_VERSION: u32 = 1;
+const ROOTFS_STAGE_VERSION: u32 = 2;
 
 /// Parse `mmdebstrap --simulate --verbose` output into the solved package set: one
 /// `"name version arch"` line per configured package, sorted and de-duplicated.

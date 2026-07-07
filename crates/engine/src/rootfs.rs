@@ -6,8 +6,11 @@
 //! `sudo`, no persistent chroot): it installs the merged rootfs package set
 //! ([`ResolvedBuild::rootfs_packages`]) from the build's own [`LocalRepo`]
 //! plus the suite mirror — so apt resolves each `.deb`'s dependencies — and a
-//! `--customize-hook` lays the staged overlay in and runs the target-chroot
-//! config (user account, ssh first-boot, group membership). The overlay is the
+//! `--customize-hook` lays the staged overlay in, runs the target-chroot
+//! config (user account, ssh first-boot, group membership), and re-runs the
+//! kernel `postinst.d` hooks so `/boot` gains the initrd, board dtb, and
+//! `extlinux.conf` u-boot loads (the kernel configured before the overlay's
+//! hooks existed, so its own postinst produced none of them). The overlay is the
 //! layered substrate merged in Rust beforehand: each layer's `overlay/` tree
 //! followed by the *generated* config this module produces from the
 //! resolved values (fstab, hostname, apt sources, locale, machine-id).
@@ -603,6 +606,15 @@ impl BootstrapStaging {
 /// group membership + sudoers, and clearing the ssh host keys so they regenerate on
 /// first boot).
 ///
+/// It finishes by re-running the kernel `postinst.d` hooks (`run-parts`) for the
+/// installed kernel: the overlay supplies the dtb-copy and `extlinux.conf`
+/// (`mk_extlinux`) hooks and initramfs-tools supplies the initrd hook, but the kernel
+/// package configured *before* the overlay was laid in, so its own postinst found an
+/// empty hook dir. Re-running them here — with the overlay, initramfs-tools, and the
+/// `LABEL=`-based `/etc/fstab` all in place — is what populates `/boot` with the
+/// initrd, board dtb, and `extlinux/extlinux.conf` that u-boot's extlinux bootflow
+/// loads; without it the image has a kernel but nothing to boot it.
+///
 /// The account is created **locked** (no `chpasswd` here): the per-image first-boot
 /// password (SEC-6) is non-reproducible, so baking it in would make the
 /// produced tree unfit for the content-addressed cache. Everything this hook
@@ -641,7 +653,16 @@ fn customize_hook_script(staging: &Path, user: &str) -> String {
          chroot \"$rootfs\" sh -c 'printf \"%s ALL=(ALL) NOPASSWD: ALL\\n\" \"{user}\" > /etc/sudoers.d/{user}'\n\
          chroot \"$rootfs\" chmod 0440 /etc/sudoers.d/{user}\n\
          # regenerate ssh host keys on first boot\n\
-         chroot \"$rootfs\" sh -c 'rm -f /etc/ssh/ssh_host_*'\n",
+         chroot \"$rootfs\" sh -c 'rm -f /etc/ssh/ssh_host_*'\n\
+         # Generate the boot artifacts u-boot's extlinux bootflow loads. The overlay\n\
+         # (laid in above) and initramfs-tools ship the /etc/kernel/postinst.d hooks\n\
+         # that build the initrd, copy the board dtb into /boot, and write\n\
+         # /boot/extlinux/extlinux.conf (root=LABEL=... from the generated fstab). The\n\
+         # kernel package was configured before the overlay existed, so its own\n\
+         # postinst run-parts found an empty hook dir and produced none of them;\n\
+         # re-run the hooks now, with everything in place. --exit-on-error fails the\n\
+         # build loudly rather than shipping a kernel with nothing to boot it.\n\
+         chroot \"$rootfs\" sh -c 'kver=\"$(linux-version list | linux-version sort --reverse | head -n1)\"; run-parts --exit-on-error --arg=\"$kver\" /etc/kernel/postinst.d'\n",
         staging = staging.display(),
     )
 }
@@ -1200,6 +1221,14 @@ mod tests {
         // None of these mutations touch a "$rootfs/..." path from outside the chroot.
         assert!(!script.contains("> \"$rootfs/etc/sudoers.d"));
         assert!(!script.contains("rm -f \"$rootfs\"/etc/ssh"));
+        // Boot artifacts: the kernel postinst.d hooks are re-run for the installed
+        // kernel (they were absent when the kernel package configured), so /boot gains
+        // the initrd, dtb, and extlinux.conf u-boot loads. Run inside the chroot,
+        // --exit-on-error so a failed hook fails the build rather than shipping an
+        // unbootable image.
+        assert!(script.contains(
+            "kver=\"$(linux-version list | linux-version sort --reverse | head -n1)\"; run-parts --exit-on-error --arg=\"$kver\" /etc/kernel/postinst.d"
+        ));
     }
 
     #[test]
