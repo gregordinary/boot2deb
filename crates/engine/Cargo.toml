@@ -17,12 +17,12 @@ toml.workspace = true
 toml_edit = "0.22"
 thiserror.workspace = true
 sha2.workspace = true
-# Pure-Rust image assembly: GPT tables, ext4 mkfs, and .xz compression —
-# no C deps. lzma-rust2's `optimization` feature (its only `unsafe`) is left off.
+# Pure-Rust image assembly: GPT tables and .xz compression — no C deps.
+# lzma-rust2's `optimization` feature (its only `unsafe`) is left off. The ext4
+# filesystem itself comes from host `mke2fs -d` (see the engine's image::ext4).
 gpt = "4"
-arcbox-ext4 = "0.1"
 # Deterministic ext4 UUID + GPT disk/partition GUIDs derived from the lock, so the
-# image carries no `/dev/urandom` identifiers. Same major as gpt/arcbox-ext4.
+# image carries no `/dev/urandom` identifiers. Same major as gpt.
 uuid.workspace = true
 lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "xz", "encoder"] }
 # Randomly-named, fail-if-exists staging dirs for the rootless bootstraps,

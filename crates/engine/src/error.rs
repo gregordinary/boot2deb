@@ -291,16 +291,6 @@ pub enum EngineError {
         detail: String,
     },
 
-    /// Pure-Rust ext4 formatting (`arcbox-ext4`) failed while building the rootfs
-    /// partition.
-    #[error("ext4 assembly failed ({context}): {detail}")]
-    Ext4 {
-        /// What the engine was doing (e.g. `format rootfs partition`).
-        context: String,
-        /// The formatter's error rendered to text.
-        detail: String,
-    },
-
     /// GPT partition-table assembly (`gpt` crate) failed.
     #[error("GPT assembly failed ({context}): {detail}")]
     Gpt {

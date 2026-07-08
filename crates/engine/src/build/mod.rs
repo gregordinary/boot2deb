@@ -79,23 +79,9 @@ impl BuildEnv {
 /// full `env_clear` is unsafe on the host (it would drop the `PATH`/`HOME` the tools
 /// need); the caller's own env (e.g. `SOURCE_DATE_EPOCH`) is already set and preserved.
 pub fn run(
-    command: Command,
-    tool: &str,
-    context: &str,
-    step: &Step,
-) -> Result<(), EngineError> {
-    run_allowing(command, tool, context, &[], step)
-}
-
-/// Like [`run`], but also treats any exit code listed in `allow` as success.
-/// A few tools signal a benign non-zero status: `e2fsck` returns 1 when it
-/// corrects a filesystem, which is expected (not a failure) after a feature
-/// change. `allow` is empty for the common case, where only exit 0 succeeds.
-pub fn run_allowing(
     mut command: Command,
     tool: &str,
     context: &str,
-    allow: &[i32],
     step: &Step,
 ) -> Result<(), EngineError> {
     command.env("TZ", "UTC").env("LC_ALL", "C.UTF-8");
@@ -134,7 +120,7 @@ pub fn run_allowing(
         context: format!("waiting for {context}"),
         source,
     })?;
-    if status.success() || matches!(status.code(), Some(c) if allow.contains(&c)) {
+    if status.success() {
         Ok(())
     } else {
         Err(EngineError::CommandFailed {

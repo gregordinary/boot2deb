@@ -16,8 +16,8 @@
 //! [`sandbox`]: an arm64 userland bootstrapped and entered without root. All
 //! of this is built on the shared [`git`] shell-outs, `make`/`merge_config.sh`,
 //! and blob verification ([`blobs`]). The [`image`] node assembles the
-//! bootable disk image in pure Rust — GPT, ext4, and `.xz` with only a `tune2fs`
-//! shell-out for the journal. The [`repo`] module assembles the build's
+//! bootable disk image without root — GPT and `.xz` in pure Rust, the ext4
+//! rootfs via host `mke2fs -d` from a userns-staged tree. The [`repo`] module assembles the build's
 //! `.deb`s into a local apt repo — including the pre-built `extra_debs` a
 //! layer or feature pulls from outside the mirror, which [`extradebs`] materializes
 //! into a content-addressed [`debstore`] and verifies against their sha256 pins

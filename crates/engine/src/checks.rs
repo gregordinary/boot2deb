@@ -14,8 +14,9 @@
 //! - **Cross-arch only** (host arch ≠ target arch): `bwrap` (rootless sandbox
 //!   entry), a `qemu-<arch>` interpreter, and a registered+enabled binfmt
 //!   handler for the target. Same-arch builds skip these entirely.
-//! - **Image path:** `tune2fs` (the ext4 journal step) — the filesystem
-//!   itself is formatted in pure Rust.
+//! - **Image path:** `mke2fs` (formats the rootfs ext4 from a userns-staged
+//!   tree) and `e2fsck` (the clean-verify gate); the staging itself rides on the
+//!   same unprivileged-userns capability the rootless bootstrap needs.
 //!
 //! Detection is a side effect (PATH scan, `/proc` + `/etc/os-release` reads,
 //! `pkg-config` shell-out), so it lives in the engine, not `core`.
@@ -284,12 +285,11 @@ pub fn tool_checks(target: Arch, cross_compile: &str) -> Vec<Check> {
         checks.push(binfmt_check(pm, target, qa));
     }
 
-    // Image assembly path: the ext4 filesystem is formatted in pure Rust
-    // (arcbox-ext4); host e2fsprogs tools finish it — `tune2fs` adds the journal,
-    // `debugfs` clears sparse_super2 (so the image is online-resizable), and
-    // `dumpe2fs`/`e2fsck` verify. All four ship in e2fsprogs, so the `tune2fs`
-    // probe already guarantees them.
-    checks.push(exe(pm, target, "tune2fs", &["tune2fs"], "ext4 journal + feature edit on the image", true, Pkg::E2fsprogs));
+    // Image assembly path: `mke2fs -d` formats the rootfs ext4 from a
+    // userns-staged tree and `e2fsck -fn` verifies it clean. Both ship in
+    // e2fsprogs, so the `mke2fs` probe already guarantees the pair; the userns
+    // capability itself is covered by the unprivileged-userns check above.
+    checks.push(exe(pm, target, "mke2fs", &["mke2fs"], "format the rootfs ext4 image", true, Pkg::E2fsprogs));
 
     checks
 }
@@ -332,34 +332,40 @@ fn openssl_check(pm: PkgManager, target: Arch) -> Check {
     }
 }
 
-/// Unprivileged user namespaces — the rootless `mmdebstrap --mode=unshare`
-/// bootstrap and the `bwrap` sandbox both depend on them.
+/// Unprivileged user namespaces with subuid/subgid ranges — the rootless
+/// `mmdebstrap --mode=unshare` bootstrap, the `bwrap` sandbox, and the ext4
+/// image staging (multi-uid ownership under `unshare --map-auto`) all depend
+/// on them.
 ///
-/// Probed **functionally**: actually create one with `unshare --user
-/// --map-root-user true`. A single-sysctl read (`unprivileged_userns_clone`) misses
-/// the other ways a host forbids namespaces — Ubuntu 24.04's
+/// Probed **functionally**: actually create one with `unshare --map-root-user
+/// --map-auto true` — the exact invocation the ext4 staging uses. A
+/// single-sysctl read (`unprivileged_userns_clone`) misses the other ways a
+/// host forbids namespaces — Ubuntu 24.04's
 /// `apparmor_restrict_unprivileged_userns=1` and `user.max_user_namespaces=0` —
-/// so the actual syscall is the authoritative check (DR-2).
+/// and a plain `--map-root-user` probe misses absent `/etc/subuid` ranges, so
+/// the actual syscall + mapping is the authoritative check (DR-2).
 fn userns_check() -> Check {
     let works = Command::new("unshare")
-        .args(["--user", "--map-root-user", "true"])
+        .args(["--map-root-user", "--map-auto", "true"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
     let status = if works {
-        CheckStatus::Present("unshare --user works".into())
+        CheckStatus::Present("unshare --map-root-user --map-auto works".into())
     } else {
         CheckStatus::Missing(
-            "cannot create an unprivileged user namespace; enable it — Debian: \
-             `sudo sysctl -w kernel.unprivileged_userns_clone=1`; Ubuntu 24.04+: \
-             `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`; and \
-             ensure `sysctl kernel.max_user_namespaces` (or `user.max_user_namespaces`) > 0"
+            "cannot create an unprivileged user namespace with subuid mapping; enable \
+             namespaces — Debian: `sudo sysctl -w kernel.unprivileged_userns_clone=1`; \
+             Ubuntu 24.04+: `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`; \
+             ensure `sysctl kernel.max_user_namespaces` (or `user.max_user_namespaces`) > 0; \
+             and give this user a subuid/subgid range (`sudo usermod --add-subuids \
+             100000-165535 --add-subgids 100000-165535 $USER`)"
                 .into(),
         )
     };
     Check {
         name: "unprivileged user namespaces".into(),
-        purpose: "rootless rootfs bootstrap + sandbox",
+        purpose: "rootless rootfs bootstrap + sandbox + ext4 image staging",
         required: true,
         status,
     }
@@ -475,11 +481,11 @@ mod tests {
         // list must include the qemu binfmt + bwrap checks; the cross toolchain
         // check names the <triple>gcc. Assert the invariants that hold either way.
         let checks = tool_checks(Arch::Arm64, "aarch64-linux-gnu-");
-        // git/make/mmdebstrap/tune2fs + the DR-1 packaging tools are in the list.
-        for needed in ["git", "make", "mmdebstrap", "tune2fs", "dpkg-deb", "sha256sum"] {
+        // git/make/mmdebstrap/mke2fs + the DR-1 packaging tools are in the list.
+        for needed in ["git", "make", "mmdebstrap", "mke2fs", "dpkg-deb", "sha256sum"] {
             assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
         }
-        // Every check is required now (the phantom mke2fs fallback was removed).
+        // Every check is a hard requirement — there are no fallback-only tools.
         assert!(checks.iter().all(|c| c.required));
     }
 

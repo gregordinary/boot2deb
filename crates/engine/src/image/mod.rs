@@ -1,14 +1,14 @@
-//! The image node — pure-Rust image assembly with no loop mount, no `dd`,
+//! The image node — unprivileged image assembly with no loop mount, no `dd`,
 //! and no `sudo`.
 //!
 //! It takes a rootfs tarball plus the u-boot raw-gap payloads and writes a
 //! bootable disk image with no `sudo`, no loop device, and no mount: the ext4
-//! filesystem is formatted in userspace (`arcbox-ext4`), the partition table is
-//! written in Rust (`gpt`), the bootloader payloads are placed by seek+write at
-//! their fixed offsets, and the result is `.xz`-compressed with a pure-Rust
-//! encoder (`lzma-rust2`). The only shell-out is host `tune2fs` to add the ext4
-//! journal. All byte/LBA arithmetic is resolved and validated up front by
-//! the `geometry` submodule.
+//! filesystem is formatted by host `mke2fs -d` from a tree staged inside an
+//! unprivileged user namespace (the `ext4` submodule), the partition table is written
+//! in Rust (`gpt`), the bootloader payloads are placed by seek+write at their
+//! fixed offsets, and the result is `.xz`-compressed with a pure-Rust encoder
+//! (`lzma-rust2`). All byte/LBA arithmetic is resolved and validated up front
+//! by the `geometry` submodule.
 //!
 //! Two layouts, selected by the resolved [`Layout`]:
 //! - **combined** — one image: the bootloader in the raw gap ahead of the rootfs
@@ -46,10 +46,9 @@ const XZ_BLOCK_SIZE: u64 = 32 * 1024 * 1024;
 
 /// Filesystem inputs for the image node.
 pub struct ImageOptions<'a> {
-    /// Rootfs as a `tar` archive — the artifact of the rootfs backend, consumed
-    /// directly by `arcbox-ext4`. `arcbox-ext4` skips block/char/FIFO/socket
-    /// entries, so any device nodes in the tar are simply not materialized
-    /// (`bwrap`/the running kernel provide `/dev` at runtime).
+    /// Rootfs as a `tar` archive — the artifact of the rootfs backend, staged
+    /// and formatted by the `ext4` submodule. Device nodes under `./dev/` are not
+    /// materialized (the kernel mounts devtmpfs over `/dev` at boot).
     pub rootfs_tar: &'a Path,
     /// `idbloader.img` from the u-boot stage ([`UbootArtifacts`](crate::build::uboot::UbootArtifacts)).
     pub idbloader: &'a Path,
@@ -474,22 +473,35 @@ mod tests {
     /// that need e2fsprogs/tar skip cleanly where it is absent.
     ///
     /// Presence is detected by whether the probe **spawns** (a missing binary fails to
-    /// exec with `ENOENT`), not by its exit status: some present tools — `tune2fs` —
-    /// print their version to stderr and exit non-zero, so a `status.success()` check
+    /// exec with `ENOENT`), not by its exit status: some present tools — e2fsprogs
+    /// binaries — reject `--version` and exit non-zero, so a `status.success()` check
     /// would wrongly report them absent and silently skip the end-to-end image tests
     /// even on a capable host (GEO-2).
     fn have(tool: &str) -> bool {
         Command::new(tool).arg("--version").output().is_ok()
     }
 
-    /// Whether every tool in `tools` is runnable, gating a host-tool-dependent
-    /// end-to-end test. When one is missing the behavior depends on
-    /// `BOOT2DEB_REQUIRE_HOST_TOOLS`: a CI job that guarantees the tools sets it, and a
-    /// miss then **panics** so the most important image assertions cannot silently drop
-    /// out of the run (GEO-2); unset (a tool-minimal dev host), the caller skips with a
-    /// printed note. Returns `true` only when all tools are present.
+    /// Whether the end-to-end image path can run: every tool in `tools` is
+    /// runnable, and — since the ext4 step stages inside a user namespace — the
+    /// exact `unshare` invocation it uses works (binary presence alone does not
+    /// imply subuid ranges are configured). When something is missing the behavior
+    /// depends on `BOOT2DEB_REQUIRE_HOST_TOOLS`: a CI job that guarantees the tools
+    /// sets it, and a miss then **panics** so the most important image assertions
+    /// cannot silently drop out of the run (GEO-2); unset (a tool-minimal dev
+    /// host), the caller skips with a printed note.
     fn require_host_tools(tools: &[&str]) -> bool {
-        let missing: Vec<&str> = tools.iter().copied().filter(|t| !have(t)).collect();
+        let mut missing: Vec<String> =
+            tools.iter().filter(|t| !have(t)).map(|t| t.to_string()).collect();
+        if missing.is_empty() {
+            let userns_ok = Command::new("unshare")
+                .args(["--map-root-user", "--map-auto", "true"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !userns_ok {
+                missing.push("unshare --map-root-user --map-auto (subuid ranges)".into());
+            }
+        }
         if missing.is_empty() {
             return true;
         }
@@ -582,7 +594,7 @@ mod tests {
     #[test]
     fn bootloader_image_is_gap_sized_with_payloads_and_no_gpt() {
         // No ext4/rootfs here — pure geometry + splice — so this runs on any host
-        // (no tar/tune2fs gate), unlike the whole-disk tests below.
+        // (no tar/mke2fs gate), unlike the whole-disk tests below.
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("out");
         let idb = tmp.path().join("idbloader.img");
@@ -610,8 +622,8 @@ mod tests {
 
     #[test]
     fn combined_image_has_gpt_rootfs_and_bootloader_at_offsets() {
-        // End-to-end (Linux only): arcbox mkfs + tune2fs journal + GPT + splices.
-        if !require_host_tools(&["tar", "tune2fs"]) {
+        // End-to-end (Linux only): userns staging + mke2fs + GPT + splices.
+        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -625,8 +637,8 @@ mod tests {
         std::fs::write(&idb, b"IDBLOADER-PAYLOAD").unwrap();
         std::fs::write(&itb, b"UBOOT-ITB-PAYLOAD").unwrap();
 
-        // 192 MiB total: rootfs at 16 MiB leaves ~176 MiB, which floors to one 128 MiB
-        // ext4 block group — the smallest filesystem arcbox-ext4 can format.
+        // 192 MiB total: rootfs at 16 MiB leaves ~176 MiB — above the geometry's
+        // 128 MiB rootfs minimum, small enough to format quickly.
         let build = small_rk1_build("192MiB");
         let opts = ImageOptions {
             rootfs_tar: &rootfs_tar,
@@ -660,14 +672,12 @@ mod tests {
         let ext4_magic = 16 * 1024 * 1024 + 0x438;
         assert_eq!(&bytes[ext4_magic..ext4_magic + 2], &[0x53, 0xEF]);
 
-        // Regression: the formatted filesystem must not claim more blocks than its
-        // GPT partition holds. arcbox-ext4 rounds a filesystem up to whole 128 MiB
-        // block groups, so sizing the partition to a non-group multiple (the earlier
-        // bug) shipped a filesystem larger than its device — "bad geometry: block
-        // count N exceeds size of device" — that would not mount. The geometry now
-        // floors the rootfs to a whole group; assert the on-disk superblock agrees.
-        // s_blocks_count_lo is a little-endian u32 at superblock offset 0x04, and the
-        // superblock starts 1024 bytes into the partition.
+        // The formatted filesystem must not claim more blocks than its GPT
+        // partition holds — a filesystem larger than its device is "bad geometry:
+        // block count N exceeds size of device" and will not mount. The geometry
+        // sizes the filesystem to exactly the partition; assert the on-disk
+        // superblock agrees. s_blocks_count_lo is a little-endian u32 at superblock
+        // offset 0x04, and the superblock starts 1024 bytes into the partition.
         let geom = Geometry::resolve(&build.offsets, &build.image_size).unwrap();
         let sb = 16 * 1024 * 1024 + 1024;
         let blocks_count = u32::from_le_bytes(bytes[sb + 4..sb + 8].try_into().unwrap()) as u64;
@@ -696,7 +706,7 @@ mod tests {
     fn compression_deletes_the_raw_image_unless_kept() {
         // End-to-end (Linux only): compress, then confirm the raw is dropped and
         // only the .xz remains (PERF-2), and that --keep-raw retains it.
-        if !require_host_tools(&["tar", "tune2fs"]) {
+        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -747,7 +757,7 @@ mod tests {
 
     #[test]
     fn split_layout_emits_bootloader_and_rootfs_images() {
-        if !require_host_tools(&["tar", "tune2fs"]) {
+        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();

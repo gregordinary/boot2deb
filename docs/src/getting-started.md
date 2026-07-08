@@ -60,7 +60,7 @@ For orientation, the checks fall into a few groups:
 | Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler | always |
 | Rootfs bootstrap | `mmdebstrap` + unprivileged user namespaces | always |
 | Packaging / apt repo | `dpkg-deb`, `dpkg-scanpackages`, `apt-ftparchive`, `sha256sum` | always |
-| Image assembly | `tune2fs` (the ext4 filesystem itself is built in pure Rust) | always |
+| Image assembly | `mke2fs` + `e2fsck` (format the rootfs ext4 and verify it clean) | always |
 | Cross toolchain | the `<triple>gcc` cross compiler (e.g. `gcc-aarch64-linux-gnu`) | cross only |
 | Emulation | `bwrap`, `qemu-<arch>-static`, and a registered binfmt handler | cross only |
 
@@ -69,9 +69,10 @@ x86_64 host building an arm64 image. An arm64 host builds it natively and skips 
 
 ### The user-namespace check (common blocker on Ubuntu 24.04)
 
-The rootless rootfs bootstrap and sandbox both need **unprivileged user namespaces**,
-which some hosts disable by default. `doctor` tests this by actually creating one, and
-if it fails it prints the fix for your host. The usual cases:
+The rootless rootfs bootstrap, the sandbox, and the ext4 image staging all need
+**unprivileged user namespaces** with a subuid/subgid range for your user, which some
+hosts disable by default. `doctor` tests this by actually creating one (with the
+subuid mapping), and if it fails it prints the fix for your host. The usual cases:
 
 - **Ubuntu 24.04+** ships an AppArmor restriction on by default:
   ```sh
@@ -83,6 +84,10 @@ if it fails it prints the fix for your host. The usual cases:
   ```
 - Either way, `kernel.max_user_namespaces` (or `user.max_user_namespaces`) must be
   greater than 0.
+- Your user needs a subuid/subgid range (usually present by default):
+  ```sh
+  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER
+  ```
 
 `sysctl -w` lasts until reboot; drop the same line in `/etc/sysctl.d/` to make it
 persist.
