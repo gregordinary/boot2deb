@@ -1,0 +1,66 @@
+#!/bin/sh
+set -e
+# boot2deb first-boot setup, run once by boot2deb-firstboot.service.
+#
+# Two phases split by a reboot, so the kernel re-reads the grown partition table
+# before the filesystem is expanded onto it:
+#   phase 1 - regenerate ssh host keys, grow the root partition to fill the disk,
+#             give the rootfs a fresh UUID, run board-specific hooks, arm phase 2,
+#             reboot.
+#   phase 2 - grow the filesystem onto the resized partition, then retire.
+#
+# State lives in /var/lib/boot2deb: `arm` marks phase 2 is pending; `done` marks
+# the whole flow complete and gates the unit off (ConditionPathExists) so this
+# never runs again.
+
+state=/var/lib/boot2deb
+arm="$state/first-boot.armed"
+done="$state/first-boot.done"
+mkdir -p "$state"
+
+rootdev="$(findmnt -no source /)"
+
+if [ -e "$arm" ]; then
+    # phase 2: expand the filesystem onto the partition phase 1 grew, then finish.
+    resize2fs "$rootdev"
+    rm -f "$arm"
+    : > "$done"
+    systemctl disable boot2deb-firstboot.service || true
+    exit 0
+fi
+
+# phase 1.
+#
+# ssh-keygen -A creates only the missing host keys (the image ships with none --
+# the build strips them so every device gets unique keys). Best-effort: a failure
+# must not abort the partition grow + phase-2 arming below, so under `set -e` the
+# ssh steps are guarded with `|| true`.
+ssh-keygen -A || true
+systemctl enable ssh.service || true
+
+# grow the root partition to fill the disk and give it a fresh GPT partition UUID
+partnum="$(echo "$rootdev" | grep -Eo '[[:digit:]]*$')"
+disk="/dev/$(lsblk -no pkname "$rootdev")"
+partuuid="$(cat /proc/sys/kernel/random/uuid)"
+echo "size=+, uuid=$partuuid" | sfdisk -f -N "$partnum" "$disk"
+
+# give the rootfs a fresh filesystem UUID (every image ships the same build-time
+# UUID) and repoint fstab at it so the extlinux hook below emits a UUID= cmdline
+uuid="$(cat /proc/sys/kernel/random/uuid)"
+echo "changing rootfs uuid: $uuid"
+tune2fs -U "$uuid" "$rootdev"
+sed -i "s|$(findmnt -fsno source '/')|UUID=$uuid|" /etc/fstab
+
+# Board-specific first-boot steps (bootloader-config regeneration, network
+# naming, ...) are drop-ins the boot-method and device overlays supply, so the
+# generic base stays portable: a non-rkbin / non-Rockchip target simply has no
+# hooks here rather than aborting on a hardcoded step.
+if [ -d /etc/boot2deb/first-boot.d ]; then
+    for hook in /etc/boot2deb/first-boot.d/*; do
+        [ -x "$hook" ] && "$hook"
+    done
+fi
+
+# arm phase 2 and reboot into it
+: > "$arm"
+reboot

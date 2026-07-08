@@ -1,0 +1,17 @@
+[Unit]
+Description=boot2deb first-boot setup (ssh host keys, grow rootfs)
+# Runs once; the script writes this stamp when it completes phase 2.
+ConditionPathExists=!/var/lib/boot2deb/first-boot.done
+# Needs a fully-mounted, writable root before it grows partitions and writes state.
+After=local-fs.target
+Requires=local-fs.target
+# Host keys must exist before sshd validates its config.
+Before=ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/boot2deb/first-boot
+
+[Install]
+WantedBy=multi-user.target

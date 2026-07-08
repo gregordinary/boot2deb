@@ -75,7 +75,10 @@ main() {
     local config="$(gen_menu_header ${kver_count})\n\n"
 
     local num=0
-    local prms="root=$(get_root_dev) ${EXTL_CMD_LINE}"
+    # rw so systemd initializes machine-id, journald, and first-boot units on a
+    # writable root from PID 1 -- a read-only window there leaves machine-id
+    # transient and trips ConditionFirstBoot units (e.g. sshd host-key generation).
+    local prms="root=$(get_root_dev) rw ${EXTL_CMD_LINE}"
     for kver in ${kvers}; do
         local entry="$(gen_menu_item "${num}" "${kver}" "${prms}")"
         num="$((num+1))"
