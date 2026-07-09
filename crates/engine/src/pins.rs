@@ -49,20 +49,46 @@ pub struct UpdateOptions<'a> {
 
 /// Resolve a build to an exact [`Lock`] by consulting upstream and the vendored
 /// blobs. This is the only function that reaches the network.
+///
+/// The patches checkout is pinned first, and a dirty one is refused
+/// ([`EngineError::PatchesDirty`]) before any upstream ref is consulted: the pin
+/// is `HEAD`, so uncommitted changes — typically a just-imported patch — would be
+/// silently absent from the lock and resurface at the next build as a pin
+/// mismatch. Failing on the local problem first also keeps the refusal instant.
 pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock, EngineError> {
+    if !git::is_clean(opts.patches_path)? {
+        return Err(EngineError::PatchesDirty {
+            root: opts.patches_path.display().to_string(),
+        });
+    }
+    let patches_commit = git::rev_parse_head(opts.patches_path)?;
     let kernel_url = kernel_source_url(&build.kernel.source)?;
     let kernel_commit = git::resolve_ref(&kernel_url, opts.kernel_ref)?;
     let uboot_commit = git::resolve_ref(&build.uboot_source, opts.uboot_ref)?;
-    let patches_commit = git::rev_parse_head(opts.patches_path)?;
-    let userspace = UserspacePins {
-        mpp: git_pin(&build.userspace.mpp.git, opts.mpp_ref)?,
-        librga: git_pin(&build.userspace.librga.git, opts.librga_ref)?,
-        libmali: git_pin(&build.userspace.libmali.git, opts.libmali_ref)?,
-    };
-    let ffmpeg = FfmpegPins {
-        base: git_pin(&build.ffmpeg.base.git, opts.ffmpeg_base_ref)?,
-        rockchip: git_pin(&build.ffmpeg.rockchip.git, opts.ffmpeg_rockchip_ref)?,
-    };
+    // Pin the media-accel sources only when the build carries them (a
+    // `requires_media_accel` feature is selected); a base build peels no such refs
+    // and its lock omits both tables entirely.
+    let userspace = build
+        .userspace
+        .as_ref()
+        .map(|u| -> Result<UserspacePins, EngineError> {
+            Ok(UserspacePins {
+                mpp: git_pin(&u.mpp.git, opts.mpp_ref)?,
+                librga: git_pin(&u.librga.git, opts.librga_ref)?,
+                libmali: git_pin(&u.libmali.git, opts.libmali_ref)?,
+            })
+        })
+        .transpose()?;
+    let ffmpeg = build
+        .ffmpeg
+        .as_ref()
+        .map(|f| -> Result<FfmpegPins, EngineError> {
+            Ok(FfmpegPins {
+                base: git_pin(&f.base.git, opts.ffmpeg_base_ref)?,
+                rockchip: git_pin(&f.rockchip.git, opts.ffmpeg_rockchip_ref)?,
+            })
+        })
+        .transpose()?;
     let atf = blob_pin(opts.blobs_dir, &build.rkbin.atf)?;
     let tpl = blob_pin(opts.blobs_dir, &build.rkbin.tpl)?;
     Ok(assemble_lock(
@@ -117,8 +143,8 @@ fn assemble_lock(
     kernel_commit: String,
     uboot_commit: String,
     patches_commit: String,
-    userspace: UserspacePins,
-    ffmpeg: FfmpegPins,
+    userspace: Option<UserspacePins>,
+    ffmpeg: Option<FfmpegPins>,
     atf: String,
     tpl: String,
 ) -> Lock {
@@ -199,6 +225,16 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
             build.extra_debs.len()
         ));
     }
+    // Media-accel presence: the lock pins userspace/ffmpeg iff the resolved build
+    // builds the stack. A drift here (a feature added or dropped since `update`)
+    // would otherwise silently skip or demand the transcode nodes — re-pin instead.
+    if lock.userspace.is_some() != build.userspace.is_some() {
+        axes.push(format!(
+            "media-accel sources: lock {} vs resolved {}",
+            if lock.userspace.is_some() { "present" } else { "absent" },
+            if build.userspace.is_some() { "present" } else { "absent" },
+        ));
+    }
     if axes.is_empty() {
         Ok(())
     } else {
@@ -235,10 +271,21 @@ fn named_tree_url(name: &str) -> Option<String> {
 }
 
 /// Hash a vendored blob and format its lock pin `"<filename>@sha256:<hex>"`.
-/// The u-boot build verifies the same pin with [`blobs::verify`].
+/// The u-boot build verifies the same pin with [`blobs::verify`]. A blob that
+/// does not exist is [`EngineError::BlobMissing`] — the remedy is to vendor the
+/// file, which a bare I/O error would not say.
 fn blob_pin(dir: &Path, filename: &str) -> Result<String, EngineError> {
     let path = dir.join(filename);
-    let bytes = std::fs::read(&path).map_err(|source| EngineError::io(&path, source))?;
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(EngineError::BlobMissing {
+                filename: filename.to_string(),
+                dir: dir.display().to_string(),
+            })
+        }
+        Err(source) => return Err(EngineError::io(&path, source)),
+    };
     Ok(blobs::pin(filename, &bytes))
 }
 
@@ -254,6 +301,77 @@ mod tests {
     }
 
     #[test]
+    fn blob_pin_names_the_vendoring_remedy_when_missing() {
+        // A blob the resolved build names but the blob dir does not hold: the
+        // error names the file, the searched dir, and the vendoring remedy —
+        // not a bare I/O "No such file or directory".
+        let dir = tempfile::tempdir().unwrap();
+        let err = blob_pin(dir.path(), "rk3588_bl31_v1.51.elf").unwrap_err();
+        match &err {
+            EngineError::BlobMissing { filename, dir: d } => {
+                assert_eq!(filename, "rk3588_bl31_v1.51.elf");
+                assert_eq!(*d, dir.path().display().to_string());
+            }
+            e => panic!("expected BlobMissing, got {e:?}"),
+        }
+        assert!(err.to_string().contains("vendor it there"), "remedy in message: {err}");
+        // A present blob still pins.
+        std::fs::write(dir.path().join("blob.bin"), b"bytes").unwrap();
+        assert!(blob_pin(dir.path(), "blob.bin").unwrap().starts_with("blob.bin@sha256:"));
+    }
+
+    #[test]
+    fn resolve_lock_refuses_a_dirty_patches_checkout_before_any_network() {
+        // An uncommitted file in the patches checkout: `update` would pin a HEAD
+        // that silently excludes it, so resolve_lock refuses. The clean check runs
+        // before any upstream ref resolution, which keeps this test offline.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@boot2deb"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("committed"), "x").unwrap();
+        git(&["add", "committed"]);
+        git(&["commit", "-qm", "c"]);
+        std::fs::write(repo.join("imported.patch"), "not committed").unwrap();
+
+        let build = rk1_build();
+        let opts = UpdateOptions {
+            kernel_ref: "v7.1.1",
+            uboot_ref: "unused",
+            mpp_ref: "unused",
+            librga_ref: "unused",
+            libmali_ref: "unused",
+            ffmpeg_base_ref: "unused",
+            ffmpeg_rockchip_ref: "unused",
+            blobs_dir: Path::new("/unused"),
+            patches_path: repo,
+            rootfs_manifest: "unused.pkgs.lock",
+        };
+        let err = resolve_lock(&build, &opts).unwrap_err();
+        match &err {
+            EngineError::PatchesDirty { root } => {
+                assert_eq!(*root, repo.display().to_string());
+            }
+            e => panic!("expected PatchesDirty, got {e:?}"),
+        }
+        assert!(err.to_string().contains("commit them"), "remedy in message: {err}");
+    }
+
+    #[test]
     fn write_lock_is_atomic_and_leaves_no_temp() {
         use boot2deb_core::lock::{
             BlobsPin, FfmpegPins, GitPin, KernelPin, PatchesPin, RootfsPin, UbootPin,
@@ -265,8 +383,8 @@ mod tests {
             kernel: KernelPin { id: "k".into(), reference: "v7.1.1".into(), commit: "a".repeat(40) },
             patches: PatchesPin { profile: "rk3588-accel".into(), commit: "b".repeat(40) },
             uboot: UbootPin { reference: "v2026.04".into(), commit: "c".repeat(40) },
-            userspace: UserspacePins { mpp: git('1'), librga: git('2'), libmali: git('3') },
-            ffmpeg: FfmpegPins { base: git('4'), rockchip: git('5') },
+            userspace: Some(UserspacePins { mpp: git('1'), librga: git('2'), libmali: git('3') }),
+            ffmpeg: Some(FfmpegPins { base: git('4'), rockchip: git('5') }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m.lock".into(), manifest_sha256: None },
             blobs: BlobsPin { atf: "a".into(), tpl: "t".into() },
             extra_debs: vec![],
@@ -312,15 +430,15 @@ mod tests {
             "c9acdc466e9aa96352f658b9276aa8a45b8e817d".into(),
             "88dc2788777babfd6322fa655df549a019aa1e69".into(),
             "67750099d1f73e36ca3551de380744a72e4d5ef7".into(),
-            UserspacePins {
+            Some(UserspacePins {
                 mpp: git_pin("mainline-cma-fix", "95a6c48816d39b190be4b7333ad6fc249c08590c"),
                 librga: git_pin("master", "2cffdf6f332c3ddb93eb087841d78e8b487db2a3"),
                 libmali: git_pin("master", "bd33ee262f47fd936b831afccaa0759b3ecc2482"),
-            },
-            FfmpegPins {
+            }),
+            Some(FfmpegPins {
                 base: git_pin("v4l2-request-n8.1", "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935"),
                 rockchip: git_pin("8.1", "f66f2f804627e4464c2d1b10181772b5437bb991"),
-            },
+            }),
             "rk3588_bl31_v1.51.elf@sha256:2847".into(),
             "rk3588_ddr..._v1.19.bin@sha256:e109".into(),
         );
@@ -328,9 +446,11 @@ mod tests {
         assert_eq!(lock.kernel.reference, "v7.1.1");
         assert_eq!(lock.patches.profile, "rk3588-accel");
         assert_eq!(lock.uboot.reference, "v2026.04");
-        assert_eq!(lock.userspace.mpp.commit, "95a6c48816d39b190be4b7333ad6fc249c08590c");
-        assert_eq!(lock.ffmpeg.base.commit, "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935");
-        assert_eq!(lock.ffmpeg.rockchip.reference, "8.1");
+        let us = lock.userspace.as_ref().unwrap();
+        let ff = lock.ffmpeg.as_ref().unwrap();
+        assert_eq!(us.mpp.commit, "95a6c48816d39b190be4b7333ad6fc249c08590c");
+        assert_eq!(ff.base.commit, "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935");
+        assert_eq!(ff.rockchip.reference, "8.1");
         assert_eq!(lock.rootfs.suite, "forky");
         assert_eq!(lock.rootfs.manifest, "turing-rk1-forky.pkgs.lock");
         assert!(lock.snapshot.is_none());
@@ -359,8 +479,8 @@ mod tests {
                 commit: "p".into(),
             },
             uboot: UbootPin { reference: "v".into(), commit: "u".into() },
-            userspace: UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") },
-            ffmpeg: FfmpegPins { base: git("b"), rockchip: git("rk") },
+            userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
+            ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
             rootfs: RootfsPin {
                 suite: build.suite.clone(),
                 manifest: "m".into(),

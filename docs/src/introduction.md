@@ -20,4 +20,6 @@ an x86_64 host builds an arm64 image without root.
 - **[Config model](reference/config-model.md)** — how a build is described across its
   axes, and how the layers resolve.
 - **[CLI](reference/cli.md)** — the command reference.
+- **[Overlays](reference/overlays.md)** — keep your own boards and retunings out-of-tree.
 - **[Adding a board](contributing/adding-a-board.md)** — bring up a new device.
+- **[Adding a patch](contributing/adding-a-patch.md)** — get a patch into a build.

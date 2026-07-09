@@ -5,8 +5,8 @@
 //! the [`model`] types, the [`ConfigRoot`] loader, the [`resolve_device`] /
 //! [`resolve_recipe`] entry points, the [`feature`], [`profile`], [`lock`], and
 //! [`kconfig`] formats, patch normalization for `patch import` ([`mbox`]),
-//! [`size`] parsing, source-pin durability form ([`sources`]), and [`host`]
-//! detection.
+//! device/recipe generation for `new-device` ([`scaffold`]), [`size`] parsing,
+//! source-pin durability form ([`sources`]), and [`host`] detection.
 //!
 //! `missing_docs` is a warning here to keep the config surface documented as it
 //! grows.
@@ -24,6 +24,7 @@ pub mod model;
 pub mod profile;
 pub mod provenance;
 pub mod resolve;
+pub mod scaffold;
 pub mod size;
 pub mod sources;
 

@@ -1,6 +1,9 @@
 # boot2deb
 ## Status
-Work in progress. RK1 boots the built Debian image successfully. Image missing mali_csffw.bin.
+Work in progress. The Turing RK1 boots the built Debian image successfully. The
+non-free RK3588 firmware the image needs — including the Mali CSF blob
+`mali_csffw.bin` the G610 GPU loads — ships in the image via the
+`firmware-misc-nonfree` package, staged at the SoC layer.
 
 ## AI Disclosure
 
@@ -62,7 +65,9 @@ The docs are an mdBook under [`docs/`](docs/) — build it with `mdbook serve do
 - [Turing RK1](docs/src/boards/turing-rk1.md) — the shipped board, and how to flash it
 - [Config model](docs/src/reference/config-model.md) — the axes and layer resolution
 - [CLI](docs/src/reference/cli.md) — command reference
+- [Overlays](docs/src/reference/overlays.md) — keep your own boards/recipes out-of-tree
 - [Adding a board](docs/src/contributing/adding-a-board.md)
+- [Adding a patch](docs/src/contributing/adding-a-patch.md)
 
 ## Layout
 

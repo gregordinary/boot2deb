@@ -17,6 +17,11 @@ elif [ -e /usr/lib/os-release ]; then
     . /usr/lib/os-release
 fi
 
+# board dtb name (generated from the device's kernel_dtb; see /etc/boot2deb/board.conf)
+if [ -e /etc/boot2deb/board.conf ]; then
+    . /etc/boot2deb/board.conf
+fi
+
 gen_menu_header() {
     local ver_count="$1"
 
@@ -56,7 +61,7 @@ gen_menu_item() {
     echo "\tmenu label ${PRETTY_NAME} ${kver}"
     echo "\tlinux ${boot_dir}/vmlinuz-${kver}"
     echo "\tinitrd ${boot_dir}/initrd.img-${kver}"
-    echo "\tfdt ${boot_dir}/rk3588-turing-rk1.dtb-${kver}"
+    echo "\tfdt ${boot_dir}/${DTB_NAME}-${kver}"
     echo "\tappend ${prms}"
 }
 

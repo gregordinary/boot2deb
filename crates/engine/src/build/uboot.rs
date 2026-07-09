@@ -384,7 +384,7 @@ fn package_deb(
 ) -> Result<PathBuf, EngineError> {
     let pkg = package_name(&build.device);
     let version = deb_version(uboot_ref);
-    let arch = build.arch.as_str();
+    let arch = build.arch.debian_arch();
 
     // Assemble under a clean pkg-stage (a stale tree would ship leftover files).
     let pkg_stage = opts.work_dir.join("uboot-deb");
@@ -571,8 +571,8 @@ mod tests {
             kernel: KernelPin { id: "k".into(), reference: "v".into(), commit: "kc".into() },
             patches: PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() },
             uboot: UbootPin { reference: "v2026.04".into(), commit: uboot_commit.into() },
-            userspace: UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") },
-            ffmpeg: FfmpegPins { base: git("b"), rockchip: git("rk") },
+            userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
+            ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
             blobs: BlobsPin { atf: "a".into(), tpl: "t".into() },
             extra_debs: vec![],

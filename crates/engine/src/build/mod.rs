@@ -741,6 +741,10 @@ fn verify_patches_pin(
     Err(EngineError::PatchesPinMismatch {
         root: patches_root.display().to_string(),
         expected: expected.to_string(),
+        // Ahead/behind selects the remedy: an ahead-of-pin or dirty checkout
+        // needs `update` (its work is not in the lock yet), a stale one needs a
+        // re-checkout at the pin.
+        relation: git::pin_relation(patches_root, expected, &head),
         actual: head,
         dirty: !clean,
     })
@@ -1305,26 +1309,52 @@ mod tests {
         // Matching pin on a clean tree: OK.
         verify_patches_pin(repo, &head, false, &step).unwrap();
 
-        // A drifted pin hard-errors, naming the expectation.
+        // A pin the checkout does not hold hard-errors, naming the expectation;
+        // the relationship is undeterminable, so the remedy spells out both paths.
         let other = "0000000000000000000000000000000000000000";
-        match verify_patches_pin(repo, other, false, &step).unwrap_err() {
+        let err = verify_patches_pin(repo, other, false, &step).unwrap_err();
+        match &err {
             EngineError::PatchesPinMismatch { expected, dirty, .. } => {
                 assert_eq!(expected, other);
                 assert!(!dirty);
             }
             e => panic!("expected PatchesPinMismatch, got {e:?}"),
         }
+        let msg = err.to_string();
+        assert!(msg.contains("boot2deb update"), "unknown-relation remedy offers update: {msg}");
+        assert!(msg.contains(other), "unknown-relation remedy offers the pin: {msg}");
         // The --patches-path co-dev override downgrades the mismatch to a warning.
         verify_patches_pin(repo, other, true, &step).unwrap();
 
-        // An uncommitted change fails the clean check even at the right commit.
+        // A checkout ahead of the pin (a commit past it) is told to re-pin with
+        // `update`, not to re-checkout — that would discard the new commit.
+        std::fs::write(repo.join("f"), "newer").unwrap();
+        git(&["add", "f"]);
+        git(&["commit", "-qm", "newer"]);
+        let msg = verify_patches_pin(repo, &head, false, &step).unwrap_err().to_string();
+        assert!(msg.contains("ahead of the pin"), "ahead remedy names the state: {msg}");
+        assert!(msg.contains("boot2deb update"), "ahead remedy points at update: {msg}");
+        let newer_head = git::rev_parse_head(repo).unwrap();
+
+        // A stale checkout (HEAD behind the pin) is told to check out the pin.
+        git(&["checkout", "-q", head.as_str()]);
+        let msg = verify_patches_pin(repo, &newer_head, false, &step).unwrap_err().to_string();
+        assert!(msg.contains("behind the pin"), "behind remedy names the state: {msg}");
+        assert!(msg.contains(&format!("checkout {newer_head}")), "behind remedy gives the command: {msg}");
+        git(&["checkout", "-q", "-"]);
+
+        // An uncommitted change fails the clean check even at the right commit,
+        // and the remedy leads with committing, whatever HEAD's relation is.
         std::fs::write(repo.join("f"), "changed").unwrap();
-        match verify_patches_pin(repo, &head, false, &step).unwrap_err() {
-            EngineError::PatchesPinMismatch { dirty, .. } => assert!(dirty),
-            e => panic!("expected dirty PatchesPinMismatch, got {e:?}"),
-        }
+        let err = verify_patches_pin(repo, &newer_head, false, &step).unwrap_err();
+        assert!(
+            matches!(err, EngineError::PatchesPinMismatch { dirty: true, .. }),
+            "expected dirty PatchesPinMismatch, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("commit them"), "dirty remedy leads with commit: {msg}");
         // ...but the override tolerates a dirty co-dev checkout too.
-        verify_patches_pin(repo, &head, true, &step).unwrap();
+        verify_patches_pin(repo, &newer_head, true, &step).unwrap();
     }
 
     #[test]

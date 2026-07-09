@@ -4,10 +4,9 @@
 # `media-accel-rockchip` capability feature that provides HW transcode on RK35xx.
 # Same device and kernel as turing-rk1-forky, just a different feature set.
 #
-# NOTE: `jellyfin` pulls from a third-party apt repo whose engine-side activation
-# (mmdebstrap) and signing-key vendoring ride the physical boot gate; see
-# features/jellyfin/README.md. `boot2deb resolve turing-rk1-jellyfin` validates
-# the composition today. The sibling .lock is written by `boot2deb update`.
+# `jellyfin` installs from its signed upstream apt repository (keyring vendored
+# at blobs/keyrings/jellyfin.gpg); see features/jellyfin/README.md. The sibling
+# .lock holds the exact resolved pins; re-pin with `boot2deb update`.
 device     = "turing-rk1"
 kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
 suite      = "forky"                     # omit -> device default_suite

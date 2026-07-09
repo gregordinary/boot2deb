@@ -129,11 +129,18 @@ pub fn build_userspace(
     let step = Step::start(sink, "userspace");
     let stage_root = opts.work_dir.join("userspace");
 
+    // The CLI schedules this stage only for a media-accel build, whose lock pins
+    // the userspace sources; reaching it without pins is an internal bug.
+    let userspace = lock
+        .userspace
+        .as_ref()
+        .ok_or(EngineError::MissingMediaAccelPins { stage: "userspace" })?;
+
     let mut packages = vec![
         Package {
             name: "mpp",
             source: opts.mpp_src,
-            pin: &lock.userspace.mpp,
+            pin: &userspace.mpp,
             deb_prefixes: &[
                 "librockchip-mpp1_",
                 "librockchip-mpp-dev_",
@@ -144,7 +151,7 @@ pub fn build_userspace(
         Package {
             name: "librga",
             source: opts.librga_src,
-            pin: &lock.userspace.librga,
+            pin: &userspace.librga,
             deb_prefixes: &["librga2_", "librga-dev_"],
         },
     ];
@@ -152,7 +159,7 @@ pub fn build_userspace(
         packages.push(Package {
             name: "libmali",
             source: opts.libmali_src,
-            pin: &lock.userspace.libmali,
+            pin: &userspace.libmali,
             deb_prefixes: &["libmali-"],
         });
     }

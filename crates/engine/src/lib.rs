@@ -62,6 +62,7 @@ pub mod secret;
 pub mod signature;
 pub mod snapshot;
 pub mod sources;
+pub mod srcfetch;
 pub mod toolchain;
 
 pub use bootstrap::DEFAULT_MIRROR;

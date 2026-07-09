@@ -5,7 +5,7 @@
 //! — peeling an annotated tag to its commit — is factored into a pure function
 //! (`pick_commit`) so it is unit-testable without a network.
 
-use crate::error::EngineError;
+use crate::error::{EngineError, PinRelation};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -73,6 +73,38 @@ pub(crate) fn is_clean(repo: &Path) -> Result<bool, EngineError> {
     let in_progress =
         git_dir.join("rebase-apply").exists() || git_dir.join("rebase-merge").exists();
     Ok(!in_progress)
+}
+
+/// Whether `ancestor` is an ancestor of (or equal to) `descendant` in `repo`,
+/// via `git merge-base --is-ancestor`. `None` when the relationship cannot be
+/// determined — e.g. a commit absent from the local object store — so callers
+/// decorating an error can degrade to generic wording instead of masking it.
+fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Option<bool> {
+    let out = run(
+        Some(repo),
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+        "merge-base --is-ancestor",
+    )
+    .ok()?;
+    match out.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Classify how a checkout's HEAD (`actual`) relates to a locked pin
+/// (`expected`), for [`PinRelation`]-driven remedy wording. Best-effort: any
+/// git failure lands on [`PinRelation::Unknown`] rather than replacing the
+/// pin-mismatch error this decorates.
+pub(crate) fn pin_relation(repo: &Path, expected: &str, actual: &str) -> PinRelation {
+    match is_ancestor(repo, expected, actual) {
+        Some(true) => PinRelation::Ahead,
+        _ => match is_ancestor(repo, actual, expected) {
+            Some(true) => PinRelation::Behind,
+            _ => PinRelation::Unknown,
+        },
+    }
 }
 
 /// Resolve a tag/branch/ref on a remote to its exact commit, peeling annotated
@@ -226,6 +258,41 @@ c9acdc466e9aa96352f658b9276aa8a45b8e817d\trefs/tags/v7.1.1^{}\n";
         assert!(is_full_sha("C9ACDC466E9AA96352F658B9276AA8A45B8E817D"));
         assert!(!is_full_sha("v7.1.1"));
         assert!(!is_full_sha("c9acdc46")); // short
+    }
+
+    #[test]
+    fn pin_relation_classifies_ahead_behind_and_unknown() {
+        // Two commits in a real local repo: parent -> child. HEAD relative to a
+        // pin at the parent is Ahead; relative to a pin at the child (after
+        // checking out the parent) it is Behind; a commit git does not hold is
+        // Unknown.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git").arg("-C").arg(repo).args(args).output().unwrap().status.success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@boot2deb"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("f"), "one").unwrap();
+        git(&["add", "f"]);
+        git(&["commit", "-qm", "one"]);
+        let parent = rev_parse_head(repo).unwrap();
+        std::fs::write(repo.join("f"), "two").unwrap();
+        git(&["add", "f"]);
+        git(&["commit", "-qm", "two"]);
+        let child = rev_parse_head(repo).unwrap();
+
+        // HEAD (child) has commits past the pin (parent): the lock is behind the work.
+        assert_eq!(pin_relation(repo, &parent, &child), PinRelation::Ahead);
+        // HEAD (parent) is an ancestor of the pin (child): a stale checkout.
+        assert_eq!(pin_relation(repo, &child, &parent), PinRelation::Behind);
+        // A pin the local object store does not hold cannot be classified.
+        let absent = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(pin_relation(repo, absent, &child), PinRelation::Unknown);
     }
 
     #[test]

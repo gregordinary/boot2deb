@@ -28,7 +28,7 @@ use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::sandbox::{BuildSandbox, SandboxRun};
 use crate::git;
-use boot2deb_core::lock::Lock;
+use boot2deb_core::lock::{FfmpegPins, Lock, UserspacePins};
 use std::path::{Path, PathBuf};
 
 /// Install prefix baked into the build; keeps `ffmpeg-rk` out of the system
@@ -149,6 +149,18 @@ pub fn build_ffmpeg(
     let stage_root = opts.work_dir.join("ffmpeg");
     let tree = stage_root.join("build");
 
+    // ffmpeg build-depends on the userspace debs, so a media-accel build always
+    // carries both pin sets; the CLI schedules this stage only then. Reaching it
+    // without pins is an internal scheduling bug.
+    let ffmpeg = lock
+        .ffmpeg
+        .as_ref()
+        .ok_or(EngineError::MissingMediaAccelPins { stage: "ffmpeg" })?;
+    let userspace = lock
+        .userspace
+        .as_ref()
+        .ok_or(EngineError::MissingMediaAccelPins { stage: "ffmpeg" })?;
+
     // The applied patch series identities for the signatures: ffmpeg's own tree
     // series, plus — for the CACHE-2 userspace-dependency fold — the `userspace` scope
     // (the MPP CMA fix). Pinned by commit, or fingerprinted from the live checkout in
@@ -173,7 +185,7 @@ pub fn build_ffmpeg(
     // qemu build). Checked before the userspace-deb dependency: a cached ffmpeg
     // needs neither the sandbox nor the userspace `.deb`s (the userspace dep identity
     // in the key is recomputed from the lock, not read from the built debs).
-    let out_man = output_manifest(lock, arch, ffmpeg_patches, us_patches);
+    let out_man = output_manifest(lock, ffmpeg, userspace, arch, ffmpeg_patches, us_patches);
     if let Some(root) = opts.store {
         let store = crate::artstore::ArtifactStore::open(root)?;
         if let Some(files) = store.restore("ffmpeg", out_man.signature().as_str(), opts.out_dir)? {
@@ -197,7 +209,7 @@ pub fn build_ffmpeg(
     // with the current input signature (base commit + patch pin); a lock bump
     // rebuilds it rather than reusing a stale checkout (COR-1). configure/compile
     // re-run regardless, so the signature covers only the tree-shaping inputs.
-    let man = clone_manifest(lock, ffmpeg_patches);
+    let man = clone_manifest(ffmpeg, &lock.patches.profile, &lock.patches.commit, ffmpeg_patches);
     if crate::signature::is_fresh(&tree, &man) {
         step.log(format!(
             "reusing ffmpeg tree at {} (signature {})",
@@ -212,7 +224,7 @@ pub fn build_ffmpeg(
             ));
             std::fs::remove_dir_all(&tree).map_err(|s| EngineError::io(&tree, s))?;
         }
-        fetch_and_patch(lock, opts, &tree, &step)?;
+        fetch_and_patch(lock, ffmpeg, opts, &tree, &step)?;
         crate::signature::write_manifest(&tree, &man)?;
     }
     step.progress(30);
@@ -232,7 +244,7 @@ pub fn build_ffmpeg(
 
     // Deterministic build timestamp from the locked base commit (COR-9); the
     // tree's HEAD is a `git am` patch commit stamped now, so read the base explicitly.
-    let build_env: Vec<(String, String)> = git::commit_epoch(&tree, &lock.ffmpeg.base.commit)
+    let build_env: Vec<(String, String)> = git::commit_epoch(&tree, &ffmpeg.base.commit)
         .ok()
         .map(|e| vec![("SOURCE_DATE_EPOCH".to_string(), e.to_string())])
         .unwrap_or_default();
@@ -250,7 +262,7 @@ pub fn build_ffmpeg(
     let depends = resolve_depends(sandbox, &stage_root, &pkg_stage, arch, &binds, &step)?;
     step.progress(90);
 
-    let version = deb_version(&lock.ffmpeg.base.reference, &lock.ffmpeg.base.commit);
+    let version = deb_version(&ffmpeg.base.reference, &ffmpeg.base.commit);
     let control = control_text(arch, &version, &depends);
     write_control(&pkg_stage, &control)?;
     let deb_name = format!("{PKG_NAME}_{version}_{arch}.deb");
@@ -292,11 +304,14 @@ pub fn build_ffmpeg(
 /// deb bytes) keeps the key computable without the userspace `.deb`s present.
 fn output_manifest(
     lock: &Lock,
+    ffmpeg: &FfmpegPins,
+    userspace: &UserspacePins,
     arch: &str,
     patches: PatchSeries,
     us_patches: PatchSeries,
 ) -> crate::signature::SignatureManifest {
-    let tree_sig = clone_manifest(lock, patches).signature();
+    let tree_sig =
+        clone_manifest(ffmpeg, &lock.patches.profile, &lock.patches.commit, patches).signature();
     let mpp_inputs = crate::build::userspace::PatchInputs {
         profile: &lock.patches.profile,
         commit: &lock.patches.commit,
@@ -304,7 +319,7 @@ fn output_manifest(
     };
     let mpp_dep = crate::build::userspace::output_manifest_for(
         "mpp",
-        &lock.userspace.mpp.commit,
+        &userspace.mpp.commit,
         &lock.rootfs.suite,
         arch,
         Some(&mpp_inputs),
@@ -312,7 +327,7 @@ fn output_manifest(
     .signature();
     let rga_dep = crate::build::userspace::output_manifest_for(
         "librga",
-        &lock.userspace.librga.commit,
+        &userspace.librga.commit,
         &lock.rootfs.suite,
         arch,
         None,
@@ -323,7 +338,7 @@ fn output_manifest(
         .fold_ordered("configure_flags", CONFIGURE_FLAGS)
         .fold_scalar("arch", arch)
         .fold_scalar("suite", &lock.rootfs.suite)
-        .fold_scalar("base.reference", &lock.ffmpeg.base.reference)
+        .fold_scalar("base.reference", &ffmpeg.base.reference)
         .fold_scalar("pkg_name", PKG_NAME)
         .fold_dep(&mpp_dep)
         .fold_dep(&rga_dep);
@@ -336,11 +351,19 @@ fn output_manifest(
 /// base). The [`PatchSeries`] fold covers the pinned patch commit and — in co-dev
 /// mode — the live-series fingerprint (CACHE-1), so a co-dev build never shares a
 /// stamp with a pinned one and an edited patch restamps. Public so `why-rebuild`
-/// ([`crate::plan`]) recomputes the same signature it stamps here.
-pub fn clone_manifest(lock: &Lock, patches: PatchSeries) -> crate::signature::SignatureManifest {
+/// ([`crate::plan`]) recomputes the same signature it stamps here. Takes the
+/// [`FfmpegPins`] and the patch profile/commit directly rather than the whole
+/// [`Lock`], since it is only meaningful for a media-accel build (one that has
+/// ffmpeg pins).
+pub fn clone_manifest(
+    ffmpeg: &FfmpegPins,
+    patches_profile: &str,
+    patches_commit: &str,
+    patches: PatchSeries,
+) -> crate::signature::SignatureManifest {
     let mut b = crate::signature::SignatureBuilder::new("ffmpeg", CLONE_STAGE_VERSION);
-    b.fold_scalar("ffmpeg.base.commit", &lock.ffmpeg.base.commit);
-    build::fold_patch_series(&mut b, &lock.patches.profile, &lock.patches.commit, patches);
+    b.fold_scalar("ffmpeg.base.commit", &ffmpeg.base.commit);
+    build::fold_patch_series(&mut b, patches_profile, patches_commit, patches);
     b.manifest()
 }
 
@@ -355,15 +378,16 @@ pub fn clone_manifest(lock: &Lock, patches: PatchSeries) -> crate::signature::Si
 /// node, and the profile is already validated there.
 fn fetch_and_patch(
     lock: &Lock,
+    ffmpeg: &FfmpegPins,
     opts: &FfmpegOptions,
     tree: &Path,
     step: &Step,
 ) -> Result<(), EngineError> {
-    let target = format!("ffmpeg-rk @ {}", lock.ffmpeg.base.reference);
+    let target = format!("ffmpeg-rk @ {}", ffmpeg.base.reference);
     let spec = ClonePinned {
         source: opts.base_src,
-        reference: &lock.ffmpeg.base.reference,
-        commit: &lock.ffmpeg.base.commit,
+        reference: &ffmpeg.base.reference,
+        commit: &ffmpeg.base.commit,
         mode: CloneMode::Fetch,
         tree,
         what: "ffmpeg base",
@@ -736,8 +760,8 @@ mod tests {
             kernel: KernelPin { id: "k".into(), reference: "v".into(), commit: "kc".into() },
             patches: PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() },
             uboot: UbootPin { reference: "v".into(), commit: "uc".into() },
-            userspace: UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") },
-            ffmpeg: FfmpegPins { base: git(base_commit), rockchip: git("rk") },
+            userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
+            ffmpeg: Some(FfmpegPins { base: git(base_commit), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
             blobs: BlobsPin { atf: "a".into(), tpl: "t".into() },
             extra_debs: vec![],
@@ -747,7 +771,11 @@ mod tests {
 
     #[test]
     fn clone_manifest_tracks_base_commit_and_patch_pin() {
-        let sig = |bc, pc, patches| clone_manifest(&lock_with(bc, pc), patches).signature;
+        let sig = |bc: &str, pc: &str, patches| {
+            let lock = lock_with(bc, pc);
+            let ff = lock.ffmpeg.as_ref().unwrap();
+            clone_manifest(ff, &lock.patches.profile, &lock.patches.commit, patches).signature
+        };
         let base = sig("bc1", "pc1", PatchSeries::Pinned);
         assert_eq!(base, sig("bc1", "pc1", PatchSeries::Pinned));
         // A base-tree bump or a patch-pin bump each invalidate the reused tree.
@@ -766,8 +794,13 @@ mod tests {
 
     #[test]
     fn output_manifest_covers_tree_arch_and_suite() {
-        let sig =
-            |lock: &Lock, arch: &str| output_manifest(lock, arch, PatchSeries::Pinned, PatchSeries::Pinned).signature.clone();
+        let sig = |lock: &Lock, arch: &str| {
+            let ff = lock.ffmpeg.as_ref().unwrap();
+            let us = lock.userspace.as_ref().unwrap();
+            output_manifest(lock, ff, us, arch, PatchSeries::Pinned, PatchSeries::Pinned)
+                .signature
+                .clone()
+        };
         let base = sig(&lock_with("bc1", "pc1"), "arm64");
         // Stable under identical inputs.
         assert_eq!(base, sig(&lock_with("bc1", "pc1"), "arm64"));
@@ -781,9 +814,18 @@ mod tests {
         sid.rootfs.suite = "sid".into();
         assert_ne!(base, sig(&sid, "arm64"));
         // Co-dev mode never shares an output entry with a pinned build.
+        let dev_lock = lock_with("bc1", "pc1");
         assert_ne!(
             base,
-            output_manifest(&lock_with("bc1", "pc1"), "arm64", PatchSeries::Dev(&[]), PatchSeries::Dev(&[])).signature
+            output_manifest(
+                &dev_lock,
+                dev_lock.ffmpeg.as_ref().unwrap(),
+                dev_lock.userspace.as_ref().unwrap(),
+                "arm64",
+                PatchSeries::Dev(&[]),
+                PatchSeries::Dev(&[]),
+            )
+            .signature
         );
     }
 
@@ -791,16 +833,21 @@ mod tests {
     fn output_manifest_folds_userspace_dependency_identity() {
         // CACHE-2: ffmpeg links against the MPP + RGA userspace debs, so a change to
         // either userspace pin must invalidate the cached ffmpeg deb.
-        let sig =
-            |lock: &Lock| output_manifest(lock, "arm64", PatchSeries::Pinned, PatchSeries::Pinned).signature.clone();
+        let sig = |lock: &Lock| {
+            let ff = lock.ffmpeg.as_ref().unwrap();
+            let us = lock.userspace.as_ref().unwrap();
+            output_manifest(lock, ff, us, "arm64", PatchSeries::Pinned, PatchSeries::Pinned)
+                .signature
+                .clone()
+        };
         let base = sig(&lock_with("bc1", "pc1"));
         // An MPP pin bump (ffmpeg base/patch/suite/arch unchanged) splits the key.
         let mut mpp_bump = lock_with("bc1", "pc1");
-        mpp_bump.userspace.mpp.commit = "m2".into();
+        mpp_bump.userspace.as_mut().unwrap().mpp.commit = "m2".into();
         assert_ne!(base, sig(&mpp_bump));
         // An RGA pin bump likewise splits it.
         let mut rga_bump = lock_with("bc1", "pc1");
-        rga_bump.userspace.librga.commit = "r2".into();
+        rga_bump.userspace.as_mut().unwrap().librga.commit = "r2".into();
         assert_ne!(base, sig(&rga_bump));
     }
 

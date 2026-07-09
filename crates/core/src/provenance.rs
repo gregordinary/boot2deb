@@ -136,6 +136,19 @@ pub struct SourcesProvenance {
     pub uboot_ref: String,
     /// u-boot commit.
     pub uboot_commit: String,
+    /// The media-accel source pins, present only when the image built the HW
+    /// transcode stack (a `requires_media_accel` feature was selected). Omitted
+    /// from the manifest for a base image, which has no such sources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_accel: Option<MediaAccelProvenance>,
+}
+
+/// The pinned media-accel source trees — the MPP/RGA/Mali userspace forks plus
+/// the ffmpeg V4L2 base and its Rockchip graft-provenance tree — as `ref` +
+/// exact `commit` pairs (from the [`Lock`]). Present in a [`SourcesProvenance`]
+/// only when the image compiled the transcode stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MediaAccelProvenance {
     /// MPP ref.
     pub mpp_ref: String,
     /// MPP commit.
@@ -230,16 +243,22 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             patches_commit: lock.patches.commit.clone(),
             uboot_ref: lock.uboot.reference.clone(),
             uboot_commit: lock.uboot.commit.clone(),
-            mpp_ref: lock.userspace.mpp.reference.clone(),
-            mpp_commit: lock.userspace.mpp.commit.clone(),
-            librga_ref: lock.userspace.librga.reference.clone(),
-            librga_commit: lock.userspace.librga.commit.clone(),
-            libmali_ref: lock.userspace.libmali.reference.clone(),
-            libmali_commit: lock.userspace.libmali.commit.clone(),
-            ffmpeg_base_ref: lock.ffmpeg.base.reference.clone(),
-            ffmpeg_base_commit: lock.ffmpeg.base.commit.clone(),
-            ffmpeg_rockchip_ref: lock.ffmpeg.rockchip.reference.clone(),
-            ffmpeg_rockchip_commit: lock.ffmpeg.rockchip.commit.clone(),
+            // Present in lockstep: resolution pins userspace and ffmpeg together or
+            // not at all, so a single `zip` yields the whole block or `None`.
+            media_accel: lock.userspace.as_ref().zip(lock.ffmpeg.as_ref()).map(|(us, ff)| {
+                MediaAccelProvenance {
+                    mpp_ref: us.mpp.reference.clone(),
+                    mpp_commit: us.mpp.commit.clone(),
+                    librga_ref: us.librga.reference.clone(),
+                    librga_commit: us.librga.commit.clone(),
+                    libmali_ref: us.libmali.reference.clone(),
+                    libmali_commit: us.libmali.commit.clone(),
+                    ffmpeg_base_ref: ff.base.reference.clone(),
+                    ffmpeg_base_commit: ff.base.commit.clone(),
+                    ffmpeg_rockchip_ref: ff.rockchip.reference.clone(),
+                    ffmpeg_rockchip_commit: ff.rockchip.commit.clone(),
+                }
+            }),
         },
         rootfs: RootfsProvenance {
             suite: lock.rootfs.suite.clone(),
@@ -263,26 +282,31 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             note: "expired at first login (passwd -e); unique per built image".to_string(),
         },
         extra_debs: lock.extra_debs.clone(),
-        // The fetched source axes, each classified offline by pin form. The
-        // ffmpeg `rockchip` pin is provenance-only (never fetched at build), so
-        // its re-fetch durability is moot and it is omitted here.
-        source_durability: vec![
-            source_durability("kernel", &lock.kernel.reference, &lock.kernel.commit),
-            source_durability("uboot", &lock.uboot.reference, &lock.uboot.commit),
-            source_durability("mpp", &lock.userspace.mpp.reference, &lock.userspace.mpp.commit),
-            source_durability(
-                "librga",
-                &lock.userspace.librga.reference,
-                &lock.userspace.librga.commit,
-            ),
-            source_durability(
-                "libmali",
-                &lock.userspace.libmali.reference,
-                &lock.userspace.libmali.commit,
-            ),
-            source_durability("ffmpeg-base", &lock.ffmpeg.base.reference, &lock.ffmpeg.base.commit),
-        ],
+        // The fetched source axes, each classified offline by pin form. The kernel
+        // and u-boot rows are always present; the media-accel rows only when the
+        // stack was built. The ffmpeg `rockchip` pin is provenance-only (never
+        // fetched at build), so its re-fetch durability is moot and it is omitted.
+        source_durability: source_durability_rows(lock),
     }
+}
+
+/// The `[[source_durability]]` rows for a lock: kernel and u-boot always, plus the
+/// four fetched media-accel trees (mpp/librga/libmali/ffmpeg-base) when the build
+/// compiled the transcode stack.
+fn source_durability_rows(lock: &Lock) -> Vec<SourceDurability> {
+    let mut rows = vec![
+        source_durability("kernel", &lock.kernel.reference, &lock.kernel.commit),
+        source_durability("uboot", &lock.uboot.reference, &lock.uboot.commit),
+    ];
+    if let Some(us) = &lock.userspace {
+        rows.push(source_durability("mpp", &us.mpp.reference, &us.mpp.commit));
+        rows.push(source_durability("librga", &us.librga.reference, &us.librga.commit));
+        rows.push(source_durability("libmali", &us.libmali.reference, &us.libmali.commit));
+    }
+    if let Some(ff) = &lock.ffmpeg {
+        rows.push(source_durability("ffmpeg-base", &ff.base.reference, &ff.base.commit));
+    }
+    rows
 }
 
 /// Classify one source pin's offline durability form for the manifest.
@@ -330,15 +354,15 @@ mod tests {
                 reference: "v2026.04".into(),
                 commit: "uc".into(),
             },
-            userspace: UserspacePins {
+            userspace: Some(UserspacePins {
                 mpp: git("mainline-cma-fix", "mc"),
                 librga: git("master", "rc"),
                 libmali: git("master", "lc"),
-            },
-            ffmpeg: FfmpegPins {
+            }),
+            ffmpeg: Some(FfmpegPins {
                 base: git("v4l2-request-n8.1", "fbc"),
                 rockchip: git("8.1", "frc"),
-            },
+            }),
             rootfs: RootfsPin {
                 suite: "forky".into(),
                 manifest: "turing-rk1-forky.pkgs.lock".into(),
@@ -379,7 +403,8 @@ mod tests {
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.sources.kernel_commit, "kc");
-        assert_eq!(prov.sources.ffmpeg_rockchip_ref, "8.1");
+        let media = prov.sources.media_accel.as_ref().expect("media-accel build has sources");
+        assert_eq!(media.ffmpeg_rockchip_ref, "8.1");
         assert_eq!(prov.rootfs.manifest_sha256, "abc123");
         assert_eq!(prov.rootfs.package_count, 223);
         assert_eq!(prov.toolchain.host_arch, "x86_64");
@@ -412,7 +437,7 @@ mod tests {
         // The emitted document is valid TOML (guards the section field ordering —
         // a scalar after a nested table would be a parse error).
         let parsed: toml::Value = toml::from_str(&text).unwrap();
-        assert_eq!(parsed["sources"]["ffmpeg_base_commit"].as_str(), Some("fbc"));
+        assert_eq!(parsed["sources"]["media_accel"]["ffmpeg_base_commit"].as_str(), Some("fbc"));
         assert_eq!(parsed["image"]["features"][0].as_str(), Some("media-accel-rockchip"));
         // No extra_debs in this build → the array-of-tables is omitted entirely.
         assert!(!text.contains("extra_debs"));

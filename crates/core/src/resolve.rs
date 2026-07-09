@@ -100,6 +100,22 @@ pub fn resolve_device(
     }
     crate::feature::ensure_no_conflicts(&loaded_features)?;
 
+    // A feature that builds the media-accel stack (`requires_media_accel`) needs the
+    // SoC to supply the `[userspace]`/`[ffmpeg]` source trees its `.deb`s compile
+    // from. Gate here so a bad composition fails at resolve, not deep in the build.
+    // The flag also decides whether this build carries sources at all: a selection
+    // with no such feature drops them, and the userspace/ffmpeg nodes are skipped.
+    let needs_media_accel = crate::feature::first_requiring_media_accel(&loaded_features);
+    if let Some(feature) = needs_media_accel {
+        if soc.userspace.is_none() || soc.ffmpeg.is_none() {
+            return Err(ConfigError::FeatureRequiresMediaAccel {
+                feature: feature.to_string(),
+                soc: device.soc.to_string(),
+            });
+        }
+    }
+    let build_media_accel = needs_media_accel.is_some();
+
     // Union the features' third-party apt sources, de-duplicated by name.
     // Two features contributing an identical source share it; a same-name/
     // different-definition clash is a resolution error, since the bootstrap could
@@ -214,8 +230,10 @@ pub fn resolve_device(
             uboot_itb: bm.uboot_itb_offset,
             rootfs: bm.rootfs_offset,
         },
-        userspace: soc.userspace,
-        ffmpeg: soc.ffmpeg,
+        // Sources ride only when a feature builds the stack; a base build drops
+        // them (validated above: `build_media_accel` implies the SoC supplies both).
+        userspace: build_media_accel.then_some(soc.userspace).flatten(),
+        ffmpeg: build_media_accel.then_some(soc.ffmpeg).flatten(),
         apt_sources,
         extra_debs,
     })
@@ -390,6 +408,10 @@ mod tests {
         // The recipe's single capability feature resolves + passes the SoC/arch
         // gates.
         assert_eq!(b.features, vec!["media-accel-rockchip"]);
+        // media-accel-rockchip declares `requires_media_accel`, so the resolved
+        // build carries the SoC's userspace + ffmpeg source trees (built as a unit).
+        assert!(b.userspace.is_some(), "media-accel build carries userspace sources");
+        assert!(b.ffmpeg.is_some(), "media-accel build carries ffmpeg sources");
         // The shipped media-accel-rockchip feature adds no third-party apt source.
         assert!(b.apt_sources.is_empty());
         // Merged rootfs set: base packages + the feature's packages, base excludes.
@@ -499,6 +521,19 @@ mod tests {
         assert!(matches!(err, ConfigError::NotFound { kind: "device", .. }));
     }
 
+    #[test]
+    fn base_resolution_selects_no_media_accel_sources() {
+        // A plain device resolution (no recipe, hence no features) builds no
+        // transcode stack, so it carries neither userspace nor ffmpeg sources even
+        // though the RK3588 SoC layer supplies them — sources ride the feature, not
+        // the SoC (UX-21).
+        let root = repo_root();
+        let b = resolve_device(&root, "turing-rk1", &Overrides::default()).unwrap();
+        assert!(b.features.is_empty());
+        assert!(b.userspace.is_none());
+        assert!(b.ffmpeg.is_none());
+    }
+
     /// Build a feature carrying a set of apt sources, for the merge tests.
     fn feat_with_sources(sources: Vec<AptSource>) -> crate::feature::Feature {
         crate::feature::Feature {
@@ -510,6 +545,7 @@ mod tests {
             apt_sources: sources,
             extra_debs: vec![],
             conflicts: vec![],
+            requires_media_accel: false,
         }
     }
 
@@ -946,5 +982,42 @@ mod fixture_tests {
             resolve_device(&ConfigRoot::new(p), "dev", &Overrides::default()).unwrap_err(),
             ConfigError::ExtraDebLocator { .. }
         ));
+    }
+
+    #[test]
+    fn media_accel_feature_on_a_sourceless_soc_is_rejected() {
+        // A feature that builds the media-accel stack requires the SoC to supply the
+        // `[userspace]`/`[ffmpeg]` sources. Rewrite the synthetic SoC to omit them
+        // and mark the feature `requires_media_accel`: resolution must fail with the
+        // dedicated error naming the feature (UX-21), not build a stack with no
+        // sources.
+        let tree = Tree {
+            features: vec![Feat { name: "accel", packages: &["p1"], exclude: &[] }],
+            ..Default::default()
+        };
+        let dir = tree.write();
+        let p = dir.path();
+        // SoC layer with no media-accel source stanzas.
+        fs::write(
+            p.join("socs/rk3588.toml"),
+            "description = \"soc\"\narch = \"arm64\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+        )
+        .unwrap();
+        // The feature opts into the media-accel build.
+        fs::write(
+            p.join("features/accel.toml"),
+            "description = \"accel\"\npackages = [\"p1\"]\nrequires_soc = [\"rk3588\"]\n\
+             requires_media_accel = true\n",
+        )
+        .unwrap();
+        let root = ConfigRoot::new(p);
+        let cli = Overrides { features: Some(vec!["accel".into()]), ..Default::default() };
+        match resolve_device(&root, "dev", &cli).unwrap_err() {
+            ConfigError::FeatureRequiresMediaAccel { feature, soc } => {
+                assert_eq!(feature, "accel");
+                assert_eq!(soc, "rk3588");
+            }
+            other => panic!("expected FeatureRequiresMediaAccel, got {other:?}"),
+        }
     }
 }

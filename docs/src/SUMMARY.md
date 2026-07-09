@@ -14,7 +14,9 @@
 
 - [Config model](reference/config-model.md)
 - [CLI](reference/cli.md)
+- [Overlays](reference/overlays.md)
 
 # Contributing
 
 - [Adding a board](contributing/adding-a-board.md)
+- [Adding a patch](contributing/adding-a-patch.md)

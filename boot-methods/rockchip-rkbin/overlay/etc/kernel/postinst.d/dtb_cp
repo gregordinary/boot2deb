@@ -3,19 +3,27 @@
 # Copyright (C) 2023, John Clark <inindev@gmail.com>
 
 # kernel post-install hook: /etc/kernel/postinst.d
-# script to copy the specified dtb file to /boot
-# after a new kernel is package installed
+# copy the board dtb into /boot after a new kernel is installed. The dtb name
+# comes from /etc/boot2deb/board.conf (generated from the device's kernel_dtb),
+# so this boot-method hook stays board-agnostic.
 
 version="$1"
-source1='/boot/rk3588-turing-rk1.dtb'
-source2="/usr/lib/linux-image-${version}/rockchip/rk3588-turing-rk1.dtb"
-target="/boot/rk3588-turing-rk1.dtb-${version}"
 
 # passing the kernel version is required
 if [ -z "${version}" ]; then
 	echo >&2 "E: dtb_cp: ${DPKG_MAINTSCRIPT_PACKAGE:-kernel package} did not pass a version number"
 	exit 2
 fi
+
+if [ ! -e /etc/boot2deb/board.conf ]; then
+	echo >&2 "E: dtb_cp: /etc/boot2deb/board.conf missing (board dtb name unknown)"
+	exit 4
+fi
+. /etc/boot2deb/board.conf
+
+source1="/boot/${DTB_NAME}"
+source2="/usr/lib/linux-image-${version}/${DTB_PATH}"
+target="/boot/${DTB_NAME}-${version}"
 
 if [ -e "${source1}" ]; then
 	echo -n "I: dtb_cp: symlink "

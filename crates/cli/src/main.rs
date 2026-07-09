@@ -1,16 +1,18 @@
 //! boot2deb CLI — a thin client over the config core and the engine.
 //!
-//! Subcommands: `list-devices`, `list-recipes`, `resolve`, and `doctor` (config
-//! inspection + host preflight); `update` (resolve upstream refs into the lock);
-//! `verify-patches` and `verify-config` (the patch and kernel-config gates);
-//! `patch import` (fetch + normalize + slot a patch into a profile); `build`
-//! (drive the compile / rootfs / image pipeline from the lock); `why-rebuild`
-//! (explain, offline, which compile nodes the next build reuses vs. rebuilds);
-//! and `clean` (remove a recipe's build scratch).
+//! Subcommands: `list-devices`, `list-recipes`, `list-kernels`, `list-features`,
+//! `resolve`, and `doctor` (config inspection + host preflight); `new-device`
+//! (scaffold a new device + recipe from the typed model); `update` (resolve upstream
+//! refs into the lock); `verify-patches` and `verify-config` (the patch and
+//! kernel-config gates); `patch import` (fetch + normalize + slot a patch into a
+//! profile); `build` (drive the compile / rootfs / image pipeline from the lock);
+//! `why-rebuild` (explain, offline, which compile nodes the next build reuses vs.
+//! rebuilds); and `clean` (remove a recipe's build scratch).
 
 use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
 use boot2deb_core::mbox::{self, ImportMeta};
-use boot2deb_core::model::{BootMethod, Layout, Overrides, ResolvedBuild};
+use boot2deb_core::model::{BootMethod, Layout, Overrides, ResolvedBuild, Soc};
+use boot2deb_core::scaffold::DeviceScaffold;
 use boot2deb_core::profile::{derive_prefix, Scope};
 use boot2deb_core::{load_profile, resolve_device, resolve_recipe, ConfigRoot};
 use boot2deb_engine::build::{ffmpeg, kernel, uboot, userspace, BuildEnv};
@@ -25,6 +27,7 @@ use boot2deb_engine::{
     EventSink,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -53,6 +56,22 @@ enum Command {
     ListDevices,
     /// List available recipes.
     ListRecipes,
+    /// List available kernel definitions (the `--kernel` override's valid values).
+    ListKernels,
+    /// List available rootfs features (the `--feature` override's valid values).
+    ListFeatures,
+    /// Scaffold a new `devices/<name>.toml` (and, by default, a matching recipe)
+    /// from the typed model: it offers the valid SoC/boot-method/kernel/feature
+    /// choices, fills every derivable value, and marks the researched values
+    /// (`kernel_dtb`, `uboot_defconfig`, the rkbin blobs) with `# TODO:` comments.
+    /// Interactive on a terminal; drive it with flags for scripting. Writes into the
+    /// highest-precedence `--overlay` when one is given, else the primary root.
+    NewDevice {
+        /// Device name — the `devices/<name>.toml` (and recipe) file stem.
+        name: String,
+        #[command(flatten)]
+        args: NewDeviceArgs,
+    },
     /// Resolve a device or recipe to a complete build (no build work).
     Resolve {
         /// Device name (e.g. turing-rk1) or recipe name (e.g. turing-rk1-forky).
@@ -324,11 +343,58 @@ struct CleanArgs {
 }
 
 #[derive(Args)]
-struct UpdateArgs {
-    /// Kernel ref to pin, resolved to a commit (e.g. v7.1.1). Auto-resolving a
-    /// kernel `track` to its latest tag is a later refinement.
+struct NewDeviceArgs {
+    /// Board description. Prompted if omitted on a terminal.
     #[arg(long)]
-    kernel_ref: String,
+    description: Option<String>,
+    /// SoC (e.g. rk3588). Must already have a `socs/<soc>.toml`. Prompted if
+    /// omitted on a terminal; required otherwise.
+    #[arg(long)]
+    soc: Option<String>,
+    /// Boot method (e.g. rockchip-rkbin). Prompted/defaulted if omitted.
+    #[arg(long)]
+    boot_method: Option<String>,
+    /// Kernel definition id (e.g. rk3588-mainline-7.1). Must support the chosen
+    /// SoC. Prompted/defaulted if omitted.
+    #[arg(long)]
+    kernel: Option<String>,
+    /// Default Debian suite. Prompted/defaulted (forky) if omitted.
+    #[arg(long)]
+    suite: Option<String>,
+    /// Default image layout (combined | split). Prompted/defaulted if omitted.
+    #[arg(long)]
+    layout: Option<String>,
+    /// Default image hostname. Defaults to the device name.
+    #[arg(long)]
+    hostname: Option<String>,
+    /// Default image size (e.g. 2G). Prompted/defaulted if omitted.
+    #[arg(long)]
+    image_size: Option<String>,
+    /// A feature the scaffolded recipe selects (repeatable). Must be compatible with
+    /// the chosen SoC/arch. Prompted from the compatible set on a terminal.
+    #[arg(long = "feature")]
+    features: Vec<String>,
+    /// Do not scaffold a recipe — write only the device file.
+    #[arg(long)]
+    no_recipe: bool,
+    /// Overwrite existing files instead of refusing.
+    #[arg(long)]
+    force: bool,
+    /// Never prompt; take every value from flags/defaults. Implied when stdin is
+    /// not a terminal.
+    #[arg(long)]
+    non_interactive: bool,
+}
+
+#[derive(Args)]
+struct UpdateArgs {
+    /// Kernel ref to pin, resolved to a commit (e.g. v7.1.1). Optional once a lock
+    /// exists: omitting it re-pins the *previous lock's* kernel ref, so a routine
+    /// re-pin (e.g. after importing a patch) needs no kernel tag the user did not
+    /// touch. Required only for the first update, which has no prior ref to inherit.
+    /// Auto-resolving a kernel `track` to its latest tag is a later refinement.
+    #[arg(long)]
+    kernel_ref: Option<String>,
     /// u-boot ref to pin (default: the boot-method's `uboot_ref`).
     #[arg(long)]
     uboot_ref: Option<String>,
@@ -362,25 +428,56 @@ struct UpdateArgs {
 
 #[derive(Args)]
 struct VerifyArgs {
-    /// Kernel checkout to verify the kernel series against.
+    /// Kernel checkout to verify the kernel series against. Optional: omit it and
+    /// the locked kernel is auto-fetched at its pinned ref into a durable cache, so
+    /// verification works on a fresh clone with no hand-cloned tree.
     #[arg(long)]
-    kernel_path: PathBuf,
-    /// ffmpeg checkout to also verify the ffmpeg series against.
+    kernel_path: Option<PathBuf>,
+    /// Kernel clone source (git URL or local path) for the auto-fetch, in place of
+    /// the kernel definition's upstream URL. A local checkout (e.g. ../linux) that
+    /// holds the locked commit makes the fetch near-instant. Ignored with
+    /// `--kernel-path`, and only used on the first materialization (the cache keys on
+    /// the commit, so later runs are hits regardless).
+    #[arg(long)]
+    kernel_src: Option<String>,
+    /// ffmpeg checkout to verify the ffmpeg series against. Optional: omit it and,
+    /// when the profile carries ffmpeg patches, the locked ffmpeg base is
+    /// auto-fetched at its pin.
     #[arg(long)]
     ffmpeg_path: Option<PathBuf>,
-    /// Userspace (MPP/RGA) checkout to also verify the userspace series against.
+    /// ffmpeg base clone source (git URL or local path) for the auto-fetch, in place
+    /// of the SoC layer's `ffmpeg.base` URL. A local checkout makes the fetch
+    /// near-instant. Ignored with `--ffmpeg-path`.
+    #[arg(long)]
+    ffmpeg_base_src: Option<String>,
+    /// Userspace (MPP/RGA) checkout to verify the userspace series against. Optional:
+    /// omit it and, when the profile carries userspace patches, the locked MPP tree
+    /// is auto-fetched at its pin.
     #[arg(long)]
     userspace_path: Option<PathBuf>,
-    /// `patches` repo checkout the profile + patches are read from.
-    #[arg(long, default_value = "../patches")]
-    patches_path: PathBuf,
+    /// MPP clone source (git URL or local path) for the auto-fetch, in place of the
+    /// SoC layer's `userspace.mpp` URL. A local checkout (e.g. ../mpp-rockchip) makes
+    /// the fetch near-instant. Ignored with `--userspace-path`.
+    #[arg(long)]
+    mpp_src: Option<String>,
+    /// `patches` repo checkout the profile + patches are read from. Omit to use
+    /// `../patches` if present, else auto-fetch the series at the lock's
+    /// `patches.commit`.
+    #[arg(long)]
+    patches_path: Option<PathBuf>,
+    /// Clone URL for auto-fetching the `patches` series when no local checkout is
+    /// present; default: the kernel definition's `patches_url`.
+    #[arg(long)]
+    patches_url: Option<String>,
 }
 
 #[derive(Args)]
 struct ConfigArgs {
     /// Kernel checkout (at the locked ref, patch series applied) to configure.
+    /// Optional: omit it and the locked kernel is auto-fetched at its pinned ref and
+    /// the kernel patch series applied for you, so the gate works on a fresh clone.
     #[arg(long)]
-    kernel_path: PathBuf,
+    kernel_path: Option<PathBuf>,
     /// Reference `.config` to check byte-identical `CONFIG_*` parity against. Omit
     /// for a clean-merge check only.
     #[arg(long)]
@@ -388,6 +485,21 @@ struct ConfigArgs {
     /// Directory for the two out-of-tree config builds (default: a temp dir).
     #[arg(long)]
     work_dir: Option<PathBuf>,
+    /// Kernel clone source (git URL or local path) for the auto-fetch, in place of
+    /// the kernel definition's upstream URL. A local checkout (e.g. ../linux) that
+    /// holds the locked commit makes the fetch near-instant. Ignored with
+    /// `--kernel-path`.
+    #[arg(long)]
+    kernel_src: Option<String>,
+    /// `patches` repo checkout the kernel series is read from when auto-fetching the
+    /// tree (ignored with `--kernel-path`, which is assumed already patched). Omit to
+    /// use `../patches` if present, else auto-fetch at the lock's `patches.commit`.
+    #[arg(long)]
+    patches_path: Option<PathBuf>,
+    /// Clone URL for auto-fetching the `patches` series; default: the kernel
+    /// definition's `patches_url`. Used only when auto-fetching the kernel tree.
+    #[arg(long)]
+    patches_url: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -515,6 +627,19 @@ fn main() -> ExitCode {
 }
 
 fn run(root: &ConfigRoot, command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    // `--root` defaults to `.`, so running from any other directory used to
+    // cascade per-layer "not found" errors that never named the real cause. One
+    // structural check up front replaces that cascade. Two commands are exempt
+    // because they do not read the config root: `patch import` operates on the
+    // patches repo (its recipe hint degrades gracefully), and a bare `doctor`
+    // reports host facts only.
+    let needs_root = !matches!(
+        command,
+        Command::Patch { .. } | Command::Doctor { target: None, .. }
+    );
+    if needs_root {
+        ensure_config_root(root)?;
+    }
     match command {
         Command::ListDevices => {
             for name in root.list("devices")? {
@@ -526,15 +651,75 @@ fn run(root: &ConfigRoot, command: Command) -> Result<(), Box<dyn std::error::Er
         }
         Command::ListRecipes => {
             for name in root.list("recipes")? {
+                // A recipe without its committed lock is not buildable until
+                // `update` resolves one, so the listing says so up front instead
+                // of letting `build` be the first to fail.
+                let lock_note = match root.lock(&name) {
+                    Ok(_) => "",
+                    Err(boot2deb_core::ConfigError::NotFound { .. }) => {
+                        "  [no lock — run `boot2deb update` to make it buildable]"
+                    }
+                    Err(_) => "  [lock unreadable]",
+                };
                 match root.recipe(&name) {
-                    Ok(r) => println!("{name:<24} device={}", r.device),
+                    Ok(r) => println!("{name:<24} device={}{lock_note}", r.device),
                     Err(_) => println!("{name:<24} (unreadable)"),
                 }
             }
         }
+        Command::ListKernels => {
+            for name in root.list("kernels")? {
+                match root.kernel(&name) {
+                    Ok(k) => {
+                        // The version-ish knob (a mainline track, or "-" for a vendor
+                        // tree pinned by ref) plus the SoCs the kernel accepts, so a
+                        // reader can pick a `--kernel` and know it fits their device.
+                        let track = k.track.as_deref().unwrap_or("-");
+                        let socs = k
+                            .supported_socs
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        println!(
+                            "{name:<24} {:<8} track={track:<8} socs={socs:<20} patches={}",
+                            k.flavor.as_str(),
+                            k.patch_profile
+                        );
+                    }
+                    Err(_) => println!("{name:<24} (unreadable)"),
+                }
+            }
+        }
+        Command::ListFeatures => {
+            for name in root.list("features")? {
+                match root.feature(&name) {
+                    Ok(f) => {
+                        // Compatibility constraints an empty list means "any"; render
+                        // that as "any" so an unconstrained feature does not look
+                        // broken. Conflicts are the other selection-time gate.
+                        let socs = constraint(&f.requires_soc);
+                        let arches = constraint(&f.requires_arch);
+                        print!("{name:<24} soc={socs:<20} arch={arches:<12}");
+                        if !f.conflicts.is_empty() {
+                            print!(" conflicts={}", f.conflicts.join(","));
+                        }
+                        println!("  {}", f.description);
+                    }
+                    Err(_) => println!("{name:<24} (unreadable)"),
+                }
+            }
+        }
+        Command::NewDevice { name, args } => {
+            new_device(root, &name, args)?;
+        }
         Command::Resolve { target, overrides } => {
             let build = resolve(root, &target, overrides.into())?;
             print_build(&build);
+            // `resolve` is the documented first coherence gate, so it validates the
+            // cheap local invariants too (geometry, fragments, keyrings) — after the
+            // printout, so the resolved values sit beside any failure they explain.
+            preflight_config(root, &build)?;
         }
         Command::Doctor { target, overrides } => {
             doctor(root, target, overrides.into())?;
@@ -553,7 +738,7 @@ fn run(root: &ConfigRoot, command: Command) -> Result<(), Box<dyn std::error::Er
         }
         Command::Patch { action } => match action {
             PatchAction::Import { source, args } => {
-                patch_import(&source, args)?;
+                patch_import(root, &source, args)?;
             }
         },
         Command::Build { recipe, args } => {
@@ -587,9 +772,9 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
     // (kernel id, patch profile, suite, extra_debs) must still match a fresh resolve,
     // or the build would mix new resolved axes with stale pins (CFG-2).
     boot2deb_engine::pins::check_lock_consistency(&lock, &resolved)?;
-    // Validate the cheap pure config invariants (image geometry + kernel-fragment
-    // existence) up front, so a bad layout or a missing fragment fails before any stage
-    // runs rather than at the image/kernel node after the pipeline (CFG-4).
+    // Validate the cheap local config invariants (image geometry, kernel-fragment
+    // and apt-keyring existence) up front, so a bad layout or a missing file fails
+    // before any stage runs rather than deep in the pipeline (CFG-4/CFG-1).
     preflight_config(root, &resolved)?;
 
     // Snapshot activation: the effective mode is `--snapshot`, else the
@@ -655,16 +840,9 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
         None => pins::kernel_source_url(&resolved.kernel.source)?,
     };
     let uboot_src = args.uboot_src.unwrap_or_else(|| resolved.uboot_source.clone());
-    let mpp_src = args.mpp_src.unwrap_or_else(|| resolved.userspace.mpp.git.clone());
-    let librga_src = args
-        .librga_src
-        .unwrap_or_else(|| resolved.userspace.librga.git.clone());
-    let libmali_src = args
-        .libmali_src
-        .unwrap_or_else(|| resolved.userspace.libmali.git.clone());
-    let ffmpeg_base_src = args
-        .ffmpeg_base_src
-        .unwrap_or_else(|| resolved.ffmpeg.base.git.clone());
+    // The userspace/ffmpeg clone sources default to the resolved SoC-layer URLs, but
+    // only exist for a media-accel build; a base build has no such sources and skips
+    // those stages, so these are computed inside the stage blocks below.
 
     // Cross-arch → pass CROSS_COMPILE; native → none.
     let pf = boot2deb_engine::preflight(resolved.arch);
@@ -710,11 +888,11 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
     let sandbox: Box<dyn BuildSandbox> = if pf.cross {
         let rootfs = work_dir
             .join("sandbox")
-            .join(format!("{}-{}", resolved.arch, resolved.suite));
+            .join(format!("{}-{}", resolved.arch.debian_arch(), resolved.suite));
         Box::new(RootlessSandbox::new(
             rootfs,
             resolved.suite.clone(),
-            resolved.arch.as_str().to_string(),
+            resolved.arch.debian_arch().to_string(),
             keyring.clone(),
         ))
     } else {
@@ -815,7 +993,24 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
         }
     }
 
-    if matches!(args.stage, StageArg::All | StageArg::Userspace) {
+    // The userspace/ffmpeg stages run only for a media-accel build (the resolved
+    // build carries the sources). An explicit `--stage userspace|ffmpeg` on a base
+    // recipe is a user error worth naming rather than silently skipping.
+    let media_accel = resolved.userspace.is_some();
+    if matches!(args.stage, StageArg::Userspace | StageArg::Ffmpeg) && !media_accel {
+        return Err(format!(
+            "recipe '{recipe}' builds no media-accel stack (no selected feature requires it), \
+             so the requested userspace/ffmpeg stage has nothing to build — add a \
+             media-accel feature to the recipe or omit --stage"
+        )
+        .into());
+    }
+
+    if matches!(args.stage, StageArg::All | StageArg::Userspace) && media_accel {
+        let us = resolved.userspace.as_ref().expect("media-accel build has userspace sources");
+        let mpp_src = args.mpp_src.clone().unwrap_or_else(|| us.mpp.git.clone());
+        let librga_src = args.librga_src.clone().unwrap_or_else(|| us.librga.git.clone());
+        let libmali_src = args.libmali_src.clone().unwrap_or_else(|| us.libmali.git.clone());
         let opts = userspace::UserspaceOptions {
             mpp_src: &mpp_src,
             librga_src: &librga_src,
@@ -831,7 +1026,7 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
             userspace::build_userspace(
                 &lock,
                 &opts,
-                resolved.arch.as_str(),
+                resolved.arch.debian_arch(),
                 &build_env,
                 sandbox.as_ref(),
                 &sink,
@@ -843,7 +1038,9 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
         record_artifacts(&out_dir, &artifacts.debs)?;
     }
 
-    if matches!(args.stage, StageArg::All | StageArg::Ffmpeg) {
+    if matches!(args.stage, StageArg::All | StageArg::Ffmpeg) && media_accel {
+        let ff = resolved.ffmpeg.as_ref().expect("media-accel build has ffmpeg sources");
+        let ffmpeg_base_src = args.ffmpeg_base_src.clone().unwrap_or_else(|| ff.base.git.clone());
         // ffmpeg build-depends on the userspace .debs; they are staged in
         // out_dir by the userspace stage (run it first, or with --stage all).
         let opts = ffmpeg::FfmpegOptions {
@@ -859,7 +1056,7 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
             ffmpeg::build_ffmpeg(
                 &lock,
                 &opts,
-                resolved.arch.as_str(),
+                resolved.arch.debian_arch(),
                 &build_env,
                 sandbox.as_ref(),
                 &sink,
@@ -904,22 +1101,11 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
         // across `--stage` invocations and is shared by every build using this
         // work dir.
         let cache_dir = work_dir.join("cache");
-        // Resolve each feature apt source's signing keyring to a vendored host path,
-        // failing fast if a declared source's keyring is missing (CFG-1): the
-        // repo is verified during the solve, not trusted blindly, so its key is a
-        // build-host prerequisite like the Debian archive keyring.
-        let mut apt_repos = Vec::with_capacity(resolved.apt_sources.len());
-        for source in &resolved.apt_sources {
-            let rel = format!("blobs/keyrings/{}", source.signed_by);
-            let keyring = root.find_asset(&rel).ok_or_else(|| {
-                format!(
-                    "apt source '{}' requires signing keyring '{}', but it is not vendored \
-                     — add it under blobs/keyrings/ (see blobs/keyrings/README.md)",
-                    source.name, rel
-                )
-            })?;
-            apt_repos.push(rootfs::AptRepo { source, keyring });
-        }
+        // Resolve each feature apt source's signing keyring to the vendored host
+        // path mmdebstrap verifies the repo against. Existence was already gated at
+        // preflight; this stage-time resolution is the backstop for a keyring
+        // removed since (CFG-1).
+        let apt_repos = apt_source_keyrings(root, &resolved.apt_sources)?;
         let opts = rootfs::RootfsOptions {
             repo_debs: &repo_debs,
             overlay_dirs: &overlay_dirs,
@@ -1174,14 +1360,15 @@ fn fragment_paths(
     Ok(paths)
 }
 
-/// Validate the resolved build's cheap, pure config invariants before a lock is written
-/// or any stage runs (CFG-4): the whole image geometry (offset ordering, alignment,
-/// GPT/rootfs fit — via the engine), and that every referenced kernel
-/// `config_fragments` file exists under the config path. Run by both `update` (so a
-/// malformed axis fails before the lock is committed) and `build` (so it fails before
-/// any stage compiles), so a bad `rootfs_offset` or a typo'd fragment name surfaces at
-/// resolution rather than deep in the build — the same fail-early discipline as the
-/// device/kernel/suite checks (CFG-2/CFG-3).
+/// Validate the resolved build's cheap, local config invariants (CFG-4): the whole
+/// image geometry (offset ordering, alignment, GPT/rootfs fit — via the engine),
+/// that every referenced kernel `config_fragments` file exists under the config
+/// path, and that every declared apt source's signing keyring is vendored (CFG-1).
+/// Run by `resolve` (the documented first coherence gate), `update` (so a malformed
+/// axis fails before the lock is committed), and `build` (so it fails before any
+/// stage compiles) — a bad `rootfs_offset`, a typo'd fragment name, or a missing
+/// keyring surfaces at resolution rather than deep in the build, the same
+/// fail-early discipline as the device/kernel/suite checks (CFG-2/CFG-3).
 fn preflight_config(
     root: &ConfigRoot,
     build: &ResolvedBuild,
@@ -1190,7 +1377,35 @@ fn preflight_config(
     // Resolve each fragment purely to assert it exists; the paths are re-resolved where
     // the kernel stage actually consumes them.
     fragment_paths(root, build)?;
+    // Resolve each keyring purely to assert it exists; the rootfs stage re-resolves
+    // the paths it hands to mmdebstrap.
+    apt_source_keyrings(root, &build.apt_sources)?;
     Ok(())
+}
+
+/// Resolve each declared apt source's signing keyring to a vendored host path,
+/// erroring on the first source whose keyring is missing (CFG-1): the repo is
+/// verified during the rootfs solve, not trusted blindly, so its key is a
+/// build-host prerequisite like the Debian archive keyring. Called from
+/// [`preflight_config`] as the early existence gate and from the rootfs stage for
+/// the paths it actually mounts.
+fn apt_source_keyrings<'a>(
+    root: &ConfigRoot,
+    sources: &'a [boot2deb_core::model::AptSource],
+) -> Result<Vec<rootfs::AptRepo<'a>>, Box<dyn std::error::Error>> {
+    let mut repos = Vec::with_capacity(sources.len());
+    for source in sources {
+        let rel = format!("blobs/keyrings/{}", source.signed_by);
+        let keyring = root.find_asset(&rel).ok_or_else(|| {
+            format!(
+                "apt source '{}' requires signing keyring '{}', but it is not vendored \
+                 — add it under blobs/keyrings/ (see blobs/keyrings/README.md)",
+                source.name, rel
+            )
+        })?;
+        repos.push(rootfs::AptRepo { source, keyring });
+    }
+    Ok(repos)
 }
 
 /// Render one build [`Event`] to the terminal: step boundaries as `==>` headers,
@@ -1215,10 +1430,10 @@ fn update(
     args: UpdateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
-    // Validate the pure config invariants (image geometry + kernel-fragment existence)
-    // before resolving/committing the lock, so a bad `rootfs_offset` or a typo'd
-    // fragment fails here rather than being pinned into the lock and failing at the next
-    // build (CFG-4).
+    // Validate the local config invariants (image geometry, kernel-fragment and
+    // apt-keyring existence) before resolving/committing the lock, so a bad
+    // `rootfs_offset` or a typo'd fragment fails here rather than being pinned into
+    // the lock and failing at the next build (CFG-4).
     preflight_config(root, &build)?;
     // An omitted per-tree ref flag preserves the *previous lock's* ref, not the
     // config's symbolic ref (COR-12). Otherwise a routine `update` that only bumps
@@ -1230,32 +1445,48 @@ fn update(
         flag.or_else(|| prev.as_ref().map(from_lock))
             .unwrap_or_else(|| default.to_string())
     };
+    // The kernel ref has no config default (the config carries only a `track`, not a
+    // concrete tag), so an omitted `--kernel-ref` inherits the previous lock's ref —
+    // the "re-pin what changed" model for a patch-only update. Only the first update
+    // (no prior lock) must supply it.
+    let kernel_ref = match args.kernel_ref {
+        Some(r) => r,
+        None => prev
+            .as_ref()
+            .map(|l| l.kernel.reference.clone())
+            .ok_or_else(|| {
+                format!(
+                    "no --kernel-ref given and no existing lock for '{recipe}' to inherit it \
+                     from — pass --kernel-ref <tag> (e.g. v7.1.1) for the first update"
+                )
+            })?,
+    };
     let uboot_ref = ref_for(args.uboot_ref, |l| l.uboot.reference.clone(), &build.uboot_ref);
-    let mpp_ref = ref_for(
-        args.mpp_ref,
-        |l| l.userspace.mpp.reference.clone(),
-        &build.userspace.mpp.git_ref,
-    );
-    let librga_ref = ref_for(
-        args.librga_ref,
-        |l| l.userspace.librga.reference.clone(),
-        &build.userspace.librga.git_ref,
-    );
-    let libmali_ref = ref_for(
-        args.libmali_ref,
-        |l| l.userspace.libmali.reference.clone(),
-        &build.userspace.libmali.git_ref,
-    );
-    let ffmpeg_base_ref = ref_for(
-        args.ffmpeg_base_ref,
-        |l| l.ffmpeg.base.reference.clone(),
-        &build.ffmpeg.base.git_ref,
-    );
-    let ffmpeg_rockchip_ref = ref_for(
-        args.ffmpeg_rockchip_ref,
-        |l| l.ffmpeg.rockchip.reference.clone(),
-        &build.ffmpeg.rockchip.git_ref,
-    );
+    // Media-accel source refs are pinned only when the recipe builds the transcode
+    // stack (its resolved build carries the sources). A base build leaves them empty —
+    // `resolve_lock` never reads a ref without a matching source, and the lock omits
+    // both pin tables. Each ref inherits the prior lock's pin, else the SoC-layer
+    // default constraint ("re-pin what changed").
+    let prev_us = prev.as_ref().and_then(|l| l.userspace.as_ref());
+    let prev_ff = prev.as_ref().and_then(|l| l.ffmpeg.as_ref());
+    let pick = |flag: Option<String>, prev: Option<String>, default: &str| {
+        flag.or(prev).unwrap_or_else(|| default.to_string())
+    };
+    let (mpp_ref, librga_ref, libmali_ref) = match &build.userspace {
+        Some(us) => (
+            pick(args.mpp_ref, prev_us.map(|u| u.mpp.reference.clone()), &us.mpp.git_ref),
+            pick(args.librga_ref, prev_us.map(|u| u.librga.reference.clone()), &us.librga.git_ref),
+            pick(args.libmali_ref, prev_us.map(|u| u.libmali.reference.clone()), &us.libmali.git_ref),
+        ),
+        None => (String::new(), String::new(), String::new()),
+    };
+    let (ffmpeg_base_ref, ffmpeg_rockchip_ref) = match &build.ffmpeg {
+        Some(ff) => (
+            pick(args.ffmpeg_base_ref, prev_ff.map(|f| f.base.reference.clone()), &ff.base.git_ref),
+            pick(args.ffmpeg_rockchip_ref, prev_ff.map(|f| f.rockchip.reference.clone()), &ff.rockchip.git_ref),
+        ),
+        None => (String::new(), String::new()),
+    };
     let blobs_dir = args.blobs_dir.clone().unwrap_or_else(|| {
         let rel = format!("blobs/{}", build.soc.as_str());
         root.find_asset(&rel).unwrap_or_else(|| root.path().join(rel))
@@ -1264,7 +1495,7 @@ fn update(
         .rootfs_manifest
         .unwrap_or_else(|| format!("{recipe}.pkgs.lock"));
     let opts = pins::UpdateOptions {
-        kernel_ref: &args.kernel_ref,
+        kernel_ref: &kernel_ref,
         uboot_ref: &uboot_ref,
         mpp_ref: &mpp_ref,
         librga_ref: &librga_ref,
@@ -1306,31 +1537,19 @@ fn update(
         lock.patches.profile,
         short(&lock.patches.commit)
     );
-    println!(
-        "  mpp      {} {}",
-        lock.userspace.mpp.reference,
-        short(&lock.userspace.mpp.commit)
-    );
-    println!(
-        "  librga   {} {}",
-        lock.userspace.librga.reference,
-        short(&lock.userspace.librga.commit)
-    );
-    println!(
-        "  libmali  {} {}",
-        lock.userspace.libmali.reference,
-        short(&lock.userspace.libmali.commit)
-    );
-    println!(
-        "  ffmpeg   {} {}",
-        lock.ffmpeg.base.reference,
-        short(&lock.ffmpeg.base.commit)
-    );
-    println!(
-        "  ff-rk    {} {} (graft provenance)",
-        lock.ffmpeg.rockchip.reference,
-        short(&lock.ffmpeg.rockchip.commit)
-    );
+    if let Some(us) = &lock.userspace {
+        println!("  mpp      {} {}", us.mpp.reference, short(&us.mpp.commit));
+        println!("  librga   {} {}", us.librga.reference, short(&us.librga.commit));
+        println!("  libmali  {} {}", us.libmali.reference, short(&us.libmali.commit));
+    }
+    if let Some(ff) = &lock.ffmpeg {
+        println!("  ffmpeg   {} {}", ff.base.reference, short(&ff.base.commit));
+        println!(
+            "  ff-rk    {} {} (graft provenance)",
+            ff.rockchip.reference,
+            short(&ff.rockchip.commit)
+        );
+    }
     println!(
         "  rootfs   {} (manifest {})",
         lock.rootfs.suite, lock.rootfs.manifest
@@ -1407,7 +1626,7 @@ fn source_axes<'a>(
     build: &ResolvedBuild,
     lock: &'a boot2deb_core::lock::Lock,
 ) -> Result<Vec<SourceAxis<'a>>, Box<dyn std::error::Error>> {
-    Ok(vec![
+    let mut axes = vec![
         SourceAxis {
             name: "kernel",
             url: pins::kernel_source_url(&build.kernel.source)?,
@@ -1420,31 +1639,39 @@ fn source_axes<'a>(
             reference: &lock.uboot.reference,
             commit: &lock.uboot.commit,
         },
-        SourceAxis {
+    ];
+    // The fetched media-accel trees, present only for a build that compiles the
+    // transcode stack. URLs come from the resolved build, pins from the lock — both
+    // `Some` together.
+    if let (Some(us), Some(us_pins)) = (&build.userspace, &lock.userspace) {
+        axes.push(SourceAxis {
             name: "mpp",
-            url: build.userspace.mpp.git.clone(),
-            reference: &lock.userspace.mpp.reference,
-            commit: &lock.userspace.mpp.commit,
-        },
-        SourceAxis {
+            url: us.mpp.git.clone(),
+            reference: &us_pins.mpp.reference,
+            commit: &us_pins.mpp.commit,
+        });
+        axes.push(SourceAxis {
             name: "librga",
-            url: build.userspace.librga.git.clone(),
-            reference: &lock.userspace.librga.reference,
-            commit: &lock.userspace.librga.commit,
-        },
-        SourceAxis {
+            url: us.librga.git.clone(),
+            reference: &us_pins.librga.reference,
+            commit: &us_pins.librga.commit,
+        });
+        axes.push(SourceAxis {
             name: "libmali",
-            url: build.userspace.libmali.git.clone(),
-            reference: &lock.userspace.libmali.reference,
-            commit: &lock.userspace.libmali.commit,
-        },
-        SourceAxis {
+            url: us.libmali.git.clone(),
+            reference: &us_pins.libmali.reference,
+            commit: &us_pins.libmali.commit,
+        });
+    }
+    if let (Some(ff), Some(ff_pins)) = (&build.ffmpeg, &lock.ffmpeg) {
+        axes.push(SourceAxis {
             name: "ffmpeg-base",
-            url: build.ffmpeg.base.git.clone(),
-            reference: &lock.ffmpeg.base.reference,
-            commit: &lock.ffmpeg.base.commit,
-        },
-    ])
+            url: ff.base.git.clone(),
+            reference: &ff_pins.base.reference,
+            commit: &ff_pins.base.commit,
+        });
+    }
+    Ok(axes)
 }
 
 /// Probe each locked source pin against its configured upstream URL and report its
@@ -1504,33 +1731,139 @@ fn verify_sources(root: &ConfigRoot, recipe: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// Verify the locked patch series applies to the provided source checkouts.
+/// Verify the locked patch series applies to the source checkouts.
+///
+/// Each tree is either an explicit `--<tree>-path` checkout or, when omitted,
+/// auto-fetched at its locked pin into a durable cache — so a fresh clone can verify
+/// with no hand-cloned trees. The kernel is always verified; ffmpeg/userspace only
+/// when the profile carries patches for them (an empty scope needs no tree). The
+/// patches checkout itself is resolved the same way `build` resolves it (explicit,
+/// `../patches`, or auto-fetched at the lock's `patches.commit`).
 fn verify_patches(
     root: &ConfigRoot,
     recipe: &str,
     args: VerifyArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let build = resolve_recipe(root, recipe, &Overrides::default())?;
     let lock = root.lock(recipe)?;
-    let profile = load_profile(&args.patches_path, &lock.patches.profile)?;
+    let sink = |e: Event| print_event(&e);
+    let (patches_root, _dev) = resolve_patches_source(
+        args.patches_path.as_deref(),
+        args.patches_url.as_deref(),
+        &build,
+        &lock,
+        root,
+        &sink,
+    )?;
+    let profile = load_profile(&patches_root, &lock.patches.profile)?;
     // Declared-intent gate: is the locked kernel in the profile's range?
     profile.ensure_applies(&lock.patches.profile, &lock.kernel.reference)?;
     let target = format!("{} @ {}", lock.kernel.id, lock.kernel.reference);
+    let cache_root = verify_trees_cache(root);
 
-    // Verify the kernel series, plus any tree whose checkout was supplied.
+    let kernel_tree = match args.kernel_path {
+        Some(p) => p,
+        None => {
+            // A `--kernel-src` local checkout/URL overrides the configured upstream
+            // for the fetch; the tree still lands at exactly the locked commit.
+            let url = match args.kernel_src {
+                Some(s) => s,
+                None => pins::kernel_source_url(&build.kernel.source)?,
+            };
+            fetch_verify_tree(&url, &lock.kernel.reference, &lock.kernel.commit, "kernel", &cache_root, &sink)?
+        }
+    };
+    // The ffmpeg/userspace series verify only for a media-accel build, which is the
+    // only one carrying those source trees; without them there is nothing to fetch or
+    // apply against (the profile's ffmpeg/userspace scopes, if any, are moot here).
+    let ffmpeg_tree = match (&build.ffmpeg, &lock.ffmpeg) {
+        (Some(ff), Some(ff_pins)) => verify_tree_for_scope(
+            args.ffmpeg_path,
+            &profile.ffmpeg,
+            args.ffmpeg_base_src.as_deref().unwrap_or(&ff.base.git),
+            &ff_pins.base.reference,
+            &ff_pins.base.commit,
+            "ffmpeg base",
+            &cache_root,
+            &sink,
+        )?,
+        _ => None,
+    };
+    let userspace_tree = match (&build.userspace, &lock.userspace) {
+        (Some(us), Some(us_pins)) => verify_tree_for_scope(
+            args.userspace_path,
+            &profile.userspace,
+            args.mpp_src.as_deref().unwrap_or(&us.mpp.git),
+            &us_pins.mpp.reference,
+            &us_pins.mpp.commit,
+            "mpp",
+            &cache_root,
+            &sink,
+        )?,
+        _ => None,
+    };
+
+    // Verify the kernel series, plus any tree resolved above.
     let mut trees: Vec<(&str, &[String], &Path)> =
-        vec![("kernel", profile.kernel.as_slice(), args.kernel_path.as_path())];
-    if let Some(p) = &args.ffmpeg_path {
+        vec![("kernel", profile.kernel.as_slice(), kernel_tree.as_path())];
+    if let Some(p) = &ffmpeg_tree {
         trees.push(("ffmpeg", profile.ffmpeg.as_slice(), p.as_path()));
     }
-    if let Some(p) = &args.userspace_path {
+    if let Some(p) = &userspace_tree {
         trees.push(("userspace", profile.userspace.as_slice(), p.as_path()));
     }
 
-    let report = patches::verify_profile(&args.patches_path, &target, &trees)?;
+    let report = patches::verify_profile(&patches_root, &target, &trees)?;
     for (tree, n) in &report {
         println!("verify-patches {recipe}: {tree} series applies ({n} patches) against {target}");
     }
     Ok(())
+}
+
+/// The durable, shared cache of auto-fetched verify checkouts (`<root>/cache/verify-trees`),
+/// commit-addressed by [`boot2deb_engine::srcfetch::ensure_tree`]. Sibling to the
+/// patches and artifact caches; survives `clean` and is reused across recipes and
+/// verify runs.
+fn verify_trees_cache(root: &ConfigRoot) -> PathBuf {
+    root.path().join("cache").join("verify-trees")
+}
+
+/// Auto-fetch a pinned source tree for verification, wrapping
+/// [`boot2deb_engine::srcfetch::ensure_tree`] in a build step so the fetch streams.
+fn fetch_verify_tree(
+    source: &str,
+    reference: &str,
+    commit: &str,
+    what: &str,
+    cache_root: &Path,
+    sink: &dyn EventSink,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let step = Step::start(sink, "fetch-source");
+    let tree = boot2deb_engine::srcfetch::ensure_tree(source, reference, commit, what, cache_root, &step)?;
+    step.finish();
+    Ok(tree)
+}
+
+/// Resolve one optional verify tree: an explicit `--<tree>-path` wins; otherwise
+/// `source` (the configured upstream, or a `--<tree>-src` override the caller already
+/// applied) is auto-fetched at the pin, but only when its `series` is non-empty (an
+/// empty scope contributes no tree, so `None`).
+#[allow(clippy::too_many_arguments)]
+fn verify_tree_for_scope(
+    explicit: Option<PathBuf>,
+    series: &[String],
+    source: &str,
+    reference: &str,
+    commit: &str,
+    what: &str,
+    cache_root: &Path,
+    sink: &dyn EventSink,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    match explicit {
+        Some(p) => Ok(Some(p)),
+        None if series.is_empty() => Ok(None),
+        None => Ok(Some(fetch_verify_tree(source, reference, commit, what, cache_root, sink)?)),
+    }
 }
 
 /// Generate the kernel `.config` from the resolved fragments and, when a reference
@@ -1549,8 +1882,58 @@ fn verify_config(
     // symbols included), not a host-probed variant.
     let pf = boot2deb_engine::preflight(build.arch);
     let cross = pf.cross.then(|| build.cross_compile.clone());
+    let sink = |e: Event| print_event(&e);
+
+    // Resolve the kernel tree to configure. An explicit `--kernel-path` is used as-is
+    // (assumed at the locked ref with the patch series applied). Otherwise the locked
+    // kernel is auto-fetched clean and its kernel series applied for us — the config
+    // gate then runs out-of-tree, and `restore` returns the shared cache tree to a
+    // clean base afterwards so `verify-patches` can reuse it.
+    let (tree, restore): (PathBuf, Option<(PathBuf, String)>) = match args.kernel_path {
+        Some(p) => (p, None),
+        None => {
+            let lock = root.lock(recipe)?;
+            let (patches_root, _dev) = resolve_patches_source(
+                args.patches_path.as_deref(),
+                args.patches_url.as_deref(),
+                &build,
+                &lock,
+                root,
+                &sink,
+            )?;
+            let profile = load_profile(&patches_root, &lock.patches.profile)?;
+            profile.ensure_applies(&lock.patches.profile, &lock.kernel.reference)?;
+            // `--kernel-src` overrides the configured upstream for the fetch (a local
+            // ../linux is near-instant); the tree still lands at the locked commit.
+            let url = match args.kernel_src {
+                Some(s) => s,
+                None => pins::kernel_source_url(&build.kernel.source)?,
+            };
+            let tree = fetch_verify_tree(
+                &url,
+                &lock.kernel.reference,
+                &lock.kernel.commit,
+                "kernel",
+                &verify_trees_cache(root),
+                &sink,
+            )?;
+            let target = format!("{} @ {}", lock.kernel.id, lock.kernel.reference);
+            let step = Step::start(&sink, "apply-patches");
+            let n = boot2deb_engine::srcfetch::apply_kernel_series(
+                &tree,
+                &lock.kernel.commit,
+                &patches_root,
+                &profile.kernel,
+                &target,
+            )?;
+            step.log(format!("applied {n} kernel patch(es) for the config gate"));
+            step.finish();
+            (tree.clone(), Some((tree, lock.kernel.commit.clone())))
+        }
+    };
+
     let inputs = kconfig::ConfigInputs {
-        tree: &args.kernel_path,
+        tree: &tree,
         arch: &build.kernel_arch,
         cross_compile: cross.as_deref(),
         base_defconfig: &build.kernel.base_defconfig,
@@ -1560,14 +1943,30 @@ fn verify_config(
         .work_dir
         .unwrap_or_else(|| std::env::temp_dir().join(format!("boot2deb-{recipe}-kconfig")));
 
-    // Stream the config `make` runs (defconfig / merge_config / olddefconfig) like
-    // any build stage, so a long or wedged run is visible rather than silent.
-    let sink = |e: Event| print_event(&e);
-    let step = Step::start(&sink, "verify-config");
+    let result = run_config_gate(&inputs, args.reference_config.as_deref(), &work_dir, recipe, &sink);
+    // Restore the shared cache tree to a clean base regardless of the gate's outcome,
+    // so a later verify-patches reuse (and this command's own next run) sees the pin.
+    if let Some((tree, base)) = &restore {
+        let _ = boot2deb_engine::srcfetch::restore_tree(tree, base);
+    }
+    result
+}
 
-    match &args.reference_config {
+/// Run the kconfig gate on a prepared (patched) kernel `tree`: with a reference
+/// config, check byte-identical `CONFIG_*` parity; without, a clean-merge check.
+/// The config `make` runs (defconfig / merge_config / olddefconfig) stream like any
+/// build stage, so a long or wedged run is visible rather than silent.
+fn run_config_gate(
+    inputs: &kconfig::ConfigInputs,
+    reference_config: Option<&Path>,
+    work_dir: &Path,
+    recipe: &str,
+    sink: &dyn EventSink,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let step = Step::start(sink, "verify-config");
+    match reference_config {
         Some(reference) => {
-            let report = kconfig::check_parity(&inputs, reference, &work_dir, &step)?;
+            let report = kconfig::check_parity(inputs, reference, work_dir, &step)?;
             for sym in &report.unmet {
                 println!("warning: fragment symbol not in final .config: {sym}");
             }
@@ -1592,7 +1991,7 @@ fn verify_config(
             }
         }
         None => {
-            let generated = kconfig::generate(&inputs, &work_dir.join("gen"), &step)?;
+            let generated = kconfig::generate(inputs, &work_dir.join("gen"), &step)?;
             if generated.unmet.is_empty() {
                 println!(
                     "verify-config {recipe}: clean merge ({} symbols); no reference config given",
@@ -1619,7 +2018,17 @@ fn verify_config(
 /// into the profile's scope at the requested position, and — with `--verify-tree` —
 /// dry-run `git am`-verify the resulting series. The file write and the profile edit
 /// are rolled back if the verify fails, so a rejected patch leaves the repo untouched.
-fn patch_import(source: &str, args: PatchImportArgs) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// A successful import is deliberately inert: builds read the series at the lock's
+/// pinned commit, so the patch reaches a build only after a commit in the patches
+/// repo and a `boot2deb update` re-pin. The success output prints that exact loop
+/// (naming the recipes whose locks the import invalidates, when `root` can resolve
+/// them) rather than leaving it to surface as a build-time pin mismatch.
+fn patch_import(
+    root: &ConfigRoot,
+    source: &str,
+    args: PatchImportArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Fetch: `-` reads stdin; otherwise a URL is fetched or a file is read.
     let bytes = if source == "-" {
         let mut buf = Vec::new();
@@ -1687,6 +2096,10 @@ fn patch_import(source: &str, args: PatchImportArgs) -> Result<(), Box<dyn std::
     std::fs::write(&dest_path, &normalized.mbox)?;
     println!("patch import: wrote {} ({} bytes)", label, normalized.mbox.len());
 
+    // Recipes whose kernel uses this profile — named in both the "verify it now" hint
+    // (when the import is unverified) and the re-pin follow-up. Computed once.
+    let recipes = recipes_using_profile(root, &args.profile);
+
     // Verify the resulting series (with the new patch spliced in at `index`) against
     // a source checkout, if one was supplied. A failure rolls back the written file.
     match &args.verify_tree {
@@ -1713,10 +2126,19 @@ fn patch_import(source: &str, args: PatchImportArgs) -> Result<(), Box<dyn std::
             }
         }
         None => {
-            eprintln!(
-                "warning: patch written but not verified — pass --verify-tree <checkout> to \
-                 dry-run `git am` the series, or run `verify-patches`."
-            );
+            // Unverified: the patch is on disk but has not been dry-run against a
+            // kernel tree, so a non-applying patch would surface only at build time.
+            // Name the exact command that verifies it now — `verify-patches`
+            // auto-fetches the locked kernel, so no hand-cloned checkout is needed —
+            // and point at `--verify-tree` for verifying during import next time.
+            let verify_cmd = match recipes.first() {
+                Some(r) => format!("boot2deb verify-patches {r}"),
+                None => "boot2deb verify-patches <recipe>".to_string(),
+            };
+            eprintln!("\n!! patch written but NOT verified — it has not been dry-run against a kernel tree.");
+            eprintln!("   verify it now:   {verify_cmd}");
+            eprintln!("                    (auto-fetches the locked kernel at its pin — no checkout needed)");
+            eprintln!("   next time:        add --verify-tree <kernel-checkout> to verify during import.");
         }
     }
 
@@ -1738,12 +2160,58 @@ fn patch_import(source: &str, args: PatchImportArgs) -> Result<(), Box<dyn std::
         index + 1,
         scope_list.len() + 1
     );
+
+    // The two follow-ups without which the import never reaches a build: the
+    // series is read at the lock's pinned patches commit, so an uncommitted or
+    // unpinned import surfaces later as a build-time pin mismatch.
+    let patches = args.patches_path.display();
+    println!("\nnext steps — no build reads the patch until the series is committed and re-pinned:");
+    println!("  1. commit it:      git -C {patches} add -A && git -C {patches} commit");
+    if recipes.is_empty() {
+        println!(
+            "  2. re-pin locks:   boot2deb update <recipe>   (each recipe whose kernel uses profile '{}')",
+            args.profile
+        );
+    } else {
+        for (i, recipe) in recipes.iter().enumerate() {
+            let head = if i == 0 { "2. re-pin locks:  " } else { "                  " };
+            println!("  {head} boot2deb update {recipe}");
+        }
+    }
     Ok(())
+}
+
+/// Recipes whose resolved kernel uses patch profile `profile` — the locks a
+/// `patch import` invalidates, named in its follow-up hint. Best-effort: a recipe
+/// that fails to resolve, or a cwd outside any config root, contributes nothing
+/// rather than failing the import (which itself needs only the patches repo).
+fn recipes_using_profile(root: &ConfigRoot, profile: &str) -> Vec<String> {
+    let Ok(names) = root.list("recipes") else {
+        return Vec::new();
+    };
+    names
+        .into_iter()
+        .filter(|name| {
+            resolve_recipe(root, name, &Overrides::default())
+                .is_ok_and(|build| build.kernel.patch_profile == profile)
+        })
+        .collect()
 }
 
 /// First 12 chars of a commit id for display.
 fn short(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
+}
+
+/// Render a feature compatibility list for `list-features`: the values comma-joined,
+/// or `"any"` when empty — an empty `requires_soc`/`requires_arch` means the feature
+/// imposes no constraint, which reads better as "any" than as a blank.
+fn constraint<T: std::fmt::Display>(items: &[T]) -> String {
+    if items.is_empty() {
+        "any".to_string()
+    } else {
+        items.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+    }
 }
 
 /// Make `path` absolute (against the current dir) if it is relative, so it is
@@ -1899,6 +2367,313 @@ fn absolutize(path: PathBuf) -> PathBuf {
             .map(|cwd| cwd.join(&path))
             .unwrap_or(path)
     }
+}
+
+/// Scaffold a new device (and, by default, its recipe) — the `new-device` command.
+///
+/// Interactive on a terminal (menus over the closed axis enums and the
+/// SoC/arch-compatible kernels + features), flag-driven when `--non-interactive` or
+/// piped. Fills every derivable value and leaves the researched ones as `# TODO:`
+/// suggestions. Writes into the highest-precedence `--overlay` when one is given —
+/// so a third party scaffolds into their own tree — else the primary root, then
+/// resolve-checks the result and prints the values the author must still verify.
+fn new_device(
+    root: &ConfigRoot,
+    name: &str,
+    args: NewDeviceArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The name is a file stem and a TOML value; keep it to the safe set the loader
+    // accepts for the layers it will live beside.
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(format!(
+            "device name '{name}' is invalid — use lowercase letters, digits, and dashes"
+        )
+        .into());
+    }
+    let interactive = !args.non_interactive && std::io::stdin().is_terminal();
+
+    // SoC: the closed enum, narrowed to those that actually have a `socs/<soc>.toml`
+    // here (a genuinely new SoC family needs a model.rs edit first — out of scope for
+    // scaffolding a board). The SoC fixes arch, dt_dir, and the module list.
+    let available_socs: Vec<Soc> =
+        Soc::all().iter().copied().filter(|s| root.soc(*s).is_ok()).collect();
+    if available_socs.is_empty() {
+        return Err("no socs/<soc>.toml found under the config root — nothing to build a device on".into());
+    }
+    // The SoC is the identifying choice, so it is required (never silently defaulted)
+    // when there is no terminal to prompt at.
+    if !interactive && args.soc.is_none() {
+        let valid = available_socs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+        return Err(format!("--soc is required in non-interactive mode (choose one of: {valid})").into());
+    }
+    let soc = ask_enum("SoC", args.soc.as_deref(), &available_socs, interactive, Soc::as_str)?;
+    let soc_layer = root.soc(soc)?;
+    let arch = soc_layer.arch;
+
+    let boot_method = ask_enum(
+        "boot method",
+        args.boot_method.as_deref(),
+        BootMethod::all(),
+        interactive,
+        BootMethod::as_str,
+    )?;
+
+    // Kernels valid for this SoC (its `supported_socs` lists the SoC).
+    let kernels: Vec<String> = root
+        .list("kernels")?
+        .into_iter()
+        .filter(|k| root.kernel(k).map(|kd| kd.supported_socs.contains(&soc)).unwrap_or(false))
+        .collect();
+    if kernels.is_empty() {
+        return Err(format!("no kernel definition supports soc '{soc}' — add one under kernels/ first").into());
+    }
+    let kernel = ask_string("kernel", args.kernel.clone(), &kernels, interactive)?;
+
+    let layout = ask_enum("layout", args.layout.as_deref(), Layout::all(), interactive, Layout::as_str)?;
+    let suite = ask_value("suite", args.suite, "forky", interactive);
+    let hostname = ask_value("hostname", args.hostname, name, interactive);
+    let image_size = ask_value("image size", args.image_size, "2G", interactive);
+    let description = ask_value("description", args.description, &format!("{name} ({soc})"), interactive);
+
+    // Features compatible with the resolved SoC/arch (the same gates resolution
+    // enforces), offered for the recipe scaffold.
+    let compatible: Vec<String> = root
+        .list("features")?
+        .into_iter()
+        .filter(|f| {
+            root.feature(f).map(|ft| ft.supports_soc(soc) && ft.supports_arch(arch)).unwrap_or(false)
+        })
+        .collect();
+    let features = if !args.features.is_empty() {
+        for f in &args.features {
+            if !compatible.contains(f) {
+                return Err(format!(
+                    "feature '{f}' is not compatible with soc '{soc}'/arch '{arch}' (or does not exist)"
+                )
+                .into());
+            }
+        }
+        args.features.clone()
+    } else if interactive {
+        ask_features(&compatible)
+    } else {
+        Vec::new()
+    };
+
+    let scaffold = DeviceScaffold {
+        name: name.to_string(),
+        description,
+        soc,
+        boot_method,
+        kernel,
+        suite,
+        layout,
+        hostname,
+        image_size,
+        dt_dir: soc_layer.dt_dir.clone(),
+        features,
+        emit_recipe: !args.no_recipe,
+    };
+
+    // Write into the highest-precedence search path: the last `--overlay` if any
+    // (the third-party's own tree), else the primary root.
+    let out_dir = root.search_paths().last().expect("a config root always has a primary path").clone();
+    let device_path = out_dir.join("devices").join(format!("{name}.toml"));
+    write_scaffold_file(&device_path, &scaffold.device_toml(), args.force)?;
+    println!("wrote {}", device_path.display());
+    if let Some(recipe) = scaffold.recipe_toml() {
+        let recipe_path = out_dir.join("recipes").join(format!("{name}.toml"));
+        write_scaffold_file(&recipe_path, &recipe, args.force)?;
+        println!("wrote {}", recipe_path.display());
+    }
+
+    // Resolve-check the freshly written device against the same root (which already
+    // includes `out_dir` in its search path). The scaffold's placeholder values are
+    // structurally valid, so this should pass — proving the layer composition — while
+    // the research notes below name what still fails at build time if left as-is.
+    match resolve_device(root, name, &Overrides::default()) {
+        Ok(_) => println!("\nresolves cleanly against the config root."),
+        Err(e) => println!("\nnote: resolve reported: {e}\n  (fix the flagged values, then re-run `boot2deb resolve {name}`)"),
+    }
+
+    let notes = scaffold.research_notes();
+    if !notes.is_empty() {
+        println!("\nvalues to research before building (each is a best-effort guess):");
+        for n in &notes {
+            println!("  {:<16} = {:?}\n      {}", n.field, n.value, n.guidance);
+        }
+    }
+
+    println!("\nnext steps:");
+    println!("  1. edit {} and replace the TODO values", device_path.display());
+    if !args.no_recipe {
+        println!("  2. boot2deb update {name}    # resolve pins into the lock");
+        println!("  3. boot2deb build  {name}    # build the image");
+    }
+    Ok(())
+}
+
+/// Read one trimmed line from stdin (empty on EOF).
+fn read_line() -> String {
+    let mut s = String::new();
+    let _ = std::io::stdin().read_line(&mut s);
+    s.trim().to_string()
+}
+
+/// Resolve a free-text scaffold value: an explicit flag wins; otherwise prompt with
+/// `default` on a terminal (blank keeps the default), or take `default` silently
+/// when non-interactive.
+fn ask_value(label: &str, provided: Option<String>, default: &str, interactive: bool) -> String {
+    if let Some(v) = provided {
+        return v;
+    }
+    if !interactive {
+        return default.to_string();
+    }
+    print!("{label} [{default}]: ");
+    let _ = std::io::stdout().flush();
+    let line = read_line();
+    if line.is_empty() {
+        default.to_string()
+    } else {
+        line
+    }
+}
+
+/// Resolve a closed-enum scaffold value. An explicit flag is parsed and checked
+/// against `options`; otherwise a terminal gets a numbered menu (blank picks the
+/// first), and a non-interactive run takes the first option as the default.
+fn ask_enum<T: Copy + std::str::FromStr<Err = String>>(
+    label: &str,
+    provided: Option<&str>,
+    options: &[T],
+    interactive: bool,
+    as_str: fn(&T) -> &'static str,
+) -> Result<T, Box<dyn std::error::Error>> {
+    if let Some(s) = provided {
+        let value: T = s.parse()?;
+        if !options.iter().any(|o| as_str(o) == as_str(&value)) {
+            let valid = options.iter().map(as_str).collect::<Vec<_>>().join(", ");
+            return Err(format!("{label} '{s}' is not available here (choose one of: {valid})").into());
+        }
+        return Ok(value);
+    }
+    let default = options[0];
+    if !interactive {
+        return Ok(default);
+    }
+    println!("{label}:");
+    for (i, o) in options.iter().enumerate() {
+        println!("  {}) {}", i + 1, as_str(o));
+    }
+    loop {
+        print!("choose [1]: ");
+        let _ = std::io::stdout().flush();
+        let line = read_line();
+        if line.is_empty() {
+            return Ok(default);
+        }
+        match line.parse::<usize>() {
+            Ok(n) if (1..=options.len()).contains(&n) => return Ok(options[n - 1]),
+            _ => println!("enter a number 1..{}", options.len()),
+        }
+    }
+}
+
+/// Resolve a scaffold value chosen from a list of strings (e.g. the SoC-compatible
+/// kernels). An explicit flag is checked against `options`; a terminal gets a menu
+/// (blank picks the first); non-interactive takes the first.
+fn ask_string(
+    label: &str,
+    provided: Option<String>,
+    options: &[String],
+    interactive: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(v) = provided {
+        if !options.contains(&v) {
+            let valid = options.join(", ");
+            return Err(format!("{label} '{v}' is not valid here (choose one of: {valid})").into());
+        }
+        return Ok(v);
+    }
+    let default = options[0].clone();
+    if !interactive {
+        return Ok(default);
+    }
+    println!("{label}:");
+    for (i, o) in options.iter().enumerate() {
+        println!("  {}) {}", i + 1, o);
+    }
+    loop {
+        print!("choose [1]: ");
+        let _ = std::io::stdout().flush();
+        let line = read_line();
+        if line.is_empty() {
+            return Ok(default);
+        }
+        match line.parse::<usize>() {
+            Ok(n) if (1..=options.len()).contains(&n) => return Ok(options[n - 1].clone()),
+            _ => println!("enter a number 1..{}", options.len()),
+        }
+    }
+}
+
+/// Prompt for the recipe's features from the SoC/arch-compatible set: a
+/// comma-separated list of menu numbers (blank selects none). De-duplicates while
+/// preserving the entered order.
+fn ask_features(compatible: &[String]) -> Vec<String> {
+    if compatible.is_empty() {
+        println!("features: (none compatible with this SoC/arch)");
+        return Vec::new();
+    }
+    println!("features (comma-separated numbers, blank for none):");
+    for (i, f) in compatible.iter().enumerate() {
+        println!("  {}) {}", i + 1, f);
+    }
+    print!("choose: ");
+    let _ = std::io::stdout().flush();
+    let mut chosen = Vec::new();
+    for tok in read_line().split(',') {
+        if let Ok(n) = tok.trim().parse::<usize>() {
+            if (1..=compatible.len()).contains(&n) && !chosen.contains(&compatible[n - 1]) {
+                chosen.push(compatible[n - 1].clone());
+            }
+        }
+    }
+    chosen
+}
+
+/// Write a scaffolded file, creating its parent directory. Refuses to clobber an
+/// existing file unless `force`, so a re-run never silently overwrites hand-edits.
+fn write_scaffold_file(path: &Path, contents: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if path.exists() && !force {
+        return Err(format!("{} already exists — pass --force to overwrite", path.display()).into());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, contents)?;
+    Ok(())
+}
+
+/// Structural check that the primary `--root` points at a boot2deb config tree —
+/// `base.toml` plus a `devices/` directory — run before any command dispatches
+/// against it. Only the primary root is checked: overlays are partial by design
+/// (a single retuned layer file is a valid overlay). The message shows the
+/// absolutized path, since the offending value is usually the implicit default
+/// `.` and "`.` not found" names nothing.
+fn ensure_config_root(root: &ConfigRoot) -> Result<(), Box<dyn std::error::Error>> {
+    let primary = root.path();
+    if primary.join("base.toml").is_file() && primary.join("devices").is_dir() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} does not look like a boot2deb config root (no base.toml + devices/) — \
+         run from the boot2deb repo root or pass --root <dir>",
+        absolutize(primary.to_path_buf()).display()
+    )
+    .into())
 }
 
 /// Overlay directories for a build's rootfs, in merge order:
@@ -2159,18 +2934,19 @@ fn print_build(b: &ResolvedBuild) {
     );
     println!("modules      : {}", b.modules.join(", "));
     println!("cross-compile: {}", b.cross_compile);
-    println!(
-        "mpp / librga : {} ({}) / {} ({})",
-        b.userspace.mpp.git, b.userspace.mpp.git_ref, b.userspace.librga.git, b.userspace.librga.git_ref
-    );
-    println!(
-        "ffmpeg base  : {} ({})",
-        b.ffmpeg.base.git, b.ffmpeg.base.git_ref
-    );
-    println!(
-        "ffmpeg rk    : {} ({})",
-        b.ffmpeg.rockchip.git, b.ffmpeg.rockchip.git_ref
-    );
+    // Media-accel source trees print only when the build compiles the stack; a base
+    // build reports it plainly instead of empty source lines.
+    match (&b.userspace, &b.ffmpeg) {
+        (Some(us), Some(ff)) => {
+            println!(
+                "mpp / librga : {} ({}) / {} ({})",
+                us.mpp.git, us.mpp.git_ref, us.librga.git, us.librga.git_ref
+            );
+            println!("ffmpeg base  : {} ({})", ff.base.git, ff.base.git_ref);
+            println!("ffmpeg rk    : {} ({})", ff.rockchip.git, ff.rockchip.git_ref);
+        }
+        _ => println!("media-accel  : none (no feature builds the transcode stack)"),
+    }
 }
 
 #[cfg(test)]
@@ -2281,5 +3057,144 @@ mod tests {
         bad_frag.kernel.config_fragments.push("definitely-no-such-fragment".to_string());
         let err = preflight_config(&root, &bad_frag).unwrap_err().to_string();
         assert!(err.contains("fragment not found"), "expected a fragment error, got: {err}");
+
+        // A declared apt source whose signing keyring is not vendored is rejected
+        // (CFG-1) — at preflight, not after the compile stages.
+        let mut bad_key = resolved.clone();
+        bad_key.apt_sources.push(boot2deb_core::model::AptSource {
+            name: "third-party".into(),
+            uri: "https://example.invalid/debian".into(),
+            suite: "trixie".into(),
+            components: vec!["main".into()],
+            signed_by: "no-such-keyring.gpg".into(),
+        });
+        let err = preflight_config(&root, &bad_key).unwrap_err().to_string();
+        assert!(
+            err.contains("no-such-keyring.gpg") && err.contains("not vendored"),
+            "expected a keyring error naming the file, got: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_the_shipped_jellyfin_composition() {
+        // The jellyfin recipe declares a third-party apt source; its signing
+        // keyring is vendored, so the shipped composition passes the same gate
+        // that rejects a missing one — `resolve turing-rk1-jellyfin` stays green.
+        let root = repo_root();
+        let resolved = resolve_recipe(&root, "turing-rk1-jellyfin", &Overrides::default()).unwrap();
+        assert!(
+            resolved.apt_sources.iter().any(|s| s.name == "jellyfin"),
+            "the jellyfin feature declares its apt source"
+        );
+        preflight_config(&root, &resolved).unwrap();
+    }
+
+    #[test]
+    fn ensure_config_root_accepts_a_config_tree_and_names_a_wrong_dir() {
+        // The shipped repo root passes.
+        ensure_config_root(&repo_root()).unwrap();
+        // A directory that is not a config root fails, naming the path and the
+        // --root remedy — the one clear error that replaces the per-command
+        // "not found" cascade.
+        let dir = tempfile::tempdir().unwrap();
+        let err = ensure_config_root(&ConfigRoot::new(dir.path())).unwrap_err().to_string();
+        assert!(err.contains("does not look like a boot2deb config root"), "{err}");
+        assert!(err.contains("--root"), "remedy names the flag: {err}");
+        // base.toml alone is not enough — devices/ must exist too.
+        std::fs::write(dir.path().join("base.toml"), "packages = []\n").unwrap();
+        assert!(ensure_config_root(&ConfigRoot::new(dir.path())).is_err());
+        std::fs::create_dir(dir.path().join("devices")).unwrap();
+        ensure_config_root(&ConfigRoot::new(dir.path())).unwrap();
+    }
+
+    #[test]
+    fn recipes_using_profile_finds_the_locks_an_import_invalidates() {
+        // Both shipped RK1 recipes resolve to the rk3588-accel profile, so a
+        // `patch import` into it names both update commands; an unknown profile
+        // (or an unusable root) degrades to the generic hint.
+        let root = repo_root();
+        let recipes = recipes_using_profile(&root, "rk3588-accel");
+        assert!(recipes.contains(&"turing-rk1-forky".to_string()), "{recipes:?}");
+        assert!(recipes.contains(&"turing-rk1-jellyfin".to_string()), "{recipes:?}");
+        assert!(recipes_using_profile(&root, "no-such-profile").is_empty());
+        let empty = tempfile::tempdir().unwrap();
+        assert!(recipes_using_profile(&ConfigRoot::new(empty.path()), "rk3588-accel").is_empty());
+    }
+
+    /// A `NewDeviceArgs` with every knob unset — the non-interactive baseline a test
+    /// tweaks per case. `non_interactive` is set so the helpers never touch stdin.
+    fn new_device_args() -> NewDeviceArgs {
+        NewDeviceArgs {
+            description: None,
+            soc: None,
+            boot_method: None,
+            kernel: None,
+            suite: None,
+            layout: None,
+            hostname: None,
+            image_size: None,
+            features: vec![],
+            no_recipe: false,
+            force: false,
+            non_interactive: true,
+        }
+    }
+
+    #[test]
+    fn new_device_rejects_a_bad_name() {
+        // An invalid name fails before any file is written (no SoC lookup needed).
+        let root = repo_root();
+        let err = new_device(&root, "Bad Name", new_device_args()).unwrap_err().to_string();
+        assert!(err.contains("invalid"), "{err}");
+    }
+
+    #[test]
+    fn new_device_non_interactive_requires_soc() {
+        let root = repo_root();
+        let err = new_device(&root, "some-board", new_device_args()).unwrap_err().to_string();
+        assert!(err.contains("--soc is required"), "{err}");
+    }
+
+    #[test]
+    fn new_device_scaffolds_into_an_overlay_and_resolves() {
+        // Primary = shipped repo (for the SoC/kernel/feature definitions), overlay =
+        // a scratch dir the new files land in — the third-party path.
+        let overlay = tempfile::tempdir().unwrap();
+        let root = ConfigRoot::with_overlays(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap().to_path_buf(),
+            [overlay.path().to_path_buf()],
+        );
+        let args = NewDeviceArgs {
+            soc: Some("rk3588".into()),
+            features: vec!["media-accel-rockchip".into()],
+            ..new_device_args()
+        };
+        new_device(&root, "test-board", args).unwrap();
+        // Files land in the overlay, not the primary root.
+        assert!(overlay.path().join("devices/test-board.toml").is_file());
+        assert!(overlay.path().join("recipes/test-board.toml").is_file());
+        // The scaffolded recipe resolves against the composed search path, carrying
+        // its selected feature — and the media-accel feature pulls in the SoC sources
+        // (UX-21). (The device alone has no features; they live in the recipe.)
+        let build = resolve_recipe(&root, "test-board", &Overrides::default()).unwrap();
+        assert_eq!(build.soc, Soc::Rk3588);
+        assert_eq!(build.features, vec!["media-accel-rockchip"]);
+        assert!(build.userspace.is_some());
+    }
+
+    #[test]
+    fn new_device_refuses_an_incompatible_feature() {
+        let overlay = tempfile::tempdir().unwrap();
+        let root = ConfigRoot::with_overlays(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap().to_path_buf(),
+            [overlay.path().to_path_buf()],
+        );
+        let args = NewDeviceArgs {
+            soc: Some("rk3588".into()),
+            features: vec!["no-such-feature".into()],
+            ..new_device_args()
+        };
+        let err = new_device(&root, "test-board", args).unwrap_err().to_string();
+        assert!(err.contains("not compatible") || err.contains("does not exist"), "{err}");
     }
 }

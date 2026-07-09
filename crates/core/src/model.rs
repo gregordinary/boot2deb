@@ -28,6 +28,20 @@ pub enum Arch {
     Riscv64,
 }
 
+impl Arch {
+    /// The Debian architecture name for this ISA — what `dpkg`, `mmdebstrap`, and
+    /// deb `Architecture:` fields expect. This differs from [`as_str`](Arch::as_str)
+    /// for 32-bit Arm, whose Debian architecture is `armhf` (hard-float), not the
+    /// `armv7` ISA spelling used for the config file stem and kbuild `ARCH`.
+    pub fn debian_arch(&self) -> &'static str {
+        match self {
+            Arch::Arm64 => "arm64",
+            Arch::Armv7 => "armhf",
+            Arch::Riscv64 => "riscv64",
+        }
+    }
+}
+
 /// System-on-chip. Selects the shared SoC layer (`socs/<soc>.toml`) that in turn
 /// names the [`Arch`], device-tree directory, and accel module list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +103,12 @@ macro_rules! kebab_enum {
             pub fn as_str(&self) -> &'static str {
                 match self { $(<$ty>::$variant => $s),+ }
             }
+            /// Every variant, in declaration order — the closed set of valid
+            /// values for this axis. Drives discovery (listing) and the
+            /// `new-device` scaffold's menus, which offer exactly these.
+            pub fn all() -> &'static [$ty] {
+                &[$(<$ty>::$variant),+]
+            }
         }
         impl fmt::Display for $ty {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -103,6 +123,34 @@ macro_rules! kebab_enum {
             }
         }
     };
+}
+
+/// A per-SoC hint for the rkbin blob set a new board is likely to need, for the
+/// `new-device` scaffold. These are *suggestions*, not validated values: the ATF
+/// (BL31) is SoC-generic and usually correct, while the DDR TPL is
+/// board-memory-specific and only a starting point. `None` means no known default,
+/// so the scaffold emits a `CHANGEME` placeholder instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobHints {
+    /// Suggested ATF/BL31 blob filename, if a SoC default is known.
+    pub atf: Option<&'static str>,
+    /// Suggested DDR TPL blob filename, if a SoC default is known.
+    pub tpl: Option<&'static str>,
+}
+
+/// The [`BlobHints`] for a SoC — the rkbin blobs a new board of this SoC most
+/// likely needs. Only SoCs with a validated shipped board carry concrete
+/// suggestions; the rest return `None`s so the scaffold flags the blobs as
+/// must-supply.
+pub fn blob_hints(soc: Soc) -> BlobHints {
+    match soc {
+        // Derived from the shipped RK3588 board (Turing RK1).
+        Soc::Rk3588 => BlobHints {
+            atf: Some("rk3588_bl31_v1.51.elf"),
+            tpl: Some("rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"),
+        },
+        Soc::Rk3576 | Soc::Rk3566 | Soc::Rk3288 => BlobHints { atf: None, tpl: None },
+    }
 }
 
 kebab_enum!(Arch { Arm64 => "arm64", Armv7 => "armv7", Riscv64 => "riscv64" });
@@ -215,10 +263,16 @@ pub struct SocLayer {
     #[serde(default)]
     pub extra_debs: Vec<ExtraDeb>,
     /// Media-accel userspace source trees (MPP/RGA/Mali), common to the RK35xx
-    /// family.
-    pub userspace: UserspaceSources,
+    /// family. Optional: a SoC that never builds the HW transcode stack omits
+    /// them, and resolution rejects a build that selects a `requires_media_accel`
+    /// feature (e.g. `media-accel-rockchip`) on a SoC that does. Present alongside
+    /// [`ffmpeg`](Self::ffmpeg) — the media-accel stack is built as a unit.
+    #[serde(default)]
+    pub userspace: Option<UserspaceSources>,
     /// ffmpeg source pair (V4L2 base + Rockchip rkmpp/rkrga), common to RK35xx.
-    pub ffmpeg: FfmpegSources,
+    /// Optional under the same contract as [`userspace`](Self::userspace).
+    #[serde(default)]
+    pub ffmpeg: Option<FfmpegSources>,
 }
 
 /// Bootloader-method invariants (`boot-methods/<method>.toml`): where the u-boot
@@ -744,10 +798,15 @@ pub struct ResolvedBuild {
     pub rkbin: Rkbin,
     /// Raw-gap offsets (from the boot method).
     pub offsets: Offsets,
-    /// Media-accel userspace source trees (from the SoC layer).
-    pub userspace: UserspaceSources,
-    /// ffmpeg source pair (from the SoC layer).
-    pub ffmpeg: FfmpegSources,
+    /// Media-accel userspace source trees (from the SoC layer). `Some` iff this
+    /// build compiles the HW transcode stack — i.e. a selected feature declares
+    /// [`requires_media_accel`](crate::feature::Feature::requires_media_accel);
+    /// resolution guarantees the SoC provides the sources in that case. `None` for
+    /// a base build, and the userspace/ffmpeg compile + plan nodes are then skipped.
+    pub userspace: Option<UserspaceSources>,
+    /// ffmpeg source pair (from the SoC layer). `Some`/`None` in lockstep with
+    /// [`userspace`](Self::userspace) — the media-accel stack is built as a unit.
+    pub ffmpeg: Option<FfmpegSources>,
     /// Third-party apt repositories the selected features contribute,
     /// unioned across features and de-duplicated by `name`. The rootfs bootstrap
     /// activates these before the package solve so an out-of-mirror app (e.g.
@@ -764,6 +823,16 @@ pub struct ResolvedBuild {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debian_arch_maps_armv7_to_armhf() {
+        // Debian's 32-bit Arm architecture is `armhf`, not the ISA spelling.
+        assert_eq!(Arch::Armv7.as_str(), "armv7");
+        assert_eq!(Arch::Armv7.debian_arch(), "armhf");
+        // The others match their ISA name.
+        assert_eq!(Arch::Arm64.debian_arch(), "arm64");
+        assert_eq!(Arch::Riscv64.debian_arch(), "riscv64");
+    }
 
     #[test]
     fn kernel_source_string_is_named() {

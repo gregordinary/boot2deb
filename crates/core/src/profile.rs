@@ -153,40 +153,81 @@ pub fn patch_prefix(label: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Choose a zero-padded numeric filename prefix that sorts a new patch at list
-/// index `index` among the profile scope's ordered entries.
+/// Choose a zero-padded filename prefix that sorts a new patch at list index
+/// `index` among the profile scope's ordered entries.
 ///
 /// The prefix mirrors the list order — a reading aid, not load-bearing (the list
-/// is authoritative). It is the midpoint between the numeric prefixes of the
-/// neighbors on either side of `index` (`before + 10` when appending, half the
+/// is authoritative). It is the integer midpoint between the numeric prefixes of
+/// the neighbors on either side of `index` (`before + 10` when appending, half the
 /// first when prepending, `010` into an empty list). Padding width matches the
-/// widest existing prefix (minimum 3). When two integer neighbors leave no gap it
-/// is [`ConfigError::PatchPrefixNoGap`], so the caller falls back to an explicit
-/// `--as` label rather than the tool silently renumbering the committed series.
+/// widest existing prefix (minimum 3).
+///
+/// When two integer neighbors leave no whole-number gap (`070`/`071`), the import
+/// does not dead-end: it appends the next free lowercase-letter suffix to the lower
+/// neighbor (`070` → `070a` → `070b` → …), which lexically sorts after `070` and
+/// before `071`, so a patch slots between consecutive entries without renumbering
+/// the committed series. Because the list — not the filename — is the authoritative
+/// order, the suffix only needs to read *near* its neighbors, not fall exactly
+/// between them.
+///
+/// The one case with no automatic room is prepending before a `000`-prefixed first
+/// entry (nothing sorts below it): that is [`ConfigError::PatchPrefixNoGap`], so the
+/// caller supplies an explicit `--as` label.
 pub fn derive_prefix(list: &[String], index: usize) -> Result<String, ConfigError> {
     let before = index
         .checked_sub(1)
         .and_then(|i| list.get(i))
         .and_then(|l| patch_prefix(l));
     let after = list.get(index).and_then(|l| patch_prefix(l));
+    let width = prefix_width(list);
 
     let value = match (before, after) {
         (Some(b), Some(a)) if a > b + 1 => b + (a - b) / 2,
-        (Some(b), Some(a)) => return Err(ConfigError::PatchPrefixNoGap { before: b, after: a }),
+        // Consecutive (or duplicate) integer neighbors: no whole-number gap, so fall
+        // back to a lettered sub-prefix on the lower neighbor.
+        (Some(b), Some(_)) => {
+            let suffix = next_suffix(list, b);
+            return Ok(format!("{b:0width$}{suffix}"));
+        }
         (Some(b), None) => b + 10,
-        (None, Some(a)) if a >= 2 => a / 2,
-        (None, Some(a)) => return Err(ConfigError::PatchPrefixNoGap { before: 0, after: a }),
+        (None, Some(a)) if a >= 1 => a / 2,
+        // Prepending before a `000` first entry: nothing sorts below it.
+        (None, Some(a)) => return Err(ConfigError::PatchPrefixNoGap { after: a }),
         (None, None) => 10,
     };
 
-    let width = list
-        .iter()
+    Ok(format!("{value:0width$}"))
+}
+
+/// The zero-padding width for a derived prefix: the widest numeric prefix among the
+/// scope's existing filenames, floored at 3, so a new prefix lines up with them.
+fn prefix_width(list: &[String]) -> usize {
+    list.iter()
         .filter_map(|l| l.rsplit('/').next())
         .map(|b| b.chars().take_while(|c| c.is_ascii_digit()).count())
         .max()
         .unwrap_or(0)
-        .max(3);
-    Ok(format!("{value:0width$}"))
+        .max(3)
+}
+
+/// The next free lowercase-letter suffix at numeric prefix `value` — `a` when none
+/// is taken, else the letter after the highest one already used by an entry whose
+/// numeric prefix is `value` (so `070` + existing `070a` yields `b`). Falls back to
+/// `z` in the absurd case that all 26 are taken; the prefix is advisory, so a
+/// collision there only affects display ordering.
+fn next_suffix(list: &[String], value: u32) -> char {
+    let used: std::collections::BTreeSet<char> = list
+        .iter()
+        .filter_map(|l| l.rsplit('/').next())
+        .filter_map(|base| {
+            let digits: String = base.chars().take_while(|c| c.is_ascii_digit()).collect();
+            (digits.parse::<u32>().ok() == Some(value))
+                .then(|| base.chars().nth(digits.len()))
+                .flatten()
+                .filter(|c| c.is_ascii_lowercase())
+        })
+        .collect();
+    ('a'..='z').find(|c| !used.contains(c)).unwrap_or('z')
 }
 
 /// Load `profiles/<name>/profile.toml` from a patches-repo root.
@@ -359,15 +400,33 @@ mod tests {
     }
 
     #[test]
-    fn derive_prefix_errors_when_no_integer_gap() {
+    fn derive_prefix_suffixes_when_no_integer_gap() {
         let list = vec![
             "k/070-a.patch".to_string(),
             "k/071-b.patch".to_string(),
         ];
-        let err = derive_prefix(&list, 1).unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::PatchPrefixNoGap { before: 70, after: 71 }
-        ));
+        // Consecutive 070/071 leave no whole-number gap: fall back to a lettered
+        // sub-prefix on the lower neighbor, which sorts between them.
+        assert_eq!(derive_prefix(&list, 1).unwrap(), "070a");
+        assert!("070-a.patch" < "070a-x.patch" && "070a-x.patch" < "071-b.patch");
+    }
+
+    #[test]
+    fn derive_prefix_advances_the_suffix_letter() {
+        // A second insert at the same slot skips the taken `a` and uses `b`.
+        let list = vec![
+            "k/070-a.patch".to_string(),
+            "k/070a-x.patch".to_string(),
+            "k/071-b.patch".to_string(),
+        ];
+        assert_eq!(derive_prefix(&list, 1).unwrap(), "070b");
+    }
+
+    #[test]
+    fn derive_prefix_prepends_before_a_low_first_entry() {
+        // Before `001` there is integer room (`000`); before `000` there is none.
+        assert_eq!(derive_prefix(&["k/001-a.patch".to_string()], 0).unwrap(), "000");
+        let err = derive_prefix(&["k/000-a.patch".to_string()], 0).unwrap_err();
+        assert!(matches!(err, ConfigError::PatchPrefixNoGap { after: 0 }));
     }
 }

@@ -1,19 +1,18 @@
-# Jellyfin apt repository keyring (not vendored yet)
+# Jellyfin apt repository keyring
 
-The `jellyfin` application feature (`features/jellyfin.toml`) installs Jellyfin
-from its signed upstream apt repository (`https://repo.jellyfin.org/debian`). That
-repository's signing key must be vendored here as `jellyfin.gpg` so the rootfs
-bootstrap can verify its `Release` signatures — the same host-distro-independent
-convention as `debian-archive-keyring.gpg`.
+`jellyfin.gpg` verifies the `Release` signatures of the Jellyfin upstream apt
+repository (`https://repo.jellyfin.org/debian`) that the `jellyfin` application
+feature (`features/jellyfin.toml`) installs from. Vendored so the rootfs
+bootstrap can verify the repo on any build host — the same
+host-distro-independent convention as `debian-archive-keyring.gpg`.
 
-**Status: not yet vendored.** The `jellyfin` feature and the
-`turing-rk1-jellyfin` recipe resolve and validate today (`boot2deb resolve`), but
-the engine-side activation of third-party apt sources inside the mmdebstrap
-bootstrap — and this key — land with the physical boot gate (see
-`features/jellyfin/README.md`). Vendoring, when it lands:
+- Provenance: fetched 2026-07-08 from
+  `https://repo.jellyfin.org/jellyfin_team.gpg.key` (ASCII-armored, sha256
+  `a0cde241ae297fa6f0265c0bf15ce9eb9ee97c008904a59ab367a67d59532839`) and
+  dearmored with `gpg --dearmor`.
+- Key: `Jellyfin Team <team@jellyfin.org>`, rsa3072,
+  fingerprint `4918 AABC 486C A052 358D  778D 4902 3CD0 1DE2 1A7B`.
+- sha256: `0bf79bc82f784381bdac9a3cf3731862db074967e77587a3bc0055576381c486`
 
-- Fetch the current key from `https://repo.jellyfin.org/jellyfin_team.gpg.key`
-  (ASCII-armored) and dearmor it: `gpg --dearmor < jellyfin_team.gpg.key >
-  jellyfin.gpg`.
-- Record its sha256 here and pin it, matching the Debian keyring's provenance
-  note. Refreshing on a key rotation is a deliberate re-validation event.
+Refreshing: when Jellyfin rotates its repository key, re-fetch the current key,
+replace this file, and update this note — a deliberate re-validation event.

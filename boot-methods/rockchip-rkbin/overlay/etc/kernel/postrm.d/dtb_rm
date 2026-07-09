@@ -3,11 +3,10 @@
 # Copyright (C) 2023, John Clark <inindev@gmail.com>
 
 # kernel post-remove hook: /etc/kernel/postrm.d
-# script to delete the specified dtb file from
-# /boot after a kernel is package removed
+# delete the board dtb from /boot after a kernel is removed. The dtb name comes
+# from /etc/boot2deb/board.conf (generated from the device's kernel_dtb).
 
 version="$1"
-target="/boot/rk3588-turing-rk1.dtb-${version}"
 
 # passing the kernel version is required
 if [ -z "${version}" ]; then
@@ -15,5 +14,9 @@ if [ -z "${version}" ]; then
 	exit 2
 fi
 
-echo "I: dtb_rm: cleaning up ${target}"
-rm -f "${target}"
+if [ -e /etc/boot2deb/board.conf ]; then
+	. /etc/boot2deb/board.conf
+	target="/boot/${DTB_NAME}-${version}"
+	echo "I: dtb_rm: cleaning up ${target}"
+	rm -f "${target}"
+fi

@@ -5,6 +5,12 @@ This gets you from a clone of the repo to a built image. It uses the shipped
 with their own recipe name. Flashing and board-specific notes live on each board's
 page — for the RK1, see [Turing RK1](boards/turing-rk1.md).
 
+> **Which track are you on?** This is the **shipped-recipe track** — `doctor` then
+> `build`, for a recipe that already ships a committed lock (like `turing-rk1-forky`).
+> Bringing up a *new* board, or authoring a patch, is the longer bring-up track: see
+> [Adding a board](contributing/adding-a-board.md) and
+> [Adding a patch](contributing/adding-a-patch.md).
+
 The build is **rootless**: it uses no `sudo` and no loop devices. You only need root
 to install host packages and (on some hosts) to enable unprivileged user namespaces
 once.

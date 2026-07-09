@@ -17,3 +17,9 @@
 description  = "Rockchip HW video transcode (MPP + RGA + ffmpeg-rk) for RK35xx"
 packages     = ["ffmpeg-rk", "librockchip-mpp1", "librga2"]
 requires_soc = ["rk3588", "rk3576", "rk3566"]
+
+# This feature's packages are built from the SoC's media-accel source trees
+# (socs/<soc>.toml [userspace]/[ffmpeg]), not the Debian mirror. The flag requires
+# the resolved SoC to supply those stanzas and schedules the userspace/ffmpeg
+# compile nodes; a build without this feature carries no sources and skips them.
+requires_media_accel = true

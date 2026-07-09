@@ -113,11 +113,16 @@ pub enum EngineError {
     /// series from this checkout, so a drifted tree would silently apply a
     /// *different* series than the lock names. An explicit `--patches-path`
     /// override downgrades this to a warning for patch co-development.
+    ///
+    /// The remedy depends on *which side* moved: a checkout ahead of the pin (or
+    /// dirty) holds work the lock should include — the fix is to commit and re-run
+    /// `boot2deb update`, not to discard the work by re-checking-out the pin. Only
+    /// a stale checkout is fixed by checking out the locked commit. The `relation`
+    /// field ([`PinRelation`]) carries that distinction into the message.
     #[error(
-        "patches checkout {root} is at {actual}{}, but the lock pins {expected}\n  \
-         re-checkout the patches repo at {expected} (or pass --patches-path <dir> to \
-         build from a working checkout)",
-        if *.dirty { " (with uncommitted changes)" } else { "" }
+        "patches checkout {root} is at {actual}{}, but the lock pins {expected}\n  {}",
+        if *.dirty { " (with uncommitted changes)" } else { "" },
+        pin_mismatch_remedy(*.relation, *.dirty, .root, .expected)
     )]
     PatchesPinMismatch {
         /// The patches checkout that drifted.
@@ -128,6 +133,22 @@ pub enum EngineError {
         actual: String,
         /// Whether the checkout also had uncommitted changes.
         dirty: bool,
+        /// How the checkout's HEAD relates to the pin — selects the remedy text.
+        relation: PinRelation,
+    },
+
+    /// The `patches` checkout `update` would pin has uncommitted changes. The pin
+    /// is `HEAD`, so those changes — typically a just-imported patch — would be
+    /// silently absent from the lock and resurface later as a build-time
+    /// [`PatchesPinMismatch`](EngineError::PatchesPinMismatch). Refused before any
+    /// upstream ref is consulted: commit first, then re-run.
+    #[error(
+        "uncommitted changes in patches checkout {root} — commit them so the pin \
+         includes your new patch, then re-run `boot2deb update <recipe>`"
+    )]
+    PatchesDirty {
+        /// The dirty patches checkout.
+        root: String,
     },
 
     /// A patch in the series did not apply to the target tree — the verify gate's
@@ -172,6 +193,20 @@ pub enum EngineError {
         status: Option<i32>,
         /// Captured stderr (trimmed).
         stderr: String,
+    },
+
+    /// A blob named by the resolved build (`rkbin.atf` / `rkbin.tpl`) does not
+    /// exist in the blob directory, so there is nothing to hash into a lock pin.
+    /// Blobs are vendored files, never fetched, so the remedy is to vendor the
+    /// file — named here rather than surfacing as a bare I/O error.
+    #[error(
+        "blob {filename} not found under {dir} — vendor it there (see blobs/README.md)"
+    )]
+    BlobMissing {
+        /// The blob filename the resolved build names.
+        filename: String,
+        /// The blob directory that was searched (`blobs/<soc>/` by default).
+        dir: String,
     },
 
     /// A vendored blob's sha256 did not match the lock pin — the u-boot build
@@ -224,6 +259,17 @@ pub enum EngineError {
         url: String,
         /// The commit the lock pins but the remote does not hold.
         commit: String,
+    },
+
+    /// A media-accel build stage (userspace or ffmpeg) was invoked for a build
+    /// whose lock carries no media-accel source pins. These stages run only when
+    /// the resolved build selects a `requires_media_accel` feature (which pins the
+    /// sources), so reaching one without pins is an internal scheduling bug, not a
+    /// user misconfiguration — the CLI gates the stages on the pins' presence.
+    #[error("internal: {stage} stage scheduled but the lock has no media-accel source pins")]
+    MissingMediaAccelPins {
+        /// The stage that was reached without pins (`userspace` or `ffmpeg`).
+        stage: &'static str,
     },
 
     /// A build stage completed but an expected output artifact was not produced.
@@ -406,6 +452,26 @@ pub enum EngineError {
     },
 }
 
+/// How a drifted `patches` checkout's HEAD relates to the locked pin. Selects
+/// the [`PatchesPinMismatch`](EngineError::PatchesPinMismatch) remedy: "your
+/// checkout has newer work" and "your checkout is stale" have opposite fixes,
+/// and pointing an ahead-of-pin user at a re-checkout would tell them to discard
+/// their work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinRelation {
+    /// The pin is an ancestor of HEAD: the checkout holds commits the lock has
+    /// not pinned yet (e.g. a committed `patch import`). Remedy: re-pin with
+    /// `boot2deb update`.
+    Ahead,
+    /// HEAD is an ancestor of the pin: the checkout is stale — behind the series
+    /// the lock names. Remedy: check out the locked commit.
+    Behind,
+    /// The histories diverged, or the relationship could not be determined (one
+    /// of the commits is absent from the local checkout). Remedy: both options,
+    /// spelled out.
+    Unknown,
+}
+
 impl EngineError {
     /// Build an [`Io`](EngineError::Io) error for `path`.
     pub(crate) fn io(path: &Path, source: std::io::Error) -> Self {
@@ -421,5 +487,33 @@ fn exit_suffix(status: Option<i32>) -> String {
     match status {
         Some(code) => format!(" (exit {code})"),
         None => String::new(),
+    }
+}
+
+/// The remedy line of the `PatchesPinMismatch` message, chosen by how the
+/// checkout relates to the pin. A dirty tree always leads with "commit" — its
+/// changes are unpinnable until committed, whatever HEAD's relation is.
+fn pin_mismatch_remedy(relation: PinRelation, dirty: bool, root: &str, expected: &str) -> String {
+    if dirty {
+        return format!(
+            "the checkout has uncommitted changes — commit them in {root}, then re-pin \
+             with `boot2deb update <recipe>` so the lock includes them (or pass \
+             --patches-path <dir> to build from the working checkout)"
+        );
+    }
+    match relation {
+        PinRelation::Ahead => "the checkout is ahead of the pin — re-pin with \
+             `boot2deb update <recipe>` to lock the new commits (or pass \
+             --patches-path <dir> to build from the working checkout)"
+            .to_string(),
+        PinRelation::Behind => format!(
+            "the checkout is behind the pin — check out the locked commit \
+             (`git -C {root} checkout {expected}`) to build the locked series"
+        ),
+        PinRelation::Unknown => format!(
+            "if the checkout's series is the one you want, re-pin with \
+             `boot2deb update <recipe>`; to build the locked series instead, \
+             re-checkout the patches repo at {expected}"
+        ),
     }
 }

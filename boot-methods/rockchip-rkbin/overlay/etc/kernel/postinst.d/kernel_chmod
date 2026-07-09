@@ -13,6 +13,9 @@ if [ -z "${version}" ]; then
         exit 2
 fi
 
-chmod 644 "/boot/rk3588-turing-rk1.dtb-${version}"
+# board dtb name from the generated board.conf (see dtb_cp)
+. /etc/boot2deb/board.conf
+
+chmod 644 "/boot/${DTB_NAME}-${version}"
 chmod 600 "/boot/System.map-${version}"
 chmod 600 "/boot/vmlinuz-${version}"

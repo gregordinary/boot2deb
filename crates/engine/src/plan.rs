@@ -118,47 +118,60 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
             &crate::build::uboot::clone_manifest(lock, patch_series(dev, &uboot_fp)),
         ),
     ];
-    let us = w.join("userspace");
-    // The userspace `git am` scope (the MPP CMA fix) folds into the patched
-    // package's tree signature, so recompute it the same way the stage stamps it —
-    // `receives_userspace_patches` is the shared source of truth for which package.
-    let patch_inputs = crate::build::userspace::PatchInputs {
-        profile: &lock.patches.profile,
-        commit: &lock.patches.commit,
-        patches: patch_series(dev, &userspace_fp),
-    };
-    let us_patches =
-        |name: &str| crate::build::userspace::receives_userspace_patches(name).then_some(&patch_inputs);
-    nodes.push(NodePlan::evaluate(
-        "userspace:mpp",
-        us.join("mpp"),
-        &crate::build::userspace::signature_manifest("mpp", &lock.userspace.mpp.commit, us_patches("mpp")),
-    ));
-    nodes.push(NodePlan::evaluate(
-        "userspace:librga",
-        us.join("librga"),
-        &crate::build::userspace::signature_manifest(
-            "librga",
-            &lock.userspace.librga.commit,
-            us_patches("librga"),
-        ),
-    ));
-    if inputs.include_libmali {
+    // The media-accel compile nodes (userspace packages + ffmpeg) exist only when
+    // the recipe builds the transcode stack — i.e. the lock pins those sources. A
+    // base build stops at kernel + u-boot.
+    if let Some(us_pins) = &lock.userspace {
+        let us = w.join("userspace");
+        // The userspace `git am` scope (the MPP CMA fix) folds into the patched
+        // package's tree signature, so recompute it the same way the stage stamps it —
+        // `receives_userspace_patches` is the shared source of truth for which package.
+        let patch_inputs = crate::build::userspace::PatchInputs {
+            profile: &lock.patches.profile,
+            commit: &lock.patches.commit,
+            patches: patch_series(dev, &userspace_fp),
+        };
+        let us_patches = |name: &str| {
+            crate::build::userspace::receives_userspace_patches(name).then_some(&patch_inputs)
+        };
         nodes.push(NodePlan::evaluate(
-            "userspace:libmali",
-            us.join("libmali"),
+            "userspace:mpp",
+            us.join("mpp"),
+            &crate::build::userspace::signature_manifest("mpp", &us_pins.mpp.commit, us_patches("mpp")),
+        ));
+        nodes.push(NodePlan::evaluate(
+            "userspace:librga",
+            us.join("librga"),
             &crate::build::userspace::signature_manifest(
-                "libmali",
-                &lock.userspace.libmali.commit,
-                us_patches("libmali"),
+                "librga",
+                &us_pins.librga.commit,
+                us_patches("librga"),
+            ),
+        ));
+        if inputs.include_libmali {
+            nodes.push(NodePlan::evaluate(
+                "userspace:libmali",
+                us.join("libmali"),
+                &crate::build::userspace::signature_manifest(
+                    "libmali",
+                    &us_pins.libmali.commit,
+                    us_patches("libmali"),
+                ),
+            ));
+        }
+    }
+    if let Some(ff_pins) = &lock.ffmpeg {
+        nodes.push(NodePlan::evaluate(
+            "ffmpeg",
+            w.join("ffmpeg").join("build"),
+            &crate::build::ffmpeg::clone_manifest(
+                ff_pins,
+                &lock.patches.profile,
+                &lock.patches.commit,
+                patch_series(dev, &ffmpeg_fp),
             ),
         ));
     }
-    nodes.push(NodePlan::evaluate(
-        "ffmpeg",
-        w.join("ffmpeg").join("build"),
-        &crate::build::ffmpeg::clone_manifest(lock, patch_series(dev, &ffmpeg_fp)),
-    ));
     nodes
 }
 
@@ -188,12 +201,12 @@ mod tests {
             kernel: KernelPin { id: "k".into(), reference: "v7.1.1".into(), commit: kernel_commit.into() },
             patches: PatchesPin { profile: "rk3588-accel".into(), commit: "p1".into() },
             uboot: UbootPin { reference: "v".into(), commit: "u1".into() },
-            userspace: UserspacePins {
+            userspace: Some(UserspacePins {
                 mpp: git(mpp_commit),
                 librga: git("rga1"),
                 libmali: git("mali1"),
-            },
-            ffmpeg: FfmpegPins { base: git("b1"), rockchip: git("rk1") },
+            }),
+            ffmpeg: Some(FfmpegPins { base: git("b1"), rockchip: git("rk1") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
             blobs: BlobsPin { atf: "a".into(), tpl: "t".into() },
             extra_debs: vec![],
@@ -238,6 +251,25 @@ mod tests {
     }
 
     #[test]
+    fn base_build_plans_only_kernel_and_uboot() {
+        // A lock with no media-accel pins (a base build) schedules neither the
+        // userspace packages nor ffmpeg — only kernel + u-boot (UX-21).
+        let mut lock = lock_fixture("kc1", "mc1");
+        lock.userspace = None;
+        lock.ffmpeg = None;
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = plan_nodes(&PlanInputs {
+            lock: &lock,
+            work_dir: tmp.path(),
+            patches_dev: false,
+            patches_root: None,
+            include_libmali: true,
+        });
+        let names: Vec<&str> = plan.iter().map(|n| n.node.as_str()).collect();
+        assert_eq!(names, ["kernel", "uboot"]);
+    }
+
+    #[test]
     fn matching_stamp_reuses_drift_rebuilds_with_the_reason() {
         let tmp = tempfile::tempdir().unwrap();
         let work = tmp.path();
@@ -264,7 +296,7 @@ mod tests {
             &mpp,
             &crate::build::userspace::signature_manifest(
                 "mpp",
-                &old.userspace.mpp.commit,
+                &old.userspace.as_ref().unwrap().mpp.commit,
                 Some(&old_patches),
             ),
         )

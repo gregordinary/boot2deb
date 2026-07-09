@@ -45,10 +45,17 @@ pub struct Lock {
     pub patches: PatchesPin,
     /// Exact u-boot pin.
     pub uboot: UbootPin,
-    /// Exact media-accel userspace source pins (MPP/RGA/Mali).
-    pub userspace: UserspacePins,
-    /// Exact ffmpeg source pins (V4L2 base + Rockchip rkmpp/rkrga).
-    pub ffmpeg: FfmpegPins,
+    /// Exact media-accel userspace source pins (MPP/RGA/Mali). Present iff the
+    /// recipe builds the HW transcode stack (a `requires_media_accel` feature is
+    /// selected); omitted from the committed lock for a base build, which resolves
+    /// and builds no userspace/ffmpeg nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userspace: Option<UserspacePins>,
+    /// Exact ffmpeg source pins (V4L2 base + Rockchip rkmpp/rkrga). Present in
+    /// lockstep with [`userspace`](Self::userspace) — the media-accel stack pins
+    /// as a unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ffmpeg: Option<FfmpegPins>,
     /// Rootfs suite + content-pinned package manifest.
     pub rootfs: RootfsPin,
     /// Verified rkbin blob hashes.
@@ -243,7 +250,7 @@ mod tests {
                 reference: "v2026.04".into(),
                 commit: "88dc2788777babfd6322fa655df549a019aa1e69".into(),
             },
-            userspace: UserspacePins {
+            userspace: Some(UserspacePins {
                 mpp: GitPin {
                     reference: "mainline-cma-fix".into(),
                     commit: "750e76ec2d9287babfaf08c8bf395ebc5e8778ea".into(),
@@ -256,8 +263,8 @@ mod tests {
                     reference: "master".into(),
                     commit: "bd33ee262f47fd936b831afccaa0759b3ecc2482".into(),
                 },
-            },
-            ffmpeg: FfmpegPins {
+            }),
+            ffmpeg: Some(FfmpegPins {
                 base: GitPin {
                     reference: "v4l2-request-n8.1".into(),
                     commit: "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935".into(),
@@ -266,7 +273,7 @@ mod tests {
                     reference: "8.1".into(),
                     commit: "f66f2f804627e4464c2d1b10181772b5437bb991".into(),
                 },
-            },
+            }),
             rootfs: RootfsPin {
                 suite: "forky".into(),
                 manifest: "turing-rk1-forky.pkgs.lock".into(),
@@ -318,15 +325,15 @@ mod tests {
                 reference: "v2".into(),
                 commit: "c".repeat(40),
             },
-            userspace: UserspacePins {
+            userspace: Some(UserspacePins {
                 mpp: GitPin { reference: "m".into(), commit: "1".repeat(40) },
                 librga: GitPin { reference: "r".into(), commit: "2".repeat(40) },
                 libmali: GitPin { reference: "l".into(), commit: "3".repeat(40) },
-            },
-            ffmpeg: FfmpegPins {
+            }),
+            ffmpeg: Some(FfmpegPins {
                 base: GitPin { reference: "b".into(), commit: "4".repeat(40) },
                 rockchip: GitPin { reference: "rk".into(), commit: "5".repeat(40) },
-            },
+            }),
             rootfs: RootfsPin {
                 suite: "forky".into(),
                 manifest: "rec.pkgs.lock".into(),
@@ -387,6 +394,25 @@ mod tests {
         assert_eq!(back.snapshot, None);
         assert!(back.extra_debs.is_empty());
         assert_eq!(back.rootfs.manifest_sha256, None);
+        assert_eq!(lock, back);
+    }
+
+    #[test]
+    fn base_build_lock_omits_the_media_accel_tables() {
+        // A recipe with no `requires_media_accel` feature builds no userspace/ffmpeg
+        // nodes, so `update` writes no pins for them. The committed lock must omit
+        // both tables entirely (not empty tables) and round-trip back to `None`.
+        let mut lock = base_lock();
+        lock.userspace = None;
+        lock.ffmpeg = None;
+        let text = lock.to_toml_string().unwrap();
+        assert!(
+            !text.contains("[userspace") && !text.contains("[ffmpeg"),
+            "base-build lock must not emit media-accel tables:\n{text}"
+        );
+        let back: Lock = toml::from_str(&text).unwrap();
+        assert_eq!(back.userspace, None);
+        assert_eq!(back.ffmpeg, None);
         assert_eq!(lock, back);
     }
 }

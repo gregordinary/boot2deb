@@ -89,6 +89,20 @@ pub struct Feature {
     /// enough.
     #[serde(default)]
     pub conflicts: Vec<String>,
+    /// This feature's packages are produced by building the SoC's media-accel
+    /// source trees — the `[userspace]` (MPP/RGA/Mali) and `[ffmpeg]` stanzas at
+    /// the SoC layer. Set on a provider feature like `media-accel-rockchip`, whose
+    /// `.deb`s (`librockchip-mpp1`, `librga2`, `ffmpeg-rk`) come from the compile
+    /// nodes, not the Debian mirror.
+    ///
+    /// A `true` here is a resolve-time requirement on the *SoC*: the resolved SoC
+    /// must provide those sources, else resolution fails with
+    /// [`ConfigError::FeatureRequiresMediaAccel`]. It is also the build-plan signal —
+    /// a build with no such feature carries no sources and skips the userspace/ffmpeg
+    /// nodes entirely. Default `false`: most features (an app like `jellyfin`, a
+    /// mirror-only add-in) need no source build.
+    #[serde(default)]
+    pub requires_media_accel: bool,
 }
 
 impl Feature {
@@ -146,6 +160,19 @@ impl Feature {
     }
 }
 
+/// The first selected feature (in recipe order) that declares
+/// [`requires_media_accel`](Feature::requires_media_accel), or `None` when none
+/// do. `Some` means the build compiles the SoC's media-accel source trees;
+/// resolution then requires the SoC to provide them, and the build schedules the
+/// userspace/ffmpeg compile nodes. Returning the *name* lets the resolve error
+/// point at the specific feature that imposed the requirement.
+pub fn first_requiring_media_accel(selected: &[(String, Feature)]) -> Option<&str> {
+    selected
+        .iter()
+        .find(|(_, f)| f.requires_media_accel)
+        .map(|(name, _)| name.as_str())
+}
+
 /// Validate a selected feature set for pairwise conflicts.
 ///
 /// `selected` pairs each chosen feature's name with its loaded manifest. Returns
@@ -180,6 +207,7 @@ mod tests {
             apt_sources: vec![],
             extra_debs: vec![],
             conflicts: conflicts.into_iter().map(String::from).collect(),
+            requires_media_accel: false,
         }
     }
 
@@ -279,5 +307,32 @@ mod tests {
         let a = ("media-accel-rockchip".to_string(), feat(vec![Soc::Rk3588], vec![]));
         let b = ("crypto-accel".to_string(), feat(vec![], vec![]));
         assert!(ensure_no_conflicts(&[a, b]).is_ok());
+    }
+
+    #[test]
+    fn requires_media_accel_defaults_false_and_parses() {
+        // Absent key → false (an app/mirror feature needs no source build).
+        let plain: Feature = toml::from_str("description = \"x\"\npackages = [\"p\"]\n").unwrap();
+        assert!(!plain.requires_media_accel);
+        // A provider feature opts in explicitly.
+        let provider: Feature =
+            toml::from_str("description = \"x\"\nrequires_media_accel = true\n").unwrap();
+        assert!(provider.requires_media_accel);
+    }
+
+    #[test]
+    fn first_requiring_media_accel_names_the_feature() {
+        let plain = feat(vec![], vec![]);
+        let mut provider = feat(vec![Soc::Rk3588], vec![]);
+        provider.requires_media_accel = true;
+        // None when no feature opts in.
+        let none = [("jellyfin".to_string(), plain.clone())];
+        assert_eq!(first_requiring_media_accel(&none), None);
+        // The requiring feature's name is returned, in recipe order.
+        let set = [
+            ("jellyfin".to_string(), plain),
+            ("media-accel-rockchip".to_string(), provider),
+        ];
+        assert_eq!(first_requiring_media_accel(&set), Some("media-accel-rockchip"));
     }
 }

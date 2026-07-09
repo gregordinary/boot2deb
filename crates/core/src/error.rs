@@ -178,6 +178,21 @@ pub enum ConfigError {
         supported: String,
     },
 
+    /// A selected feature declares `requires_media_accel` but the resolved SoC
+    /// provides no `[userspace]`/`[ffmpeg]` source stanzas to build the stack
+    /// from. The remedy is to add those stanzas at the SoC layer (as RK3588 does)
+    /// or drop the feature for this target.
+    #[error(
+        "feature '{feature}' builds the media-accel stack but soc '{soc}' declares no \
+         [userspace]/[ffmpeg] sources — add them at socs/{soc}.toml or drop the feature"
+    )]
+    FeatureRequiresMediaAccel {
+        /// The feature that requires the media-accel source trees.
+        feature: String,
+        /// The resolved SoC that lacks them.
+        soc: String,
+    },
+
     /// A selected feature does not support the resolved arch. The arch gate
     /// for a discrete-GPU capability feature, orthogonal to the SoC gate.
     #[error("feature '{feature}' does not support arch '{arch}' (supported arches: {supported})")]
@@ -280,17 +295,18 @@ pub enum ConfigError {
     #[error("patch has no subject and none could be derived (pass --subject)")]
     PatchMissingSubject,
 
-    /// `patch import` could not choose a numeric filename prefix that sorts the new
-    /// patch at the requested position: its integer neighbors leave no gap. Pass an
-    /// explicit destination label with `--as`.
+    /// `patch import` could not choose a filename prefix for the requested position.
+    /// Consecutive integer neighbors auto-degrade to a lettered sub-prefix
+    /// ([`derive_prefix`](crate::profile::derive_prefix)), so this remains only for
+    /// the one case with no room below it: prepending before a `000`-prefixed first
+    /// entry. Pass an explicit destination label with `--as`.
     #[error(
-        "no integer filename-prefix gap at this position (between {before} and {after}); \
-         pass an explicit label with --as"
+        "cannot place a patch before prefix {after:03} (nothing sorts below it); \
+         pass an explicit label with --as (e.g. --as media-accel/kernel/000a-<slug>.patch)"
     )]
     PatchPrefixNoGap {
-        /// The prefix of the entry that would precede the new patch.
-        before: u32,
-        /// The prefix of the entry that would follow it.
+        /// The prefix of the first entry, which the new patch would precede (`0`,
+        /// since a higher first entry leaves integer room and does not reach here).
         after: u32,
     },
 }
