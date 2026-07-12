@@ -121,7 +121,7 @@ is not already present — you do not need to clone it separately.
 The rootfs bootstrap is content-cached, so a rebuild whose solved package set is
 unchanged skips the multi-minute bootstrap. To force a clean rootfs, add
 `--refresh-rootfs`. To build a single stage, pass `--stage`
-(`kernel`, `uboot`, `userspace`, `ffmpeg`, `rootfs`, `image`) — see the
+(`kernel`, `dtb`, `uboot`, `userspace`, `ffmpeg`, `rootfs`, `image`) — see the
 [CLI reference](reference/cli.md).
 
 ### What you get

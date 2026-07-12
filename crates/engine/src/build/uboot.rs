@@ -8,7 +8,9 @@
 //! passed — the defconfig carries it. The blobs are verified against the lock's
 //! hashes ([`crate::blobs`]) before `make` consumes them.
 
-use crate::build::{self, stage_artifact, BuildEnv, ClonePinned, CloneMode, PatchScope, PatchSeries};
+use crate::build::{
+    self, stage_artifact, BuildEnv, ClonePinned, CloneMode, PatchScope, PatchSeries, PatchSource,
+};
 use crate::blobs;
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
@@ -25,15 +27,19 @@ const CLONE_STAGE_VERSION: u32 = 1;
 /// Stage-recipe version for the u-boot **output** signature (Tier-2 artifact cache):
 /// bump when the compile/package logic changes the produced payloads/deb in a
 /// way the folded inputs do not already capture.
-const OUTPUT_STAGE_VERSION: u32 = 1;
+/// v2: the defconfig is now generated with the blob `make` variables, so a board with
+/// a BL32 resolves `OPTEE_LIB`/`HAS_TEE_IN_BUILD_ENV` at config time and produces a
+/// different `.config` — and payloads — than v1 did.
+const OUTPUT_STAGE_VERSION: u32 = 2;
 
 /// Filesystem inputs for the u-boot stage.
 pub struct UbootOptions<'a> {
     /// Git URL or local path to clone u-boot from, at the locked ref. Defaults to
     /// the boot method's `uboot_source`; a local clone speeds the shallow clone.
     pub source: &'a str,
-    /// Checkout of the `patches` repo at the locked commit.
-    pub patches_root: &'a Path,
+    /// The patch series to apply, or `None` when the resolved kernel names no patch
+    /// profile — u-boot is then compiled exactly as cloned.
+    pub patches: Option<PatchSource<'a>>,
     /// Directory holding the vendored rkbin blobs, verified against the lock
     /// before use.
     pub blobs_dir: &'a Path,
@@ -41,9 +47,6 @@ pub struct UbootOptions<'a> {
     pub work_dir: &'a Path,
     /// Directory the produced boot payloads are staged into.
     pub out_dir: &'a Path,
-    /// The `patches_root` is an explicit `--patches-path` co-dev checkout: a
-    /// patches-pin mismatch is a loud warning rather than a hard error.
-    pub patches_dev: bool,
     /// Root of the Tier-2 artifact store ([`crate::artstore`]), or `None` to
     /// disable output caching. On a hit the payloads + deb are restored; on a miss
     /// they are stored after the build.
@@ -82,16 +85,8 @@ pub fn build_uboot(
     // The applied patch series' identity for the Tier-1/Tier-2 signatures:
     // pinned by `patches.commit`, or the live-series fingerprint in co-dev mode so an
     // edited u-boot patch restamps the tree (CACHE-1). `series_fp` outlives `patches`.
-    let series_fp = if opts.patches_dev {
-        build::patch_series_fingerprint(opts.patches_root, &lock.patches.profile, PatchScope::Uboot)
-    } else {
-        Vec::new()
-    };
-    let patches = if opts.patches_dev {
-        PatchSeries::Dev(&series_fp)
-    } else {
-        PatchSeries::Pinned
-    };
+    let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Uboot);
+    let patches = build::series_identity(opts.patches, &series_fp);
 
     // Tier-2 output cache: restore the payloads + deb and skip the whole
     // clone/blob-verify/configure/compile when the output signature is stored. The
@@ -147,16 +142,27 @@ pub fn build_uboot(
     let blob_stage = opts.work_dir.join("blobs");
     let atf = absolute(blobs::verify_to(opts.blobs_dir, &lock.blobs.atf, &blob_stage)?)?;
     let tpl = absolute(blobs::verify_to(opts.blobs_dir, &lock.blobs.tpl, &blob_stage)?)?;
-    step.log("verified rkbin ATF + TPL against the lock");
+    // BL32/OP-TEE only where the boot chain has one (RK3576); BL31-only SoCs
+    // (RK3588/RK1) pin no bl32, so nothing is verified or passed.
+    let bl32 = match &lock.blobs.bl32 {
+        Some(pin) => Some(absolute(blobs::verify_to(opts.blobs_dir, pin, &blob_stage)?)?),
+        None => None,
+    };
+    step.log(if bl32.is_some() {
+        "verified rkbin ATF + TPL + BL32 against the lock"
+    } else {
+        "verified rkbin ATF + TPL against the lock"
+    });
     step.progress(30);
 
-    configure(build, env, &tree, reused, &step)?;
+    let blobs = BlobPaths { atf, tpl, bl32 };
+    configure(build, env, &tree, &blobs, reused, &step)?;
     step.progress(40);
 
     // Deterministic build timestamp from the locked commit, so `u-boot.itb` does
     // not embed wall-clock time (COR-9).
     let epoch = crate::git::commit_epoch(&tree, &lock.uboot.commit).ok();
-    compile(env, &tree, &atf, &tpl, epoch, &step)?;
+    compile(env, &tree, &blobs, epoch, &step)?;
 
     let (idbloader, uboot_itb) = collect(opts, &tree, &step)?;
     step.progress(90);
@@ -210,6 +216,7 @@ fn output_manifest(
         .fold_scalar("uboot_defconfig", &build.uboot_defconfig)
         .fold_scalar("blob.atf", &lock.blobs.atf)
         .fold_scalar("blob.tpl", &lock.blobs.tpl)
+        .fold_scalar("blob.bl32", lock.blobs.bl32.as_deref().unwrap_or(""))
         .fold_scalar("device", &build.device)
         .fold_scalar("description", &build.description)
         .fold_scalar("soc", build.soc.as_str())
@@ -235,7 +242,7 @@ fn output_manifest(
 pub fn clone_manifest(lock: &Lock, patches: PatchSeries) -> crate::signature::SignatureManifest {
     let mut b = crate::signature::SignatureBuilder::new("uboot", CLONE_STAGE_VERSION);
     b.fold_scalar("uboot.commit", &lock.uboot.commit);
-    build::fold_patch_series(&mut b, &lock.patches.profile, &lock.patches.commit, patches);
+    build::fold_patch_series(&mut b, lock.patches.as_ref(), patches);
     b.manifest()
 }
 
@@ -256,17 +263,14 @@ fn clone_and_patch(
         mode: CloneMode::Shallow,
         tree,
         what: "u-boot",
-        patches_root: opts.patches_root,
-        patches_commit: &lock.patches.commit,
-        patches_dev: opts.patches_dev,
-        profile: &lock.patches.profile,
+        patches: opts.patches,
         scope: PatchScope::Uboot,
         target: &target,
         gate_reference: None,
     };
     let n = build::clone_pinned(&spec, step)?;
-    if n > 0 {
-        step.log(format!("applied {n} u-boot patches ({})", lock.patches.profile));
+    if let (Some(p), 1..) = (opts.patches, n) {
+        step.log(format!("applied {n} u-boot patches ({})", p.pin.profile));
     }
     Ok(())
 }
@@ -277,6 +281,7 @@ fn configure(
     build: &ResolvedBuild,
     env: &BuildEnv,
     tree: &Path,
+    blobs: &BlobPaths,
     reused: bool,
     step: &Step,
 ) -> Result<(), EngineError> {
@@ -290,7 +295,9 @@ fn configure(
     // cannot read it as an option or a `FOO=bar` variable assignment (SUB-1).
     build::reject_unsafe_make_target("uboot_defconfig", &build.uboot_defconfig)?;
     let mut defconfig = Command::new("make");
-    defconfig.arg("-C").arg(tree).arg("--").arg(&build.uboot_defconfig);
+    defconfig.arg("-C").arg(tree);
+    blob_vars(&mut defconfig, blobs);
+    defconfig.arg("--").arg(&build.uboot_defconfig);
     cross(&mut defconfig, env);
     build::run(
         defconfig,
@@ -302,25 +309,54 @@ fn configure(
 
 /// Build u-boot with the verified blobs passed as make variables.
 /// `source_date_epoch` is the locked commit's committer date (COR-9).
+///
+/// `bl32` is the OP-TEE payload, passed only when the boot chain needs one. It is
+/// passed as `TEE=` — the variable mainline u-boot's binman FIT assembly reads for
+/// the OP-TEE image; the vendor tree's `BL32=` name is not used here.
 fn compile(
     env: &BuildEnv,
     tree: &Path,
-    atf: &Path,
-    tpl: &Path,
+    blobs: &BlobPaths,
     source_date_epoch: Option<u64>,
     step: &Step,
 ) -> Result<(), EngineError> {
     let mut make = Command::new("make");
-    make.arg("-C")
-        .arg(tree)
-        .arg(format!("-j{}", env.jobs()))
-        .arg(format!("BL31={}", atf.display()))
-        .arg(format!("ROCKCHIP_TPL={}", tpl.display()));
+    make.arg("-C").arg(tree).arg(format!("-j{}", env.jobs()));
+    blob_vars(&mut make, blobs);
     if let Some(epoch) = source_date_epoch {
         make.env("SOURCE_DATE_EPOCH", epoch.to_string());
     }
     cross(&mut make, env);
     build::run(make, "make", "make u-boot", step)
+}
+
+/// The verified rkbin payloads a u-boot build consumes, as absolute paths.
+pub struct BlobPaths {
+    /// ATF/BL31 image (`BL31=`).
+    pub atf: PathBuf,
+    /// DDR init TPL (`ROCKCHIP_TPL=`).
+    pub tpl: PathBuf,
+    /// OP-TEE secure payload (`TEE=`), on SoCs whose boot chain has one.
+    pub bl32: Option<PathBuf>,
+}
+
+/// Add the blob payload paths as `make` variables.
+///
+/// Passed to **both** [`configure`] and [`compile`], because u-boot's Kconfig reads
+/// them out of the build environment — `HAS_TEE_IN_BUILD_ENV` is
+/// `def_bool $(success, test -n "$(TEE)")` and `select`s `OPTEE_LIB`, which in turn
+/// exposes `OPTEE_TZDRAM_SIZE`. Generating the `.config` without `TEE` and then
+/// compiling with it leaves those symbols unset, so the compile's `syncconfig` finds a
+/// stale `.config` and stops for interactive input — a build that hangs on stdin.
+/// The two invocations must therefore see one environment. (`TEE` is also what makes
+/// u-boot copy OP-TEE's reserved-memory nodes into the FDT it hands the kernel, so
+/// having it at config time is the correct behaviour, not a workaround.)
+fn blob_vars(cmd: &mut Command, blobs: &BlobPaths) {
+    cmd.arg(format!("BL31={}", blobs.atf.display()))
+        .arg(format!("ROCKCHIP_TPL={}", blobs.tpl.display()));
+    if let Some(bl32) = &blobs.bl32 {
+        cmd.arg(format!("TEE={}", bl32.display()));
+    }
 }
 
 /// Stage the produced boot payloads out of the tree, returning
@@ -569,15 +605,41 @@ mod tests {
         let git = |c: &str| GitPin { reference: "r".into(), commit: c.into() };
         Lock {
             kernel: KernelPin { id: "k".into(), reference: "v".into(), commit: "kc".into() },
-            patches: PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() },
+            patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
             uboot: UbootPin { reference: "v2026.04".into(), commit: uboot_commit.into() },
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
-            blobs: BlobsPin { atf: "a".into(), tpl: "t".into() },
+            blobs: BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None },
             extra_debs: vec![],
             snapshot: None,
         }
+    }
+
+    #[test]
+    fn blob_vars_are_identical_for_configure_and_compile() {
+        // u-boot's Kconfig reads `TEE` from the environment, so a `.config` generated
+        // without it lacks OPTEE_LIB/OPTEE_TZDRAM_SIZE and the compile's `syncconfig`
+        // stops for interactive input. Both invocations must pass the same variables.
+        let vars = |bl32: Option<&str>| {
+            let blobs = BlobPaths {
+                atf: PathBuf::from("/b/bl31.elf"),
+                tpl: PathBuf::from("/b/ddr.bin"),
+                bl32: bl32.map(PathBuf::from),
+            };
+            let mut cmd = Command::new("make");
+            blob_vars(&mut cmd, &blobs);
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        // A BL31-only SoC (RK3588/RK1) passes no `TEE`, so its Kconfig sees none.
+        assert_eq!(vars(None), ["BL31=/b/bl31.elf", "ROCKCHIP_TPL=/b/ddr.bin"]);
+        // A SoC with OP-TEE (RK3576) passes it, at both config and compile time.
+        assert_eq!(
+            vars(Some("/b/bl32.bin")),
+            ["BL31=/b/bl31.elf", "ROCKCHIP_TPL=/b/ddr.bin", "TEE=/b/bl32.bin"]
+        );
     }
 
     #[test]
@@ -619,6 +681,10 @@ mod tests {
         let mut lock_blob = lock_with("uc1", "pc1");
         lock_blob.blobs.atf = "different-atf-hash".into();
         assert_ne!(base, man(&lock_blob, &env("gcc-1"), PatchSeries::Pinned));
+        // Adding/altering the BL32 blob also restamps (the OP-TEE payload is folded).
+        let mut lock_bl32 = lock_with("uc1", "pc1");
+        lock_bl32.blobs.bl32 = Some("rk3576_bl32@sha256:cd".into());
+        assert_ne!(base, man(&lock_bl32, &env("gcc-1"), PatchSeries::Pinned));
         // Toolchain and co-dev mode each split the key.
         assert_ne!(base, man(&lock_with("uc1", "pc1"), &env("gcc-2"), PatchSeries::Pinned));
         let empty: Vec<String> = vec![];
@@ -796,11 +862,10 @@ mod tests {
             std::fs::create_dir_all(&work).unwrap();
             let opts = UbootOptions {
                 source: "unused",
-                patches_root: &dummy,
+                patches: None,
                 blobs_dir: &dummy,
                 work_dir: &work,
                 out_dir: &work,
-                patches_dev: false,
                 store: None,
             };
             let deb = package_deb(&build, "2026.04", &opts, Some(1_600_000_000), &idb, &itb, &step)

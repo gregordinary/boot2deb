@@ -40,10 +40,36 @@ impl ConfigRoot {
     /// A primary (shipped) root plus ordered overlay directories. Overlays
     /// are listed low→high: a later overlay wins over an earlier one, and any
     /// overlay wins over the primary root.
-    pub fn with_overlays(root: impl Into<PathBuf>, overlays: impl IntoIterator<Item = PathBuf>) -> Self {
+    ///
+    /// Each overlay must be an existing directory. An empty path would silently
+    /// resolve every asset against the process's current directory, and a mistyped
+    /// one would shadow nothing at all — in both cases the build proceeds against a
+    /// config tree the operator did not intend, which is precisely the failure an
+    /// overlay exists to make explicit. Both are [`ConfigError::InvalidOverlay`].
+    pub fn with_overlays(
+        root: impl Into<PathBuf>,
+        overlays: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, ConfigError> {
         let mut roots = vec![root.into()];
-        roots.extend(overlays);
-        Self { roots }
+        for overlay in overlays {
+            let why = if overlay.as_os_str().is_empty() {
+                Some("the path is empty")
+            } else if !overlay.exists() {
+                Some("no such directory")
+            } else if !overlay.is_dir() {
+                Some("not a directory")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                return Err(ConfigError::InvalidOverlay {
+                    path: overlay.display().to_string(),
+                    why,
+                });
+            }
+            roots.push(overlay);
+        }
+        Ok(Self { roots })
     }
 
     /// The primary (shipped) root — the base of the search path. Non-config assets
@@ -468,7 +494,7 @@ mod tests {
         if let Some(b) = overlay_base {
             std::fs::write(o.path().join("base.toml"), b).unwrap();
         }
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]);
+        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
         (p, o, root)
     }
 
@@ -497,7 +523,7 @@ mod tests {
         std::fs::write(o.path().join("recipes/extra.toml"), "device = \"d\"\n").unwrap();
         // `shipped` in both roots: overlay adds a suite, must merge, not duplicate.
         std::fs::write(o.path().join("recipes/shipped.toml"), "suite = \"sid\"\n").unwrap();
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]);
+        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
 
         assert_eq!(root.list("recipes").unwrap(), vec!["extra", "shipped"]);
         let extra = root.recipe("extra").unwrap();
@@ -516,7 +542,7 @@ mod tests {
         let o = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(o.path().join("recipes")).unwrap();
         std::fs::write(o.path().join("recipes/ov.toml"), "device = \"d\"\n").unwrap();
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]);
+        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
 
         let lp = root.lock_path("ov").unwrap();
         assert!(lp.starts_with(o.path()), "lock should write into the overlay: {lp:?}");
@@ -536,12 +562,45 @@ mod tests {
     }
 
     #[test]
+    fn with_overlays_rejects_an_empty_or_missing_overlay() {
+        let primary = tempfile::tempdir().unwrap();
+        let good = tempfile::tempdir().unwrap();
+        let root = |o: PathBuf| ConfigRoot::with_overlays(primary.path().to_path_buf(), [o]);
+
+        // An existing directory composes the search path.
+        assert_eq!(root(good.path().to_path_buf()).unwrap().search_paths().len(), 2);
+
+        // An empty `--overlay ''` would resolve every asset against the process's
+        // current directory — refused, not silently accepted.
+        let err = root(PathBuf::new()).err().expect("empty overlay is refused");
+        assert!(
+            matches!(&err, ConfigError::InvalidOverlay { why, .. } if *why == "the path is empty"),
+            "{err}"
+        );
+        // A typo'd overlay would shadow nothing, so the build would quietly use the
+        // shipped config instead of the operator's.
+        let err = root(primary.path().join("nope")).err().expect("missing overlay is refused");
+        assert!(
+            matches!(&err, ConfigError::InvalidOverlay { why, .. } if *why == "no such directory"),
+            "{err}"
+        );
+        // A file is not a search path.
+        let file = primary.path().join("a-file");
+        std::fs::write(&file, "x").unwrap();
+        let err = root(file).err().expect("a file is not an overlay");
+        assert!(
+            matches!(&err, ConfigError::InvalidOverlay { why, .. } if *why == "not a directory"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn find_asset_prefers_overlay_and_stacks_all() {
         let p = tempfile::tempdir().unwrap();
         let o = tempfile::tempdir().unwrap();
         std::fs::write(p.path().join("blob.bin"), "primary").unwrap();
         std::fs::write(o.path().join("blob.bin"), "overlay").unwrap();
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]);
+        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
         // Highest precedence wins.
         assert!(root.find_asset("blob.bin").unwrap().starts_with(o.path()));
         // All copies, low→high (primary first).
@@ -557,13 +616,13 @@ mod tests {
         let o = tempfile::tempdir().unwrap();
         std::fs::write(p.path().join("keyring.gpg"), "shipped").unwrap();
         // No overlay copy: the shipped anchor resolves.
-        let root_no_shadow = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]);
+        let root_no_shadow = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
         let anchor = root_no_shadow.find_trust_anchor("keyring.gpg", false).unwrap().unwrap();
         assert!(anchor.starts_with(p.path()), "must resolve from the shipped root");
 
         // An overlay copy is a swap attempt: fail closed.
         std::fs::write(o.path().join("keyring.gpg"), "overlay").unwrap();
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]);
+        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
         assert!(matches!(
             root.find_trust_anchor("keyring.gpg", false),
             Err(ConfigError::OverlayTrustAnchor { .. })

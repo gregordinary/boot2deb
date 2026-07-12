@@ -9,6 +9,12 @@ several) with the global `--overlay <dir>` flag, on any command:
 cargo run -p boot2deb-cli -- --overlay ~/my-boards build my-tablet-forky
 ```
 
+Each `--overlay` must name an existing directory. An empty or mistyped path is a
+resolve-time error rather than a silent no-op: an empty one would resolve every asset
+against the current directory, and a typo would shadow nothing at all — either way the
+build would quietly use a config tree you did not intend, which is exactly what an
+overlay exists to make explicit.
+
 An overlay has the **same directory layout** as the shipped root — any subset of
 `devices/`, `socs/`, `arches/`, `boot-methods/`, `kernels/`, `features/`, `recipes/`,
 plus `fragments/`, `blobs/`, and per-layer `overlay/` trees. You ship only the files you

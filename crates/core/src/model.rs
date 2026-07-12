@@ -125,34 +125,6 @@ macro_rules! kebab_enum {
     };
 }
 
-/// A per-SoC hint for the rkbin blob set a new board is likely to need, for the
-/// `new-device` scaffold. These are *suggestions*, not validated values: the ATF
-/// (BL31) is SoC-generic and usually correct, while the DDR TPL is
-/// board-memory-specific and only a starting point. `None` means no known default,
-/// so the scaffold emits a `CHANGEME` placeholder instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlobHints {
-    /// Suggested ATF/BL31 blob filename, if a SoC default is known.
-    pub atf: Option<&'static str>,
-    /// Suggested DDR TPL blob filename, if a SoC default is known.
-    pub tpl: Option<&'static str>,
-}
-
-/// The [`BlobHints`] for a SoC — the rkbin blobs a new board of this SoC most
-/// likely needs. Only SoCs with a validated shipped board carry concrete
-/// suggestions; the rest return `None`s so the scaffold flags the blobs as
-/// must-supply.
-pub fn blob_hints(soc: Soc) -> BlobHints {
-    match soc {
-        // Derived from the shipped RK3588 board (Turing RK1).
-        Soc::Rk3588 => BlobHints {
-            atf: Some("rk3588_bl31_v1.51.elf"),
-            tpl: Some("rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"),
-        },
-        Soc::Rk3576 | Soc::Rk3566 | Soc::Rk3288 => BlobHints { atf: None, tpl: None },
-    }
-}
-
 kebab_enum!(Arch { Arm64 => "arm64", Armv7 => "armv7", Riscv64 => "riscv64" });
 kebab_enum!(Soc { Rk3588 => "rk3588", Rk3576 => "rk3576", Rk3566 => "rk3566", Rk3288 => "rk3288" });
 kebab_enum!(BootMethod {
@@ -244,6 +216,12 @@ pub struct SocLayer {
     pub arch: Arch,
     /// Device-tree subdirectory under `arch/<arch>/boot/dts/` (e.g. `rockchip`).
     pub dt_dir: String,
+    /// rkbin blob defaults shared by boards on this SoC: the SoC-generic ATF and a
+    /// common-memory DDR TPL, plus BL32 where the boot chain needs OP-TEE. A device
+    /// inherits these and overrides per field (typically just the TPL for different
+    /// DRAM); resolution requires the merged `atf` and `tpl` to be present. §3.6.
+    #[serde(default)]
+    pub rkbin: RkbinLayer,
     /// Accel/media modules force-loaded at boot via `/etc/modules-load.d/`, so
     /// they are present on first boot even where device-tree auto-probe would
     /// otherwise be enough.
@@ -442,15 +420,44 @@ fn reject_unsafe_path(rel: &str) -> Result<(), ConfigError> {
     }
 }
 
-/// The rkbin blob pair (ATF/BL31 + DDR TPL) a Rockchip u-boot build consumes.
-/// Referenced by filename here and verified by sha256 against the lock.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// rkbin blob references as authored at a config layer (SoC or device). Every
+/// field is optional so a layer states only its deltas: the SoC supplies the
+/// defaults and a device overrides per field. Resolution merges SoC `(+)` device
+/// (device wins per field) into a resolved [`Rkbin`], where `atf` and `tpl` are
+/// required and `bl32` stays optional. §3.6.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RkbinLayer {
+    /// ARM Trusted Firmware (BL31) ELF filename. SoC-generic, so it is normally
+    /// set once at the SoC layer.
+    #[serde(default)]
+    pub atf: Option<String>,
+    /// DDR init TPL filename. Board-memory-specific: the SoC layer supplies a
+    /// common-memory default and a board with different DRAM overrides it here.
+    #[serde(default)]
+    pub tpl: Option<String>,
+    /// OP-TEE secure-payload (BL32) filename. Set on SoCs whose u-boot expects
+    /// OP-TEE (e.g. RK3576, which hangs after "Starting kernel" without it);
+    /// omitted on BL31-only boots (RK3588/RK1).
+    #[serde(default)]
+    pub bl32: Option<String>,
+}
+
+/// The resolved rkbin blob set a Rockchip u-boot build consumes: ATF/BL31 and the
+/// DDR TPL (both required — resolution guarantees them present) plus an optional
+/// OP-TEE BL32. Referenced by filename here and verified by sha256 against the lock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Rkbin {
     /// ARM Trusted Firmware (BL31) ELF filename.
     pub atf: String,
-    /// DDR init TPL filename (board-memory-specific — hence at the device layer).
+    /// DDR init TPL filename (board-memory-specific — a SoC default the device
+    /// layer may override).
     pub tpl: String,
+    /// OP-TEE secure-payload (BL32) filename when the boot chain needs one;
+    /// `None` on BL31-only SoCs (RK3588/RK1), and then omitted from the serialized
+    /// form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bl32: Option<String>,
 }
 
 /// A device: hardware invariants plus the defaults that let `boot2deb build
@@ -472,6 +479,16 @@ pub struct DeviceLayer {
     pub uboot_defconfig: String,
     /// Board device-tree blob path, relative to the DT output dir.
     pub kernel_dtb: String,
+    /// Device-tree sources for a board whose `.dts` is not yet in the kernel: the
+    /// board `.dts` plus any board-specific `.dtsi` it includes, as paths relative
+    /// to the config root (e.g. `devices/h96-max-m9/dts/rk3576-h96-max-m9.dts`),
+    /// resolved along the overlay search path like a fragment or blob. The kernel
+    /// stage copies them into the in-tree DT dir and teaches that dir's Makefile to
+    /// build the DTB. Empty for a board whose DTB is already upstream, which is the
+    /// case a plain mainline build already covers. Resolution requires
+    /// [`kernel_dtb`](Self::kernel_dtb) to name one of these sources. §4.
+    #[serde(default)]
+    pub device_dts: Vec<String>,
     /// Board-specific kconfig fragments (board deltas only; SoC/accel fragments
     /// belong to the kernel definition).
     pub device_config_fragments: Vec<String>,
@@ -487,8 +504,12 @@ pub struct DeviceLayer {
     pub hostname: String,
     /// Default image size (authored string, e.g. `2G`).
     pub image_size: String,
-    /// rkbin ATF/TPL blob set for this board's memory configuration.
-    pub rkbin: Rkbin,
+    /// rkbin blob overrides for this board's memory configuration, merged over the
+    /// SoC layer's defaults (device wins per field). A board on standard memory
+    /// omits this block entirely and inherits the SoC's blobs; a board with
+    /// different DRAM overrides `tpl`. §3.6.
+    #[serde(default)]
+    pub rkbin: RkbinLayer,
     /// Board-specific rootfs packages added to the base set; empty for the
     /// RK1.
     #[serde(default)]
@@ -623,14 +644,17 @@ pub struct KernelDef {
     /// Version-coupled kconfig fragments (SoC drivers + accel enables), in merge
     /// order.
     pub config_fragments: Vec<String>,
-    /// Patch profile in the `patches` repo (`"none"` for pre-patched vendor
-    /// trees).
+    /// Patch profile in the `patches` repo, or
+    /// [`NO_PATCH_PROFILE`](crate::profile::NO_PATCH_PROFILE) (`"none"`) for a kernel
+    /// that applies no series — a fully-upstream SoC or a pre-patched vendor tree.
+    /// Resolution maps the sentinel to
+    /// [`ResolvedKernel::patch_profile`]`= None`.
     pub patch_profile: String,
     /// Clone URL of the `patches` repo the profile lives in. Used to
     /// auto-fetch the series at the lock-pinned commit when no local checkout is
     /// present — the North-Star "selecting a device auto-fetches the right
-    /// patches." Optional: a `patch_profile = "none"` (pre-patched vendor) kernel
-    /// omits it, and an explicit `--patches-path`/`--patches-url` overrides it.
+    /// patches." Optional: a kernel with no patch profile omits it,
+    /// and an explicit `--patches-path`/`--patches-url` overrides it.
     #[serde(default)]
     pub patches_url: Option<String>,
     /// SoCs this kernel supports; resolution rejects a mismatched device.
@@ -708,11 +732,14 @@ pub struct ResolvedKernel {
     pub track: Option<String>,
     /// In-tree base defconfig.
     pub base_defconfig: String,
-    /// Patch profile name.
-    pub patch_profile: String,
+    /// Patch profile name, or `None` when this kernel applies no series (the
+    /// authored [`NO_PATCH_PROFILE`](crate::profile::NO_PATCH_PROFILE) sentinel). A
+    /// `None` profile means the build never reads the `patches` repo: no checkout is
+    /// resolved, no series is applied, and the lock records no `[patches]` table.
+    pub patch_profile: Option<String>,
     /// Clone URL of the `patches` repo, for auto-fetching the series at the
-    /// lock-pinned commit when no local checkout is present. `None` for a
-    /// pre-patched vendor kernel (`patch_profile = "none"`).
+    /// lock-pinned commit when no local checkout is present. `None` when
+    /// [`patch_profile`](Self::patch_profile) is `None` (nothing to fetch).
     pub patches_url: Option<String>,
     /// Kernel-owned fragments followed by device fragments, in apply order.
     pub config_fragments: Vec<String>,
@@ -780,8 +807,14 @@ pub struct ResolvedBuild {
     pub uboot_source: String,
     /// u-boot ref constraint (from the boot method).
     pub uboot_ref: String,
-    /// Board DTB path.
+    /// Board DTB path, relative to the DT output dir.
     pub kernel_dtb: String,
+    /// Config-root-relative device-tree sources the kernel stage copies into the
+    /// in-tree DT dir before `make` (from the device). Empty when the board's DTB is
+    /// already upstream. Resolution guarantees each path is contained (relative, no
+    /// `..`), names a `.dts`/`.dtsi`, and that [`kernel_dtb`](Self::kernel_dtb) is
+    /// compiled from one of them. §4.
+    pub device_dts: Vec<String>,
     /// Device-tree subdirectory (from the SoC).
     pub dt_dir: String,
     /// Force-loaded accel modules (from the SoC).

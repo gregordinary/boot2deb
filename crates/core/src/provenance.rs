@@ -128,10 +128,14 @@ pub struct SourcesProvenance {
     pub kernel_ref: String,
     /// Kernel commit.
     pub kernel_commit: String,
-    /// Patch profile name.
-    pub patch_profile: String,
+    /// Patch profile name. Absent — along with
+    /// [`patches_commit`](Self::patches_commit) — when the kernel applied no series,
+    /// so the record never implies a `patches` dependency the build did not have.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_profile: Option<String>,
     /// `patches` repo commit the series is pinned at.
-    pub patches_commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patches_commit: Option<String>,
     /// u-boot ref.
     pub uboot_ref: String,
     /// u-boot commit.
@@ -191,6 +195,9 @@ pub struct BlobsProvenance {
     pub atf: String,
     /// DDR TPL blob pin.
     pub tpl: String,
+    /// OP-TEE BL32 blob pin, present only when the build has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bl32: Option<String>,
 }
 
 /// Build host / toolchain identity — the toolchain *selection* (host+target arch
@@ -239,8 +246,8 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             kernel_id: lock.kernel.id.clone(),
             kernel_ref: lock.kernel.reference.clone(),
             kernel_commit: lock.kernel.commit.clone(),
-            patch_profile: lock.patches.profile.clone(),
-            patches_commit: lock.patches.commit.clone(),
+            patch_profile: lock.patches.as_ref().map(|p| p.profile.clone()),
+            patches_commit: lock.patches.as_ref().map(|p| p.commit.clone()),
             uboot_ref: lock.uboot.reference.clone(),
             uboot_commit: lock.uboot.commit.clone(),
             // Present in lockstep: resolution pins userspace and ffmpeg together or
@@ -269,6 +276,7 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
         blobs: BlobsProvenance {
             atf: lock.blobs.atf.clone(),
             tpl: lock.blobs.tpl.clone(),
+            bl32: lock.blobs.bl32.clone(),
         },
         toolchain: ToolchainProvenance {
             host_arch: facts.host_arch.to_string(),
@@ -346,10 +354,10 @@ mod tests {
                 reference: "v7.1.1".into(),
                 commit: "kc".into(),
             },
-            patches: PatchesPin {
+            patches: Some(PatchesPin {
                 profile: "rk3588-accel".into(),
                 commit: "pc".into(),
-            },
+            }),
             uboot: UbootPin {
                 reference: "v2026.04".into(),
                 commit: "uc".into(),
@@ -371,6 +379,7 @@ mod tests {
             blobs: BlobsPin {
                 atf: "atf@sha256:0".into(),
                 tpl: "tpl@sha256:1".into(),
+                bl32: None,
             },
             extra_debs: vec![],
             snapshot: None,

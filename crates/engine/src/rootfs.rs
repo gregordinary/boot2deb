@@ -124,14 +124,12 @@ pub struct AptRepo<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootfsArtifacts {
     /// The rootfs `tar` archive (device nodes excluded), consumed by the image
-    /// node's ext4 formatter.
+    /// node's ext4 formatter. [`DEFAULT_USER`]'s account is **locked** in it — the
+    /// unique per-image first-boot password (SEC-6) is spliced into the staged tree
+    /// at image assembly, not into this shared, cacheable tarball.
     pub tar: PathBuf,
     /// The solved package manifest (`name version arch sha256` per line).
     pub manifest: PathBuf,
-    /// The per-image first-boot password baked into [`DEFAULT_USER`] (SEC-6)
-    /// — unique per build. The caller surfaces it and records it in the provenance
-    /// manifest; it is not written to any committed file.
-    pub password: String,
 }
 
 /// A rootfs backend: bootstraps the device userland to a tarball plus a
@@ -182,8 +180,8 @@ impl Rootfs for MmdebstrapRootfs {
         //    apt cache is still populated, then (b) lay the overlay in and run the
         //    chroot config. The account is created **locked** here — the unique
         //    per-image password (SEC-6) is non-reproducible, so it is *not*
-        //    baked into the cacheable tree; it is spliced into the finished tar
-        //    below, keeping a stored tree reusable across builds.
+        //    baked into the cacheable tree; it is spliced into the staged tree at
+        //    image assembly, keeping a stored tree reusable across builds.
         let deb_hashes = staging.deb_hashes_path();
         let hash_hook = staging.hash_hook_path();
         std::fs::write(&hash_hook, capture_hashes_hook_script(&deb_hashes))
@@ -271,19 +269,16 @@ impl Rootfs for MmdebstrapRootfs {
             step.progress(75);
         }
 
-        // 6. Splice the unique per-image first-boot password into the finished tar
-        //    (SEC-6): the account is locked in the cacheable tree, so this is
-        //    the only per-build-unique step, applied on both the hit and miss paths.
-        let password = crate::secret::generate_password()?;
-        let hash = crypt_password(&password)?;
-        apply_password(&tarball, DEFAULT_USER, &hash, opts.source_date_epoch, &step)?;
-
+        // The account stays locked in this shared, cacheable tarball. The unique
+        // per-image first-boot password (SEC-6) is spliced into the staged tree at
+        // image assembly (the image node's ext4 stage), not into the tar — so a
+        // stored tree is reusable across builds and no fragile in-archive member
+        // surgery on the (PAX) tarball is needed.
         step.progress(100);
         step.finish();
         Ok(RootfsArtifacts {
             tar: tarball,
             manifest: opts.manifest_out.to_path_buf(),
-            password,
         })
     }
 }
@@ -628,9 +623,9 @@ impl BootstrapStaging {
 /// The account is created **locked** (no `chpasswd` here): the per-image first-boot
 /// password (SEC-6) is non-reproducible, so baking it in would make the
 /// produced tree unfit for the content-addressed cache. Everything this hook
-/// does *is* reproducible, so the tree it yields is cacheable; the rootfs node
-/// splices the unique password into `/etc/shadow` afterward
-/// ([`apply_password`]).
+/// does *is* reproducible, so the tree it yields is cacheable; the image node
+/// splices the unique password into the staged `/etc/shadow` at assembly time
+/// (see [`crate::image`]).
 ///
 /// `staging`/`user` are baked in, so the script is self-contained. Target binaries
 /// (`useradd`, `usermod`, …) run under the host's `qemu-user` binfmt when cross-arch,
@@ -677,150 +672,9 @@ fn customize_hook_script(staging: &Path, user: &str) -> String {
     )
 }
 
-/// Hash `pass` for `/etc/shadow` with the host's `openssl passwd -6` (sha512crypt,
-/// `$6$…`) — a scheme every modern `libcrypt` accepts, computed on the host so no
-/// target `chpasswd` (and thus no writable rootfs directory) is needed on the cache
-/// restore path. The password is fed on stdin, never the argv (SEC hygiene).
-fn crypt_password(pass: &str) -> Result<String, EngineError> {
-    use std::io::Write;
-    use std::process::Stdio;
-    let mut child = Command::new("openssl")
-        .args(["passwd", "-6", "-stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| EngineError::CommandSpawn {
-            command: "openssl".into(),
-            context: "hash first-boot password".into(),
-            source,
-        })?;
-    child
-        .stdin
-        .take()
-        .expect("stdin was piped")
-        .write_all(format!("{pass}\n").as_bytes())
-        .map_err(|s| EngineError::io(Path::new("openssl-stdin"), s))?;
-    let out = child
-        .wait_with_output()
-        .map_err(|source| EngineError::CommandSpawn {
-            command: "openssl".into(),
-            context: "hash first-boot password".into(),
-            source,
-        })?;
-    if !out.status.success() {
-        return Err(EngineError::CommandFailed {
-            command: "openssl".into(),
-            context: "hash first-boot password".into(),
-            status: out.status.code(),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    let hash = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !hash.starts_with("$6$") {
-        return Err(EngineError::CommandFailed {
-            command: "openssl".into(),
-            context: "hash first-boot password".into(),
-            status: None,
-            stderr: format!("unexpected crypt output: {hash}"),
-        });
-    }
-    Ok(hash)
-}
-
-/// Splice the per-image password `hash` into `user`'s `/etc/shadow` line inside the
-/// finished `tarball` (SEC-6). The bootstrap left the account locked
-/// (`{user}:!:…`); this rewrites that one line with the hash and forces a change at
-/// first login ([`rootcache::splice_shadow`]).
-///
-/// Done as a surgical `tar` member replace — read `./etc/shadow`, rewrite the line,
-/// `--delete` the old member and `--append` the new one — rather than an
-/// extract/re-tar, which under a rootless build would flatten the tree's root
-/// ownership to the build user. The appended member's ownership is set explicitly
-/// (`root:shadow` / `0640`, Debian's `/etc/shadow` mode) so it is correct regardless
-/// of the build user.
-///
-/// The delete/append pair runs on a **sibling copy**, not the published tar, and the
-/// result is `fsync`ed and renamed over the original as the single commit point
-/// (ATOM-1). An interruption between the two `tar` calls therefore leaves the original
-/// password-free tar intact for a clean retry, never a tar missing its `./etc/shadow`
-/// member (which an `--stage image` retry would otherwise format into a broken image).
-///
-/// `epoch` (the lock-derived `SOURCE_DATE_EPOCH`, if known) is stamped onto the
-/// appended member as its fixed mtime, so the splice — which runs after mmdebstrap and
-/// is thus outside its mtime clamp — does not reintroduce a build-time mtime (DET-2).
-fn apply_password(
-    tarball: &Path,
-    user: &str,
-    hash: &str,
-    epoch: Option<u64>,
-    step: &Step,
-) -> Result<(), EngineError> {
-    let shadow = tar_member(tarball, "./etc/shadow")?;
-    let spliced = rootcache::splice_shadow(&shadow, user, hash).ok_or_else(|| {
-        EngineError::ArtifactMissing {
-            what: format!("{user} account in /etc/shadow"),
-            location: tarball.display().to_string(),
-        }
-    })?;
-    // Stage the rewritten shadow under `./etc/shadow` so `tar --append -C <stage>`
-    // records it at the archive path the bootstrap used.
-    let stage = tempfile::Builder::new()
-        .prefix("boot2deb-shadow-")
-        .tempdir()
-        .map_err(|s| EngineError::io(&std::env::temp_dir(), s))?;
-    let etc = stage.path().join("etc");
-    std::fs::create_dir_all(&etc).map_err(|s| EngineError::io(&etc, s))?;
-    let shadow_path = etc.join("shadow");
-    std::fs::write(&shadow_path, spliced).map_err(|s| EngineError::io(&shadow_path, s))?;
-
-    // Mutate a sibling copy on the same filesystem, then rename over the original —
-    // rename is the atomic publish. A stray copy from a crashed run is swept by the
-    // cache/out_dir GC; the pid keeps concurrent runs' scratch files distinct.
-    let scratch = tarball.with_file_name(format!(
-        ".{}.{}.splice.partial",
-        tarball
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("rootfs.tar"),
-        std::process::id()
-    ));
-    let rm_scratch = |e| {
-        let _ = std::fs::remove_file(&scratch);
-        e
-    };
-    std::fs::copy(tarball, &scratch).map_err(|s| rm_scratch(EngineError::io(&scratch, s)))?;
-    let mut del = Command::new("tar");
-    del.arg("--delete").arg("-f").arg(&scratch).arg("./etc/shadow");
-    crate::build::run(del, "tar", "remove locked shadow entry", step).map_err(rm_scratch)?;
-    let mut app = Command::new("tar");
-    app.arg("--append")
-        .arg("-f")
-        .arg(&scratch)
-        .arg("-C")
-        .arg(stage.path())
-        .arg("--owner=0")
-        .arg("--group=42")
-        .arg("--mode=0640");
-    // Fixed mtime on the appended member (DET-2): the splice runs after mmdebstrap, so
-    // its clamp does not reach here — stamp the epoch directly.
-    if let Some(epoch) = epoch {
-        app.arg(format!("--mtime=@{epoch}"));
-    }
-    app.arg("./etc/shadow");
-    crate::build::run(app, "tar", "bake per-image password", step).map_err(rm_scratch)?;
-    // fsync the spliced copy so its bytes reach disk before the rename commits it.
-    std::fs::File::open(&scratch)
-        .and_then(|f| f.sync_all())
-        .map_err(|s| rm_scratch(EngineError::io(&scratch, s)))?;
-    std::fs::rename(&scratch, tarball).map_err(|s| rm_scratch(EngineError::io(tarball, s)))?;
-    step.log("spliced the unique per-image first-boot password into /etc/shadow");
-    Ok(())
-}
-
-/// Extract a single `member` from `tarball` to a string (`tar xOf`). Shared by the
-/// manifest reader and the password splice; mmdebstrap tarballs store `./`-prefixed
-/// paths, so pass e.g. `./etc/shadow`.
+/// Extract a single `member` from `tarball` to a string (`tar xOf`). Used by the
+/// manifest reader (and tests); mmdebstrap tarballs store `./`-prefixed paths, so
+/// pass e.g. `./var/lib/dpkg/status`.
 fn tar_member(tarball: &Path, member: &str) -> Result<String, EngineError> {
     let out = Command::new("tar")
         .args(["xOf"])
@@ -853,10 +707,10 @@ const REQUIRED_TAR_MEMBERS: &[&str] = &["./etc/os-release", "./etc/fstab", "./et
 /// Validate that `tarball` is a complete, readable rootfs archive before the image
 /// stage formats it into ext4 (ATOM-1). Lists the archive end-to-end (`tar tf`, which
 /// errors on a truncated archive) and confirms every `REQUIRED_TAR_MEMBERS` entry is
-/// present. A partial tar left by an interrupted bootstrap or a pre-rename splice
-/// crash fails here with a "re-run rootfs" pointer, rather than being silently
-/// formatted into a broken image by an `--stage image` retry whose gate only checked
-/// that the file existed.
+/// present (including the still-locked `./etc/shadow`). A partial tar left by an
+/// interrupted bootstrap fails here with a "re-run rootfs" pointer, rather than being
+/// silently formatted into a broken image by an `--stage image` retry whose gate only
+/// checked that the file existed.
 pub fn validate_tar(tarball: &Path) -> Result<(), EngineError> {
     let out = Command::new("tar")
         .arg("-tf")
@@ -1391,59 +1245,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_password_splices_shadow_and_leaves_other_members() {
-        // Build a tiny mmdebstrap-shaped tarball (./-prefixed) with a locked account.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("r");
-        let tarball = tmp.path().join("rootfs.tar");
-        let members = [
-            ("./etc/os-release", "ID=debian\n"),
-            ("./etc/fstab", "LABEL=rootfs / ext4 defaults 0 1\n"),
-            ("./etc/shadow", "root:*:20000::::::\ndebian:!:20000:0:99999:7:::\n"),
-            ("./etc/hostname", "turing-rk1\n"),
-        ];
-        if !build_test_tar(&tarball, &root, &members) {
-            eprintln!("skipping: tar unavailable");
-            return;
-        }
-        let sink = |_: crate::event::Event| {};
-        let step = Step::start(&sink, "rootfs");
-        // 1700000000 = 2023-11-14 UTC — a fixed epoch to prove the appended member's
-        // mtime is stamped, not build-time (DET-2).
-        apply_password(&tarball, "debian", "$6$SALT$HASH", Some(1_700_000_000), &step).unwrap();
-        // The debian line now carries the hash + forced change; root is untouched;
-        // the other member survives the delete/append.
-        let shadow = tar_member(&tarball, "./etc/shadow").unwrap();
-        assert!(shadow.contains("debian:$6$SALT$HASH:0:0:99999:7:::"));
-        assert!(shadow.contains("root:*:20000::::::"));
-        assert!(!shadow.contains("debian:!:"));
-        let hostname = tar_member(&tarball, "./etc/hostname").unwrap();
-        assert_eq!(hostname, "turing-rk1\n");
-        // The appended shadow member carries the fixed epoch's date, not "now".
-        let listing = Command::new("tar")
-            .arg("--utc")
-            .arg("-tvf")
-            .arg(&tarball)
-            .arg("./etc/shadow")
-            .output()
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&listing.stdout).contains("2023-11-14"),
-            "appended shadow mtime should be the fixed epoch, got: {}",
-            String::from_utf8_lossy(&listing.stdout)
-        );
-        // The spliced tar is still a complete, valid archive (atomic rename left no
-        // half-deleted member); no `.splice.partial` scratch remains beside it.
-        validate_tar(&tarball).unwrap();
-        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().contains(".splice.partial"))
-            .collect();
-        assert!(leftovers.is_empty(), "splice left scratch behind: {leftovers:?}");
-    }
-
-    #[test]
     fn validate_tar_rejects_a_tar_missing_a_required_member() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("r");
@@ -1463,20 +1264,6 @@ mod tests {
             matches!(err, EngineError::ArtifactMissing { what, .. } if what.contains("./etc/shadow")),
             "expected a missing-member error naming shadow"
         );
-    }
-
-    #[test]
-    fn crypt_password_produces_a_sha512crypt_hash() {
-        // openssl is a checked host dep (doctor); skip if absent.
-        if Command::new("openssl").arg("version").output().map(|o| !o.status.success()).unwrap_or(true) {
-            eprintln!("skipping: openssl unavailable");
-            return;
-        }
-        let hash = crypt_password("Example116BitSecret").unwrap();
-        assert!(hash.starts_with("$6$"), "sha512crypt hash, got {hash}");
-        // Same password, different salt each call (openssl randomizes) — not reused.
-        let again = crypt_password("Example116BitSecret").unwrap();
-        assert_ne!(hash, again);
     }
 
     #[test]

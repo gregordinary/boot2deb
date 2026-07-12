@@ -76,9 +76,10 @@ Work from the bottom of the hardware stack up, adding only what is new:
 4. **device** (`devices/<device>.toml`) — the board itself, stating only its deltas: its
    `soc`, `boot_method`, `supported_boot_methods`, `uboot_defconfig`, `kernel_dtb`,
    `image_size`, `hostname`, `supported_kernels` / `default_kernel`, `default_suite`,
-   `default_layout`, and any board-memory-specific bootloader blobs (the `[rkbin]` DDR TPL
-   + ATF for a Rockchip board — these are board-specific, so they live here, not at the soc
-   layer).
+   `default_layout`, and — only if the board departs from the SoC's defaults — an
+   `[rkbin]` block. The bootloader blobs are **inherited from the soc layer** and merged
+   per field, so a board on the SoC's usual memory omits the block entirely; a board with
+   different DRAM overrides just `tpl`.
    - **`device_config_fragments` gotcha:** naming a fragment here makes its file
      *mandatory*. `device_config_fragments = ["device/my-board"]` requires
      `fragments/device/my-board.config` to exist — a missing file fails `resolve`. A board
@@ -86,7 +87,9 @@ Work from the bottom of the hardware stack up, adding only what is new:
      Do not name a fragment you have not written.
 5. **kernel** (`kernels/<kernel>.toml`) — the orthogonal kernel axis: its source refs,
    `.config` fragments, and patch profile. Version-coupled, so a new kernel version is a
-   new file.
+   new file. A kernel that applies no series — a stock mainline build for a SoC that is
+   fully upstream — writes `patch_profile = "none"` and then never reads the `patches`
+   repo at all.
 
 Supporting assets:
 
@@ -95,7 +98,10 @@ Supporting assets:
 - **fragments** (`fragments/<name>.config`) — kernel `.config` fragments merged onto the
   base defconfig, referenced by name from a kernel or device.
 - **patch profile** — lives in the separate `patches` repo, referenced by the kernel; see
-  [Adding a patch](adding-a-patch.md).
+  [Adding a patch](adding-a-patch.md). Omitted entirely by a `patch_profile = "none"`
+  kernel.
+- **board device tree** — only when the board's `.dts` is not yet upstream; see
+  [`device_dts`](#when-the-boards-device-tree-is-not-upstream).
 
 Finally, a **recipe** (`recipes/<recipe>.toml`) pins one point across the axes — device,
 kernel, suite, features, layout.
@@ -108,13 +114,32 @@ stage that consumes them compiles, so a typo produces a late, confusing failure:
 
 | Value | Layer | Fails at |
 | --- | --- | --- |
-| `kernel_dtb` | device | the kernel build — the DTB is not produced |
+| `kernel_dtb` | device | the kernel build — the DTB is not produced (unless the board carries `device_dts`, below, which makes this a resolve-time check) |
 | `uboot_defconfig` | device | the u-boot build — unknown defconfig |
 
 Take both from the board's upstream support: `kernel_dtb` is the device tree the mainline
 kernel builds for the board (under `arch/<arch>/boot/dts/<dt_dir>/`), and
 `uboot_defconfig` is the board's u-boot defconfig. Confirm each exists in the exact
 kernel/u-boot versions you pin before you trust a green `resolve`.
+
+### When the board's device tree is not upstream
+
+A freshly-supported SoC often has every driver in mainline but none of its boards. Fork
+the nearest in-tree board `.dts`, put it in your overlay, and list it in `device_dts`:
+
+```toml
+kernel_dtb = "rockchip/rk3576-my-box.dtb"
+device_dts = ["devices/my-box/dts/rk3576-my-box.dts"]
+```
+
+The kernel stage copies it into the tree and registers the DTB with kbuild, so it ships
+in the `linux-image` deb like any in-tree board. `kernel_dtb` is then **validated** at
+resolve — it must be the DTB one of those sources builds — so the table above no longer
+applies to it. Iterate with `build <recipe> --stage dtb`, which rebuilds only the DTB.
+
+Keep `device_dts` for the *new* board file. An edit to an *existing* upstream `.dts` is a
+patch in the kernel's patch profile; a source that would overwrite an in-tree file is
+refused rather than silently shadowing it.
 
 ## Bring it up
 

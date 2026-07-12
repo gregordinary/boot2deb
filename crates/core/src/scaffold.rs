@@ -13,10 +13,11 @@
 //! human, doing no I/O. The CLI writes the files and runs the resolve check; a
 //! future UI reuses the same rendering. The two unvalidatable, build-late values
 //! ([`kernel_dtb`](DeviceScaffold::kernel_dtb_suggestion) and the u-boot defconfig)
-//! and the board-memory-specific rkbin blobs are the
-//! [`research_notes`](DeviceScaffold::research_notes) a caller surfaces after writing.
+//! plus the DDR TPL — inherited from the SoC layer but board-memory-specific, so
+//! worth confirming — are the [`research_notes`](DeviceScaffold::research_notes) a
+//! caller surfaces after writing.
 
-use crate::model::{blob_hints, BootMethod, Layout, Soc};
+use crate::model::{BootMethod, Layout, RkbinLayer, Soc};
 use std::fmt::Write as _;
 
 /// The decisions needed to scaffold a new device (and, optionally, its default
@@ -49,6 +50,12 @@ pub struct DeviceScaffold {
     /// The SoC layer's device-tree subdirectory (e.g. `rockchip`), read from
     /// `socs/<soc>.toml` — used only to shape the `kernel_dtb` suggestion.
     pub dt_dir: String,
+    /// The SoC layer's rkbin defaults, read from `socs/<soc>.toml`. When the SoC
+    /// supplies `atf` + `tpl`, a standard-memory board inherits them and the
+    /// scaffold emits no `[rkbin]` block — only a note on overriding the DDR TPL
+    /// for different memory. When the SoC has no defaults, the scaffold writes a
+    /// `[rkbin]` block with `CHANGEME` placeholders the author must fill.
+    pub soc_rkbin: RkbinLayer,
     /// Features the scaffolded recipe selects. Empty means a plain base image.
     pub features: Vec<String>,
     /// Whether to also render a `recipes/<name>.toml` pinning this device.
@@ -89,23 +96,33 @@ impl DeviceScaffold {
         format!("{}/{}-{}.dtb", self.dt_dir, self.soc.as_str(), self.name)
     }
 
-    /// The suggested rkbin ATF blob, or a `CHANGEME` placeholder when the SoC has no
-    /// known default. The ATF (BL31) is SoC-generic, so the suggestion is usually
+    /// Whether the SoC layer supplies a complete rkbin default set (ATF + DDR TPL),
+    /// so a standard-memory board inherits it and the scaffold emits no `[rkbin]`
+    /// block. A partial SoC set (or none) falls back to explicit placeholders.
+    fn soc_supplies_blobs(&self) -> bool {
+        let set = |o: &Option<String>| o.as_deref().is_some_and(|s| !s.trim().is_empty());
+        set(&self.soc_rkbin.atf) && set(&self.soc_rkbin.tpl)
+    }
+
+    /// The rkbin ATF blob the SoC layer supplies, or a `CHANGEME` placeholder when
+    /// it has none. The ATF (BL31) is SoC-generic, so the SoC default is normally
     /// right; still vendored under `blobs/<soc>/` and content-checked at `update`.
     pub fn atf_suggestion(&self) -> String {
-        blob_hints(self.soc)
+        self.soc_rkbin
             .atf
-            .map(String::from)
+            .clone()
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("{PLACEHOLDER}-{}_bl31.elf", self.soc.as_str()))
     }
 
-    /// The suggested rkbin DDR TPL blob, or a `CHANGEME` placeholder. The TPL is
-    /// **board-memory-specific** (LPDDR type/speed), so even a SoC default is only a
-    /// starting point the author must match to the board's memory.
+    /// The rkbin DDR TPL blob the SoC layer supplies, or a `CHANGEME` placeholder.
+    /// The TPL is **board-memory-specific** (DDR type/speed), so even a SoC default
+    /// is only a starting point the author must match to the board's memory.
     pub fn tpl_suggestion(&self) -> String {
-        blob_hints(self.soc)
+        self.soc_rkbin
             .tpl
-            .map(String::from)
+            .clone()
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("{PLACEHOLDER}-{}_ddr.bin", self.soc.as_str()))
     }
 
@@ -137,11 +154,22 @@ impl DeviceScaffold {
         let _ = writeln!(s, "default_layout          = {:?}               # combined | split", self.layout.as_str());
         let _ = writeln!(s, "hostname                = {:?}", self.hostname);
         let _ = writeln!(s, "image_size              = {:?}", self.image_size);
-        let _ = writeln!(s, "\n# DDR TPL is board-memory-specific, so the rkbin blob set lives at the device layer.");
-        let _ = writeln!(s, "# TODO: vendor these blobs under blobs/{}/ and verify the TPL matches this board's memory.", self.soc.as_str());
-        let _ = writeln!(s, "[rkbin]");
-        let _ = writeln!(s, "atf = {:?}", self.atf_suggestion());
-        let _ = writeln!(s, "tpl = {:?}", self.tpl_suggestion());
+        if self.soc_supplies_blobs() {
+            // Standard-memory board: inherit the SoC's rkbin. Emit no `[rkbin]`
+            // block, only the override recipe for a board with different DRAM.
+            let _ = writeln!(s, "\n# rkbin (ATF + DDR TPL) is inherited from socs/{}.toml. The DDR TPL is", self.soc.as_str());
+            let _ = writeln!(s, "# board-memory-specific: if this board's DRAM differs from the SoC default,");
+            let _ = writeln!(s, "# override just the TPL (vendor the file under blobs/{}/):", self.soc.as_str());
+            let _ = writeln!(s, "#   [rkbin]");
+            let _ = writeln!(s, "#   tpl = {:?}", self.tpl_suggestion());
+        } else {
+            // No SoC default: the author must supply the whole blob set here.
+            let _ = writeln!(s, "\n# TODO: the SoC layer supplies no rkbin defaults — provide the blob set and");
+            let _ = writeln!(s, "# vendor the files under blobs/{}/. The DDR TPL must match this board's memory.", self.soc.as_str());
+            let _ = writeln!(s, "[rkbin]");
+            let _ = writeln!(s, "atf = {:?}", self.atf_suggestion());
+            let _ = writeln!(s, "tpl = {:?}", self.tpl_suggestion());
+        }
         s
     }
 
@@ -192,21 +220,30 @@ impl DeviceScaffold {
                 guidance: "must name a DTB the kernel builds under its dt_dir; \
                            unvalidated at resolve, fails at the kernel build if wrong",
             },
-            ResearchNote {
+        ];
+        // The DDR TPL is always worth verifying against the board's memory, but the
+        // guidance differs by whether it is inherited or must be supplied outright.
+        if self.soc_supplies_blobs() {
+            notes.push(ResearchNote {
                 field: "rkbin.tpl",
                 value: self.tpl_suggestion(),
-                guidance: "board-memory-specific DDR init blob — match it to this board's \
-                           LPDDR type/speed and vendor it under blobs/<soc>/",
-            },
-        ];
-        // The ATF suggestion is high-confidence when known; only flag it when it is a
-        // placeholder the author must replace outright.
-        if self.atf_suggestion().contains(PLACEHOLDER) {
+                guidance: "inherited SoC-default DDR init blob — confirm it matches this \
+                           board's memory; if the DRAM differs, override `tpl` on the \
+                           device layer and vendor the file under blobs/<soc>/",
+            });
+        } else {
+            // No SoC default: both blobs must be supplied here.
             notes.push(ResearchNote {
                 field: "rkbin.atf",
                 value: self.atf_suggestion(),
-                guidance: "no known default ATF/BL31 blob for this SoC — supply one and \
-                           vendor it under blobs/<soc>/",
+                guidance: "no SoC-default ATF/BL31 blob — supply one and vendor it \
+                           under blobs/<soc>/",
+            });
+            notes.push(ResearchNote {
+                field: "rkbin.tpl",
+                value: self.tpl_suggestion(),
+                guidance: "board-memory-specific DDR init blob — match it to this board's \
+                           DRAM type/speed and vendor it under blobs/<soc>/",
             });
         }
         notes
@@ -229,6 +266,11 @@ mod tests {
             hostname: "h96-max-m9".into(),
             image_size: "2G".into(),
             dt_dir: "rockchip".into(),
+            soc_rkbin: RkbinLayer {
+                atf: Some("rk3588_bl31_v1.51.elf".into()),
+                tpl: Some("rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin".into()),
+                bl32: None,
+            },
             features: vec!["media-accel-rockchip".into()],
             emit_recipe: true,
         }
@@ -280,12 +322,34 @@ mod tests {
     }
 
     #[test]
-    fn unknown_soc_blobs_are_placeholders_and_flagged() {
-        // A SoC with no blob hints yields CHANGEME placeholders and an extra ATF note.
+    fn soc_without_blob_defaults_emits_placeholders_and_flags_both() {
+        // A SoC layer with no rkbin defaults: the scaffold writes an explicit
+        // `[rkbin]` block with CHANGEME placeholders and flags both blobs.
         let mut d = rk1_like();
         d.soc = Soc::Rk3288;
+        d.soc_rkbin = RkbinLayer::default();
         assert!(d.atf_suggestion().contains(PLACEHOLDER));
+        let toml = d.device_toml();
+        assert!(toml.contains("[rkbin]"), "must emit an explicit rkbin block");
+        // Parses as a DeviceLayer even with the placeholder blob set.
+        let _: crate::model::DeviceLayer = toml::from_str(&toml).unwrap();
         let fields: Vec<&str> = d.research_notes().iter().map(|n| n.field).collect();
-        assert!(fields.contains(&"rkbin.atf"));
+        assert!(fields.contains(&"rkbin.atf") && fields.contains(&"rkbin.tpl"));
+    }
+
+    #[test]
+    fn soc_with_blob_defaults_inherits_and_omits_the_rkbin_block() {
+        // A standard-memory board on a SoC with defaults inherits them: no
+        // `[rkbin]` block, only the inherited-TPL verification note.
+        let d = rk1_like();
+        let toml = d.device_toml();
+        // The only `[rkbin]` text is the commented override recipe, never a live table.
+        assert!(!toml.lines().any(|l| l.trim_start() == "[rkbin]"));
+        assert!(toml.contains("inherited from socs/rk3588.toml"));
+        let parsed: crate::model::DeviceLayer = toml::from_str(&toml).unwrap();
+        assert_eq!(parsed.rkbin, RkbinLayer::default(), "inherits, overrides nothing");
+        let notes = d.research_notes();
+        let tpl = notes.iter().find(|n| n.field == "rkbin.tpl").unwrap();
+        assert!(tpl.guidance.contains("inherited"));
     }
 }

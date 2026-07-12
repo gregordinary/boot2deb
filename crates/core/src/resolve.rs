@@ -49,19 +49,15 @@ pub fn resolve_device(
         });
     }
 
-    // Required blobs present.
-    if device.rkbin.atf.trim().is_empty() {
-        return Err(ConfigError::MissingBlob {
-            device: device_name.to_string(),
-            what: "rkbin.atf".into(),
-        });
-    }
-    if device.rkbin.tpl.trim().is_empty() {
-        return Err(ConfigError::MissingBlob {
-            device: device_name.to_string(),
-            what: "rkbin.tpl".into(),
-        });
-    }
+    // rkbin is layered: the SoC supplies the defaults (SoC-generic ATF, a
+    // common-memory DDR TPL, and BL32 where the boot chain needs OP-TEE) and the
+    // device overrides per field (typically just the DDR TPL for its DRAM). §3.6.
+    let rkbin = resolve_rkbin(&soc.rkbin, &device.rkbin, device_name)?;
+
+    // A board carrying its own device tree must actually build the DTB it boots;
+    // check that here so a filename typo is a typed error rather than a kernel that
+    // builds fine and then finds no DTB at boot. §4.
+    validate_device_dts(&device.device_dts, &device.kernel_dtb, device_name)?;
 
     // Kernel-owned fragments first, then device fragments (apply order).
     let mut config_fragments = kdef.config_fragments.clone();
@@ -203,7 +199,9 @@ pub fn resolve_device(
             source: kdef.source,
             track: kdef.track,
             base_defconfig: kdef.base_defconfig,
-            patch_profile: kdef.patch_profile,
+            // The `"none"` sentinel becomes a typed absence exactly here; nothing
+            // downstream compares the authored string.
+            patch_profile: crate::profile::patch_profile(&kdef.patch_profile).map(str::to_string),
             patches_url: kdef.patches_url,
             config_fragments,
         },
@@ -218,13 +216,14 @@ pub fn resolve_device(
         uboot_source: bm.uboot_source,
         uboot_ref: bm.uboot_ref,
         kernel_dtb: device.kernel_dtb,
+        device_dts: device.device_dts,
         dt_dir: soc.dt_dir,
         modules: soc.modules,
         kernel_arch: arch.kernel_arch,
         uboot_arch: arch.uboot_arch,
         cross_compile: arch.cross_compile,
         kbuild_image: arch.kbuild_image,
-        rkbin: device.rkbin,
+        rkbin,
         offsets: Offsets {
             idbloader: bm.idbloader_offset,
             uboot_itb: bm.uboot_itb_offset,
@@ -236,6 +235,97 @@ pub fn resolve_device(
         ffmpeg: build_media_accel.then_some(soc.ffmpeg).flatten(),
         apt_sources,
         extra_debs,
+    })
+}
+
+/// Validate a device's loose device-tree sources against its `kernel_dtb` (§4).
+///
+/// Two checks, both cheap and both fatal before any build work:
+///  - **Shape**: every entry is a relative, `..`-free path to a `.dts` or `.dtsi`.
+///    The engine joins these onto the config-root search path and copies the result
+///    into the kernel tree, so an escaping path would smuggle in a foreign file.
+///  - **Correspondence**: `kernel_dtb`'s basename is produced by one of the listed
+///    `.dts` sources (`rockchip/board.dtb` ← `.../board.dts`). Without this a typo
+///    yields a kernel that builds and then boots to a missing DTB.
+///
+/// An empty `device_dts` is the upstream-DTB case and imposes no constraint: the
+/// kernel's own tree builds the board's DTB.
+fn validate_device_dts(
+    device_dts: &[String],
+    kernel_dtb: &str,
+    device_name: &str,
+) -> Result<(), ConfigError> {
+    let invalid = |path: &str, why| ConfigError::InvalidDeviceDts {
+        device: device_name.to_string(),
+        path: path.to_string(),
+        why,
+    };
+    for entry in device_dts {
+        let path = std::path::Path::new(entry);
+        if entry.trim().is_empty() {
+            return Err(invalid(entry, "the entry is empty"));
+        }
+        if path.is_absolute() {
+            return Err(invalid(entry, "the path is absolute"));
+        }
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(invalid(entry, "the path escapes the config root via '..'"));
+        }
+        if !matches!(path.extension().and_then(|e| e.to_str()), Some("dts" | "dtsi")) {
+            return Err(invalid(entry, "the file is not a .dts or .dtsi"));
+        }
+    }
+    if device_dts.is_empty() {
+        return Ok(());
+    }
+    // `kernel_dtb` is DT-output-dir-relative (`rockchip/board.dtb`); only its
+    // basename can match a source file, whose own directory is a config-root layout
+    // choice unrelated to the in-tree DT dir.
+    let stem = std::path::Path::new(kernel_dtb)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let expected = format!("{stem}.dts");
+    let built = device_dts
+        .iter()
+        .filter_map(|e| std::path::Path::new(e).file_name()?.to_str())
+        .any(|name| name == expected);
+    if !built {
+        return Err(ConfigError::KernelDtbNotInDeviceDts {
+            device: device_name.to_string(),
+            kernel_dtb: kernel_dtb.to_string(),
+            sources: device_dts.join(", "),
+            expected,
+        });
+    }
+    Ok(())
+}
+
+/// Merge the SoC-layer rkbin defaults with the device overrides (device wins per
+/// field) and validate the result: `atf` and `tpl` are required (a missing or
+/// blank one is a [`ConfigError::MissingBlob`]), `bl32` stays optional. §3.6.
+fn resolve_rkbin(
+    soc: &RkbinLayer,
+    device: &RkbinLayer,
+    device_name: &str,
+) -> Result<Rkbin, ConfigError> {
+    // A blank string counts as unset (filtered per side), so an empty device
+    // override never masks a good SoC default; then device wins over SoC.
+    let clean = |o: &Option<String>| o.clone().filter(|v| !v.trim().is_empty());
+    let pick = |dev: &Option<String>, soc: &Option<String>| clean(dev).or_else(|| clean(soc));
+    let require = |v: Option<String>, what: &str| {
+        v.ok_or_else(|| ConfigError::MissingBlob {
+            device: device_name.to_string(),
+            what: what.into(),
+        })
+    };
+    Ok(Rkbin {
+        atf: require(pick(&device.atf, &soc.atf), "rkbin.atf")?,
+        tpl: require(pick(&device.tpl, &soc.tpl), "rkbin.tpl")?,
+        bl32: pick(&device.bl32, &soc.bl32),
     })
 }
 
@@ -374,6 +464,121 @@ mod tests {
             .unwrap()
             .to_path_buf();
         ConfigRoot::new(dir)
+    }
+
+    fn layer(atf: Option<&str>, tpl: Option<&str>, bl32: Option<&str>) -> RkbinLayer {
+        RkbinLayer {
+            atf: atf.map(Into::into),
+            tpl: tpl.map(Into::into),
+            bl32: bl32.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn rkbin_inherits_soc_defaults_when_the_device_overrides_nothing() {
+        // Standard-memory board: empty device block, everything from the SoC.
+        let soc = layer(Some("atf.elf"), Some("ddr.bin"), None);
+        let r = resolve_rkbin(&soc, &RkbinLayer::default(), "dev").unwrap();
+        assert_eq!(r.atf, "atf.elf");
+        assert_eq!(r.tpl, "ddr.bin");
+        assert_eq!(r.bl32, None);
+    }
+
+    #[test]
+    fn rkbin_device_overrides_win_per_field() {
+        // The device swaps only the DDR TPL (different DRAM); ATF still inherited.
+        let soc = layer(Some("atf.elf"), Some("ddr-lpddr4.bin"), None);
+        let dev = layer(None, Some("ddr-ddr4.bin"), None);
+        let r = resolve_rkbin(&soc, &dev, "dev").unwrap();
+        assert_eq!(r.atf, "atf.elf", "ATF inherited from the SoC");
+        assert_eq!(r.tpl, "ddr-ddr4.bin", "device TPL wins");
+    }
+
+    #[test]
+    fn rkbin_bl32_resolves_from_either_layer_and_stays_optional() {
+        // BL32 from the SoC (the RK3576 case): inherited onto a board that omits it.
+        let soc = layer(Some("atf.elf"), Some("ddr.bin"), Some("optee.bin"));
+        let r = resolve_rkbin(&soc, &RkbinLayer::default(), "dev").unwrap();
+        assert_eq!(r.bl32.as_deref(), Some("optee.bin"));
+        // A device may still override it.
+        let dev = layer(None, None, Some("optee-board.bin"));
+        let r2 = resolve_rkbin(&soc, &dev, "dev").unwrap();
+        assert_eq!(r2.bl32.as_deref(), Some("optee-board.bin"));
+    }
+
+    #[test]
+    fn rkbin_missing_required_field_is_a_typed_error() {
+        // No layer supplies the TPL -> MissingBlob naming the device and field.
+        let soc = layer(Some("atf.elf"), None, None);
+        let err = resolve_rkbin(&soc, &RkbinLayer::default(), "h96").unwrap_err();
+        match err {
+            ConfigError::MissingBlob { device, what } => {
+                assert_eq!(device, "h96");
+                assert_eq!(what, "rkbin.tpl");
+            }
+            other => panic!("expected MissingBlob, got {other:?}"),
+        }
+        // A blank override does not mask a good SoC default.
+        let blanked = resolve_rkbin(&soc, &layer(Some("  "), Some("ddr.bin"), None), "h96").unwrap();
+        assert_eq!(blanked.atf, "atf.elf");
+    }
+
+    #[test]
+    fn the_none_sentinel_resolves_to_no_patch_profile() {
+        // The `"none"` spelling is config-facing only; resolution turns it into a
+        // typed absence so no downstream code compares against the magic string.
+        assert_eq!(crate::profile::patch_profile("none"), None);
+        assert_eq!(crate::profile::patch_profile("rk3588-accel"), Some("rk3588-accel"));
+    }
+
+    #[test]
+    fn device_dts_empty_is_the_upstream_dtb_case() {
+        // A board whose DTB is already in the kernel lists no sources, and
+        // `kernel_dtb` is then unconstrained by this check.
+        assert!(validate_device_dts(&[], "rockchip/rk3576-evb1-v10.dtb", "evb1").is_ok());
+    }
+
+    #[test]
+    fn device_dts_must_build_the_kernel_dtb() {
+        let dts = ["devices/h96/dts/rk3576-h96-max-m9.dts".to_string()];
+        // The `.dts` basename matches the `.dtb` basename: the board boots what it builds.
+        assert!(validate_device_dts(&dts, "rockchip/rk3576-h96-max-m9.dtb", "h96").is_ok());
+        // A `.dtsi` alongside it is fine as long as the `.dts` is present.
+        let with_dtsi = [
+            "devices/h96/dts/rk3576-h96-common.dtsi".to_string(),
+            "devices/h96/dts/rk3576-h96-max-m9.dts".to_string(),
+        ];
+        assert!(validate_device_dts(&with_dtsi, "rockchip/rk3576-h96-max-m9.dtb", "h96").is_ok());
+
+        // A typo'd `kernel_dtb` names a DTB no source builds -> typed error, not a bad boot.
+        let err = validate_device_dts(&dts, "rockchip/rk3576-h96-max-m9s.dtb", "h96").unwrap_err();
+        match err {
+            ConfigError::KernelDtbNotInDeviceDts { device, expected, .. } => {
+                assert_eq!(device, "h96");
+                assert_eq!(expected, "rk3576-h96-max-m9s.dts");
+            }
+            other => panic!("expected KernelDtbNotInDeviceDts, got {other:?}"),
+        }
+        // A lone `.dtsi` builds no DTB, so it cannot satisfy `kernel_dtb`.
+        let only_dtsi = ["devices/h96/dts/rk3576-h96-max-m9.dtsi".to_string()];
+        assert!(validate_device_dts(&only_dtsi, "rockchip/rk3576-h96-max-m9.dtb", "h96").is_err());
+    }
+
+    #[test]
+    fn device_dts_entries_must_be_contained_dt_sources() {
+        let bad = |entry: &str| {
+            let err = validate_device_dts(&[entry.to_string()], "rockchip/b.dtb", "h96").unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidDeviceDts { .. }),
+                "expected InvalidDeviceDts for {entry:?}, got {err:?}"
+            );
+        };
+        bad("");                                   // empty
+        bad("/etc/passwd.dts");                    // absolute
+        bad("../../outside/b.dts");                // escapes the config root
+        bad("devices/h96/dts/../../../b.dts");     // escapes mid-path
+        bad("devices/h96/dts/b.dtb");              // a blob, not a source
+        bad("devices/h96/dts/b");                  // no extension
     }
 
     #[test]

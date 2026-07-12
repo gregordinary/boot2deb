@@ -84,9 +84,9 @@ cargo run -p boot2deb-cli -- build turing-rk1-forky
 Builds the recipe from its lock: compiles the kernel, u-boot, userspace, and ffmpeg,
 bootstraps the rootfs, and writes the bootable disk image. Notable flags:
 
-- **`--stage <node>`** runs a single node — `kernel`, `uboot`, `userspace`, `ffmpeg`,
-  `rootfs`, or `image`; the default builds everything. A `--stage uboot` run also emits
-  a standalone, directly-flashable `<device>-boot.img` (see below).
+- **`--stage <node>`** runs a single node — `kernel`, `dtb`, `uboot`, `userspace`,
+  `ffmpeg`, `rootfs`, or `image`; the default builds everything. A `--stage uboot` run
+  also emits a standalone, directly-flashable `<device>-boot.img` (see below).
 - **`--layout combined|split`** overrides the image packaging. `combined` is one
   whole-disk image; `split` emits a bootloader-only image and a separate rootfs image
   for a two-medium install. This is lock-independent — it changes only how the image is
@@ -100,6 +100,14 @@ instead of re-running the multi-minute bootstrap. Because the key is the solved 
 moved mirror resolves new versions and rebuilds automatically — a cache hit is never
 stale. The unique per-image first-boot password is applied on restore, not cached, so
 every image still gets its own credential.
+
+### Rebuilding only the board DTB
+
+`build <recipe> --stage dtb` compiles just the board's device tree in the
+already-cloned, already-patched kernel tree and stages the `.dtb` — seconds rather than
+a full kernel build. It is the bring-up loop for a board carrying its own `device_dts`
+source: edit the `.dts`, rebuild the DTB, reflash. The result is byte-identical to the
+DTB a full `--stage kernel` ships inside the `linux-image` deb.
 
 ### Standalone bootloader image
 

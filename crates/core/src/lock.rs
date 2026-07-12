@@ -41,8 +41,12 @@ const LOCK_BANNER: &str = "\
 pub struct Lock {
     /// Exact kernel pin.
     pub kernel: KernelPin,
-    /// Exact patch-series pin.
-    pub patches: PatchesPin,
+    /// Exact patch-series pin. Present iff the resolved kernel names a patch
+    /// profile. A kernel that applies no series never reads the `patches` repo, so
+    /// pinning a commit would record provenance for a dependency the build does not
+    /// have; the committed lock then omits the `[patches]` table entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patches: Option<PatchesPin>,
     /// Exact u-boot pin.
     pub uboot: UbootPin,
     /// Exact media-accel userspace source pins (MPP/RGA/Mali). Present iff the
@@ -194,6 +198,11 @@ pub struct BlobsPin {
     pub atf: String,
     /// DDR TPL blob pin.
     pub tpl: String,
+    /// OP-TEE BL32 blob pin, present only when the build has one. Absent on
+    /// BL31-only boots (RK3588/RK1), so those locks serialize without the field
+    /// and older locks parse unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bl32: Option<String>,
 }
 
 /// How a captured snapshot participates in a build.
@@ -242,10 +251,10 @@ mod tests {
                 reference: "v7.1.1".into(),
                 commit: "c9acdc466e9aa96352f658b9276aa8a45b8e817d".into(),
             },
-            patches: PatchesPin {
+            patches: Some(PatchesPin {
                 profile: "rk3588-accel".into(),
                 commit: "f78b240894a29a4c3976ad22935b1c2e16b3c6ad".into(),
-            },
+            }),
             uboot: UbootPin {
                 reference: "v2026.04".into(),
                 commit: "88dc2788777babfd6322fa655df549a019aa1e69".into(),
@@ -282,6 +291,7 @@ mod tests {
             blobs: BlobsPin {
                 atf: "rk3588_bl31_v1.51.elf@sha256:00".into(),
                 tpl: "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin@sha256:11".into(),
+                bl32: None,
             },
             extra_debs: vec![
                 ExtraDeb {
@@ -317,10 +327,10 @@ mod tests {
                 reference: "v1".into(),
                 commit: "a".repeat(40),
             },
-            patches: PatchesPin {
-                profile: "none".into(),
+            patches: Some(PatchesPin {
+                profile: "rk3588-accel".into(),
                 commit: "b".repeat(40),
-            },
+            }),
             uboot: UbootPin {
                 reference: "v2".into(),
                 commit: "c".repeat(40),
@@ -342,10 +352,30 @@ mod tests {
             blobs: BlobsPin {
                 atf: "atf@sha256:0".into(),
                 tpl: "tpl@sha256:1".into(),
+                bl32: None,
             },
             extra_debs: vec![],
             snapshot: None,
         }
+    }
+
+    #[test]
+    fn a_no_patch_kernels_lock_omits_the_patches_table() {
+        // A kernel that applies no series pins no `patches` commit: the committed
+        // lock has no `[patches]` table at all, and round-trips back to `None` rather
+        // than to a placeholder pin.
+        let mut lock = base_lock();
+        lock.patches = None;
+        let text = lock.to_toml_string().unwrap();
+        assert!(
+            !text.contains("[patches]"),
+            "no-patch lock must omit the table entirely:\n{text}"
+        );
+        assert_eq!(toml::from_str::<Lock>(&text).unwrap(), lock);
+        // A lock that does pin a series still writes the table.
+        let with = base_lock().to_toml_string().unwrap();
+        assert!(with.contains("[patches]"));
+        assert!(with.contains("profile = \"rk3588-accel\""));
     }
 
     #[test]
@@ -414,5 +444,23 @@ mod tests {
         assert_eq!(back.userspace, None);
         assert_eq!(back.ffmpeg, None);
         assert_eq!(lock, back);
+    }
+
+    #[test]
+    fn bl32_blob_pin_round_trips_and_is_omitted_when_absent() {
+        // BL31-only build (RK3588/RK1): no bl32 key in the committed form, parses
+        // back to None, and an older lock written without the key still loads.
+        let lock = base_lock();
+        assert_eq!(lock.blobs.bl32, None);
+        let text = lock.to_toml_string().unwrap();
+        assert!(!text.contains("bl32"), "absent bl32 must be omitted:\n{text}");
+        assert_eq!(toml::from_str::<Lock>(&text).unwrap().blobs.bl32, None);
+
+        // OP-TEE build (RK3576): the pin is present and survives the round-trip.
+        let mut with = base_lock();
+        with.blobs.bl32 = Some("rk3576_bl32_v1.08.bin@sha256:ab".into());
+        let text = with.to_toml_string().unwrap();
+        assert!(text.contains("bl32 = \"rk3576_bl32_v1.08.bin@sha256:ab\""));
+        assert_eq!(toml::from_str::<Lock>(&text).unwrap(), with);
     }
 }

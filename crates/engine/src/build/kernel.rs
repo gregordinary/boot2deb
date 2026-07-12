@@ -1,14 +1,21 @@
 //! Kernel compile stage: clone the pinned tree, apply the locked
-//! patch series (`git am`), lay down the fragment-derived `.config`, and
-//! run `make bindeb-pkg` — producing the `linux-image` / `linux-headers` `.deb`s.
+//! patch series (`git am`), install the board's loose device-tree sources, lay down
+//! the fragment-derived `.config`, and run `make bindeb-pkg` — producing the
+//! `linux-image` / `linux-headers` `.deb`s.
 //!
 //! The `.config` is generated exactly as the parity check does ([`crate::kconfig`]):
 //! base defconfig + fragments merged out-of-tree, then copied into the tree, so the
 //! shipped kernel is configured from the same fragments `verify-config` checks.
+//!
+//! A board whose `.dts` is not yet upstream carries it in `device_dts` (§4): the
+//! clone step copies those sources into the in-tree DT dir and registers the board
+//! DTB in that dir's `Makefile`, so `bindeb-pkg` ships it in the `linux-image` deb
+//! like any in-tree board. [`build_dtb`] rebuilds just that DTB for the bring-up
+//! edit → reflash loop.
 
 use crate::build::{
     self, deb_names, pick_deb, stage_artifact, BuildEnv, ClonePinned, CloneMode, PatchScope,
-    PatchSeries,
+    PatchSeries, PatchSource,
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
@@ -41,19 +48,22 @@ pub struct KernelOptions<'a> {
     /// Git URL or local path to clone the kernel from, at the locked ref. A local
     /// clone (e.g. `../linux`) makes the shallow clone near-instant.
     pub source: &'a str,
-    /// Checkout of the `patches` repo at the locked commit.
-    pub patches_root: &'a Path,
+    /// The patch series to apply, or `None` when the resolved kernel names no patch
+    /// profile — the tree is then compiled exactly as cloned and the `patches` repo is
+    /// never read.
+    pub patches: Option<PatchSource<'a>>,
     /// Resolved kconfig fragment files in merge order (base → soc → accel →
     /// device), as produced from the resolved build's fragment names.
     pub fragments: &'a [PathBuf],
+    /// Resolved `device_dts` sources (the board `.dts` plus any board `.dtsi`), in
+    /// authored order, as produced from the resolved build's `device_dts` names.
+    /// Empty for a board whose DTB is already upstream. §4.
+    pub device_dts: &'a [PathBuf],
     /// Scratch directory holding the kernel clone (`<work>/linux`) and the `.deb`s
     /// `bindeb-pkg` drops beside it.
     pub work_dir: &'a Path,
     /// Directory the produced `.deb`s are staged into.
     pub out_dir: &'a Path,
-    /// The `patches_root` is an explicit `--patches-path` co-dev checkout: a
-    /// patches-pin mismatch is a loud warning rather than a hard error.
-    pub patches_dev: bool,
     /// Root of the Tier-2 artifact store ([`crate::artstore`]), or `None` to
     /// disable output caching. On a hit the built `.deb`s are restored instead of
     /// recompiled; on a miss they are stored after the build.
@@ -107,21 +117,18 @@ pub fn build_kernel(
     // pinned by `patches.commit`, or — in co-dev (`--patches-path`) mode — the
     // fingerprint of the live series, so an edited patch restamps the tree instead of
     // restoring a stale one (CACHE-1). Computed once; `series_fp` outlives `patches`.
-    let series_fp = if opts.patches_dev {
-        build::patch_series_fingerprint(opts.patches_root, &lock.patches.profile, PatchScope::Kernel)
-    } else {
-        Vec::new()
-    };
-    let patches = if opts.patches_dev {
-        PatchSeries::Dev(&series_fp)
-    } else {
-        PatchSeries::Pinned
-    };
+    let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Kernel);
+    let patches = build::series_identity(opts.patches, &series_fp);
+
+    // The board's own device-tree sources are copied into the tree, so their content
+    // — like a co-dev patch's — shapes it: fold it into the Tier-1 signature so an
+    // edited `.dts` restamps rather than reuses.
+    let dts_fp = build::device_dts_fingerprint(opts.device_dts);
 
     // Tier-2 output cache: if the full output signature (tree inputs +
     // config + toolchain) is already stored, restore the `.deb`s and skip the
     // clone/patch/configure/compile entirely — the whole payoff of the store.
-    let out_man = output_manifest(build, lock, opts, env, patches)?;
+    let out_man = output_manifest(build, lock, opts, env, patches, &dts_fp)?;
     if let Some(root) = opts.store {
         let store = crate::artstore::ArtifactStore::open(root)?;
         if let Some(files) = store.restore("kernel", out_man.signature().as_str(), opts.out_dir)? {
@@ -145,7 +152,7 @@ pub fn build_kernel(
     // changes the signature, so the stale tree is removed and rebuilt rather than
     // silently reused (COR-1). configure()/compile() re-run regardless, so the
     // signature covers only the tree-shaping clone/patch inputs.
-    let man = clone_manifest(lock, patches);
+    let man = clone_manifest(lock, patches, &dts_fp);
     if crate::signature::is_fresh(&tree, &man) {
         step.log(format!(
             "reusing kernel tree at {} (signature {})",
@@ -194,6 +201,78 @@ pub fn build_kernel(
     Ok(artifacts)
 }
 
+/// Rebuild only the board DTB (`make <dt_dir>/<board>.dtb`) in the already-patched
+/// tree, staging it into `out_dir` — the bring-up fast path (§4).
+///
+/// Prepares the tree exactly as [`build_kernel`] does (clone + `git am` +
+/// `device_dts` install on a stale or absent tree, reuse on a fresh one) and
+/// regenerates the `.config`, which kbuild needs before it will build any DTB.
+/// It then compiles the one DTB instead of the whole kernel, so an edit to the board
+/// `.dts` reaches a flashable DTB in seconds rather than a full kernel build. Neither
+/// artifact cache tier applies: the output is a single small file whose only input is
+/// a source the developer is actively editing.
+pub fn build_dtb(
+    build: &ResolvedBuild,
+    lock: &Lock,
+    opts: &KernelOptions,
+    env: &BuildEnv,
+    sink: &dyn EventSink,
+) -> Result<PathBuf, EngineError> {
+    let step = Step::start(sink, "dtb");
+    let tree = tree_dir(opts.work_dir);
+
+    let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Kernel);
+    let patches = build::series_identity(opts.patches, &series_fp);
+    let dts_fp = build::device_dts_fingerprint(opts.device_dts);
+    let man = clone_manifest(lock, patches, &dts_fp);
+    if crate::signature::is_fresh(&tree, &man) {
+        step.log(format!("reusing kernel tree at {}", tree.display()));
+    } else {
+        if tree.exists() {
+            std::fs::remove_dir_all(&tree).map_err(|s| EngineError::io(&tree, s))?;
+        }
+        clone_and_patch(build, lock, opts, &tree, &step)?;
+        crate::signature::write_manifest(&tree, &man)?;
+    }
+    step.progress(40);
+
+    configure(build, opts, env, &tree, &step)?;
+
+    // `kernel_dtb` is already `<dt_dir>/<board>.dtb`, which is exactly how kbuild's
+    // `%.dtb` rule names a DTB (relative to `arch/<arch>/boot/dts`).
+    build::reject_unsafe_make_target("kernel_dtb", &build.kernel_dtb)?;
+    let mut make = Command::new("make");
+    make.arg("-C")
+        .arg(&tree)
+        .arg(format!("-j{}", env.jobs()))
+        .arg("--")
+        .arg(&build.kernel_dtb);
+    for (key, value) in kbuild_env(build, crate::git::commit_epoch(&tree, &lock.kernel.commit).ok()) {
+        make.env(key, value);
+    }
+    if let Some(prefix) = &env.cross_compile {
+        make.env("CROSS_COMPILE", prefix);
+    }
+    build::run(make, "make", "make <board>.dtb", &step)?;
+
+    let built = dt_source_dir(build, &tree).join(
+        Path::new(&build.kernel_dtb)
+            .file_name()
+            .unwrap_or_default(),
+    );
+    if !built.exists() {
+        return Err(EngineError::ArtifactMissing {
+            what: build.kernel_dtb.clone(),
+            location: built.display().to_string(),
+        });
+    }
+    let staged = stage_artifact(opts.out_dir, &built)?;
+    step.log(format!("staged {}", staged.display()));
+    step.progress(100);
+    step.finish();
+    Ok(staged)
+}
+
 /// The Tier-2 output signature manifest of the kernel `.deb`s: every input
 /// that determines the produced packages, not just the source tree. It folds the
 /// Tier-1 tree signature ([`clone_manifest`]) as a dependency (covering the kernel
@@ -210,8 +289,9 @@ fn output_manifest(
     opts: &KernelOptions,
     env: &BuildEnv,
     patches: PatchSeries,
+    device_dts: &[String],
 ) -> Result<crate::signature::SignatureManifest, EngineError> {
-    let tree_sig = clone_manifest(lock, patches).signature();
+    let tree_sig = clone_manifest(lock, patches, device_dts).signature();
     let mut fragments = Vec::with_capacity(opts.fragments.len());
     for frag in opts.fragments {
         let name = frag.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -231,29 +311,46 @@ fn output_manifest(
 
 /// The Tier-1 signature manifest of the cloned+patched kernel tree: the
 /// pinned inputs that determine its content — the kernel commit, the kernel
-/// reference, and the patch series (`build::fold_patch_series`). The source URL is
+/// reference, the patch series (`build::fold_patch_series`), and the board's loose
+/// device-tree sources. The source URL is
 /// excluded (a commit content-addresses the tree, so the same commit from any mirror
 /// is the same tree). The reference is folded because the patch-applicability gate
 /// keys on it, so a reference change without a commit change must restamp the tree to
 /// force the gate to re-evaluate (CACHE-4). The [`PatchSeries`] fold covers the
 /// pinned commit and — in co-dev mode — the live-series fingerprint (CACHE-1), so a
 /// co-dev build never shares a stamp with a pinned one and an edited patch restamps.
+/// `device_dts` is the ordered content fingerprint from
+/// [`device_dts_fingerprint`](crate::build::device_dts_fingerprint); it is folded only
+/// when non-empty, so a board with an upstream DTB signs exactly as it did before the
+/// mechanism existed and keeps its cached tree.
 /// Public so `why-rebuild` ([`crate::plan`]) recomputes the same signature it stamps
 /// here.
-pub fn clone_manifest(lock: &Lock, patches: PatchSeries) -> crate::signature::SignatureManifest {
+pub fn clone_manifest(
+    lock: &Lock,
+    patches: PatchSeries,
+    device_dts: &[String],
+) -> crate::signature::SignatureManifest {
     let mut b = crate::signature::SignatureBuilder::new("kernel", CLONE_STAGE_VERSION);
     b.fold_scalar("kernel.commit", &lock.kernel.commit);
     b.fold_scalar("kernel.reference", &lock.kernel.reference);
-    build::fold_patch_series(&mut b, &lock.patches.profile, &lock.patches.commit, patches);
+    build::fold_patch_series(&mut b, lock.patches.as_ref(), patches);
+    if !device_dts.is_empty() {
+        b.fold_ordered("device_dts", device_dts);
+    }
     b.manifest()
 }
 
 /// Shallow-clone the pinned kernel, verify it sits at the locked commit, enforce
-/// the patches pin, and apply the locked kernel patch series in place. A
+/// the patches pin, apply the locked kernel patch series in place, and install the
+/// board's `device_dts` sources. A
 /// failure removes the partial tree so a resume never reuses a half-patched kernel
 /// (via [`build::clone_pinned`], which homes that guard and the pin check).
+///
+/// The device-tree install runs **after** `git am` — a patch may touch the DT dir's
+/// `Makefile`, and the board's DTB rule must survive that — and **before** any
+/// `make`, so the first compile sees the board `.dts`.
 fn clone_and_patch(
-    _build: &ResolvedBuild,
+    build: &ResolvedBuild,
     lock: &Lock,
     opts: &KernelOptions,
     tree: &Path,
@@ -267,17 +364,126 @@ fn clone_and_patch(
         mode: CloneMode::Shallow,
         tree,
         what: "kernel",
-        patches_root: opts.patches_root,
-        patches_commit: &lock.patches.commit,
-        patches_dev: opts.patches_dev,
-        profile: &lock.patches.profile,
+        patches: opts.patches,
         scope: PatchScope::Kernel,
         target: &target,
         gate_reference: Some(&lock.kernel.reference),
     };
     let n = build::clone_pinned(&spec, step)?;
-    step.log(format!("applied {n} kernel patches ({})", lock.patches.profile));
+    match opts.patches {
+        Some(p) => step.log(format!("applied {n} kernel patches ({})", p.pin.profile)),
+        None => step.log("no patch profile: compiling the kernel tree as cloned"),
+    }
+    install_device_dts(build, opts.device_dts, tree, step)?;
     Ok(())
+}
+
+/// The in-tree device-tree source directory for a build: `arch/<arch>/boot/dts/<dt_dir>`.
+/// This is where `device_dts` sources land and where `kernel_dtb` is compiled, so both
+/// the install and the [`build_dtb`] fast path derive their paths from it.
+fn dt_source_dir(build: &ResolvedBuild, tree: &Path) -> PathBuf {
+    tree.join("arch")
+        .join(&build.kernel_arch)
+        .join("boot")
+        .join("dts")
+        .join(&build.dt_dir)
+}
+
+/// Copy the board's loose device-tree sources into the kernel's DT dir and register
+/// the board DTB with kbuild, so `bindeb-pkg` compiles and ships it like any in-tree
+/// board (§4).
+///
+/// Copy-into-tree rather than a standalone `dtc` run: a forked board `.dts`'s
+/// `#include "<soc>.dtsi"` then resolves for free, and the DTB rides in the
+/// `linux-image` deb with the kernel it was built against.
+///
+/// A source that would overwrite an existing in-tree file is refused
+/// ([`EngineError::DeviceDtsShadowsUpstream`]) — that is a patch's job, not this
+/// mechanism's. Only `.dts` sources are registered in the `Makefile`; a `.dtsi` is an
+/// include, compiled through whatever `.dts` pulls it in.
+fn install_device_dts(
+    build: &ResolvedBuild,
+    sources: &[PathBuf],
+    tree: &Path,
+    step: &Step,
+) -> Result<(), EngineError> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let dt_dir = dt_source_dir(build, tree);
+    std::fs::create_dir_all(&dt_dir).map_err(|s| EngineError::io(&dt_dir, s))?;
+
+    for src in sources {
+        let name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let dest = dt_dir.join(&name);
+        if dest.exists() {
+            return Err(EngineError::DeviceDtsShadowsUpstream {
+                src: src.display().to_string(),
+                dest: dest.display().to_string(),
+            });
+        }
+        std::fs::copy(src, &dest).map_err(|s| EngineError::io(src, s))?;
+        if name.ends_with(".dts") {
+            let dtb = name.replace(".dts", ".dtb");
+            register_dtb(&dt_dir, &dtb)?;
+        }
+    }
+    step.log(format!(
+        "installed {} device-tree source(s) into {}",
+        sources.len(),
+        dt_dir.display()
+    ));
+    Ok(())
+}
+
+/// Append `dtb-$(CONFIG_…) += <dtb>` to a DT directory's `Makefile`, idempotently.
+///
+/// The `CONFIG_` symbol is read from the Makefile's own first `dtb-$(CONFIG_…) +=`
+/// rule rather than hardcoded per SoC vendor: whatever gates the neighbouring boards'
+/// DTBs gates this board's too, which is the only correct answer and keeps the engine
+/// vendor-agnostic. A tree with no such rule cannot build the DTB, so that is an error
+/// rather than a silently-ignored append.
+fn register_dtb(dt_dir: &Path, dtb: &str) -> Result<(), EngineError> {
+    let makefile = dt_dir.join("Makefile");
+    let content = std::fs::read_to_string(&makefile).map_err(|s| EngineError::io(&makefile, s))?;
+
+    // Idempotent: a reused or already-registered tree is left untouched. Scanning
+    // every line (not just `dtb-` ones) also catches a rule split over `\`
+    // continuations.
+    if content
+        .lines()
+        .any(|line| line.split_whitespace().any(|tok| tok == dtb))
+    {
+        return Ok(());
+    }
+    let symbol = dtb_config_symbol(&content)
+        .ok_or_else(|| EngineError::DeviceDtsNoMakefileRule {
+            makefile: makefile.display().to_string(),
+            dtb: dtb.to_string(),
+        })?
+        .to_string();
+    let mut out = content;
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("dtb-$({symbol}) += {dtb}\n"));
+    std::fs::write(&makefile, out).map_err(|s| EngineError::io(&makefile, s))?;
+    Ok(())
+}
+
+/// The `CONFIG_` symbol guarding DTB builds in a DT directory's `Makefile`, taken from
+/// its first `dtb-$(CONFIG_…) +=` rule (e.g. `CONFIG_ARCH_ROCKCHIP`). Pure, so the
+/// parse is unit-testable against real Makefile shapes.
+fn dtb_config_symbol(makefile: &str) -> Option<&str> {
+    makefile.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("dtb-$(")?;
+        let (symbol, _) = rest.split_once(')')?;
+        symbol.starts_with("CONFIG_").then_some(symbol)
+    })
 }
 
 /// Generate the fragment-merged `.config` (identical to the parity check's)
@@ -289,6 +495,7 @@ fn configure(
     tree: &Path,
     step: &Step,
 ) -> Result<(), EngineError> {
+    mrproper_if_dirty(build, env, tree, step)?;
     let inputs = kconfig::ConfigInputs {
         tree,
         arch: &build.kernel_arch,
@@ -316,6 +523,48 @@ fn configure(
         opts.fragments.len()
     ));
     Ok(())
+}
+
+/// The paths whose presence makes kbuild call a source tree "not clean" — exactly the
+/// three `outputmakefile` tests. All are outputs of an *in-tree* build.
+fn in_tree_build_state(build: &ResolvedBuild, tree: &Path) -> [PathBuf; 3] {
+    [
+        tree.join(".config"),
+        tree.join("include").join("config"),
+        tree.join("arch").join(&build.kernel_arch).join("include").join("generated"),
+    ]
+}
+
+/// `make mrproper` the tree if a previous in-tree build left state behind.
+///
+/// The `.config` is generated by an out-of-tree (`O=`) build so the same code can
+/// configure a *shared* verify-tree without dirtying it — but kbuild refuses an `O=`
+/// build whose source tree carries in-tree build output, and `configure` itself ends
+/// by copying the generated `.config` into the tree for `make bindeb-pkg`. So the
+/// second configure of any reused tree — a rebuild after a fragment edit, a repeated
+/// `--stage dtb`, a resumed interrupted build — would fail with kbuild's "The source
+/// tree is not clean" unless the tree is reset first. The Tier-1 clone/patch work is
+/// still reused; only the build output is discarded, which a changed `.config` would
+/// have invalidated anyway. Mirrors the u-boot stage's `distclean` of a reused tree.
+fn mrproper_if_dirty(
+    build: &ResolvedBuild,
+    env: &BuildEnv,
+    tree: &Path,
+    step: &Step,
+) -> Result<(), EngineError> {
+    if !in_tree_build_state(build, tree).iter().any(|p| p.exists()) {
+        return Ok(());
+    }
+    step.log("kernel tree carries a previous in-tree build — mrproper before configuring");
+    let mut make = Command::new("make");
+    make.arg("-C")
+        .arg(tree)
+        .arg(format!("ARCH={}", build.kernel_arch))
+        .arg("mrproper");
+    if let Some(prefix) = &env.cross_compile {
+        make.env("CROSS_COMPILE", prefix);
+    }
+    build::run(make, "make", "make mrproper", step)
 }
 
 /// Run `make bindeb-pkg` with the resolved kbuild env and cross settings.
@@ -407,12 +656,12 @@ mod tests {
         let git = |c: &str| GitPin { reference: "r".into(), commit: c.into() };
         Lock {
             kernel: KernelPin { id: "k".into(), reference: "v".into(), commit: kernel_commit.into() },
-            patches: PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() },
+            patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
             uboot: UbootPin { reference: "v".into(), commit: "u".into() },
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
-            blobs: BlobsPin { atf: "a".into(), tpl: "t".into() },
+            blobs: BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None },
             extra_debs: vec![],
             snapshot: None,
         }
@@ -420,7 +669,7 @@ mod tests {
 
     #[test]
     fn clone_manifest_tracks_pin_and_dev_inputs() {
-        let sig = |kc, pc, patches| clone_manifest(&lock_with(kc, pc), patches).signature;
+        let sig = |kc, pc, patches| clone_manifest(&lock_with(kc, pc), patches, &[]).signature;
         let base = sig("kc1", "pc1", PatchSeries::Pinned);
         // Same pins → same signature (a plain rebuild reuses the tree).
         assert_eq!(base, sig("kc1", "pc1", PatchSeries::Pinned));
@@ -451,8 +700,170 @@ mod tests {
         a.kernel.reference = "v7.1.1".into();
         b.kernel.reference = "v7.1.2".into();
         assert_ne!(
-            clone_manifest(&a, PatchSeries::Pinned).signature,
-            clone_manifest(&b, PatchSeries::Pinned).signature
+            clone_manifest(&a, PatchSeries::Pinned, &[]).signature,
+            clone_manifest(&b, PatchSeries::Pinned, &[]).signature
+        );
+    }
+
+    #[test]
+    fn device_dts_content_folds_into_the_clone_signature() {
+        let lock = lock_with("kc1", "pc1");
+        let sig = |dts: &[String]| clone_manifest(&lock, PatchSeries::Pinned, dts).signature;
+
+        // A board with an upstream DTB folds nothing, so its tree signature is exactly
+        // what it was before `device_dts` existed — its cached tree stays valid.
+        let upstream = sig(&[]);
+        assert_eq!(upstream, clone_manifest(&lock, PatchSeries::Pinned, &[]).signature);
+
+        // Carrying a board `.dts` at all distinguishes the tree (it now holds an extra
+        // source and a Makefile rule).
+        let v1 = vec!["board.dts=aaa".to_string()];
+        assert_ne!(upstream, sig(&v1));
+
+        // Editing the board `.dts` restamps the tree, so the next build re-copies and
+        // recompiles rather than reusing a tree built from the old source.
+        let v2 = vec!["board.dts=bbb".to_string()];
+        assert_ne!(sig(&v1), sig(&v2));
+
+        // Order is significant (a `.dtsi` include order can change the DTB).
+        let a = vec!["a.dtsi=1".to_string(), "b.dts=2".to_string()];
+        let b = vec!["b.dts=2".to_string(), "a.dtsi=1".to_string()];
+        assert_ne!(sig(&a), sig(&b));
+    }
+
+    #[test]
+    fn in_tree_build_state_matches_kbuilds_cleanliness_test() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path();
+        let build = rk1_build();
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "configure");
+
+        // A freshly-cloned tree carries none of the three, so nothing is cleaned and
+        // no `make` runs (this test never shells out).
+        assert!(!in_tree_build_state(&build, tree).iter().any(|p| p.exists()));
+        mrproper_if_dirty(&build, &BuildEnv { cross_compile: None, jobs: None, toolchain_id: String::new() }, tree, &step).unwrap();
+
+        // Each of kbuild's three markers, alone, makes the tree dirty. `configure`
+        // itself creates the first by copying the generated `.config` in, which is why
+        // a reused tree must be reset before the next out-of-tree config build.
+        let markers = in_tree_build_state(&build, tree);
+        assert_eq!(markers[0], tree.join(".config"));
+        assert_eq!(markers[1], tree.join("include/config"));
+        assert_eq!(markers[2], tree.join("arch/arm64/include/generated"));
+        for marker in &markers {
+            if let Some(parent) = marker.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(marker, "x").unwrap();
+            assert!(
+                in_tree_build_state(&build, tree).iter().any(|p| p.exists()),
+                "{} must mark the tree dirty",
+                marker.display()
+            );
+            std::fs::remove_file(marker).unwrap();
+        }
+    }
+
+    #[test]
+    fn dtb_config_symbol_reads_the_dirs_own_guard() {
+        let rockchip = "# SPDX\ndtb-$(CONFIG_ARCH_ROCKCHIP) += rk3576-evb1-v10.dtb\n";
+        assert_eq!(dtb_config_symbol(rockchip), Some("CONFIG_ARCH_ROCKCHIP"));
+        // Another vendor's dir yields that vendor's symbol — nothing is hardcoded.
+        assert_eq!(
+            dtb_config_symbol("dtb-$(CONFIG_ARCH_SUNXI) += sun50i.dtb\n"),
+            Some("CONFIG_ARCH_SUNXI")
+        );
+        // Leading whitespace is tolerated; a non-CONFIG variable is not a guard.
+        assert_eq!(dtb_config_symbol("  dtb-$(CONFIG_X) += a.dtb"), Some("CONFIG_X"));
+        assert_eq!(dtb_config_symbol("dtb-$(FOO) += a.dtb\n"), None);
+        assert_eq!(dtb_config_symbol("subdir-y += rockchip\n"), None);
+    }
+
+    #[test]
+    fn register_dtb_appends_once_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let makefile = dir.join("Makefile");
+        std::fs::write(&makefile, "dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3576-evb1-v10.dtb\n").unwrap();
+
+        register_dtb(dir, "rk3576-h96-max-m9.dtb").unwrap();
+        let after = std::fs::read_to_string(&makefile).unwrap();
+        assert!(after.contains("dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3576-h96-max-m9.dtb"));
+        assert!(after.contains("rk3576-evb1-v10.dtb"), "upstream rules are preserved");
+
+        // A reused tree must not accumulate duplicate rules.
+        register_dtb(dir, "rk3576-h96-max-m9.dtb").unwrap();
+        let again = std::fs::read_to_string(&makefile).unwrap();
+        assert_eq!(after, again);
+        assert_eq!(again.matches("rk3576-h96-max-m9.dtb").count(), 1);
+    }
+
+    #[test]
+    fn register_dtb_needs_a_rule_to_model_and_a_final_newline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // A Makefile with no `dtb-$(CONFIG_…)` rule gives nothing to model the entry on.
+        std::fs::write(dir.join("Makefile"), "subdir-y += foo\n").unwrap();
+        assert!(matches!(
+            register_dtb(dir, "board.dtb"),
+            Err(EngineError::DeviceDtsNoMakefileRule { .. })
+        ));
+        // A Makefile whose last line lacks a newline still gets a well-formed rule.
+        std::fs::write(dir.join("Makefile"), "dtb-$(CONFIG_A) += a.dtb").unwrap();
+        register_dtb(dir, "board.dtb").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("Makefile")).unwrap(),
+            "dtb-$(CONFIG_A) += a.dtb\ndtb-$(CONFIG_A) += board.dtb\n"
+        );
+    }
+
+    #[test]
+    fn install_device_dts_copies_sources_and_refuses_to_shadow_upstream() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("linux");
+        let build = rk1_build();
+        let dt_dir = dt_source_dir(&build, &tree);
+        std::fs::create_dir_all(&dt_dir).unwrap();
+        std::fs::write(dt_dir.join("Makefile"), "dtb-$(CONFIG_ARCH_ROCKCHIP) += up.dtb\n").unwrap();
+        std::fs::write(dt_dir.join("upstream.dts"), "/* in-tree */\n").unwrap();
+
+        let src_dir = tmp.path().join("cfg");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let dtsi = src_dir.join("board-common.dtsi");
+        let dts = src_dir.join("board.dts");
+        std::fs::write(&dtsi, "/* common */\n").unwrap();
+        std::fs::write(&dts, "/* board */\n").unwrap();
+
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "device-dts");
+        install_device_dts(&build, &[dtsi, dts], &tree, &step).unwrap();
+
+        // Both sources land in the DT dir; only the `.dts` gets a build rule (a `.dtsi`
+        // is compiled through whatever includes it).
+        assert!(dt_dir.join("board-common.dtsi").exists());
+        assert!(dt_dir.join("board.dts").exists());
+        let makefile = std::fs::read_to_string(dt_dir.join("Makefile")).unwrap();
+        assert!(makefile.contains("dtb-$(CONFIG_ARCH_ROCKCHIP) += board.dtb"));
+        assert!(!makefile.contains("board-common.dtb"));
+
+        // An empty source list is the upstream-DTB case: nothing is touched.
+        let untouched = std::fs::read_to_string(dt_dir.join("Makefile")).unwrap();
+        install_device_dts(&build, &[], &tree, &step).unwrap();
+        assert_eq!(untouched, std::fs::read_to_string(dt_dir.join("Makefile")).unwrap());
+
+        // A source colliding with an in-tree file is refused: editing upstream DT is a
+        // patch's job, and clobbering it would hide the drift.
+        let shadow = src_dir.join("upstream.dts");
+        std::fs::write(&shadow, "/* mine */\n").unwrap();
+        assert!(matches!(
+            install_device_dts(&build, &[shadow], &tree, &step),
+            Err(EngineError::DeviceDtsShadowsUpstream { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(dt_dir.join("upstream.dts")).unwrap(),
+            "/* in-tree */\n",
+            "the upstream source is left intact"
         );
     }
 
@@ -468,11 +879,11 @@ mod tests {
         let frags = vec![f1.clone(), f2.clone()];
         let opts = KernelOptions {
             source: "",
-            patches_root: tmp.path(),
+            patches: None,
             fragments: &frags,
+            device_dts: &[],
             work_dir: tmp.path(),
             out_dir: tmp.path(),
-            patches_dev: false,
             store: None,
         };
         let env = |tc: &str| BuildEnv {
@@ -481,7 +892,7 @@ mod tests {
             toolchain_id: tc.to_string(),
         };
         let sig = |lock: &Lock, env: &BuildEnv| {
-            output_manifest(&build, lock, &opts, env, PatchSeries::Pinned).unwrap().signature
+            output_manifest(&build, lock, &opts, env, PatchSeries::Pinned, &[]).unwrap().signature
         };
         let base = sig(&lock, &env("gcc-1"));
         // Identical inputs → identical signature (a plain rebuild restores).

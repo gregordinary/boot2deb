@@ -82,6 +82,11 @@ pub struct PlanInputs<'a> {
     /// Include the optional `libmali` userspace node (built only with
     /// `--build-libmali`).
     pub include_libmali: bool,
+    /// The build's resolved `device_dts` sources. Their content is folded into the
+    /// kernel tree signature (the stage copies them into the tree), so the prediction
+    /// must fold it too or an edited board `.dts` would be reported as "reuse". Empty
+    /// for a board whose DTB is upstream. §4.
+    pub device_dts: &'a [PathBuf],
 }
 
 /// Predict the reuse decision for every compile node, in build order. Reads
@@ -94,9 +99,11 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
     // per scope exactly as each stage does so a co-dev prediction matches the stamp.
     // Pinned mode (or no patches root) folds by commit only. The `*_fp` Vecs are held
     // here so the borrowed [`PatchSeries::Dev`] outlives every use below.
-    let fingerprint = |scope| match inputs.patches_root {
-        Some(root) if inputs.patches_dev => {
-            crate::build::patch_series_fingerprint(root, &lock.patches.profile, scope)
+    // A lock with no `[patches]` table (a kernel with no patch profile) has no series
+    // to fingerprint at all, in either mode.
+    let fingerprint = |scope| match (inputs.patches_root, &lock.patches) {
+        (Some(root), Some(pin)) if inputs.patches_dev => {
+            crate::build::patch_series_fingerprint(root, &pin.profile, scope)
         }
         _ => Vec::new(),
     };
@@ -106,11 +113,13 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
     let ffmpeg_fp = fingerprint(crate::build::PatchScope::Ffmpeg);
     let userspace_fp = fingerprint(crate::build::PatchScope::Userspace);
 
+    let dts_fp = crate::build::device_dts_fingerprint(inputs.device_dts);
+
     let mut nodes = vec![
         NodePlan::evaluate(
             "kernel",
             w.join("linux"),
-            &crate::build::kernel::clone_manifest(lock, patch_series(dev, &kernel_fp)),
+            &crate::build::kernel::clone_manifest(lock, patch_series(dev, &kernel_fp), &dts_fp),
         ),
         NodePlan::evaluate(
             "uboot",
@@ -127,8 +136,7 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
         // package's tree signature, so recompute it the same way the stage stamps it —
         // `receives_userspace_patches` is the shared source of truth for which package.
         let patch_inputs = crate::build::userspace::PatchInputs {
-            profile: &lock.patches.profile,
-            commit: &lock.patches.commit,
+            pin: lock.patches.as_ref(),
             patches: patch_series(dev, &userspace_fp),
         };
         let us_patches = |name: &str| {
@@ -166,8 +174,7 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
             w.join("ffmpeg").join("build"),
             &crate::build::ffmpeg::clone_manifest(
                 ff_pins,
-                &lock.patches.profile,
-                &lock.patches.commit,
+                lock.patches.as_ref(),
                 patch_series(dev, &ffmpeg_fp),
             ),
         ));
@@ -199,7 +206,7 @@ mod tests {
         let git = |c: &str| GitPin { reference: "r".into(), commit: c.into() };
         Lock {
             kernel: KernelPin { id: "k".into(), reference: "v7.1.1".into(), commit: kernel_commit.into() },
-            patches: PatchesPin { profile: "rk3588-accel".into(), commit: "p1".into() },
+            patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: "p1".into() }),
             uboot: UbootPin { reference: "v".into(), commit: "u1".into() },
             userspace: Some(UserspacePins {
                 mpp: git(mpp_commit),
@@ -208,7 +215,7 @@ mod tests {
             }),
             ffmpeg: Some(FfmpegPins { base: git("b1"), rockchip: git("rk1") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
-            blobs: BlobsPin { atf: "a".into(), tpl: "t".into() },
+            blobs: BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None },
             extra_debs: vec![],
             snapshot: None,
         }
@@ -228,6 +235,7 @@ mod tests {
             patches_dev: false,
             patches_root: None,
             include_libmali: false,
+            device_dts: &[],
         });
         // No trees on disk yet → every node is a fresh build.
         assert!(plan.iter().all(|n| n.status == NodeStatus::Absent));
@@ -246,6 +254,7 @@ mod tests {
             patches_dev: false,
             patches_root: None,
             include_libmali: true,
+            device_dts: &[],
         });
         assert!(with.iter().any(|n| n.node == "userspace:libmali"));
     }
@@ -264,6 +273,7 @@ mod tests {
             patches_dev: false,
             patches_root: None,
             include_libmali: true,
+            device_dts: &[],
         });
         let names: Vec<&str> = plan.iter().map(|n| n.node.as_str()).collect();
         assert_eq!(names, ["kernel", "uboot"]);
@@ -280,7 +290,7 @@ mod tests {
         std::fs::create_dir_all(&linux).unwrap();
         write_manifest(
             &linux,
-            &crate::build::kernel::clone_manifest(&old, crate::build::PatchSeries::Pinned),
+            &crate::build::kernel::clone_manifest(&old, crate::build::PatchSeries::Pinned, &[]),
         )
         .unwrap();
         let mpp = work.join("userspace").join("mpp");
@@ -288,8 +298,7 @@ mod tests {
         // Stamp mpp exactly as plan_nodes recomputes it: the MPP tree folds the patch
         // series, so include the same PatchInputs.
         let old_patches = crate::build::userspace::PatchInputs {
-            profile: &old.patches.profile,
-            commit: &old.patches.commit,
+            pin: old.patches.as_ref(),
             patches: crate::build::PatchSeries::Pinned,
         };
         write_manifest(
@@ -310,6 +319,7 @@ mod tests {
             patches_dev: false,
             patches_root: None,
             include_libmali: false,
+            device_dts: &[],
         });
 
         // mpp is unchanged → reuse.
@@ -339,6 +349,7 @@ mod tests {
             patches_dev: false,
             patches_root: None,
             include_libmali: false,
+            device_dts: &[],
         });
         assert_eq!(status_of(&plan, "kernel"), &NodeStatus::Unstamped);
     }

@@ -113,6 +113,11 @@ pub struct ImageArtifacts {
     /// Whether the raw image files were deleted after compression (PERF-2), so a
     /// consumer knows only the `.xz` remains.
     pub raw_removed: bool,
+    /// The per-image first-boot password spliced into [`crate::rootfs::DEFAULT_USER`]'s
+    /// account (SEC-6) — unique per build, expired so it must be changed at first
+    /// login. The caller surfaces it and records it in the provenance manifest; it
+    /// is written to no committed file.
+    pub password: String,
 }
 
 /// Validate the resolved build's image geometry (offsets, size, GPT/rootfs fit)
@@ -188,6 +193,13 @@ pub fn build_image(
     let disk_guid = derive_uuid(opts.image_seed, &build.device, "gpt-disk");
     let part_guid = derive_uuid(opts.image_seed, &build.device, "gpt-partition");
 
+    // The per-image first-boot password (SEC-6): generated here so the shared,
+    // cacheable rootfs tarball stays password-free (the account is locked in it)
+    // and each built image gets its own credential — spliced into the staged
+    // `/etc/shadow` before formatting, not surgically into the tar.
+    let password = crate::secret::generate_password()?;
+    let password_hash = crate::secret::crypt_password(&password)?;
+
     // The ext4 rootfs partition is identical across layouts — build it once.
     let ext4 = opts.work_dir.join("rootfs.ext4");
     ext4::build_rootfs_ext4(
@@ -196,6 +208,10 @@ pub fn build_image(
         opts.rootfs_tar,
         opts.rootfs_label,
         ext4_uuid,
+        ext4::FirstBoot {
+            user: crate::rootfs::DEFAULT_USER,
+            password_hash: &password_hash,
+        },
         &step,
     )?;
     step.progress(50);
@@ -254,6 +270,7 @@ pub fn build_image(
         output,
         compressed,
         raw_removed,
+        password,
     })
 }
 
@@ -522,10 +539,19 @@ mod tests {
         std::fs::create_dir_all(root.join("usr/bin")).unwrap();
         std::fs::write(root.join("etc/hostname"), b"turing-rk1\n").unwrap();
         std::fs::write(root.join("usr/bin/true"), b"#!/bin/true\n").unwrap();
+        // The default account is locked in the tarball; the image stage splices the
+        // per-image first-boot hash into it before formatting.
+        std::fs::write(
+            root.join("etc/shadow"),
+            b"root:*:19000:0:99999:7:::\ndebian:!:19000:0:99999:7:::\n",
+        )
+        .unwrap();
         let out = std::fs::File::create(path).unwrap();
-        // tar the tree with reproducible-ish flags; content is what matters here.
+        // Record root ownership like the real rootfs tar (mmdebstrap emits uid 0),
+        // so the userns extraction maps it back to the build user — which the image
+        // stage's in-place shadow splice needs to be able to rewrite the file.
         let status = Command::new("tar")
-            .arg("-C")
+            .args(["--owner=0", "--group=0", "--numeric-owner", "-C"])
             .arg(&root)
             .arg("-cf")
             .arg(path)
@@ -623,7 +649,7 @@ mod tests {
     #[test]
     fn combined_image_has_gpt_rootfs_and_bootloader_at_offsets() {
         // End-to-end (Linux only): userns staging + mke2fs + GPT + splices.
-        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck"]) {
+        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck", "openssl"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -706,7 +732,7 @@ mod tests {
     fn compression_deletes_the_raw_image_unless_kept() {
         // End-to-end (Linux only): compress, then confirm the raw is dropped and
         // only the .xz remains (PERF-2), and that --keep-raw retains it.
-        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck"]) {
+        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck", "openssl"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -757,7 +783,7 @@ mod tests {
 
     #[test]
     fn split_layout_emits_bootloader_and_rootfs_images() {
-        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck"]) {
+        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck", "openssl"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();

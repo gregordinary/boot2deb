@@ -6,6 +6,10 @@ userspace, u-boot) before it compiles. The series is declared by a
 lives in the separate `patches` repo. Adding a patch means getting it into that series
 and then into a build. This page walks the loop end to end.
 
+It applies to a kernel that names a profile. A kernel with `patch_profile = "none"`
+applies no series and never reads the `patches` repo; giving such a board a patch means
+first authoring a profile for its kernel.
+
 ## The loop
 
 ```text

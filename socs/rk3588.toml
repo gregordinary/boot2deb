@@ -21,6 +21,13 @@ modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket
 # here; a board that adds a wifi module pulls its firmware on its device layer.
 packages = ["firmware-misc-nonfree", "firmware-realtek"]
 
+# rkbin defaults for RK3588 boards. ATF (BL31) is SoC-generic; the DDR TPL is a
+# common-memory default a board with different DRAM overrides on its device layer.
+# RK3588 boots BL31-only, so there is no BL32/OP-TEE.
+[rkbin]
+atf = "rk3588_bl31_v1.51.elf"
+tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
+
 # Media-accel userspace source trees, shared across the RK35xx family.
 # `ref` is the default constraint; the exact commit is pinned in the lock. mpp
 # pins the durable upstream release tag, and the contiguous-CMA allocator fix the

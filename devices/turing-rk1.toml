@@ -14,8 +14,5 @@ default_layout          = "combined"               # combined | split
 hostname                = "turing-rk1"
 image_size              = "2G"
 
-# DDR TPL is board-memory-specific, so the rkbin blob set lives at the device
-# layer (not the soc layer) for the RK1's LPDDR configuration.
-[rkbin]
-atf = "rk3588_bl31_v1.51.elf"
-tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
+# rkbin (ATF + DDR TPL) is inherited from socs/rk3588.toml — the RK1 uses the
+# SoC's common LPDDR configuration, so it overrides nothing here.

@@ -14,6 +14,13 @@
 //! kernel's online resize (`EXT4_IOC_RESIZE_FS`) grows without a meta_bg
 //! conversion — first boot expands the rootfs while it is mounted as `/`.
 //!
+//! The staged tree is also where the unique per-image first-boot password is
+//! spliced (SEC-6): the cacheable rootfs tarball leaves the default account
+//! locked, and `/etc/shadow` is rewritten here — the one per-build-unique step —
+//! before `mke2fs` records the tree. Editing the extracted file in place keeps
+//! the `root:shadow` ownership the namespace set, so no fragile in-archive
+//! member surgery is needed.
+//!
 //! The finished image must verify **clean**: `e2fsck -fn` runs read-only and
 //! any nonzero exit fails the build. A just-formatted filesystem has nothing
 //! legitimate to correct, so a "fix" here means the formatter and the checker
@@ -53,18 +60,20 @@ const EXT4_FEATURES: &str = "64bit,dir_index,dir_nlink,ext_attr,extent,extra_isi
 /// guarantees it). `label` is the ext4 volume label (≤ 16 bytes) the rootfs's
 /// `/etc/fstab` mounts by. `uuid` is the deterministic superblock UUID the caller
 /// derived from the lock, so a rebuild reproduces it instead of `mke2fs` drawing
-/// a random one.
+/// a random one. `first_boot` is the per-image credential spliced into the staged
+/// `/etc/shadow` after extraction and before formatting (SEC-6).
 ///
 /// The output is *not* byte-for-byte reproducible on its own: `mke2fs` stamps
-/// the superblock's format/check times from the wall clock. The UUID is the one
-/// identifier the reproducibility contract reaches; two builds differ only in
-/// those timestamp fields.
+/// the superblock's format/check times from the wall clock, and the per-image
+/// first-boot password is unique per build. The UUID is the one identifier the
+/// reproducibility contract reaches.
 pub(crate) fn build_rootfs_ext4(
     dest: &Path,
     size: u64,
     tarball: &Path,
     label: &str,
     uuid: Uuid,
+    first_boot: FirstBoot,
     step: &Step,
 ) -> Result<(), EngineError> {
     assert!(
@@ -85,9 +94,58 @@ pub(crate) fn build_rootfs_ext4(
     remove_staging(&staging, step)?;
     std::fs::create_dir_all(&staging).map_err(|s| EngineError::io(&staging, s))?;
     stage_rootfs(tarball, &staging, step)?;
+    splice_first_boot_password(&staging, first_boot, step)?;
     mkfs(dest, size, &staging, label, uuid, step)?;
     remove_staging(&staging, step)?;
     verify_clean(dest, step)
+}
+
+/// The per-image first-boot credential spliced into the staged rootfs before it
+/// is formatted (SEC-6). The default account is created locked in the cacheable
+/// rootfs tarball; this rewrites its `/etc/shadow` line with a fresh hash and
+/// forces a change at first login.
+pub(crate) struct FirstBoot<'a> {
+    /// The default account whose locked shadow line receives the hash.
+    pub user: &'a str,
+    /// A `sha512crypt` (`$6$`) hash from [`crate::secret::crypt_password`].
+    pub password_hash: &'a str,
+}
+
+/// Rewrite `first_boot.user`'s locked `/etc/shadow` line in the staged tree with
+/// the per-image hash (SEC-6), before `mke2fs -d` records the tree.
+///
+/// The unique per-image password is non-reproducible, so the cacheable rootfs
+/// tarball leaves the account locked (`{user}:!:…`) and the splice happens here —
+/// the one per-build-unique step. The extracted file is owner-writable (mode
+/// `0640`), so an in-place content rewrite keeps its inode: the `root:shadow`
+/// ownership the userns extraction set survives for `mke2fs` to read back, with
+/// no fragile `tar --delete`/`--append` on the (PAX) archive. The extracted
+/// file's mtime is mmdebstrap's epoch clamp; it is restored across the rewrite so
+/// the splice reintroduces no build-time mtime (DET).
+fn splice_first_boot_password(
+    staging: &Path,
+    first_boot: FirstBoot,
+    step: &Step,
+) -> Result<(), EngineError> {
+    let shadow = staging.join("etc/shadow");
+    let current = std::fs::read_to_string(&shadow).map_err(|s| EngineError::io(&shadow, s))?;
+    let spliced =
+        crate::rootcache::splice_shadow(&current, first_boot.user, first_boot.password_hash)
+            .ok_or_else(|| EngineError::ArtifactMissing {
+                what: format!("{} account in /etc/shadow", first_boot.user),
+                location: shadow.display().to_string(),
+            })?;
+    let mtime = std::fs::metadata(&shadow)
+        .and_then(|m| m.modified())
+        .map_err(|s| EngineError::io(&shadow, s))?;
+    std::fs::write(&shadow, spliced).map_err(|s| EngineError::io(&shadow, s))?;
+    std::fs::File::options()
+        .write(true)
+        .open(&shadow)
+        .and_then(|f| f.set_modified(mtime))
+        .map_err(|s| EngineError::io(&shadow, s))?;
+    step.log("spliced the unique per-image first-boot password into /etc/shadow");
+    Ok(())
 }
 
 /// A command running inside a fresh user namespace: the build user mapped to
@@ -251,6 +309,13 @@ mod tests {
         let root = tmp.path().join("tree");
         std::fs::create_dir_all(root.join("etc")).unwrap();
         std::fs::write(root.join("etc/hostname"), b"turing-rk1\n").unwrap();
+        // The account is locked in the tarball; the image stage splices the
+        // per-image first-boot hash into it.
+        std::fs::write(
+            root.join("etc/shadow"),
+            b"root:*:19000:0:99999:7:::\ndebian:!:19000:0:99999:7:::\n",
+        )
+        .unwrap();
         let tar = tmp.path().join("rootfs.tar");
         let status = Command::new("tar")
             .args(["--owner=0", "--group=0", "--numeric-owner", "-C"])
@@ -267,7 +332,11 @@ mod tests {
         let size: u64 = 64 * 1024 * 1024;
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "image");
-        build_rootfs_ext4(&img, size, &tar, "rootfs", uuid, &step).unwrap();
+        let first_boot = FirstBoot {
+            user: "debian",
+            password_hash: "$6$saltsalt$0123456789abcdef",
+        };
+        build_rootfs_ext4(&img, size, &tar, "rootfs", uuid, first_boot, &step).unwrap();
 
         let bytes = std::fs::read(&img).unwrap();
         // s_uuid at superblock offset 0x68.
@@ -288,5 +357,68 @@ mod tests {
 
         // The staging tree is cleaned up.
         assert!(!tmp.path().join("rootfs-staging").exists());
+    }
+
+    #[test]
+    fn splice_first_boot_password_rewrites_the_locked_line_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("stage");
+        std::fs::create_dir_all(staging.join("etc")).unwrap();
+        let shadow = staging.join("etc/shadow");
+        std::fs::write(
+            &shadow,
+            "root:*:19000:0:99999:7:::\ndebian:!:19000:0:99999:7:::\n",
+        )
+        .unwrap();
+        // The on-disk shape the userns extraction leaves: mode 0640 and an
+        // epoch-clamped mtime, both of which the in-place rewrite must keep.
+        std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&shadow)
+            .unwrap()
+            .set_modified(epoch)
+            .unwrap();
+
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "image");
+        let first_boot = FirstBoot {
+            user: "debian",
+            password_hash: "$6$saltsalt$hashhashhash",
+        };
+        splice_first_boot_password(&staging, first_boot, &step).unwrap();
+
+        let out = std::fs::read_to_string(&shadow).unwrap();
+        // The debian line carries the hash and is expired (field 3 = 0); root is untouched.
+        assert!(
+            out.contains("debian:$6$saltsalt$hashhashhash:0:0:99999:7:::"),
+            "spliced line missing, got: {out}"
+        );
+        assert!(out.contains("root:*:19000:0:99999:7:::"), "root line preserved");
+        // In-place rewrite preserves both the mode and the clamped mtime.
+        let meta = std::fs::metadata(&shadow).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o640, "0640 preserved");
+        assert_eq!(meta.modified().unwrap(), epoch, "epoch-clamped mtime preserved");
+    }
+
+    #[test]
+    fn splice_first_boot_password_errors_when_the_account_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("stage");
+        std::fs::create_dir_all(staging.join("etc")).unwrap();
+        std::fs::write(staging.join("etc/shadow"), "root:*:19000:0:99999:7:::\n").unwrap();
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "image");
+        let first_boot = FirstBoot {
+            user: "debian",
+            password_hash: "$6$x$y",
+        };
+        let err = splice_first_boot_password(&staging, first_boot, &step).unwrap_err();
+        assert!(
+            matches!(err, EngineError::ArtifactMissing { what, .. } if what.contains("debian account")),
+            "expected a missing-account error"
+        );
     }
 }

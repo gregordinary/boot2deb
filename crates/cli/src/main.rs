@@ -163,6 +163,10 @@ enum StageArg {
     All,
     /// Only the kernel `.deb`s.
     Kernel,
+    /// Only the board DTB, rebuilt in the already-patched kernel tree — the
+    /// board-bring-up loop (edit the `device_dts` source, rebuild, reflash) without a
+    /// full kernel build.
+    Dtb,
     /// Only the u-boot boot payloads.
     Uboot,
     /// Only the userspace media-accel `.deb`s (MPP/RGA).
@@ -616,7 +620,15 @@ fn parse_scope(s: &str) -> Result<Scope, String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let root = ConfigRoot::with_overlays(cli.root, cli.overlay);
+    // Every overlay must name an existing directory; a bad `--overlay` fails here
+    // rather than silently composing a search path the operator did not intend.
+    let root = match ConfigRoot::with_overlays(cli.root, cli.overlay) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     match run(&root, cli.command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -901,34 +913,53 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
 
     let sink = |e: Event| print_event(&e);
 
-    // Resolve the patches source only for the stages that apply the series
-    // (kernel/u-boot/userspace/ffmpeg): an explicit --patches-path co-dev checkout,
-    // else the default ../patches if present, else auto-fetch at the pinned commit.
-    // The userspace stage applies the MPP CMA fix to the MPP tree. A
-    // rootfs/image-only build needs no patches, so it never fetches.
-    let needs_patches = matches!(
+    // Resolve the patches source only when there is a series to apply: the lock pins
+    // one (its kernel names a patch profile) *and* this run includes a stage that
+    // applies it (kernel/u-boot/userspace/ffmpeg — the userspace stage carries the MPP
+    // CMA fix). A rootfs/image-only build, or any build of a no-patch kernel, never
+    // reads or fetches the `patches` repo.
+    //
+    // The source is an explicit --patches-path co-dev checkout, else the default
+    // ../patches if present, else an auto-fetch at the pinned commit.
+    let stage_applies_patches = matches!(
         args.stage,
-        StageArg::All | StageArg::Kernel | StageArg::Uboot | StageArg::Userspace | StageArg::Ffmpeg
+        StageArg::All
+            | StageArg::Kernel
+            | StageArg::Dtb
+            | StageArg::Uboot
+            | StageArg::Userspace
+            | StageArg::Ffmpeg
     );
-    let (patches_path, patches_dev) = if needs_patches {
-        resolve_patches_source(
+    let checkout = match (&lock.patches, stage_applies_patches) {
+        (Some(pin), true) => Some(resolve_patches_source(
             args.patches_path.as_deref(),
             args.patches_url.as_deref(),
             &resolved,
-            &lock,
+            pin,
             root,
             &sink,
-        )?
-    } else {
-        (PathBuf::from("../patches"), false)
+        )?),
+        _ => None,
     };
+    // Bind the resolved checkout to the lock's pin, so no stage can be handed a
+    // profile without a checkout to read it from (or vice versa).
+    let patches = checkout.as_ref().zip(lock.patches.as_ref()).map(
+        |((root, dev), pin)| boot2deb_engine::build::PatchSource {
+            root,
+            pin,
+            dev: *dev,
+        },
+    );
 
     // The rootfs tarball the image stage consumes: produced by the rootfs stage,
     // or supplied directly via --rootfs-tar for an image-only build.
     let mut rootfs_tar = args.rootfs_tar.clone();
-    // Captured when this run builds the rootfs (the point the per-image password +
-    // solved manifest exist), to emit the provenance manifest at the end.
-    let mut rootfs_out: Option<(PathBuf, String)> = None;
+    // The solved manifest, captured when this run builds the rootfs; joins the
+    // image stage's per-image password to emit the provenance manifest at the end.
+    let mut rootfs_manifest: Option<PathBuf> = None;
+    // The per-image first-boot password, captured when this run assembles the image
+    // (the image stage now owns it, splicing it into the staged rootfs).
+    let mut first_boot_password: Option<String> = None;
     // The freshly-solved manifest's sha256, set by the rootfs stage — verified
     // against the committed pin and recorded into the lock by `--save-manifest`.
     let mut solved_manifest_digest: Option<String> = None;
@@ -938,34 +969,43 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
     // earlier builds of other kernel versions.
     let mut kernel_image_deb: Option<PathBuf> = None;
 
-    if matches!(args.stage, StageArg::All | StageArg::Kernel) {
+    // The kernel stage and the DTB fast path share every filesystem input; both
+    // prepare the same `<work>/linux` tree, so they resolve their options identically.
+    if matches!(args.stage, StageArg::All | StageArg::Kernel | StageArg::Dtb) {
         let fragments = fragment_paths(root, &resolved)?;
+        let device_dts = device_dts_paths(root, &resolved)?;
         let opts = kernel::KernelOptions {
             source: &kernel_src,
-            patches_root: &patches_path,
+            patches,
             fragments: &fragments,
+            device_dts: &device_dts,
             work_dir: &work_dir,
             out_dir: &out_dir,
-            patches_dev,
             store: artifact_store.as_deref(),
         };
-        let artifacts = run_stage("kernel", &sink, || {
-            kernel::build_kernel(&resolved, &lock, &opts, &build_env, &sink)
-        })?;
-        println!("kernel image  : {}", artifacts.image_deb.display());
-        println!("kernel headers: {}", artifacts.headers_deb.display());
-        record_artifacts(&out_dir, &[artifacts.image_deb.clone(), artifacts.headers_deb.clone()])?;
-        kernel_image_deb = Some(artifacts.image_deb.clone());
+        if matches!(args.stage, StageArg::Dtb) {
+            let dtb = run_stage("dtb", &sink, || {
+                kernel::build_dtb(&resolved, &lock, &opts, &build_env, &sink)
+            })?;
+            println!("board dtb     : {}", dtb.display());
+        } else {
+            let artifacts = run_stage("kernel", &sink, || {
+                kernel::build_kernel(&resolved, &lock, &opts, &build_env, &sink)
+            })?;
+            println!("kernel image  : {}", artifacts.image_deb.display());
+            println!("kernel headers: {}", artifacts.headers_deb.display());
+            record_artifacts(&out_dir, &[artifacts.image_deb.clone(), artifacts.headers_deb.clone()])?;
+            kernel_image_deb = Some(artifacts.image_deb.clone());
+        }
     }
 
     if matches!(args.stage, StageArg::All | StageArg::Uboot) {
         let opts = uboot::UbootOptions {
             source: &uboot_src,
-            patches_root: &patches_path,
+            patches,
             blobs_dir: &blobs_dir,
             work_dir: &work_dir,
             out_dir: &out_dir,
-            patches_dev,
             store: artifact_store.as_deref(),
         };
         let artifacts = run_stage("uboot", &sink, || {
@@ -1018,8 +1058,7 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
             build_libmali: args.build_libmali,
             work_dir: &work_dir,
             out_dir: &out_dir,
-            patches_root: &patches_path,
-            patches_dev,
+            patches,
             store: artifact_store.as_deref(),
         };
         let artifacts = run_stage("userspace", &sink, || {
@@ -1045,11 +1084,10 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
         // out_dir by the userspace stage (run it first, or with --stage all).
         let opts = ffmpeg::FfmpegOptions {
             base_src: &ffmpeg_base_src,
-            patches_root: &patches_path,
+            patches,
             userspace_debs: &out_dir,
             work_dir: &work_dir,
             out_dir: &out_dir,
-            patches_dev,
             store: artifact_store.as_deref(),
         };
         let artifacts = run_stage("ffmpeg", &sink, || {
@@ -1144,16 +1182,10 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
             }
         }
         solved_manifest_digest = Some(solved_digest);
-        // The per-image first-boot password (SEC-6): unique per build, must
-        // be changed at first login. Surfaced here since it exists nowhere else the
-        // operator can read it except the provenance manifest.
-        println!(
-            "first-boot pw: {}  (user {}, expired — change at first login)",
-            artifacts.password,
-            rootfs::DEFAULT_USER
-        );
+        // The account is locked in the tarball; the unique per-image first-boot
+        // password is assigned at image assembly (surfaced there), not here.
         rootfs_tar = Some(artifacts.tar);
-        rootfs_out = Some((artifacts.manifest, artifacts.password));
+        rootfs_manifest = Some(artifacts.manifest);
     }
 
     if matches!(args.stage, StageArg::All | StageArg::Image) {
@@ -1216,14 +1248,23 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
         for xz in &artifacts.compressed {
             println!("compressed    : {}", xz.display());
         }
+        // The per-image first-boot password (SEC-6): unique per build, expired so it
+        // must be changed at first login. Surfaced here since it exists nowhere else
+        // the operator can read it except the provenance manifest.
+        println!(
+            "first-boot pw: {}  (user {}, expired — change at first login)",
+            artifacts.password,
+            rootfs::DEFAULT_USER
+        );
+        first_boot_password = Some(artifacts.password);
     }
 
-    // Emit the provenance manifest when this run built the rootfs — the
-    // point at which the per-image password and solved manifest both exist. It
-    // joins the lock's pins, the resolved build point, the solved-manifest digest,
+    // Emit the provenance manifest when this run built both the rootfs and the image
+    // — the point at which the solved manifest and the per-image password both exist.
+    // It joins the lock's pins, the resolved build point, the solved-manifest digest,
     // the blob hashes, the toolchain identity, and the first-boot credential into
     // one "exactly what went into this image" document for support/security.
-    if let Some((manifest_path, password)) = &rootfs_out {
+    if let (Some(manifest_path), Some(password)) = (&rootfs_manifest, &first_boot_password) {
         let manifest_bytes = std::fs::read(manifest_path).map_err(|e| {
             format!("read solved manifest {}: {e}", manifest_path.display())
         })?;
@@ -1267,7 +1308,7 @@ fn build(root: &ConfigRoot, recipe: &str, args: BuildArgs) -> Result<(), Box<dyn
             println!("saved snapshot: {ts} (mode off — activate with --snapshot fallback|pin)");
         }
         if args.save_manifest {
-            let (manifest_path, _) = rootfs_out.as_ref().ok_or(
+            let manifest_path = rootfs_manifest.as_ref().ok_or(
                 "--save-manifest needs the rootfs stage — run --stage all or --stage rootfs",
             )?;
             let digest = solved_manifest_digest.as_ref().ok_or(
@@ -1302,7 +1343,7 @@ fn resolve_patches_source(
     patches_path: Option<&Path>,
     patches_url: Option<&str>,
     resolved: &ResolvedBuild,
-    lock: &boot2deb_core::lock::Lock,
+    pin: &boot2deb_core::lock::PatchesPin,
     root: &ConfigRoot,
     sink: &dyn EventSink,
 ) -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
@@ -1317,11 +1358,11 @@ fn resolve_patches_source(
         .map(str::to_string)
         .or_else(|| resolved.kernel.patches_url.clone())
         .ok_or_else(|| EngineError::PatchesNoSource {
-            commit: lock.patches.commit.clone(),
+            commit: pin.commit.clone(),
         })?;
     let cache_root = root.path().join("cache").join("patches");
     let step = Step::start(sink, "patches");
-    let dir = patchfetch::fetch_profile(&url, &lock.patches.commit, &cache_root, &step)?;
+    let dir = patchfetch::fetch_profile(&url, &pin.commit, &cache_root, &step)?;
     step.finish();
     Ok((dir, false))
 }
@@ -1360,9 +1401,28 @@ fn fragment_paths(
     Ok(paths)
 }
 
+/// Resolve a build's `device_dts` entries to files along the config search path,
+/// erroring if any is missing (§4). The entries are already validated at resolution
+/// to be contained, relative `.dts`/`.dtsi` paths; an overlay commonly ships them for
+/// the device it adds, and the highest-precedence copy wins as for any other asset.
+fn device_dts_paths(
+    root: &ConfigRoot,
+    build: &ResolvedBuild,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut paths = Vec::new();
+    for rel in &build.device_dts {
+        let path = root
+            .find_asset(rel)
+            .ok_or_else(|| format!("device_dts source not found: {rel} (searched the config path)"))?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
 /// Validate the resolved build's cheap, local config invariants (CFG-4): the whole
 /// image geometry (offset ordering, alignment, GPT/rootfs fit — via the engine),
-/// that every referenced kernel `config_fragments` file exists under the config
+/// that every referenced kernel `config_fragments` file and `device_dts` source
+/// exists under the config
 /// path, and that every declared apt source's signing keyring is vendored (CFG-1).
 /// Run by `resolve` (the documented first coherence gate), `update` (so a malformed
 /// axis fails before the lock is committed), and `build` (so it fails before any
@@ -1377,6 +1437,9 @@ fn preflight_config(
     // Resolve each fragment purely to assert it exists; the paths are re-resolved where
     // the kernel stage actually consumes them.
     fragment_paths(root, build)?;
+    // Likewise the board's device-tree sources: a missing `.dts` must fail here, not
+    // after the kernel has cloned and patched.
+    device_dts_paths(root, build)?;
     // Resolve each keyring purely to assert it exists; the rootfs stage re-resolves
     // the paths it hands to mmdebstrap.
     apt_source_keyrings(root, &build.apt_sources)?;
@@ -1532,11 +1595,12 @@ fn update(
         lock.uboot.reference,
         short(&lock.uboot.commit)
     );
-    println!(
-        "  patches  {} {}",
-        lock.patches.profile,
-        short(&lock.patches.commit)
-    );
+    // A no-patch kernel has no series to report; printing an empty row would imply
+    // one exists.
+    match &lock.patches {
+        Some(p) => println!("  patches  {} {}", p.profile, short(&p.commit)),
+        None => println!("  patches  (none — this kernel applies no series)"),
+    }
     if let Some(us) = &lock.userspace {
         println!("  mpp      {} {}", us.mpp.reference, short(&us.mpp.commit));
         println!("  librga   {} {}", us.librga.reference, short(&us.librga.commit));
@@ -1556,6 +1620,9 @@ fn update(
     );
     println!("  blob atf {}", lock.blobs.atf);
     println!("  blob tpl {}", lock.blobs.tpl);
+    if let Some(bl32) = &lock.blobs.bl32 {
+        println!("  blob bl32 {bl32}");
+    }
     for d in &lock.extra_debs {
         println!("  extradeb {} {}", d.locator_label(), short(&d.sha256));
     }
@@ -1747,17 +1814,23 @@ fn verify_patches(
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
     let lock = root.lock(recipe)?;
     let sink = |e: Event| print_event(&e);
+    // Nothing to verify for a kernel that applies no series: report it and succeed,
+    // rather than failing on a `patches` checkout the build would never read.
+    let Some(pin) = lock.patches.as_ref() else {
+        println!("verify-patches {recipe}: this kernel applies no patch series (nothing to verify)");
+        return Ok(());
+    };
     let (patches_root, _dev) = resolve_patches_source(
         args.patches_path.as_deref(),
         args.patches_url.as_deref(),
         &build,
-        &lock,
+        pin,
         root,
         &sink,
     )?;
-    let profile = load_profile(&patches_root, &lock.patches.profile)?;
+    let profile = load_profile(&patches_root, &pin.profile)?;
     // Declared-intent gate: is the locked kernel in the profile's range?
-    profile.ensure_applies(&lock.patches.profile, &lock.kernel.reference)?;
+    profile.ensure_applies(&pin.profile, &lock.kernel.reference)?;
     let target = format!("{} @ {}", lock.kernel.id, lock.kernel.reference);
     let cache_root = verify_trees_cache(root);
 
@@ -1893,16 +1966,24 @@ fn verify_config(
         Some(p) => (p, None),
         None => {
             let lock = root.lock(recipe)?;
-            let (patches_root, _dev) = resolve_patches_source(
-                args.patches_path.as_deref(),
-                args.patches_url.as_deref(),
-                &build,
-                &lock,
-                root,
-                &sink,
-            )?;
-            let profile = load_profile(&patches_root, &lock.patches.profile)?;
-            profile.ensure_applies(&lock.patches.profile, &lock.kernel.reference)?;
+            // A kernel with no patch profile reads no `patches` checkout: the config
+            // gate then runs against the pristine locked tree.
+            let series = match lock.patches.as_ref() {
+                Some(pin) => {
+                    let (patches_root, _dev) = resolve_patches_source(
+                        args.patches_path.as_deref(),
+                        args.patches_url.as_deref(),
+                        &build,
+                        pin,
+                        root,
+                        &sink,
+                    )?;
+                    let profile = load_profile(&patches_root, &pin.profile)?;
+                    profile.ensure_applies(&pin.profile, &lock.kernel.reference)?;
+                    Some((patches_root, profile))
+                }
+                None => None,
+            };
             // `--kernel-src` overrides the configured upstream for the fetch (a local
             // ../linux is near-instant); the tree still lands at the locked commit.
             let url = match args.kernel_src {
@@ -1917,17 +1998,19 @@ fn verify_config(
                 &verify_trees_cache(root),
                 &sink,
             )?;
-            let target = format!("{} @ {}", lock.kernel.id, lock.kernel.reference);
-            let step = Step::start(&sink, "apply-patches");
-            let n = boot2deb_engine::srcfetch::apply_kernel_series(
-                &tree,
-                &lock.kernel.commit,
-                &patches_root,
-                &profile.kernel,
-                &target,
-            )?;
-            step.log(format!("applied {n} kernel patch(es) for the config gate"));
-            step.finish();
+            if let Some((patches_root, profile)) = series {
+                let target = format!("{} @ {}", lock.kernel.id, lock.kernel.reference);
+                let step = Step::start(&sink, "apply-patches");
+                let n = boot2deb_engine::srcfetch::apply_kernel_series(
+                    &tree,
+                    &lock.kernel.commit,
+                    &patches_root,
+                    &profile.kernel,
+                    &target,
+                )?;
+                step.log(format!("applied {n} kernel patch(es) for the config gate"));
+                step.finish();
+            }
             (tree.clone(), Some((tree, lock.kernel.commit.clone())))
         }
     };
@@ -2193,7 +2276,7 @@ fn recipes_using_profile(root: &ConfigRoot, profile: &str) -> Vec<String> {
         .into_iter()
         .filter(|name| {
             resolve_recipe(root, name, &Overrides::default())
-                .is_ok_and(|build| build.kernel.patch_profile == profile)
+                .is_ok_and(|build| build.kernel.patch_profile.as_deref() == Some(profile))
         })
         .collect()
 }
@@ -2226,6 +2309,11 @@ fn why_rebuild(
     args: WhyRebuildArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lock = root.lock(recipe)?;
+    // The kernel tree signature folds the board's device-tree sources, so the
+    // prediction resolves the recipe to find them — an edited board `.dts` must be
+    // reported as a rebuild, not a reuse (§4).
+    let build = resolve_recipe(root, recipe, &Overrides::default())?;
+    let device_dts = device_dts_paths(root, &build)?;
     let work_dir = absolutize(
         args.work_dir
             .unwrap_or_else(|| PathBuf::from("build").join(recipe)),
@@ -2238,6 +2326,7 @@ fn why_rebuild(
         // the build reads its patches from (CACHE-1); `None` in pinned mode.
         patches_root: args.patches_path.as_deref(),
         include_libmali: args.build_libmali,
+        device_dts: &device_dts,
     });
 
     println!("why-rebuild {recipe} (work {})", work_dir.display());
@@ -2472,6 +2561,7 @@ fn new_device(
         hostname,
         image_size,
         dt_dir: soc_layer.dt_dir.clone(),
+        soc_rkbin: soc_layer.rkbin.clone(),
         features,
         emit_recipe: !args.no_recipe,
     };
@@ -2893,7 +2983,7 @@ fn print_build(b: &ResolvedBuild) {
     println!("boot method  : {}", b.boot_method);
     println!("kernel       : {} ({}, base {})", b.kernel.id, b.kernel.flavor, b.kernel.base_defconfig);
     println!("  track      : {}", b.kernel.track.as_deref().unwrap_or("-"));
-    println!("  profile    : {}", b.kernel.patch_profile);
+    println!("  profile    : {}", b.kernel.patch_profile.as_deref().unwrap_or("none"));
     println!("  fragments  : {}", b.kernel.config_fragments.join(", "));
     println!("suite        : {}", b.suite);
     println!(
@@ -2925,9 +3015,17 @@ fn print_build(b: &ResolvedBuild) {
     println!("image size   : {}", b.image_size);
     println!("hostname     : {}", b.hostname);
     println!("dtb          : {}", b.kernel_dtb);
+    // Only a board carrying its own (not-yet-upstream) device tree has sources to
+    // show; an upstream-DTB board would print an empty line for nothing.
+    if !b.device_dts.is_empty() {
+        println!("device dts   : {}", b.device_dts.join(", "));
+    }
     println!("u-boot       : {} ({})", b.uboot_ref, b.uboot_defconfig);
     println!("rkbin atf    : {}", b.rkbin.atf);
     println!("rkbin tpl    : {}", b.rkbin.tpl);
+    if let Some(bl32) = &b.rkbin.bl32 {
+        println!("rkbin bl32   : {bl32}");
+    }
     println!(
         "offsets      : idbloader {}, u-boot.itb {}, rootfs {}",
         b.offsets.idbloader, b.offsets.uboot_itb, b.offsets.rootfs
@@ -3163,7 +3261,8 @@ mod tests {
         let root = ConfigRoot::with_overlays(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap().to_path_buf(),
             [overlay.path().to_path_buf()],
-        );
+        )
+        .unwrap();
         let args = NewDeviceArgs {
             soc: Some("rk3588".into()),
             features: vec!["media-accel-rockchip".into()],
@@ -3188,7 +3287,8 @@ mod tests {
         let root = ConfigRoot::with_overlays(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap().to_path_buf(),
             [overlay.path().to_path_buf()],
-        );
+        )
+        .unwrap();
         let args = NewDeviceArgs {
             soc: Some("rk3588".into()),
             features: vec!["no-such-feature".into()],

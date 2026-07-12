@@ -272,6 +272,33 @@ pub enum EngineError {
         stage: &'static str,
     },
 
+    /// A `device_dts` source would overwrite a device-tree file the kernel already
+    /// ships. `device_dts` owns the *new* board file; an edit to an *existing*
+    /// upstream `.dts`/`.dtsi` is a patch in the kernel's patch profile, which `git
+    /// am` applies with conflict detection. Silently clobbering the upstream file
+    /// would hide that the fork has drifted, so the copy refuses. §4.
+    #[error(
+        "device_dts source '{src}' already exists in the kernel tree at {dest} — \
+         device_dts adds a new board device tree; edit an existing one with a patch instead"
+    )]
+    DeviceDtsShadowsUpstream {
+        /// The config-root-relative source that collided.
+        src: String,
+        /// The in-tree path it would have overwritten.
+        dest: String,
+    },
+
+    /// The in-tree device-tree directory's `Makefile` has no `dtb-$(CONFIG_…) += …`
+    /// rule to model the board's DTB entry on, so the engine cannot teach kbuild to
+    /// build the copied `.dts` — a `.dts` compiled by nothing yields no DTB.
+    #[error("no 'dtb-$(CONFIG_…) +=' rule found in {makefile} — cannot register '{dtb}' for build")]
+    DeviceDtsNoMakefileRule {
+        /// The device-tree directory Makefile that was inspected.
+        makefile: String,
+        /// The DTB that needed registering.
+        dtb: String,
+    },
+
     /// A build stage completed but an expected output artifact was not produced.
     #[error("{what} not found after build (looked in {location})")]
     ArtifactMissing {

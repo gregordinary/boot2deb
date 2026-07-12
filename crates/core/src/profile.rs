@@ -18,6 +18,24 @@ use serde::Deserialize;
 use std::path::Path;
 use std::str::FromStr;
 
+/// The `patch_profile` a kernel definition authors when it applies no patch series
+/// at all — a stock mainline kernel whose SoC is fully upstream, or a vendor kernel
+/// that already ships its patches. Such a build never reads the `patches` repo, so
+/// its lock records no `[patches]` table.
+///
+/// The spelling is config-facing; [`patch_profile`] maps it to the `None` the rest of
+/// the code reasons about, so no other module compares against this string.
+pub const NO_PATCH_PROFILE: &str = "none";
+
+/// Interpret a kernel definition's authored `patch_profile`: `None` for the
+/// [`NO_PATCH_PROFILE`] sentinel, `Some(name)` for a real profile in the `patches`
+/// repo. Resolution calls this once, so an absent profile flows through
+/// [`ResolvedKernel`](crate::model::ResolvedKernel) and the lock as a typed absence
+/// rather than a magic string.
+pub fn patch_profile(authored: &str) -> Option<&str> {
+    (authored != NO_PATCH_PROFILE).then_some(authored)
+}
+
 /// A patch profile manifest (`profiles/<name>/profile.toml`).
 ///
 /// Each scope list is an ordered sequence of patches-repo-relative paths, and

@@ -12,6 +12,7 @@ use crate::error::EngineError;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::process::Command;
 
 /// Password alphabet: mixed case + digits with the visually ambiguous characters
 /// (`0`/`O`/`o`, `1`/`l`/`I`) removed, so the one-time secret transcribes cleanly
@@ -51,6 +52,58 @@ pub fn generate_password() -> Result<String, EngineError> {
     Ok(out)
 }
 
+/// Hash `pass` into a `sha512crypt` (`$6$`) entry for `/etc/shadow`, via
+/// `openssl passwd -6` (a random salt per call, so the same password hashes
+/// differently each time). The image stage splices the result into the default
+/// account's shadow line; the plaintext is surfaced to the operator once and
+/// committed nowhere.
+pub(crate) fn crypt_password(pass: &str) -> Result<String, EngineError> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("openssl")
+        .args(["passwd", "-6", "-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| EngineError::CommandSpawn {
+            command: "openssl".into(),
+            context: "hash first-boot password".into(),
+            source,
+        })?;
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(format!("{pass}\n").as_bytes())
+        .map_err(|s| EngineError::io(Path::new("openssl-stdin"), s))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|source| EngineError::CommandSpawn {
+            command: "openssl".into(),
+            context: "hash first-boot password".into(),
+            source,
+        })?;
+    if !out.status.success() {
+        return Err(EngineError::CommandFailed {
+            command: "openssl".into(),
+            context: "hash first-boot password".into(),
+            status: out.status.code(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    let hash = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !hash.starts_with("$6$") {
+        return Err(EngineError::CommandFailed {
+            command: "openssl".into(),
+            context: "hash first-boot password".into(),
+            status: None,
+            stderr: format!("unexpected crypt output: {hash}"),
+        });
+    }
+    Ok(hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +126,24 @@ mod tests {
     fn passwords_are_unique() {
         // Two 116-bit draws colliding is a broken-RNG signal, not a flake.
         assert_ne!(generate_password().unwrap(), generate_password().unwrap());
+    }
+
+    #[test]
+    fn crypt_password_produces_a_sha512crypt_hash() {
+        // openssl is a checked host dep (doctor); skip if absent.
+        if Command::new("openssl")
+            .arg("version")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping: openssl unavailable");
+            return;
+        }
+        let hash = crypt_password("Example116BitSecret").unwrap();
+        assert!(hash.starts_with("$6$"), "sha512crypt hash, got {hash}");
+        // Same password, different salt each call (openssl randomizes) — not reused.
+        let again = crypt_password("Example116BitSecret").unwrap();
+        assert_ne!(hash, again);
     }
 }

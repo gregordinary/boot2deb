@@ -122,6 +122,52 @@ pub enum ConfigError {
         what: String,
     },
 
+    /// An `--overlay` argument does not name an existing directory. An empty path
+    /// would resolve assets against the current directory and a mistyped one would
+    /// shadow nothing, so both fail before any layer is read.
+    #[error("invalid overlay '{path}': {why}")]
+    InvalidOverlay {
+        /// The offending overlay path.
+        path: String,
+        /// What is wrong with it.
+        why: &'static str,
+    },
+
+    /// A `device_dts` entry is not a contained, relative device-tree source path.
+    /// The entries are joined onto every config-root search path, so an absolute
+    /// path or a `..` component would read — and later copy into the kernel tree —
+    /// a file from outside the config tree.
+    #[error(
+        "device '{device}' has an invalid device_dts entry '{path}': {why} \
+         (expected a config-root-relative path to a .dts or .dtsi)"
+    )]
+    InvalidDeviceDts {
+        /// The device being resolved.
+        device: String,
+        /// The offending entry.
+        path: String,
+        /// What is wrong with it.
+        why: &'static str,
+    },
+
+    /// A board lists `device_dts` sources but none of them compiles the DTB named
+    /// by `kernel_dtb` — the boot would look for a DTB the kernel never builds. The
+    /// basenames must correspond (`rockchip/board.dtb` ← `.../board.dts`).
+    #[error(
+        "device '{device}': kernel_dtb '{kernel_dtb}' is not built by any device_dts \
+         source ({sources}) — expected a '{expected}' among them"
+    )]
+    KernelDtbNotInDeviceDts {
+        /// The device being resolved.
+        device: String,
+        /// The DTB the board is configured to boot.
+        kernel_dtb: String,
+        /// Comma-separated `device_dts` entries.
+        sources: String,
+        /// The `.dts` basename that would satisfy the check.
+        expected: String,
+    },
+
     /// A patch profile's `applies_to_kernel` is not a valid semver requirement.
     #[error("profile '{profile}' has invalid applies_to_kernel '{value}': {source}")]
     InvalidVersionReq {

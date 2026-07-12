@@ -78,6 +78,11 @@ impl BuildEnv {
 /// discipline so a host's timezone/locale cannot leak into packaged output (DET-6). A
 /// full `env_clear` is unsafe on the host (it would drop the `PATH`/`HOME` the tools
 /// need); the caller's own env (e.g. `SOURCE_DATE_EPOCH`) is already set and preserved.
+///
+/// **stdin is `/dev/null`.** A build is non-interactive by construction, and a tool
+/// that decides to ask a question — kbuild's `conf` dropping into `oldaskconfig` on an
+/// out-of-date `.config` is the live example — must fail or take its default rather
+/// than block forever on a terminal that may not even be attached.
 pub fn run(
     mut command: Command,
     tool: &str,
@@ -85,6 +90,7 @@ pub fn run(
     step: &Step,
 ) -> Result<(), EngineError> {
     command.env("TZ", "UTC").env("LC_ALL", "C.UTF-8");
+    command.stdin(Stdio::null());
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
@@ -587,15 +593,9 @@ pub(crate) struct ClonePinned<'a> {
     /// Label for a [`EngineError::CommitMismatch`] (e.g. `"kernel"`, `"u-boot"`,
     /// `"ffmpeg base"`).
     pub what: &'a str,
-    /// The `patches` checkout the series is read from.
-    pub patches_root: &'a Path,
-    /// The commit the lock pins the patches checkout at (`lock.patches.commit`).
-    pub patches_commit: &'a str,
-    /// When set, the patches checkout was chosen explicitly via `--patches-path`
-    /// for co-development: a pin mismatch is a loud warning rather than an error.
-    pub patches_dev: bool,
-    /// The patch profile name from the lock (`lock.patches.profile`).
-    pub profile: &'a str,
+    /// The patch series to apply on top, or `None` when the resolved kernel names no
+    /// patch profile — the tree is then compiled exactly as cloned.
+    pub patches: Option<PatchSource<'a>>,
     /// Which per-tree series to apply.
     pub scope: PatchScope,
     /// Message label for the patched tree (e.g. `"kernel @ v7.1.1"`).
@@ -603,6 +603,25 @@ pub(crate) struct ClonePinned<'a> {
     /// When `Some`, gate the profile's declared kernel range against this ref
     /// before applying — the kernel node's declared-intent gate.
     pub gate_reference: Option<&'a str>,
+}
+
+/// A resolved `patches` checkout together with the pin and profile it supplies.
+///
+/// Bundled rather than carried as four loose fields so that "this build applies no
+/// patches" is one `Option::None` the compiler enforces: there is no way to name a
+/// profile without a checkout to read it from, nor to resolve a checkout for a build
+/// that has no series.
+#[derive(Clone, Copy)]
+pub struct PatchSource<'a> {
+    /// The `patches` checkout the series is read from.
+    pub root: &'a Path,
+    /// The lock's pin: which profile, at which `patches`-repo commit. Borrowed from
+    /// the lock rather than copied field-by-field, so the same value feeds both the
+    /// apply step and the signature fold.
+    pub pin: &'a boot2deb_core::lock::PatchesPin,
+    /// The checkout was chosen explicitly via `--patches-path` for co-development:
+    /// a pin mismatch is a loud warning rather than an error.
+    pub dev: bool,
 }
 
 /// Clone/fetch the pinned source into `tree`, verify it sits at the locked commit,
@@ -646,10 +665,7 @@ fn clone_pinned_inner(spec: &ClonePinned, step: &Step) -> Result<usize, EngineEr
     apply_profile_scope(
         &ApplyScope {
             tree: spec.tree,
-            patches_root: spec.patches_root,
-            patches_commit: spec.patches_commit,
-            patches_dev: spec.patches_dev,
-            profile: spec.profile,
+            patches: spec.patches,
             scope: spec.scope,
             target: spec.target,
             gate_reference: spec.gate_reference,
@@ -664,14 +680,8 @@ pub(crate) struct ApplyScope<'a> {
     /// The source tree to apply the series onto, in place. The caller has already
     /// checked it out at the locked commit and must have it clean.
     pub tree: &'a Path,
-    /// The `patches` checkout the series is read from.
-    pub patches_root: &'a Path,
-    /// The commit the lock pins the patches checkout at (`lock.patches.commit`).
-    pub patches_commit: &'a str,
-    /// A co-dev `--patches-path` override: a pin mismatch is a warning, not an error.
-    pub patches_dev: bool,
-    /// The patch profile name from the lock (`lock.patches.profile`).
-    pub profile: &'a str,
+    /// The series to apply, or `None` when the build's kernel names no patch profile.
+    pub patches: Option<PatchSource<'a>>,
     /// Which per-tree series to apply.
     pub scope: PatchScope,
     /// Message label for the patched tree (e.g. `"kernel @ v7.1.1"`).
@@ -686,21 +696,28 @@ pub(crate) struct ApplyScope<'a> {
 /// already-checked-out `tree` in place — leaving the fully-patched source the build
 /// compiles. Returns the number of patches applied.
 ///
+/// A build whose kernel names no patch profile (`spec.patches` is `None`) applies
+/// nothing and reads no `patches` checkout: it returns `0` before any pin check, so a
+/// fully-upstream board builds with the `patches` repo absent entirely.
+///
 /// Shared by [`clone_pinned`] (which clones/fetches first) and the userspace stage
 /// (which fetches its own tree but applies its `userspace` scope the same way),
 /// so the pin enforcement and verify-applies gate are one implementation.
 /// The caller owns removing a partial tree on failure — [`clone_pinned`] and the
 /// userspace stage both do (a resume must never reuse a half-patched tree, COR-1).
 pub(crate) fn apply_profile_scope(spec: &ApplyScope, step: &Step) -> Result<usize, EngineError> {
-    verify_patches_pin(spec.patches_root, spec.patches_commit, spec.patches_dev, step)?;
-    let profile = boot2deb_core::load_profile(spec.patches_root, spec.profile)?;
+    let Some(patches) = spec.patches else {
+        return Ok(0);
+    };
+    verify_patches_pin(patches.root, &patches.pin.commit, patches.dev, step)?;
+    let profile = boot2deb_core::load_profile(patches.root, &patches.pin.profile)?;
     if let Some(reference) = spec.gate_reference {
         // Declared-intent gate before touching the tree.
-        profile.ensure_applies(spec.profile, reference)?;
+        profile.ensure_applies(&patches.pin.profile, reference)?;
     }
     let series = spec.scope.series(&profile);
     patches::apply_tree(
-        spec.patches_root,
+        patches.root,
         series,
         spec.tree,
         spec.scope.tree_label(),
@@ -836,20 +853,75 @@ pub(crate) fn patch_series_fingerprint(
         .collect()
 }
 
-/// Fold the applied patch series' identity into a Tier-1 tree signature: always the
+/// The co-dev content fingerprint of `scope`'s series, or empty when the build is in
+/// pinned mode or applies no patches at all. Paired with [`series_identity`], which
+/// borrows the result; the two are split so the `Vec` outlives the borrowing
+/// [`PatchSeries`]. Every compile stage computes its series identity through this
+/// pair, so "no patch profile" is handled once rather than per stage.
+pub(crate) fn dev_series_fingerprint(patches: Option<PatchSource>, scope: PatchScope) -> Vec<String> {
+    match patches {
+        Some(p) if p.dev => patch_series_fingerprint(p.root, &p.pin.profile, scope),
+        _ => Vec::new(),
+    }
+}
+
+/// The [`PatchSeries`] a stage folds into its Tier-1 signature, given `fp` from
+/// [`dev_series_fingerprint`]. A build with no patch source reports `Pinned`, which
+/// [`fold_patch_series`] then ignores in favour of its `patches = "none"` scalar —
+/// there is no series to be pinned or co-developed.
+pub(crate) fn series_identity<'a>(patches: Option<PatchSource>, fp: &'a [String]) -> PatchSeries<'a> {
+    if patches.is_some_and(|p| p.dev) {
+        PatchSeries::Dev(fp)
+    } else {
+        PatchSeries::Pinned
+    }
+}
+
+/// The ordered content fingerprint of a board's loose device-tree sources — for each
+/// resolved `device_dts` path, in order, `"<basename>=<sha256 of its bytes>"` (§4).
+///
+/// Folded into the kernel's Tier-1 tree signature, because these files are copied into
+/// the tree: editing the board `.dts` must restamp the tree so the next build re-copies
+/// and recompiles rather than reusing a stale one. Only the basename is folded — that
+/// is what lands in the kernel's DT dir, so moving a source within the config root
+/// changes nothing about the resulting tree. Best-effort like the patch-series
+/// fingerprint: an unreadable file folds a stable `<unreadable>`
+/// sentinel so computing a signature never fails, and the copy then fails loudly at
+/// [`kernel::build_kernel`] time.
+pub fn device_dts_fingerprint(sources: &[PathBuf]) -> Vec<String> {
+    sources
+        .iter()
+        .map(|path| {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let digest = std::fs::read(path)
+                .map(|bytes| crate::blobs::sha256_hex(&bytes))
+                .unwrap_or_else(|_| "<unreadable>".to_string());
+            format!("{name}={digest}")
+        })
+        .collect()
+}
+
+/// Fold the applied patch series' identity into a Tier-1 tree signature: the
 /// profile name and pinned commit, then either the pinned marker or (co-dev) the
 /// live-series fingerprint (CACHE-1). Shared by every compile stage's `clone_manifest`
 /// so the pinned-vs-co-dev discipline is one implementation. The pinned fold is byte-
 /// identical to folding `patches_dev = "0"` alone, so a pinned tree signature is
 /// unchanged by co-dev support — only co-dev builds gain the extra fingerprint.
+///
+/// A build with no patch profile (`pin` is `None`) folds a single `patches = "none"`
+/// scalar: it has no profile, commit, or series to identify, and the distinct label
+/// keeps its signature from ever colliding with a patched tree's.
 pub(crate) fn fold_patch_series(
     b: &mut crate::signature::SignatureBuilder,
-    profile: &str,
-    commit: &str,
+    pin: Option<&boot2deb_core::lock::PatchesPin>,
     patches: PatchSeries,
 ) {
-    b.fold_scalar("patches.profile", profile);
-    b.fold_scalar("patches.commit", commit);
+    let Some(pin) = pin else {
+        b.fold_scalar("patches", "none");
+        return;
+    };
+    b.fold_scalar("patches.profile", &pin.profile);
+    b.fold_scalar("patches.commit", &pin.commit);
     match patches {
         PatchSeries::Pinned => {
             b.fold_scalar("patches_dev", "0");

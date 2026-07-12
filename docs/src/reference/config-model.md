@@ -36,6 +36,13 @@ not in this one; the resolved profile name and its exact `patches`-repo commit a
 recorded together in the lock's `[patches]` block. Authoring workflow:
 [Adding a patch](../contributing/adding-a-patch.md).
 
+A kernel may apply **no series at all** — a stock mainline kernel whose SoC is fully
+upstream, or a vendor tree that already ships its patches. It writes
+`patch_profile = "none"`, and then the build never reads the `patches` repo: nothing is
+fetched, nothing is applied, `verify-patches` reports there is nothing to verify, and
+the lock **omits its `[patches]` block entirely** rather than pinning a commit the build
+never consumes. Such a board builds on a machine with no `patches` checkout.
+
 ## The hardware stack
 
 The device's hardware properties resolve by merging four TOML layers, lowest to
@@ -70,6 +77,31 @@ and skips the userspace/ffmpeg compile nodes entirely; a SoC that never transcod
 the stanzas. Selecting a `requires_media_accel` feature on a SoC that lacks them is a
 resolve-time error, so the coupling is checked, not assumed.
 
+### A board device tree that is not yet upstream
+
+A device normally names an in-tree DTB with `kernel_dtb`, and the kernel's own tree
+builds it. A freshly-supported SoC often has every driver upstream but none of its
+boards, so a device may instead carry its device-tree **sources** in `device_dts` — the
+board `.dts` plus any board-specific `.dtsi`, as config-root-relative paths resolved
+along the overlay search path like a fragment or blob:
+
+```toml
+kernel_dtb = "rockchip/rk3576-h96-max-m9.dtb"
+device_dts = ["devices/h96-max-m9/dts/rk3576-h96-max-m9.dts"]
+```
+
+The kernel stage copies them into `arch/<arch>/boot/dts/<dt_dir>/` after the clone and
+`git am`, then teaches that directory's `Makefile` to build the DTB, so `bindeb-pkg`
+ships it in the `linux-image` deb like any in-tree board — and a forked board `.dts`'s
+`#include "<soc>.dtsi"` resolves for free. Each source is content-hashed into the kernel
+tree's signature, so editing the `.dts` rebuilds. Resolution checks that `kernel_dtb` is
+actually built by one of the listed sources, and that each entry is a contained relative
+`.dts`/`.dtsi` path.
+
+`device_dts` adds a *new* board device tree. Editing an *existing* upstream `.dts` is a
+patch's job, and a source that would overwrite an in-tree file is refused. For the
+edit → reflash loop, `build <recipe> --stage dtb` rebuilds just that DTB in seconds.
+
 ### Explicit over derived
 
 Several device values are redundant with a value the resolver could derive:
@@ -89,7 +121,8 @@ A **recipe** (`recipes/<recipe>.toml`) pins one buildable point: it names the de
 and, optionally, the kernel, suite, features, layout, and image size (each omitted axis
 falls back to the device default). Its **lock** (`recipes/<recipe>.lock`) holds the
 exact resolved pins: commit hashes for every source (including the `[patches]` profile
-and commit), blob content hashes, and the solved rootfs manifest digest.
+and commit, when the kernel has one), blob content hashes, and the solved rootfs
+manifest digest.
 
 The split between the two is what makes a build reproducible:
 
