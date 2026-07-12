@@ -94,29 +94,81 @@ fn reject_downgrade(from: &str, to: &str) -> Result<(), FetchError> {
 }
 
 /// Resolve a redirect `Location` against the current URL: an absolute `http(s)` URL
-/// is used as-is; a root-relative (`/path`) or path-relative (`sub/x`) target is
-/// joined onto the current URL's authority/path. Enough URL handling for the deb/
-/// patch CDNs in play, without pulling in a full URL parser.
+/// is used as-is, a network-path reference (`//host/path`) takes the base's scheme,
+/// and a root-relative (`/path`) or path-relative (`sub/x`) target is joined onto
+/// the current URL's authority/path. The resulting path is dot-segment-normalized
+/// ([`normalize_url_path`], TRUST-8) whichever branch produced it. Enough URL
+/// handling for the deb/patch CDNs in play, without pulling in a full URL parser.
 fn resolve_redirect(base: &str, loc: &str) -> Result<String, FetchError> {
-    if loc.starts_with("http://") || loc.starts_with("https://") {
-        return Ok(loc.to_string());
-    }
     let scheme_end = base
         .find("://")
         .ok_or_else(|| FetchError(format!("malformed base URL: {base}")))?
         + 3;
-    // Split scheme://authority from the path portion.
-    let authority_len = base[scheme_end..].find('/').map(|i| scheme_end + i).unwrap_or(base.len());
-    let scheme_authority = &base[..authority_len];
-    if loc.starts_with('/') {
-        Ok(format!("{scheme_authority}{loc}"))
+    let absolute = if loc.starts_with("http://") || loc.starts_with("https://") {
+        loc.to_string()
+    } else if let Some(rest) = loc.strip_prefix("//") {
+        // Network-path reference (RFC 3986 section 4.2): same scheme, new authority.
+        format!("{}{rest}", &base[..scheme_end])
     } else {
-        // Path-relative: replace the last path segment of the base.
-        let dir_end = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
-        // Never let the relative join fall back into the authority separator.
-        let dir = if dir_end < authority_len { authority_len } else { dir_end };
-        Ok(format!("{}{loc}", &base[..dir]))
+        // Split scheme://authority from the path portion.
+        let authority_len =
+            base[scheme_end..].find('/').map(|i| scheme_end + i).unwrap_or(base.len());
+        let scheme_authority = &base[..authority_len];
+        if loc.starts_with('/') {
+            format!("{scheme_authority}{loc}")
+        } else {
+            // Path-relative: replace the last path segment of the base.
+            let dir_end = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
+            // Never let the relative join fall back into the authority separator.
+            let dir = if dir_end < authority_len { authority_len } else { dir_end };
+            format!("{}{loc}", &base[..dir])
+        }
+    };
+    normalize_url_path(&absolute)
+}
+
+/// Apply RFC 3986 remove-dot-segments to `url`'s path, leaving the scheme,
+/// authority, and query/fragment untouched (TRUST-8): a redirect target cannot
+/// smuggle `.`/`..` segments into the request path this client then sends, and
+/// `..` can never climb above the path root.
+fn normalize_url_path(url: &str) -> Result<String, FetchError> {
+    let scheme_end = url
+        .find("://")
+        .ok_or_else(|| FetchError(format!("malformed URL: {url}")))?
+        + 3;
+    let Some(path_start) = url[scheme_end..].find('/').map(|i| scheme_end + i) else {
+        return Ok(url.to_string()); // authority only, no path to normalize
+    };
+    let (path_end, tail) = match url[path_start..].find(['?', '#']) {
+        Some(i) => (path_start + i, &url[path_start + i..]),
+        None => (url.len(), ""),
+    };
+    let path = &url[path_start..path_end];
+    Ok(format!("{}{}{tail}", &url[..path_start], normalize_dot_segments(path)))
+}
+
+/// Remove `.`/`..` segments from an absolute URL path (RFC 3986 section 5.2.4),
+/// keeping empty segments (`a//b`) verbatim — they name a resource, not a
+/// traversal. `..` at the root is dropped rather than climbing.
+fn normalize_dot_segments(path: &str) -> String {
+    // The leading anchor keeps the result rooted; `..` can never pop it.
+    let mut out: Vec<&str> = vec![""];
+    for seg in path.split('/').skip(1) {
+        match seg {
+            "." => {}
+            ".." => {
+                if out.len() > 1 {
+                    out.pop();
+                }
+            }
+            s => out.push(s),
+        }
     }
+    // A path ending in a dot segment refers to a directory: keep the slash.
+    if matches!(path.rsplit('/').next(), Some(".") | Some("..")) {
+        out.push("");
+    }
+    out.join("/")
 }
 
 #[cfg(test)]
@@ -194,6 +246,44 @@ mod tests {
         );
         // No path on the base → authority preserved for a root-relative target.
         assert_eq!(resolve_redirect("https://h", "/c").unwrap(), "https://h/c");
+    }
+
+    #[test]
+    fn resolve_redirect_normalizes_dot_segments_and_network_paths() {
+        // `..` in a relative Location resolves in place and cannot climb above
+        // the path root (TRUST-8)...
+        assert_eq!(
+            resolve_redirect("https://h/a/b/c", "../x").unwrap(),
+            "https://h/a/x"
+        );
+        assert_eq!(
+            resolve_redirect("https://h/a/b", "../../../../x").unwrap(),
+            "https://h/x"
+        );
+        // ...including inside an absolute or root-relative target...
+        assert_eq!(
+            resolve_redirect("https://h/a", "https://o/a/../secret").unwrap(),
+            "https://o/secret"
+        );
+        assert_eq!(
+            resolve_redirect("https://h/a/b", "/c/./d/../e").unwrap(),
+            "https://h/c/e"
+        );
+        // ...while the query survives untouched and empty segments stay verbatim.
+        assert_eq!(
+            resolve_redirect("https://h/a/b", "/c/../d?x=../y").unwrap(),
+            "https://h/d?x=../y"
+        );
+        assert_eq!(
+            resolve_redirect("https://h/a", "/c//d").unwrap(),
+            "https://h/c//d"
+        );
+        // A network-path reference keeps the base scheme (RFC 3986 section 4.2)
+        // rather than being misread as a root-relative path on the old host.
+        assert_eq!(
+            resolve_redirect("https://h/a/b", "//mirror.example/pool/x.deb").unwrap(),
+            "https://mirror.example/pool/x.deb"
+        );
     }
 
     #[test]

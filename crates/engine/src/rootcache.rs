@@ -182,10 +182,11 @@ pub struct CachedRootfs {
 
 /// Content-addressed store of bootstrapped rootfs trees under `<cache>/rootfs/`,
 /// keyed by the [`cache_key`] signature. A stored entry is a directory
-/// `<key>/` holding `rootfs.tar` + `manifest.pkgs`; it is published atomically (a
-/// `<key>.partial` staged then renamed), so an interrupted store never leaves a
-/// half-written entry a later build would trust — the same fail-safe the sandbox
-/// bootstrap uses.
+/// `<key>/` holding `rootfs.tar` + `manifest.pkgs`; it is published atomically
+/// (staged in a pid-distinct `.partial` temp, then renamed), so an interrupted
+/// store never leaves a half-written entry a later build would trust, and two
+/// concurrent builds of the same key cannot clobber each other's staging
+/// (COR-27) — the same discipline as [`crate::artstore::ArtifactStore`].
 pub struct RootfsStore {
     /// The `<cache>/rootfs` root the entries live under.
     root: PathBuf,
@@ -214,9 +215,17 @@ impl RootfsStore {
         (tar.is_file() && manifest.is_file()).then_some(CachedRootfs { tar, manifest })
     }
 
-    /// Store `tar` + `manifest` under `key`, replacing any prior entry. Copies into a
-    /// `<key>.partial` dir then renames it into place, so the entry only ever appears
-    /// complete.
+    /// Store `tar` + `manifest` under `key`, replacing any prior entry — a
+    /// `--refresh-rootfs` rebuild must refresh the stored bytes, so (unlike
+    /// [`crate::artstore::ArtifactStore::put`]) an existing entry is not kept.
+    ///
+    /// Concurrency discipline (COR-27): staging uses a pid-distinct `.partial`
+    /// temp, so two builds of the same key cannot delete each other's in-flight
+    /// staging; a prior entry is atomically moved aside rather than deleted in
+    /// place, so a concurrent `get`'s exposure is one rename, not the duration
+    /// of a recursive delete; and losing the publish rename to a concurrent
+    /// `put` keeps the winner's complete entry — content is signature-keyed, so
+    /// any complete entry for `key` is equivalent.
     pub fn put(
         &self,
         key: &Signature,
@@ -225,15 +234,39 @@ impl RootfsStore {
         step: &Step,
     ) -> Result<(), EngineError> {
         let entry = self.entry(key);
-        let partial = self.root.join(format!("{}.partial", key.as_str()));
+        let pid = std::process::id();
+        let partial = self.root.join(format!(".{}.{pid}.partial", key.as_str()));
         let _ = std::fs::remove_dir_all(&partial);
         std::fs::create_dir_all(&partial).map_err(|s| EngineError::io(&partial, s))?;
         std::fs::copy(tar, partial.join("rootfs.tar")).map_err(|s| EngineError::io(tar, s))?;
         std::fs::copy(manifest, partial.join("manifest.pkgs"))
             .map_err(|s| EngineError::io(manifest, s))?;
-        // Replace any prior entry (a --refresh-rootfs rebuild), then publish atomically.
-        let _ = std::fs::remove_dir_all(&entry);
-        std::fs::rename(&partial, &entry).map_err(|s| EngineError::io(&entry, s))?;
+        // Move any prior entry aside (atomic; the `.partial` infix keeps it
+        // sweepable if we crash before the cleanup below).
+        let replaced = self.root.join(format!(".{}.{pid}.partial-replaced", key.as_str()));
+        let _ = std::fs::remove_dir_all(&replaced);
+        match std::fs::rename(&entry, &replaced) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&partial);
+                return Err(EngineError::io(&entry, e));
+            }
+        }
+        match std::fs::rename(&partial, &entry) {
+            Ok(()) => {}
+            // Lost the publish race to a concurrent put of the same key: theirs
+            // is complete and key-equivalent, so drop ours.
+            Err(_) if entry.join("rootfs.tar").is_file() => {
+                let _ = std::fs::remove_dir_all(&partial);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&partial);
+                let _ = std::fs::remove_dir_all(&replaced);
+                return Err(EngineError::io(&entry, e));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&replaced);
         step.log(format!("cached rootfs {} in the store", key.short()));
         Ok(())
     }
@@ -266,6 +299,49 @@ I: success in 2.7310 seconds
                 "openssl 3.6.3-1 arm64".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn put_replaces_the_entry_and_spares_another_builds_staging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RootfsStore::new(tmp.path());
+        let sink = |_e: crate::event::Event| {};
+        let step = crate::event::Step::start(&sink, "rootfs");
+        let key = crate::signature::SignatureBuilder::new("t", 1).finish();
+
+        let tar_one = tmp.path().join("a.tar");
+        let manifest = tmp.path().join("a.pkgs");
+        std::fs::write(&tar_one, b"tar-one").unwrap();
+        std::fs::write(&manifest, b"man-one").unwrap();
+
+        // A concurrent build's pid-distinct staging must survive our put
+        // (COR-27): a shared-name partial deleted on entry was the old race.
+        let foreign = tmp
+            .path()
+            .join("rootfs")
+            .join(format!(".{}.999999.partial", key.as_str()));
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("rootfs.tar"), b"in-flight").unwrap();
+
+        store.put(&key, &tar_one, &manifest, &step).unwrap();
+        let hit = store.get(&key).expect("stored entry");
+        assert_eq!(std::fs::read(&hit.tar).unwrap(), b"tar-one");
+        assert!(foreign.join("rootfs.tar").exists(), "foreign staging must survive");
+
+        // A re-put replaces the entry (--refresh-rootfs refreshes stored bytes)...
+        let tar_two = tmp.path().join("b.tar");
+        std::fs::write(&tar_two, b"tar-two").unwrap();
+        store.put(&key, &tar_two, &manifest, &step).unwrap();
+        assert_eq!(std::fs::read(store.get(&key).unwrap().tar).unwrap(), b"tar-two");
+
+        // ...and leaves nothing behind but the entry and the foreign staging.
+        let leftovers: Vec<String> = std::fs::read_dir(tmp.path().join("rootfs"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != key.as_str() && !n.contains(".999999."))
+            .collect();
+        assert!(leftovers.is_empty(), "temps left behind: {leftovers:?}");
     }
 
     #[test]

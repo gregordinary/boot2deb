@@ -217,6 +217,11 @@ pub fn build_userspace(
     for (i, pkg) in packages.iter().enumerate() {
         let restored = if cached[i] {
             let store = store.as_ref().expect("cached implies a store");
+            // The restore lands beside whatever the shared stage dir already
+            // holds, and `collect` copies *every* matching name — sweep the
+            // package's stale-version `.deb`s first so a leftover from a build
+            // at different pins cannot ride along with the restored set (COR-22).
+            build::purge_stage_debs(&stage_root, pkg.deb_prefixes)?;
             store
                 .restore(&node_name(pkg), &out_sigs[i], &stage_root)?
                 .inspect(|_| step.log(format!("{}: restored from artifact cache", pkg.name)))
@@ -251,25 +256,18 @@ fn build_one(
 ) -> Result<(), EngineError> {
     let tree = stage_root.join(pkg.name);
     let man = package_signature(pkg, patches.inputs_for(pkg.name).as_ref());
-    let fresh = crate::signature::is_fresh(&tree, &man);
-    // Reuse the built `.deb`s only when the fetched+patched tree still matches the
-    // locked commit *and* patch series (Tier-1): a pin or patch bump
-    // makes the tree stale, so its tree + any stale-version `.deb`s are purged and
-    // it is refetched/repatched/rebuilt rather than silently reused (COR-1/COR-8).
-    if fresh && package_staged(stage_root, pkg)? {
+    // Skip the whole build only when the fetched+patched tree still matches the
+    // locked commit *and* patch series and **all** of the package's `.deb`s are
+    // staged (COR-1/COR-8): a crash between compile and staging re-runs the
+    // package rather than skipping to a later stage that misses a `.deb`.
+    if crate::signature::is_fresh(&tree, &man) && package_staged(stage_root, pkg)? {
         step.log(format!("{}: already built, skipping", pkg.name));
         return Ok(());
     }
-    if fresh {
-        step.log(format!("{}: reusing tree at {}", pkg.name, tree.display()));
-    } else {
-        if tree.exists() {
-            step.log(format!("{}: source pin changed — refetching", pkg.name));
-            std::fs::remove_dir_all(&tree).map_err(|s| EngineError::io(&tree, s))?;
-        }
+    build::reuse_or_refresh_tree(&tree, &man, pkg.name, step, || {
         // Purge stale-version `.deb`s so `collect` cannot ship an old one and
-        // `package_staged` cannot be fooled by it.
-        remove_staged_debs(stage_root, pkg)?;
+        // `package_staged` cannot be fooled by it (COR-22).
+        build::purge_stage_debs(stage_root, pkg.deb_prefixes)?;
         build::fetch_commit(pkg.source, &pkg.pin.reference, &pkg.pin.commit, pkg.name, &tree, step)?;
         // Apply the profile's `userspace` scope onto the fetched base — the MPP CMA
         // fix, mirroring the kernel/ffmpeg stages' clone→apply flow. Only
@@ -282,8 +280,8 @@ fn build_one(
                 let _ = std::fs::remove_dir_all(&tree);
             })?;
         }
-        crate::signature::write_manifest(&tree, &man)?;
-    }
+        Ok(())
+    })?;
 
     if pkg.name == "libmali" {
         filter_libmali_targets(&tree.join("debian/targets"), LIBMALI_VARIANT, step)?;
@@ -322,6 +320,15 @@ fn collect(
     step: &Step,
 ) -> Result<UserspaceArtifacts, EngineError> {
     let names = deb_names(stage_root)?;
+    // `out_dir` accumulates staged `.deb`s across builds, and the ffmpeg stage
+    // re-scans it for these packages by prefix + highest version
+    // (`required_userspace_debs`) — sweep each package's stale versions before
+    // staging the fresh set, so a leftover from earlier pins can never outrank
+    // it there (COR-22). All sweeps run before any staging: prefixes may overlap
+    // across packages, and a later sweep must not remove an earlier stage copy.
+    for pkg in packages {
+        build::purge_stage_debs(out_dir, pkg.deb_prefixes)?;
+    }
     let mut debs = Vec::new();
     let mut seen = Vec::new();
     for pkg in packages {
@@ -526,22 +533,6 @@ fn store_package(
     Ok(())
 }
 
-/// Remove `pkg`'s already-staged `.deb`s from `stage_root` (by name prefix), so a
-/// refetch after a pin bump leaves no stale-version `.deb` for `collect` to ship
-/// or `package_staged` to miscount. An absent dir/file is a no-op.
-fn remove_staged_debs(stage_root: &Path, pkg: &Package) -> Result<(), EngineError> {
-    if !stage_root.exists() {
-        return Ok(());
-    }
-    for name in deb_names(stage_root)? {
-        if pkg.deb_prefixes.iter().any(|p| name.starts_with(p)) {
-            let path = stage_root.join(&name);
-            std::fs::remove_file(&path).map_err(|s| EngineError::io(&path, s))?;
-        }
-    }
-    Ok(())
-}
-
 /// True only if **all** of `pkg`'s `.deb`s already sit in `stage_root` (resume
 /// check). Requiring every prefix — not just one — means a crash partway through a
 /// multi-binary package's outputs re-runs it rather than skipping to a later stage
@@ -670,8 +661,8 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
 
     #[test]
     fn package_signature_tracks_commit_and_name() {
-        let pin_a = GitPin { reference: "master".into(), commit: "c1".into() };
-        let pin_b = GitPin { reference: "master".into(), commit: "c2".into() };
+        let pin_a = GitPin { source: "s".into(), reference: "master".into(), commit: "c1".into() };
+        let pin_b = GitPin { source: "s".into(), reference: "master".into(), commit: "c2".into() };
         let mpp_a = Package { name: "mpp", source: "", pin: &pin_a, deb_prefixes: &[] };
         let mpp_a2 = Package { name: "mpp", source: "x", pin: &pin_a, deb_prefixes: &["y_"] };
         let mpp_b = Package { name: "mpp", source: "", pin: &pin_b, deb_prefixes: &[] };
@@ -692,6 +683,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         assert!(!receives_userspace_patches("libmali"));
 
         let pin = GitPin {
+            source: "s".into(),
             reference: "v1.5.0-1-20260121-750e76e".into(),
             commit: "750e76ec2d9287babfaf08c8bf395ebc5e8778ea".into(),
         };
@@ -728,29 +720,37 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
     }
 
     #[test]
-    fn remove_staged_debs_purges_only_matching_prefixes() {
+    fn collect_sweeps_stale_out_dir_versions_before_staging() {
         let tmp = tempfile::tempdir().unwrap();
         let stage_root = tmp.path().join("userspace");
+        let out_dir = tmp.path().join("artifacts");
         std::fs::create_dir_all(&stage_root).unwrap();
-        for n in [
-            "librockchip-mpp1_1.5.0_arm64.deb",
-            "librockchip-mpp-dev_1.5.0_arm64.deb",
-            "librga2_2.2.0_arm64.deb",
-        ] {
-            std::fs::write(stage_root.join(n), b"x").unwrap();
-        }
-        let pin = GitPin { reference: "c".into(), commit: "c".into() };
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // A previous build (at different pins) staged 1.6.0 into out_dir. The
+        // ffmpeg stage selects from out_dir by highest version, so the stale
+        // deb must not survive a fresh stage that produced 1.5.0 (COR-22).
+        std::fs::write(out_dir.join("librockchip-mpp1_1.6.0_arm64.deb"), b"stale").unwrap();
+        // Another stage's artifact in the shared out_dir stays untouched.
+        std::fs::write(out_dir.join("u-boot-turing-rk1_2026.04_arm64.deb"), b"other").unwrap();
+        std::fs::write(stage_root.join("librockchip-mpp1_1.5.0_arm64.deb"), b"fresh").unwrap();
+
+        let pin = GitPin { source: "s".into(), reference: "c".into(), commit: "c".into() };
         let mpp = Package {
             name: "mpp",
             source: "",
             pin: &pin,
-            deb_prefixes: &["librockchip-mpp1_", "librockchip-mpp-dev_"],
+            deb_prefixes: &["librockchip-mpp1_"],
         };
-        remove_staged_debs(&stage_root, &mpp).unwrap();
-        // mpp's debs are gone; the unrelated rga deb stays.
-        assert!(!stage_root.join("librockchip-mpp1_1.5.0_arm64.deb").exists());
-        assert!(!stage_root.join("librockchip-mpp-dev_1.5.0_arm64.deb").exists());
-        assert!(stage_root.join("librga2_2.2.0_arm64.deb").exists());
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "userspace");
+        let artifacts = collect(&[mpp], &stage_root, &out_dir, &step).unwrap();
+
+        assert_eq!(
+            artifacts.debs,
+            vec![out_dir.join("librockchip-mpp1_1.5.0_arm64.deb")]
+        );
+        assert!(!out_dir.join("librockchip-mpp1_1.6.0_arm64.deb").exists());
+        assert!(out_dir.join("u-boot-turing-rk1_2026.04_arm64.deb").exists());
     }
 
     #[test]
@@ -758,7 +758,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         let tmp = tempfile::tempdir().unwrap();
         let stage_root = tmp.path().join("userspace");
         std::fs::create_dir_all(&stage_root).unwrap();
-        let pin = GitPin { reference: "c".into(), commit: "c".into() };
+        let pin = GitPin { source: "s".into(), reference: "c".into(), commit: "c".into() };
         let mpp = Package {
             name: "mpp",
             source: "",
@@ -787,6 +787,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
             std::fs::write(stage_root.join(n), b"x").unwrap();
         }
         let mpp_pin = GitPin {
+            source: "s".into(),
             reference: "c".into(),
             commit: "c".into(),
         };
@@ -824,7 +825,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
                 deb_prefixes: &["librockchip-mpp1_"],
             }
         }
-        let pin = |c: &str| GitPin { reference: "r".into(), commit: c.into() };
+        let pin = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         let p1 = pin("c1");
         let sig = |pkg: &Package, suite: &str, arch: &str| {
             package_output_manifest(pkg, suite, arch, None).signature

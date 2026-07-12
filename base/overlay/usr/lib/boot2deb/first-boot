@@ -49,7 +49,16 @@ echo "size=+, uuid=$partuuid" | sfdisk -f -N "$partnum" "$disk"
 uuid="$(cat /proc/sys/kernel/random/uuid)"
 echo "changing rootfs uuid: $uuid"
 tune2fs -U "$uuid" "$rootdev"
-sed -i "s|$(findmnt -fsno source '/')|UUID=$uuid|" /etc/fstab
+# Rewrite fstab's root source only when one is actually found there: an empty
+# capture would make the sed expression `s||...|` (an empty/previous-regex
+# pattern), corrupting every line instead of editing one. The root still mounts
+# by LABEL= in that case, so skipping is safe.
+fstab_src="$(findmnt -fsno source / || true)"
+if [ -n "$fstab_src" ]; then
+    sed -i "s|$fstab_src|UUID=$uuid|" /etc/fstab
+else
+    echo "warning: no root source found in /etc/fstab; leaving it unchanged"
+fi
 
 # Board-specific first-boot steps (bootloader-config regeneration, network
 # naming, ...) are drop-ins the boot-method and device overlays supply, so the

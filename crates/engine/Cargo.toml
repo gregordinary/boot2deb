@@ -49,3 +49,7 @@ gix = { version = "0.85", default-features = false, features = [
 # huge-history repo. Already in the tree transitively; the engine is Linux-only,
 # so the Unix `killpg` is idiomatic here.
 libc = "0.2"
+
+[dev-dependencies]
+# NDJSON wire-shape tests for the --json event stream (event.rs).
+serde_json.workspace = true

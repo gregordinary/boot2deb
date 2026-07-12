@@ -268,6 +268,24 @@ pub enum ConfigError {
         name: String,
     },
 
+    /// An `apt_sources` field cannot be rendered into the apt one-line source
+    /// (`deb [signed-by=…] <uri> <suite> <components…>`): the line is positional
+    /// and space-separated, so an empty value or one carrying whitespace or
+    /// `[`/`]` would be parsed as line structure rather than content — and a
+    /// non-http(s) URI would point the bootstrap solve at an arbitrary
+    /// transport (SEC-8).
+    #[error("feature '{feature}': apt source '{name}' has an unusable {field}: {value:?}")]
+    AptSourceBadField {
+        /// The feature contributing the source.
+        feature: String,
+        /// The apt source's `name`.
+        name: String,
+        /// Which field is unusable (`name`, `uri`, `suite`, or `components`).
+        field: &'static str,
+        /// The offending value.
+        value: String,
+    },
+
     /// The same feature was selected more than once. Features apply their overlay
     /// and packages, so a duplicate would apply an overlay twice — rejected rather
     /// than silently deduplicated.

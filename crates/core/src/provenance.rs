@@ -345,12 +345,14 @@ mod tests {
 
     fn sample_lock() -> Lock {
         let git = |r: &str, c: &str| GitPin {
+            source: "s".into(),
             reference: r.into(),
             commit: c.into(),
         };
         Lock {
             kernel: KernelPin {
                 id: "rk3588-mainline-7.1".into(),
+                source: "ks".into(),
                 reference: "v7.1.1".into(),
                 commit: "kc".into(),
             },
@@ -359,6 +361,7 @@ mod tests {
                 commit: "pc".into(),
             }),
             uboot: UbootPin {
+                source: "us".into(),
                 reference: "v2026.04".into(),
                 commit: "uc".into(),
             },

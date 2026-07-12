@@ -10,7 +10,8 @@
 //! preserves every owner and `mke2fs -d` records them into the filesystem.
 //!
 //! `mke2fs` writes the journal at format time and lays out a standard
-//! `sparse_super` + `resize_inode` filesystem (reserved GDT blocks), which the
+//! `sparse_super` + `resize_inode` filesystem whose reserved GDT blocks are
+//! explicitly sized for growth to [`ONLINE_RESIZE_CEILING`] (GEO-3), which the
 //! kernel's online resize (`EXT4_IOC_RESIZE_FS`) grows without a meta_bg
 //! conversion — first boot expands the rootfs while it is mounted as `/`.
 //!
@@ -43,15 +44,39 @@ use uuid::Uuid;
 /// `mke2fs.conf`: a build on any distribution produces the same layout.
 ///
 /// `resize_inode` + `sparse_super` are the load-bearing pair — reserved GDT
-/// blocks give the kernel's online resize its growth headroom (~1024x the
-/// formatted size) without a meta_bg conversion. `metadata_csum_seed` stores
-/// the checksum seed in the superblock instead of deriving it from the UUID,
-/// which is what lets first-boot's `tune2fs -U` re-UUID the *mounted* root
-/// without rewriting every metadata checksum. The rest is the standard modern
-/// ext4 set the target kernel and e2fsprogs both support.
+/// blocks give the kernel's online resize its growth headroom (sized by
+/// [`ONLINE_RESIZE_CEILING`], GEO-3) without a meta_bg conversion.
+/// `metadata_csum_seed` stores the checksum seed in the superblock instead of
+/// deriving it from the UUID, which is what lets first-boot's `tune2fs -U`
+/// re-UUID the *mounted* root without rewriting every metadata checksum. The
+/// rest is the standard modern ext4 set the target kernel and e2fsprogs both
+/// support.
 const EXT4_FEATURES: &str = "64bit,dir_index,dir_nlink,ext_attr,extent,extra_isize,filetype,\
                              flex_bg,has_journal,huge_file,large_file,metadata_csum,\
                              metadata_csum_seed,resize_inode,sparse_super";
+
+/// Online-resize ceiling requested at format time — 8 TiB, passed to `mke2fs`
+/// as `-E resize=` (GEO-3).
+///
+/// First boot grows the mounted root with `resize2fs`, an *online* resize whose
+/// reach is exactly the reserved GDT blocks laid down here. Without an explicit
+/// request `mke2fs` reserves for ~1024x the formatted size, so a 2 GiB image
+/// tops out near 2 TiB and silently strands the rest of a larger NVMe. 8 TiB is
+/// the mechanism's own ceiling under this feature set: the resize inode
+/// addresses at most `block_size / 4` = 1024 reserved GDT blocks through its
+/// single indirect block, each holding 64 of the 64-byte (`64bit`-feature)
+/// descriptors, each descriptor one 128 MiB block group — 1024 x 64 x 128 MiB
+/// = 8 TiB. It also covers the largest M.2 NVMe the supported boards take. The
+/// reservation itself costs ~4 MiB in the image.
+const ONLINE_RESIZE_CEILING: u64 = 8 << 40;
+
+/// The `-E resize=` value in ext4 blocks: the ceiling, or the filesystem's own
+/// block count where the formatted size is already at/above it — a filesystem
+/// that large has no reserved-GDT headroom left to ask for, and `mke2fs`
+/// rejects a resize target below the filesystem size.
+fn online_resize_blocks(size: u64) -> u64 {
+    size.max(ONLINE_RESIZE_CEILING) / EXT4_BLOCK
+}
 
 /// Format `dest` as an ext4 filesystem of exactly `size` bytes holding the
 /// rootfs `tarball`'s contents, then verify it.
@@ -214,8 +239,12 @@ fn mkfs(
     cmd.arg("-U").arg(uuid.to_string());
     cmd.arg("-O").arg(EXT4_FEATURES);
     // Fully initialize inode tables and the journal at format time — the image
-    // content must not depend on a first mount finishing the format.
-    cmd.args(["-E", "lazy_itable_init=0,lazy_journal_init=0"]);
+    // content must not depend on a first mount finishing the format. `resize=`
+    // reserves GDT headroom for online growth to the ceiling (GEO-3).
+    cmd.arg("-E").arg(format!(
+        "lazy_itable_init=0,lazy_journal_init=0,resize={}",
+        online_resize_blocks(size)
+    ));
     cmd.arg("-d").arg(staging);
     cmd.arg(dest);
     cmd.arg((size / EXT4_BLOCK).to_string());
@@ -352,11 +381,36 @@ mod tests {
         // s_feature_incompat at 0x60: CSUM_SEED (0x2000) — first-boot re-UUIDs
         // the mounted root, which needs the seed decoupled from the UUID.
         assert_ne!(sb_u32(&bytes, 0x60) & 0x2000, 0, "metadata_csum_seed must be set");
-        // s_reserved_gdt_blocks at 0xCE: the online-resize growth headroom.
-        assert!(sb_u16(&bytes, 0xCE) > 0, "reserved GDT blocks must be present");
+        // s_reserved_gdt_blocks at 0xCE: the online-resize growth headroom must
+        // reach the 8 TiB ceiling (GEO-3), not mke2fs's ~1024x-formatted default
+        // — growth to 8 TiB needs 1024 GDT blocks total (65536 groups x 64-byte
+        // descriptors / 4 KiB blocks), one of which this small filesystem
+        // already uses, so at least 1023 are reserved.
+        assert!(
+            sb_u16(&bytes, 0xCE) >= 1023,
+            "reserved GDT blocks must cover the 8 TiB online-resize ceiling, got {}",
+            sb_u16(&bytes, 0xCE)
+        );
 
         // The staging tree is cleaned up.
         assert!(!tmp.path().join("rootfs-staging").exists());
+    }
+
+    #[test]
+    fn online_resize_request_is_the_ceiling_until_the_image_reaches_it() {
+        // A normal-sized rootfs asks for the full 8 TiB ceiling...
+        assert_eq!(
+            online_resize_blocks(2 << 30),
+            ONLINE_RESIZE_CEILING / EXT4_BLOCK
+        );
+        // ...an image at the ceiling asks for exactly itself (no headroom, but
+        // also no mke2fs rejection for a target below the filesystem size)...
+        assert_eq!(
+            online_resize_blocks(ONLINE_RESIZE_CEILING),
+            ONLINE_RESIZE_CEILING / EXT4_BLOCK
+        );
+        // ...and a larger one asks for its own size.
+        assert_eq!(online_resize_blocks(16 << 40), (16u64 << 40) / EXT4_BLOCK);
     }
 
     #[test]

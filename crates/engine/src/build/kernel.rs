@@ -35,6 +35,13 @@ const BUILD_VERSION: u32 = 1;
 /// treated as stale and the tree is rebuilt.
 const CLONE_STAGE_VERSION: u32 = 1;
 
+/// `.deb` name prefixes `make bindeb-pkg` drops into the work dir (beside the
+/// tree). [`build_kernel`] sweeps these before each compile so [`collect`]'s
+/// highest-version pick can only see the `.deb`s the current compile produced —
+/// a leftover from a build at different pins must not outrank them (COR-22).
+/// Covers everything `bindeb-pkg` emits, not just the two `collect` stages.
+const KERNEL_DEB_PREFIXES: &[&str] = &["linux-image-", "linux-headers-", "linux-libc-dev"];
+
 /// Stage-recipe version for the kernel **output** signature (Tier-2 artifact cache):
 /// bump when the compile/package logic changes the produced `.deb`s in a way
 /// the folded inputs do not already capture (e.g. a changed `make` invocation).
@@ -129,51 +136,40 @@ pub fn build_kernel(
     // config + toolchain) is already stored, restore the `.deb`s and skip the
     // clone/patch/configure/compile entirely — the whole payoff of the store.
     let out_man = output_manifest(build, lock, opts, env, patches, &dts_fp)?;
-    if let Some(root) = opts.store {
-        let store = crate::artstore::ArtifactStore::open(root)?;
-        if let Some(files) = store.restore("kernel", out_man.signature().as_str(), opts.out_dir)? {
-            if let (Some(image_deb), Some(headers_deb)) = (
-                crate::build::role_path(&files, "image_deb"),
-                crate::build::role_path(&files, "headers_deb"),
-            ) {
-                step.log(format!(
-                    "restored kernel .debs from the artifact cache (signature {})",
-                    out_man.signature().short()
-                ));
-                step.progress(100);
-                step.finish();
-                return Ok(KernelArtifacts { image_deb, headers_deb });
-            }
-        }
+    if let Some([image_deb, headers_deb]) = build::restore_stage_outputs(
+        opts.store,
+        "kernel",
+        &out_man.signature(),
+        opts.out_dir,
+        &["image_deb", "headers_deb"],
+        &step,
+    )?
+    .as_deref()
+    {
+        step.progress(100);
+        step.finish();
+        return Ok(KernelArtifacts {
+            image_deb: image_deb.clone(),
+            headers_deb: headers_deb.clone(),
+        });
     }
 
-    // Tier-1 reuse: reuse the cloned+patched tree only when it is stamped
-    // with the current input signature. A lock bump (kernel commit or patch pin)
-    // changes the signature, so the stale tree is removed and rebuilt rather than
-    // silently reused (COR-1). configure()/compile() re-run regardless, so the
-    // signature covers only the tree-shaping clone/patch inputs.
+    // Tier-1 reuse of the cloned+patched tree (COR-1): a lock bump (kernel commit
+    // or patch pin) rebuilds it; configure()/compile() re-run regardless.
     let man = clone_manifest(lock, patches, &dts_fp);
-    if crate::signature::is_fresh(&tree, &man) {
-        step.log(format!(
-            "reusing kernel tree at {} (signature {})",
-            tree.display(),
-            man.signature().short()
-        ));
-    } else {
-        if tree.exists() {
-            step.log(format!(
-                "kernel tree at {} is stale (inputs changed) — rebuilding",
-                tree.display()
-            ));
-            std::fs::remove_dir_all(&tree).map_err(|s| EngineError::io(&tree, s))?;
-        }
-        clone_and_patch(build, lock, opts, &tree, &step)?;
-        crate::signature::write_manifest(&tree, &man)?;
-    }
+    build::reuse_or_refresh_tree(&tree, &man, "kernel", &step, || {
+        clone_and_patch(build, lock, opts, &tree, &step)
+    })?;
     step.progress(30);
 
     configure(build, opts, env, &tree, &step)?;
     step.progress(40);
+
+    // Sweep kernel `.deb`s a previous build left in the work dir: `remove_dir_all`
+    // above clears only the tree, and `collect` picks by highest version among
+    // whatever sits beside it — a stale, higher-versioned leftover (a repin down
+    // with the artifact cache off or cleared) would silently ship (COR-22).
+    build::purge_stage_debs(opts.work_dir, KERNEL_DEB_PREFIXES)?;
 
     // Deterministic build timestamp from the locked base commit, not the tree's
     // README mtime (= clone time) or HEAD (a patch commit stamped now) (COR-9).
@@ -184,18 +180,16 @@ pub fn build_kernel(
 
     // Store the produced `.deb`s under the output signature so a later build (or a
     // rebuild after `clean`) restores instead of recompiling.
-    if let Some(root) = opts.store {
-        let store = crate::artstore::ArtifactStore::open(root)?;
-        store.put(
-            "kernel",
-            out_man.signature().as_str(),
-            &[
-                ("image_deb", artifacts.image_deb.as_path()),
-                ("headers_deb", artifacts.headers_deb.as_path()),
-            ],
-        )?;
-        step.log("stored kernel .debs to the artifact cache");
-    }
+    build::store_stage_outputs(
+        opts.store,
+        "kernel",
+        &out_man.signature(),
+        &[
+            ("image_deb", artifacts.image_deb.as_path()),
+            ("headers_deb", artifacts.headers_deb.as_path()),
+        ],
+        &step,
+    )?;
     step.progress(100);
     step.finish();
     Ok(artifacts)
@@ -653,11 +647,11 @@ mod tests {
     };
 
     fn lock_with(kernel_commit: &str, patches_commit: &str) -> Lock {
-        let git = |c: &str| GitPin { reference: "r".into(), commit: c.into() };
+        let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
-            kernel: KernelPin { id: "k".into(), reference: "v".into(), commit: kernel_commit.into() },
+            kernel: KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: kernel_commit.into() },
             patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
-            uboot: UbootPin { reference: "v".into(), commit: "u".into() },
+            uboot: UbootPin { source: "us".into(), reference: "v".into(), commit: "u".into() },
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
@@ -729,6 +723,46 @@ mod tests {
         let a = vec!["a.dtsi=1".to_string(), "b.dts=2".to_string()];
         let b = vec!["b.dts=2".to_string(), "a.dtsi=1".to_string()];
         assert_ne!(sig(&a), sig(&b));
+    }
+
+    #[test]
+    fn stale_higher_versioned_debs_cannot_survive_the_precompile_sweep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        // Leftovers from a build at higher pins, exactly where bindeb-pkg drops them.
+        for stale in [
+            "linux-image-7.1.2-1-arm64_7.1.2-1_arm64.deb",
+            "linux-headers-7.1.2-1-arm64_7.1.2-1_arm64.deb",
+            "linux-libc-dev_7.1.2-1_arm64.deb",
+        ] {
+            std::fs::write(work.join(stale), b"stale").unwrap();
+        }
+        // The sweep build_kernel runs before compile...
+        build::purge_stage_debs(&work, KERNEL_DEB_PREFIXES).unwrap();
+        // ...then the compile writes the current build's outputs...
+        for fresh in [
+            "linux-image-7.1.1-1-arm64_7.1.1-1_arm64.deb",
+            "linux-headers-7.1.1-1-arm64_7.1.1-1_arm64.deb",
+        ] {
+            std::fs::write(work.join(fresh), b"fresh").unwrap();
+        }
+        // ...and collect can only stage those, not a higher-versioned leftover.
+        let out = tmp.path().join("out");
+        let opts = KernelOptions {
+            source: "",
+            patches: None,
+            fragments: &[],
+            device_dts: &[],
+            work_dir: &work,
+            out_dir: &out,
+            store: None,
+        };
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "kernel");
+        let staged = collect(&opts, &step).unwrap();
+        assert!(staged.image_deb.ends_with("linux-image-7.1.1-1-arm64_7.1.1-1_arm64.deb"));
+        assert!(staged.headers_deb.ends_with("linux-headers-7.1.1-1-arm64_7.1.1-1_arm64.deb"));
     }
 
     #[test]

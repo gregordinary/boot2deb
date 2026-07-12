@@ -1,5 +1,7 @@
 /target
 /build
+# Ad-hoc build logs captured at the config root (e.g. tee'd full-build output).
+/build-*.log
 # Rendered mdBook output; the sources live in docs/src/.
 /docs/book
 # Durable build-host caches, not committed config: the content-addressed store for

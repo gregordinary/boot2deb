@@ -198,6 +198,13 @@ fn run_merge_config(
     step: &Step,
 ) -> Result<(), EngineError> {
     let script = tree.join("scripts/kconfig/merge_config.sh");
+    // `sh` opens the script argument only after `current_dir(tree)` takes effect, so
+    // a tree-derived script path must be absolute or it re-resolves *inside* the
+    // tree and dangles whenever `tree` itself is relative (e.g. the verify cache
+    // under the default relative `--root`). Canonicalizing keeps the invocation
+    // CWD-independent and fails here, naming the script, when the tree carries no
+    // merge_config.sh at all (COR-21).
+    let script = std::fs::canonicalize(&script).map_err(|source| EngineError::io(&script, source))?;
     let context = format!("merge_config.sh for {}", tree.display());
     let mut cmd = Command::new("sh");
     cmd.arg(&script)
@@ -270,5 +277,36 @@ mod tests {
         // Final matches the requested values; B absent == not set.
         let final_config = KernelConfig::parse("CONFIG_A=y\nCONFIG_UNRELATED=m\n");
         assert!(unmet_symbols(&requested, &final_config).is_empty());
+    }
+
+    #[test]
+    fn merge_config_script_resolves_from_a_relative_tree_path() {
+        use crate::event::Event;
+        // The child `sh` chdirs into the tree before opening the script argument, so
+        // the script path must not depend on the parent CWD (COR-21). Reproduce with
+        // a *relative* tree path, which requires a known CWD: cargo runs unit tests
+        // from the crate root, with the workspace target dir at ../../target. Skip
+        // (rather than create stray dirs) if invoked from anywhere else.
+        let cwd = std::env::current_dir().unwrap();
+        if cwd.canonicalize().ok() != Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize().ok() {
+            eprintln!("skipping: test CWD is not the crate root");
+            return;
+        }
+        let rel_root = Path::new("../../target/kconfig-relative-tree-test");
+        let tree = rel_root.join("tree");
+        let scripts = tree.join("scripts/kconfig");
+        std::fs::create_dir_all(&scripts).unwrap();
+        // A stub merge_config.sh: the test asserts only that `sh` can open it.
+        std::fs::write(scripts.join("merge_config.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+        let out = rel_root.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        let sink = |_e: Event| {};
+        let step = Step::start(&sink, "test");
+        // The stub ignores its arguments, so any existing file serves as the base.
+        let base = scripts.join("merge_config.sh");
+        let result = run_merge_config(&tree, &out, "arm64", None, &base, &[], &step);
+        std::fs::remove_dir_all(rel_root).ok();
+        result.expect("merge_config.sh must be invocable when the tree path is relative");
     }
 }

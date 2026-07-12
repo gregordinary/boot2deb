@@ -1,12 +1,12 @@
-//! The structured build event stream — the one contract the CLI consumes
-//! today and the Dioxus UI will consume later.
+//! The structured build event stream — the contract the CLI consumes (human
+//! rendering, or NDJSON under `--json`) and the Dioxus UI will consume later.
 //!
-//! Today there is a single consumer, so the stream is delivered in-process: a
-//! stage emits [`Event`]s to an [`EventSink`] (a callback or trait object)
-//! rather than over a wire. The enum derives `Serialize`/`Deserialize` so it
-//! *can* become a JSON wire form later without a redesign, but no transport is
-//! built now — designing the enum cleanly is
-//! free; serializing before there is a second consumer is waste.
+//! The stream is delivered in-process: a stage emits [`Event`]s to an
+//! [`EventSink`] (a callback or trait object). The serialized form is the
+//! CLI's `--json` wire format: one event per line, each a JSON object tagged
+//! by its `event` field (the serde `tag` below), e.g.
+//! `{"event":"step_started","step":"kernel"}`. Variants and fields may still
+//! grow; consumers should ignore unknown `event` tags.
 //!
 //! Every event carries the `step` it belongs to (a build-graph node such as
 //! `kernel` or `uboot`), so a flat stream stays self-describing once
@@ -58,6 +58,17 @@ pub enum Event {
     StepFinished {
         /// The step that finished.
         step: String,
+    },
+    /// A produced artifact's location — the structured counterpart of the CLI's
+    /// human `role : path` summary lines, so a `--json` consumer gets the paths
+    /// (image, `.deb`s, boot payloads) without scraping log lines.
+    Artifact {
+        /// The step that produced it.
+        step: String,
+        /// What the artifact is within its step (e.g. `image_deb`, `idbloader`).
+        role: String,
+        /// Its path on the build host.
+        path: String,
     },
     /// A build step failed. The build stops; `context` is a human-readable
     /// summary (the typed [`EngineError`](crate::EngineError) is returned
@@ -149,6 +160,28 @@ mod tests {
     /// A sink that records every event, for asserting on the emitted sequence.
     fn recorder(log: &RefCell<Vec<Event>>) -> impl EventSink + '_ {
         move |e: Event| log.borrow_mut().push(e)
+    }
+
+    #[test]
+    fn events_serialize_to_the_tagged_ndjson_shape() {
+        // The serialized form is the CLI's `--json` wire format; these literals
+        // are the documented schema, so a rename or retag is a breaking change
+        // this test makes deliberate.
+        let started = serde_json::to_string(&Event::StepStarted { step: "kernel".into() }).unwrap();
+        assert_eq!(started, r#"{"event":"step_started","step":"kernel"}"#);
+        let artifact = serde_json::to_string(&Event::Artifact {
+            step: "image".into(),
+            role: "compressed".into(),
+            path: "/out/img.xz".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            artifact,
+            r#"{"event":"artifact","step":"image","role":"compressed","path":"/out/img.xz"}"#
+        );
+        // Round-trips, for the consumer side of the same enum.
+        let back: Event = serde_json::from_str(&artifact).unwrap();
+        assert!(matches!(back, Event::Artifact { .. }));
     }
 
     #[test]

@@ -203,11 +203,11 @@ mod tests {
     };
 
     fn lock_fixture(kernel_commit: &str, mpp_commit: &str) -> Lock {
-        let git = |c: &str| GitPin { reference: "r".into(), commit: c.into() };
+        let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
-            kernel: KernelPin { id: "k".into(), reference: "v7.1.1".into(), commit: kernel_commit.into() },
+            kernel: KernelPin { id: "k".into(), source: "ks".into(), reference: "v7.1.1".into(), commit: kernel_commit.into() },
             patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: "p1".into() }),
-            uboot: UbootPin { reference: "v".into(), commit: "u1".into() },
+            uboot: UbootPin { source: "us".into(), reference: "v".into(), commit: "u1".into() },
             userspace: Some(UserspacePins {
                 mpp: git(mpp_commit),
                 librga: git("rga1"),

@@ -925,7 +925,9 @@ mod config {
     /// security and updates pockets. Always the canonical `deb.debian.org` — the
     /// build-time `--mirror` override only redirects the bootstrap *fetch*, not the
     /// sources the shipped image points its `apt` at, so a device updates from the
-    /// official mirror regardless of which mirror built it.
+    /// official mirror regardless of which mirror built it. Plain `http://` is
+    /// standard Debian practice: apt verifies each `Release` signature against the
+    /// device's archive keyring, so the transport carries no integrity burden.
     pub fn apt_sources(suite: &str) -> String {
         format!(
             "deb http://deb.debian.org/debian {suite} main contrib non-free non-free-firmware\n\

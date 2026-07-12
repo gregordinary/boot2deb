@@ -15,6 +15,12 @@
 //! preloaded and nothing is copied into the rootfs. This is deliberately the same
 //! rootless-userland machinery the rootfs assembly is built on: the
 //! bootstrapped tree is the seed of the base-rootfs cache, not a throwaway.
+//!
+//! The sandbox is a rootless *convenience* — a clean, reproducible target-arch
+//! userland — not a hard security boundary against malicious build code: it runs
+//! as the build user with the build directories bind-mounted read-write. What
+//! stops a malicious build script is that every compiled source is pinned to an
+//! exact commit by the lock, not the namespace around the compiler.
 
 use crate::bootstrap::{StagingRoot, COMPONENTS, DEFAULT_MIRROR};
 use crate::build;

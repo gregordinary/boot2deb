@@ -68,6 +68,15 @@ pub fn is_full_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// True for a 64-character *lowercase* hex sha256 digest — the shape every
+/// content pin (blob pins, `extra_debs` hashes, the manifest digest) is written
+/// with, enforced where those pins are parsed (TRUST-7). Lowercase-strict
+/// because the generators (`sha256_hex`) emit lowercase and the pins are
+/// compared as bytes.
+pub fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Canonicalize a git reference for a pin: a full 40-hex sha is lowercased to git's
 /// own output form, so a later byte-for-byte `HEAD == pinned` check holds; a tag or
 /// branch name is returned unchanged. Applied where a user-supplied ref is ingested

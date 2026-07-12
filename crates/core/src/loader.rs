@@ -267,28 +267,30 @@ impl ConfigRoot {
 
     /// Load `recipes/<name>.lock` — the resolved exact pins for a recipe.
     /// `boot2deb build` reads only this; `boot2deb update` writes it. A lock is an
-    /// *atomic* artifact (exact pins), not a mergeable layer, so it is read from
-    /// the highest-precedence root that has it (an overlay's lock shadows a shipped
-    /// one), never merged.
+    /// *atomic* artifact (exact pins), not a mergeable layer, and it is read from
+    /// the root that **owns the recipe** — the same root
+    /// [`lock_path`](Self::lock_path) writes to — so `update`'s write target and
+    /// `build`'s read source can never address two different locks for one
+    /// recipe (COR-26). An overlay that wants different pins overlays the recipe
+    /// and its lock as a unit; an overlay retuning a shipped recipe owns both
+    /// automatically.
     pub fn lock(&self, name: &str) -> Result<crate::lock::Lock, ConfigError> {
         validate_name("lock", name)?;
-        let rel = format!("recipes/{name}.lock");
-        let mut last_path = PathBuf::new();
-        for root in self.roots.iter().rev() {
-            let path = root.join(&rel);
-            last_path = path.clone();
-            if let Some(text) = Self::read_file(&path)? {
-                return toml::from_str(&text).map_err(|source| ConfigError::Parse {
-                    path: path.display().to_string(),
-                    source,
-                });
-            }
+        let path = self
+            .owning_root("recipes", name)
+            .join("recipes")
+            .join(format!("{name}.lock"));
+        match Self::read_file(&path)? {
+            Some(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse {
+                path: path.display().to_string(),
+                source,
+            }),
+            None => Err(ConfigError::NotFound {
+                kind: "lock",
+                name: name.to_string(),
+                path: path.display().to_string(),
+            }),
         }
-        Err(ConfigError::NotFound {
-            kind: "lock",
-            name: name.to_string(),
-            path: last_path.display().to_string(),
-        })
     }
 
     /// Filesystem path of `recipes/<name>.lock`, whether or not it exists — the
@@ -559,6 +561,47 @@ mod tests {
         // A traversal recipe or filename is rejected as a write target.
         assert!(root.recipe_sibling("../x", "m").is_err());
         assert!(root.recipe_sibling("ov", "../m").is_err());
+    }
+
+    /// A minimal parseable lock whose kernel commit is 40 x `commit_char`, for
+    /// telling two on-disk locks apart.
+    fn lock_toml(commit_char: char) -> String {
+        let c: String = std::iter::repeat_n(commit_char, 40).collect();
+        let h: String = std::iter::repeat_n('0', 64).collect();
+        format!(
+            "[kernel]\nid = \"k\"\nsource = \"s\"\nref = \"v\"\ncommit = \"{c}\"\n\
+             [uboot]\nsource = \"s\"\nref = \"v\"\ncommit = \"{c}\"\n\
+             [rootfs]\nsuite = \"forky\"\nmanifest = \"m.pkgs.lock\"\n\
+             [blobs]\natf = \"a.elf@sha256:{h}\"\ntpl = \"t.bin@sha256:{h}\"\n"
+        )
+    }
+
+    #[test]
+    fn lock_reads_from_the_recipe_owning_root() {
+        // The lock is addressed by the recipe-owning root for read and write
+        // alike (COR-26): an overlay shipping only a stray lock (without
+        // overlaying the recipe) does not shadow the canonical one, so
+        // `update`'s write target and `build`'s read source can never diverge.
+        let p = tempfile::tempdir().unwrap();
+        let o = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(p.path().join("recipes")).unwrap();
+        std::fs::create_dir_all(o.path().join("recipes")).unwrap();
+        std::fs::write(p.path().join("recipes/r.toml"), "device = \"d\"\n").unwrap();
+        std::fs::write(p.path().join("recipes/r.lock"), lock_toml('a')).unwrap();
+        std::fs::write(o.path().join("recipes/r.lock"), lock_toml('b')).unwrap();
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+
+        // The primary root owns the recipe, so its lock is the one read...
+        assert_eq!(root.lock("r").unwrap().kernel.commit, "a".repeat(40));
+        // ...and the write target agrees with the read source.
+        assert_eq!(root.lock_path("r").unwrap(), p.path().join("recipes/r.lock"));
+
+        // Overlaying the recipe itself moves ownership — and with it both the
+        // lock read and the lock write — to the overlay.
+        std::fs::write(o.path().join("recipes/r.toml"), "device = \"d\"\n").unwrap();
+        assert_eq!(root.lock("r").unwrap().kernel.commit, "b".repeat(40));
+        assert_eq!(root.lock_path("r").unwrap(), o.path().join("recipes/r.lock"));
     }
 
     #[test]

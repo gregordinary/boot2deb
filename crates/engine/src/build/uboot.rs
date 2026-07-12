@@ -92,49 +92,32 @@ pub fn build_uboot(
     // clone/blob-verify/configure/compile when the output signature is stored. The
     // signature folds the blob hashes, so a hit implies the same verified blobs.
     let out_man = output_manifest(build, lock, env, patches);
-    if let Some(root) = opts.store {
-        let store = crate::artstore::ArtifactStore::open(root)?;
-        if let Some(files) = store.restore("uboot", out_man.signature().as_str(), opts.out_dir)? {
-            if let (Some(idbloader), Some(uboot_itb), Some(deb)) = (
-                crate::build::role_path(&files, "idbloader"),
-                crate::build::role_path(&files, "uboot_itb"),
-                crate::build::role_path(&files, "deb"),
-            ) {
-                step.log(format!(
-                    "restored u-boot payloads + deb from the artifact cache (signature {})",
-                    out_man.signature().short()
-                ));
-                step.progress(100);
-                step.finish();
-                return Ok(UbootArtifacts { idbloader, uboot_itb, deb });
-            }
-        }
+    if let Some([idbloader, uboot_itb, deb]) = build::restore_stage_outputs(
+        opts.store,
+        "uboot",
+        &out_man.signature(),
+        opts.out_dir,
+        &["idbloader", "uboot_itb", "deb"],
+        &step,
+    )?
+    .as_deref()
+    {
+        step.progress(100);
+        step.finish();
+        return Ok(UbootArtifacts {
+            idbloader: idbloader.clone(),
+            uboot_itb: uboot_itb.clone(),
+            deb: deb.clone(),
+        });
     }
 
-    // Tier-1 reuse: the cloned+patched tree is reused only when its stamp
-    // matches the current input signature; a lock bump rebuilds it rather than
-    // reusing a stale checkout (COR-1). configure() distcleans + reconfigures a
-    // reused tree and compile() re-runs, so the signature covers only the
-    // tree-shaping clone/patch inputs.
+    // Tier-1 reuse of the cloned+patched tree (COR-1): a lock bump rebuilds it.
+    // configure() distcleans + reconfigures a *reused* tree (keyed on the returned
+    // flag) and compile() re-runs regardless.
     let man = clone_manifest(lock, patches);
-    let reused = crate::signature::is_fresh(&tree, &man);
-    if reused {
-        step.log(format!(
-            "reusing u-boot tree at {} (signature {})",
-            tree.display(),
-            man.signature().short()
-        ));
-    } else {
-        if tree.exists() {
-            step.log(format!(
-                "u-boot tree at {} is stale (inputs changed) — rebuilding",
-                tree.display()
-            ));
-            std::fs::remove_dir_all(&tree).map_err(|s| EngineError::io(&tree, s))?;
-        }
-        clone_and_patch(lock, opts, &tree, &step)?;
-        crate::signature::write_manifest(&tree, &man)?;
-    }
+    let reused = build::reuse_or_refresh_tree(&tree, &man, "u-boot", &step, || {
+        clone_and_patch(lock, opts, &tree, &step)
+    })?;
     step.progress(20);
 
     // Verify blobs against the lock and stage the verified bytes into a private
@@ -170,19 +153,17 @@ pub fn build_uboot(
     let deb = package_deb(build, &lock.uboot.reference, opts, epoch, &idbloader, &uboot_itb, &step)?;
 
     // Store the payloads + deb under the output signature.
-    if let Some(root) = opts.store {
-        let store = crate::artstore::ArtifactStore::open(root)?;
-        store.put(
-            "uboot",
-            out_man.signature().as_str(),
-            &[
-                ("idbloader", idbloader.as_path()),
-                ("uboot_itb", uboot_itb.as_path()),
-                ("deb", deb.as_path()),
-            ],
-        )?;
-        step.log("stored u-boot payloads + deb to the artifact cache");
-    }
+    build::store_stage_outputs(
+        opts.store,
+        "uboot",
+        &out_man.signature(),
+        &[
+            ("idbloader", idbloader.as_path()),
+            ("uboot_itb", uboot_itb.as_path()),
+            ("deb", deb.as_path()),
+        ],
+        &step,
+    )?;
     step.progress(100);
     step.finish();
     Ok(UbootArtifacts {
@@ -602,11 +583,11 @@ mod tests {
     };
 
     fn lock_with(uboot_commit: &str, patches_commit: &str) -> Lock {
-        let git = |c: &str| GitPin { reference: "r".into(), commit: c.into() };
+        let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
-            kernel: KernelPin { id: "k".into(), reference: "v".into(), commit: "kc".into() },
+            kernel: KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() },
             patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
-            uboot: UbootPin { reference: "v2026.04".into(), commit: uboot_commit.into() },
+            uboot: UbootPin { source: "us".into(), reference: "v2026.04".into(), commit: uboot_commit.into() },
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },

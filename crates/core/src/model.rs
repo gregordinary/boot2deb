@@ -348,7 +348,9 @@ pub struct ExtraDeb {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Mandatory content hash (lowercase hex sha256) — the pin the build trusts and
-    /// the signature keys on.
+    /// the signature keys on. The shape is enforced by [`validate`](Self::validate)
+    /// at resolution (and re-checked in the engine), not at the parse boundary, so
+    /// the failure carries the typed [`ConfigError::ExtraDebBadHash`] context.
     pub sha256: String,
 }
 
@@ -720,7 +722,7 @@ pub struct Overrides {
 
 /// The kernel axis of a [`ResolvedBuild`]: a [`KernelDef`] flattened with its
 /// merged fragment list.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedKernel {
     /// Kernel definition id (e.g. `rk3588-mainline-7.1`).
     pub id: String,
@@ -747,7 +749,7 @@ pub struct ResolvedKernel {
 
 /// Raw-gap layout offsets for a build, carried as authored strings (parsed to
 /// bytes only when the image is written).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Offsets {
     /// `idbloader.img` offset.
     pub idbloader: String,
@@ -764,7 +766,7 @@ pub struct Offsets {
 /// every referenced layer merged, so the engine never re-reads config. Fields
 /// with no default (e.g. blobs) are guaranteed present because resolution
 /// validated them.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedBuild {
     /// Device name that was resolved.
     pub device: String,

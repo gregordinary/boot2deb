@@ -14,6 +14,12 @@ use std::path::{Path, PathBuf};
 /// Default Debian mirror both bootstraps pull from — also the base mirror the
 /// rootfs node's snapshot resolution ([`crate::snapshot`]) layers a snapshot
 /// mirror onto, re-exported at the crate root as [`crate::DEFAULT_MIRROR`].
+///
+/// Plain `http://` is standard Debian practice: integrity comes from apt's
+/// `Release`-signature verification against the vendored archive keyring, not
+/// the transport, so a tampering mirror or on-path attacker can at worst
+/// observe which packages are fetched or deny service — never alter what is
+/// installed.
 pub const DEFAULT_MIRROR: &str = "http://deb.debian.org/debian";
 
 /// Debian archive components enabled in both bootstraps: `non-free`/

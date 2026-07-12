@@ -176,47 +176,31 @@ pub fn build_ffmpeg(
     // needs neither the sandbox nor the userspace `.deb`s (the userspace dep identity
     // in the key is recomputed from the lock, not read from the built debs).
     let out_man = output_manifest(lock, ffmpeg, userspace, arch, ffmpeg_patches, us_patches);
-    if let Some(root) = opts.store {
-        let store = crate::artstore::ArtifactStore::open(root)?;
-        if let Some(files) = store.restore("ffmpeg", out_man.signature().as_str(), opts.out_dir)? {
-            if let Some(deb) = crate::build::role_path(&files, "deb") {
-                step.log(format!(
-                    "restored ffmpeg-rk deb from the artifact cache (signature {})",
-                    out_man.signature().short()
-                ));
-                step.progress(100);
-                step.finish();
-                return Ok(FfmpegArtifacts { deb });
-            }
-        }
+    if let Some([deb]) = build::restore_stage_outputs(
+        opts.store,
+        "ffmpeg",
+        &out_man.signature(),
+        opts.out_dir,
+        &["deb"],
+        &step,
+    )?
+    .as_deref()
+    {
+        step.progress(100);
+        step.finish();
+        return Ok(FfmpegArtifacts { deb: deb.clone() });
     }
 
     // Fail fast on the build-time dependency (the userspace `.deb`s) before the
     // expensive source fetch, so a forgotten userspace stage errors immediately.
     let debs = required_userspace_debs(opts.userspace_debs)?;
 
-    // Tier-1 reuse: reuse the fetched+patched tree only when it is stamped
-    // with the current input signature (base commit + patch pin); a lock bump
-    // rebuilds it rather than reusing a stale checkout (COR-1). configure/compile
-    // re-run regardless, so the signature covers only the tree-shaping inputs.
+    // Tier-1 reuse of the fetched+patched tree (COR-1): a lock bump (base commit
+    // or patch pin) rebuilds it; configure/compile re-run regardless.
     let man = clone_manifest(ffmpeg, lock.patches.as_ref(), ffmpeg_patches);
-    if crate::signature::is_fresh(&tree, &man) {
-        step.log(format!(
-            "reusing ffmpeg tree at {} (signature {})",
-            tree.display(),
-            man.signature().short()
-        ));
-    } else {
-        if tree.exists() {
-            step.log(format!(
-                "ffmpeg tree at {} is stale (inputs changed) — rebuilding",
-                tree.display()
-            ));
-            std::fs::remove_dir_all(&tree).map_err(|s| EngineError::io(&tree, s))?;
-        }
-        fetch_and_patch(ffmpeg, opts, &tree, &step)?;
-        crate::signature::write_manifest(&tree, &man)?;
-    }
+    build::reuse_or_refresh_tree(&tree, &man, "ffmpeg", &step, || {
+        fetch_and_patch(ffmpeg, opts, &tree, &step)
+    })?;
     step.progress(30);
 
     step.log(format!("sandbox: {}", sandbox.describe()));
@@ -263,11 +247,13 @@ pub fn build_ffmpeg(
     step.log(format!("staged {deb_name}"));
 
     // Store the deb under the output signature.
-    if let Some(root) = opts.store {
-        let store = crate::artstore::ArtifactStore::open(root)?;
-        store.put("ffmpeg", out_man.signature().as_str(), &[("deb", deb.as_path())])?;
-        step.log("stored ffmpeg-rk deb to the artifact cache");
-    }
+    build::store_stage_outputs(
+        opts.store,
+        "ffmpeg",
+        &out_man.signature(),
+        &[("deb", deb.as_path())],
+        &step,
+    )?;
     step.progress(100);
     step.finish();
     Ok(FfmpegArtifacts { deb })
@@ -610,32 +596,38 @@ fn resolve_depends(
 fn scan_binaries(pkg_stage: &Path) -> Result<Vec<PathBuf>, EngineError> {
     let prefix = pkg_stage.join(&INSTALL_PREFIX[1..]);
     let mut out = Vec::new();
-    let bin = prefix.join("bin");
-    if let Ok(entries) = std::fs::read_dir(&bin) {
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_file() {
-                out.push(p);
-            }
+    for e in read_dir_entries(&prefix.join("bin"))? {
+        let p = e.path();
+        if p.is_file() {
+            out.push(p);
         }
     }
-    let lib = prefix.join("lib");
-    if let Ok(entries) = std::fs::read_dir(&lib) {
-        for e in entries.flatten() {
-            let p = e.path();
-            // Versioned shared objects — the `.so.` infix matches both the real
-            // `libfoo.so.N.M.P` and the `libfoo.so.N` SONAME symlink (which
-            // `is_file()` follows, so it is included too; harmless for shlibdeps).
-            // The unversioned `.so` dev symlink has no `.so.` infix and is excluded.
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            if p.is_file() && name.contains(".so.") {
-                out.push(p);
-            }
+    for e in read_dir_entries(&prefix.join("lib"))? {
+        let p = e.path();
+        // Versioned shared objects — the `.so.` infix matches both the real
+        // `libfoo.so.N.M.P` and the `libfoo.so.N` SONAME symlink (which
+        // `is_file()` follows, so it is included too; harmless for shlibdeps).
+        // The unversioned `.so` dev symlink has no `.so.` infix and is excluded.
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if p.is_file() && name.contains(".so.") {
+            out.push(p);
         }
     }
     out.sort();
     Ok(out)
+}
+
+/// `read_dir` that treats an *absent* directory as empty but surfaces an
+/// unreadable one: an I/O or permissions failure here would otherwise silently
+/// shrink the `dpkg-shlibdeps` input set and ship an incomplete runtime
+/// `Depends` (COR-25).
+fn read_dir_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, EngineError> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries.map(|e| e.map_err(|s| EngineError::io(dir, s))).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(EngineError::io(dir, e)),
+    }
 }
 
 /// A `debian/shlibs.local` marking every private soname under `lib_dir` as
@@ -646,11 +638,9 @@ fn scan_binaries(pkg_stage: &Path) -> Result<Vec<PathBuf>, EngineError> {
 /// `libfoo.so.N.M.P`). Sorted + deduped for determinism.
 fn private_shlibs_local(lib_dir: &Path) -> Result<String, EngineError> {
     let mut lines: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(lib_dir) {
-        for e in entries.flatten() {
-            if let Some((lib, ver)) = soname_entry(&e.file_name().to_string_lossy()) {
-                lines.push(format!("{lib} {ver} \n"));
-            }
+    for e in read_dir_entries(lib_dir)? {
+        if let Some((lib, ver)) = soname_entry(&e.file_name().to_string_lossy()) {
+            lines.push(format!("{lib} {ver} \n"));
         }
     }
     lines.sort();
@@ -740,11 +730,11 @@ mod tests {
     };
 
     fn lock_with(base_commit: &str, patches_commit: &str) -> Lock {
-        let git = |c: &str| GitPin { reference: "r".into(), commit: c.into() };
+        let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
-            kernel: KernelPin { id: "k".into(), reference: "v".into(), commit: "kc".into() },
+            kernel: KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() },
             patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
-            uboot: UbootPin { reference: "v".into(), commit: "uc".into() },
+            uboot: UbootPin { source: "us".into(), reference: "v".into(), commit: "uc".into() },
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git(base_commit), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
@@ -752,6 +742,29 @@ mod tests {
             extra_debs: vec![],
             snapshot: None,
         }
+    }
+
+    #[test]
+    fn unreadable_scan_dir_is_an_error_not_an_empty_scan() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        // An absent directory is a legitimate empty scan...
+        assert!(read_dir_entries(&tmp.path().join("missing")).unwrap().is_empty());
+        // ...but an unreadable one must surface, or `dpkg-shlibdeps` would compute
+        // an incomplete Depends from a silently-shrunk input set (COR-25).
+        let dir = tmp.path().join("noread");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // With DAC override (root), the mode does not bite; skip rather than
+        // assert something the host cannot produce.
+        let mode_bites = std::fs::read_dir(&dir).is_err();
+        let result = read_dir_entries(&dir);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !mode_bites {
+            eprintln!("skipping: running with permission override (root)");
+            return;
+        }
+        result.unwrap_err();
     }
 
     #[test]

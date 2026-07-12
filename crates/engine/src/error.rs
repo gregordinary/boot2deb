@@ -151,6 +151,20 @@ pub enum EngineError {
         root: String,
     },
 
+    /// `update` found no `patches` checkout at the given path. The pin is the
+    /// checkout's `HEAD`, so `update` needs a local clone — unlike `build`,
+    /// which reads the already-pinned commit and auto-fetches it with no
+    /// checkout present.
+    #[error(
+        "no patches checkout at {path}: `update` pins the checkout's HEAD, so it \
+         needs a local clone there (clone the patches repo, or point --patches-path \
+         at one); `build` needs no checkout — it auto-fetches the pinned commit"
+    )]
+    PatchesCheckoutMissing {
+        /// The path expected to hold the checkout.
+        path: String,
+    },
+
     /// A patch in the series did not apply to the target tree — the verify gate's
     /// hard error, naming the failing patch and the kernel it was checked against.
     /// Patches are never silently skipped or fuzzed in.

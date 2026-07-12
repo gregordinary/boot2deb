@@ -120,16 +120,20 @@ values for you, so the boilerplate is paid by the generator, not the author.
 A **recipe** (`recipes/<recipe>.toml`) pins one buildable point: it names the device
 and, optionally, the kernel, suite, features, layout, and image size (each omitted axis
 falls back to the device default). Its **lock** (`recipes/<recipe>.lock`) holds the
-exact resolved pins: commit hashes for every source (including the `[patches]` profile
-and commit, when the kernel has one), blob content hashes, and the solved rootfs
-manifest digest.
+exact resolved pins: for every git source, the repo URL it was pinned from plus the
+ref and commit (including the `[patches]` profile and commit, when the kernel has
+one), blob content hashes, and the solved rootfs manifest digest.
 
 The split between the two is what makes a build reproducible:
 
 - **`update`** is the only command that consults upstream. It resolves refs to commits,
   hashes blobs, and writes the lock.
 - **`build`** reads only the lock. It touches no network for its pins, so the same lock
-  always produces the same inputs.
+  always produces the same inputs. Before building it checks the lock against a fresh
+  resolution on every axis the lock records from config — the source repos, blob file
+  names, kernel id, suite, patch profile, extra debs — and refuses on drift, so a
+  config edit after `update` (say a boot-method flip to a different u-boot repo) is a
+  named error rather than a build against stale pins.
 
 See the [CLI reference](cli.md) for the commands that operate on these.
 

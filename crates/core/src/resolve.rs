@@ -365,9 +365,52 @@ fn merge_extra_debs(
     Ok(merged)
 }
 
-/// Union the selected features' [`AptSource`]s, keyed by `name`. Two
-/// features may legitimately reference the same repo — those collapse to one
-/// entry — but a same-name pair with different settings is
+/// One field of the apt one-line source format: non-empty printable ASCII with
+/// no whitespace and no `[`/`]` — whitespace separates the line's positional
+/// fields and the brackets delimit its option block, so either would be parsed
+/// as structure, not content (SEC-8).
+fn apt_line_token(v: &str) -> bool {
+    !v.is_empty() && v.chars().all(|c| c.is_ascii_graphic() && c != '[' && c != ']')
+}
+
+/// Validate a feature's [`AptSource`] against the one-line source grammar the
+/// bootstrap renders it into (SEC-8): every field a clean token, the URI
+/// http(s) (any other transport would sidestep the mirror trust model), the
+/// name additionally separator-free (it becomes a dedup key and file stem), and
+/// at least one component unless the suite is an exact path (ends in `/`).
+fn validate_apt_source(feature: &str, src: &AptSource) -> Result<(), ConfigError> {
+    let bad = |field: &'static str, value: &str| ConfigError::AptSourceBadField {
+        feature: feature.to_string(),
+        name: src.name.clone(),
+        field,
+        value: value.to_string(),
+    };
+    if !apt_line_token(&src.name) || src.name.contains('/') {
+        return Err(bad("name", &src.name));
+    }
+    if !apt_line_token(&src.uri)
+        || !(src.uri.starts_with("https://") || src.uri.starts_with("http://"))
+    {
+        return Err(bad("uri", &src.uri));
+    }
+    if !apt_line_token(&src.suite) {
+        return Err(bad("suite", &src.suite));
+    }
+    if src.components.is_empty() && !src.suite.ends_with('/') {
+        return Err(bad("components", "(empty)"));
+    }
+    for component in &src.components {
+        if !apt_line_token(component) {
+            return Err(bad("components", component));
+        }
+    }
+    Ok(())
+}
+
+/// Union the selected features' [`AptSource`]s, keyed by `name`. Each source is
+/// validated against the apt line grammar first ([`validate_apt_source`],
+/// SEC-8). Two features may legitimately reference the same repo — those
+/// collapse to one entry — but a same-name pair with different settings is
 /// [`ConfigError::ConflictingAptSource`], since the bootstrap solve could not tell
 /// which repo to activate. Order follows first appearance across the feature list.
 fn merge_apt_sources(
@@ -376,6 +419,7 @@ fn merge_apt_sources(
     let mut merged: Vec<(String, AptSource)> = Vec::new();
     for (feat_name, feat) in features {
         for src in &feat.apt_sources {
+            validate_apt_source(feat_name, src)?;
             if let Some((owner, existing)) = merged.iter().find(|(_, s)| s.name == src.name) {
                 if existing != src {
                     return Err(ConfigError::ConflictingAptSource {
@@ -754,14 +798,52 @@ mod tests {
         }
     }
 
-    fn src(name: &str, uri: &str) -> AptSource {
+    fn src(name: &str, host: &str) -> AptSource {
         AptSource {
             name: name.into(),
-            uri: uri.into(),
+            uri: format!("https://{host}.example/debian"),
             suite: "trixie".into(),
             components: vec!["main".into()],
             signed_by: "k.gpg".into(),
         }
+    }
+
+    #[test]
+    fn apt_sources_reject_line_structure_injection() {
+        // The rendered `deb [signed-by=…] <uri> <suite> <components…>` line is
+        // positional, so whitespace / brackets / newlines in any field — or a
+        // non-http(s) transport — must fail at resolve time (SEC-8), naming the
+        // field.
+        let with = |mutate: &dyn Fn(&mut AptSource)| {
+            let mut s = src("vendor", "repo");
+            mutate(&mut s);
+            s
+        };
+        for (field, source) in [
+            ("uri", with(&|s| s.uri = "https://repo.example/a b".into())),
+            ("uri", with(&|s| s.uri = "file:///etc/apt".into())),
+            ("suite", with(&|s| s.suite = "tri xie".into())),
+            ("suite", with(&|s| s.suite = "trixie] [trusted=yes".into())),
+            ("suite", with(&|s| s.suite = "trixie\nmain".into())),
+            ("components", with(&|s| s.components = vec![])),
+            ("components", with(&|s| s.components = vec!["ma in".into()])),
+            ("name", with(&|s| s.name = "je/llyfin".into())),
+        ] {
+            let feat = ("app".to_string(), feat_with_sources(vec![source]));
+            match merge_apt_sources(&[feat]).unwrap_err() {
+                ConfigError::AptSourceBadField { field: f, .. } => {
+                    assert_eq!(f, field, "wrong field named");
+                }
+                other => panic!("{field}: expected AptSourceBadField, got {other:?}"),
+            }
+        }
+        // An exact-path repo (suite ending in `/`) legitimately has no components.
+        let exact = with(&|s| {
+            s.suite = "./".into();
+            s.components = vec![];
+        });
+        let feat = ("app".to_string(), feat_with_sources(vec![exact]));
+        assert_eq!(merge_apt_sources(&[feat]).unwrap().len(), 1);
     }
 
     #[test]

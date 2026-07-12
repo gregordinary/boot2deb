@@ -7,9 +7,11 @@ set -e
 # Disable consistent network device naming
 ln -sf /dev/null /etc/systemd/network/99-default.link
 
-# Generate a locally-administered unicast MAC address
+# Generate a locally-administered unicast MAC address: clear the multicast bit
+# (byte 0 bit 0, via the leading 0xfe) and set the locally-administered bit
+# (byte 0 bit 1 = 0x02), so the address can never collide with a vendor OUI.
 macd=$(xxd -s250 -l6 -p /dev/urandom)
-mac_address=$(printf '%012x' $((0x$macd & 0xfefffffffffc | 0x200000000000)) | sed 's/../&:/g;s/:$//')
+mac_address=$(printf '%012x' $((0x$macd & 0xfefffffffffc | 0x020000000000)) | sed 's/../&:/g;s/:$//')
 
 # udev rule to keep the interface named eth0
 cat <<EOF > /etc/udev/rules.d/70-persistent-net.rules

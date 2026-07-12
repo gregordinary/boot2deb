@@ -107,7 +107,7 @@ pub fn normalize(text: &str, meta: &ImportMeta) -> Result<Normalized, ConfigErro
 /// A URL-and-punctuation-free kebab-case slug for a patch filename, from a subject.
 ///
 /// Lowercases, turns every run of non-alphanumeric characters into a single `-`,
-/// trims leading/trailing `-`, and caps the length at a word boundary (≤50 chars)
+/// trims leading/trailing `-`, and caps the length at a word boundary (≤60 chars)
 /// so the numeric prefix stays legible. An all-punctuation subject yields
 /// `"patch"`.
 pub fn slugify(subject: &str) -> String {

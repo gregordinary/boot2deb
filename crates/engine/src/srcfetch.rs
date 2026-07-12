@@ -88,9 +88,13 @@ pub fn restore_tree(tree: &Path, base_commit: &str) -> Result<(), EngineError> {
     crate::git::reset_hard(tree, base_commit)
 }
 
-/// First 12 chars of a commit id for a log line.
+/// First 12 characters of a commit id for a log line. Truncates on a character
+/// boundary so a malformed value renders short instead of panicking (COR-24).
 fn short(commit: &str) -> &str {
-    &commit[..commit.len().min(12)]
+    match commit.char_indices().nth(12) {
+        Some((i, _)) => &commit[..i],
+        None => commit,
+    }
 }
 
 #[cfg(test)]

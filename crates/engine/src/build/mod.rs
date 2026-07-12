@@ -74,10 +74,14 @@ impl BuildEnv {
 /// This is the single host-side command choke point (native compiles, the cross
 /// `bwrap` wrapper, kernel/u-boot `make`, `git`, the rootfs `mmdebstrap` bootstrap,
 /// `dpkg-deb`), so it normalizes the determinism-relevant environment here — `TZ=UTC`
-/// and `LC_ALL=C.UTF-8` — matching the cross sandbox's `--clearenv` + `SANDBOX_ENV`
-/// discipline so a host's timezone/locale cannot leak into packaged output (DET-6). A
-/// full `env_clear` is unsafe on the host (it would drop the `PATH`/`HOME` the tools
-/// need); the caller's own env (e.g. `SOURCE_DATE_EPOCH`) is already set and preserved.
+/// and `LC_ALL=C.UTF-8`, matching the cross sandbox's `--clearenv` + `SANDBOX_ENV`
+/// discipline so a host's timezone/locale cannot leak into packaged output (DET-6),
+/// and the kbuild-honored flag variables (`KCFLAGS`/`KAFLAGS`/`KCPPFLAGS`) plus
+/// `MAKEFLAGS`/`GNUMAKEFLAGS` are removed, so a flag exported in the host shell
+/// cannot silently shape the kernel/u-boot bytes a lock-keyed cache entry claims
+/// to reproduce (DET-8). A full `env_clear` is unsafe on the host (it would drop
+/// the `PATH`/`HOME` the tools need); the caller's own env (e.g.
+/// `SOURCE_DATE_EPOCH`) is already set and preserved.
 ///
 /// **stdin is `/dev/null`.** A build is non-interactive by construction, and a tool
 /// that decides to ask a question — kbuild's `conf` dropping into `oldaskconfig` on an
@@ -90,6 +94,9 @@ pub fn run(
     step: &Step,
 ) -> Result<(), EngineError> {
     command.env("TZ", "UTC").env("LC_ALL", "C.UTF-8");
+    for flag_var in ["KCFLAGS", "KAFLAGS", "KCPPFLAGS", "MAKEFLAGS", "GNUMAKEFLAGS"] {
+        command.env_remove(flag_var);
+    }
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
@@ -647,12 +654,16 @@ fn clone_pinned_inner(spec: &ClonePinned, step: &Step) -> Result<usize, EngineEr
         CloneMode::Shallow => {
             clone_shallow(spec.source, spec.reference, spec.tree, step)?;
             // The build reads only the lock: a clone that lands on a different
-            // commit is a hard error, not a silently different tree.
+            // commit is a hard error, not a silently different tree. Normalize
+            // the expected side like the `Fetch` arm does, so both arms accept
+            // the same pin spellings (an uppercase-hex hand edit names the same
+            // object git prints in lowercase).
             let head = git::rev_parse_head(spec.tree)?;
-            if head != spec.commit {
+            let expected = boot2deb_core::sources::normalize_ref(spec.commit);
+            if head != expected {
                 return Err(EngineError::CommitMismatch {
                     what: spec.what.to_string(),
-                    expected: spec.commit.to_string(),
+                    expected,
                     actual: head,
                 });
             }
@@ -795,6 +806,99 @@ pub(crate) fn sanitize_deb_version(raw: &str) -> String {
 /// caller then falls through to a rebuild rather than trusting a partial restore).
 pub(crate) fn role_path(restored: &[(String, PathBuf)], role: &str) -> Option<PathBuf> {
     restored.iter().find(|(r, _)| r == role).map(|(_, p)| p.clone())
+}
+
+/// Tier-2 early exit shared by the compile stages: restore `node`'s stored
+/// outputs into `out_dir` when the store holds signature `sig` with **every**
+/// role in `roles`, returning the restored paths in `roles` order. A miss, a
+/// partial entry (any role absent), or a disabled store (`None`) returns `None`
+/// — the caller then builds and stores.
+///
+/// One implementation for every stage keeps the restore semantics provably
+/// identical (all-roles-or-nothing, same log shape); per-stage copies of this
+/// block are how stage behavior drifts (COR-22 grew from such a divergence).
+pub(crate) fn restore_stage_outputs(
+    store_root: Option<&Path>,
+    node: &str,
+    sig: &crate::signature::Signature,
+    out_dir: &Path,
+    roles: &[&str],
+    step: &Step,
+) -> Result<Option<Vec<PathBuf>>, EngineError> {
+    let Some(root) = store_root else {
+        return Ok(None);
+    };
+    let store = crate::artstore::ArtifactStore::open(root)?;
+    let Some(files) = store.restore(node, sig.as_str(), out_dir)? else {
+        return Ok(None);
+    };
+    let mut paths = Vec::with_capacity(roles.len());
+    for role in roles {
+        match role_path(&files, role) {
+            Some(p) => paths.push(p),
+            None => return Ok(None),
+        }
+    }
+    step.log(format!(
+        "restored {node} outputs from the artifact cache (signature {})",
+        sig.short()
+    ));
+    Ok(Some(paths))
+}
+
+/// Tier-2 store side of [`restore_stage_outputs`]: put `node`'s built outputs
+/// under signature `sig` so a later build restores instead of recompiling. A
+/// disabled store (`None`) is a no-op.
+pub(crate) fn store_stage_outputs(
+    store_root: Option<&Path>,
+    node: &str,
+    sig: &crate::signature::Signature,
+    files: &[(&str, &Path)],
+    step: &Step,
+) -> Result<(), EngineError> {
+    let Some(root) = store_root else {
+        return Ok(());
+    };
+    let store = crate::artstore::ArtifactStore::open(root)?;
+    store.put(node, sig.as_str(), files)?;
+    step.log(format!("stored {node} outputs to the artifact cache"));
+    Ok(())
+}
+
+/// Tier-1 gate shared by the compile stages: keep the fetched+patched tree at
+/// `tree` only when it is stamped with `man`'s signature; otherwise remove the
+/// stale tree, run `refresh` to re-materialize it, and stamp it (COR-1).
+/// Returns `true` when the tree was reused — a stage whose configure step must
+/// clean a previously-built tree keys on it.
+///
+/// A lock or patch bump changes the signature, so a stale tree is rebuilt
+/// rather than silently reused; the compile steps re-run regardless, so the
+/// signature covers only the tree-shaping fetch/patch inputs.
+pub(crate) fn reuse_or_refresh_tree(
+    tree: &Path,
+    man: &crate::signature::SignatureManifest,
+    what: &str,
+    step: &Step,
+    refresh: impl FnOnce() -> Result<(), EngineError>,
+) -> Result<bool, EngineError> {
+    if crate::signature::is_fresh(tree, man) {
+        step.log(format!(
+            "reusing {what} tree at {} (signature {})",
+            tree.display(),
+            man.signature().short()
+        ));
+        return Ok(true);
+    }
+    if tree.exists() {
+        step.log(format!(
+            "{what} tree at {} is stale (inputs changed) — rebuilding",
+            tree.display()
+        ));
+        std::fs::remove_dir_all(tree).map_err(|s| EngineError::io(tree, s))?;
+    }
+    refresh()?;
+    crate::signature::write_manifest(tree, man)?;
+    Ok(false)
 }
 
 /// The lowercase-hex sha256 of a file's contents, for folding an in-repo input
@@ -1080,6 +1184,28 @@ fn deb_names(dir: &Path) -> Result<Vec<String>, EngineError> {
     Ok(names)
 }
 
+/// Remove every `.deb` under `dir` whose name starts with one of `prefixes`.
+///
+/// The stale-output sweep every stage runs over a directory it later *scans* for
+/// `.deb`s: [`pick_deb`] picks the highest version and `select_debs` copies every
+/// match among whatever is present, so a leftover from a build at different pins
+/// (e.g. a higher-versioned kernel before a repin down) must be removed before
+/// fresh outputs land, or it can be selected and shipped in place of them
+/// (COR-22). Prefix-scoped so one stage's sweep cannot touch another stage's
+/// artifacts in a shared directory. An absent `dir` is a no-op.
+pub(crate) fn purge_stage_debs(dir: &Path, prefixes: &[&str]) -> Result<(), EngineError> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for name in deb_names(dir)? {
+        if prefixes.iter().any(|p| name.starts_with(p)) {
+            let path = dir.join(&name);
+            std::fs::remove_file(&path).map_err(|s| EngineError::io(&path, s))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1347,6 +1473,160 @@ mod tests {
             Some("linux-headers-7.1.1-1-arm64_7.1.1-10_arm64.deb")
         );
         assert_eq!(pick_deb(&names, "nonexistent-"), None);
+    }
+
+    #[test]
+    fn reuse_or_refresh_tree_reuses_stamped_and_rebuilds_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("tree");
+        let sink = |_e: Event| {};
+        let step = Step::start(&sink, "test");
+        let man_for = |pin: &str| {
+            let mut b = crate::signature::SignatureBuilder::new("t", 1);
+            b.fold_scalar("pin", pin);
+            b.manifest()
+        };
+        let ran = std::cell::Cell::new(0);
+
+        // Absent tree: refresh runs and the tree is stamped; not a reuse.
+        let man_v1 = man_for("v1");
+        let reused = reuse_or_refresh_tree(&tree, &man_v1, "test", &step, || {
+            ran.set(ran.get() + 1);
+            std::fs::create_dir_all(&tree).map_err(|s| EngineError::io(&tree, s))?;
+            std::fs::write(tree.join("f"), "v1").map_err(|s| EngineError::io(&tree, s))
+        })
+        .unwrap();
+        assert!(!reused);
+        assert_eq!(ran.get(), 1);
+
+        // Unchanged signature: reused, refresh not called.
+        let reused = reuse_or_refresh_tree(&tree, &man_v1, "test", &step, || {
+            ran.set(ran.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert!(reused);
+        assert_eq!(ran.get(), 1);
+
+        // Pin bump: the stale tree is removed *before* refresh re-materializes it.
+        let reused = reuse_or_refresh_tree(&tree, &man_for("v2"), "test", &step, || {
+            ran.set(ran.get() + 1);
+            assert!(!tree.exists(), "stale tree must be removed before refresh");
+            std::fs::create_dir_all(&tree).map_err(|s| EngineError::io(&tree, s))
+        })
+        .unwrap();
+        assert!(!reused);
+        assert_eq!(ran.get(), 2);
+    }
+
+    #[test]
+    fn stage_output_store_roundtrip_requires_every_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_root = tmp.path().join("store");
+        let out = tmp.path().join("out");
+        let sink = |_e: Event| {};
+        let step = Step::start(&sink, "test");
+        let sig = crate::signature::SignatureBuilder::new("t", 1).finish();
+        let empty: &[(&str, &Path)] = &[];
+
+        // Disabled store (None): storing is a no-op, restoring always misses.
+        store_stage_outputs(None, "t", &sig, empty, &step).unwrap();
+        assert!(restore_stage_outputs(None, "t", &sig, &out, &["a"], &step)
+            .unwrap()
+            .is_none());
+
+        // Miss before anything is stored.
+        assert!(
+            restore_stage_outputs(Some(&store_root), "t", &sig, &out, &["a"], &step)
+                .unwrap()
+                .is_none()
+        );
+
+        // Roundtrip: paths come back in the caller's role order.
+        let a = tmp.path().join("a.deb");
+        let b = tmp.path().join("b.deb");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        store_stage_outputs(Some(&store_root), "t", &sig, &[("a", &a), ("b", &b)], &step).unwrap();
+        let paths = restore_stage_outputs(Some(&store_root), "t", &sig, &out, &["b", "a"], &step)
+            .unwrap()
+            .expect("full hit");
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"b");
+        assert_eq!(std::fs::read(&paths[1]).unwrap(), b"a");
+
+        // An entry missing a requested role is a miss, never a partial restore.
+        assert!(restore_stage_outputs(
+            Some(&store_root),
+            "t",
+            &sig,
+            &out,
+            &["a", "missing"],
+            &step
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn shallow_clone_accepts_an_uppercase_hex_pin() {
+        // Both clone arms must accept the same pin spellings: the Fetch arm
+        // normalizes the expected commit before comparing, so the Shallow arm's
+        // check has to as well — an uppercase-hex hand edit names the same object.
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").arg("-C").arg(&origin).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(origin.join("f"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["tag", "v1"]);
+        let commit = git(&["rev-parse", "HEAD"]).to_uppercase();
+
+        let tree = tmp.path().join("tree");
+        let sink = |_e: Event| {};
+        let step = Step::start(&sink, "test");
+        let spec = ClonePinned {
+            source: origin.to_str().unwrap(),
+            reference: "v1",
+            commit: &commit,
+            mode: CloneMode::Shallow,
+            tree: &tree,
+            what: "test",
+            patches: None,
+            scope: PatchScope::Kernel,
+            target: "test @ v1",
+            gate_reference: None,
+        };
+        clone_pinned(&spec, &step).expect("uppercase pin must match the same object");
+    }
+
+    #[test]
+    fn purge_stage_debs_removes_only_matching_prefixes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for n in [
+            "linux-image-7.1.2-1-arm64_7.1.2-1_arm64.deb",
+            "linux-headers-7.1.2-1-arm64_7.1.2-1_arm64.deb",
+            "u-boot-turing-rk1_2026.04_arm64.deb",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        purge_stage_debs(dir, &["linux-image-", "linux-headers-"]).unwrap();
+        // The swept prefixes are gone; another stage's deb and non-deb files stay.
+        assert!(!dir.join("linux-image-7.1.2-1-arm64_7.1.2-1_arm64.deb").exists());
+        assert!(!dir.join("linux-headers-7.1.2-1-arm64_7.1.2-1_arm64.deb").exists());
+        assert!(dir.join("u-boot-turing-rk1_2026.04_arm64.deb").exists());
+        assert!(dir.join("notes.txt").exists());
+        // An absent dir is a no-op, not an error.
+        purge_stage_debs(&dir.join("missing"), &["linux-image-"]).unwrap();
     }
 
     #[test]

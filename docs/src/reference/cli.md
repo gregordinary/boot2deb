@@ -3,9 +3,17 @@
 The binary is `boot2deb`; during development run it with `cargo run -p boot2deb-cli --`.
 It defaults `--root .`, so run it from inside `boot2deb/` (or pass `--root`).
 
-Two global flags apply to every command: `--root <dir>` (the config root) and
-`--overlay <dir>` (an out-of-tree config overlay, repeatable) — see
-[Overlays](overlays.md).
+Three global flags apply to every command: `--root <dir>` (the config root),
+`--overlay <dir>` (an out-of-tree config overlay, repeatable — see
+[Overlays](overlays.md)), and `--json` (machine-readable output).
+
+Under `--json`, the `list-*` commands print one JSON array (unreadable entries
+become `{"name", "error"}` objects), `resolve` prints the fully resolved build as
+one JSON document, and `build` streams NDJSON — one JSON object per line, tagged
+by its `event` field (`step_started`, `progress`, `log`, `artifact`,
+`step_finished`, `error`), with every produced artifact's path carried by an
+`artifact` event. Errors are still plain text on stderr, and the exit code is the
+result either way. Other commands print their human form regardless.
 
 The two commands that split reproducibility from upstream are `update` (the only one
 that consults the network) and `build` (reads only the lock). See
@@ -216,6 +224,11 @@ cargo run -p boot2deb-cli -- why-rebuild turing-rk1-forky
 # previews; --cache / --sandbox clean only that subtree.
 cargo run -p boot2deb-cli -- clean turing-rk1-forky --dry-run
 ```
+
+`clean` removes only directories `build` created: every work dir is stamped with a
+`.boot2deb-work` marker, and an unmarked target is refused — so a mistyped
+`--work-dir` cannot recursively delete an arbitrary tree. `--force` overrides the
+check for a directory you are sure about.
 
 `why-rebuild` reads the lock and each compile node's signature stamp and reports, per node,
 whether the next `build` reuses or rebuilds the cloned-and-patched tree, naming the pinned
