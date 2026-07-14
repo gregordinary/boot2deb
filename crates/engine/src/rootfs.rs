@@ -115,7 +115,7 @@ pub struct RootfsOptions<'a> {
     /// (`--refresh-rootfs`). The solve still runs and the fresh tree is re-stored.
     pub refresh: bool,
     /// Third-party apt repositories the selected features contribute
-    /// ([`ResolvedBuild::apt_sources`], CFG-1), each paired with the host
+    /// ([`ResolvedBuild::apt_sources`]), each paired with the host
     /// path its `signed_by` keyring resolved to. Rendered into signed `deb` positionals
     /// so apt resolves an out-of-mirror app (e.g. Jellyfin) during the bootstrap solve.
     /// Empty when no feature adds one.
@@ -125,8 +125,8 @@ pub struct RootfsOptions<'a> {
     /// `None` when the kernel tree is not available to read it (a partial rootfs-only
     /// build). When set it is exported into the mmdebstrap environment so the tarball's
     /// member mtimes are clamped to it, and stamped onto the password-splice's appended
-    /// `./etc/shadow` member, so only the deliberate per-image secret (    /// DET-1) — not incidental build-time mtimes — varies between builds of one lock
-    /// (DET-2/DET-4).
+    /// `./etc/shadow` member, so only the deliberate per-image secret — not incidental
+    /// build-time mtimes — varies between builds of one lock.
     pub source_date_epoch: Option<u64>,
 }
 
@@ -153,8 +153,8 @@ pub enum BootConfig<'a> {
     },
 }
 
-/// A resolved third-party apt repository activated during the rootfs bootstrap solve
-/// (CFG-1): a feature's [`AptSource`] paired with the host path its `signed_by`
+/// A resolved third-party apt repository activated during the rootfs bootstrap solve:
+/// a feature's [`AptSource`] paired with the host path its `signed_by`
 /// keyring resolved to. The CLI resolves and existence-checks the keyring (a vendored
 /// build-host prerequisite); the rootfs stage renders the pair into an
 /// mmdebstrap positional `deb [signed-by=…]` line so the repo's `Release` signature is
@@ -327,7 +327,7 @@ impl Rootfs for MmdebstrapRootfs {
                 &hash_hook,
             ));
             // Clamp every tar member mtime to the lock-derived epoch so build-time
-            // mtimes do not leak into the tarball (DET-4). mmdebstrap reduces any mtime
+            // mtimes do not leak into the tarball. mmdebstrap reduces any mtime
             // newer than SOURCE_DATE_EPOCH down to it; the generated config and the
             // overlay (hook-copied without preserving timestamps) are stamped "now", so
             // they all clamp to the epoch, while pinned package files keep their fixed
@@ -374,7 +374,7 @@ fn include_arg(build: &ResolvedBuild, opts: &RootfsOptions) -> Option<String> {
 }
 
 /// Render a resolved feature apt repository as an mmdebstrap positional
-/// `deb [signed-by=<keyring>] <uri> <suite> <components…>` line (CFG-1). The
+/// `deb [signed-by=<keyring>] <uri> <suite> <components…>` line. The
 /// `signed-by` points at the host keyring path the source's `signed_by` resolved to,
 /// so apt verifies the repo's `Release` signature during the solve rather than
 /// trusting it blindly — unlike the local repo's `[trusted=yes]`, which is our own
@@ -409,7 +409,7 @@ fn simulate_argv(
         "--verbose".to_string(),
     ];
     // Bound apt's per-connection network wait so a stalled mirror fails rather than
-    // hangs (TRUST-5).
+    // hangs.
     argv.extend(crate::bootstrap::APT_TIMEOUT_OPTS.iter().map(|s| s.to_string()));
     if let Some(kr) = keyring {
         argv.push(format!("--keyring={}", kr.display()));
@@ -418,14 +418,14 @@ fn simulate_argv(
         argv.push(include);
     }
     // `--` stops option parsing so the positional suite/target/mirrors cannot be
-    // read as options even if a value begins with `-` (SUB-2; mmdebstrap documents
+    // read as options even if a value begins with `-` (mmdebstrap documents
     // this terminator explicitly).
     argv.push("--".to_string());
     argv.push(build.suite.clone());
     argv.push("/dev/null".to_string());
     argv.extend(opts.mirrors.iter().cloned());
     // Third-party feature repos (signed), so an out-of-mirror app resolves in the
-    // solve; the local repo (our own built debs) stays last (CFG-1).
+    // solve; the local repo (our own built debs) stays last.
     argv.extend(opts.apt_sources.iter().map(apt_source_line));
     argv.push(repo_source.to_string());
     argv
@@ -557,7 +557,7 @@ fn mmdebstrap_argv(
         "--aptopt=APT::Keep-Downloaded-Packages \"true\"".to_string(),
     ];
     // Bound apt's per-connection network wait so a stalled mirror fails rather than
-    // hangs (TRUST-5).
+    // hangs.
     argv.extend(crate::bootstrap::APT_TIMEOUT_OPTS.iter().map(|s| s.to_string()));
     if let Some(kr) = keyring {
         argv.push(format!("--keyring={}", kr.display()));
@@ -579,7 +579,7 @@ fn mmdebstrap_argv(
     argv.push(format!("--customize-hook=sh {} \"$1\"", hash_hook.display()));
     argv.push(format!("--customize-hook=sh {} \"$1\"", hook.display()));
     // `--` stops option parsing so the positional suite/target/mirrors cannot be
-    // read as options even if a value begins with `-` (SUB-2; mmdebstrap documents
+    // read as options even if a value begins with `-` (mmdebstrap documents
     // this terminator explicitly).
     argv.push("--".to_string());
     argv.push(build.suite.clone());
@@ -588,7 +588,7 @@ fn mmdebstrap_argv(
     // the local repo — apt tries them in order.
     argv.extend(opts.mirrors.iter().cloned());
     // Third-party feature repos (signed), so an out-of-mirror app resolves in the
-    // solve; the local repo (our own built debs) stays last (CFG-1).
+    // solve; the local repo (our own built debs) stays last.
     argv.extend(opts.apt_sources.iter().map(apt_source_line));
     argv.push(repo_source.to_string());
     argv
@@ -869,8 +869,7 @@ fn customize_hook_script(
          # without preserving owner lands the files root-owned, as /etc config must be.\n\
          # Timestamps are dropped so overlay files take a fresh mtime that mmdebstrap's\n\
          # SOURCE_DATE_EPOCH clamp then pins to the epoch, rather than carrying a\n\
-         # checkout-time mtime that could sit below the epoch and escape the clamp\n\
-         # (DET-2).\n\
+         # checkout-time mtime that could sit below the epoch and escape the clamp.\n\
          cp -dR --remove-destination --preserve=mode \"{staging}/.\" \"$rootfs/\"\n\
          # default account, created locked; the per-image password is spliced in later\n\
          chroot \"$rootfs\" useradd -m -s /bin/bash \"{user}\"\n\
@@ -878,7 +877,7 @@ fn customize_hook_script(
          # passwordless sudo for the default account (0440, as visudo expects), and\n\
          # the ssh host-key reset, run INSIDE the chroot: an overlay could plant a\n\
          # symlink at /etc/sudoers.d or /etc/ssh, and doing these writes/removals from\n\
-         # outside would follow it out of the rootfs (TRUST-2). Inside the chroot a\n\
+         # outside would follow it out of the rootfs. Inside the chroot a\n\
          # symlink resolves against the rootfs root, so the mutation stays contained.\n\
          chroot \"$rootfs\" mkdir -p /etc/sudoers.d\n\
          chroot \"$rootfs\" sh -c 'printf \"%s ALL=(ALL) NOPASSWD: ALL\\n\" \"{user}\" > /etc/sudoers.d/{user}'\n\
@@ -1069,7 +1068,7 @@ fn tar_member(tarball: &Path, member: &str) -> Result<String, EngineError> {
 const REQUIRED_TAR_MEMBERS: &[&str] = &["./etc/os-release", "./etc/fstab", "./etc/shadow"];
 
 /// Validate that `tarball` is a complete, readable rootfs archive before the image
-/// stage formats it into ext4 (ATOM-1). Lists the archive end-to-end (`tar tf`, which
+/// stage formats it into ext4. Lists the archive end-to-end (`tar tf`, which
 /// errors on a truncated archive) and confirms every `REQUIRED_TAR_MEMBERS` entry is
 /// present (including the still-locked `./etc/shadow`). A partial tar left by an
 /// interrupted bootstrap fails here with a "re-run rootfs" pointer, rather than being
@@ -1454,6 +1453,59 @@ mod tests {
         resolve_recipe(&repo_root(), "turing-rk1-forky", &Overrides::default()).unwrap()
     }
 
+    /// Every first-boot hook any layer ships must be executable.
+    ///
+    /// The overlay trees are copied with `cp -a`, so a hook's mode in the repo is its
+    /// mode in the image, and [the runner](../../../base/overlay/usr/lib/boot2deb/first-boot)
+    /// refuses to run a non-executable one. The hooks are load-bearing — depthcharge's
+    /// re-signs the kernel partition against the UUID first-boot has just changed — so a
+    /// lost `+x` bit is the difference between a board that boots and one that boots
+    /// exactly once. Nothing else in the build would notice, hence this test.
+    #[test]
+    fn shipped_first_boot_hooks_are_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .to_path_buf();
+        let mut checked = 0usize;
+        // Every layer that may carry an overlay: the base, and each boot method / device.
+        let layer_dirs = std::iter::once(root.join("base"))
+            .chain(["boot-methods", "devices"].iter().flat_map(|kind| {
+                std::fs::read_dir(root.join(kind))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+            }));
+
+        for layer in layer_dirs {
+            for overlay in ["overlay", "overlay-pre"] {
+                let hooks = layer.join(overlay).join("etc/boot2deb/first-boot.d");
+                let Ok(entries) = std::fs::read_dir(&hooks) else {
+                    continue; // this layer ships no hooks, which is the common case
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let mode = path.metadata().unwrap().permissions().mode();
+                    assert!(
+                        mode & 0o111 != 0,
+                        "first-boot hook {} is mode {:o}; it would be copied into the image \
+                         non-executable and the runner would refuse to boot past it",
+                        path.display(),
+                        mode & 0o7777,
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // A path typo that found no hooks at all would make the assertions above vacuous.
+        assert!(checked >= 3, "expected to find the shipped hooks, saw {checked}");
+    }
+
     /// The other shape: a depthcharge board with a distro kernel.
     fn c201() -> ResolvedBuild {
         resolve_recipe(&repo_root(), "asus-c201-forky", &Overrides::default()).unwrap()
@@ -1642,7 +1694,7 @@ mod tests {
             && a.contains("linux-image-7.1.1-1-arm64")
             && a.contains("isc-dhcp-client-")));
         assert!(!argv.iter().any(|a| a.starts_with("--exclude=")));
-        // `--` terminates options immediately before the positionals (SUB-2).
+        // `--` terminates options immediately before the positionals.
         assert_eq!(argv[argv.len() - 6], "--");
         // Suite, tarball, both mirrors (in order), and the local repo source are the
         // trailing args.
@@ -1670,7 +1722,7 @@ mod tests {
     fn hook_creates_locked_account_and_lays_overlay() {
         let script = customize_hook_script(Path::new("/w/rootfs-overlay"), "debian", &rk1(), None);
         // Timestamps are not preserved, so overlay files take a fresh mtime that
-        // mmdebstrap's SOURCE_DATE_EPOCH clamp pins to the epoch (DET-2).
+        // mmdebstrap's SOURCE_DATE_EPOCH clamp pins to the epoch.
         assert!(script.contains(
             "cp -dR --remove-destination --preserve=mode \"/w/rootfs-overlay/.\" \"$rootfs/\""
         ));
@@ -1682,7 +1734,7 @@ mod tests {
         assert!(!script.contains("passwd -e"));
         assert!(script.contains("usermod -aG video,render"));
         // Sudoers write, chmod, and the ssh host-key reset all run inside the chroot
-        // so an overlay symlink cannot redirect them out of the rootfs (TRUST-2).
+        // so an overlay symlink cannot redirect them out of the rootfs.
         assert!(script.contains(
             "chroot \"$rootfs\" sh -c 'printf \"%s ALL=(ALL) NOPASSWD: ALL\\n\" \"debian\" > /etc/sudoers.d/debian'"
         ));
@@ -1740,7 +1792,7 @@ mod tests {
         // No hooks / cache-retention flags on the solve path.
         assert!(!argv.iter().any(|a| a.starts_with("--customize-hook=")));
         assert!(!argv.iter().any(|a| a.starts_with("--skip=")));
-        // `--` terminates options immediately before the positionals (SUB-2).
+        // `--` terminates options immediately before the positionals.
         assert_eq!(argv[argv.len() - 5], "--");
         // Suite, /dev/null target, mirror, and the local repo are the trailing args.
         let tail = &argv[argv.len() - 4..];
@@ -1752,7 +1804,7 @@ mod tests {
 
     #[test]
     fn feature_apt_sources_become_signed_deb_positionals_before_the_local_repo() {
-        // CFG-1: a resolved feature repo (e.g. Jellyfin) must reach the solve as a
+        // A resolved feature repo (e.g. Jellyfin) must reach the solve as a
         // signed `deb` positional so apt can resolve its out-of-mirror package.
         let build = rk1();
         let mirrors = vec![crate::DEFAULT_MIRROR.to_string()];

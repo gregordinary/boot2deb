@@ -1,0 +1,64 @@
+#!/bin/sh
+# Give the max98090 codec a working playback path, once, and persist it.
+#
+# The board comes up silent, and muting is only half the reason. The codec's
+# speaker and headphone amplifiers are fed by DAPM mixers whose DAC input switches
+# default to *off*, so out of the box the DAC is not routed to either output at all
+# -- there is no path to unmute. On top of that the amplifier mute bits are set.
+# Both have to be cleared before anything reaches the speakers, which is why
+# `alsa-utils` alone does not fix it and why a user who only touches the obvious
+# "Speaker" volume still hears nothing.
+#
+# The four routing switches below connect each DAC channel to its own side's mixer
+# (left DAC -> left speaker/headphone, right to right). The four amplifier switches
+# are inverted mute bits, so 1 means unmuted. The volumes are set to a sane fraction
+# of full scale rather than left at the register default.
+#
+# `alsactl store` then writes /var/lib/alsa/asound.state, which alsa-utils'
+# alsa-restore.service replays on every later boot -- so this runs once and the
+# settings are the board's from then on, editable afterwards with `alsamixer`.
+#
+# Audio is a comfort, not a boot dependency: every failure here is reported and
+# ignored, and the script always exits 0. First-boot aborts on a hook that fails,
+# and a silent speaker is not worth refusing to bring the machine up over.
+
+card=""
+for c in $(sed -n 's/^ *\([0-9]\{1,\}\) \[.*/\1/p' /proc/asound/cards 2>/dev/null); do
+    # Identify the card by a control only this codec has, rather than by index or
+    # name: an HDMI card may enumerate first, and the ALSA card id is derived from
+    # the device tree's model string, which is not ours to depend on.
+    if amixer -c "$c" controls 2>/dev/null | grep -q "Speaker Left Switch"; then
+        card="$c"
+        break
+    fi
+done
+
+if [ -z "$card" ]; then
+    echo "audio: no max98090 card found; leaving the mixer alone" >&2
+    exit 0
+fi
+
+set_ctl() {
+    amixer -c "$card" cset name="$1" -- "$2" >/dev/null 2>&1 ||
+        echo "audio: could not set '$1' to '$2'" >&2
+}
+
+# Route each DAC channel to its own side of the speaker and headphone mixers.
+set_ctl "Left Speaker Mixer Left DAC Switch"    on
+set_ctl "Right Speaker Mixer Right DAC Switch"  on
+set_ctl "Left Headphone Mixer Left DAC Switch"  on
+set_ctl "Right Headphone Mixer Right DAC Switch" on
+
+# Unmute both amplifiers (these controls are inverted mute bits: 1 is unmuted).
+set_ctl "Speaker Left Switch"    on
+set_ctl "Speaker Right Switch"   on
+set_ctl "Headphone Left Switch"  on
+set_ctl "Headphone Right Switch" on
+
+# Audible but not at the top of the scale, where this speaker distorts.
+set_ctl "Speaker Volume"   "70%"
+set_ctl "Headphone Volume" "60%"
+
+alsactl store || echo "audio: could not persist the mixer state" >&2
+
+exit 0

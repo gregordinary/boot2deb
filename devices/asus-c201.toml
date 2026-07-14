@@ -35,15 +35,34 @@ keymap                  = "us"
 # --- Rootfs -------------------------------------------------------------------
 # A laptop, so NetworkManager owns the interfaces (wifi is the primary link) — which
 # means dropping the base layer's dhcpcd rather than running two things that both
-# want to configure a NIC. alsa-utils is not a nicety: the max98090 codec comes up
-# muted and stays that way without `alsactl` restoring a state file.
+# want to configure a NIC.
+#
+# network-manager-tui is a separate package from network-manager, and on this board it
+# is not optional in practice: wifi is the only link, so joining a network is the first
+# thing anyone does and everything else — updating, installing a desktop — waits behind
+# it. Without this the image offers `nmcli` and nothing else, which is a poor thing to
+# hand someone at a bare console on a machine with no ethernet port. 568 KiB buys
+# `nmtui`.
+#
+# alsa-utils is not a nicety. The max98090 comes up with its DAC unrouted *and* its
+# amplifiers muted, so the board is silent until both are cleared; the device's
+# `first-boot.d/20-audio` hook does that once and `alsactl` (from this package)
+# persists it, replaying it on every later boot.
+#
+# bluez is what makes the Bluetooth half of the radio usable. The BCM4354 is a
+# combo part: wifi is on SDIO, Bluetooth on uart0 (the device tree wires it as
+# `brcm,bcm43540-bt`), and the kernel loads the patchram this device vendors
+# alongside the wifi NVRAM. That gets an HCI device up — but an HCI device with no
+# host stack is a blob loaded for nothing, so the stack ships too.
 packages = [
     "network-manager",
+    "network-manager-tui",
     "wpasupplicant",
     "iw",
     "wireless-regdb",
     "rfkill",
     "alsa-utils",
+    "bluez",
     "ca-certificates",
 ]
 exclude = ["dhcpcd"]

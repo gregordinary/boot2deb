@@ -64,9 +64,20 @@ fi
 # naming, ...) are drop-ins the boot-method and device overlays supply, so the
 # generic base stays portable: a non-rkbin / non-Rockchip target simply has no
 # hooks here rather than aborting on a hardcoded step.
+# A hook that is present but not executable is a packaging fault, and it is fatal
+# rather than skipped. These hooks are load-bearing -- the depthcharge one re-signs
+# the kernel partition against the UUID this script just changed -- so silently
+# passing over one produces a system that boots this once and never again. Failing
+# here instead leaves a running system with the old UUIDs still valid, which is
+# recoverable.
 if [ -d /etc/boot2deb/first-boot.d ]; then
     for hook in /etc/boot2deb/first-boot.d/*; do
-        [ -x "$hook" ] && "$hook"
+        [ -e "$hook" ] || continue          # nothing to run; the glob did not match
+        if [ ! -x "$hook" ]; then
+            echo "first-boot hook $hook is not executable; refusing to skip it" >&2
+            exit 1
+        fi
+        "$hook"
     done
 fi
 

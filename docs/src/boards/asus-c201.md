@@ -96,6 +96,68 @@ sudo dpkg-reconfigure keyboard-configuration && sudo setupcon   # on the board
 
 See [Locale, timezone, and keyboard](../localization.md).
 
+## Getting online
+
+There is no ethernet port, so Wi-Fi is the only way onto the network and joining one is
+the first thing to do after logging in:
+
+```sh
+sudo nmtui        # pick "Activate a connection", choose the network, enter the key
+```
+
+NetworkManager owns the interfaces (the base layer's `dhcpcd` is excluded here, so the
+two do not fight over the NIC), and it remembers the network, so this is a one-time
+step. `nmcli device wifi list` and `nmcli device wifi connect <ssid> --ask` do the same
+job without the interface.
+
+Wi-Fi needs two Broadcom blobs Debian does not ship; they are vendored in the device
+layer and are already in the image. Scanning shows randomized, locally-administered MAC
+addresses — that is NetworkManager, not a fault.
+
+## Audio
+
+The image comes up with working speakers. That takes a little doing, because the
+max98090 codec starts in a state where two separate things are in the way: its
+amplifiers are muted, *and* the DAPM mixers that feed them have their DAC input
+switches open, so there is no route from the DAC to the speakers to unmute in the first
+place. Clearing only the mutes — which is what reaching for the obvious `Speaker`
+control does — still leaves the board silent.
+
+The device's `first-boot.d/20-audio` hook closes the routing switches, unmutes both
+amplifiers, sets sane volumes, and runs `alsactl store`. `alsa-utils` replays the
+result on every later boot, so this happens once and then it is simply the board's
+mixer state. Adjust it like any other Debian system:
+
+```sh
+alsamixer && sudo alsactl store
+```
+
+## Bluetooth
+
+The Wi-Fi and Bluetooth halves of the BCM4354 arrive on different buses: Wi-Fi over
+SDIO, Bluetooth over `uart0`, which the device tree wires as `brcm,bcm43540-bt`. The
+kernel loads the Bluetooth patchram this device vendors alongside the Wi-Fi NVRAM, and
+the image ships `bluez` so there is a host stack to use it.
+
+`btsdio` is blacklisted. The BCM4354's SDIO side also advertises a Bluetooth function,
+and if `btsdio` claims it, Wi-Fi does not survive suspend and resume.
+
+## Display
+
+An eDP panel and a real HDMI port, both driven by mainline `rockchip-drm`.
+
+HDMI does **4K30** (3840x2160 at a 297 MHz pixel clock) and cannot do 4K60. That is the
+hardware: the RK3288 caps TMDS at 340 MHz, its HDMI PHY has no scrambling above that,
+and the VOP cannot emit YUV420, so there is no reduced-rate path to 4K60 either. Nothing
+in the image configures any of this — the ceilings are constants in the driver, and the
+kernel Debian ships already supports everything the SoC can do.
+
+One quirk is worth knowing if a 4K display comes up showing only part of the picture.
+The RK3288 has two display controllers, and the smaller one (VOPL) tops out at 2560x1600
+while advertising the same maximum as the larger one. Which controller the HDMI encoder
+lands on is decided at runtime by DRM, not by configuration. `dmesg | grep -i vop` says
+which one it got.
+
 ## Status
 
 **Hardware-confirmed** on a libreboot unit: both suites, both board profiles, booting to
