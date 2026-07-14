@@ -9,11 +9,14 @@ A build is a single point across the axes a user selects:
 - **kernel** — an orthogonal axis that owns everything version-coupled: its source
   refs, `.config` fragments, and [patch profile](#patch-profiles-belong-to-the-kernel).
   A device declares which kernels it supports and a default; override with `--kernel`
-  (values from `list-kernels`).
+  (values from `list-kernels`). Some kernels are [not built at
+  all](#kernels-are-compiled-or-installed).
 - **suite** — the Debian suite (e.g. `forky`, `sid`); override with `--suite`.
-- **layout** — how the disk image is packaged: `combined` (one whole-disk image with
-  the bootloader in the raw gap) or `split` (separate bootloader and rootfs images for
-  a two-medium install); override with `--layout`.
+- **layout** — how the disk image is packaged: `combined` (one whole-disk image, boot
+  payload and rootfs on a single medium) or `split` (separate bootloader and rootfs
+  images for a two-medium install); override with `--layout`. Only a boot method that
+  *has* a bootloader can split it off; the combination is rejected at resolve for one
+  that does not.
 - **features** — a *list* of composable rootfs add-ins stacked onto the base image:
   a **capability** feature that provides a hardware stack (`media-accel-rockchip`, the
   RK35xx HW-transcode userspace) or an **application** feature that installs an app
@@ -21,8 +24,81 @@ A build is a single point across the axes a user selects:
   `turing-rk1-forky` and `turing-rk1-jellyfin` share a device and kernel and differ
   only here. Override with `--feature` (repeatable; values from `list-features`).
 
-Two more knobs round out a build without being headline axes: `--boot-method` (a
-device property, rarely overridden) and `--image-size`.
+Three more knobs round out a build without being headline axes: `--boot-method` (a
+device property, rarely overridden), `--board` (the depthcharge board profile — see
+[Boot methods describe different things](#boot-methods-describe-different-things)), and
+`--image-size`.
+
+The system locale, timezone, and console keymap are resolved the same way, and are split
+across two layers for a reason: see
+[Locale, timezone, and keyboard](../localization.md).
+
+## Kernels are compiled, or installed
+
+A kernel definition's `flavor` decides what shape it has, because the two kinds of
+kernel have almost nothing in common:
+
+- **`mainline` / `vendor`** — compiled from source. The definition owns a source ref, a
+  base defconfig, a fragment list, and a patch profile, and the build clones the tree,
+  applies the series, merges the config, and runs `make bindeb-pkg`. The lock pins the
+  exact commit.
+
+- **`distro-package`** — installed from the Debian mirror. The definition owns nothing
+  but a package name (`linux-image-armmp`); Debian owns the source, the config, and the
+  patches. There is no compile node, no fragment merge, no patch series, and **no
+  `[kernel]` table in the lock** — the exact version and hash are pinned in the solved
+  package manifest, alongside every other package in the image.
+
+This is not a shortcut. For a board whose SoC and device tree are fully upstream —
+every Veyron Chromebook, for instance — compiling a kernel would add a cross-build and
+a maintenance burden to arrive at a *worse* version of what `apt` already ships: one
+that stops receiving Debian's security updates on the running board. Where Debian's
+kernel runs the hardware, using it is the right answer, and the model says so rather
+than pretending otherwise.
+
+One definition then serves every suite, because the suite picks the version:
+`asus-c201-forky` and `asus-c201-trixie` name the same `debian-armmp` kernel and resolve
+7.1.x and 6.12.x respectively.
+
+A distro kernel rejects the two device fields it could never act on — `device_dts` and
+`device_config_fragments` are compile inputs, and a board that declared them with a
+kernel that compiles nothing would read as configured and boot as broken.
+
+## Boot methods describe different things
+
+A boot method is not a set of options on a common shape — the shapes genuinely differ —
+so `boot-methods/<method>.toml` is a **variant per method**, and the file's own name
+selects it. A field belonging to another method is an *unknown field*: a parse error
+naming the file, not a value quietly carried into a build with nowhere to put it.
+
+- **`rockchip-rkbin`** — we compile the bootloader. The layer carries the u-boot source
+  and ref and the raw-gap offsets (`idbloader_offset`, `uboot_itb_offset`,
+  `rootfs_offset`); the device carries `uboot_defconfig` and inherits an rkbin blob set
+  (ATF + DDR TPL) from its SoC. The payloads land *outside* any partition, in the gap
+  ahead of the rootfs.
+
+- **`depthcharge`** — we compile no bootloader at all. The firmware is the board's own
+  (coreboot in an SPI chip), and what it loads is the **kernel itself**, vboot-signed and
+  wrapped in a FIT, from a *ChromeOS kernel partition* it finds by scanning each medium's
+  GPT for a type GUID. The layer carries that partition's geometry and the GPT attribute
+  bits that make the firmware boot it (`priority` / `tries` / `successful`), plus the
+  command line to bake into the signature. The device carries a **board profile**.
+
+Because the requirements are method-scoped, a board is only ever asked for fields its
+own boot method reads: the C201 declares no `uboot_defconfig` and no rkbin blobs, and
+omitting them is not an error — omitting its `[depthcharge]` block is.
+
+### Board profiles
+
+A depthcharge **board profile** is `depthcharge-tools`' codename for a *firmware
+behaviour set* — its payload ceiling, and whether it loads a FIT ramdisk or needs the
+initramfs address patched into every DTB. It describes **the firmware a unit runs**, not
+the board model: the same C201 takes one profile on stock firmware and another with
+libreboot installed. So the device declares a default and the profiles it supports, and
+`--board` selects among them.
+
+The default is deliberately the *stock* profile: a stock-profile image boots on stock
+firmware **and** on a unit running libreboot, while the reverse is not true.
 
 ## Patch profiles belong to the kernel
 
@@ -121,8 +197,24 @@ A **recipe** (`recipes/<recipe>.toml`) pins one buildable point: it names the de
 and, optionally, the kernel, suite, features, layout, and image size (each omitted axis
 falls back to the device default). Its **lock** (`recipes/<recipe>.lock`) holds the
 exact resolved pins: for every git source, the repo URL it was pinned from plus the
-ref and commit (including the `[patches]` profile and commit, when the kernel has
-one), blob content hashes, and the solved rootfs manifest digest.
+ref and commit, blob content hashes, and the solved rootfs manifest digest.
+
+**A lock records what the build depends on, and nothing else.** Each table is present
+only when the build actually has that dependency: `[kernel]` when a kernel is compiled,
+`[uboot]` and `[blobs]` when a bootloader is, `[patches]` when a series is applied,
+`[userspace]`/`[ffmpeg]` when the media-accel stack is. Pinning a commit nothing
+consumes would record provenance for a dependency that does not exist — and would make
+`update` demand a checkout the build never reads. Taken to its limit, a board that
+installs Debian's kernel and boots its own firmware has a lock with exactly one table:
+
+```toml
+[rootfs]
+suite = "forky"
+manifest = "asus-c201-forky.pkgs.lock"
+```
+
+That is the whole truth about what it depends on, and the package manifest beside it
+pins every one of those packages by name, version, and sha256.
 
 The split between the two is what makes a build reproducible:
 

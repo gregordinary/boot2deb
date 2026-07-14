@@ -74,7 +74,11 @@ pub(crate) fn run(
     let kernels: Vec<String> = root
         .list("kernels")?
         .into_iter()
-        .filter(|k| root.kernel(k).map(|kd| kd.supported_socs.contains(&soc)).unwrap_or(false))
+        .filter(|k| {
+            root.kernel(k)
+                .map(|kd| kd.supported_socs().contains(&soc))
+                .unwrap_or(false)
+        })
         .collect();
     if kernels.is_empty() {
         return Err(format!(
@@ -250,7 +254,7 @@ mod tests {
         assert!(overlay.path().join("recipes/test-board.toml").is_file());
         // The scaffolded recipe resolves against the composed search path, carrying
         // its selected feature — and the media-accel feature pulls in the SoC sources
-        // (UX-21). (The device alone has no features; they live in the recipe.)
+        //. (The device alone has no features; they live in the recipe.)
         let build = resolve_recipe(&root, "test-board", &Overrides::default()).unwrap();
         assert_eq!(build.soc, Soc::Rk3588);
         assert_eq!(build.features, vec!["media-accel-rockchip"]);

@@ -11,13 +11,13 @@ use crate::args::{BuildArgs, StageArg};
 use crate::artifacts::{kernel_packages, ledger_debs, record_artifacts};
 use crate::config::{
     apt_source_keyrings, device_dts_paths, extra_debs_store, fragment_paths, overlay_dirs,
-    preflight_config, resolve_patches_source,
+    preflight_config, resolve_patches_source, OverlayStage,
 };
 use crate::fsutil::absolutize;
 use crate::render::{emit_artifact, note, print_event, print_event_json, short};
 use crate::workdir::mark_work_dir;
 use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
-use boot2deb_core::model::Overrides;
+use boot2deb_core::model::{Overrides, ResolvedBoot, ResolvedBuild};
 use boot2deb_core::{resolve_recipe, ConfigRoot};
 use boot2deb_engine::build::{ffmpeg, kernel, uboot, userspace, BuildEnv};
 use boot2deb_engine::debstore::DebStore;
@@ -105,7 +105,7 @@ pub(crate) fn run(
             .unwrap_or_else(|| PathBuf::from("build").join(recipe)),
     );
     // Stamp the scratch tree as boot2deb-owned before anything writes into it:
-    // `clean` removes only stamped work dirs (SEC-7).
+    // `clean` removes only stamped work dirs.
     mark_work_dir(&work_dir)?;
     let out_dir = absolutize(args.out_dir.unwrap_or_else(|| work_dir.join("artifacts")));
     // Sweep stale `.partial` staging temps a hard-killed prior run may have left in the
@@ -116,11 +116,27 @@ pub(crate) fn run(
         let rel = format!("blobs/{}", resolved.soc.as_str());
         root.find_asset(&rel).unwrap_or_else(|| root.path().join(rel))
     });
-    let kernel_src = match args.kernel_src {
-        Some(s) => s,
-        None => pins::kernel_source_url(&resolved.kernel.source)?,
+    // Which compile nodes this build even has. Both are properties of the resolved
+    // build, not of the stage flags: a distro-package kernel is installed from the
+    // mirror rather than compiled, and a board whose firmware is its own (depthcharge)
+    // builds no bootloader at all. Every stage below is gated on these, so an
+    // inapplicable stage is skipped in a full build and named as an error when asked
+    // for explicitly.
+    let compiles_kernel = resolved.compiles_kernel();
+    let builds_uboot = resolved.rkbin_boot().is_some();
+
+    let kernel_src = match (&args.kernel_src, resolved.kernel.compiled()) {
+        (Some(s), _) => s.clone(),
+        (None, Some(k)) => pins::kernel_source_url(&k.source)?,
+        // Not fetched: a distro kernel has no source tree.
+        (None, None) => String::new(),
     };
-    let uboot_src = args.uboot_src.unwrap_or_else(|| resolved.uboot_source.clone());
+    let uboot_src = args.uboot_src.clone().unwrap_or_else(|| {
+        resolved
+            .rkbin_boot()
+            .map(|b| b.uboot_source.clone())
+            .unwrap_or_default()
+    });
     // The userspace/ffmpeg clone sources default to the resolved SoC-layer URLs, but
     // only exist for a media-accel build; a base build has no such sources and skips
     // those stages, so these are computed inside the stage blocks below.
@@ -248,9 +264,30 @@ pub(crate) fn run(
     // earlier builds of other kernel versions.
     let mut kernel_image_deb: Option<PathBuf> = None;
 
+    // Asking for a stage this build does not have is a user error worth naming, not a
+    // silent skip — otherwise `--stage kernel` on a board that installs Debian's
+    // kernel would exit 0 having done nothing.
+    if matches!(args.stage, StageArg::Kernel | StageArg::Dtb) && !compiles_kernel {
+        return Err(format!(
+            "recipe '{recipe}' uses kernel '{}', which is a distro package installed from \
+             the Debian mirror — there is no kernel tree to compile, so the requested \
+             stage has nothing to build",
+            resolved.kernel.id()
+        )
+        .into());
+    }
+    if matches!(args.stage, StageArg::Uboot) && !builds_uboot {
+        return Err(format!(
+            "recipe '{recipe}' boots via '{}', whose firmware is the board's own — no \
+             bootloader is built, so the requested stage has nothing to build",
+            resolved.boot_method
+        )
+        .into());
+    }
+
     // The kernel stage and the DTB fast path share every filesystem input; both
     // prepare the same `<work>/linux` tree, so they resolve their options identically.
-    if matches!(args.stage, StageArg::All | StageArg::Kernel | StageArg::Dtb) {
+    if matches!(args.stage, StageArg::All | StageArg::Kernel | StageArg::Dtb) && compiles_kernel {
         let fragments = fragment_paths(root, &resolved)?;
         let device_dts = device_dts_paths(root, &resolved)?;
         let opts = kernel::KernelOptions {
@@ -277,7 +314,7 @@ pub(crate) fn run(
         }
     }
 
-    if matches!(args.stage, StageArg::All | StageArg::Uboot) {
+    if matches!(args.stage, StageArg::All | StageArg::Uboot) && builds_uboot {
         let opts = uboot::UbootOptions {
             source: &uboot_src,
             patches,
@@ -378,11 +415,34 @@ pub(crate) fn run(
         // Bootstrap the device rootfs: stand up a local apt repo from the
         // built .debs in out_dir, install the merged package set, apply the layered
         // overlay, and emit the tarball the image stage formats into ext4.
-        let overlay_dirs = overlay_dirs(root, &resolved);
+        let preinstall_overlay_dirs = overlay_dirs(root, &resolved, OverlayStage::PreInstall);
+        let overlay_dirs = overlay_dirs(root, &resolved, OverlayStage::Customize);
+        // The boot-method config the rootfs generates for itself. Only depthcharge has
+        // any: its boot payload is a signed kernel built *inside* the rootfs, so the
+        // rootfs has to know which board profile to sign for and what cmdline to bake in.
+        let boot_config = resolved.depthcharge_boot().map(|b| rootfs::BootConfig::Depthcharge {
+            board: &b.board,
+            cmdline: &b.cmdline,
+        });
+        // The rootfs PARTUUID is an *input* here, not an output of the image node: under
+        // depthcharge the signed kernel's root= is derived from this rootfs's own
+        // /etc/fstab, so the partition has to be named before the filesystem exists.
+        let identity = image_identity(recipe, &resolved);
         // The local apt repo is seeded from the artifact ledger — the exact debs the
         // compile stages recorded — not an extension-only scan of out_dir, so an
         // unsigned stray never becomes trusted apt input (TRUST-3).
-        let mut repo_debs = ledger_debs(&out_dir)?;
+        //
+        // A build that compiles nothing stages no `.deb`s of its own, and then an empty
+        // ledger is the *correct* state, not a forgotten compile stage — so the ledger
+        // is only consulted where artifacts are actually produced. Its local repo is
+        // empty (or holds only `extra_debs`), and every package, kernel included, comes
+        // from the mirror.
+        let produces_debs = compiles_kernel || builds_uboot || media_accel;
+        let mut repo_debs = if produces_debs {
+            ledger_debs(&out_dir)?
+        } else {
+            Vec::new()
+        };
         // Materialize the pre-built extra_debs into the content store and
         // add them to the local apt repo's deb set — the way a feature's packages
         // reach the solve, but for bytes pulled from outside the mirror. They then
@@ -417,6 +477,9 @@ pub(crate) fn run(
         let opts = rootfs::RootfsOptions {
             repo_debs: &repo_debs,
             overlay_dirs: &overlay_dirs,
+            preinstall_overlay_dirs: &preinstall_overlay_dirs,
+            boot_config,
+            rootfs_partuuid: identity.rootfs_partuuid,
             out_dir: &out_dir,
             keyring: keyring.as_deref(),
             manifest_out: &manifest_out,
@@ -482,27 +545,39 @@ pub(crate) fn run(
         // retry after an interrupted rootfs stage then fails cleanly here instead of
         // formatting a truncated tar into a broken ext4 image.
         rootfs::validate_tar(&rootfs_tar)?;
+        // The boot payload, per method. A raw-gap bootloader was staged into out_dir
+        // by the u-boot stage; a depthcharge board's signed kernel needs nothing here,
+        // because it is already inside the rootfs tarball (`depthchargectl` built it
+        // there, so the same tool re-signs it on the running board).
         let idbloader = out_dir.join("idbloader.img");
         let uboot_itb = out_dir.join("u-boot.itb");
-        for (what, p) in [("idbloader.img", &idbloader), ("u-boot.itb", &uboot_itb)] {
-            if !p.exists() {
-                return Err(format!(
-                    "{what} not found in {} — run `build {recipe} --stage uboot` first",
-                    out_dir.display()
-                )
-                .into());
+        // Matched on the resolved boot method, not on a boolean, so adding a third
+        // method is a compile error here rather than a silent route into the wrong arm.
+        let boot = match &resolved.boot {
+            ResolvedBoot::RockchipRkbin(_) => {
+                for (what, p) in [("idbloader.img", &idbloader), ("u-boot.itb", &uboot_itb)] {
+                    if !p.exists() {
+                        return Err(format!(
+                            "{what} not found in {} — run `build {recipe} --stage uboot` first",
+                            out_dir.display()
+                        )
+                        .into());
+                    }
+                }
+                image::BootPayload::RockchipRkbin {
+                    idbloader: &idbloader,
+                    uboot_itb: &uboot_itb,
+                }
             }
-        }
+            ResolvedBoot::Depthcharge(_) => image::BootPayload::Depthcharge,
+        };
         let opts = image::ImageOptions {
             rootfs_tar: &rootfs_tar,
-            idbloader: &idbloader,
-            uboot_itb: &uboot_itb,
+            boot,
             out_dir: &out_dir,
             work_dir: &work_dir,
             rootfs_label: &args.rootfs_label,
-            // Seed the deterministic ext4 UUID + GPT GUIDs from the locked kernel
-            // commit, so the image's identifiers are a function of the lock.
-            image_seed: &lock.kernel.commit,
+            identity: image_identity(recipe, &resolved),
             compress: !args.no_compress,
             keep_raw: args.keep_raw,
         };
@@ -521,7 +596,7 @@ pub(crate) fn run(
         for xz in &artifacts.compressed {
             emit_artifact(&sink, "image", "compressed", xz);
         }
-        // The per-image first-boot password (SEC-6): unique per build, expired so it
+        // The per-image first-boot password: unique per build, expired so it
         // must be changed at first login. Surfaced here since it exists nowhere else
         // the operator can read it except the provenance manifest.
         note(
@@ -612,4 +687,20 @@ pub(crate) fn run(
         note(json, &sink, "build", format!("updated lock  : {}", path.display()));
     }
     Ok(())
+}
+
+/// The image's deterministic on-disk identifiers, seeded by the **recipe name**.
+///
+/// The seed has to be stable across rebuilds (so the image reproduces) and distinct
+/// per build point (so two images never claim the same PARTUUID). The recipe name is
+/// exactly that, and — unlike the kernel commit — every build has one: a
+/// distro-package kernel pins no commit at all, and even where one exists, a kernel
+/// bump is no reason for a board's disk identifiers to change.
+///
+/// Distinctness is not cosmetic here. Under depthcharge the rootfs PARTUUID is baked
+/// into the kernel's signed command line, so two recipes that shared one would
+/// produce two cards a kernel cannot tell apart — the failure the phase-1 pipeline
+/// lived with by hand ("never insert both cards at once") and this removes.
+fn image_identity(recipe: &str, build: &ResolvedBuild) -> image::ImageIdentity {
+    image::ImageIdentity::derive(recipe, &build.device)
 }

@@ -38,7 +38,7 @@ pub struct BuildFacts<'a> {
     pub package_count: usize,
     /// Default account name the image ships with.
     pub user: &'a str,
-    /// The per-image first-boot password (SEC-6). Deliberately unique per
+    /// The per-image first-boot password. Deliberately unique per
     /// build, so it is not derivable and the rootfs `/etc/shadow` is intentionally
     /// outside the byte-reproducibility claim.
     pub password: &'a str,
@@ -55,11 +55,14 @@ pub struct ProvenanceManifest {
     pub sources: SourcesProvenance,
     /// Rootfs suite + the content-pinned solved-manifest reference.
     pub rootfs: RootfsProvenance,
-    /// Verified rkbin blob pins.
-    pub blobs: BlobsProvenance,
+    /// Verified rkbin blob pins. Absent when the boot method consumes no rkbin blobs
+    /// — a depthcharge board's firmware is its own, so there is no ATF or DDR TPL in
+    /// its boot chain to record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blobs: Option<BlobsProvenance>,
     /// Build host / toolchain identity.
     pub toolchain: ToolchainProvenance,
-    /// First-boot credential — the per-image secret (SEC-6).
+    /// First-boot credential — the per-image secret.
     pub credentials: CredentialsProvenance,
     /// Pre-built `extra_debs` pulled from outside the Debian mirror,
     /// each content-pinned by sha256 — part of "exactly what went into this image."
@@ -107,6 +110,12 @@ pub struct ImageProvenance {
     pub soc: String,
     /// Selected boot method.
     pub boot_method: String,
+    /// The depthcharge board profile the kernel partition was signed for, when the
+    /// boot method has one. It records *which firmware* this image targets — a stock
+    /// C201 and a libreboot'd one take different profiles — which is not otherwise
+    /// recoverable from the image. Absent under a boot method with no board profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
     /// Debian suite.
     pub suite: String,
     /// Selected rootfs features (empty for a plain base image).
@@ -117,6 +126,17 @@ pub struct ImageProvenance {
     pub image_size: String,
     /// Image hostname.
     pub hostname: String,
+    /// The `LANG` the image boots with.
+    pub locale: String,
+    /// Every locale compiled into the image, so a reader can tell — without booting it
+    /// — which locales this image can be switched to with no network.
+    pub locales_generate: Vec<String>,
+    /// The `tzdata` zone the image's `/etc/localtime` points at.
+    pub timezone: String,
+    /// The console keyboard layout, when the board has a keyboard. Absent on a
+    /// headless board, which ships Debian's default rather than a configured one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keymap: Option<String>,
 }
 
 /// Every pinned source, as `ref` + exact `commit` pairs (from the [`Lock`]).
@@ -124,10 +144,22 @@ pub struct ImageProvenance {
 pub struct SourcesProvenance {
     /// Kernel definition id.
     pub kernel_id: String,
-    /// Kernel ref that was pinned.
-    pub kernel_ref: String,
+    /// How the kernel was obtained: `mainline`, `vendor`, or `distro-package`. It is
+    /// what tells a reader whether to expect a commit below or a package.
+    pub kernel_flavor: String,
+    /// Kernel ref that was pinned. Absent — with
+    /// [`kernel_commit`](Self::kernel_commit) — for a distro-package kernel, which is
+    /// not fetched from git at all: its exact version and hash are pinned in the
+    /// solved package manifest, like every other package in the image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_ref: Option<String>,
     /// Kernel commit.
-    pub kernel_commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_commit: Option<String>,
+    /// The kernel package a distro-package build installs (`linux-image-armmp`).
+    /// Absent for a compiled kernel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_package: Option<String>,
     /// Patch profile name. Absent — along with
     /// [`patches_commit`](Self::patches_commit) — when the kernel applied no series,
     /// so the record never implies a `patches` dependency the build did not have.
@@ -136,10 +168,13 @@ pub struct SourcesProvenance {
     /// `patches` repo commit the series is pinned at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patches_commit: Option<String>,
-    /// u-boot ref.
-    pub uboot_ref: String,
+    /// u-boot ref. Absent — with [`uboot_commit`](Self::uboot_commit) — when the boot
+    /// method compiles no u-boot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uboot_ref: Option<String>,
     /// u-boot commit.
-    pub uboot_commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uboot_commit: Option<String>,
     /// The media-accel source pins, present only when the image built the HW
     /// transcode stack (a `requires_media_accel` feature was selected). Omitted
     /// from the manifest for a base image, which has no such sources.
@@ -220,7 +255,7 @@ pub struct ToolchainProvenance {
 pub struct CredentialsProvenance {
     /// Default account name.
     pub user: String,
-    /// The per-image password (SEC-6).
+    /// The per-image password.
     pub password: String,
     /// How the credential behaves on the shipped image.
     pub note: String,
@@ -236,20 +271,34 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             arch: build.arch.to_string(),
             soc: build.soc.to_string(),
             boot_method: build.boot_method.to_string(),
+            board: build.depthcharge_boot().map(|b| b.board.clone()),
             suite: build.suite.clone(),
             features: build.features.clone(),
             layout: build.layout.to_string(),
             image_size: build.image_size.clone(),
             hostname: build.hostname.clone(),
+            locale: build.locale.clone(),
+            locales_generate: build.locales_generate.clone(),
+            timezone: build.timezone.clone(),
+            // The layout alone identifies the keymap for a reader; the XKB model,
+            // variant, and options are build inputs, recoverable from the config.
+            keymap: build.keymap.as_ref().map(|k| k.layout.clone()),
         },
         sources: SourcesProvenance {
-            kernel_id: lock.kernel.id.clone(),
-            kernel_ref: lock.kernel.reference.clone(),
-            kernel_commit: lock.kernel.commit.clone(),
+            // The id and flavor come from the resolved build, so they are recorded
+            // even for a kernel the lock pins no commit for.
+            kernel_id: build.kernel.id().to_string(),
+            kernel_flavor: build.kernel.flavor().to_string(),
+            kernel_ref: lock.kernel.as_ref().map(|k| k.reference.clone()),
+            kernel_commit: lock.kernel.as_ref().map(|k| k.commit.clone()),
+            kernel_package: match &build.kernel {
+                crate::model::ResolvedKernel::Distro(k) => Some(k.package.clone()),
+                crate::model::ResolvedKernel::Compiled(_) => None,
+            },
             patch_profile: lock.patches.as_ref().map(|p| p.profile.clone()),
             patches_commit: lock.patches.as_ref().map(|p| p.commit.clone()),
-            uboot_ref: lock.uboot.reference.clone(),
-            uboot_commit: lock.uboot.commit.clone(),
+            uboot_ref: lock.uboot.as_ref().map(|u| u.reference.clone()),
+            uboot_commit: lock.uboot.as_ref().map(|u| u.commit.clone()),
             // Present in lockstep: resolution pins userspace and ffmpeg together or
             // not at all, so a single `zip` yields the whole block or `None`.
             media_accel: lock.userspace.as_ref().zip(lock.ffmpeg.as_ref()).map(|(us, ff)| {
@@ -273,11 +322,11 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             manifest_sha256: facts.manifest_sha256.to_string(),
             package_count: facts.package_count,
         },
-        blobs: BlobsProvenance {
-            atf: lock.blobs.atf.clone(),
-            tpl: lock.blobs.tpl.clone(),
-            bl32: lock.blobs.bl32.clone(),
-        },
+        blobs: lock.blobs.as_ref().map(|b| BlobsProvenance {
+            atf: b.atf.clone(),
+            tpl: b.tpl.clone(),
+            bl32: b.bl32.clone(),
+        }),
         toolchain: ToolchainProvenance {
             host_arch: facts.host_arch.to_string(),
             target_arch: build.arch.to_string(),
@@ -290,22 +339,26 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             note: "expired at first login (passwd -e); unique per built image".to_string(),
         },
         extra_debs: lock.extra_debs.clone(),
-        // The fetched source axes, each classified offline by pin form. The kernel
-        // and u-boot rows are always present; the media-accel rows only when the
-        // stack was built. The ffmpeg `rockchip` pin is provenance-only (never
-        // fetched at build), so its re-fetch durability is moot and it is omitted.
+        // Every source axis the build actually *fetches*, classified offline by pin
+        // form. A source the build never fetches has no re-fetch durability to report,
+        // so it contributes no row: a distro-package kernel and a boot method with no
+        // u-boot both drop out here, as does the ffmpeg `rockchip` pin (provenance
+        // only — the graft ships as patches, so that tree is never cloned).
         source_durability: source_durability_rows(lock),
     }
 }
 
-/// The `[[source_durability]]` rows for a lock: kernel and u-boot always, plus the
-/// four fetched media-accel trees (mpp/librga/libmali/ffmpeg-base) when the build
-/// compiled the transcode stack.
+/// The `[[source_durability]]` rows for a lock — one per source the build fetches
+/// from git: the kernel and u-boot when they are compiled, plus the four media-accel
+/// trees (mpp/librga/libmali/ffmpeg-base) when the transcode stack is built.
 fn source_durability_rows(lock: &Lock) -> Vec<SourceDurability> {
-    let mut rows = vec![
-        source_durability("kernel", &lock.kernel.reference, &lock.kernel.commit),
-        source_durability("uboot", &lock.uboot.reference, &lock.uboot.commit),
-    ];
+    let mut rows = Vec::new();
+    if let Some(k) = &lock.kernel {
+        rows.push(source_durability("kernel", &k.reference, &k.commit));
+    }
+    if let Some(u) = &lock.uboot {
+        rows.push(source_durability("uboot", &u.reference, &u.commit));
+    }
     if let Some(us) = &lock.userspace {
         rows.push(source_durability("mpp", &us.mpp.reference, &us.mpp.commit));
         rows.push(source_durability("librga", &us.librga.reference, &us.librga.commit));
@@ -350,21 +403,21 @@ mod tests {
             commit: c.into(),
         };
         Lock {
-            kernel: KernelPin {
+            kernel: Some(KernelPin {
                 id: "rk3588-mainline-7.1".into(),
                 source: "ks".into(),
                 reference: "v7.1.1".into(),
                 commit: "kc".into(),
-            },
+            }),
             patches: Some(PatchesPin {
                 profile: "rk3588-accel".into(),
                 commit: "pc".into(),
             }),
-            uboot: UbootPin {
+            uboot: Some(UbootPin {
                 source: "us".into(),
                 reference: "v2026.04".into(),
                 commit: "uc".into(),
-            },
+            }),
             userspace: Some(UserspacePins {
                 mpp: git("mainline-cma-fix", "mc"),
                 librga: git("master", "rc"),
@@ -379,11 +432,11 @@ mod tests {
                 manifest: "turing-rk1-forky.pkgs.lock".into(),
                 manifest_sha256: Some("mh".into()),
             },
-            blobs: BlobsPin {
+            blobs: Some(BlobsPin {
                 atf: "atf@sha256:0".into(),
                 tpl: "tpl@sha256:1".into(),
                 bl32: None,
-            },
+            }),
             extra_debs: vec![],
             snapshot: None,
         }
@@ -414,7 +467,8 @@ mod tests {
             password: "Kp7rTx",
         };
         let prov = assemble(&build, &lock, &facts);
-        assert_eq!(prov.sources.kernel_commit, "kc");
+        assert_eq!(prov.sources.kernel_commit.as_deref(), Some("kc"));
+        assert_eq!(prov.sources.kernel_flavor, "mainline");
         let media = prov.sources.media_accel.as_ref().expect("media-accel build has sources");
         assert_eq!(media.ffmpeg_rockchip_ref, "8.1");
         assert_eq!(prov.rootfs.manifest_sha256, "abc123");

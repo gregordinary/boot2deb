@@ -2,7 +2,7 @@
 //!
 //! Each renders one row per entry (or a JSON array under `--json`) and collects the
 //! entries that failed to parse, so a corrupt layer file is reported rather than
-//! silently dropped (UX-28). An unreadable entry never fails the listing.
+//! silently dropped. An unreadable entry never fails the listing.
 
 use crate::render::{constraint, finish_listing};
 use boot2deb_core::ConfigRoot;
@@ -65,36 +65,45 @@ pub(crate) fn recipes(root: &ConfigRoot, json: bool) -> Result {
 }
 
 /// `list-kernels`: the `--kernel` override's valid values, each with the
-/// version-ish knob (a mainline track, or `-` for a vendor tree pinned by ref) and
-/// the SoCs it accepts, so a reader can pick one and know it fits their device.
+/// version-ish knob (a mainline track, a `-` for a vendor tree pinned by ref, or the
+/// package a distro kernel installs) and the SoCs it accepts, so a reader can pick
+/// one and know it fits their device.
 pub(crate) fn kernels(root: &ConfigRoot, json: bool) -> Result {
     let mut broken = Vec::new();
     let mut rows = Vec::new();
     for name in root.list("kernels")? {
         match root.kernel(&name) {
             Ok(k) if json => {
-                let socs: Vec<&str> = k.supported_socs.iter().map(|s| s.as_str()).collect();
+                let socs: Vec<&str> = k.supported_socs().iter().map(|s| s.as_str()).collect();
+                let (flavor, track, patches) = kernel_fields(&k);
                 rows.push(serde_json::json!({
                     "name": name,
-                    "flavor": k.flavor.as_str(),
-                    "track": k.track,
+                    "flavor": flavor,
+                    "track": track,
                     "socs": socs,
-                    "patches": k.patch_profile,
+                    "patches": patches,
                 }));
             }
             Ok(k) => {
-                let track = k.track.as_deref().unwrap_or("-");
+                let (flavor, track, patches) = kernel_fields(&k);
                 let socs = k
-                    .supported_socs
+                    .supported_socs()
                     .iter()
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join(",");
-                println!(
-                    "{name:<24} {:<8} track={track:<8} socs={socs:<20} patches={}",
-                    k.flavor.as_str(),
-                    k.patch_profile
-                );
+                // The version knob is labelled for what it *is*: a compiled kernel
+                // tracks an upstream version, a distro kernel names a package and lets
+                // the suite decide the version.
+                let version = match &k {
+                    boot2deb_core::model::KernelDef::Compiled(_) => {
+                        format!("track={}", track.as_deref().unwrap_or("-"))
+                    }
+                    boot2deb_core::model::KernelDef::Distro(_) => {
+                        format!("package={}", track.as_deref().unwrap_or("-"))
+                    }
+                };
+                println!("{name:<24} {flavor:<15} {version:<28} socs={socs:<12} patches={patches}");
             }
             Err(e) if json => {
                 rows.push(serde_json::json!({"name": name, "error": e.to_string()}));
@@ -106,6 +115,29 @@ pub(crate) fn kernels(root: &ConfigRoot, json: bool) -> Result {
         }
     }
     finish_listing(json, rows, "kernel", &broken)
+}
+
+/// The three display fields of a kernel definition, per flavor: how it is obtained,
+/// its version knob, and its patch series.
+///
+/// The knobs differ because the kernels do. A compiled kernel tracks an upstream
+/// version and applies a patch profile; a distro kernel has neither — its version
+/// comes from the suite and it is patched by Debian — so what a reader wants to see
+/// there is the package that installs it.
+fn kernel_fields(k: &boot2deb_core::model::KernelDef) -> (String, Option<String>, String) {
+    use boot2deb_core::model::KernelDef;
+    match k {
+        KernelDef::Compiled(k) => (
+            k.flavor.as_str().to_string(),
+            k.track.clone(),
+            k.patch_profile.clone(),
+        ),
+        KernelDef::Distro(k) => (
+            k.flavor.as_str().to_string(),
+            Some(k.package.clone()),
+            "none".to_string(),
+        ),
+    }
 }
 
 /// `list-features`: the `--feature` override's valid values with their selection

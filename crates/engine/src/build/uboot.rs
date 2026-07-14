@@ -15,6 +15,7 @@ use crate::blobs;
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use boot2deb_core::lock::Lock;
+use boot2deb_core::model::ResolvedRkbinBoot;
 use boot2deb_core::size::parse_size;
 use boot2deb_core::ResolvedBuild;
 use std::path::{Path, PathBuf};
@@ -79,6 +80,14 @@ pub fn build_uboot(
     env: &BuildEnv,
     sink: &dyn EventSink,
 ) -> Result<UbootArtifacts, EngineError> {
+    // Narrow the build once: everything below reads the u-boot defconfig, the rkbin
+    // blob set, and the raw-gap offsets, which only this boot method has.
+    let boot = build.rkbin_boot().ok_or(EngineError::StageNotApplicable {
+        stage: "uboot",
+        why: "this board's boot method builds no bootloader — its firmware is its own",
+    })?;
+    let uboot = build::uboot_pin(lock)?;
+    let blob_pins = build::blob_pins(lock)?;
     let step = Step::start(sink, "uboot");
     let tree = opts.work_dir.join("u-boot");
 
@@ -91,7 +100,7 @@ pub fn build_uboot(
     // Tier-2 output cache: restore the payloads + deb and skip the whole
     // clone/blob-verify/configure/compile when the output signature is stored. The
     // signature folds the blob hashes, so a hit implies the same verified blobs.
-    let out_man = output_manifest(build, lock, env, patches);
+    let out_man = output_manifest(build, boot, lock, env, patches)?;
     if let Some([idbloader, uboot_itb, deb]) = build::restore_stage_outputs(
         opts.store,
         "uboot",
@@ -114,20 +123,20 @@ pub fn build_uboot(
     // Tier-1 reuse of the cloned+patched tree (COR-1): a lock bump rebuilds it.
     // configure() distcleans + reconfigures a *reused* tree (keyed on the returned
     // flag) and compile() re-runs regardless.
-    let man = clone_manifest(lock, patches);
+    let man = clone_manifest(lock, patches)?;
     let reused = build::reuse_or_refresh_tree(&tree, &man, "u-boot", &step, || {
         clone_and_patch(lock, opts, &tree, &step)
     })?;
     step.progress(20);
 
     // Verify blobs against the lock and stage the verified bytes into a private
-    // dir the build consumes, so `make` reads exactly what was hashed (SEC-5).
+    // dir the build consumes, so `make` reads exactly what was hashed.
     let blob_stage = opts.work_dir.join("blobs");
-    let atf = absolute(blobs::verify_to(opts.blobs_dir, &lock.blobs.atf, &blob_stage)?)?;
-    let tpl = absolute(blobs::verify_to(opts.blobs_dir, &lock.blobs.tpl, &blob_stage)?)?;
+    let atf = absolute(blobs::verify_to(opts.blobs_dir, &blob_pins.atf, &blob_stage)?)?;
+    let tpl = absolute(blobs::verify_to(opts.blobs_dir, &blob_pins.tpl, &blob_stage)?)?;
     // BL32/OP-TEE only where the boot chain has one (RK3576); BL31-only SoCs
     // (RK3588/RK1) pin no bl32, so nothing is verified or passed.
-    let bl32 = match &lock.blobs.bl32 {
+    let bl32 = match &blob_pins.bl32 {
         Some(pin) => Some(absolute(blobs::verify_to(opts.blobs_dir, pin, &blob_stage)?)?),
         None => None,
     };
@@ -139,18 +148,18 @@ pub fn build_uboot(
     step.progress(30);
 
     let blobs = BlobPaths { atf, tpl, bl32 };
-    configure(build, env, &tree, &blobs, reused, &step)?;
+    configure(boot, env, &tree, &blobs, reused, &step)?;
     step.progress(40);
 
     // Deterministic build timestamp from the locked commit, so `u-boot.itb` does
     // not embed wall-clock time (COR-9).
-    let epoch = crate::git::commit_epoch(&tree, &lock.uboot.commit).ok();
+    let epoch = crate::git::commit_epoch(&tree, &uboot.commit).ok();
     compile(env, &tree, &blobs, epoch, &step)?;
 
     let (idbloader, uboot_itb) = collect(opts, &tree, &step)?;
     step.progress(90);
 
-    let deb = package_deb(build, &lock.uboot.reference, opts, epoch, &idbloader, &uboot_itb, &step)?;
+    let deb = package_deb(build, boot, &uboot.reference, opts, epoch, &idbloader, &uboot_itb, &step)?;
 
     // Store the payloads + deb under the output signature.
     build::store_stage_outputs(
@@ -184,31 +193,33 @@ pub fn build_uboot(
 /// everything that can change them.
 fn output_manifest(
     build: &ResolvedBuild,
+    boot: &ResolvedRkbinBoot,
     lock: &Lock,
     env: &BuildEnv,
     patches: PatchSeries,
-) -> crate::signature::SignatureManifest {
+) -> Result<crate::signature::SignatureManifest, EngineError> {
     // Fold the Tier-1 tree signature (carrying the co-dev series fingerprint, if any),
     // so a co-dev build never shares an output entry with a pinned one and an edited
     // patch invalidates the cached deb (CACHE-1).
-    let tree_sig = clone_manifest(lock, patches).signature();
+    let tree_sig = clone_manifest(lock, patches)?.signature();
+    let pins = build::blob_pins(lock)?;
     let mut b = crate::signature::SignatureBuilder::new("uboot:out", OUTPUT_STAGE_VERSION);
     b.fold_dep(&tree_sig)
-        .fold_scalar("uboot_defconfig", &build.uboot_defconfig)
-        .fold_scalar("blob.atf", &lock.blobs.atf)
-        .fold_scalar("blob.tpl", &lock.blobs.tpl)
-        .fold_scalar("blob.bl32", lock.blobs.bl32.as_deref().unwrap_or(""))
+        .fold_scalar("uboot_defconfig", &boot.uboot_defconfig)
+        .fold_scalar("blob.atf", &pins.atf)
+        .fold_scalar("blob.tpl", &pins.tpl)
+        .fold_scalar("blob.bl32", pins.bl32.as_deref().unwrap_or(""))
         .fold_scalar("device", &build.device)
         .fold_scalar("description", &build.description)
         .fold_scalar("soc", build.soc.as_str())
         .fold_scalar("boot_method", build.boot_method.as_str())
         .fold_scalar("arch", build.arch.as_str())
-        .fold_scalar("offset.idbloader", &build.offsets.idbloader)
-        .fold_scalar("offset.uboot_itb", &build.offsets.uboot_itb)
-        .fold_scalar("uboot.reference", &lock.uboot.reference)
+        .fold_scalar("offset.idbloader", &boot.offsets.idbloader)
+        .fold_scalar("offset.uboot_itb", &boot.offsets.uboot_itb)
+        .fold_scalar("uboot.reference", &build::uboot_pin(lock)?.reference)
         .fold_scalar("cross", env.cross_compile.as_deref().unwrap_or(""))
         .fold_scalar("toolchain", &env.toolchain_id);
-    b.manifest()
+    Ok(b.manifest())
 }
 
 /// The Tier-1 signature manifest of the cloned+patched u-boot tree: the
@@ -220,11 +231,15 @@ fn output_manifest(
 /// Blobs/defconfig are not folded here — they gate compile, which re-runs on every
 /// invocation, not the tree reuse. Public so `why-rebuild` ([`crate::plan`])
 /// recomputes the same signature it stamps here.
-pub fn clone_manifest(lock: &Lock, patches: PatchSeries) -> crate::signature::SignatureManifest {
+pub fn clone_manifest(
+    lock: &Lock,
+    patches: PatchSeries,
+) -> Result<crate::signature::SignatureManifest, EngineError> {
+    let pin = build::uboot_pin(lock)?;
     let mut b = crate::signature::SignatureBuilder::new("uboot", CLONE_STAGE_VERSION);
-    b.fold_scalar("uboot.commit", &lock.uboot.commit);
+    b.fold_scalar("uboot.commit", &pin.commit);
     build::fold_patch_series(&mut b, lock.patches.as_ref(), patches);
-    b.manifest()
+    Ok(b.manifest())
 }
 
 /// Shallow-clone the pinned u-boot, verify the commit, enforce the patches pin,
@@ -236,11 +251,12 @@ fn clone_and_patch(
     tree: &Path,
     step: &Step,
 ) -> Result<(), EngineError> {
-    let target = format!("u-boot @ {}", lock.uboot.reference);
+    let pin = build::uboot_pin(lock)?;
+    let target = format!("u-boot @ {}", pin.reference);
     let spec = ClonePinned {
         source: opts.source,
-        reference: &lock.uboot.reference,
-        commit: &lock.uboot.commit,
+        reference: &pin.reference,
+        commit: &pin.commit,
         mode: CloneMode::Shallow,
         tree,
         what: "u-boot",
@@ -259,7 +275,7 @@ fn clone_and_patch(
 /// Configure the board defconfig (`make <defconfig>`), `distclean`ing first only
 /// when reusing a tree. RK3588 u-boot takes no `ARCH=` (the defconfig sets it).
 fn configure(
-    build: &ResolvedBuild,
+    boot: &ResolvedRkbinBoot,
     env: &BuildEnv,
     tree: &Path,
     blobs: &BlobPaths,
@@ -274,16 +290,16 @@ fn configure(
     }
     // The defconfig comes from config; validate it and pass it after `--` so make
     // cannot read it as an option or a `FOO=bar` variable assignment (SUB-1).
-    build::reject_unsafe_make_target("uboot_defconfig", &build.uboot_defconfig)?;
+    build::reject_unsafe_make_target("uboot_defconfig", &boot.uboot_defconfig)?;
     let mut defconfig = Command::new("make");
     defconfig.arg("-C").arg(tree);
     blob_vars(&mut defconfig, blobs);
-    defconfig.arg("--").arg(&build.uboot_defconfig);
+    defconfig.arg("--").arg(&boot.uboot_defconfig);
     cross(&mut defconfig, env);
     build::run(
         defconfig,
         "make",
-        &format!("make {}", build.uboot_defconfig),
+        &format!("make {}", boot.uboot_defconfig),
         step,
     )
 }
@@ -390,8 +406,10 @@ fn package_name(device: &str) -> String {
 /// `source_date_epoch` (the locked commit's committer date) is exported so
 /// `dpkg-deb` clamps every archive member's mtime to it, making the `.deb`
 /// byte-reproducible rather than stamped with the build clock.
+#[allow(clippy::too_many_arguments)]
 fn package_deb(
     build: &ResolvedBuild,
+    boot: &ResolvedRkbinBoot,
     uboot_ref: &str,
     opts: &UbootOptions,
     source_date_epoch: Option<u64>,
@@ -406,7 +424,7 @@ fn package_deb(
     // Assemble under a clean pkg-stage (a stale tree would ship leftover files).
     let pkg_stage = opts.work_dir.join("uboot-deb");
     let _ = std::fs::remove_dir_all(&pkg_stage);
-    stage_tree(&pkg_stage, build, &pkg, &version, arch, idbloader, uboot_itb)?;
+    stage_tree(&pkg_stage, build, boot, &pkg, &version, arch, idbloader, uboot_itb)?;
     // Force uniform data modes (dirs 0755, files 0644) so the host umask does not leak
     // into the packaged tree — the u-boot deb is data-only, so this is byte-safe and
     // makes the .deb reproducible across hosts (DET-5).
@@ -434,17 +452,19 @@ fn package_deb(
 /// [`package_deb`] so the layout is testable without `dpkg-deb`. The offsets are
 /// parsed from the build's authored strings, so a malformed offset is a
 /// typed [`ConfigError`](boot2deb_core::ConfigError) here rather than a bad deb.
+#[allow(clippy::too_many_arguments)]
 fn stage_tree(
     pkg_stage: &Path,
     build: &ResolvedBuild,
+    boot: &ResolvedRkbinBoot,
     pkg: &str,
     version: &str,
     arch: &str,
     idbloader: &Path,
     uboot_itb: &Path,
 ) -> Result<(), EngineError> {
-    let idb_off = parse_size(&build.offsets.idbloader)?;
-    let itb_off = parse_size(&build.offsets.uboot_itb)?;
+    let idb_off = parse_size(&boot.offsets.idbloader)?;
+    let itb_off = parse_size(&boot.offsets.uboot_itb)?;
 
     let lib_dir = pkg_stage.join(format!("usr/lib/u-boot/{}", build.device));
     std::fs::create_dir_all(&lib_dir).map_err(|s| EngineError::io(&lib_dir, s))?;
@@ -458,9 +478,9 @@ fn stage_tree(
     let readme = readme_text(
         &build.device,
         &build.description,
-        &build.offsets.idbloader,
+        &boot.offsets.idbloader,
         idb_off,
-        &build.offsets.uboot_itb,
+        &boot.offsets.uboot_itb,
         itb_off,
     );
     write_file(&doc_dir.join("README.Debian"), &readme)?;
@@ -585,13 +605,13 @@ mod tests {
     fn lock_with(uboot_commit: &str, patches_commit: &str) -> Lock {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
-            kernel: KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() },
+            kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() }),
             patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
-            uboot: UbootPin { source: "us".into(), reference: "v2026.04".into(), commit: uboot_commit.into() },
+            uboot: Some(UbootPin { source: "us".into(), reference: "v2026.04".into(), commit: uboot_commit.into() }),
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
-            blobs: BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None },
+            blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
             extra_debs: vec![],
             snapshot: None,
         }
@@ -625,7 +645,7 @@ mod tests {
 
     #[test]
     fn clone_manifest_tracks_pin_and_dev_inputs() {
-        let sig = |uc, pc, patches| clone_manifest(&lock_with(uc, pc), patches).signature;
+        let sig = |uc, pc, patches| clone_manifest(&lock_with(uc, pc), patches).unwrap().signature;
         let base = sig("uc1", "pc1", PatchSeries::Pinned);
         assert_eq!(base, sig("uc1", "pc1", PatchSeries::Pinned));
         // A u-boot bump or a patches-pin bump each invalidate the reused tree.
@@ -650,8 +670,9 @@ mod tests {
             jobs: None,
             toolchain_id: tc.to_string(),
         };
+        let boot = build.rkbin_boot().unwrap();
         let man = |lock: &Lock, env: &BuildEnv, patches| {
-            output_manifest(&build, lock, env, patches).signature
+            output_manifest(&build, boot, lock, env, patches).unwrap().signature
         };
         let base = man(&lock_with("uc1", "pc1"), &env("gcc-1"), PatchSeries::Pinned);
         // Stable under identical inputs.
@@ -660,11 +681,11 @@ mod tests {
         assert_ne!(base, man(&lock_with("uc2", "pc1"), &env("gcc-1"), PatchSeries::Pinned));
         // A blob change → new signature (a hit must imply the same verified blobs).
         let mut lock_blob = lock_with("uc1", "pc1");
-        lock_blob.blobs.atf = "different-atf-hash".into();
+        lock_blob.blobs.as_mut().unwrap().atf = "different-atf-hash".into();
         assert_ne!(base, man(&lock_blob, &env("gcc-1"), PatchSeries::Pinned));
         // Adding/altering the BL32 blob also restamps (the OP-TEE payload is folded).
         let mut lock_bl32 = lock_with("uc1", "pc1");
-        lock_bl32.blobs.bl32 = Some("rk3576_bl32@sha256:cd".into());
+        lock_bl32.blobs.as_mut().unwrap().bl32 = Some("rk3576_bl32@sha256:cd".into());
         assert_ne!(base, man(&lock_bl32, &env("gcc-1"), PatchSeries::Pinned));
         // Toolchain and co-dev mode each split the key.
         assert_ne!(base, man(&lock_with("uc1", "pc1"), &env("gcc-2"), PatchSeries::Pinned));
@@ -743,7 +764,9 @@ mod tests {
         std::fs::write(&itb, b"UBOOTITB").unwrap();
 
         let pkg_stage = tmp.path().join("pkg-stage");
-        stage_tree(&pkg_stage, &build, "u-boot-turing-rk1", "2026.04", "arm64", &idb, &itb).unwrap();
+        let boot = build.rkbin_boot().unwrap();
+        stage_tree(&pkg_stage, &build, boot, "u-boot-turing-rk1", "2026.04", "arm64", &idb, &itb)
+            .unwrap();
 
         // Payloads + install.conf land under /usr/lib/u-boot/<device>/.
         let libd = pkg_stage.join("usr/lib/u-boot/turing-rk1");
@@ -782,7 +805,9 @@ mod tests {
         std::fs::write(&idb, b"IDB").unwrap();
         std::fs::write(&itb, b"ITB").unwrap();
         let pkg_stage = tmp.path().join("pkg-stage");
-        stage_tree(&pkg_stage, &build, "u-boot-turing-rk1", "2026.04", "arm64", &idb, &itb).unwrap();
+        let boot = build.rkbin_boot().unwrap();
+        stage_tree(&pkg_stage, &build, boot, "u-boot-turing-rk1", "2026.04", "arm64", &idb, &itb)
+            .unwrap();
 
         let deb = tmp.path().join("u-boot-turing-rk1_2026.04_arm64.deb");
         let built = Command::new("fakeroot")
@@ -849,8 +874,10 @@ mod tests {
                 out_dir: &work,
                 store: None,
             };
-            let deb = package_deb(&build, "2026.04", &opts, Some(1_600_000_000), &idb, &itb, &step)
-                .unwrap();
+            let boot = build.rkbin_boot().unwrap();
+            let deb =
+                package_deb(&build, boot, "2026.04", &opts, Some(1_600_000_000), &idb, &itb, &step)
+                    .unwrap();
             std::fs::read(&deb).unwrap()
         };
 

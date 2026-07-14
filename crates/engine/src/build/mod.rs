@@ -21,6 +21,7 @@ pub mod userspace;
 use crate::error::EngineError;
 use crate::event::{Step, Stream};
 use crate::{git, patches};
+use boot2deb_core::lock::Lock;
 use boot2deb_core::PatchProfile;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
@@ -60,6 +61,39 @@ impl BuildEnv {
                 .unwrap_or(1)
         })
     }
+}
+
+/// The lock's kernel pin, or a typed error if this build compiles no kernel.
+///
+/// A lock omits a pin exactly when the build has no such dependency — a
+/// distro-package kernel is installed from the mirror, so there is no commit to
+/// pin — and the CLI schedules the compile nodes from the *resolved build*, which
+/// agrees. So a stage reaching here with no pin means the lock and the config have
+/// drifted apart (a lock written before the kernel's flavor changed), and re-running
+/// `update` is the fix. These accessors are where that mismatch is named, once,
+/// instead of every field access having to cope with an absence that should not
+/// happen.
+pub(crate) fn kernel_pin(lock: &Lock) -> Result<&boot2deb_core::lock::KernelPin, EngineError> {
+    lock.kernel.as_ref().ok_or(EngineError::MissingPin {
+        what: "kernel",
+        stage: "kernel",
+    })
+}
+
+/// The lock's u-boot pin, or a typed error if this build's boot method compiles none.
+pub(crate) fn uboot_pin(lock: &Lock) -> Result<&boot2deb_core::lock::UbootPin, EngineError> {
+    lock.uboot.as_ref().ok_or(EngineError::MissingPin {
+        what: "uboot",
+        stage: "uboot",
+    })
+}
+
+/// The lock's rkbin blob pins, or a typed error if this build's boot method uses none.
+pub(crate) fn blob_pins(lock: &Lock) -> Result<&boot2deb_core::lock::BlobsPin, EngineError> {
+    lock.blobs.as_ref().ok_or(EngineError::MissingPin {
+        what: "blobs",
+        stage: "uboot",
+    })
 }
 
 /// Run `command` to completion, relaying every stdout/stderr line to `step` as a

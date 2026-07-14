@@ -322,6 +322,44 @@ pub enum EngineError {
         location: String,
     },
 
+    /// A compile stage was reached for a build that has no such stage — the kernel
+    /// node on a distro-package kernel, the u-boot node on a board whose firmware is
+    /// its own. The CLI schedules stages from the resolved build, so a normal run
+    /// cannot reach this; it is the engine's own contract check against being handed
+    /// a build it should never have been given.
+    #[error("the {stage} stage does not apply to this build: {why}")]
+    StageNotApplicable {
+        /// The stage that was invoked.
+        stage: &'static str,
+        /// Why this build has no such stage.
+        why: &'static str,
+    },
+
+    /// The lock omits a pin the stage needs. A lock omits a pin exactly when the
+    /// build has no such dependency, so this means the lock and the config disagree —
+    /// a lock written before the kernel's flavor or the board's boot method changed.
+    #[error(
+        "the lock has no [{what}] pin, which the {stage} stage requires — the lock \
+         predates a change to this recipe; re-run `boot2deb update <recipe>`"
+    )]
+    MissingPin {
+        /// The absent lock table.
+        what: &'static str,
+        /// The stage that needs it.
+        stage: &'static str,
+    },
+
+    /// The signed kernel partition image is not one this image could boot. The
+    /// cmdline is baked into its vboot signature, so a wrong value cannot be repaired
+    /// after the fact — and on a board with no serial console every variant of "wrong"
+    /// looks the same from the outside: it powers up, finds no root, and reboots. So
+    /// each is caught here, at build time, with the reason named.
+    #[error("the signed kernel partition is not bootable for this image: {detail}")]
+    KpartInvalid {
+        /// What is wrong with it, and why that would fail to boot.
+        detail: String,
+    },
+
     /// The solved rootfs manifest could not be fully content-pinned: some
     /// installed packages had no captured `.deb` to hash, so their sha256 is
     /// unknown. Surfaced rather than shipping a partially pinned manifest,

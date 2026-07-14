@@ -6,7 +6,7 @@
 //! through [`note`] so both modes carry the same facts. The remaining helpers format
 //! the non-streaming commands' output.
 
-use boot2deb_core::model::ResolvedBuild;
+use boot2deb_core::model::{ResolvedBoot, ResolvedBuild, ResolvedKernel};
 use boot2deb_engine::event::{Event, Stream};
 use boot2deb_engine::EventSink;
 use std::path::Path;
@@ -79,7 +79,7 @@ pub(crate) fn finish_listing(
 }
 
 /// After a `list-*` render, surface unreadable entries on stderr so a corrupt
-/// layer file is not lost in a long listing (UX-28). The listing itself stays
+/// layer file is not lost in a long listing. The listing itself stays
 /// usable and the exit code stays 0 — a warning, not a failure.
 pub(crate) fn warn_unreadable(kind: &str, broken: &[(String, String)]) {
     if broken.is_empty() {
@@ -136,10 +136,20 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     println!("device       : {} — {}", b.device, b.description);
     println!("arch / soc   : {} / {}", b.arch, b.soc);
     println!("boot method  : {}", b.boot_method);
-    println!("kernel       : {} ({}, base {})", b.kernel.id, b.kernel.flavor, b.kernel.base_defconfig);
-    println!("  track      : {}", b.kernel.track.as_deref().unwrap_or("-"));
-    println!("  profile    : {}", b.kernel.patch_profile.as_deref().unwrap_or("none"));
-    println!("  fragments  : {}", b.kernel.config_fragments.join(", "));
+    // A kernel prints only what it has: a compiled one is described by its source and
+    // config inputs, a distro one by the package that installs it.
+    match &b.kernel {
+        ResolvedKernel::Compiled(k) => {
+            println!("kernel       : {} ({}, base {})", k.id, k.flavor, k.base_defconfig);
+            println!("  track      : {}", k.track.as_deref().unwrap_or("-"));
+            println!("  profile    : {}", k.patch_profile.as_deref().unwrap_or("none"));
+            println!("  fragments  : {}", k.config_fragments.join(", "));
+        }
+        ResolvedKernel::Distro(k) => {
+            println!("kernel       : {} (distro-package)", k.id);
+            println!("  package    : {} (version pinned in the package manifest)", k.package);
+        }
+    }
     println!("suite        : {}", b.suite);
     println!(
         "features     : {}",
@@ -169,22 +179,54 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     println!("layout       : {}", b.layout);
     println!("image size   : {}", b.image_size);
     println!("hostname     : {}", b.hostname);
+    println!("locale       : {} (generated: {})", b.locale, b.locales_generate.join(", "));
+    println!("timezone     : {}", b.timezone);
+    // A headless board has no keymap and prints none — an empty line would suggest the
+    // knob exists and was left blank, when in fact Debian's default is what ships.
+    if let Some(k) = &b.keymap {
+        let mut km = k.layout.clone();
+        if !k.variant.is_empty() {
+            km.push_str(&format!(" ({})", k.variant));
+        }
+        println!("keymap       : {km} [{}]", k.model);
+    }
     println!("dtb          : {}", b.kernel_dtb);
     // Only a board carrying its own (not-yet-upstream) device tree has sources to
     // show; an upstream-DTB board would print an empty line for nothing.
     if !b.device_dts.is_empty() {
         println!("device dts   : {}", b.device_dts.join(", "));
     }
-    println!("u-boot       : {} ({})", b.uboot_ref, b.uboot_defconfig);
-    println!("rkbin atf    : {}", b.rkbin.atf);
-    println!("rkbin tpl    : {}", b.rkbin.tpl);
-    if let Some(bl32) = &b.rkbin.bl32 {
-        println!("rkbin bl32   : {bl32}");
+    // The boot section is the boot method's, and the two methods have nothing in
+    // common to print: one compiles a bootloader out of blobs and writes it into a raw
+    // gap, the other signs a kernel into a partition the firmware picks by its bits.
+    match &b.boot {
+        ResolvedBoot::RockchipRkbin(boot) => {
+            println!("u-boot       : {} ({})", boot.uboot_ref, boot.uboot_defconfig);
+            println!("rkbin atf    : {}", boot.rkbin.atf);
+            println!("rkbin tpl    : {}", boot.rkbin.tpl);
+            if let Some(bl32) = &boot.rkbin.bl32 {
+                println!("rkbin bl32   : {bl32}");
+            }
+            println!(
+                "offsets      : idbloader {}, u-boot.itb {}, rootfs {}",
+                boot.offsets.idbloader, boot.offsets.uboot_itb, boot.offsets.rootfs
+            );
+        }
+        ResolvedBoot::Depthcharge(boot) => {
+            println!("board profile: {}", boot.board);
+            println!(
+                "kernel part  : {} @ {} (priority {} tries {} successful {} -> flags {:#018x})",
+                boot.kpart.size,
+                boot.kpart.offset,
+                boot.kpart.priority,
+                boot.kpart.tries,
+                boot.kpart.successful,
+                boot.kpart.flags
+            );
+            println!("cmdline      : {} (root= derived from fstab)", boot.cmdline);
+            println!("offsets      : rootfs {}", boot.rootfs_offset);
+        }
     }
-    println!(
-        "offsets      : idbloader {}, u-boot.itb {}, rootfs {}",
-        b.offsets.idbloader, b.offsets.uboot_itb, b.offsets.rootfs
-    );
     println!("modules      : {}", b.modules.join(", "));
     println!("cross-compile: {}", b.cross_compile);
     // Media-accel source trees print only when the build compiles the stack; a base

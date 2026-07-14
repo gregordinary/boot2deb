@@ -70,6 +70,18 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
 
+    /// A kernel definition has no `flavor`. The flavor selects which *shape* the
+    /// definition has — a compiled kernel's source ref and fragments, or a distro
+    /// kernel's package name — so without it there is no struct to validate the file
+    /// against.
+    #[error("kernel '{kernel}' has no `flavor` (expected mainline, vendor, or distro-package) in {path}")]
+    MissingKernelFlavor {
+        /// The kernel definition id.
+        kernel: String,
+        /// The file that lacks the key.
+        path: String,
+    },
+
     /// A generated artifact (e.g. a lockfile) could not be serialized to TOML.
     #[error("failed to serialize {what}: {source}")]
     Serialize {
@@ -120,6 +132,84 @@ pub enum ConfigError {
         device: String,
         /// Which blob field is missing.
         what: String,
+    },
+
+    /// The device omits a field the *resolved boot method* requires. The
+    /// requirement is method-scoped, not universal — a board that boots depthcharge
+    /// has no `uboot_defconfig` because it compiles no u-boot, and one that boots
+    /// rkbin has no `[depthcharge]` block — so the error names the method that wants
+    /// it rather than implying every device must carry it.
+    #[error("device '{device}' boots via '{boot_method}', which requires `{what}` — add it to devices/{device}.toml")]
+    MissingBootField {
+        /// The device being resolved.
+        device: String,
+        /// The boot method that requires the field.
+        boot_method: &'static str,
+        /// The missing field, as authored in the device layer.
+        what: &'static str,
+    },
+
+    /// The requested depthcharge board profile is not in the device's
+    /// `supported_boards`. A profile describes the *firmware* the unit runs (a stock
+    /// C201 and a libreboot'd one differ), so picking the wrong one produces an image
+    /// that firmware will not boot — caught here rather than on the hardware.
+    #[error("device '{device}' does not support board profile '{board}' (supported: {supported})")]
+    UnknownBoardProfile {
+        /// The device being resolved.
+        device: String,
+        /// The requested profile.
+        board: String,
+        /// Comma-separated profiles the device does support.
+        supported: String,
+    },
+
+    /// The requested image layout has no meaning under the resolved boot method.
+    #[error("boot method '{boot_method}' does not support the '{layout}' layout: {why}")]
+    UnsupportedLayout {
+        /// The resolved boot method.
+        boot_method: &'static str,
+        /// The requested layout.
+        layout: String,
+        /// Why the combination cannot be built.
+        why: &'static str,
+    },
+
+    /// A ChromeOS kernel-partition attribute does not fit its field. `priority` and
+    /// `tries` are 4 bits each, so a value above 15 cannot be written — see
+    /// [`kpart_flags`](crate::chromeos::kpart_flags).
+    #[error("{field} = {value} does not fit its 4-bit GPT attribute field (0-15)")]
+    InvalidKpartAttr {
+        /// The offending field (`kpart_priority` or `kpart_tries`).
+        field: &'static str,
+        /// The authored value.
+        value: u8,
+    },
+
+    /// A boot method's kernel command line carries something the signing tool cannot
+    /// or will not honour, so the value would not survive into the booted kernel.
+    #[error("invalid kernel cmdline {value:?}: {why}")]
+    InvalidCmdline {
+        /// The offending cmdline.
+        value: String,
+        /// Why it cannot be used.
+        why: &'static str,
+    },
+
+    /// The device declares an input that only a *compiled* kernel consumes — a board
+    /// device tree, or board kconfig fragments — while the resolved kernel is a
+    /// distro package that compiles nothing. Nothing would ever build the DTB or merge
+    /// the fragments, so the board would read as configured and boot as broken.
+    #[error(
+        "device '{device}' declares `{what}`, but kernel '{kernel}' is a distro-package \
+         kernel that compiles nothing — the value would never be used"
+    )]
+    DistroKernelCompilesNothing {
+        /// The device being resolved.
+        device: String,
+        /// The distro-package kernel it was paired with.
+        kernel: String,
+        /// The compile-only device field that would be ignored.
+        what: &'static str,
     },
 
     /// An `--overlay` argument does not name an existing directory. An empty path
@@ -273,7 +363,7 @@ pub enum ConfigError {
     /// and space-separated, so an empty value or one carrying whitespace or
     /// `[`/`]` would be parsed as line structure rather than content — and a
     /// non-http(s) URI would point the bootstrap solve at an arbitrary
-    /// transport (SEC-8).
+    /// transport.
     #[error("feature '{feature}': apt source '{name}' has an unusable {field}: {value:?}")]
     AptSourceBadField {
         /// The feature contributing the source.
@@ -372,5 +462,41 @@ pub enum ConfigError {
         /// The prefix of the first entry, which the new patch would precede (`0`,
         /// since a higher first entry leaves integer room and does not reach here).
         after: u32,
+    },
+
+    /// A locale name is not one `locale-gen` could act on. The name reaches
+    /// `/etc/locale.gen` as a `<name> <charset>` line and `/etc/locale.conf` as a
+    /// shell-sourced `LANG=` value, so it must both carry a codeset and contain
+    /// nothing a shell would interpret.
+    #[error("invalid locale '{value}': {why}")]
+    InvalidLocale {
+        /// The offending locale.
+        value: String,
+        /// Why it cannot be used.
+        why: &'static str,
+    },
+
+    /// A timezone is not a name `tzdata` could resolve. It becomes the target of the
+    /// `/etc/localtime` symlink under `/usr/share/zoneinfo/`, so a name that escaped
+    /// that directory would point the system clock at an arbitrary file.
+    #[error("invalid timezone '{value}': {why}")]
+    InvalidTimezone {
+        /// The offending timezone.
+        value: String,
+        /// Why it cannot be used.
+        why: &'static str,
+    },
+
+    /// A keymap field carries something `/etc/default/keyboard` cannot hold. That
+    /// file is *sourced by shell* (`console-setup`, `keyboard-setup`), so a value with
+    /// a quote or a substitution in it would execute rather than configure.
+    #[error("invalid keymap {field} '{value}': {why}")]
+    InvalidKeymap {
+        /// Which XKB field (`layout`, `model`, `variant`, `options`).
+        field: &'static str,
+        /// The offending value.
+        value: String,
+        /// Why it cannot be used.
+        why: &'static str,
     },
 }

@@ -39,6 +39,17 @@ pub(crate) fn run(
     });
 
     println!("why-rebuild {recipe} (work {})", work_dir.display());
+    // A recipe can legitimately have no compile nodes at all — a board that installs
+    // Debian's kernel and boots its own firmware compiles nothing, so there is nothing
+    // to rebuild. Say that, rather than printing an empty list that reads as a bug.
+    if nodes.is_empty() {
+        println!(
+            "  this recipe compiles nothing from source (the kernel is a distro package \
+             and the boot method builds no bootloader), so it has no compile nodes to \
+             reuse or rebuild. Its rootfs is keyed on the live package solve."
+        );
+        return Ok(());
+    }
     for node in &nodes {
         let (verb, reason) = match &node.status {
             plan::NodeStatus::Absent => ("build", "no previous build".to_string()),

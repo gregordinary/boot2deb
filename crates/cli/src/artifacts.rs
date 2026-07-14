@@ -55,6 +55,10 @@ fn read_ledger_names(ledger: &Path) -> Result<BTreeSet<String>, Box<dyn std::err
 /// extension-only scan, a stray or partially-written `.deb` the build did not record
 /// is never ingested. A missing ledger (no compile stage staged into this `out_dir`)
 /// is a hard error with the same "run the compile stages first" hint the scan gave.
+///
+/// Only call this for a build that **produces** `.deb`s. One that compiles nothing —
+/// a distro kernel on a board whose firmware is its own — has an empty ledger as its
+/// correct state, and every package, kernel included, comes from the mirror.
 pub(crate) fn ledger_debs(out_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let ledger = out_dir.join(ARTIFACT_LEDGER);
     let names = read_ledger_names(&ledger)?;

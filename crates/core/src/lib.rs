@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
+pub mod chromeos;
 pub mod error;
 pub mod feature;
 pub mod host;

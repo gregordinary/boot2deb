@@ -182,7 +182,7 @@ pub(crate) fn import(
 /// Map a 1-based `--position` onto an insertion index for a list of `len`
 /// entries; `None` appends. 0 and anything past one-beyond-the-end are errors
 /// naming the valid range — a silent clamp would put the patch somewhere other
-/// than where the caller asked (UX-26).
+/// than where the caller asked.
 fn insert_index(position: Option<usize>, len: usize) -> Result<usize, String> {
     match position {
         None => Ok(len),
@@ -207,7 +207,7 @@ fn recipes_using_profile(root: &ConfigRoot, profile: &str) -> Vec<String> {
         .into_iter()
         .filter(|name| {
             resolve_recipe(root, name, &Overrides::default())
-                .is_ok_and(|build| build.kernel.patch_profile.as_deref() == Some(profile))
+                .is_ok_and(|build| build.kernel.patch_profile() == Some(profile))
         })
         .collect()
 }
@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(insert_index(Some(4), 3), Ok(3));
         // 0 is not a position (the flag is 1-based)...
         assert!(insert_index(Some(0), 3).unwrap_err().contains("1-based"));
-        // ...and past-the-end values are errors, not a silent clamp-to-append (UX-26).
+        // ...and past-the-end values are errors, not a silent clamp-to-append.
         assert!(insert_index(Some(5), 3).unwrap_err().contains("past the end"));
     }
 

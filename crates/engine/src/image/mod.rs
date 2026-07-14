@@ -1,31 +1,38 @@
 //! The image node — unprivileged image assembly with no loop mount, no `dd`,
 //! and no `sudo`.
 //!
-//! It takes a rootfs tarball plus the u-boot raw-gap payloads and writes a
+//! It takes a rootfs tarball plus the boot method's payload and writes a
 //! bootable disk image with no `sudo`, no loop device, and no mount: the ext4
 //! filesystem is formatted by host `mke2fs -d` from a tree staged inside an
 //! unprivileged user namespace (the `ext4` submodule), the partition table is written
-//! in Rust (`gpt`), the bootloader payloads are placed by seek+write at their
-//! fixed offsets, and the result is `.xz`-compressed with a pure-Rust encoder
-//! (`lzma-rust2`). All byte/LBA arithmetic is resolved and validated up front
-//! by the `geometry` submodule.
+//! in Rust (`gpt`), the boot payload is placed by seek+write, and the result is
+//! `.xz`-compressed with a pure-Rust encoder (`lzma-rust2`). All byte/LBA arithmetic
+//! is resolved and validated up front by the `geometry` submodule.
+//!
+//! **Where the boot payload comes from is the boot method's business.** Under
+//! `rockchip-rkbin` it is two blobs the u-boot stage compiled, written into a raw gap
+//! outside any partition. Under `depthcharge` it is one vboot-signed kernel FIT that
+//! `depthchargectl` built *inside the rootfs*, which this node reads back out of the
+//! tarball and places in a ChromeOS kernel partition (the `depthcharge` submodule).
 //!
 //! Two layouts, selected by the resolved [`Layout`]:
-//! - **combined** — one image: the bootloader in the raw gap ahead of the rootfs
-//!   partition (the RK1 default, a single medium).
+//! - **combined** — one image, boot payload and rootfs on a single medium.
 //! - **split** — a bootloader-only image for the boot medium (eMMC/SPI) plus a
 //!   bootloader-agnostic rootfs image for a separate disk; mainline u-boot's
 //!   distro-boot discovers the rootfs at runtime, so both share one rootfs build.
+//!   Only `rockchip-rkbin` has a bootloader to split off; resolution rejects the
+//!   combination for any method that does not.
 
+mod depthcharge;
 mod ext4;
 mod geometry;
 mod gpt;
 
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
-use boot2deb_core::model::Layout;
+use boot2deb_core::model::{Layout, ResolvedBoot};
 use boot2deb_core::ResolvedBuild;
-use geometry::Geometry;
+use geometry::{BootGeometry, Geometry};
 use lzma_rust2::{XzOptions, XzWriterMt};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -44,35 +51,88 @@ const XZ_PRESET: u32 = 6;
 /// negligible while a multi-GiB image still parallelizes well.
 const XZ_BLOCK_SIZE: u64 = 32 * 1024 * 1024;
 
+/// Where the image's boot payload comes from, per boot method.
+#[derive(Debug, Clone, Copy)]
+pub enum BootPayload<'a> {
+    /// `rockchip-rkbin`: the two raw-gap payloads the u-boot stage compiled
+    /// ([`UbootArtifacts`](crate::build::uboot::UbootArtifacts)).
+    RockchipRkbin {
+        /// `idbloader.img`.
+        idbloader: &'a Path,
+        /// `u-boot.itb`.
+        uboot_itb: &'a Path,
+    },
+    /// `depthcharge`: the signed kernel FIT, which carries no path because it is not
+    /// produced by a compile stage at all — `depthchargectl` built it *inside the
+    /// rootfs*, so the image node reads it out of the rootfs tarball (see the
+    /// `depthcharge` submodule for why that is the right place for it to be built).
+    Depthcharge,
+}
+
 /// Filesystem inputs for the image node.
 pub struct ImageOptions<'a> {
     /// Rootfs as a `tar` archive — the artifact of the rootfs backend, staged
     /// and formatted by the `ext4` submodule. Device nodes under `./dev/` are not
-    /// materialized (the kernel mounts devtmpfs over `/dev` at boot).
+    /// materialized (the kernel mounts devtmpfs over `/dev` at boot). Under
+    /// `depthcharge` it also carries the signed kernel partition image.
     pub rootfs_tar: &'a Path,
-    /// `idbloader.img` from the u-boot stage ([`UbootArtifacts`](crate::build::uboot::UbootArtifacts)).
-    pub idbloader: &'a Path,
-    /// `u-boot.itb` from the u-boot stage.
-    pub uboot_itb: &'a Path,
+    /// The boot payload to place, per the resolved boot method.
+    pub boot: BootPayload<'a>,
     /// Directory the finished image(s) are written to.
     pub out_dir: &'a Path,
     /// Scratch directory for the intermediate ext4 partition image.
     pub work_dir: &'a Path,
     /// ext4 volume label and GPT partition name (≤ 16 bytes), e.g. `rootfs`.
     pub rootfs_label: &'a str,
-    /// Stable seed for the image's on-disk identifiers, derived by the caller from
-    /// the lock (e.g. the kernel commit). The ext4 UUID and the GPT disk/partition
-    /// GUIDs are hashed from this rather than drawn from `/dev/urandom`, so a
-    /// rebuild from the same lock yields the same identifiers — the reproducibility
-    /// contract. Distinct locks (or devices) still get distinct GUIDs.
-    pub image_seed: &'a str,
+    /// The image's deterministic on-disk identifiers ([`ImageIdentity`]).
+    pub identity: ImageIdentity,
     /// Also emit a `.xz` alongside each raw image.
     pub compress: bool,
     /// Keep the raw `.img` after compressing it. Default (`false`): with
     /// compression on, the raw image is derivable from the `.xz`, so it is deleted
-    /// once compression succeeds to save disk on the largest artifact (PERF-2).
+    /// once compression succeeds to save disk on the largest artifact.
     /// Ignored when `compress` is off.
     pub keep_raw: bool,
+}
+
+/// The image's on-disk identifiers, all derived from one lock-stable seed rather
+/// than drawn from `/dev/urandom` — so a rebuild from the same lock reproduces them,
+/// which is the reproducibility contract, while distinct recipes (or devices) still
+/// get distinct values.
+///
+/// It is computed **once, by the caller**, and shared by the rootfs and image nodes,
+/// because under `depthcharge` the rootfs's own `/etc/fstab` has to name the
+/// partition the signed kernel will root on. That makes the rootfs PARTUUID an input
+/// to the rootfs, not an output of the partition table — the one identifier that must
+/// be known before the filesystem that references it exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageIdentity {
+    /// The ext4 superblock UUID of the rootfs filesystem.
+    pub ext4_uuid: Uuid,
+    /// The GPT header's disk GUID.
+    pub disk_guid: Uuid,
+    /// The rootfs partition's GUID — its **PARTUUID**.
+    pub rootfs_partuuid: Uuid,
+    /// The ChromeOS kernel partition's GUID. Unused under a boot method that writes
+    /// no such partition.
+    pub kpart_guid: Uuid,
+}
+
+impl ImageIdentity {
+    /// Derive every identifier from a lock-stable `seed` and the `device`.
+    ///
+    /// `seed` identifies the build point (the recipe), so two images of the same
+    /// recipe reproduce each other and two different recipes — `asus-c201-forky` and
+    /// `asus-c201-trixie`, say — never collide on a PARTUUID, which would make two
+    /// cards indistinguishable to a kernel that has both in front of it.
+    pub fn derive(seed: &str, device: &str) -> Self {
+        ImageIdentity {
+            ext4_uuid: derive_uuid(seed, device, "ext4-rootfs"),
+            disk_guid: derive_uuid(seed, device, "gpt-disk"),
+            rootfs_partuuid: derive_uuid(seed, device, "gpt-partition"),
+            kpart_guid: derive_uuid(seed, device, "gpt-kernel-partition"),
+        }
+    }
 }
 
 /// The image artifact(s) produced, per the resolved [`Layout`].
@@ -110,11 +170,11 @@ pub struct ImageArtifacts {
     pub output: ImageOutput,
     /// The `.xz` artifacts (one per raw image), empty when compression was off.
     pub compressed: Vec<PathBuf>,
-    /// Whether the raw image files were deleted after compression (PERF-2), so a
+    /// Whether the raw image files were deleted after compression, so a
     /// consumer knows only the `.xz` remains.
     pub raw_removed: bool,
     /// The per-image first-boot password spliced into [`crate::rootfs::DEFAULT_USER`]'s
-    /// account (SEC-6) — unique per build, expired so it must be changed at first
+    /// account — unique per build, expired so it must be changed at first
     /// login. The caller surfaces it and records it in the provenance manifest; it
     /// is written to no committed file.
     pub password: String,
@@ -124,16 +184,7 @@ pub struct ImageArtifacts {
 /// without writing anything — the cheap up-front check `build` runs right after
 /// resolution so a bad layout fails before any stage compiles (COR-10).
 pub fn validate_geometry(build: &ResolvedBuild) -> Result<(), EngineError> {
-    Geometry::resolve(&build.offsets, &build.image_size).map(|_| ())
-}
-
-/// The two GPT identifiers for a whole-disk image — both derived from the lock,
-/// passed together so [`assemble_disk`] threads them into [`gpt::write_table`].
-struct DiskGuids {
-    /// The GPT header's disk GUID.
-    disk: Uuid,
-    /// The rootfs partition entry's unique GUID.
-    partition: Uuid,
+    Geometry::resolve(&build.boot, &build.image_size).map(|_| ())
 }
 
 /// Derive a deterministic, RFC-4122-shaped UUID for one image identifier from the
@@ -167,7 +218,7 @@ fn derive_uuid(seed: &str, device: &str, domain: &str) -> Uuid {
 ///
 /// Resolves and validates the geometry, formats the rootfs ext4 partition once
 /// (shared by both layouts), then writes the layout the device resolved to.
-/// The bootloader payloads' sizes are checked against their gap slots
+/// The boot payload's size is checked against the space the geometry gave it
 /// before any bytes are placed.
 pub fn build_image(
     build: &ResolvedBuild,
@@ -175,25 +226,35 @@ pub fn build_image(
     sink: &dyn EventSink,
 ) -> Result<ImageArtifacts, EngineError> {
     let step = Step::start(sink, "image");
-    let geom = Geometry::resolve(&build.offsets, &build.image_size)?;
+    let geom = Geometry::resolve(&build.boot, &build.image_size)?;
     std::fs::create_dir_all(opts.out_dir).map_err(|s| EngineError::io(opts.out_dir, s))?;
     std::fs::create_dir_all(opts.work_dir).map_err(|s| EngineError::io(opts.work_dir, s))?;
 
-    // Payloads must fit their raw-gap slots — check before the expensive ext4
-    // build so a too-large bootloader fails fast rather than after formatting the
-    // whole rootfs (COR-10).
-    let idb_len = file_len(opts.idbloader)?;
-    let itb_len = file_len(opts.uboot_itb)?;
-    geom.check_payload_fit(idb_len, itb_len)?;
+    // Resolve the boot payload to concrete bytes. Under depthcharge that means
+    // taking the signed kernel out of the rootfs tarball, and checking it is one
+    // *this* image can boot — its cmdline must root on the partition this image is
+    // about to write, and that cannot be repaired later because it is signed.
+    let kpart = match opts.boot {
+        BootPayload::Depthcharge => {
+            let kpart = depthcharge::extract_kpart(opts.rootfs_tar, opts.work_dir, &step)?;
+            depthcharge::verify_kpart(&kpart, opts.identity.rootfs_partuuid)?;
+            step.log(format!(
+                "verified the signed kernel partition ({} bytes) roots on PARTUUID={}",
+                file_len(&kpart)?,
+                opts.identity.rootfs_partuuid
+            ));
+            Some(kpart)
+        }
+        BootPayload::RockchipRkbin { .. } => None,
+    };
 
-    // Deterministic on-disk identifiers derived from the lock seed + the device,
-    // so a rebuild reproduces them. Distinct per purpose (a shared seed must
-    // not collapse the three into one value) and per device.
-    let ext4_uuid = derive_uuid(opts.image_seed, &build.device, "ext4-rootfs");
-    let disk_guid = derive_uuid(opts.image_seed, &build.device, "gpt-disk");
-    let part_guid = derive_uuid(opts.image_seed, &build.device, "gpt-partition");
+    // The payload must fit the space it was given — checked before the expensive
+    // ext4 build, so an oversized boot payload fails fast rather than after
+    // formatting the whole rootfs (COR-10).
+    let payloads = boot_payloads(&opts.boot, kpart.as_deref())?;
+    geom.check_payload_fit(&payloads)?;
 
-    // The per-image first-boot password (SEC-6): generated here so the shared,
+    // The per-image first-boot password: generated here so the shared,
     // cacheable rootfs tarball stays password-free (the account is locked in it)
     // and each built image gets its own credential — spliced into the staged
     // `/etc/shadow` before formatting, not surgically into the tar.
@@ -207,7 +268,7 @@ pub fn build_image(
         geom.rootfs_bytes,
         opts.rootfs_tar,
         opts.rootfs_label,
-        ext4_uuid,
+        opts.identity.ext4_uuid,
         ext4::FirstBoot {
             user: crate::rootfs::DEFAULT_USER,
             password_hash: &password_hash,
@@ -216,24 +277,34 @@ pub fn build_image(
     )?;
     step.progress(50);
 
-    let guids = DiskGuids {
-        disk: disk_guid,
-        partition: part_guid,
-    };
     let output = match build.layout {
         Layout::Combined => {
             let image = opts.out_dir.join(format!("{}.img", build.device));
-            assemble_disk(&image, &geom, &ext4, &guids, true, opts, &step)?;
+            assemble_disk(&image, &geom, &ext4, kpart.as_deref(), true, opts, &step)?;
             step.log(format!("wrote combined image {}", image.display()));
             ImageOutput::Combined { image }
         }
         Layout::Split => {
+            // Only a method with a bootloader of its own can be split off onto a
+            // separate medium; resolution rejects the combination for any other.
+            let ResolvedBoot::RockchipRkbin(_) = &build.boot else {
+                return Err(EngineError::StageNotApplicable {
+                    stage: "image (split layout)",
+                    why: "this boot method has no separate bootloader medium to emit",
+                });
+            };
+            let BootPayload::RockchipRkbin { idbloader, uboot_itb } = opts.boot else {
+                return Err(EngineError::StageNotApplicable {
+                    stage: "image (split layout)",
+                    why: "no bootloader payloads were supplied",
+                });
+            };
             // Rootfs image: GPT + rootfs partition, empty raw gap (bootloader-agnostic).
             let rootfs = opts.out_dir.join(format!("{}-rootfs.img", build.device));
-            assemble_disk(&rootfs, &geom, &ext4, &guids, false, opts, &step)?;
+            assemble_disk(&rootfs, &geom, &ext4, None, false, opts, &step)?;
             // Bootloader image: just the raw-gap payloads on a gap-sized medium.
             let bootloader = opts.out_dir.join(format!("{}-boot.img", build.device));
-            assemble_bootloader(&bootloader, &geom, opts.idbloader, opts.uboot_itb, &step)?;
+            assemble_bootloader(&bootloader, &geom, idbloader, uboot_itb, &step)?;
             step.log(format!(
                 "wrote split images {} + {}",
                 bootloader.display(),
@@ -254,7 +325,7 @@ pub fn build_image(
             compressed.push(dst);
         }
         // The raw image is derivable from its `.xz`, so drop it unless asked to keep
-        // it — it is the largest artifact (PERF-2).
+        // it — it is the largest artifact.
         if !opts.keep_raw {
             for image in output.images() {
                 std::fs::remove_file(image).map_err(|s| EngineError::io(image, s))?;
@@ -292,9 +363,12 @@ pub fn build_bootloader_image(
     sink: &dyn EventSink,
 ) -> Result<PathBuf, EngineError> {
     let step = Step::start(sink, "bootloader-image");
-    let geom = Geometry::resolve(&build.offsets, &build.image_size)?;
+    let geom = Geometry::resolve(&build.boot, &build.image_size)?;
     // The same fail-fast fit check the full image node runs before placing bytes.
-    geom.check_payload_fit(file_len(idbloader)?, file_len(uboot_itb)?)?;
+    geom.check_payload_fit(&[
+        ("idbloader.img", file_len(idbloader)?),
+        ("u-boot.itb", file_len(uboot_itb)?),
+    ])?;
     std::fs::create_dir_all(out_dir).map_err(|s| EngineError::io(out_dir, s))?;
     let image = out_dir.join(format!("{}-boot.img", build.device));
     assemble_bootloader(&image, &geom, idbloader, uboot_itb, &step)?;
@@ -303,29 +377,92 @@ pub fn build_bootloader_image(
     Ok(image)
 }
 
+/// The boot payloads to place, as `(name, length)` pairs in the order the boot
+/// method writes them — the input to [`Geometry::check_payload_fit`].
+fn boot_payloads<'a>(
+    boot: &BootPayload<'a>,
+    kpart: Option<&'a Path>,
+) -> Result<Vec<(&'a str, u64)>, EngineError> {
+    match (boot, kpart) {
+        (
+            BootPayload::RockchipRkbin {
+                idbloader,
+                uboot_itb,
+            },
+            _,
+        ) => Ok(vec![
+            ("idbloader.img", file_len(idbloader)?),
+            ("u-boot.itb", file_len(uboot_itb)?),
+        ]),
+        (BootPayload::Depthcharge, Some(kpart)) => {
+            Ok(vec![("the signed kernel partition", file_len(kpart)?)])
+        }
+        (BootPayload::Depthcharge, None) => Err(EngineError::StageNotApplicable {
+            stage: "image",
+            why: "the signed kernel partition was not extracted from the rootfs",
+        }),
+    }
+}
+
 /// Write a whole-disk image: a full-size file, the GPT table, the rootfs ext4
-/// filesystem spliced at its partition offset, and — when `with_bootloader` —
-/// the raw-gap bootloader payloads. Shared by combined (with bootloader) and the
-/// split rootfs image (without).
+/// filesystem spliced at its partition offset, and — when `with_boot` — the boot
+/// method's payload. Shared by combined (with the boot payload) and the split rootfs
+/// image (without).
 fn assemble_disk(
     image: &Path,
     geom: &Geometry,
     ext4: &Path,
-    guids: &DiskGuids,
-    with_bootloader: bool,
+    kpart: Option<&Path>,
+    with_boot: bool,
     opts: &ImageOptions,
     step: &Step,
 ) -> Result<(), EngineError> {
     create_sized_image(image, geom.total_size)?;
-    gpt::write_table(image, geom, opts.rootfs_label, guids.disk, guids.partition)?;
+    gpt::write_table(
+        image,
+        geom,
+        opts.rootfs_label,
+        opts.identity.disk_guid,
+        opts.identity.rootfs_partuuid,
+        opts.identity.kpart_guid,
+    )?;
     splice_file(image, geom.rootfs_off, ext4)?;
-    if with_bootloader {
-        splice_file(image, geom.idbloader_off, opts.idbloader)?;
-        splice_file(image, geom.uboot_itb_off, opts.uboot_itb)?;
+    if with_boot {
+        match (&geom.boot, &opts.boot) {
+            (
+                BootGeometry::RawGap {
+                    idbloader_off,
+                    uboot_itb_off,
+                },
+                BootPayload::RockchipRkbin {
+                    idbloader,
+                    uboot_itb,
+                },
+            ) => {
+                splice_file(image, *idbloader_off, idbloader)?;
+                splice_file(image, *uboot_itb_off, uboot_itb)?;
+            }
+            (BootGeometry::Kpart { offset, .. }, BootPayload::Depthcharge) => {
+                let kpart = kpart.ok_or(EngineError::StageNotApplicable {
+                    stage: "image",
+                    why: "the signed kernel partition was not extracted from the rootfs",
+                })?;
+                splice_file(image, *offset, kpart)?;
+            }
+            // The geometry and the payload both come from the same resolved boot
+            // method, so they cannot disagree — but they are separate values, and a
+            // mismatch would write a bootloader into a kernel partition.
+            _ => {
+                return Err(EngineError::StageNotApplicable {
+                    stage: "image",
+                    why: "the boot payload does not match the resolved boot geometry",
+                })
+            }
+        }
     }
     step.log(format!(
         "laid GPT + rootfs partition{} into {}",
-        if with_bootloader { " + bootloader" } else { "" },
+        if with_boot { " + boot payload" } else { "" },
         image.display()
     ));
     Ok(())
@@ -341,9 +478,19 @@ fn assemble_bootloader(
     uboot_itb: &Path,
     step: &Step,
 ) -> Result<(), EngineError> {
+    let BootGeometry::RawGap {
+        idbloader_off,
+        uboot_itb_off,
+    } = geom.boot
+    else {
+        return Err(EngineError::StageNotApplicable {
+            stage: "bootloader-image",
+            why: "this boot method writes no bootloader into a raw gap",
+        });
+    };
     create_sized_image(image, geom.rootfs_off)?;
-    splice_file(image, geom.idbloader_off, idbloader)?;
-    splice_file(image, geom.uboot_itb_off, uboot_itb)?;
+    splice_file(image, idbloader_off, idbloader)?;
+    splice_file(image, uboot_itb_off, uboot_itb)?;
     step.log(format!("laid bootloader payloads into {}", image.display()));
     Ok(())
 }
@@ -369,7 +516,7 @@ fn create_sized_image(path: &Path, size: u64) -> Result<(), EngineError> {
 /// A **sparse** copy: runs of zero bytes in the source are skipped by seeking the
 /// destination forward rather than writing them, so the output keeps the ~2 GB
 /// ext4's holes instead of materializing every zero block — halving write I/O on
-/// the largest artifact (PERF-1). Correct only because the caller pre-sizes `image`
+/// the largest artifact. Correct only because the caller pre-sizes `image`
 /// (via [`create_sized_image`]) to cover `offset + len(src)`, so seeking over a
 /// trailing hole never shortens the file; the skipped bytes were already zero from
 /// the sparse `set_len`.
@@ -493,7 +640,7 @@ mod tests {
     /// exec with `ENOENT`), not by its exit status: some present tools — e2fsprogs
     /// binaries — reject `--version` and exit non-zero, so a `status.success()` check
     /// would wrongly report them absent and silently skip the end-to-end image tests
-    /// even on a capable host (GEO-2).
+    /// even on a capable host.
     fn have(tool: &str) -> bool {
         Command::new(tool).arg("--version").output().is_ok()
     }
@@ -504,7 +651,7 @@ mod tests {
     /// imply subuid ranges are configured). When something is missing the behavior
     /// depends on `BOOT2DEB_REQUIRE_HOST_TOOLS`: a CI job that guarantees the tools
     /// sets it, and a miss then **panics** so the most important image assertions
-    /// cannot silently drop out of the run (GEO-2); unset (a tool-minimal dev
+    /// cannot silently drop out of the run; unset (a tool-minimal dev
     /// host), the caller skips with a printed note.
     fn require_host_tools(tools: &[&str]) -> bool {
         let mut missing: Vec<String> =
@@ -668,12 +815,14 @@ mod tests {
         let build = small_rk1_build("192MiB");
         let opts = ImageOptions {
             rootfs_tar: &rootfs_tar,
-            idbloader: &idb,
-            uboot_itb: &itb,
+            boot: BootPayload::RockchipRkbin {
+                idbloader: &idb,
+                uboot_itb: &itb,
+            },
             out_dir: &out,
             work_dir: &work,
             rootfs_label: "rootfs",
-            image_seed: "test-seed-commit",
+            identity: ImageIdentity::derive("test-seed", "turing-rk1"),
             compress: false,
             keep_raw: false,
         };
@@ -704,7 +853,7 @@ mod tests {
         // sizes the filesystem to exactly the partition; assert the on-disk
         // superblock agrees. s_blocks_count_lo is a little-endian u32 at superblock
         // offset 0x04, and the superblock starts 1024 bytes into the partition.
-        let geom = Geometry::resolve(&build.offsets, &build.image_size).unwrap();
+        let geom = Geometry::resolve(&build.boot, &build.image_size).unwrap();
         let sb = 16 * 1024 * 1024 + 1024;
         let blocks_count = u32::from_le_bytes(bytes[sb + 4..sb + 8].try_into().unwrap()) as u64;
         assert_eq!(blocks_count, geom.rootfs_bytes / 4096, "fs block count matches geometry");
@@ -731,7 +880,7 @@ mod tests {
     #[test]
     fn compression_deletes_the_raw_image_unless_kept() {
         // End-to-end (Linux only): compress, then confirm the raw is dropped and
-        // only the .xz remains (PERF-2), and that --keep-raw retains it.
+        // only the .xz remains, and that --keep-raw retains it.
         if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck", "openssl"]) {
             return;
         }
@@ -747,12 +896,14 @@ mod tests {
         let run = |out: &Path, keep_raw: bool| {
             let opts = ImageOptions {
                 rootfs_tar: &rootfs_tar,
-                idbloader: &idb,
-                uboot_itb: &itb,
+                boot: BootPayload::RockchipRkbin {
+                    idbloader: &idb,
+                    uboot_itb: &itb,
+                },
                 out_dir: out,
                 work_dir: &out.join("work"),
                 rootfs_label: "rootfs",
-                image_seed: "test-seed-commit",
+                identity: ImageIdentity::derive("test-seed", "turing-rk1"),
                 compress: true,
                 keep_raw,
             };
@@ -798,12 +949,14 @@ mod tests {
         build.layout = Layout::Split;
         let opts = ImageOptions {
             rootfs_tar: &rootfs_tar,
-            idbloader: &idb,
-            uboot_itb: &itb,
+            boot: BootPayload::RockchipRkbin {
+                idbloader: &idb,
+                uboot_itb: &itb,
+            },
             out_dir: &tmp.path().join("out"),
             work_dir: &tmp.path().join("work"),
             rootfs_label: "rootfs",
-            image_seed: "test-seed-commit",
+            identity: ImageIdentity::derive("test-seed", "turing-rk1"),
             compress: false,
             keep_raw: false,
         };

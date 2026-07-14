@@ -1,0 +1,64 @@
+# devices/asus-c201.toml — ASUS Chromebook C201 / C201PA (google,veyron-speedy).
+#
+# An RK3288 Veyron Chromebook: 32-bit Arm, ChromeOS firmware, and — unusually for a
+# board this far from a reference design — nothing to build. Its device tree is
+# upstream, Debian's own kernel runs it, and its bootloader is coreboot in an SPI
+# chip. So this file states a boot method, a board profile, and the hardware's own
+# quirks, and that is the whole board.
+description             = "ASUS Chromebook C201 (RK3288, google,veyron-speedy)"
+soc                     = "rk3288"                          # -> arch=armv7, dt_dir, modules, firmware
+boot_method             = "depthcharge"
+supported_boot_methods  = ["depthcharge"]
+
+# The board is upstream, so the kernel builds this DTB from its own tree and there is
+# no `device_dts` to carry. It is what makes the rest of the Veyron family nearly
+# free: a sibling board is a device file and nothing else.
+kernel_dtb              = "rockchip/rk3288-veyron-speedy.dtb"
+
+# No `device_config_fragments` and no `uboot_defconfig`: this board compiles neither a
+# kernel nor a bootloader, and resolution rejects either field on a build that could
+# never act on it.
+device_config_fragments = []
+
+supported_kernels       = ["debian-armmp"]
+default_kernel          = "debian-armmp"
+default_suite           = "forky"                           # validated on the hardware; trixie also boots
+default_layout          = "combined"
+hostname                = "asus-c201"
+image_size              = "4G"
+
+# The board is a laptop: it has a keyboard under the user's hands, and it is the one
+# shipped device for which a console keymap configures anything at all (the RK1 and
+# the H96 are headless). The C201PA ships a US layout.
+keymap                  = "us"
+
+# --- Rootfs -------------------------------------------------------------------
+# A laptop, so NetworkManager owns the interfaces (wifi is the primary link) — which
+# means dropping the base layer's dhcpcd rather than running two things that both
+# want to configure a NIC. alsa-utils is not a nicety: the max98090 codec comes up
+# muted and stays that way without `alsactl` restoring a state file.
+packages = [
+    "network-manager",
+    "wpasupplicant",
+    "iw",
+    "wireless-regdb",
+    "rfkill",
+    "alsa-utils",
+    "ca-certificates",
+]
+exclude = ["dhcpcd"]
+
+# --- The board profile ---------------------------------------------------------
+# `speedy` is the *stock* depthcharge profile, and it is the default deliberately: a
+# stock-profile image boots on stock firmware AND on a unit running libreboot, while
+# the reverse is not true. Both are confirmed on the hardware.
+#
+# `speedy-libreboot` is selectable (`--board speedy-libreboot`) for a unit with
+# libreboot installed. It buys a 32 MiB payload ceiling instead of 16 MiB, which is
+# headroom for a debug initramfs carrying the display stack — worth having, not worth
+# defaulting to.
+#
+# (This table is last because TOML scopes every key after a table header into it.)
+[depthcharge]
+board            = "speedy"
+supported_boards = ["speedy", "speedy-libreboot"]

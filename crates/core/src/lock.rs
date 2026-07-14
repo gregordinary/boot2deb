@@ -120,16 +120,26 @@ const LOCK_BANNER: &str = "\
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lock {
-    /// Exact kernel pin.
-    pub kernel: KernelPin,
+    /// Exact kernel pin. Present iff the build **compiles** a kernel. A
+    /// distro-package kernel is installed from the mirror like any other package, so
+    /// its exact version and hash live in the solved package manifest
+    /// ([`RootfsPin::manifest`]) and there is no commit to pin here; the committed
+    /// lock then omits the `[kernel]` table entirely, rather than recording a source
+    /// dependency the build does not have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<KernelPin>,
     /// Exact patch-series pin. Present iff the resolved kernel names a patch
     /// profile. A kernel that applies no series never reads the `patches` repo, so
     /// pinning a commit would record provenance for a dependency the build does not
     /// have; the committed lock then omits the `[patches]` table entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patches: Option<PatchesPin>,
-    /// Exact u-boot pin.
-    pub uboot: UbootPin,
+    /// Exact u-boot pin. Present iff the build's boot method **compiles u-boot**
+    /// (`rockchip-rkbin`). A depthcharge board's firmware is its own — coreboot in an
+    /// SPI chip — so nothing bootloader-shaped is fetched or built, and the committed
+    /// lock omits the `[uboot]` table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uboot: Option<UbootPin>,
     /// Exact media-accel userspace source pins (MPP/RGA/Mali). Present iff the
     /// recipe builds the HW transcode stack (a `requires_media_accel` feature is
     /// selected); omitted from the committed lock for a base build, which resolves
@@ -143,8 +153,11 @@ pub struct Lock {
     pub ffmpeg: Option<FfmpegPins>,
     /// Rootfs suite + content-pinned package manifest.
     pub rootfs: RootfsPin,
-    /// Verified rkbin blob hashes.
-    pub blobs: BlobsPin,
+    /// Verified rkbin blob hashes. Present iff the build's boot method consumes rkbin
+    /// blobs (`rockchip-rkbin`, whose u-boot build takes the ATF and DDR TPL as make
+    /// inputs). Omitted from the committed lock otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blobs: Option<BlobsPin>,
     /// Pre-built `.deb`s pulled from outside the Debian mirror,
     /// content-pinned by sha256 — the resolved [`ExtraDeb`] set recorded verbatim
     /// (the sha256 is already exact, so there is nothing to resolve). `update`
@@ -356,21 +369,21 @@ mod tests {
     #[test]
     fn lock_roundtrips_through_toml() {
         let lock = Lock {
-            kernel: KernelPin {
+            kernel: Some(KernelPin {
                 id: "rk3588-mainline-7.1".into(),
                 source: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git".into(),
                 reference: "v7.1.1".into(),
                 commit: "c9acdc466e9aa96352f658b9276aa8a45b8e817d".into(),
-            },
+            }),
             patches: Some(PatchesPin {
                 profile: "rk3588-accel".into(),
                 commit: "f78b240894a29a4c3976ad22935b1c2e16b3c6ad".into(),
             }),
-            uboot: UbootPin {
+            uboot: Some(UbootPin {
                 source: "https://source.denx.de/u-boot/u-boot.git".into(),
                 reference: "v2026.04".into(),
                 commit: "88dc2788777babfd6322fa655df549a019aa1e69".into(),
-            },
+            }),
             userspace: Some(UserspacePins {
                 mpp: GitPin {
                     source: "https://github.com/example/mpp.git".into(),
@@ -405,11 +418,11 @@ mod tests {
                 manifest: "turing-rk1-forky.pkgs.lock".into(),
                 manifest_sha256: Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into()),
             },
-            blobs: BlobsPin {
+            blobs: Some(BlobsPin {
                 atf: "rk3588_bl31_v1.51.elf@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
                 tpl: "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin@sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
                 bl32: None,
-            },
+            }),
             extra_debs: vec![
                 ExtraDeb {
                     url: Some("https://vendor.example/foo_1.2_arm64.deb".into()),
@@ -439,21 +452,21 @@ mod tests {
     /// `snapshot = ` or an empty table, and must round-trip back to `None`.
     fn base_lock() -> Lock {
         Lock {
-            kernel: KernelPin {
+            kernel: Some(KernelPin {
                 id: "k".into(),
                 source: "https://k.example/k.git".into(),
                 reference: "v1".into(),
                 commit: "a".repeat(40),
-            },
+            }),
             patches: Some(PatchesPin {
                 profile: "rk3588-accel".into(),
                 commit: "b".repeat(40),
             }),
-            uboot: UbootPin {
+            uboot: Some(UbootPin {
                 source: "https://u.example/u.git".into(),
                 reference: "v2".into(),
                 commit: "c".repeat(40),
-            },
+            }),
             userspace: Some(UserspacePins {
                 mpp: GitPin { source: "m://s".into(), reference: "m".into(), commit: "1".repeat(40) },
                 librga: GitPin { source: "r://s".into(), reference: "r".into(), commit: "2".repeat(40) },
@@ -468,14 +481,49 @@ mod tests {
                 manifest: "rec.pkgs.lock".into(),
                 manifest_sha256: None,
             },
-            blobs: BlobsPin {
+            blobs: Some(BlobsPin {
                 atf: "atf@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
                 tpl: "tpl@sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
                 bl32: None,
-            },
+            }),
             extra_debs: vec![],
             snapshot: None,
         }
+    }
+
+    #[test]
+    fn a_distro_kernel_depthcharge_lock_pins_only_the_rootfs() {
+        // The C201 shape: Debian's own kernel package, a boot method that compiles no
+        // u-boot, and no rkbin blobs. Nothing is fetched from git and nothing is
+        // compiled, so the only thing there *is* to pin is the package set — and the
+        // committed lock says exactly that, rather than carrying three tables of
+        // provenance for dependencies the build does not have.
+        let lock = Lock {
+            kernel: None,
+            patches: None,
+            uboot: None,
+            userspace: None,
+            ffmpeg: None,
+            rootfs: RootfsPin {
+                suite: "forky".into(),
+                manifest: "asus-c201-forky.pkgs.lock".into(),
+                manifest_sha256: None,
+            },
+            blobs: None,
+            extra_debs: vec![],
+            snapshot: None,
+        };
+        let text = lock.to_toml_string().unwrap();
+        for absent in ["[kernel]", "[patches]", "[uboot]", "[blobs]", "[userspace", "[ffmpeg"] {
+            assert!(
+                !text.contains(absent),
+                "a distro-kernel depthcharge lock must omit {absent}:\n{text}"
+            );
+        }
+        assert!(text.contains("[rootfs]"));
+        // And it round-trips: every omitted table reads back as an absence, not a
+        // default-constructed pin.
+        assert_eq!(toml::from_str::<Lock>(&text).unwrap(), lock);
     }
 
     #[test]
@@ -518,7 +566,7 @@ mod tests {
             1,
         );
         let back: Lock = toml::from_str(&upper).unwrap();
-        assert_eq!(back.kernel.commit, "a".repeat(40));
+        assert_eq!(back.kernel.unwrap().commit, "a".repeat(40));
     }
 
     #[test]
@@ -609,14 +657,17 @@ mod tests {
         // BL31-only build (RK3588/RK1): no bl32 key in the committed form, parses
         // back to None, and an older lock written without the key still loads.
         let lock = base_lock();
-        assert_eq!(lock.blobs.bl32, None);
+        assert_eq!(lock.blobs.as_ref().unwrap().bl32, None);
         let text = lock.to_toml_string().unwrap();
         assert!(!text.contains("bl32"), "absent bl32 must be omitted:\n{text}");
-        assert_eq!(toml::from_str::<Lock>(&text).unwrap().blobs.bl32, None);
+        assert_eq!(
+            toml::from_str::<Lock>(&text).unwrap().blobs.unwrap().bl32,
+            None
+        );
 
         // OP-TEE build (RK3576): the pin is present and survives the round-trip.
         let mut with = base_lock();
-        with.blobs.bl32 = Some("rk3576_bl32_v1.08.bin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        with.blobs.as_mut().unwrap().bl32 = Some("rk3576_bl32_v1.08.bin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
         let text = with.to_toml_string().unwrap();
         assert!(text.contains("bl32 = \"rk3576_bl32_v1.08.bin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""));
         assert_eq!(toml::from_str::<Lock>(&text).unwrap(), with);

@@ -42,11 +42,15 @@ pub(crate) fn run(
     // concrete tag), so an omitted `--kernel-ref` inherits the previous lock's ref —
     // the "re-pin what changed" model for a patch-only update. Only the first update
     // (no prior lock) must supply it.
-    let kernel_ref = match args.kernel_ref {
-        Some(r) => r,
-        None => prev
+    // Only a compiled kernel has a ref to pin; a distro kernel's version rides the
+    // package set, so an absent `--kernel-ref` is fine and the value goes unread.
+    let kernel_ref = match (args.kernel_ref, build.compiles_kernel()) {
+        (Some(r), _) => r,
+        (None, false) => String::new(),
+        (None, true) => prev
             .as_ref()
-            .map(|l| l.kernel.reference.clone())
+            .and_then(|l| l.kernel.as_ref())
+            .map(|k| k.reference.clone())
             .ok_or_else(|| {
                 format!(
                     "no --kernel-ref given and no existing lock for '{recipe}' to inherit it \
@@ -54,7 +58,16 @@ pub(crate) fn run(
                 )
             })?,
     };
-    let uboot_ref = ref_for(args.uboot_ref, |l| l.uboot.reference.clone(), &build.uboot_ref);
+    // Likewise u-boot: only the boot method that compiles one has a ref.
+    let configured_uboot_ref = build
+        .rkbin_boot()
+        .map(|b| b.uboot_ref.clone())
+        .unwrap_or_default();
+    let uboot_ref = ref_for(
+        args.uboot_ref,
+        |l| l.uboot.as_ref().map(|u| u.reference.clone()).unwrap_or_default(),
+        &configured_uboot_ref,
+    );
     // Media-accel source refs are pinned only when the recipe builds the transcode
     // stack (its resolved build carries the sources). A base build leaves them empty —
     // `resolve_lock` never reads a ref without a matching source, and the lock omits
@@ -118,13 +131,19 @@ pub(crate) fn run(
     pins::write_lock(&path, &lock)?;
 
     println!("wrote {}", path.display());
-    println!(
-        "  kernel   {} {} {}",
-        lock.kernel.id,
-        lock.kernel.reference,
-        short(&lock.kernel.commit)
-    );
-    println!("  u-boot   {} {}", lock.uboot.reference, short(&lock.uboot.commit));
+    // Only the pins this build actually has are printed. A row for an absent one
+    // would claim a dependency the lock deliberately does not record.
+    match &lock.kernel {
+        Some(k) => println!("  kernel   {} {} {}", k.id, k.reference, short(&k.commit)),
+        None => println!(
+            "  kernel   {} (distro package — version pinned in the package manifest)",
+            build.kernel.id()
+        ),
+    }
+    match &lock.uboot {
+        Some(u) => println!("  u-boot   {} {}", u.reference, short(&u.commit)),
+        None => println!("  u-boot   (none — this board's firmware is its own)"),
+    }
     // A no-patch kernel has no series to report; printing an empty row would imply
     // one exists.
     match &lock.patches {
@@ -145,10 +164,12 @@ pub(crate) fn run(
         );
     }
     println!("  rootfs   {} (manifest {})", lock.rootfs.suite, lock.rootfs.manifest);
-    println!("  blob atf {}", lock.blobs.atf);
-    println!("  blob tpl {}", lock.blobs.tpl);
-    if let Some(bl32) = &lock.blobs.bl32 {
-        println!("  blob bl32 {bl32}");
+    if let Some(blobs) = &lock.blobs {
+        println!("  blob atf {}", blobs.atf);
+        println!("  blob tpl {}", blobs.tpl);
+        if let Some(bl32) = &blobs.bl32 {
+            println!("  blob bl32 {bl32}");
+        }
     }
     for d in &lock.extra_debs {
         println!("  extradeb {} {}", d.locator_label(), short(&d.sha256));

@@ -1,0 +1,31 @@
+#!/bin/sh
+set -e
+# depthcharge boot flow: re-sign and re-write the kernel partition so the signed
+# command line picks up the rootfs UUID the base first-boot step just assigned.
+#
+# This is the exact counterpart of the rkbin method's 10-extlinux, and it exists for
+# the same reason — first-boot has just given the rootfs a fresh filesystem UUID and a
+# fresh partition UUID, and repointed /etc/fstab at it, so whatever the bootloader was
+# told at build time is now stale. The difference is that on this board the cmdline is
+# not a file we can edit: it is baked into the kernel's vboot signature. Changing it
+# means rebuilding and re-signing the image and writing it back to the kernel
+# partition, which is precisely what `depthchargectl write` does.
+#
+# It reads root from /etc/fstab (already rewritten), finds the partition to write from
+# `kern_guid=` in /proc/cmdline (which the firmware substituted with the booted kernel
+# partition's PARTUUID), and re-signs. `--allow-current` because this image carries a
+# single kernel partition, so the one to rewrite is the one we booted from — the same
+# thing the package's own kernel-upgrade hook does when it finds exactly one.
+#
+# first-boot runs this *before* it reboots, and aborts without rebooting if it fails.
+# That ordering is load-bearing: a failure here leaves a running system with a
+# mismatched kernel partition, which is recoverable; rebooting into one is not.
+
+# Nothing to re-sign if we did not boot through depthcharge (the firmware prepends
+# `cros_secure` when we did) — for instance if this rootfs was moved to another board.
+if ! grep -q cros_secure /proc/cmdline 2>/dev/null; then
+    echo "not booted via depthcharge; leaving the kernel partition alone" >&2
+    exit 0
+fi
+
+depthchargectl write --allow-current

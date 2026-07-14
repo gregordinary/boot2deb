@@ -1,0 +1,22 @@
+# kernels/debian-armmp.toml — Debian's own armhf kernel, installed from the mirror.
+#
+# `distro-package` is the flavor for a board that needs no kernel of ours. Nothing is
+# compiled, patched, or configured: Debian builds `linux-image-armmp` and this
+# definition just names it. So there is no source ref, no defconfig, no fragment list,
+# and no patch profile — and the lock records no kernel commit, because the exact
+# version and hash are pinned in the solved package manifest like every other package
+# in the image.
+#
+# This is the honest model for the Veyron Chromebooks. The RK3288 and all ten Veyron
+# boards are fully upstream and actively maintained, and Debian's own armhf kernel
+# runs them: there is no patch to carry and no config to curate, so compiling a kernel
+# would add a 30-minute cross-build and a maintenance burden to arrive at a worse
+# version of what `apt` already ships — one that would also stop receiving Debian's
+# security updates on the running board.
+#
+# One definition serves every suite. `linux-image-armmp` is a metapackage, so the
+# *suite* decides the version — forky resolves 7.1.x, trixie 6.12.x — and that
+# resolution is captured, per recipe, in that recipe's package manifest.
+flavor         = "distro-package"
+package        = "linux-image-armmp"
+supported_socs = ["rk3288"]

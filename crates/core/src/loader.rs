@@ -192,6 +192,24 @@ impl ConfigRoot {
         name: &str,
         rel: &str,
     ) -> Result<T, ConfigError> {
+        let (value, path) = self.merge_value(kind, name, rel)?;
+        deserialize_at(value, &path)
+    }
+
+    /// Deep-merge every copy of `rel` along the search path into one
+    /// [`toml::Value`], returning it with the highest-precedence path that
+    /// contributed (so a later parse error is attributed to a real file).
+    ///
+    /// Kept separate from [`load_merged`](Self::load_merged) for the layers whose
+    /// Rust *type* is chosen by a value inside the merged config — a boot method by
+    /// its filename, a kernel by its `flavor` — which must inspect the value before
+    /// deserializing it into the right variant.
+    fn merge_value(
+        &self,
+        kind: &'static str,
+        name: &str,
+        rel: &str,
+    ) -> Result<(toml::Value, PathBuf), ConfigError> {
         let mut merged: Option<toml::Value> = None;
         let mut top_path: Option<PathBuf> = None;
         let mut last_path = PathBuf::new();
@@ -221,11 +239,7 @@ impl ConfigRoot {
                 path: last_path.display().to_string(),
             });
         };
-        let path = top_path.unwrap_or(last_path);
-        value.try_into().map_err(|source| ConfigError::Parse {
-            path: path.display().to_string(),
-            source,
-        })
+        Ok((value, top_path.unwrap_or(last_path)))
     }
 
     /// Load `devices/<name>.toml`.
@@ -241,12 +255,48 @@ impl ConfigRoot {
         self.load("arch", "arches", arch.as_str())
     }
     /// Load the boot-method layer for `bm` (`boot-methods/<bm>.toml`).
+    ///
+    /// The [`BootMethod`] *is* the variant selector, so the file is deserialized
+    /// straight into that method's struct. Fields belonging to another method are
+    /// unknown fields here and are rejected — an `idbloader_offset` in
+    /// `boot-methods/depthcharge.toml` is a parse error naming the file, not a value
+    /// silently carried into a build that has no raw gap to write it to.
     pub fn boot_method(&self, bm: BootMethod) -> Result<BootMethodLayer, ConfigError> {
-        self.load("boot-method", "boot-methods", bm.as_str())
+        let rel = format!("boot-methods/{}.toml", bm.as_str());
+        let (value, path) = self.merge_value("boot-method", bm.as_str(), &rel)?;
+        Ok(match bm {
+            BootMethod::RockchipRkbin => BootMethodLayer::RockchipRkbin(deserialize_at(value, &path)?),
+            BootMethod::Depthcharge => BootMethodLayer::Depthcharge(deserialize_at(value, &path)?),
+        })
     }
-    /// Load `kernels/<id>.toml`.
+
+    /// Load `kernels/<id>.toml`, dispatching on its `flavor` to the variant that
+    /// flavor's fields belong to: a compiled kernel carries a source ref, defconfig,
+    /// fragments, and patch profile; a `distro-package` kernel carries only a package
+    /// name. Each variant is strict, so a fragment list on a distro kernel — which
+    /// nothing would ever read — fails at load rather than being ignored.
     pub fn kernel(&self, id: &str) -> Result<KernelDef, ConfigError> {
-        self.load("kernel", "kernels", id)
+        validate_name("kernel", id)?;
+        let rel = format!("kernels/{id}.toml");
+        let (value, path) = self.merge_value("kernel", id, &rel)?;
+        let flavor: KernelFlavor = value
+            .get("flavor")
+            .cloned()
+            .ok_or_else(|| ConfigError::MissingKernelFlavor {
+                kernel: id.to_string(),
+                path: path.display().to_string(),
+            })?
+            .try_into()
+            .map_err(|source| ConfigError::Parse {
+                path: path.display().to_string(),
+                source,
+            })?;
+        Ok(match flavor {
+            KernelFlavor::Mainline | KernelFlavor::Vendor => {
+                KernelDef::Compiled(deserialize_at(value, &path)?)
+            }
+            KernelFlavor::DistroPackage => KernelDef::Distro(deserialize_at(value, &path)?),
+        })
     }
     /// Load `recipes/<name>.toml`.
     pub fn recipe(&self, name: &str) -> Result<Recipe, ConfigError> {
@@ -351,6 +401,16 @@ impl ConfigRoot {
         }
         Ok(names.into_iter().collect())
     }
+}
+
+/// Deserialize a merged config value into its strict struct, attributing any
+/// failure to the file it came from. Shared by the plain loaders and the
+/// variant-dispatching ones, so an unknown field is reported identically either way.
+fn deserialize_at<T: DeserializeOwned>(value: toml::Value, path: &Path) -> Result<T, ConfigError> {
+    value.try_into().map_err(|source| ConfigError::Parse {
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 /// Deep-merge `overlay` into `base` with the overlay winning. Two tables
@@ -593,14 +653,14 @@ mod tests {
             ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
 
         // The primary root owns the recipe, so its lock is the one read...
-        assert_eq!(root.lock("r").unwrap().kernel.commit, "a".repeat(40));
+        assert_eq!(root.lock("r").unwrap().kernel.unwrap().commit, "a".repeat(40));
         // ...and the write target agrees with the read source.
         assert_eq!(root.lock_path("r").unwrap(), p.path().join("recipes/r.lock"));
 
         // Overlaying the recipe itself moves ownership — and with it both the
         // lock read and the lock write — to the overlay.
         std::fs::write(o.path().join("recipes/r.toml"), "device = \"d\"\n").unwrap();
-        assert_eq!(root.lock("r").unwrap().kernel.commit, "b".repeat(40));
+        assert_eq!(root.lock("r").unwrap().kernel.unwrap().commit, "b".repeat(40));
         assert_eq!(root.lock_path("r").unwrap(), o.path().join("recipes/r.lock"));
     }
 

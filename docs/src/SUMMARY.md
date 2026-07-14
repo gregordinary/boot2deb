@@ -5,10 +5,12 @@
 # User guide
 
 - [Getting started](getting-started.md)
+- [Locale, timezone, and keyboard](localization.md)
 
 # Boards
 
 - [Turing RK1](boards/turing-rk1.md)
+- [ASUS Chromebook C201](boards/asus-c201.md)
 
 # Reference
 

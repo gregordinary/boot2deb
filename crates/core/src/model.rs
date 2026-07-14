@@ -57,18 +57,23 @@ pub enum Soc {
     Rk3288,
 }
 
-/// How the bootloader is produced and written to the medium. Owns the raw-gap
-/// offsets and payload format; a device selects one from its
-/// `supported_boot_methods`.
+/// How a board boots: what the boot payload is, where it is written, and what the
+/// firmware expects to find. A device selects one from its
+/// `supported_boot_methods`, and the method's [`BootMethodLayer`] variant owns the
+/// details.
+///
+/// This is the closed set of *implemented* methods — every variant has a layer
+/// struct and an engine path, so adding a board is adding config, and adding a boot
+/// method is a variant plus its struct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BootMethod {
     /// Rockchip idbloader + `u-boot.itb` in the raw gap, with rkbin ATF/TPL.
     RockchipRkbin,
-    /// ChromeOS depthcharge: a vboot-signed kernel partition (planned).
+    /// ChromeOS depthcharge: a vboot-signed kernel FIT in a ChromeOS kernel
+    /// partition, selected by GPT attribute bits. The firmware is the board's own
+    /// (coreboot in SPI flash), so nothing bootloader-shaped is built or written.
     Depthcharge,
-    /// RISC-V OpenSBI (planned).
-    Opensbi,
 }
 
 /// Image packaging topology.
@@ -82,14 +87,23 @@ pub enum Layout {
     Split,
 }
 
-/// Provenance of a kernel tree.
+/// Provenance of a kernel — and, since two of these are compiled from source and
+/// one is not, which shape its definition takes ([`KernelDef`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KernelFlavor {
-    /// Upstream/mainline (or `linux-stable`); patched by a profile.
+    /// Upstream/mainline (or `linux-stable`); compiled from source, patched by a
+    /// profile.
     Mainline,
-    /// Vendor / out-of-tree BSP tree, typically shipped pre-patched.
+    /// Vendor / out-of-tree BSP tree; compiled from source, typically shipped
+    /// pre-patched.
     Vendor,
+    /// The distribution's own kernel package (`linux-image-armmp`), installed from
+    /// the Debian mirror like any other package. Nothing is compiled, patched, or
+    /// configured: there is no source ref, no defconfig, no fragments, and no patch
+    /// series, and the exact version is pinned by name+version+sha256 in the rootfs
+    /// package manifest rather than by a commit in the lock.
+    DistroPackage,
 }
 
 /// Implements `as_str` / [`Display`](fmt::Display) / [`FromStr`] for a config
@@ -127,10 +141,10 @@ macro_rules! kebab_enum {
 
 kebab_enum!(Arch { Arm64 => "arm64", Armv7 => "armv7", Riscv64 => "riscv64" });
 kebab_enum!(Soc { Rk3588 => "rk3588", Rk3576 => "rk3576", Rk3566 => "rk3566", Rk3288 => "rk3288" });
-kebab_enum!(BootMethod {
-    RockchipRkbin => "rockchip-rkbin", Depthcharge => "depthcharge", Opensbi => "opensbi" });
+kebab_enum!(BootMethod { RockchipRkbin => "rockchip-rkbin", Depthcharge => "depthcharge" });
 kebab_enum!(Layout { Combined => "combined", Split => "split" });
-kebab_enum!(KernelFlavor { Mainline => "mainline", Vendor => "vendor" });
+kebab_enum!(KernelFlavor {
+    Mainline => "mainline", Vendor => "vendor", DistroPackage => "distro-package" });
 
 // ---------------------------------------------------------------------------
 // Hardware layers
@@ -253,11 +267,83 @@ pub struct SocLayer {
     pub ffmpeg: Option<FfmpegSources>,
 }
 
-/// Bootloader-method invariants (`boot-methods/<method>.toml`): where the u-boot
-/// source comes from and the raw offsets its payloads are written to.
+/// Bootloader-method invariants (`boot-methods/<method>.toml`), tagged per method.
+///
+/// Boot methods describe genuinely different things — one board's bootloader is a
+/// pair of blobs we compile and write into a raw gap, another's is firmware in an
+/// SPI chip that loads a signed kernel out of a GPT partition — so the layer is a
+/// variant per [`BootMethod`] rather than one struct whose fields half apply.
+///
+/// The variant is chosen by the *filename*: [`ConfigRoot::boot_method`] is handed
+/// the [`BootMethod`] and deserializes `boot-methods/<method>.toml` into that
+/// method's struct. So each variant keeps `deny_unknown_fields` (a serde
+/// internally-tagged enum would forfeit it) and an impossible layer — rkbin
+/// offsets on a depthcharge board — cannot be authored at all.
+///
+/// [`ConfigRoot::boot_method`]: crate::loader::ConfigRoot::boot_method
+#[derive(Debug, Clone)]
+pub enum BootMethodLayer {
+    /// Rockchip idbloader + `u-boot.itb` written into the raw gap, with rkbin
+    /// ATF/TPL.
+    RockchipRkbin(RockchipRkbinLayer),
+    /// ChromeOS depthcharge: a vboot-signed FIT in a ChromeOS kernel partition.
+    Depthcharge(DepthchargeLayer),
+}
+
+impl BootMethodLayer {
+    /// Which method this layer describes.
+    pub fn method(&self) -> BootMethod {
+        match self {
+            BootMethodLayer::RockchipRkbin(_) => BootMethod::RockchipRkbin,
+            BootMethodLayer::Depthcharge(_) => BootMethod::Depthcharge,
+        }
+    }
+
+    /// Human-readable description.
+    pub fn description(&self) -> &str {
+        match self {
+            BootMethodLayer::RockchipRkbin(l) => &l.description,
+            BootMethodLayer::Depthcharge(l) => &l.description,
+        }
+    }
+
+    /// Rootfs packages this boot method's wiring needs (`depthcharge-tools` for
+    /// the ChromeOS method; none for `rockchip-rkbin`, whose boot wiring is
+    /// overlay files rather than packages).
+    pub fn packages(&self) -> &[String] {
+        match self {
+            BootMethodLayer::RockchipRkbin(l) => &l.packages,
+            BootMethodLayer::Depthcharge(l) => &l.packages,
+        }
+    }
+
+    /// Packages this boot method drops from the merged rootfs set, unioned with
+    /// every other layer's `exclude` (exclude wins).
+    pub fn exclude(&self) -> &[String] {
+        match self {
+            BootMethodLayer::RockchipRkbin(l) => &l.exclude,
+            BootMethodLayer::Depthcharge(l) => &l.exclude,
+        }
+    }
+
+    /// Pre-built `.deb`s this boot method pulls from outside the Debian mirror.
+    pub fn extra_debs(&self) -> &[ExtraDeb] {
+        match self {
+            BootMethodLayer::RockchipRkbin(l) => &l.extra_debs,
+            BootMethodLayer::Depthcharge(l) => &l.extra_debs,
+        }
+    }
+}
+
+/// The `rockchip-rkbin` boot method: where the u-boot source comes from and the
+/// raw offsets its payloads are written to.
+///
+/// The bootloader lives *outside* any filesystem, in the gap ahead of the rootfs
+/// partition, so the offsets are the whole contract between the u-boot build and
+/// the image node.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BootMethodLayer {
+pub struct RockchipRkbinLayer {
     /// Human-readable description.
     pub description: String,
     /// Upstream u-boot git URL.
@@ -271,17 +357,74 @@ pub struct BootMethodLayer {
     pub uboot_itb_offset: String,
     /// Start offset of the rootfs partition (e.g. `16MiB`).
     pub rootfs_offset: String,
-    /// Boot-method-specific rootfs packages added to the base set; empty
-    /// for `rockchip-rkbin`, whose boot wiring is overlay files, not packages.
+    /// Boot-method-specific rootfs packages added to the base set; empty here,
+    /// since the boot wiring is overlay files, not packages.
     #[serde(default)]
     pub packages: Vec<String>,
-    /// Packages this boot method drops from the merged rootfs set, unioned
-    /// with every other layer's `exclude` (exclude wins). Empty for
-    /// `rockchip-rkbin`.
+    /// Packages this boot method drops from the merged rootfs set.
     #[serde(default)]
     pub exclude: Vec<String>,
-    /// Pre-built `.deb`s this boot method pulls from outside the Debian mirror;
-    /// empty for `rockchip-rkbin`.
+    /// Pre-built `.deb`s this boot method pulls from outside the Debian mirror.
+    #[serde(default)]
+    pub extra_debs: Vec<ExtraDeb>,
+}
+
+/// The `depthcharge` boot method: a vboot-signed FIT written into a **ChromeOS
+/// kernel partition**, which the board's firmware (coreboot + depthcharge, in an
+/// SPI chip that is not ours to build) finds by GPT type GUID and selects by the
+/// partition's attribute bits.
+///
+/// Nothing here is a bootloader we produce — the payload *is* the kernel. It is
+/// built by `depthchargectl` **inside the rootfs**, so the same packaged hooks
+/// re-sign and re-flash it when the kernel is upgraded on the running board, and
+/// the image node only has to place the blob it produced.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DepthchargeLayer {
+    /// Human-readable description.
+    pub description: String,
+    /// Byte offset of the ChromeOS kernel partition (authored string, e.g.
+    /// `12MiB`). The firmware scans every medium's GPT for the type GUID and never
+    /// looks at a partition's number or start, so this is a free choice — but it
+    /// must clear the 8 MiB region a Veyron eMMC reserves at its head, which
+    /// `12MiB` does on eMMC and costs nothing on SD/USB.
+    pub kpart_offset: String,
+    /// Size of the ChromeOS kernel partition (e.g. `16MiB`). It bounds the signed
+    /// payload the image can carry; the *firmware's* own ceiling is a property of
+    /// the board profile and is enforced by `depthchargectl`.
+    pub kpart_size: String,
+    /// Start offset of the rootfs partition (e.g. `28MiB`) — at or after the end
+    /// of the kernel partition.
+    pub rootfs_offset: String,
+    /// GPT attribute bits 51:48 — boot priority among candidate kernel partitions.
+    /// 15 is highest; 0 means never boot. Range 0-15.
+    pub kpart_priority: u8,
+    /// GPT attribute bits 55:52 — remaining boot attempts, decremented by the
+    /// firmware on each failure unless [`kpart_successful`](Self::kpart_successful)
+    /// is set. Range 0-15.
+    pub kpart_tries: u8,
+    /// GPT attribute bit 56 — mark the partition as known-good, so the firmware
+    /// stops decrementing `tries` and never gives up on it.
+    pub kpart_successful: bool,
+    /// Kernel command line baked into the signed FIT — **without** `root=`, which
+    /// `depthchargectl` derives from the image's `/etc/fstab` and appends itself
+    /// (it strips any `root=` that disagrees with fstab, and re-derives it on every
+    /// on-device kernel upgrade).
+    ///
+    /// It must contain **no `%`**: `depthchargectl` round-trips the computed
+    /// cmdline through a `ConfigParser` whose interpolation rejects a raw `%`. The
+    /// `kern_guid=%U` the firmware substitutes is prepended later, by
+    /// `mkdepthcharge`, past that round-trip.
+    pub cmdline: String,
+    /// Rootfs packages this boot method needs — `depthcharge-tools`, which both
+    /// builds the signed payload at image time and re-signs it on the running board
+    /// through its `/etc/kernel/postinst.d` hook.
+    #[serde(default)]
+    pub packages: Vec<String>,
+    /// Packages this boot method drops from the merged rootfs set.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Pre-built `.deb`s this boot method pulls from outside the Debian mirror.
     #[serde(default)]
     pub extra_debs: Vec<ExtraDeb>,
 }
@@ -462,6 +605,30 @@ pub struct Rkbin {
     pub bl32: Option<String>,
 }
 
+/// A device's depthcharge board-profile selection (`[depthcharge]` on the device
+/// layer).
+///
+/// A *board profile* is `depthcharge-tools`' codename for a firmware behaviour set
+/// — its payload ceiling, and whether the firmware loads a FIT ramdisk or needs the
+/// initramfs address patched into every DTB's `/chosen`. It is a property of the
+/// **firmware the unit runs**, not of the board model, which is why it is a
+/// selectable axis rather than a constant: the same C201 has one profile on stock
+/// firmware and another with libreboot installed.
+///
+/// The default is the *stock* profile, deliberately: a stock-profile image boots on
+/// stock firmware **and** on a libreboot unit, while the reverse is not true.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceDepthcharge {
+    /// Board profile used when `--board` is not given.
+    pub board: String,
+    /// Board profiles this device can use; a `--board` override must be one of
+    /// these. Each is passed verbatim to `depthchargectl`, which resolves it against
+    /// its own board database — the payload ceiling and DTB-patching policy live
+    /// there and are deliberately not duplicated here.
+    pub supported_boards: Vec<String>,
+}
+
 /// A device: hardware invariants plus the defaults that let `boot2deb build
 /// <device>` resolve a complete build with no other input. A device
 /// states only its deltas; everything else comes from its soc/arch/boot-method
@@ -477,8 +644,17 @@ pub struct DeviceLayer {
     pub boot_method: BootMethod,
     /// Boot methods this board can use; an override must be one of these.
     pub supported_boot_methods: Vec<BootMethod>,
-    /// u-boot defconfig for this board.
-    pub uboot_defconfig: String,
+    /// u-boot defconfig for this board. Required by the `rockchip-rkbin` boot
+    /// method, which compiles u-boot from source; absent on a board whose firmware
+    /// is not ours to build (a depthcharge Chromebook boots coreboot out of an SPI
+    /// chip). Resolution enforces it per method, so an omission is a typed error
+    /// only where it matters.
+    #[serde(default)]
+    pub uboot_defconfig: Option<String>,
+    /// Depthcharge board-profile selection. Required by the `depthcharge` boot
+    /// method and absent otherwise. §3.2.
+    #[serde(default)]
+    pub depthcharge: Option<DeviceDepthcharge>,
     /// Board device-tree blob path, relative to the DT output dir.
     pub kernel_dtb: String,
     /// Device-tree sources for a board whose `.dts` is not yet in the kernel: the
@@ -506,6 +682,12 @@ pub struct DeviceLayer {
     pub hostname: String,
     /// Default image size (authored string, e.g. `2G`).
     pub image_size: String,
+    /// Console keyboard layout, for a board that *has* a keyboard. Absent on a
+    /// headless board — a server or a TV box has no console anyone types at, and a
+    /// layout declared for it would configure nothing. Overridable per recipe or with
+    /// `--keymap`, since a board can always gain a USB keyboard on its HDMI console.
+    #[serde(default)]
+    pub keymap: Option<Keymap>,
     /// rkbin blob overrides for this board's memory configuration, merged over the
     /// SoC layer's defaults (device wins per field). A board on standard memory
     /// omits this block entirely and inherits the SoC's blobs; a board with
@@ -532,6 +714,29 @@ pub struct DeviceLayer {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BaseLayer {
+    /// System locale — the `LANG=` an image boots with, written to
+    /// `/etc/locale.conf`. Distro policy rather than a hardware property, so it lives
+    /// here and not on a device; a recipe or `--locale` overrides it.
+    ///
+    /// Defaults to `C.UTF-8`, which glibc builds in: it is a complete UTF-8 locale
+    /// that resolves on an image carrying no locale data at all, so a config root that
+    /// omits this still yields a working system.
+    #[serde(default = "default_locale")]
+    pub locale: String,
+    /// Locales generated into the image *in addition to* [`locale`](Self::locale),
+    /// which resolution always generates — so this lists only the extras (see
+    /// [`ResolvedBuild::locales_generate`]).
+    ///
+    /// Each becomes a line in `/etc/locale.gen`, and `locale-gen` compiles it into the
+    /// image at build time. That is what lets a *pre-built* image switch to one of them
+    /// with no network: the locale data is already there.
+    #[serde(default)]
+    pub locales_generate: Vec<String>,
+    /// System timezone, as a `tzdata` zone name (`UTC`, `America/New_York`). Sets the
+    /// `/etc/localtime` symlink, which is the only interface `tzdata` and `systemd`
+    /// still read — forky's `tzdata` deletes `/etc/timezone` outright.
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
     /// Base Debian packages installed into every rootfs (the bootstrap
     /// `--include` set) — device- and feature-independent distro policy.
     #[serde(default)]
@@ -548,6 +753,145 @@ pub struct BaseLayer {
     /// distro-generic base.
     #[serde(default)]
     pub extra_debs: Vec<ExtraDeb>,
+}
+
+// ---------------------------------------------------------------------------
+// Localization
+// ---------------------------------------------------------------------------
+
+/// The system locale a config root falls back to: `C.UTF-8`, which glibc builds into
+/// `libc-bin` — so it resolves even on an image carrying no locale data at all.
+fn default_locale() -> String {
+    "C.UTF-8".to_string()
+}
+
+/// The system timezone a config root falls back to.
+fn default_timezone() -> String {
+    "UTC".to_string()
+}
+
+/// The XKB model `keyboard-configuration` assumes for a generic keyboard, and the
+/// value it writes when nothing says otherwise.
+const DEFAULT_XKB_MODEL: &str = "pc105";
+
+/// The codeset half of a locale's `/etc/locale.gen` line: `en_US.UTF-8` → `UTF-8`,
+/// `sr_RS.UTF-8@latin` → `UTF-8`.
+///
+/// `locale-gen` reads `<name> <codeset>` pairs, and the codeset is not free-standing
+/// config — it is carried inside the locale name, after the `.` and before any
+/// `@modifier`. Returns `None` for a name with no codeset (`de_DE`), which resolution
+/// rejects: `locale-gen` could not act on it.
+pub fn locale_codeset(locale: &str) -> Option<&str> {
+    let (_, after_dot) = locale.rsplit_once('.')?;
+    let codeset = after_dot.split('@').next().unwrap_or(after_dot);
+    (!codeset.is_empty()).then_some(codeset)
+}
+
+/// Console keyboard layout — the four XKB variables Debian's
+/// `keyboard-configuration` reads out of `/etc/default/keyboard`.
+///
+/// Authored as a bare layout code, which takes Debian's defaults for the rest:
+///
+/// ```toml
+/// keymap = "us"
+/// ```
+///
+/// or as a table, when the layout alone is not enough:
+///
+/// ```toml
+/// keymap = { layout = "gb", variant = "extd", options = "ctrl:nocaps" }
+/// ```
+///
+/// It sits at the **device** layer because whether a console keymap means anything is
+/// a property of the hardware: a laptop has a keyboard under the user's hands, a
+/// headless server has none. A board that omits it gets no generated
+/// `/etc/default/keyboard`, leaving `keyboard-configuration`'s own default (`pc105` /
+/// `us`) in place — the right outcome for an image nobody types at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Keymap {
+    /// `XKBLAYOUT` — the layout code (`us`, `gb`, `de`), or a comma-separated list of
+    /// them. The one field a keymap cannot omit.
+    pub layout: String,
+    /// `XKBMODEL` — the physical keyboard model. Defaults to `pc105`, which is what
+    /// Debian writes for a keyboard it was told nothing about.
+    pub model: String,
+    /// `XKBVARIANT` — the layout variant (`dvorak`, `nodeadkeys`); empty for none.
+    pub variant: String,
+    /// `XKBOPTIONS` — comma-separated XKB options (`ctrl:nocaps`); empty for none.
+    pub options: String,
+}
+
+impl Keymap {
+    /// A keymap from a bare layout code, with Debian's defaults for the other three.
+    pub fn from_layout(layout: &str) -> Self {
+        Self {
+            layout: layout.to_string(),
+            model: DEFAULT_XKB_MODEL.to_string(),
+            variant: String::new(),
+            options: String::new(),
+        }
+    }
+}
+
+/// `XKBMODEL`'s default, as a `serde` field default.
+fn default_xkb_model() -> String {
+    DEFAULT_XKB_MODEL.to_string()
+}
+
+// Manual `Deserialize` rather than `#[serde(untagged)]`: the bare-string form is what
+// a device author writes 95% of the time, but an untagged enum ignores unknown fields
+// regardless of `deny_unknown_fields`, so a table with a misspelled `varient` would be
+// silently dropped. Dispatching on the TOML value kind — string → layout-only, table →
+// a `deny_unknown_fields` helper — keeps both shapes and makes the typo a named error.
+impl<'de> Deserialize<'de> for Keymap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Table {
+            layout: String,
+            #[serde(default = "default_xkb_model")]
+            model: String,
+            #[serde(default)]
+            variant: String,
+            #[serde(default)]
+            options: String,
+        }
+
+        struct KeymapVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for KeymapVisitor {
+            type Value = Keymap;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a layout code (\"us\") or a table with a `layout` key")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Keymap, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Keymap::from_layout(v))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Keymap, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let t = Table::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(Keymap {
+                    layout: t.layout,
+                    model: t.model,
+                    variant: t.variant,
+                    options: t.options,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(KeymapVisitor)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -626,14 +970,63 @@ impl<'de> Deserialize<'de> for KernelSource {
     }
 }
 
-/// A kernel definition (`kernels/<id>.toml`): a versioned entity that owns
-/// everything version-coupled — its source ref, base defconfig, config
-/// fragments, and patch profile. Bumping a kernel means authoring a *new*
-/// definition, never editing a device.
+/// A kernel definition (`kernels/<id>.toml`), tagged by [`KernelFlavor`].
+///
+/// A kernel is a versioned entity that owns everything version-coupled, so bumping
+/// one means authoring a *new* definition rather than editing a device. What it
+/// owns depends on where it comes from: a compiled kernel owns a source ref, a base
+/// defconfig, config fragments, and a patch profile; a distribution kernel owns
+/// only its package name, because Debian owns everything else.
+///
+/// The variant is chosen by the file's `flavor` key: [`ConfigRoot::kernel`] reads it
+/// and deserializes into that variant's struct, so each keeps `deny_unknown_fields`
+/// — a `config_fragments` on a distro kernel, or a missing `source` on a mainline
+/// one, is a parse error naming the file.
+///
+/// [`ConfigRoot::kernel`]: crate::loader::ConfigRoot::kernel
+#[derive(Debug, Clone)]
+pub enum KernelDef {
+    /// A kernel compiled from source (`mainline` or `vendor`).
+    Compiled(CompiledKernelDef),
+    /// The distribution's own kernel package (`distro-package`).
+    Distro(DistroKernelDef),
+}
+
+impl KernelDef {
+    /// SoCs this kernel supports; resolution rejects a mismatched device.
+    pub fn supported_socs(&self) -> &[Soc] {
+        match self {
+            KernelDef::Compiled(k) => &k.supported_socs,
+            KernelDef::Distro(k) => &k.supported_socs,
+        }
+    }
+}
+
+/// The distribution's own kernel package — no source, no defconfig, no fragments,
+/// no patches. The build installs it from the mirror, and the rootfs package
+/// manifest pins its exact version and hash, so the lock records no kernel commit.
+///
+/// One definition serves every suite: the *suite* decides the version (forky
+/// resolves 7.1.x, trixie 6.12.x from the same `linux-image-armmp`), and that
+/// resolution is already captured, per-recipe, in the solved package manifest.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct KernelDef {
-    /// Mainline vs. vendor provenance.
+pub struct DistroKernelDef {
+    /// Always [`KernelFlavor::DistroPackage`]; the key that selected this variant.
+    pub flavor: KernelFlavor,
+    /// The kernel package to install (e.g. `linux-image-armmp`). Resolution adds it
+    /// to the rootfs package set, so it installs — and pins — like any other package.
+    pub package: String,
+    /// SoCs this kernel supports; resolution rejects a mismatched device.
+    pub supported_socs: Vec<Soc>,
+}
+
+/// A kernel compiled from source: it owns its source ref, base defconfig, config
+/// fragments, and patch profile.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledKernelDef {
+    /// Mainline vs. vendor provenance; the key that selected this variant.
     pub flavor: KernelFlavor,
     /// Where to fetch the tree.
     pub source: KernelSource,
@@ -693,6 +1086,20 @@ pub struct Recipe {
     /// Image-size override; `None` → device `image_size`.
     #[serde(default)]
     pub image_size: Option<String>,
+    /// System-locale override; `None` → base `locale`.
+    #[serde(default)]
+    pub locale: Option<String>,
+    /// Extra-locale override; `None` → base `locales_generate`. `Some` **replaces**
+    /// the base list rather than adding to it, so a recipe can drop a locale the base
+    /// generates as well as add one.
+    #[serde(default)]
+    pub locales_generate: Option<Vec<String>>,
+    /// Timezone override; `None` → base `timezone`.
+    #[serde(default)]
+    pub timezone: Option<String>,
+    /// Keymap override; `None` → device `keymap`.
+    #[serde(default)]
+    pub keymap: Option<Keymap>,
 }
 
 /// Per-axis overrides applied during resolution.
@@ -710,20 +1117,82 @@ pub struct Overrides {
     pub layout: Option<Layout>,
     /// Override the boot method (must be in the device's supported set).
     pub boot_method: Option<BootMethod>,
+    /// Override the depthcharge board profile (must be in the device's
+    /// `supported_boards`). Ignored by boot methods that have no board profile.
+    pub board: Option<String>,
     /// Override the feature set (`None` defers to the recipe; `Some` replaces it).
     pub features: Option<Vec<String>>,
     /// Override the image size.
     pub image_size: Option<String>,
+    /// Override the system locale (the image's `LANG`).
+    pub locale: Option<String>,
+    /// Override the *extra* locales generated into the image (`Some` replaces the
+    /// base list). The system locale is folded in by resolution either way, so this
+    /// never has to repeat it.
+    pub locales_generate: Option<Vec<String>>,
+    /// Override the system timezone.
+    pub timezone: Option<String>,
+    /// Override the console keymap. Accepted even for a device that declares none:
+    /// `console-setup` ships on every image, so a keymap is always actionable — a
+    /// headless board simply has no reason to *default* one.
+    pub keymap: Option<Keymap>,
 }
 
 // ---------------------------------------------------------------------------
 // Resolved build (output of resolution)
 // ---------------------------------------------------------------------------
 
-/// The kernel axis of a [`ResolvedBuild`]: a [`KernelDef`] flattened with its
-/// merged fragment list.
+/// The kernel axis of a [`ResolvedBuild`]: a [`KernelDef`] resolved against the
+/// device, tagged the same way.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ResolvedKernel {
+#[serde(tag = "flavor", rename_all = "kebab-case")]
+pub enum ResolvedKernel {
+    /// A kernel this build compiles, patches, and configures.
+    Compiled(ResolvedCompiledKernel),
+    /// A kernel this build installs from the Debian mirror.
+    Distro(ResolvedDistroKernel),
+}
+
+impl ResolvedKernel {
+    /// Kernel definition id (e.g. `rk3588-mainline-7.1`).
+    pub fn id(&self) -> &str {
+        match self {
+            ResolvedKernel::Compiled(k) => &k.id,
+            ResolvedKernel::Distro(k) => &k.id,
+        }
+    }
+
+    /// Mainline / vendor / distro-package provenance.
+    pub fn flavor(&self) -> KernelFlavor {
+        match self {
+            ResolvedKernel::Compiled(k) => k.flavor,
+            ResolvedKernel::Distro(_) => KernelFlavor::DistroPackage,
+        }
+    }
+
+    /// The compile inputs, or `None` for a distro-package kernel. `Some` is exactly
+    /// the condition under which the kernel node builds, the patch series applies,
+    /// and the lock pins a kernel commit.
+    pub fn compiled(&self) -> Option<&ResolvedCompiledKernel> {
+        match self {
+            ResolvedKernel::Compiled(k) => Some(k),
+            ResolvedKernel::Distro(_) => None,
+        }
+    }
+
+    /// The patch profile this kernel applies, or `None` when it applies no series —
+    /// either the authored [`NO_PATCH_PROFILE`](crate::profile::NO_PATCH_PROFILE)
+    /// sentinel, or a distro-package kernel, which never reads the `patches` repo at
+    /// all.
+    pub fn patch_profile(&self) -> Option<&str> {
+        self.compiled().and_then(|k| k.patch_profile.as_deref())
+    }
+}
+
+/// A resolved compiled kernel: the definition flattened with its merged fragment
+/// list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedCompiledKernel {
     /// Kernel definition id (e.g. `rk3588-mainline-7.1`).
     pub id: String,
     /// Mainline vs. vendor.
@@ -747,6 +1216,17 @@ pub struct ResolvedKernel {
     pub config_fragments: Vec<String>,
 }
 
+/// A resolved distro-package kernel: nothing but which package installs it. Its
+/// exact version and hash ride the rootfs package manifest, like any other package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedDistroKernel {
+    /// Kernel definition id (e.g. `debian-armmp`).
+    pub id: String,
+    /// The kernel package, which resolution has already added to
+    /// [`ResolvedBuild::rootfs_packages`].
+    pub package: String,
+}
+
 /// Raw-gap layout offsets for a build, carried as authored strings (parsed to
 /// bytes only when the image is written).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -757,6 +1237,86 @@ pub struct Offsets {
     pub uboot_itb: String,
     /// Rootfs partition start.
     pub rootfs: String,
+}
+
+/// The resolved ChromeOS kernel partition: where it sits and the attribute bits
+/// that make the firmware boot it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Kpart {
+    /// Partition start (authored string, parsed to bytes by the image node).
+    pub offset: String,
+    /// Partition size (authored string).
+    pub size: String,
+    /// Boot priority (GPT attribute bits 51:48).
+    pub priority: u8,
+    /// Remaining boot attempts (bits 55:52).
+    pub tries: u8,
+    /// Known-good flag (bit 56).
+    pub successful: bool,
+    /// The three fields above packed into the GPT entry's 64-bit attribute word —
+    /// what actually lands on disk. Computed at resolution by
+    /// [`kpart_flags`](crate::chromeos::kpart_flags), which also range-checks
+    /// `priority` and `tries`, so the image node writes a value it does not have to
+    /// re-validate.
+    pub flags: u64,
+}
+
+/// The boot-method-specific half of a [`ResolvedBuild`].
+///
+/// Resolution has already enforced each method's own requirements — rkbin blobs and
+/// a `uboot_defconfig` for `rockchip-rkbin`, a board profile for `depthcharge` — so
+/// every field here is guaranteed present for the method that owns it, and the
+/// engine matches once rather than testing for absent fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "method", rename_all = "kebab-case")]
+pub enum ResolvedBoot {
+    /// Compile u-boot, write idbloader + `u-boot.itb` into the raw gap.
+    RockchipRkbin(ResolvedRkbinBoot),
+    /// Place a `depthchargectl`-signed kernel FIT in a ChromeOS kernel partition.
+    Depthcharge(ResolvedDepthchargeBoot),
+}
+
+impl ResolvedBoot {
+    /// Start offset of the rootfs partition. Both methods place the rootfs after
+    /// whatever they own at the head of the medium, so the image node reads this
+    /// without caring which method resolved it.
+    pub fn rootfs_offset(&self) -> &str {
+        match self {
+            ResolvedBoot::RockchipRkbin(b) => &b.offsets.rootfs,
+            ResolvedBoot::Depthcharge(b) => &b.rootfs_offset,
+        }
+    }
+}
+
+/// The resolved `rockchip-rkbin` boot configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedRkbinBoot {
+    /// u-boot defconfig for this board (from the device; required by this method).
+    pub uboot_defconfig: String,
+    /// u-boot git source (from the boot method).
+    pub uboot_source: String,
+    /// u-boot ref constraint (from the boot method); pinned exactly in the lock.
+    pub uboot_ref: String,
+    /// rkbin blob set — the SoC's defaults merged with the device's overrides.
+    /// Resolution guarantees `atf` and `tpl` are present.
+    pub rkbin: Rkbin,
+    /// Raw-gap offsets (from the boot method).
+    pub offsets: Offsets,
+}
+
+/// The resolved `depthcharge` boot configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedDepthchargeBoot {
+    /// The selected board profile, passed verbatim to `depthchargectl` (its `board`
+    /// codename). Validated at resolution against the device's `supported_boards`.
+    pub board: String,
+    /// The ChromeOS kernel partition this build writes.
+    pub kpart: Kpart,
+    /// Kernel command line baked into the signed FIT, minus `root=` — which
+    /// `depthchargectl` derives from `/etc/fstab`.
+    pub cmdline: String,
+    /// Start offset of the rootfs partition.
+    pub rootfs_offset: String,
 }
 
 /// A complete, validated build point — the single input the engine consumes.
@@ -803,12 +1363,27 @@ pub struct ResolvedBuild {
     pub image_size: String,
     /// Image hostname.
     pub hostname: String,
-    /// u-boot defconfig (from the device).
-    pub uboot_defconfig: String,
-    /// u-boot git source (from the boot method).
-    pub uboot_source: String,
-    /// u-boot ref constraint (from the boot method).
-    pub uboot_ref: String,
+    /// System locale — the image's `LANG`, written to `/etc/locale.conf`. Resolution
+    /// guarantees it also appears in [`locales_generate`](Self::locales_generate), so
+    /// the `LANG` an image boots with can never name a locale that image does not have.
+    pub locale: String,
+    /// Every locale generated into the image, in `/etc/locale.gen` order: the system
+    /// [`locale`](Self::locale) first, then the configured extras, de-duplicated.
+    ///
+    /// The build compiles these with `locale-gen`, which is what makes a *pre-built*
+    /// image reconfigurable offline: switching to one of them needs no network,
+    /// because the data is already on the disk.
+    pub locales_generate: Vec<String>,
+    /// System timezone (a `tzdata` zone name), materialized as the `/etc/localtime`
+    /// symlink.
+    pub timezone: String,
+    /// Console keyboard layout, or `None` on a board with no keyboard — in which case
+    /// the build writes no `/etc/default/keyboard` and Debian's own default stands.
+    pub keymap: Option<Keymap>,
+    /// The boot-method-specific configuration, tagged by method: what the
+    /// bootloader/boot payload is, where it goes, and what it needs. Every field is
+    /// guaranteed present for the method it belongs to.
+    pub boot: ResolvedBoot,
     /// Board DTB path, relative to the DT output dir.
     pub kernel_dtb: String,
     /// Config-root-relative device-tree sources the kernel stage copies into the
@@ -829,10 +1404,6 @@ pub struct ResolvedBuild {
     pub cross_compile: String,
     /// `KBUILD_IMAGE` path (from the arch).
     pub kbuild_image: String,
-    /// rkbin blob set.
-    pub rkbin: Rkbin,
-    /// Raw-gap offsets (from the boot method).
-    pub offsets: Offsets,
     /// Media-accel userspace source trees (from the SoC layer). `Some` iff this
     /// build compiles the HW transcode stack — i.e. a selected feature declares
     /// [`requires_media_accel`](crate::feature::Feature::requires_media_accel);
@@ -853,6 +1424,35 @@ pub struct ResolvedBuild {
     /// the lock; `build` materializes them into the local apt repo before the
     /// solve. Empty when no layer or feature adds one.
     pub extra_debs: Vec<ExtraDeb>,
+}
+
+impl ResolvedBuild {
+    /// The `rockchip-rkbin` boot configuration, or `None` under another boot
+    /// method. `Some` is exactly the condition under which this build compiles
+    /// u-boot, consumes rkbin blobs, and writes a raw-gap bootloader — so the
+    /// u-boot node, the blob pins, and the raw-gap image path all key on it.
+    pub fn rkbin_boot(&self) -> Option<&ResolvedRkbinBoot> {
+        match &self.boot {
+            ResolvedBoot::RockchipRkbin(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// The `depthcharge` boot configuration, or `None` under another boot method.
+    pub fn depthcharge_boot(&self) -> Option<&ResolvedDepthchargeBoot> {
+        match &self.boot {
+            ResolvedBoot::Depthcharge(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Whether this build compiles a kernel from source. False for a
+    /// distro-package kernel, whose `linux-image-*` comes from the Debian mirror
+    /// like any other package — so the kernel compile node, its patch series, and
+    /// its config fragments are all skipped, and the lock pins no kernel commit.
+    pub fn compiles_kernel(&self) -> bool {
+        matches!(self.kernel, ResolvedKernel::Compiled(_))
+    }
 }
 
 #[cfg(test)]

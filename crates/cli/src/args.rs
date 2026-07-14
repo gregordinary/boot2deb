@@ -3,7 +3,7 @@
 //! validation only; the handlers in [`crate::commands`] own every side effect.
 
 use boot2deb_core::lock::SnapshotMode;
-use boot2deb_core::model::{BootMethod, Layout, Overrides};
+use boot2deb_core::model::{BootMethod, Keymap, Layout, Overrides};
 use boot2deb_core::profile::Scope;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -595,12 +595,36 @@ pub(crate) struct OverrideArgs {
     pub(crate) layout: Option<Layout>,
     #[arg(long = "boot-method", value_parser = parse_boot_method)]
     pub(crate) boot_method: Option<BootMethod>,
+    /// Depthcharge board profile (e.g. `speedy-libreboot`). A profile describes the
+    /// *firmware* a unit runs, not the board model — so a unit with replacement
+    /// firmware may take a different one. Must be in the device's
+    /// `supported_boards`; ignored by boot methods with no board profile.
+    #[arg(long)]
+    pub(crate) board: Option<String>,
     /// Rootfs feature add-in, repeatable (`--feature media-accel-rockchip`). When
     /// any is given, replaces the recipe's feature list.
     #[arg(long = "feature")]
     pub(crate) features: Vec<String>,
     #[arg(long = "image-size")]
     pub(crate) image_size: Option<String>,
+    /// System locale — the image's `LANG` (e.g. `de_DE.UTF-8`); default: the
+    /// recipe/base `locale`. Always generated into the image, so it is safe to name a
+    /// locale nothing else lists.
+    #[arg(long)]
+    pub(crate) locale: Option<String>,
+    /// Extra locale to generate into the image, repeatable (`--locale-gen
+    /// fr_FR.UTF-8`). When any is given, replaces the base `locales_generate` list;
+    /// the system locale is generated regardless.
+    #[arg(long = "locale-gen")]
+    pub(crate) locales_generate: Vec<String>,
+    /// System timezone (e.g. `America/New_York`); default: the recipe/base `timezone`.
+    #[arg(long)]
+    pub(crate) timezone: Option<String>,
+    /// Console keyboard layout (e.g. `gb`); default: the recipe/device `keymap`, and
+    /// none at all on a headless board. Sets `XKBLAYOUT`; the model, variant, and
+    /// options keep their defaults — set those in the device's `[keymap]` table.
+    #[arg(long)]
+    pub(crate) keymap: Option<String>,
 }
 
 impl From<OverrideArgs> for Overrides {
@@ -610,8 +634,13 @@ impl From<OverrideArgs> for Overrides {
             suite: a.suite,
             layout: a.layout,
             boot_method: a.boot_method,
+            board: a.board,
             features: (!a.features.is_empty()).then_some(a.features),
             image_size: a.image_size,
+            locale: a.locale,
+            locales_generate: (!a.locales_generate.is_empty()).then_some(a.locales_generate),
+            timezone: a.timezone,
+            keymap: a.keymap.as_deref().map(Keymap::from_layout),
         }
     }
 }
@@ -638,7 +667,7 @@ fn parse_scope(s: &str) -> Result<Scope, String> {
 }
 
 /// Parse `--jobs`: a positive `make -j` count. 0 is rejected — `make -j0` means
-/// "unlimited", which is never what a typo intends (UX-27).
+/// "unlimited", which is never what a typo intends.
 fn parse_jobs(s: &str) -> Result<usize, String> {
     match s.parse::<usize>() {
         Ok(0) => Err("must be at least 1 (omit --jobs to use all cores)".into()),

@@ -126,9 +126,23 @@ impl DeviceScaffold {
             .unwrap_or_else(|| format!("{PLACEHOLDER}-{}_ddr.bin", self.soc.as_str()))
     }
 
-    /// Render `devices/<name>.toml`. Derivable values are filled; the four
-    /// researched values carry a best-effort suggestion and a `# TODO:` line, so the
-    /// file resolves immediately while flagging what still needs verifying.
+    /// The suggested depthcharge board profile: the device name, which is the
+    /// convention `depthcharge-tools` follows for its board codenames (the C201 is
+    /// `speedy`). A guess — the codename must exist in that tool's board database,
+    /// which resolution cannot check.
+    pub fn board_suggestion(&self) -> String {
+        self.name.clone()
+    }
+
+    /// Render `devices/<name>.toml`. Derivable values are filled; the researched
+    /// values carry a best-effort suggestion and a `# TODO:` line, so the file
+    /// resolves immediately while flagging what still needs verifying.
+    ///
+    /// The boot method decides which fields the board even *has*: a board that
+    /// compiles u-boot needs a defconfig and a blob set, and one whose firmware is
+    /// its own needs a board profile instead. Emitting the other method's fields
+    /// would not merely be noise — they are unknown fields, and the file would not
+    /// parse.
     pub fn device_toml(&self) -> String {
         let mut s = String::new();
         let _ = writeln!(
@@ -142,8 +156,10 @@ impl DeviceScaffold {
         let _ = writeln!(s, "soc                     = {:?}                # -> arch, dt_dir, modules", self.soc.as_str());
         let _ = writeln!(s, "boot_method             = {:?}", self.boot_method.as_str());
         let _ = writeln!(s, "supported_boot_methods  = [{:?}]", self.boot_method.as_str());
-        let _ = writeln!(s, "\n# TODO: verify this defconfig exists in the u-boot tree (unvalidated — fails at the u-boot build).");
-        let _ = writeln!(s, "uboot_defconfig         = {:?}", self.uboot_defconfig_suggestion());
+        if self.boot_method == BootMethod::RockchipRkbin {
+            let _ = writeln!(s, "\n# TODO: verify this defconfig exists in the u-boot tree (unvalidated — fails at the u-boot build).");
+            let _ = writeln!(s, "uboot_defconfig         = {:?}", self.uboot_defconfig_suggestion());
+        }
         let _ = writeln!(s, "# TODO: verify this DTB path exists in the kernel tree (unvalidated — fails at the kernel build).");
         let _ = writeln!(s, "kernel_dtb              = {:?}", self.kernel_dtb_suggestion());
         let _ = writeln!(s, "# TODO: board-specific kconfig fragments, or [] for none. Naming a fragment makes its file mandatory.");
@@ -154,6 +170,24 @@ impl DeviceScaffold {
         let _ = writeln!(s, "default_layout          = {:?}               # combined | split", self.layout.as_str());
         let _ = writeln!(s, "hostname                = {:?}", self.hostname);
         let _ = writeln!(s, "image_size              = {:?}", self.image_size);
+        // Left commented, because the honest default for a board nobody has typed at is
+        // *no* keymap: boot2deb then writes no /etc/default/keyboard and Debian's own
+        // default stands. Only a board with a keyboard under the user's hands — a
+        // laptop — has a layout to declare. (Emitted before the boot-method table:
+        // every key after a TOML table header is scoped into it.)
+        let _ = writeln!(s, "# Console keymap. Uncomment only if this board HAS a keyboard (a laptop); a");
+        let _ = writeln!(s, "# headless board leaves it unset. A table gives the model/variant/options too.");
+        let _ = writeln!(s, "#   keymap                = \"us\"");
+        match self.boot_method {
+            BootMethod::RockchipRkbin => self.write_rkbin_block(&mut s),
+            BootMethod::Depthcharge => self.write_depthcharge_block(&mut s),
+        }
+        s
+    }
+
+    /// The `[rkbin]` half of a `rockchip-rkbin` device file: inherited from the SoC
+    /// where it supplies defaults, explicit placeholders where it does not.
+    fn write_rkbin_block(&self, s: &mut String) {
         if self.soc_supplies_blobs() {
             // Standard-memory board: inherit the SoC's rkbin. Emit no `[rkbin]`
             // block, only the override recipe for a board with different DRAM.
@@ -170,7 +204,20 @@ impl DeviceScaffold {
             let _ = writeln!(s, "atf = {:?}", self.atf_suggestion());
             let _ = writeln!(s, "tpl = {:?}", self.tpl_suggestion());
         }
-        s
+    }
+
+    /// The `[depthcharge]` half of a depthcharge device file: which board profile
+    /// `depthchargectl` signs for.
+    fn write_depthcharge_block(&self, s: &mut String) {
+        let board = self.board_suggestion();
+        let _ = writeln!(s, "\n# TODO: the depthcharge-tools board profile for this unit — its `board` codename");
+        let _ = writeln!(s, "# (`depthchargectl list-boards`). A profile describes the *firmware* the unit runs,");
+        let _ = writeln!(s, "# not the board model, so a unit with replacement firmware may take a different one.");
+        let _ = writeln!(s, "# Prefer the stock profile as the default: a stock-profile image also boots on a");
+        let _ = writeln!(s, "# unit with replacement firmware, while the reverse is not true.");
+        let _ = writeln!(s, "[depthcharge]");
+        let _ = writeln!(s, "board            = {board:?}");
+        let _ = writeln!(s, "supported_boards = [{board:?}]");
     }
 
     /// Render `recipes/<name>.toml` — the buildable point pinning this device with
@@ -207,44 +254,59 @@ impl DeviceScaffold {
     /// written suggestion and guidance. The caller prints these after writing the
     /// files, closing the loop between "it resolves" and "it will actually build".
     pub fn research_notes(&self) -> Vec<ResearchNote> {
-        let mut notes = vec![
-            ResearchNote {
+        let mut notes = Vec::new();
+        if self.boot_method == BootMethod::RockchipRkbin {
+            notes.push(ResearchNote {
                 field: "uboot_defconfig",
                 value: self.uboot_defconfig_suggestion(),
                 guidance: "must name a defconfig present in the u-boot source tree; \
                            unvalidated at resolve, fails at the u-boot build if wrong",
-            },
-            ResearchNote {
-                field: "kernel_dtb",
-                value: self.kernel_dtb_suggestion(),
-                guidance: "must name a DTB the kernel builds under its dt_dir; \
-                           unvalidated at resolve, fails at the kernel build if wrong",
-            },
-        ];
-        // The DDR TPL is always worth verifying against the board's memory, but the
-        // guidance differs by whether it is inherited or must be supplied outright.
-        if self.soc_supplies_blobs() {
-            notes.push(ResearchNote {
-                field: "rkbin.tpl",
-                value: self.tpl_suggestion(),
-                guidance: "inherited SoC-default DDR init blob — confirm it matches this \
-                           board's memory; if the DRAM differs, override `tpl` on the \
-                           device layer and vendor the file under blobs/<soc>/",
             });
-        } else {
-            // No SoC default: both blobs must be supplied here.
-            notes.push(ResearchNote {
-                field: "rkbin.atf",
-                value: self.atf_suggestion(),
-                guidance: "no SoC-default ATF/BL31 blob — supply one and vendor it \
-                           under blobs/<soc>/",
-            });
-            notes.push(ResearchNote {
-                field: "rkbin.tpl",
-                value: self.tpl_suggestion(),
-                guidance: "board-memory-specific DDR init blob — match it to this board's \
-                           DRAM type/speed and vendor it under blobs/<soc>/",
-            });
+        }
+        notes.push(ResearchNote {
+            field: "kernel_dtb",
+            value: self.kernel_dtb_suggestion(),
+            guidance: "must name a DTB the kernel builds under its dt_dir; \
+                       unvalidated at resolve, fails at the kernel build if wrong",
+        });
+        match self.boot_method {
+            // The DDR TPL is always worth verifying against the board's memory, but
+            // the guidance differs by whether it is inherited or must be supplied.
+            BootMethod::RockchipRkbin if self.soc_supplies_blobs() => {
+                notes.push(ResearchNote {
+                    field: "rkbin.tpl",
+                    value: self.tpl_suggestion(),
+                    guidance: "inherited SoC-default DDR init blob — confirm it matches this \
+                               board's memory; if the DRAM differs, override `tpl` on the \
+                               device layer and vendor the file under blobs/<soc>/",
+                });
+            }
+            BootMethod::RockchipRkbin => {
+                // No SoC default: both blobs must be supplied here.
+                notes.push(ResearchNote {
+                    field: "rkbin.atf",
+                    value: self.atf_suggestion(),
+                    guidance: "no SoC-default ATF/BL31 blob — supply one and vendor it \
+                               under blobs/<soc>/",
+                });
+                notes.push(ResearchNote {
+                    field: "rkbin.tpl",
+                    value: self.tpl_suggestion(),
+                    guidance: "board-memory-specific DDR init blob — match it to this board's \
+                               DRAM type/speed and vendor it under blobs/<soc>/",
+                });
+            }
+            BootMethod::Depthcharge => {
+                notes.push(ResearchNote {
+                    field: "depthcharge.board",
+                    value: self.board_suggestion(),
+                    guidance: "must name a board profile depthcharge-tools knows \
+                               (`depthchargectl list-boards`); it describes the firmware the \
+                               unit runs, so a unit with replacement firmware may take a \
+                               different profile. A wrong profile builds an image the \
+                               firmware silently refuses to boot",
+                });
+            }
         }
         notes
     }
@@ -335,6 +397,35 @@ mod tests {
         let _: crate::model::DeviceLayer = toml::from_str(&toml).unwrap();
         let fields: Vec<&str> = d.research_notes().iter().map(|n| n.field).collect();
         assert!(fields.contains(&"rkbin.atf") && fields.contains(&"rkbin.tpl"));
+    }
+
+    #[test]
+    fn a_depthcharge_board_scaffolds_a_board_profile_and_no_uboot() {
+        // A board whose firmware is its own has no u-boot defconfig and no rkbin
+        // blobs — those fields are not merely unnecessary, they are unknown fields on
+        // this method's layer, so emitting them would produce a file that fails to
+        // parse. What it needs instead is a board profile.
+        let mut d = rk1_like();
+        d.name = "asus-c201".into();
+        d.soc = Soc::Rk3288;
+        d.boot_method = BootMethod::Depthcharge;
+        d.soc_rkbin = RkbinLayer::default();
+        d.features = vec![];
+
+        let toml = d.device_toml();
+        let parsed: crate::model::DeviceLayer = toml::from_str(&toml).unwrap();
+        assert!(parsed.uboot_defconfig.is_none(), "no u-boot is compiled here");
+        assert_eq!(parsed.rkbin, RkbinLayer::default(), "no rkbin chain on this board");
+        let dc = parsed.depthcharge.expect("a depthcharge board needs a board profile");
+        assert_eq!(dc.board, "asus-c201");
+        assert_eq!(dc.supported_boards, vec!["asus-c201"]);
+        assert!(!toml.contains("uboot_defconfig"));
+        assert!(!toml.lines().any(|l| l.trim_start() == "[rkbin]"));
+
+        // The researched values follow the method: the board profile replaces the
+        // u-boot defconfig and the blob set.
+        let fields: Vec<&str> = d.research_notes().iter().map(|n| n.field).collect();
+        assert_eq!(fields, vec!["kernel_dtb", "depthcharge.board"]);
     }
 
     #[test]

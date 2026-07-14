@@ -85,8 +85,13 @@ pub(crate) fn fragment_paths(
     root: &ConfigRoot,
     build: &ResolvedBuild,
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    // A distro kernel merges no fragments — Debian owns its config — so it resolves
+    // to an empty list rather than an error.
+    let Some(kernel) = build.kernel.compiled() else {
+        return Ok(Vec::new());
+    };
     let mut paths = Vec::new();
-    for name in &build.kernel.config_fragments {
+    for name in &kernel.config_fragments {
         let rel = format!("fragments/{name}.config");
         let path = root
             .find_asset(&rel)
@@ -145,17 +150,63 @@ pub(crate) fn apt_source_keyrings<'a>(
 /// copy of the same tree), so an overlay's overlay-tree stacks right after — and
 /// thus wins over — the shipped one, matching the layer merge semantics. Absent
 /// dirs contribute nothing.
-pub(crate) fn overlay_dirs(root: &ConfigRoot, b: &ResolvedBuild) -> Vec<PathBuf> {
+///
+/// `stage` selects *when* the tree is laid into the rootfs, which is a different
+/// question from what is in it (see [`OverlayStage`]).
+pub(crate) fn overlay_dirs(
+    root: &ConfigRoot,
+    b: &ResolvedBuild,
+    stage: OverlayStage,
+) -> Vec<PathBuf> {
+    let dir = stage.dir_name();
     let mut rels = vec![
-        "base/overlay".to_string(),
-        format!("socs/{}/overlay", b.soc.as_str()),
-        format!("boot-methods/{}/overlay", b.boot_method.as_str()),
-        format!("devices/{}/overlay", b.device),
+        format!("base/{dir}"),
+        format!("socs/{}/{dir}", b.soc.as_str()),
+        format!("boot-methods/{}/{dir}", b.boot_method.as_str()),
+        format!("devices/{}/{dir}", b.device),
     ];
     for feature in &b.features {
-        rels.push(format!("features/{feature}/overlay"));
+        rels.push(format!("features/{feature}/{dir}"));
     }
     rels.iter().flat_map(|rel| root.find_asset_all(rel)).collect()
+}
+
+/// When a layer's overlay tree is laid into the rootfs.
+///
+/// Most config belongs *after* the packages, where it wins over whatever they
+/// shipped — that is [`Customize`](OverlayStage::Customize), the `overlay/` tree, and
+/// it is where nearly everything goes.
+///
+/// [`PreInstall`](OverlayStage::PreInstall) — the `overlay-pre/` tree — exists for the
+/// config a package's own maintainer scripts have to *see while they run*. Two things
+/// on a depthcharge board need it, and one of them is a safety property:
+///
+///  - `depthcharge-tools` registers a kernel hook that re-signs and re-flashes a
+///    ChromeOS kernel partition. Installed with no config present, it runs at its
+///    defaults and looks for that partition on **the build host's** disks. Its config
+///    must exist, saying `enable-system-hooks = False`, before the package does.
+///  - The initramfs settings (`MODULES=list`) must precede the kernel package, or the
+///    first initramfs is built at `MODULES=most` — three times the size budget the
+///    signed payload has — and then thrown away and rebuilt.
+///
+/// Both are cases where "config wins over the package" is not enough, because the
+/// package *acted* before the config arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverlayStage {
+    /// `overlay-pre/` — laid in before any package is installed.
+    PreInstall,
+    /// `overlay/` — laid in after every package, so it wins over package files.
+    Customize,
+}
+
+impl OverlayStage {
+    /// The layer subdirectory this stage reads.
+    fn dir_name(self) -> &'static str {
+        match self {
+            OverlayStage::PreInstall => "overlay-pre",
+            OverlayStage::Customize => "overlay",
+        }
+    }
 }
 
 /// The durable, shared cache of auto-fetched verify checkouts (`<root>/cache/verify-trees`),
@@ -222,7 +273,7 @@ pub(crate) fn resolve_patches_source(
     }
     let url = patches_url
         .map(str::to_string)
-        .or_else(|| resolved.kernel.patches_url.clone())
+        .or_else(|| resolved.kernel.compiled().and_then(|k| k.patches_url.clone()))
         .ok_or_else(|| EngineError::PatchesNoSource {
             commit: pin.commit.clone(),
         })?;
@@ -254,20 +305,26 @@ pub(crate) fn source_axes<'a>(
     build: &ResolvedBuild,
     lock: &'a boot2deb_core::lock::Lock,
 ) -> Result<Vec<SourceAxis<'a>>, Box<dyn std::error::Error>> {
-    let mut axes = vec![
-        SourceAxis {
+    // Only sources the build actually fetches from git have a re-fetch durability to
+    // report. A distro-package kernel is installed from the mirror and a depthcharge
+    // board builds no bootloader, so neither contributes an axis.
+    let mut axes = Vec::new();
+    if let (Some(kernel), Some(pin)) = (build.kernel.compiled(), &lock.kernel) {
+        axes.push(SourceAxis {
             name: "kernel",
-            url: pins::kernel_source_url(&build.kernel.source)?,
-            reference: &lock.kernel.reference,
-            commit: &lock.kernel.commit,
-        },
-        SourceAxis {
+            url: pins::kernel_source_url(&kernel.source)?,
+            reference: &pin.reference,
+            commit: &pin.commit,
+        });
+    }
+    if let (Some(boot), Some(pin)) = (build.rkbin_boot(), &lock.uboot) {
+        axes.push(SourceAxis {
             name: "u-boot",
-            url: build.uboot_source.clone(),
-            reference: &lock.uboot.reference,
-            commit: &lock.uboot.commit,
-        },
-    ];
+            url: boot.uboot_source.clone(),
+            reference: &pin.reference,
+            commit: &pin.commit,
+        });
+    }
     // The fetched media-accel trees, present only for a build that compiles the
     // transcode stack. URLs come from the resolved build, pins from the lock — both
     // `Some` together.
@@ -318,12 +375,16 @@ mod tests {
 
         // A nonsensical rootfs offset (the review's own probe value) is rejected.
         let mut bad_geom = resolved.clone();
-        bad_geom.offsets.rootfs = "1".to_string();
+        if let boot2deb_core::model::ResolvedBoot::RockchipRkbin(boot) = &mut bad_geom.boot {
+            boot.offsets.rootfs = "1".to_string();
+        }
         assert!(preflight_config(&root, &bad_geom).is_err(), "bad geometry must fail preflight");
 
         // A referenced-but-missing kernel fragment is rejected.
         let mut bad_frag = resolved.clone();
-        bad_frag.kernel.config_fragments.push("definitely-no-such-fragment".to_string());
+        if let boot2deb_core::model::ResolvedKernel::Compiled(k) = &mut bad_frag.kernel {
+            k.config_fragments.push("definitely-no-such-fragment".to_string());
+        }
         let err = preflight_config(&root, &bad_frag).unwrap_err().to_string();
         assert!(err.contains("fragment not found"), "expected a fragment error, got: {err}");
 

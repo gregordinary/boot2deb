@@ -40,7 +40,16 @@ pub(crate) fn run(
     // Tool-presence preflight: report each requirement with its path or a
     // host-specific install hint, then fail if any required tool is missing.
     println!();
-    let checks = boot2deb_engine::checks::tool_checks(build.arch, &build.cross_compile);
+    // Ask only for what this build will actually invoke. A board that installs
+    // Debian's kernel and boots its own firmware compiles nothing, so listing a cross
+    // compiler among its requirements would be noise a real missing tool could hide in.
+    let needs = boot2deb_engine::checks::ToolNeeds {
+        target: build.arch,
+        cross_compile: build.cross_compile.clone(),
+        compiles_sources: build.compiles_kernel() || build.rkbin_boot().is_some(),
+        sandbox_builds: build.userspace.is_some(),
+    };
+    let checks = boot2deb_engine::checks::tool_checks(&needs);
     let mut blocking = 0usize;
     for c in &checks {
         match &c.status {

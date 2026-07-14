@@ -39,10 +39,15 @@ cargo run -p boot2deb-cli -- doctor turing-rk1-forky
 - **`resolve`** prints the fully merged build point without building, and runs the same
   local `preflight_config` coherence check the build does (geometry, fragment-file
   existence, feature compatibility, apt keyrings). Selectable axes (`--kernel`,
-  `--suite`, `--feature`, `--layout`, `--boot-method`, `--image-size`) can be overridden
-  on the command line.
+  `--suite`, `--feature`, `--layout`, `--boot-method`, `--board`, `--image-size`,
+  `--locale`, `--locale-gen`, `--timezone`, `--keymap`) can be overridden on the command
+  line.
 - **`doctor`** reports the host's tool-presence preflight for a target and, for anything
-  missing, the exact per-distro install command. See [Getting started](../getting-started.md).
+  missing, the exact per-distro install command. It asks only for what *that build* will
+  invoke: a board that installs Debian's kernel and boots its own firmware compiles
+  nothing, so it is not told to install a cross compiler — which keeps a genuinely
+  missing tool from getting lost among requirements that do not apply. See
+  [Getting started](../getting-started.md).
 
 ## Scaffolding
 
@@ -94,11 +99,24 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
 
 - **`--stage <node>`** runs a single node — `kernel`, `dtb`, `uboot`, `userspace`,
   `ffmpeg`, `rootfs`, or `image`; the default builds everything. A `--stage uboot` run
-  also emits a standalone, directly-flashable `<device>-boot.img` (see below).
+  also emits a standalone, directly-flashable `<device>-boot.img` (see below). Asking for
+  a node this recipe does not *have* — `--stage kernel` on a board that installs Debian's
+  kernel — is an error naming why, not a silent no-op.
 - **`--layout combined|split`** overrides the image packaging. `combined` is one
   whole-disk image; `split` emits a bootloader-only image and a separate rootfs image
   for a two-medium install. This is lock-independent — it changes only how the image is
-  packaged, not any pinned source.
+  packaged, not any pinned source. Only a boot method that *has* a bootloader can split
+  it off.
+- **`--board <profile>`** selects the depthcharge board profile — which *firmware* the
+  signed kernel is built for, not which board. The default is the device's, which is the
+  stock profile; `--board speedy-libreboot` targets a C201 running libreboot. Ignored by
+  boot methods with no board profile.
+- **`--locale`, `--locale-gen`, `--timezone`, `--keymap`** override the localization
+  axes: the image's `LANG`, any extra locales compiled into it, the `/etc/localtime`
+  zone, and the console keyboard layout. Lock-independent — they change only generated
+  rootfs config, not any pinned source. The system locale is *always* generated, so
+  `--locale de_DE.UTF-8` needs no matching `--locale-gen`. See
+  [Locale, timezone, and keyboard](../localization.md).
 - **`--refresh-rootfs`** forces a clean rootfs bootstrap instead of restoring the
   content cache.
 

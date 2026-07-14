@@ -230,34 +230,61 @@ fn qemu_arch(arch: Arch) -> &'static str {
     }
 }
 
-/// Run every host preflight check for building `target` with the given
-/// `cross_compile` prefix (e.g. `aarch64-linux-gnu-`), in report order.
-pub fn tool_checks(target: Arch, cross_compile: &str) -> Vec<Check> {
+/// What a *particular build* needs from the host — the input to [`tool_checks`].
+///
+/// Not every build needs every tool, and asking for tools a build will never invoke
+/// is not harmless: it turns `doctor` from "here is what you are missing" into a
+/// checklist with items on it that do not apply, which is how a real missing tool gets
+/// lost in the noise. A board that installs Debian's kernel and boots its own firmware
+/// compiles nothing at all, and should not be told to install a cross compiler.
+#[derive(Debug, Clone)]
+pub struct ToolNeeds {
+    /// The target architecture.
+    pub target: Arch,
+    /// `CROSS_COMPILE` prefix for the target (e.g. `aarch64-linux-gnu-`), used only
+    /// when the host arch differs.
+    pub cross_compile: String,
+    /// The build compiles a kernel and/or a bootloader from source: it needs a C
+    /// toolchain for the target, the kernel's build-time helpers, and `git` to fetch
+    /// the trees and apply the patch series.
+    pub compiles_sources: bool,
+    /// The build compiles target-arch `.deb`s inside the rootless sandbox (the
+    /// media-accel stack), which is entered with `bwrap`.
+    pub sandbox_builds: bool,
+}
+
+/// Run every host preflight check a build actually needs, in report order.
+pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
+    let target = needs.target;
     let host = HostInfo::detect();
     let cross = host.is_cross_for(target);
     let pm = PkgManager::detect(&host);
-    // Always-required host tooling.
-    let mut checks = vec![
-        exe(pm, target, "git", &["git"], "git am --3way patch apply", true, Pkg::Git),
-        exe(pm, target, "make", &["make"], "kernel/u-boot/userspace compile", true, Pkg::Make),
-        exe(pm, target, "bc", &["bc"], "kernel build dependency", true, Pkg::Bc),
-        exe(pm, target, "flex", &["flex"], "kernel build dependency", true, Pkg::Flex),
-        exe(pm, target, "bison", &["bison"], "kernel build dependency", true, Pkg::Bison),
-        openssl_check(pm, target),
-    ];
+    let mut checks = Vec::new();
 
-    // Target C toolchain: native cc when host arch = target, else the cross gcc.
-    if cross {
-        let cc = format!("{cross_compile}gcc");
-        checks.push(exe(
-            pm, target, &cc, &[&cc],
-            "cross C toolchain for the target", true, Pkg::CrossToolchain,
-        ));
-    } else {
-        checks.push(exe(
-            pm, target, "cc", &["cc", "gcc"],
-            "native C toolchain for the target", true, Pkg::NativeToolchain,
-        ));
+    // The compile toolchain, only where something is compiled. A distro-package kernel
+    // on a board with no bootloader of its own needs none of this.
+    if needs.compiles_sources {
+        checks.extend([
+            exe(pm, target, "git", &["git"], "fetch pinned sources + git am the patch series", true, Pkg::Git),
+            exe(pm, target, "make", &["make"], "kernel/u-boot compile", true, Pkg::Make),
+            exe(pm, target, "bc", &["bc"], "kernel build dependency", true, Pkg::Bc),
+            exe(pm, target, "flex", &["flex"], "kernel build dependency", true, Pkg::Flex),
+            exe(pm, target, "bison", &["bison"], "kernel build dependency", true, Pkg::Bison),
+            openssl_check(pm, target),
+        ]);
+        // Target C toolchain: native cc when host arch = target, else the cross gcc.
+        if cross {
+            let cc = format!("{}gcc", needs.cross_compile);
+            checks.push(exe(
+                pm, target, &cc, &[&cc],
+                "cross C toolchain for the target", true, Pkg::CrossToolchain,
+            ));
+        } else {
+            checks.push(exe(
+                pm, target, "cc", &["cc", "gcc"],
+                "native C toolchain for the target", true, Pkg::NativeToolchain,
+            ));
+        }
     }
 
     // Rootfs bootstrap + rootless namespaces — needed on every build.
@@ -267,14 +294,15 @@ pub fn tool_checks(target: Arch, cross_compile: &str) -> Vec<Check> {
     // Local apt repo + packaging + content-hash tools the rootfs/package stages
     // shell out to. Missing, `doctor` used to pass and the build then
     // died mid-rootfs on a non-Debian host (DR-1).
-    checks.push(exe(pm, target, "dpkg-deb", &["dpkg-deb"], "host .deb packaging", true, Pkg::Dpkg));
+    checks.push(exe(pm, target, "dpkg-deb", &["dpkg-deb"], "read each fetched .deb for the content pin", true, Pkg::Dpkg));
     checks.push(exe(pm, target, "dpkg-scanpackages", &["dpkg-scanpackages"], "local apt repo Packages index", true, Pkg::DpkgDev));
     checks.push(exe(pm, target, "apt-ftparchive", &["apt-ftparchive"], "local apt repo Release", true, Pkg::AptUtils));
     checks.push(exe(pm, target, "sha256sum", &["sha256sum"], "rootfs .deb content-hash capture", true, Pkg::Coreutils));
 
-    // Cross-arch only: the rootless sandbox + qemu-user binfmt.
+    // Cross-arch: the target's maintainer scripts run under the host's qemu-user
+    // binfmt handler during the rootfs bootstrap, whatever else the build does — so
+    // this is needed even by a board that compiles nothing.
     if cross {
-        checks.push(exe(pm, target, "bwrap", &["bwrap"], "rootless sandbox entry", true, Pkg::Bubblewrap));
         let qa = qemu_arch(target);
         let qnames = [format!("qemu-{qa}-static"), format!("qemu-{qa}")];
         let qrefs: Vec<&str> = qnames.iter().map(String::as_str).collect();
@@ -283,6 +311,11 @@ pub fn tool_checks(target: Arch, cross_compile: &str) -> Vec<Check> {
             "run target binaries under binfmt", true, Pkg::QemuUser,
         ));
         checks.push(binfmt_check(pm, target, qa));
+        // `bwrap` only enters the sandbox the target-arch package builds happen in, so
+        // it is needed only by a build that has some.
+        if needs.sandbox_builds {
+            checks.push(exe(pm, target, "bwrap", &["bwrap"], "rootless sandbox entry", true, Pkg::Bubblewrap));
+        }
     }
 
     // Image assembly path: `mke2fs -d` formats the rootfs ext4 from a
@@ -475,18 +508,63 @@ mod tests {
         );
     }
 
+    /// The RK1 shape: compiles a kernel and a bootloader, and builds the media-accel
+    /// stack in the sandbox.
+    fn compiling_build() -> ToolNeeds {
+        ToolNeeds {
+            target: Arch::Arm64,
+            cross_compile: "aarch64-linux-gnu-".into(),
+            compiles_sources: true,
+            sandbox_builds: true,
+        }
+    }
+
+    /// The C201 shape: Debian's kernel, the board's own firmware, no accel stack — so
+    /// nothing is compiled from source at all.
+    fn assembling_build() -> ToolNeeds {
+        ToolNeeds {
+            target: Arch::Armv7,
+            cross_compile: "arm-linux-gnueabihf-".into(),
+            compiles_sources: false,
+            sandbox_builds: false,
+        }
+    }
+
     #[test]
-    fn cross_target_yields_qemu_and_sandbox_checks() {
-        // Building arm64 from this test's host: if the host is not arm64, the
-        // list must include the qemu binfmt + bwrap checks; the cross toolchain
-        // check names the <triple>gcc. Assert the invariants that hold either way.
-        let checks = tool_checks(Arch::Arm64, "aarch64-linux-gnu-");
-        // git/make/mmdebstrap/mke2fs + the DR-1 packaging tools are in the list.
-        for needed in ["git", "make", "mmdebstrap", "mke2fs", "dpkg-deb", "sha256sum"] {
+    fn a_compiling_build_asks_for_the_toolchain() {
+        let checks = tool_checks(&compiling_build());
+        for needed in ["git", "make", "bc", "flex", "bison", "mmdebstrap", "mke2fs", "dpkg-deb"] {
             assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
         }
         // Every check is a hard requirement — there are no fallback-only tools.
         assert!(checks.iter().all(|c| c.required));
+    }
+
+    #[test]
+    fn a_build_that_compiles_nothing_asks_for_no_compiler() {
+        // The payoff of a needs-driven list: this board installs Debian's kernel and
+        // boots its own firmware, so a cross compiler is not merely unused — telling
+        // the operator to install one is noise a genuinely missing tool could hide in.
+        let checks = tool_checks(&assembling_build());
+        for absent in ["git", "make", "bc", "flex", "bison", "openssl", "bwrap"] {
+            assert!(
+                !checks.iter().any(|c| c.name.contains(absent)),
+                "{absent} is not needed by a build that compiles nothing"
+            );
+        }
+        assert!(!checks.iter().any(|c| c.name.ends_with("gcc")));
+
+        // What it *does* still need: the image is assembled the same way, and its
+        // armhf maintainer scripts still run under qemu — so a missing binfmt handler
+        // is still a blocking failure, and it is the *arm* one, not aarch64.
+        for needed in ["mmdebstrap", "mke2fs", "dpkg-deb", "sha256sum"] {
+            assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
+        }
+        let host = HostInfo::detect();
+        if host.is_cross_for(Arch::Armv7) {
+            assert!(checks.iter().any(|c| c.name == "qemu-arm-static"));
+            assert!(checks.iter().any(|c| c.name.contains("arm binfmt")));
+        }
     }
 
     #[test]

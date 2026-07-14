@@ -69,27 +69,70 @@ Work from the bottom of the hardware stack up, adding only what is new:
      `socs/rk3588.toml`. A headless SoC that never transcodes omits them entirely. Selecting
      a `requires_media_accel` feature on a SoC that lacks them is a resolve-time error, so
      the coupling is checked, not assumed.
-3. **boot-method** (`boot-methods/<method>.toml`) — how this family boots: the u-boot
-   source + ref, and the **image offsets** (where `idbloader` and `u-boot.itb` sit in the
-   raw gap, and where the rootfs partition starts). `boot-methods/<method>/overlay/` ships
-   any boot-time files (e.g. the extlinux generator).
+3. **boot-method** (`boot-methods/<method>.toml`) — how this family boots. **The file's
+   shape depends on the method**, because the methods differ in kind:
+   - `rockchip-rkbin` compiles a bootloader: the u-boot source + ref and the **raw-gap
+     offsets** (where `idbloader` and `u-boot.itb` sit outside any partition, and where
+     the rootfs partition starts).
+   - `depthcharge` compiles nothing — the firmware is the board's own and what it loads
+     is the signed kernel — so the file carries the ChromeOS kernel partition's geometry,
+     its GPT attribute bits, and the command line to sign into the kernel.
+
+   A field from the other method is an unknown field and fails to parse, which is the
+   point: an image cannot half-belong to two boot chains.
+   `boot-methods/<method>/overlay/` ships any boot-time files (e.g. the extlinux
+   generator), and `overlay-pre/` ships config a package's own maintainer scripts must
+   see *while they run* (see [Two overlay stages](#two-overlay-stages)).
 4. **device** (`devices/<device>.toml`) — the board itself, stating only its deltas: its
-   `soc`, `boot_method`, `supported_boot_methods`, `uboot_defconfig`, `kernel_dtb`,
-   `image_size`, `hostname`, `supported_kernels` / `default_kernel`, `default_suite`,
-   `default_layout`, and — only if the board departs from the SoC's defaults — an
-   `[rkbin]` block. The bootloader blobs are **inherited from the soc layer** and merged
-   per field, so a board on the SoC's usual memory omits the block entirely; a board with
-   different DRAM overrides just `tpl`.
+   `soc`, `boot_method`, `supported_boot_methods`, `kernel_dtb`, `image_size`,
+   `hostname`, `supported_kernels` / `default_kernel`, `default_suite`, `default_layout`,
+   plus **whatever its boot method requires**:
+   - under `rockchip-rkbin`: a `uboot_defconfig`, and — only if the board departs from
+     the SoC's defaults — an `[rkbin]` block. The bootloader blobs are **inherited from
+     the soc layer** and merged per field, so a board on the SoC's usual memory omits the
+     block entirely; a board with different DRAM overrides just `tpl`.
+   - under `depthcharge`: a `[depthcharge]` block naming the board profile and the
+     profiles the unit supports. No `uboot_defconfig`, no blobs — this board compiles no
+     bootloader, and resolution does not ask it to.
    - **`device_config_fragments` gotcha:** naming a fragment here makes its file
      *mandatory*. `device_config_fragments = ["device/my-board"]` requires
      `fragments/device/my-board.config` to exist — a missing file fails `resolve`. A board
      with no board-specific kconfig deltas uses `device_config_fragments = []` to add none.
      Do not name a fragment you have not written.
-5. **kernel** (`kernels/<kernel>.toml`) — the orthogonal kernel axis: its source refs,
-   `.config` fragments, and patch profile. Version-coupled, so a new kernel version is a
-   new file. A kernel that applies no series — a stock mainline build for a SoC that is
-   fully upstream — writes `patch_profile = "none"` and then never reads the `patches`
-   repo at all.
+5. **kernel** (`kernels/<kernel>.toml`) — the orthogonal kernel axis. **Ask first whether
+   the board needs a kernel of yours at all.**
+   - If Debian's own kernel already runs the hardware — which it does for any SoC and
+     board that are fully upstream — write a `flavor = "distro-package"` definition
+     naming the package (`linux-image-armmp`) and you are done. No source ref, no
+     defconfig, no fragments, no patches, and one definition serves every suite. This is
+     the *better* answer where it applies: `apt` keeps the board's kernel patched, which
+     a kernel you compiled does not.
+   - Otherwise write a `mainline` or `vendor` definition with its source refs, `.config`
+     fragments, and patch profile. Version-coupled, so a new kernel version is a new
+     file. A compiled kernel that applies no series writes `patch_profile = "none"` and
+     then never reads the `patches` repo.
+
+   Note that a distro kernel and the two compile-only device fields (`device_dts`,
+   `device_config_fragments`) are mutually exclusive, and resolution says so: nothing
+   would ever build the DTB or merge the fragments.
+
+## Two overlay stages
+
+Each layer may ship two trees of files that are copied into the rootfs:
+
+- **`overlay/`** — laid in **after** every package. It therefore wins over whatever the
+  packages shipped, which is what nearly all config wants.
+- **`overlay-pre/`** — laid in **before** any package is installed. This is for config a
+  package's own maintainer scripts must see *while they run*, where winning afterwards is
+  too late because the package already acted. Two examples, both from the C201:
+  - initramfs settings (`MODULES=list`) must precede the kernel package, or the first
+    initramfs is built at `MODULES=most` — far over the signed payload's size budget —
+    and then thrown away and rebuilt.
+  - `depthcharge-tools`' kernel hook re-signs and re-flashes a ChromeOS kernel partition.
+    Installed with no config present, it runs at its defaults and goes looking for that
+    partition on **the build host's** disks. Its config has to be there first.
+
+Use `overlay/` unless the package acts before your file would arrive.
 
 Supporting assets:
 

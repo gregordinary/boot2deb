@@ -115,18 +115,20 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
 
     let dts_fp = crate::build::device_dts_fingerprint(inputs.device_dts);
 
-    let mut nodes = vec![
-        NodePlan::evaluate(
-            "kernel",
-            w.join("linux"),
-            &crate::build::kernel::clone_manifest(lock, patch_series(dev, &kernel_fp), &dts_fp),
-        ),
-        NodePlan::evaluate(
-            "uboot",
-            w.join("u-boot"),
-            &crate::build::uboot::clone_manifest(lock, patch_series(dev, &uboot_fp)),
-        ),
-    ];
+    // A node exists only where the build has one, and the lock is the record of
+    // that: it pins a kernel commit iff the kernel is compiled, and a u-boot commit
+    // iff the boot method builds a bootloader. A board that installs Debian's kernel
+    // and boots its own firmware has neither compile node, so it has nothing to
+    // rebuild — and `why-rebuild` says so by listing no such node, rather than
+    // reporting a phantom one as perpetually stale. Both manifests are therefore
+    // computed from the pin, and a `None` pin simply contributes no node.
+    let mut nodes = Vec::new();
+    if let Ok(man) = crate::build::kernel::clone_manifest(lock, patch_series(dev, &kernel_fp), &dts_fp) {
+        nodes.push(NodePlan::evaluate("kernel", w.join("linux"), &man));
+    }
+    if let Ok(man) = crate::build::uboot::clone_manifest(lock, patch_series(dev, &uboot_fp)) {
+        nodes.push(NodePlan::evaluate("uboot", w.join("u-boot"), &man));
+    }
     // The media-accel compile nodes (userspace packages + ffmpeg) exist only when
     // the recipe builds the transcode stack — i.e. the lock pins those sources. A
     // base build stops at kernel + u-boot.
@@ -205,9 +207,9 @@ mod tests {
     fn lock_fixture(kernel_commit: &str, mpp_commit: &str) -> Lock {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
-            kernel: KernelPin { id: "k".into(), source: "ks".into(), reference: "v7.1.1".into(), commit: kernel_commit.into() },
+            kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v7.1.1".into(), commit: kernel_commit.into() }),
             patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: "p1".into() }),
-            uboot: UbootPin { source: "us".into(), reference: "v".into(), commit: "u1".into() },
+            uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "u1".into() }),
             userspace: Some(UserspacePins {
                 mpp: git(mpp_commit),
                 librga: git("rga1"),
@@ -215,7 +217,7 @@ mod tests {
             }),
             ffmpeg: Some(FfmpegPins { base: git("b1"), rockchip: git("rk1") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
-            blobs: BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None },
+            blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
             extra_debs: vec![],
             snapshot: None,
         }
@@ -262,7 +264,7 @@ mod tests {
     #[test]
     fn base_build_plans_only_kernel_and_uboot() {
         // A lock with no media-accel pins (a base build) schedules neither the
-        // userspace packages nor ffmpeg — only kernel + u-boot (UX-21).
+        // userspace packages nor ffmpeg — only kernel + u-boot.
         let mut lock = lock_fixture("kc1", "mc1");
         lock.userspace = None;
         lock.ffmpeg = None;
@@ -290,7 +292,8 @@ mod tests {
         std::fs::create_dir_all(&linux).unwrap();
         write_manifest(
             &linux,
-            &crate::build::kernel::clone_manifest(&old, crate::build::PatchSeries::Pinned, &[]),
+            &crate::build::kernel::clone_manifest(&old, crate::build::PatchSeries::Pinned, &[])
+                .unwrap(),
         )
         .unwrap();
         let mpp = work.join("userspace").join("mpp");

@@ -22,6 +22,16 @@ pub(crate) fn run(
     args: ConfigArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
+    // There is a kernel config to verify only where a kernel is configured. A distro
+    // kernel arrives pre-built from the mirror: Debian owns its `.config`, so there
+    // are no fragments to merge and nothing this gate could compare.
+    let kernel = build.kernel.compiled().ok_or_else(|| {
+        format!(
+            "recipe '{recipe}' uses kernel '{}', a distro package built by Debian — its \
+             kernel config is not ours to generate, so there is nothing to verify",
+            build.kernel.id()
+        )
+    })?;
     // Fragment names resolve to fragments/<name>.config along the config search
     // path (overlay-aware), erroring if any is missing.
     let fragments = fragment_paths(root, &build)?;
@@ -41,6 +51,9 @@ pub(crate) fn run(
         Some(p) => (p, None),
         None => {
             let lock = root.lock(recipe)?;
+            let kernel_pin = lock.kernel.as_ref().ok_or_else(|| {
+                format!("the lock for '{recipe}' pins no kernel — re-run `boot2deb update`")
+            })?;
             // A kernel with no patch profile reads no `patches` checkout: the config
             // gate then runs against the pristine locked tree.
             let series = match lock.patches.as_ref() {
@@ -54,7 +67,7 @@ pub(crate) fn run(
                         &sink,
                     )?;
                     let profile = load_profile(&patches_root, &pin.profile)?;
-                    profile.ensure_applies(&pin.profile, &lock.kernel.reference)?;
+                    profile.ensure_applies(&pin.profile, &kernel_pin.reference)?;
                     Some((patches_root, profile))
                 }
                 None => None,
@@ -63,22 +76,22 @@ pub(crate) fn run(
             // ../linux is near-instant); the tree still lands at the locked commit.
             let url = match args.kernel_src {
                 Some(s) => s,
-                None => pins::kernel_source_url(&build.kernel.source)?,
+                None => pins::kernel_source_url(&kernel.source)?,
             };
             let tree = fetch_verify_tree(
                 &url,
-                &lock.kernel.reference,
-                &lock.kernel.commit,
+                &kernel_pin.reference,
+                &kernel_pin.commit,
                 "kernel",
                 &verify_trees_cache(root),
                 &sink,
             )?;
             if let Some((patches_root, profile)) = series {
-                let target = format!("{} @ {}", lock.kernel.id, lock.kernel.reference);
+                let target = format!("{} @ {}", kernel_pin.id, kernel_pin.reference);
                 let step = Step::start(&sink, "apply-patches");
                 let n = boot2deb_engine::srcfetch::apply_kernel_series(
                     &tree,
-                    &lock.kernel.commit,
+                    &kernel_pin.commit,
                     &patches_root,
                     &profile.kernel,
                     &target,
@@ -86,7 +99,7 @@ pub(crate) fn run(
                 step.log(format!("applied {n} kernel patch(es) for the config gate"));
                 step.finish();
             }
-            (tree.clone(), Some((tree, lock.kernel.commit.clone())))
+            (tree.clone(), Some((tree, kernel_pin.commit.clone())))
         }
     };
 
@@ -94,7 +107,7 @@ pub(crate) fn run(
         tree: &tree,
         arch: &build.kernel_arch,
         cross_compile: cross.as_deref(),
-        base_defconfig: &build.kernel.base_defconfig,
+        base_defconfig: &kernel.base_defconfig,
         fragments: &fragments,
     };
     let work_dir = args

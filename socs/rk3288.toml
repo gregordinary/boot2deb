@@ -1,0 +1,32 @@
+# socs/rk3288.toml — Rockchip RK3288 SoC invariants, shared across the Veyron
+# Chromebook family (ten in-tree boards).
+description = "Rockchip RK3288 (4x Cortex-A17, Mali-T764)"
+arch        = "armv7"
+dt_dir      = "rockchip"                 # arch/arm/boot/dts/<dt_dir> — same layout as arm64
+
+# No [rkbin]. The RK3288 Chromebooks have no maskrom loader chain and no ATF/DDR
+# blobs: the firmware is coreboot in the board's SPI flash. The depthcharge boot
+# method reads no blob set, and resolution asks for none.
+
+# Media modules. Both RK3288 codec blocks are mainline and neither is disabled in
+# the Veyron device trees, so both inherit rk3288.dtsi's enabled default:
+#   hantro_vpu     — JPEG encode, MPEG-2 / VP8 / H.264 decode
+#   rockchip_vdec  — HEVC decode (the RK3288 variant of rkvdec)
+modules = ["hantro_vpu", "rockchip_vdec"]
+
+# Broadcom SDIO wifi firmware. Debian's firmware-brcm80211 carries the
+# brcmfmac4354-sdio .bin and its .clm_blob, but neither the board NVRAM nor any
+# BCM4354 Bluetooth patchram — those two are vendored on the device layer, which is
+# also where they belong: they identify a specific radio module, not the SoC.
+#
+# Only the Broadcom Veyron boards (speedy/minnie/mickey/brain) need this package;
+# the Marvell-radio boards (jerry/jaq/mighty/fievel/tiger) want firmware-libertas
+# instead. It sits here rather than per-device because every board this SoC layer
+# currently serves is a Broadcom one; the day a Marvell board is added, this moves
+# down to the devices.
+packages = ["firmware-brcm80211"]
+
+# No [userspace] / [ffmpeg]: there is no Rockchip media-accel userspace stack for the
+# RK3288 (MPP and RGA target the RK35xx family). Video decode here is the mainline
+# V4L2 stateless path via Hantro/rkvdec. Resolution therefore rejects a
+# `requires_media_accel` feature on this SoC, which is the correct outcome.

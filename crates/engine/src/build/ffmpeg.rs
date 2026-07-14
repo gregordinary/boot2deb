@@ -732,13 +732,13 @@ mod tests {
     fn lock_with(base_commit: &str, patches_commit: &str) -> Lock {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
-            kernel: KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() },
+            kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() }),
             patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
-            uboot: UbootPin { source: "us".into(), reference: "v".into(), commit: "uc".into() },
+            uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "uc".into() }),
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git(base_commit), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
-            blobs: BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None },
+            blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
             extra_debs: vec![],
             snapshot: None,
         }

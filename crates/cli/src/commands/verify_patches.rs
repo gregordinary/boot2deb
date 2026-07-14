@@ -33,6 +33,14 @@ pub(crate) fn run(
         );
         return Ok(());
     };
+    // A patch series implies a tree to apply it to, so the lock pins both or neither.
+    let (Some(kernel), Some(kernel_pin)) = (build.kernel.compiled(), lock.kernel.as_ref()) else {
+        return Err(format!(
+            "the lock for '{recipe}' pins a patch series but no kernel to apply it to — \
+             re-run `boot2deb update`"
+        )
+        .into());
+    };
     let (patches_root, _dev) = resolve_patches_source(
         args.patches_path.as_deref(),
         args.patches_url.as_deref(),
@@ -43,8 +51,8 @@ pub(crate) fn run(
     )?;
     let profile = load_profile(&patches_root, &pin.profile)?;
     // Declared-intent gate: is the locked kernel in the profile's range?
-    profile.ensure_applies(&pin.profile, &lock.kernel.reference)?;
-    let target = format!("{} @ {}", lock.kernel.id, lock.kernel.reference);
+    profile.ensure_applies(&pin.profile, &kernel_pin.reference)?;
+    let target = format!("{} @ {}", kernel_pin.id, kernel_pin.reference);
     let cache_root = verify_trees_cache(root);
 
     let kernel_tree = match args.kernel_path {
@@ -54,12 +62,12 @@ pub(crate) fn run(
             // for the fetch; the tree still lands at exactly the locked commit.
             let url = match args.kernel_src {
                 Some(s) => s,
-                None => pins::kernel_source_url(&build.kernel.source)?,
+                None => pins::kernel_source_url(&kernel.source)?,
             };
             fetch_verify_tree(
                 &url,
-                &lock.kernel.reference,
-                &lock.kernel.commit,
+                &kernel_pin.reference,
+                &kernel_pin.commit,
                 "kernel",
                 &cache_root,
                 &sink,

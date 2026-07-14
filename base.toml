@@ -1,7 +1,30 @@
 # base.toml — the distro-generic rootfs substrate: the base Debian package
-# set every boot2deb image installs, plus packages excluded from the base system.
+# set every boot2deb image installs, plus packages excluded from the base system,
+# and the system-wide locale/timezone policy.
 # Layer-specific packages (soc/boot-method/device) and feature packages stack on
 # top at resolution; overlay files live in each layer's overlay/ tree.
+
+# --- Localization -------------------------------------------------------------
+# The `LANG` an image boots with. C.UTF-8 is a complete UTF-8 locale built into
+# glibc, so it needs no locale data on disk and no package — it works on the
+# smallest possible image. It is also neutral: this project targets no one country,
+# and a US locale is not a better default than any other.
+locale = "C.UTF-8"
+
+# Locales compiled into every image *in addition to* the one above, so a pre-built
+# image can be switched to one of them offline. en_US.UTF-8 is here because Debian's
+# stock sshd ships `AcceptEnv LANG LC_*`: an SSH client forwards its own LANG, and a
+# session that lands on a locale the image never generated is what makes a shell
+# print `perl: warning: Setting locale failed`. Generating it costs ~3 MiB and makes
+# the common client work; any *other* locale is one `dpkg-reconfigure locales` away,
+# with no network, because the `locales` package below ships on the image.
+locales_generate = ["en_US.UTF-8"]
+
+# Sets the /etc/localtime symlink. UTC is what a server should log in regardless of
+# where it sits; `timedatectl set-timezone` changes it on a running image.
+timezone = "UTC"
+
+# --- Packages -----------------------------------------------------------------
 packages = [
     "initramfs-tools",
     "dbus",
@@ -18,5 +41,16 @@ packages = [
     "xz-utils",
     "zip",
     "zstd",
+    # The three packages that make a *pre-built* image reconfigurable with no network.
+    # `dpkg-reconfigure locales` / `keyboard-configuration` / `tzdata` only exist if
+    # the package does, so an image without them forces a user who wants a German
+    # locale or a UK keymap onto the network before the knob even appears. Measured on
+    # forky/arm64 they cost ~44 MiB installed (locales 15.4 + xkb-data 10.6 +
+    # console-setup-linux 7.1 + libc-l10n 4.7 + kbd 2.9 + keyboard-configuration 2.8 +
+    # console-setup 0.4), plus ~3 MiB for the generated locale-archive. NOT
+    # `locales-all`, which is hundreds of MiB.
+    "locales",
+    "keyboard-configuration",
+    "console-setup",
 ]
 exclude = ["isc-dhcp-client"]

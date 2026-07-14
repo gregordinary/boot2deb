@@ -16,6 +16,19 @@ pub(crate) fn run(root: &ConfigRoot, recipe: &str) -> Result<(), Box<dyn std::er
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
     let lock = root.lock(recipe)?;
     let axes = source_axes(&build, &lock)?;
+    // A recipe can pin nothing from git: a distro kernel comes from the mirror and a
+    // board whose firmware is its own builds no bootloader. There is then no upstream
+    // to rot, which is a stronger guarantee than "all pins are durable" — so say so
+    // rather than reporting on an empty set.
+    if axes.is_empty() {
+        println!(
+            "{recipe} fetches nothing from git (its kernel is a distro package and its boot \
+             method builds no bootloader), so no source pin can rot upstream. Its package \
+             versions are pinned by sha256 in {}.",
+            lock.rootfs.manifest
+        );
+        return Ok(());
+    }
     println!(
         "probing {} source pins for {recipe} against their configured upstreams (read-only)\n",
         axes.len()

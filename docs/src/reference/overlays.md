@@ -48,9 +48,10 @@ The search path is the shipped root first, then each `--overlay` in the order gi
   entry included.
 
 A layer file present only in an overlay simply adds a new target (nothing to merge).
-Fragments, blobs, and per-feature/-layer `overlay/` trees resolve along the same path: a
-same-named asset in an overlay shadows the shipped one, while feature/layer overlay trees
-present in both roots stack (shipped first, overlay last).
+Fragments, blobs, and per-feature/-layer rootfs trees (both `overlay/` and
+`overlay-pre/`) resolve along the same path: a same-named asset in an overlay shadows the
+shipped one, while rootfs trees present in both roots stack (shipped first, overlay
+last).
 
 ## Locks land in the owning overlay
 

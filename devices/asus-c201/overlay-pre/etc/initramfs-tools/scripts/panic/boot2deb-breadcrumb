@@ -1,0 +1,67 @@
+#!/bin/sh
+# initramfs panic hook: leave evidence somewhere a host can read it.
+#
+# This board has no serial console and (by budget, see conf.d/veyron.conf) no
+# display inside the initramfs, so an initramfs failure is a silent white
+# screen. This script runs from initramfs-tools' panic() -- i.e. exactly when
+# the boot has given up -- and writes the full story (cmdline, block devices,
+# loaded modules, dmesg) to the root of every ext4 partition it can reach.
+# Pulling the SD card afterwards and looking for BOOT2DEB-PANIC.txt replaces a
+# serial log. If the file never appears AND the machine still reboots ~30 s
+# after the panic (the cmdline carries panic=30), the initramfs ran but could
+# not reach any storage; if the machine never reboots either, the kernel never
+# got as far as the initramfs.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case $1 in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+
+report=/tmp/BOOT2DEB-PANIC.txt
+{
+    echo "===================================================================="
+    echo "== boot2deb initramfs panic breadcrumb"
+    echo "== kernel: $(uname -r 2>/dev/null)"
+    echo "== cmdline: $(cat /proc/cmdline 2>/dev/null)"
+    echo "== uptime: $(cat /proc/uptime 2>/dev/null)"
+    echo "== block devices:"
+    ls -l /dev/mmcblk* /dev/sd* 2>/dev/null || echo "   none"
+    echo "== /proc/partitions:"
+    cat /proc/partitions 2>/dev/null
+    echo "== by-partuuid:"
+    ls -l /dev/disk/by-partuuid 2>/dev/null || echo "   none"
+    echo "== deferred probes:"
+    cat /sys/kernel/debug/devices_deferred 2>/dev/null || echo "   (debugfs unavailable)"
+    echo "== modules:"
+    cat /proc/modules 2>/dev/null
+    echo "== dmesg:"
+    dmesg 2>/dev/null
+} > "$report" 2>&1
+
+# The short version goes to the panel too -- on the display-carrying debug
+# builds this is readable directly, and it costs nothing on the blind ones.
+{
+    echo "==== boot2deb panic summary ===================================="
+    echo "-- /proc/partitions:"
+    cat /proc/partitions 2>/dev/null
+    echo "-- deferred probes:"
+    cat /sys/kernel/debug/devices_deferred 2>/dev/null
+    echo "-- mmc/regulator/i2c dmesg:"
+    dmesg 2>/dev/null | grep -iE 'mmc|dw.mmc|rk808|regulat|i2c|pwrseq' | tail -25
+    echo "================================================================"
+} > /dev/console 2>&1 || true
+
+# Append, never overwrite: one card can witness several failed boots (and the
+# eMMC's rootfs is a frequent landing spot), so each report must survive the
+# next one. The header above delimits entries.
+mkdir -p /tmp/bc-mnt
+for dev in /dev/mmcblk*p* /dev/sd*[0-9]; do
+    [ -b "$dev" ] || continue
+    if mount -t ext4 -o rw "$dev" /tmp/bc-mnt 2>/dev/null; then
+        cat "$report" >> /tmp/bc-mnt/BOOT2DEB-PANIC.txt 2>/dev/null
+        sync
+        umount /tmp/bc-mnt 2>/dev/null
+    fi
+done

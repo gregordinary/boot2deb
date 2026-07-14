@@ -1,0 +1,12 @@
+# arches/armv7.toml — invariants shared by every 32-bit Arm v7 target.
+#
+# Debian calls this architecture `armhf` (hard-float); `armv7` is the ISA spelling,
+# used for this file's stem and for kbuild's ARCH. Arch::debian_arch() maps between
+# them, so the rootfs bootstraps as armhf while the kernel builds as ARCH=arm.
+kernel_arch   = "arm"                    # ARCH= for kbuild
+uboot_arch    = "arm"                    # unused where the boot method builds no u-boot
+kbuild_image  = "arch/arm/boot/zImage"   # KBUILD_IMAGE — zImage, not Image
+cross_compile = "arm-linux-gnueabihf-"   # used only when host arch != armv7
+
+# The Debian armhf userland baseline is Armv7-A + Thumb-2 + VFPv3-D16 (NEON is not
+# in it). The RK3288's Cortex-A17 has VFPv4 + NEON and clears it comfortably.

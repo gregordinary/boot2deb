@@ -1,0 +1,52 @@
+# boot-methods/depthcharge.toml — ChromeOS depthcharge: a vboot-signed kernel FIT
+# written into a ChromeOS kernel partition.
+#
+# This method builds no bootloader. The firmware is the board's own — coreboot plus
+# depthcharge, in an SPI chip that is not ours to produce — and what it loads is the
+# kernel itself, signed and wrapped in a FIT. So there is no u-boot, no rkbin blob,
+# and no raw gap: the payload is a GPT partition, and the firmware finds it by type
+# GUID and picks it by the attribute bits below.
+description = "ChromeOS depthcharge: a vboot-signed kernel FIT in a ChromeOS kernel partition"
+
+# --- The kernel partition ----------------------------------------------------
+# The firmware scans every boot medium's GPT for the ChromeOS kernel type GUID and
+# never looks at a partition's number or start sector, so the geometry is a free
+# choice. 12 MiB clears the 8 MiB region a Veyron eMMC reserves at its head (4 MiB
+# would land inside it) and costs nothing on SD or USB, so one geometry serves every
+# medium. 16 MiB matches the factory KERN-A size.
+kpart_offset  = "12MiB"                  # LBA 24576
+kpart_size    = "16MiB"                  # 32768 sectors
+rootfs_offset = "28MiB"                  # LBA 57344 — immediately after the kernel partition
+
+# GPT attribute bits 48-63 of the kernel partition's entry. `successful` is what
+# stops the firmware decrementing `tries` to zero and giving up on the image.
+# Packed, these are 0x015A000000000000 — plain bits in a standard GPT entry, so the
+# `gpt` crate writes them and no ChromeOS host tooling (cgpt) is needed.
+kpart_priority   = 10                    # bits 51:48 — 15 highest, 0 = never boot
+kpart_tries      = 5                     # bits 55:52
+kpart_successful = true                  # bit 56
+
+# --- The command line --------------------------------------------------------
+# Baked into the signed FIT, so it cannot be edited on the device — only re-signed.
+#
+# It carries no `root=`: depthchargectl derives that from the image's /etc/fstab and
+# strips any root that disagrees, here and on every on-device kernel upgrade. It also
+# carries no '%': depthchargectl round-trips the computed cmdline through a
+# ConfigParser whose interpolation rejects one outright, and no escaping works. The
+# kern_guid=%U the firmware substitutes is prepended afterwards by mkdepthcharge,
+# past that round-trip. Resolution enforces both rules.
+#
+# panic=30 is this board's only failure signal: it has no serial console, so a kernel
+# panic or an initramfs that gives up on root reboots to the firmware splash ~30 s
+# later. A machine that never reboots therefore means the kernel never reached the
+# initramfs at all — which is the single most useful bit of information a failed boot
+# can give you here.
+cmdline = "console=tty1 rootwait ro panic=30"
+
+# --- Packages ----------------------------------------------------------------
+# depthcharge-tools both builds the signed payload at image time (inside the rootfs,
+# so the image node only has to place the blob it produced) and re-signs and re-writes
+# the kernel partition on the running board via its /etc/kernel/postinst.d hook — the
+# structural twin of the rockchip-rkbin method's extlinux hook. It pulls in vboot-utils
+# (futility), which the build uses to verify the signature it just produced.
+packages = ["depthcharge-tools"]

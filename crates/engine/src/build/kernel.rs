@@ -21,6 +21,7 @@ use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::kconfig;
 use boot2deb_core::lock::Lock;
+use boot2deb_core::model::ResolvedCompiledKernel;
 use boot2deb_core::ResolvedBuild;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -93,15 +94,24 @@ pub fn tree_dir(work_dir: &Path) -> PathBuf {
     work_dir.join("linux")
 }
 
-/// The locked kernel commit's committer date as a `SOURCE_DATE_EPOCH`, read from the
-/// cloned tree under `work_dir` — the lock-derived deterministic build timestamp.
-/// The rootfs node reuses it (the same seed the image identifiers derive from,
-/// the kernel commit) so its tarball mtimes are stable across builds of one lock
-/// (DET-2/DET-4). `None` when the kernel tree is absent (a build that has not run the
-/// kernel stage in this `work_dir`) or the commit object is unreadable; the caller then
-/// proceeds without mtime clamping.
+/// The locked kernel commit's committer date as a `SOURCE_DATE_EPOCH` — the
+/// lock-derived deterministic build timestamp, read from the cloned tree under
+/// `work_dir`. The rootfs node reuses it so its tarball mtimes are stable across builds
+/// of one lock (DET-2/DET-4).
+///
+/// `None` when there is no such date to read: the lock pins no kernel commit (a
+/// distro-package kernel is installed from the mirror, so no source tree exists), the
+/// kernel tree is absent (a build that has not run the kernel stage in this `work_dir`),
+/// or the commit object is unreadable. The caller then proceeds without mtime clamping,
+/// and that build's tarball carries build-time mtimes.
+///
+/// That is a scoped loss, not a hole in the reproducibility claim: the guarantee is the
+/// *content pin* — every package by name, version, and sha256 in the solved manifest —
+/// and it is untouched. The ext4 filesystem is not byte-reproducible either (§3.6), so
+/// the whole-image byte claim already waits on the Phase-F formatter.
 pub fn source_date_epoch(work_dir: &Path, lock: &Lock) -> Option<u64> {
-    crate::git::commit_epoch(&tree_dir(work_dir), &lock.kernel.commit).ok()
+    let pin = lock.kernel.as_ref()?;
+    crate::git::commit_epoch(&tree_dir(work_dir), &pin.commit).ok()
 }
 
 /// Run the kernel stage, emitting its [`Event`](crate::event::Event)s to `sink`.
@@ -117,6 +127,13 @@ pub fn build_kernel(
     env: &BuildEnv,
     sink: &dyn EventSink,
 ) -> Result<KernelArtifacts, EngineError> {
+    // Narrow the build once: everything below reads the compile inputs — the source,
+    // the defconfig, the fragments — which only a compiled kernel has.
+    let kernel = build.kernel.compiled().ok_or(EngineError::StageNotApplicable {
+        stage: "kernel",
+        why: "the resolved kernel is a distro package installed from the Debian mirror, \
+              so there is no source tree to compile",
+    })?;
     let step = Step::start(sink, "kernel");
     let tree = tree_dir(opts.work_dir);
 
@@ -135,7 +152,7 @@ pub fn build_kernel(
     // Tier-2 output cache: if the full output signature (tree inputs +
     // config + toolchain) is already stored, restore the `.deb`s and skip the
     // clone/patch/configure/compile entirely — the whole payoff of the store.
-    let out_man = output_manifest(build, lock, opts, env, patches, &dts_fp)?;
+    let out_man = output_manifest(build, kernel, lock, opts, env, patches, &dts_fp)?;
     if let Some([image_deb, headers_deb]) = build::restore_stage_outputs(
         opts.store,
         "kernel",
@@ -156,13 +173,13 @@ pub fn build_kernel(
 
     // Tier-1 reuse of the cloned+patched tree (COR-1): a lock bump (kernel commit
     // or patch pin) rebuilds it; configure()/compile() re-run regardless.
-    let man = clone_manifest(lock, patches, &dts_fp);
+    let man = clone_manifest(lock, patches, &dts_fp)?;
     build::reuse_or_refresh_tree(&tree, &man, "kernel", &step, || {
         clone_and_patch(build, lock, opts, &tree, &step)
     })?;
     step.progress(30);
 
-    configure(build, opts, env, &tree, &step)?;
+    configure(build, kernel, opts, env, &tree, &step)?;
     step.progress(40);
 
     // Sweep kernel `.deb`s a previous build left in the work dir: `remove_dir_all`
@@ -173,7 +190,7 @@ pub fn build_kernel(
 
     // Deterministic build timestamp from the locked base commit, not the tree's
     // README mtime (= clone time) or HEAD (a patch commit stamped now) (COR-9).
-    let epoch = crate::git::commit_epoch(&tree, &lock.kernel.commit).ok();
+    let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
     compile(build, env, &tree, epoch, &step)?;
 
     let artifacts = collect(opts, &step)?;
@@ -212,13 +229,18 @@ pub fn build_dtb(
     env: &BuildEnv,
     sink: &dyn EventSink,
 ) -> Result<PathBuf, EngineError> {
+    let kernel = build.kernel.compiled().ok_or(EngineError::StageNotApplicable {
+        stage: "dtb",
+        why: "the resolved kernel is a distro package installed from the Debian mirror, \
+              so there is no kernel tree to compile a device tree in",
+    })?;
     let step = Step::start(sink, "dtb");
     let tree = tree_dir(opts.work_dir);
 
     let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Kernel);
     let patches = build::series_identity(opts.patches, &series_fp);
     let dts_fp = build::device_dts_fingerprint(opts.device_dts);
-    let man = clone_manifest(lock, patches, &dts_fp);
+    let man = clone_manifest(lock, patches, &dts_fp)?;
     if crate::signature::is_fresh(&tree, &man) {
         step.log(format!("reusing kernel tree at {}", tree.display()));
     } else {
@@ -230,7 +252,7 @@ pub fn build_dtb(
     }
     step.progress(40);
 
-    configure(build, opts, env, &tree, &step)?;
+    configure(build, kernel, opts, env, &tree, &step)?;
 
     // `kernel_dtb` is already `<dt_dir>/<board>.dtb`, which is exactly how kbuild's
     // `%.dtb` rule names a DTB (relative to `arch/<arch>/boot/dts`).
@@ -241,7 +263,8 @@ pub fn build_dtb(
         .arg(format!("-j{}", env.jobs()))
         .arg("--")
         .arg(&build.kernel_dtb);
-    for (key, value) in kbuild_env(build, crate::git::commit_epoch(&tree, &lock.kernel.commit).ok()) {
+    let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
+    for (key, value) in kbuild_env(build, epoch) {
         make.env(key, value);
     }
     if let Some(prefix) = &env.cross_compile {
@@ -279,13 +302,14 @@ pub fn build_dtb(
 /// kernel commit, already folded via the tree dependency.
 fn output_manifest(
     build: &ResolvedBuild,
+    kernel: &ResolvedCompiledKernel,
     lock: &Lock,
     opts: &KernelOptions,
     env: &BuildEnv,
     patches: PatchSeries,
     device_dts: &[String],
 ) -> Result<crate::signature::SignatureManifest, EngineError> {
-    let tree_sig = clone_manifest(lock, patches, device_dts).signature();
+    let tree_sig = clone_manifest(lock, patches, device_dts)?.signature();
     let mut fragments = Vec::with_capacity(opts.fragments.len());
     for frag in opts.fragments {
         let name = frag.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -294,7 +318,7 @@ fn output_manifest(
     let mut b = crate::signature::SignatureBuilder::new("kernel:out", OUTPUT_STAGE_VERSION);
     b.fold_dep(&tree_sig)
         .fold_ordered("fragments", &fragments)
-        .fold_scalar("base_defconfig", &build.kernel.base_defconfig)
+        .fold_scalar("base_defconfig", &kernel.base_defconfig)
         .fold_scalar("kernel_arch", &build.kernel_arch)
         .fold_scalar("kbuild_image", &build.kbuild_image)
         .fold_scalar("localversion", &localversion(build))
@@ -323,15 +347,16 @@ pub fn clone_manifest(
     lock: &Lock,
     patches: PatchSeries,
     device_dts: &[String],
-) -> crate::signature::SignatureManifest {
+) -> Result<crate::signature::SignatureManifest, EngineError> {
+    let pin = build::kernel_pin(lock)?;
     let mut b = crate::signature::SignatureBuilder::new("kernel", CLONE_STAGE_VERSION);
-    b.fold_scalar("kernel.commit", &lock.kernel.commit);
-    b.fold_scalar("kernel.reference", &lock.kernel.reference);
+    b.fold_scalar("kernel.commit", &pin.commit);
+    b.fold_scalar("kernel.reference", &pin.reference);
     build::fold_patch_series(&mut b, lock.patches.as_ref(), patches);
     if !device_dts.is_empty() {
         b.fold_ordered("device_dts", device_dts);
     }
-    b.manifest()
+    Ok(b.manifest())
 }
 
 /// Shallow-clone the pinned kernel, verify it sits at the locked commit, enforce
@@ -350,18 +375,19 @@ fn clone_and_patch(
     tree: &Path,
     step: &Step,
 ) -> Result<(), EngineError> {
-    let target = format!("{} @ {}", lock.kernel.id, lock.kernel.reference);
+    let pin = build::kernel_pin(lock)?;
+    let target = format!("{} @ {}", pin.id, pin.reference);
     let spec = ClonePinned {
         source: opts.source,
-        reference: &lock.kernel.reference,
-        commit: &lock.kernel.commit,
+        reference: &pin.reference,
+        commit: &pin.commit,
         mode: CloneMode::Shallow,
         tree,
         what: "kernel",
         patches: opts.patches,
         scope: PatchScope::Kernel,
         target: &target,
-        gate_reference: Some(&lock.kernel.reference),
+        gate_reference: Some(&pin.reference),
     };
     let n = build::clone_pinned(&spec, step)?;
     match opts.patches {
@@ -484,6 +510,7 @@ fn dtb_config_symbol(makefile: &str) -> Option<&str> {
 /// and copy it into the tree as `.config`.
 fn configure(
     build: &ResolvedBuild,
+    kernel: &ResolvedCompiledKernel,
     opts: &KernelOptions,
     env: &BuildEnv,
     tree: &Path,
@@ -497,7 +524,7 @@ fn configure(
         // so cross-toolchain-probed symbols (ARM64_BTI/E0PD/…) are settled here and
         // `make bindeb-pkg` never prompts via an interactive oldconfig.
         cross_compile: env.cross_compile.as_deref(),
-        base_defconfig: &build.kernel.base_defconfig,
+        base_defconfig: &kernel.base_defconfig,
         fragments: opts.fragments,
     };
     let config_out = opts.work_dir.join("config-gen");
@@ -649,13 +676,13 @@ mod tests {
     fn lock_with(kernel_commit: &str, patches_commit: &str) -> Lock {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
-            kernel: KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: kernel_commit.into() },
+            kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: kernel_commit.into() }),
             patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
-            uboot: UbootPin { source: "us".into(), reference: "v".into(), commit: "u".into() },
+            uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "u".into() }),
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
             rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
-            blobs: BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None },
+            blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
             extra_debs: vec![],
             snapshot: None,
         }
@@ -663,7 +690,7 @@ mod tests {
 
     #[test]
     fn clone_manifest_tracks_pin_and_dev_inputs() {
-        let sig = |kc, pc, patches| clone_manifest(&lock_with(kc, pc), patches, &[]).signature;
+        let sig = |kc, pc, patches| clone_manifest(&lock_with(kc, pc), patches, &[]).unwrap().signature;
         let base = sig("kc1", "pc1", PatchSeries::Pinned);
         // Same pins → same signature (a plain rebuild reuses the tree).
         assert_eq!(base, sig("kc1", "pc1", PatchSeries::Pinned));
@@ -691,23 +718,23 @@ mod tests {
         // change with no commit change must restamp the tree (CACHE-4).
         let mut a = lock_with("kc1", "pc1");
         let mut b = lock_with("kc1", "pc1");
-        a.kernel.reference = "v7.1.1".into();
-        b.kernel.reference = "v7.1.2".into();
+        a.kernel.as_mut().unwrap().reference = "v7.1.1".into();
+        b.kernel.as_mut().unwrap().reference = "v7.1.2".into();
         assert_ne!(
-            clone_manifest(&a, PatchSeries::Pinned, &[]).signature,
-            clone_manifest(&b, PatchSeries::Pinned, &[]).signature
+            clone_manifest(&a, PatchSeries::Pinned, &[]).unwrap().signature,
+            clone_manifest(&b, PatchSeries::Pinned, &[]).unwrap().signature
         );
     }
 
     #[test]
     fn device_dts_content_folds_into_the_clone_signature() {
         let lock = lock_with("kc1", "pc1");
-        let sig = |dts: &[String]| clone_manifest(&lock, PatchSeries::Pinned, dts).signature;
+        let sig = |dts: &[String]| clone_manifest(&lock, PatchSeries::Pinned, dts).unwrap().signature;
 
         // A board with an upstream DTB folds nothing, so its tree signature is exactly
         // what it was before `device_dts` existed — its cached tree stays valid.
         let upstream = sig(&[]);
-        assert_eq!(upstream, clone_manifest(&lock, PatchSeries::Pinned, &[]).signature);
+        assert_eq!(upstream, clone_manifest(&lock, PatchSeries::Pinned, &[]).unwrap().signature);
 
         // Carrying a board `.dts` at all distinguishes the tree (it now holds an extra
         // source and a Makefile rule).
@@ -926,7 +953,9 @@ mod tests {
             toolchain_id: tc.to_string(),
         };
         let sig = |lock: &Lock, env: &BuildEnv| {
-            output_manifest(&build, lock, &opts, env, PatchSeries::Pinned, &[]).unwrap().signature
+            output_manifest(&build, build.kernel.compiled().unwrap(), lock, &opts, env, PatchSeries::Pinned, &[])
+                .unwrap()
+                .signature
         };
         let base = sig(&lock, &env("gcc-1"));
         // Identical inputs → identical signature (a plain rebuild restores).

@@ -19,7 +19,7 @@
 //! The build's own accel `.deb`s (from the local repo) are *not* archive
 //! packages, so their bytes are folded in directly ([`RootfsStore`] callers pass
 //! their sha256s), as is the assembled overlay tree. What is deliberately **not**
-//! folded is the per-image first-boot password (SEC-6): it is unique per
+//! folded is the per-image first-boot password: it is unique per
 //! build by design, so it is applied *after* restore (the rootfs node splices it
 //! into `/etc/shadow`, [`splice_shadow`]), keeping the cached tree reusable.
 //!
@@ -38,7 +38,13 @@ use std::path::{Path, PathBuf};
 /// logic changes in a way that alters the produced tree for unchanged inputs (e.g.
 /// the overlay merge order or the generated-config shape), so a logic change forces
 /// a fresh bootstrap rather than a stale hit.
-const ROOTFS_STAGE_VERSION: u32 = 2;
+///
+/// v4: the node generates the localization config (`/etc/locale.conf`,
+/// `/etc/locale.gen`, `/etc/localtime`, `/etc/default/keyboard`) into the pre-install
+/// overlay, so the `locales`/`keyboard-configuration`/`tzdata` packages configure
+/// themselves against it and `locale-gen` runs during the install — a different tree
+/// from the same inputs.
+const ROOTFS_STAGE_VERSION: u32 = 4;
 
 /// Parse `mmdebstrap --simulate --verbose` output into the solved package set: one
 /// `"name version arch"` line per configured package, sorted and de-duplicated.

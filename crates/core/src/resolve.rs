@@ -41,27 +41,35 @@ pub fn resolve_device(
         });
     }
     let kdef = root.kernel(&kernel_id)?;
-    if !kdef.supported_socs.contains(&device.soc) {
+    if !kdef.supported_socs().contains(&device.soc) {
         return Err(ConfigError::SocMismatch {
             kernel: kernel_id,
             soc: device.soc.to_string(),
-            supported: join(&kdef.supported_socs),
+            supported: join(kdef.supported_socs()),
         });
     }
-
-    // rkbin is layered: the SoC supplies the defaults (SoC-generic ATF, a
-    // common-memory DDR TPL, and BL32 where the boot chain needs OP-TEE) and the
-    // device overrides per field (typically just the DDR TPL for its DRAM). §3.6.
-    let rkbin = resolve_rkbin(&soc.rkbin, &device.rkbin, device_name)?;
 
     // A board carrying its own device tree must actually build the DTB it boots;
     // check that here so a filename typo is a typed error rather than a kernel that
     // builds fine and then finds no DTB at boot. §4.
     validate_device_dts(&device.device_dts, &device.kernel_dtb, device_name)?;
 
-    // Kernel-owned fragments first, then device fragments (apply order).
-    let mut config_fragments = kdef.config_fragments.clone();
-    config_fragments.extend(device.device_config_fragments.iter().cloned());
+    let layout = overrides.layout.unwrap_or(device.default_layout);
+
+    // The boot method's *own* requirements, enforced only for the method that has
+    // them: rkbin blobs and a `uboot_defconfig` where u-boot is compiled, a board
+    // profile where a signed kernel partition is written. A board is never asked for
+    // a field its boot method would not read.
+    let boot = resolve_boot(
+        &bm,
+        &device,
+        &soc,
+        device_name,
+        layout,
+        overrides.board.as_deref(),
+    )?;
+
+    let kernel = resolve_kernel(kdef, kernel_id, &device, device_name)?;
 
     let suite = overrides
         .suite
@@ -71,7 +79,6 @@ pub fn resolve_device(
     // the shape guard also keeps a leading-`-` suite from ever reaching mmdebstrap as
     // a positional (SUB-2 backstop).
     validate_suite(&suite)?;
-    let layout = overrides.layout.unwrap_or(device.default_layout);
     let features = overrides.features.clone().unwrap_or_default();
     // Reject a feature selected twice: its overlay + packages would otherwise apply
     // twice (COR-15).
@@ -118,17 +125,26 @@ pub fn resolve_device(
     // not tell which repo to activate.
     let apt_sources = merge_apt_sources(&loaded_features)?;
 
-    // Merge the rootfs package set: base ∪ soc ∪ boot-method ∪ device ∪ Σ
+    // Merge the rootfs package set: base ∪ soc ∪ boot-method ∪ device ∪ kernel ∪ Σ
     // features, de-duplicated with order preserved (base first). apt solves the
     // set, so order is not load-bearing — it only keeps the merged list stable.
+    //
+    // A distro-package kernel joins the set here: it installs from the mirror like
+    // any other package (and is pinned like one, in the solved manifest), rather than
+    // arriving as a built artifact through the local repo.
     let base = root.base()?;
+    let kernel_packages: Vec<String> = match &kernel {
+        ResolvedKernel::Distro(k) => vec![k.package.clone()],
+        ResolvedKernel::Compiled(_) => Vec::new(),
+    };
     let mut rootfs_packages = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for src in [
         base.packages.as_slice(),
         soc.packages.as_slice(),
-        bm.packages.as_slice(),
+        bm.packages(),
         device.packages.as_slice(),
+        kernel_packages.as_slice(),
     ] {
         extend_unique(&mut rootfs_packages, &mut seen, src);
     }
@@ -144,7 +160,7 @@ pub fn resolve_device(
     for src in [
         base.exclude.as_slice(),
         soc.exclude.as_slice(),
-        bm.exclude.as_slice(),
+        bm.exclude(),
         device.exclude.as_slice(),
     ] {
         extend_unique(&mut rootfs_exclude, &mut seen_exclude, src);
@@ -168,24 +184,22 @@ pub fn resolve_device(
         .clone()
         .unwrap_or_else(|| device.image_size.clone());
 
-    // Validate the authored geometry strings up front: a typo (`"2GB!"`) or
-    // an unparseable offset must fail at resolve, not deep in the image stage after
-    // the whole pipeline has run. The resolved build keeps the authored strings;
-    // the image node re-parses them into its byte/LBA `Geometry`. A zero-size image
-    // is not buildable, so it is rejected here.
-    for s in [
-        image_size.as_str(),
-        bm.idbloader_offset.as_str(),
-        bm.uboot_itb_offset.as_str(),
-        bm.rootfs_offset.as_str(),
-    ] {
-        crate::size::parse_size(s)?;
-    }
+    // Validate the authored image size up front: a typo (`"2GB!"`) must fail at
+    // resolve, not deep in the image stage after the whole pipeline has run. The
+    // resolved build keeps the authored string; the image node re-parses it into its
+    // byte/LBA `Geometry`. A zero-size image is not buildable. (The boot method's own
+    // offsets are parsed the same way, in `resolve_boot`.)
     if crate::size::parse_size(&image_size)? == 0 {
         return Err(ConfigError::InvalidSize {
             value: image_size.clone(),
         });
     }
+
+    // Localization: base-layer distro policy (locale, generated locales, timezone) plus
+    // the device's keymap, each overridable. Validated here so a bad zone or a locale
+    // with no codeset is a typed error at resolve, not a dangling /etc/localtime or an
+    // ungenerated LANG discovered on the booted board.
+    let (locale, locales_generate, timezone, keymap) = resolve_l10n(&base, &device, overrides)?;
 
     Ok(ResolvedBuild {
         device: device_name.to_string(),
@@ -193,18 +207,7 @@ pub fn resolve_device(
         arch: soc.arch,
         soc: device.soc,
         boot_method,
-        kernel: ResolvedKernel {
-            id: kernel_id,
-            flavor: kdef.flavor,
-            source: kdef.source,
-            track: kdef.track,
-            base_defconfig: kdef.base_defconfig,
-            // The `"none"` sentinel becomes a typed absence exactly here; nothing
-            // downstream compares the authored string.
-            patch_profile: crate::profile::patch_profile(&kdef.patch_profile).map(str::to_string),
-            patches_url: kdef.patches_url,
-            config_fragments,
-        },
+        kernel,
         suite,
         features,
         rootfs_packages,
@@ -212,9 +215,11 @@ pub fn resolve_device(
         layout,
         image_size,
         hostname: device.hostname,
-        uboot_defconfig: device.uboot_defconfig,
-        uboot_source: bm.uboot_source,
-        uboot_ref: bm.uboot_ref,
+        locale,
+        locales_generate,
+        timezone,
+        keymap,
+        boot,
         kernel_dtb: device.kernel_dtb,
         device_dts: device.device_dts,
         dt_dir: soc.dt_dir,
@@ -223,12 +228,6 @@ pub fn resolve_device(
         uboot_arch: arch.uboot_arch,
         cross_compile: arch.cross_compile,
         kbuild_image: arch.kbuild_image,
-        rkbin,
-        offsets: Offsets {
-            idbloader: bm.idbloader_offset,
-            uboot_itb: bm.uboot_itb_offset,
-            rootfs: bm.rootfs_offset,
-        },
         // Sources ride only when a feature builds the stack; a base build drops
         // them (validated above: `build_media_accel` implies the SoC supplies both).
         userspace: build_media_accel.then_some(soc.userspace).flatten(),
@@ -236,6 +235,194 @@ pub fn resolve_device(
         apt_sources,
         extra_debs,
     })
+}
+
+/// Resolve the boot-method-specific half of a build, enforcing that method's
+/// requirements — and only that method's.
+///
+/// This is where the layered config stops being uniform: `rockchip-rkbin` compiles
+/// u-boot and so demands a `uboot_defconfig` and an rkbin blob set, while
+/// `depthcharge` compiles no bootloader at all and instead demands a board profile.
+/// Asking every device for every method's fields would make a Chromebook declare a
+/// u-boot defconfig it will never build.
+fn resolve_boot(
+    bm: &BootMethodLayer,
+    device: &DeviceLayer,
+    soc: &SocLayer,
+    device_name: &str,
+    layout: Layout,
+    board_override: Option<&str>,
+) -> Result<ResolvedBoot, ConfigError> {
+    match bm {
+        BootMethodLayer::RockchipRkbin(l) => {
+            let uboot_defconfig = device
+                .uboot_defconfig
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .ok_or(ConfigError::MissingBootField {
+                    device: device_name.to_string(),
+                    boot_method: BootMethod::RockchipRkbin.as_str(),
+                    what: "uboot_defconfig",
+                })?;
+            // rkbin is layered: the SoC supplies the defaults (SoC-generic ATF, a
+            // common-memory DDR TPL, and BL32 where the boot chain needs OP-TEE) and
+            // the device overrides per field (typically just the DDR TPL). §3.6.
+            let rkbin = resolve_rkbin(&soc.rkbin, &device.rkbin, device_name)?;
+            for s in [&l.idbloader_offset, &l.uboot_itb_offset, &l.rootfs_offset] {
+                crate::size::parse_size(s)?;
+            }
+            Ok(ResolvedBoot::RockchipRkbin(ResolvedRkbinBoot {
+                uboot_defconfig,
+                uboot_source: l.uboot_source.clone(),
+                uboot_ref: l.uboot_ref.clone(),
+                rkbin,
+                offsets: Offsets {
+                    idbloader: l.idbloader_offset.clone(),
+                    uboot_itb: l.uboot_itb_offset.clone(),
+                    rootfs: l.rootfs_offset.clone(),
+                },
+            }))
+        }
+        BootMethodLayer::Depthcharge(l) => {
+            // `split` exists to put the bootloader on a *different* medium from the
+            // rootfs. Depthcharge has no bootloader of ours, and the firmware finds
+            // the kernel partition by scanning the GPT of the same disk it will root
+            // from — so there is nothing to split off.
+            if layout == Layout::Split {
+                return Err(ConfigError::UnsupportedLayout {
+                    boot_method: BootMethod::Depthcharge.as_str(),
+                    layout: layout.to_string(),
+                    why: "the firmware finds the kernel partition by scanning the boot \
+                          medium's own GPT, so there is no separate bootloader medium to emit",
+                });
+            }
+            let dc = device
+                .depthcharge
+                .as_ref()
+                .ok_or(ConfigError::MissingBootField {
+                    device: device_name.to_string(),
+                    boot_method: BootMethod::Depthcharge.as_str(),
+                    what: "a [depthcharge] block (board, supported_boards)",
+                })?;
+            let board = board_override.unwrap_or(&dc.board).to_string();
+            if !dc.supported_boards.contains(&board) {
+                return Err(ConfigError::UnknownBoardProfile {
+                    device: device_name.to_string(),
+                    board,
+                    supported: dc.supported_boards.join(", "),
+                });
+            }
+            for s in [&l.kpart_offset, &l.kpart_size, &l.rootfs_offset] {
+                crate::size::parse_size(s)?;
+            }
+            validate_depthcharge_cmdline(&l.cmdline)?;
+            let flags =
+                crate::chromeos::kpart_flags(l.kpart_priority, l.kpart_tries, l.kpart_successful)?;
+            Ok(ResolvedBoot::Depthcharge(ResolvedDepthchargeBoot {
+                board,
+                kpart: Kpart {
+                    offset: l.kpart_offset.clone(),
+                    size: l.kpart_size.clone(),
+                    priority: l.kpart_priority,
+                    tries: l.kpart_tries,
+                    successful: l.kpart_successful,
+                    flags,
+                },
+                cmdline: l.cmdline.clone(),
+                rootfs_offset: l.rootfs_offset.clone(),
+            }))
+        }
+    }
+}
+
+/// Reject a depthcharge cmdline that `depthchargectl` cannot carry, or that claims
+/// something it is not ours to claim.
+///
+/// Two rules, each learned from a boot that failed:
+///  - **No `%`.** `depthchargectl` writes its computed cmdline back through a
+///    `ConfigParser` whose interpolation rejects a raw `%` — it is a hard error, and
+///    no escaping works (`%%U` is un-escaped on read and rejected on write). The
+///    `kern_guid=%U` the firmware substitutes is prepended later, by `mkdepthcharge`,
+///    past that round-trip.
+///  - **No `root=`.** `depthchargectl` derives root from `/etc/fstab` and *strips* any
+///    `root=` that disagrees with it — here and again on every on-device kernel
+///    upgrade. Authoring one would be a value that silently does not survive.
+fn validate_depthcharge_cmdline(cmdline: &str) -> Result<(), ConfigError> {
+    let bad = |why| {
+        Err(ConfigError::InvalidCmdline {
+            value: cmdline.to_string(),
+            why,
+        })
+    };
+    if cmdline.contains('%') {
+        return bad(
+            "it contains a '%', which depthchargectl's config round-trip rejects outright \
+             (no escaping works); the kern_guid=%U substitution is added by mkdepthcharge, \
+             past that round-trip",
+        );
+    }
+    if cmdline.split_whitespace().any(|tok| tok.starts_with("root=")) {
+        return bad(
+            "it sets `root=`, which depthchargectl derives from the image's /etc/fstab and \
+             strips when it disagrees — remove it and let fstab be the single source",
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the kernel axis, and reject the two device fields a distro-package
+/// kernel could never act on.
+///
+/// A distro kernel compiles nothing, so a `device_dts` or `device_config_fragments`
+/// on such a build is not merely redundant — it is a board whose device tree will
+/// never be compiled and whose kconfig will never be merged. That reads as
+/// configured and boots as broken, so it is a typed error instead.
+fn resolve_kernel(
+    kdef: KernelDef,
+    kernel_id: String,
+    device: &DeviceLayer,
+    device_name: &str,
+) -> Result<ResolvedKernel, ConfigError> {
+    match kdef {
+        KernelDef::Compiled(k) => {
+            // Kernel-owned fragments first, then device fragments (apply order).
+            let mut config_fragments = k.config_fragments;
+            config_fragments.extend(device.device_config_fragments.iter().cloned());
+            Ok(ResolvedKernel::Compiled(ResolvedCompiledKernel {
+                id: kernel_id,
+                flavor: k.flavor,
+                source: k.source,
+                track: k.track,
+                base_defconfig: k.base_defconfig,
+                // The `"none"` sentinel becomes a typed absence exactly here; nothing
+                // downstream compares the authored string.
+                patch_profile: crate::profile::patch_profile(&k.patch_profile).map(str::to_string),
+                patches_url: k.patches_url,
+                config_fragments,
+            }))
+        }
+        KernelDef::Distro(k) => {
+            for (what, declared) in [
+                ("device_dts", !device.device_dts.is_empty()),
+                (
+                    "device_config_fragments",
+                    !device.device_config_fragments.is_empty(),
+                ),
+            ] {
+                if declared {
+                    return Err(ConfigError::DistroKernelCompilesNothing {
+                        device: device_name.to_string(),
+                        kernel: kernel_id,
+                        what,
+                    });
+                }
+            }
+            Ok(ResolvedKernel::Distro(ResolvedDistroKernel {
+                id: kernel_id,
+                package: k.package,
+            }))
+        }
+    }
 }
 
 /// Validate a device's loose device-tree sources against its `kernel_dtb` (§4).
@@ -357,7 +544,7 @@ fn merge_extra_debs(
     };
     absorb(&base.extra_debs)?;
     absorb(&soc.extra_debs)?;
-    absorb(&bm.extra_debs)?;
+    absorb(bm.extra_debs())?;
     absorb(&device.extra_debs)?;
     for (_, feat) in features {
         absorb(&feat.extra_debs)?;
@@ -368,13 +555,13 @@ fn merge_extra_debs(
 /// One field of the apt one-line source format: non-empty printable ASCII with
 /// no whitespace and no `[`/`]` — whitespace separates the line's positional
 /// fields and the brackets delimit its option block, so either would be parsed
-/// as structure, not content (SEC-8).
+/// as structure, not content.
 fn apt_line_token(v: &str) -> bool {
     !v.is_empty() && v.chars().all(|c| c.is_ascii_graphic() && c != '[' && c != ']')
 }
 
 /// Validate a feature's [`AptSource`] against the one-line source grammar the
-/// bootstrap renders it into (SEC-8): every field a clean token, the URI
+/// bootstrap renders it into: every field a clean token, the URI
 /// http(s) (any other transport would sidestep the mirror trust model), the
 /// name additionally separator-free (it becomes a dedup key and file stem), and
 /// at least one component unless the suite is an exact path (ends in `/`).
@@ -408,8 +595,8 @@ fn validate_apt_source(feature: &str, src: &AptSource) -> Result<(), ConfigError
 }
 
 /// Union the selected features' [`AptSource`]s, keyed by `name`. Each source is
-/// validated against the apt line grammar first ([`validate_apt_source`],
-/// SEC-8). Two features may legitimately reference the same repo — those
+/// validated against the apt line grammar first ([`validate_apt_source`]).
+/// Two features may legitimately reference the same repo — those
 /// collapse to one entry — but a same-name pair with different settings is
 /// [`ConfigError::ConflictingAptSource`], since the bootstrap solve could not tell
 /// which repo to activate. Order follows first appearance across the feature list.
@@ -449,11 +636,16 @@ pub fn resolve_recipe(
         suite: cli.suite.clone().or(recipe.suite),
         layout: cli.layout.or(recipe.layout),
         boot_method: cli.boot_method,
+        board: cli.board.clone(),
         features: cli
             .features
             .clone()
             .or_else(|| (!recipe.features.is_empty()).then_some(recipe.features)),
         image_size: cli.image_size.clone().or(recipe.image_size),
+        locale: cli.locale.clone().or(recipe.locale),
+        locales_generate: cli.locales_generate.clone().or(recipe.locales_generate),
+        timezone: cli.timezone.clone().or(recipe.timezone),
+        keymap: cli.keymap.clone().or(recipe.keymap),
     };
     resolve_device(root, &recipe.device, &merged)
 }
@@ -493,6 +685,171 @@ fn validate_suite(suite: &str) -> Result<(), ConfigError> {
             value: suite.to_string(),
         })
     }
+}
+
+/// Resolve the localization axis: the system locale, the locales generated into the
+/// image, the timezone, and the console keymap.
+///
+/// The three system-wide values default at the **base** layer (they are distro policy,
+/// not hardware) while the keymap defaults at the **device** layer (whether a console
+/// keymap means anything is a property of the board); a recipe or CLI flag overrides
+/// any of them.
+///
+/// The one invariant worth stating: the resolved `locale` is *always* generated. It
+/// leads the generated set unconditionally, so `LANG` can never name a locale the
+/// image lacks — the failure that makes a shell print `Setting locale failed` on every
+/// login.
+///
+/// It leads the set even when glibc would carry it anyway (`C.UTF-8` is built into
+/// `libc-bin` and needs no `locale-gen` line to *work*). That is not redundant: the
+/// `locales` package builds the choice list `dpkg-reconfigure locales` offers for the
+/// default locale out of `/etc/locale.gen`, so a system locale missing from that file
+/// is a system locale the user cannot see or re-select on the running board.
+fn resolve_l10n(
+    base: &BaseLayer,
+    device: &DeviceLayer,
+    overrides: &Overrides,
+) -> Result<(String, Vec<String>, String, Option<Keymap>), ConfigError> {
+    let locale = overrides
+        .locale
+        .clone()
+        .unwrap_or_else(|| base.locale.clone());
+    validate_locale(&locale)?;
+
+    let extras = overrides
+        .locales_generate
+        .clone()
+        .unwrap_or_else(|| base.locales_generate.clone());
+
+    // The system locale leads the generated set, then the configured extras.
+    let mut locales_generate = vec![locale.clone()];
+    let mut seen = std::collections::HashSet::from([locale.clone()]);
+    for extra in &extras {
+        validate_locale(extra)?;
+        if seen.insert(extra.clone()) {
+            locales_generate.push(extra.clone());
+        }
+    }
+
+    let timezone = overrides
+        .timezone
+        .clone()
+        .unwrap_or_else(|| base.timezone.clone());
+    validate_timezone(&timezone)?;
+
+    let keymap = overrides.keymap.clone().or_else(|| device.keymap.clone());
+    if let Some(k) = &keymap {
+        validate_keymap(k)?;
+    }
+
+    Ok((locale, locales_generate, timezone, keymap))
+}
+
+/// Reject a locale `locale-gen` could not act on, or that would not survive the two
+/// files it lands in.
+///
+/// The name becomes a `LANG=` value in `/etc/locale.conf` (shell-sourced by `pam_env`)
+/// and the left half of an `/etc/locale.gen` line, so it must be a bare locale name —
+/// and it must carry a codeset, since `locale-gen` is given `<name> <codeset>` pairs
+/// and there is nowhere else for that half to come from. This is a UTF-8-era
+/// constraint on the *build-time* knob only: a legacy 8-bit locale is still one
+/// `dpkg-reconfigure locales` away on the running image.
+fn validate_locale(locale: &str) -> Result<(), ConfigError> {
+    if locale.is_empty() {
+        return Err(ConfigError::InvalidLocale {
+            value: locale.to_string(),
+            why: "empty",
+        });
+    }
+    if !locale
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@'))
+    {
+        return Err(ConfigError::InvalidLocale {
+            value: locale.to_string(),
+            why: "must be a bare locale name ([A-Za-z0-9._-@], e.g. 'en_US.UTF-8')",
+        });
+    }
+    if crate::model::locale_codeset(locale).is_none() {
+        return Err(ConfigError::InvalidLocale {
+            value: locale.to_string(),
+            why: "has no codeset — locale-gen needs one (write 'de_DE.UTF-8', not 'de_DE')",
+        });
+    }
+    Ok(())
+}
+
+/// Reject a timezone that is not a `tzdata` zone name.
+///
+/// It becomes the target of the `/etc/localtime` symlink under `/usr/share/zoneinfo/`,
+/// so a `..` or a leading `/` would aim the system clock at an arbitrary file outside
+/// the zone database. Shape only — whether the zone *exists* is a fact about the
+/// target's `tzdata`, which the rootfs stage checks in the chroot.
+fn validate_timezone(tz: &str) -> Result<(), ConfigError> {
+    if tz.is_empty() {
+        return Err(ConfigError::InvalidTimezone {
+            value: tz.to_string(),
+            why: "empty",
+        });
+    }
+    if tz.starts_with('/') || tz.ends_with('/') {
+        return Err(ConfigError::InvalidTimezone {
+            value: tz.to_string(),
+            why: "must be a zone name relative to /usr/share/zoneinfo (e.g. 'America/New_York')",
+        });
+    }
+    for part in tz.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(ConfigError::InvalidTimezone {
+                value: tz.to_string(),
+                why: "must not contain an empty or dot component (no path traversal)",
+            });
+        }
+        if !part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+'))
+        {
+            return Err(ConfigError::InvalidTimezone {
+                value: tz.to_string(),
+                why: "zone components are [A-Za-z0-9_+-] (e.g. 'Etc/GMT+5')",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Reject a keymap value `/etc/default/keyboard` cannot hold.
+///
+/// That file is *sourced by shell* — `console-setup` and `keyboard-setup` read it with
+/// `.` — so every value is rendered inside double quotes and a `"`, `$`, or backtick in
+/// one would end the string and run as code on the target. The XKB grammar needs none
+/// of those characters, so the safe set is also the complete one.
+fn validate_keymap(keymap: &Keymap) -> Result<(), ConfigError> {
+    if keymap.layout.is_empty() {
+        return Err(ConfigError::InvalidKeymap {
+            field: "layout",
+            value: keymap.layout.clone(),
+            why: "empty — a keymap must name a layout (e.g. 'us')",
+        });
+    }
+    for (field, value) in [
+        ("layout", &keymap.layout),
+        ("model", &keymap.model),
+        ("variant", &keymap.variant),
+        ("options", &keymap.options),
+    ] {
+        if !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ',' | ':' | '_' | '-' | '+' | '.'))
+        {
+            return Err(ConfigError::InvalidKeymap {
+                field,
+                value: value.clone(),
+                why: "XKB values are [A-Za-z0-9,:_+.-] — /etc/default/keyboard is sourced by shell",
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -646,6 +1003,193 @@ mod tests {
     }
 
     #[test]
+    fn l10n_defaults_come_from_the_layer_that_determines_them() {
+        let root = repo_root();
+
+        // The RK1 is a headless server: it takes the base layer's system-wide locale
+        // and timezone, and has no keymap at all — nothing is typing at its console.
+        let rk1 = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
+        assert_eq!(rk1.locale, "C.UTF-8");
+        assert_eq!(rk1.timezone, "UTC");
+        assert_eq!(rk1.keymap, None, "a headless board declares no keymap");
+
+        // The C201 is a laptop, and is the one shipped board a console keymap
+        // configures anything on. It takes the same system-wide locale.
+        let c201 = resolve_recipe(&root, "asus-c201-forky", &Overrides::default()).unwrap();
+        assert_eq!(c201.locale, "C.UTF-8");
+        let keymap = c201.keymap.expect("a board with a keyboard declares a keymap");
+        assert_eq!(keymap.layout, "us");
+        assert_eq!(keymap.model, "pc105", "the bare-string form takes Debian's model");
+    }
+
+    #[test]
+    fn the_system_locale_is_always_generated() {
+        // The invariant: LANG can never name a locale the image does not carry. It
+        // holds even when the locale is one the config never listed, and even when it
+        // is C.UTF-8 — which glibc builds in and *would* work ungenerated, but which
+        // must still appear in /etc/locale.gen, because that file is where the `locales`
+        // package builds the choice list `dpkg-reconfigure locales` offers.
+        let root = repo_root();
+
+        let base = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
+        assert_eq!(base.locales_generate, vec!["C.UTF-8", "en_US.UTF-8"]);
+        assert!(base.locales_generate.contains(&base.locale));
+
+        // An override the base never lists is generated anyway, and leads the set.
+        let de = resolve_recipe(
+            &root,
+            "turing-rk1-forky",
+            &Overrides {
+                locale: Some("de_DE.UTF-8".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(de.locales_generate, vec!["de_DE.UTF-8", "en_US.UTF-8"]);
+
+        // Naming it in both places generates it once, not twice.
+        let dup = resolve_recipe(
+            &root,
+            "turing-rk1-forky",
+            &Overrides {
+                locale: Some("fr_FR.UTF-8".into()),
+                locales_generate: Some(vec!["fr_FR.UTF-8".into(), "ja_JP.UTF-8".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(dup.locales_generate, vec!["fr_FR.UTF-8", "ja_JP.UTF-8"]);
+    }
+
+    #[test]
+    fn a_keymap_override_reaches_a_board_that_defaults_none() {
+        // `console-setup` ships on every image, so a keymap is always *actionable* —
+        // a headless board simply has no reason to default one. Plugging a USB keyboard
+        // into the RK1's HDMI console is a real thing to do, and `--keymap` covers it.
+        let root = repo_root();
+        let b = resolve_recipe(
+            &root,
+            "turing-rk1-forky",
+            &Overrides {
+                keymap: Some(Keymap::from_layout("gb")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(b.keymap.unwrap().layout, "gb");
+    }
+
+    #[test]
+    fn validate_locale_demands_a_codeset_and_rejects_shell_metacharacters() {
+        for ok in ["C.UTF-8", "en_US.UTF-8", "sr_RS.UTF-8@latin", "ja_JP.UTF-8"] {
+            assert!(validate_locale(ok).is_ok(), "{ok} should be a valid locale");
+        }
+        for bad in [
+            "",                    // empty
+            "de_DE",               // no codeset: locale-gen takes `<name> <codeset>` pairs
+            "en_US.UTF-8; rm -rf", // shell metacharacters (it lands in a sourced file)
+            "en_US.UTF-8\"$(id)",  // quote + substitution
+            "../../etc/passwd",    // path shape
+        ] {
+            assert!(
+                matches!(validate_locale(bad), Err(ConfigError::InvalidLocale { .. })),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn locale_codeset_is_the_half_after_the_dot_and_before_any_modifier() {
+        assert_eq!(crate::model::locale_codeset("en_US.UTF-8"), Some("UTF-8"));
+        assert_eq!(crate::model::locale_codeset("C.UTF-8"), Some("UTF-8"));
+        // A modifier rides *after* the codeset: `sr_RS.UTF-8@latin UTF-8` is the real
+        // /etc/locale.gen line, so the modifier must not be swept into the codeset.
+        assert_eq!(crate::model::locale_codeset("sr_RS.UTF-8@latin"), Some("UTF-8"));
+        assert_eq!(crate::model::locale_codeset("de_DE"), None);
+        assert_eq!(crate::model::locale_codeset("de_DE."), None);
+    }
+
+    #[test]
+    fn validate_timezone_rejects_anything_that_escapes_the_zone_database() {
+        for ok in ["UTC", "America/New_York", "Etc/GMT+5", "America/Argentina/Buenos_Aires"] {
+            assert!(validate_timezone(ok).is_ok(), "{ok} should be a valid zone");
+        }
+        for bad in [
+            "",                        // empty
+            "/etc/shadow",             // absolute: escapes /usr/share/zoneinfo
+            "../../../etc/shadow",     // traversal: /etc/localtime would point at it
+            "America/../../etc/shadow",// traversal mid-path
+            "Europe/",                 // trailing separator
+            "Europe/Ber lin",          // space
+            "Europe/Berlin;id",        // shell metacharacter
+        ] {
+            assert!(
+                matches!(validate_timezone(bad), Err(ConfigError::InvalidTimezone { .. })),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_keymap_rejects_what_a_sourced_shell_file_cannot_hold() {
+        assert!(validate_keymap(&Keymap::from_layout("us")).is_ok());
+        assert!(validate_keymap(&Keymap {
+            layout: "us,de".into(), // XKB takes a layout list
+            model: "pc105".into(),
+            variant: "nodeadkeys".into(),
+            options: "ctrl:nocaps,grp:alt_shift_toggle".into(),
+        })
+        .is_ok());
+
+        // /etc/default/keyboard is sourced by console-setup, so a quote closes the
+        // string and what follows runs as code on the target.
+        let injected = Keymap {
+            layout: "us\"; id #".into(),
+            ..Keymap::from_layout("us")
+        };
+        assert!(matches!(
+            validate_keymap(&injected),
+            Err(ConfigError::InvalidKeymap { field: "layout", .. })
+        ));
+        let subst = Keymap {
+            options: "$(id)".into(),
+            ..Keymap::from_layout("us")
+        };
+        assert!(matches!(
+            validate_keymap(&subst),
+            Err(ConfigError::InvalidKeymap { field: "options", .. })
+        ));
+        assert!(matches!(
+            validate_keymap(&Keymap::from_layout("")),
+            Err(ConfigError::InvalidKeymap { field: "layout", .. })
+        ));
+    }
+
+    #[test]
+    fn a_keymap_parses_from_a_bare_layout_or_a_table() {
+        #[derive(serde::Deserialize)]
+        struct Holder {
+            keymap: Keymap,
+        }
+
+        // The common case: a layout code, everything else Debian's default.
+        let bare: Holder = toml::from_str("keymap = \"us\"").unwrap();
+        assert_eq!(bare.keymap, Keymap::from_layout("us"));
+
+        // The full case: a table, with the unstated fields still defaulted.
+        let table: Holder =
+            toml::from_str("[keymap]\nlayout = \"gb\"\noptions = \"ctrl:nocaps\"\n").unwrap();
+        assert_eq!(table.keymap.layout, "gb");
+        assert_eq!(table.keymap.model, "pc105");
+        assert_eq!(table.keymap.options, "ctrl:nocaps");
+
+        // A typo in the table is an error, not a silently dropped field — which is the
+        // whole reason this type has a hand-written Deserialize.
+        let typo = toml::from_str::<Holder>("[keymap]\nlayout = \"gb\"\nvarient = \"extd\"\n");
+        assert!(typo.is_err(), "an unknown keymap field must be rejected");
+    }
+
+    #[test]
     fn rk1_recipe_resolves_expected_axes() {
         let root = repo_root();
         let b = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
@@ -667,18 +1211,15 @@ mod tests {
         assert!(b.rootfs_packages.contains(&"openssh-server".to_string()));
         assert!(b.rootfs_packages.contains(&"ffmpeg-rk".to_string()));
         assert_eq!(b.rootfs_exclude, vec!["isc-dhcp-client"]);
-        assert_eq!(b.kernel.id, "rk3588-mainline-7.1");
-        assert_eq!(b.uboot_ref, "v2026.04");
+        assert_eq!(b.kernel.id(), "rk3588-mainline-7.1");
         assert_eq!(b.kernel_dtb, "rockchip/rk3588-turing-rk1.dtb");
-        assert_eq!(b.offsets.idbloader, "32KiB");
-        assert_eq!(b.offsets.uboot_itb, "8MiB");
-        assert_eq!(b.offsets.rootfs, "16MiB");
         assert!(b.modules.contains(&"rga3".to_string()));
         assert!(b.modules.contains(&"rkvenc".to_string()));
         // kernel fragments precede device fragments in apply order; the generated
         // Debian baseline is first, then the curated rockchip slices.
+        let kernel = b.kernel.compiled().expect("the RK1 compiles its kernel");
         assert_eq!(
-            b.kernel.config_fragments,
+            kernel.config_fragments,
             vec![
                 "base/debian-arm64",
                 "soc/rk3588",
@@ -686,7 +1227,16 @@ mod tests {
                 "device/turing-rk1"
             ]
         );
-        assert_eq!(b.rkbin.atf, "rk3588_bl31_v1.51.elf");
+        // The boot half resolves as the rkbin variant, carrying the u-boot source,
+        // the raw-gap offsets, and the SoC-inherited blob set.
+        let boot = b.rkbin_boot().expect("the RK1 boots via rockchip-rkbin");
+        assert_eq!(boot.uboot_ref, "v2026.04");
+        assert_eq!(boot.uboot_defconfig, "turing-rk1-rk3588_defconfig");
+        assert_eq!(boot.offsets.idbloader, "32KiB");
+        assert_eq!(boot.offsets.uboot_itb, "8MiB");
+        assert_eq!(boot.offsets.rootfs, "16MiB");
+        assert_eq!(boot.rkbin.atf, "rk3588_bl31_v1.51.elf");
+        assert!(b.depthcharge_boot().is_none());
     }
 
     #[test]
@@ -700,6 +1250,130 @@ mod tests {
         let b = resolve_device(&root, "turing-rk1", &ov).unwrap();
         assert_eq!(b.suite, "sid");
         assert_eq!(b.layout, Layout::Split);
+    }
+
+    #[test]
+    fn c201_recipe_resolves_a_depthcharge_board_with_a_distro_kernel() {
+        let root = repo_root();
+        let b = resolve_recipe(&root, "asus-c201-forky", &Overrides::default()).unwrap();
+        assert_eq!(b.arch, Arch::Armv7);
+        assert_eq!(b.arch.debian_arch(), "armhf");
+        assert_eq!(b.soc, Soc::Rk3288);
+        assert_eq!(b.boot_method, BootMethod::Depthcharge);
+        assert_eq!(b.suite, "forky");
+
+        // The kernel is Debian's: no source, no fragments, no patches — and the
+        // package joins the rootfs set, which is how it gets installed and pinned.
+        assert!(!b.compiles_kernel());
+        assert_eq!(b.kernel.id(), "debian-armmp");
+        assert_eq!(b.kernel.patch_profile(), None);
+        assert!(b.kernel.compiled().is_none());
+        assert!(b.rootfs_packages.contains(&"linux-image-armmp".to_string()));
+
+        // The boot half is the kernel partition, with the bits that make the firmware
+        // boot it. These are the values read back off the image that boots the unit.
+        assert!(b.rkbin_boot().is_none(), "this board has no rkbin chain");
+        let boot = b.depthcharge_boot().expect("a depthcharge board");
+        assert_eq!(boot.board, "speedy", "the stock profile, which boots both firmwares");
+        assert_eq!(boot.kpart.offset, "12MiB");
+        assert_eq!(boot.kpart.size, "16MiB");
+        assert_eq!(boot.kpart.flags, 0x015A_0000_0000_0000);
+        assert_eq!(boot.rootfs_offset, "28MiB");
+        assert!(!boot.cmdline.contains("root="), "root= is depthchargectl's to derive");
+
+        // A laptop whose primary link is wifi: NetworkManager owns the interfaces, so
+        // the base layer's dhcpcd is dropped rather than left to fight it.
+        assert!(b.rootfs_packages.contains(&"network-manager".to_string()));
+        assert!(!b.rootfs_packages.contains(&"dhcpcd".to_string()));
+        assert!(b.rootfs_exclude.contains(&"dhcpcd".to_string()));
+        // The boot method brings the tool that signs the kernel, on the build host and
+        // on the running board alike.
+        assert!(b.rootfs_packages.contains(&"depthcharge-tools".to_string()));
+
+        // The RK3288 has no Rockchip media-accel stack, so nothing pulls those sources.
+        assert!(b.userspace.is_none());
+        assert!(b.ffmpeg.is_none());
+    }
+
+    #[test]
+    fn the_trixie_recipe_differs_only_in_the_suite() {
+        // One distro-kernel definition serves both releases: the *suite* picks the
+        // version (forky 7.1.x, trixie 6.12.x), which is the whole point of not
+        // authoring a kernel per release.
+        let root = repo_root();
+        let b = resolve_recipe(&root, "asus-c201-trixie", &Overrides::default()).unwrap();
+        assert_eq!(b.suite, "trixie");
+        assert_eq!(b.kernel.id(), "debian-armmp");
+        assert_eq!(b.device, "asus-c201");
+    }
+
+    #[test]
+    fn the_board_profile_is_selectable_and_validated() {
+        let root = repo_root();
+        // A unit running libreboot takes the other profile.
+        let ov = Overrides {
+            board: Some("speedy-libreboot".to_string()),
+            ..Default::default()
+        };
+        let b = resolve_device(&root, "asus-c201", &ov).unwrap();
+        assert_eq!(b.depthcharge_boot().unwrap().board, "speedy-libreboot");
+
+        // A profile the device does not support is rejected here rather than producing
+        // an image the firmware silently refuses to boot.
+        let ov = Overrides {
+            board: Some("kevin".to_string()),
+            ..Default::default()
+        };
+        match resolve_device(&root, "asus-c201", &ov).unwrap_err() {
+            ConfigError::UnknownBoardProfile { device, board, supported } => {
+                assert_eq!(device, "asus-c201");
+                assert_eq!(board, "kevin");
+                assert!(supported.contains("speedy"));
+            }
+            other => panic!("expected UnknownBoardProfile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_depthcharge_board_cannot_split_its_bootloader_off() {
+        // `split` puts the bootloader on a different medium from the rootfs. This board
+        // has no bootloader of ours, and the firmware finds its kernel by scanning the
+        // GPT of the disk it will root from — so there is nothing to split.
+        let root = repo_root();
+        let ov = Overrides {
+            layout: Some(Layout::Split),
+            ..Default::default()
+        };
+        match resolve_device(&root, "asus-c201", &ov).unwrap_err() {
+            ConfigError::UnsupportedLayout { boot_method, layout, .. } => {
+                assert_eq!(boot_method, "depthcharge");
+                assert_eq!(layout, "split");
+            }
+            other => panic!("expected UnsupportedLayout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_depthcharge_cmdline_may_not_carry_a_percent_or_a_root() {
+        // Both rules are the hardware talking. depthchargectl round-trips the computed
+        // cmdline through a ConfigParser that rejects a raw `%` outright — no escaping
+        // works — and it derives root from /etc/fstab, stripping any root that
+        // disagrees. Either mistake yields an image that boots and finds no disk.
+        for bad in [
+            "console=tty1 root=PARTUUID=%U/PARTNROFF=1",
+            "console=tty1 ro root=PARTUUID=1234",
+            "console=tty1 kern_guid=%U",
+        ] {
+            assert!(
+                matches!(
+                    validate_depthcharge_cmdline(bad),
+                    Err(ConfigError::InvalidCmdline { .. })
+                ),
+                "{bad:?} must be rejected"
+            );
+        }
+        // What the shipped board actually carries.
+        assert!(validate_depthcharge_cmdline("console=tty1 rootwait ro panic=30").is_ok());
     }
 
     #[test]
@@ -771,11 +1445,169 @@ mod tests {
     }
 
     #[test]
+    fn each_boot_method_requires_only_its_own_fields() {
+        // The whole point of the tagged layer: a board is asked for what its boot
+        // method reads, and nothing else. The RK1 must supply a u-boot defconfig and an
+        // rkbin blob set; the C201 must supply neither, and supplies a board profile
+        // instead. Resolving both proves each requirement is scoped, and the reverse —
+        // omitting a *required* field — is covered by MissingBootField below.
+        let root = repo_root();
+        let rk1 = resolve_device(&root, "turing-rk1", &Overrides::default()).unwrap();
+        let rk1_boot = rk1.rkbin_boot().unwrap();
+        assert!(!rk1_boot.uboot_defconfig.is_empty());
+        assert!(!rk1_boot.rkbin.atf.is_empty());
+
+        let c201 = resolve_device(&root, "asus-c201", &Overrides::default()).unwrap();
+        assert!(c201.depthcharge_boot().is_some());
+        // And the C201's device file genuinely carries neither — this is not an
+        // inherited default quietly filling in.
+        let device = root.device("asus-c201").unwrap();
+        assert!(device.uboot_defconfig.is_none());
+        assert_eq!(device.rkbin, RkbinLayer::default());
+    }
+
+    #[test]
+    fn a_board_missing_its_boot_methods_required_field_is_a_typed_error() {
+        // The error names the method that wants the field, not "every device needs
+        // this" — because it does not.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        for sub in ["arches", "socs", "boot-methods", "devices", "kernels"] {
+            std::fs::create_dir_all(p.join(sub)).unwrap();
+        }
+        std::fs::write(
+            p.join("arches/armv7.toml"),
+            "kernel_arch = \"arm\"\nuboot_arch = \"arm\"\n\
+             kbuild_image = \"arch/arm/boot/zImage\"\ncross_compile = \"\"\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("base.toml"), "packages = []\nexclude = []\n").unwrap();
+        std::fs::write(
+            p.join("socs/rk3288.toml"),
+            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("boot-methods/depthcharge.toml"),
+            "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
+             rootfs_offset = \"28MiB\"\nkpart_priority = 10\nkpart_tries = 5\n\
+             kpart_successful = true\ncmdline = \"ro\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("kernels/k.toml"),
+            "flavor = \"distro-package\"\npackage = \"linux-image-armmp\"\n\
+             supported_socs = [\"rk3288\"]\n",
+        )
+        .unwrap();
+        // A depthcharge board with no [depthcharge] block: nothing would know which
+        // firmware to sign for.
+        std::fs::write(
+            p.join("devices/dev.toml"),
+            "description = \"d\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
+             supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/d.dtb\"\n\
+             device_config_fragments = []\nsupported_kernels = [\"k\"]\ndefault_kernel = \"k\"\n\
+             default_suite = \"forky\"\ndefault_layout = \"combined\"\nhostname = \"d\"\n\
+             image_size = \"4G\"\n",
+        )
+        .unwrap();
+        let root = ConfigRoot::new(p);
+        match resolve_device(&root, "dev", &Overrides::default()).unwrap_err() {
+            ConfigError::MissingBootField { device, boot_method, what } => {
+                assert_eq!(device, "dev");
+                assert_eq!(boot_method, "depthcharge");
+                assert!(what.contains("depthcharge"));
+            }
+            other => panic!("expected MissingBootField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_distro_kernel_rejects_the_device_inputs_it_could_never_compile() {
+        // A board device tree and board kconfig fragments are compile inputs. Paired
+        // with a kernel that compiles nothing, they are not merely redundant — the DTB
+        // would never be built, and the board would read as configured and boot as
+        // broken. So it is an error, naming the field.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        for sub in ["arches", "socs", "boot-methods", "devices", "kernels"] {
+            std::fs::create_dir_all(p.join(sub)).unwrap();
+        }
+        std::fs::write(
+            p.join("arches/armv7.toml"),
+            "kernel_arch = \"arm\"\nuboot_arch = \"arm\"\n\
+             kbuild_image = \"arch/arm/boot/zImage\"\ncross_compile = \"\"\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("base.toml"), "packages = []\nexclude = []\n").unwrap();
+        std::fs::write(
+            p.join("socs/rk3288.toml"),
+            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("boot-methods/depthcharge.toml"),
+            "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
+             rootfs_offset = \"28MiB\"\nkpart_priority = 10\nkpart_tries = 5\n\
+             kpart_successful = true\ncmdline = \"ro\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("kernels/k.toml"),
+            "flavor = \"distro-package\"\npackage = \"linux-image-armmp\"\n\
+             supported_socs = [\"rk3288\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("devices/dev.toml"),
+            "description = \"d\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
+             supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/d.dtb\"\n\
+             device_config_fragments = [\"device/d\"]\nsupported_kernels = [\"k\"]\n\
+             default_kernel = \"k\"\ndefault_suite = \"forky\"\ndefault_layout = \"combined\"\n\
+             hostname = \"d\"\nimage_size = \"4G\"\n\n[depthcharge]\nboard = \"d\"\n\
+             supported_boards = [\"d\"]\n",
+        )
+        .unwrap();
+        let root = ConfigRoot::new(p);
+        match resolve_device(&root, "dev", &Overrides::default()).unwrap_err() {
+            ConfigError::DistroKernelCompilesNothing { device, kernel, what } => {
+                assert_eq!(device, "dev");
+                assert_eq!(kernel, "k");
+                assert_eq!(what, "device_config_fragments");
+            }
+            other => panic!("expected DistroKernelCompilesNothing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_boot_method_layer_rejects_another_methods_fields() {
+        // The variant is chosen by the filename, so a raw-gap offset in the depthcharge
+        // layer is an *unknown field* — a parse error naming the file, not a value
+        // silently carried into a build with no raw gap to write it to.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("boot-methods")).unwrap();
+        std::fs::write(
+            p.join("boot-methods/depthcharge.toml"),
+            "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
+             rootfs_offset = \"28MiB\"\nkpart_priority = 10\nkpart_tries = 5\n\
+             kpart_successful = true\ncmdline = \"ro\"\nidbloader_offset = \"32KiB\"\n",
+        )
+        .unwrap();
+        let root = ConfigRoot::new(p);
+        let err = root.boot_method(BootMethod::Depthcharge).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Parse { .. }) && err.to_string().contains("idbloader_offset"),
+            "expected a parse error naming the stray field, got: {err}"
+        );
+    }
+
+    #[test]
     fn base_resolution_selects_no_media_accel_sources() {
         // A plain device resolution (no recipe, hence no features) builds no
         // transcode stack, so it carries neither userspace nor ffmpeg sources even
         // though the RK3588 SoC layer supplies them — sources ride the feature, not
-        // the SoC (UX-21).
+        // the SoC.
         let root = repo_root();
         let b = resolve_device(&root, "turing-rk1", &Overrides::default()).unwrap();
         assert!(b.features.is_empty());
@@ -812,7 +1644,7 @@ mod tests {
     fn apt_sources_reject_line_structure_injection() {
         // The rendered `deb [signed-by=…] <uri> <suite> <components…>` line is
         // positional, so whitespace / brackets / newlines in any field — or a
-        // non-http(s) transport — must fail at resolve time (SEC-8), naming the
+        // non-http(s) transport — must fail at resolve time, naming the
         // field.
         let with = |mutate: &dyn Fn(&mut AptSource)| {
             let mut s = src("vendor", "repo");
@@ -1137,7 +1969,7 @@ mod fixture_tests {
             ..Default::default()
         };
         let b = resolve_recipe(&root, "rec", &cli).unwrap();
-        assert_eq!(b.kernel.id, "k2");
+        assert_eq!(b.kernel.id(), "k2");
         assert_eq!(b.suite, "sid");
         assert_eq!(b.layout, Layout::Split);
         assert_eq!(b.features, vec!["f2"]);
@@ -1163,7 +1995,7 @@ mod fixture_tests {
         let dir = tree.write();
         let root = ConfigRoot::new(dir.path());
         let b = resolve_recipe(&root, "rec", &Overrides::default()).unwrap();
-        assert_eq!(b.kernel.id, "k2");
+        assert_eq!(b.kernel.id(), "k2");
         assert_eq!(b.suite, "bookworm");
         assert_eq!(b.layout, Layout::Split);
         assert_eq!(b.features, vec!["f1"]);
@@ -1276,7 +2108,7 @@ mod fixture_tests {
         // A feature that builds the media-accel stack requires the SoC to supply the
         // `[userspace]`/`[ffmpeg]` sources. Rewrite the synthetic SoC to omit them
         // and mark the feature `requires_media_accel`: resolution must fail with the
-        // dedicated error naming the feature (UX-21), not build a stack with no
+        // dedicated error naming the feature, not build a stack with no
         // sources.
         let tree = Tree {
             features: vec![Feat { name: "accel", packages: &["p1"], exclude: &[] }],

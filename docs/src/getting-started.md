@@ -22,9 +22,10 @@ once.
   and Ubuntu are the primary targets; Fedora and Arch work too (`doctor` knows their
   package names). macOS can run the read-only commands but cannot build.
 - **A recent stable Rust toolchain**, installed via [rustup](https://rustup.rs).
-- **Disk and time.** A cold build compiles the kernel and u-boot and bootstraps a
-  Debian rootfs — budget a few GB of scratch space and tens of minutes the first
-  time. Later builds reuse cached trees.
+- **Disk and time.** A cold build bootstraps a Debian rootfs, and — for a board that
+  needs one — compiles a kernel and a bootloader. Budget a few GB of scratch space and
+  tens of minutes the first time; later builds reuse cached trees. A board that compiles
+  nothing (the C201) is much cheaper: it is a rootfs bootstrap and an image assembly.
 
 ## Let `doctor` find what's missing
 
@@ -63,15 +64,22 @@ For orientation, the checks fall into a few groups:
 
 | Group | What it covers | When |
 | --- | --- | --- |
-| Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler | always |
 | Rootfs bootstrap | `mmdebstrap` + unprivileged user namespaces | always |
 | Packaging / apt repo | `dpkg-deb`, `dpkg-scanpackages`, `apt-ftparchive`, `sha256sum` | always |
 | Image assembly | `mke2fs` + `e2fsck` (format the rootfs ext4 and verify it clean) | always |
-| Cross toolchain | the `<triple>gcc` cross compiler (e.g. `gcc-aarch64-linux-gnu`) | cross only |
-| Emulation | `bwrap`, `qemu-<arch>-static`, and a registered binfmt handler | cross only |
+| Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler (native, or the `<triple>gcc` cross compiler) | only if the recipe compiles a kernel or a bootloader |
+| Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | cross only |
+| Sandbox | `bwrap`, to enter the rootless target-arch build sandbox | cross **and** the recipe builds target-arch packages (the media-accel stack) |
 
-The "cross only" rows apply when your host arch differs from the target — i.e. any
-x86_64 host building an arm64 image. An arm64 host builds it natively and skips them.
+**`doctor` asks only for what *your recipe* will actually invoke**, so the table above
+is a superset. `doctor turing-rk1-forky` wants the whole list; `doctor asus-c201-forky`
+wants no compiler at all, because that board installs Debian's kernel and boots its own
+firmware. That is deliberate: a requirement you do not need is somewhere a requirement
+you *do* need can hide.
+
+The "cross" rows apply when your host arch differs from the target — i.e. any x86_64
+host building an arm64 or armhf image. An arm64 host builds an arm64 image natively and
+skips them.
 
 ### The user-namespace check (common blocker on Ubuntu 24.04)
 
@@ -111,12 +119,16 @@ With `doctor` green:
 cargo run -p boot2deb-cli -- build turing-rk1-forky
 ```
 
-This resolves the recipe's committed lockfile and runs the pipeline end to end:
-compile the kernel and u-boot, build the media-accel userspace and ffmpeg, bootstrap
-the Debian rootfs, and assemble a bootable disk image. The build reads only the lock,
-so it consults no network for its pins and is reproducible from what is committed. The
-patch series is fetched automatically at its pinned commit if a `../patches` checkout
-is not already present — you do not need to clone it separately.
+This resolves the recipe's committed lockfile and runs the pipeline end to end. For the
+RK1 that is: compile the kernel and u-boot, build the media-accel userspace and ffmpeg,
+bootstrap the Debian rootfs, and assemble a bootable disk image. **A recipe runs only the
+stages it has** — `build asus-c201-forky` compiles nothing at all, so it is a rootfs
+bootstrap and an image assembly and nothing else.
+
+The build reads only the lock, so it consults no network for its pins and is reproducible
+from what is committed. The patch series, where a recipe has one, is fetched automatically
+at its pinned commit if a `../patches` checkout is not already present — you do not need
+to clone it separately.
 
 The rootfs bootstrap is content-cached, so a rebuild whose solved package set is
 unchanged skips the multi-minute bootstrap. To force a clean rootfs, add
