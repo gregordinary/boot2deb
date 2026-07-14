@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Wall-clock cap on the `gix` patches fetch (TRUST-5). `gix` polls an interrupt
+/// Wall-clock cap on the `gix` patches fetch. `gix` polls an interrupt
 /// flag during transfer, so a watchdog trips it after this deadline and a stalled
 /// remote aborts with an error instead of hanging `build`/`update` forever. Generous
 /// enough for a full-history clone of the small `patches` repo on a slow link.
@@ -55,7 +55,7 @@ pub fn fetch_profile(
     }
     std::fs::create_dir_all(cache_root).map_err(|source| EngineError::io(cache_root, source))?;
     // Sweep `.fetch-*` staging dirs a hard-killed clone may have left before starting a
-    // fresh one (ATOM-3); the durable patches cache survives `clean`, so leftovers
+    // fresh one; the durable patches cache survives `clean`, so leftovers
     // would otherwise accrue.
     crate::gc::sweep_stale_temps(cache_root);
 
@@ -90,7 +90,7 @@ pub fn fetch_profile(
 fn clone_at_commit(url: &str, dir: &Path, commit: &str) -> Result<(), String> {
     // Shared interrupt flag: gix polls it during the fetch/checkout, and a watchdog
     // thread trips it after GIX_FETCH_TIMEOUT so a stalled remote aborts rather than
-    // hangs (TRUST-5). `done` stops the watchdog once the work finishes.
+    // hangs. `done` stops the watchdog once the work finishes.
     let interrupt = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
     let watchdog = {
@@ -120,7 +120,7 @@ fn clone_at_commit(url: &str, dir: &Path, commit: &str) -> Result<(), String> {
     result
 }
 
-/// The fetch + detached checkout itself, cancellable via `interrupt` (TRUST-5).
+/// The fetch + detached checkout itself, cancellable via `interrupt`.
 fn clone_at_commit_inner(
     url: &str,
     dir: &Path,

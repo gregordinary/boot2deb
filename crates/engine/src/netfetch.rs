@@ -1,4 +1,4 @@
-//! Bounded HTTP(S) fetch (TRUST-4) — the size-capped, redirect-bounded GET shared by
+//! Bounded HTTP(S) fetch — the size-capped, redirect-bounded GET shared by
 //! the `extra_debs` and `patch import` fetchers.
 //!
 //! Both callers pull bytes from an operator- or lock-supplied URL, so an unbounded
@@ -96,9 +96,9 @@ fn reject_downgrade(from: &str, to: &str) -> Result<(), FetchError> {
 /// Resolve a redirect `Location` against the current URL: an absolute `http(s)` URL
 /// is used as-is, a network-path reference (`//host/path`) takes the base's scheme,
 /// and a root-relative (`/path`) or path-relative (`sub/x`) target is joined onto
-/// the current URL's authority/path. The resulting path is dot-segment-normalized
-/// ([`normalize_url_path`], TRUST-8) whichever branch produced it. Enough URL
-/// handling for the deb/patch CDNs in play, without pulling in a full URL parser.
+/// the current URL's authority/path. The resulting path is dot-segment-normalized by
+/// [`normalize_url_path`] whichever branch produced it. Enough URL handling for the
+/// deb/patch CDNs in play, without pulling in a full URL parser.
 fn resolve_redirect(base: &str, loc: &str) -> Result<String, FetchError> {
     let scheme_end = base
         .find("://")
@@ -128,7 +128,7 @@ fn resolve_redirect(base: &str, loc: &str) -> Result<String, FetchError> {
 }
 
 /// Apply RFC 3986 remove-dot-segments to `url`'s path, leaving the scheme,
-/// authority, and query/fragment untouched (TRUST-8): a redirect target cannot
+/// authority, and query/fragment untouched: a redirect target cannot
 /// smuggle `.`/`..` segments into the request path this client then sends, and
 /// `..` can never climb above the path root.
 fn normalize_url_path(url: &str) -> Result<String, FetchError> {
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn resolve_redirect_normalizes_dot_segments_and_network_paths() {
         // `..` in a relative Location resolves in place and cannot climb above
-        // the path root (TRUST-8)...
+        // the path root...
         assert_eq!(
             resolve_redirect("https://h/a/b/c", "../x").unwrap(),
             "https://h/a/x"

@@ -191,8 +191,8 @@ pub struct CachedRootfs {
 /// `<key>/` holding `rootfs.tar` + `manifest.pkgs`; it is published atomically
 /// (staged in a pid-distinct `.partial` temp, then renamed), so an interrupted
 /// store never leaves a half-written entry a later build would trust, and two
-/// concurrent builds of the same key cannot clobber each other's staging
-/// (COR-27) — the same discipline as [`crate::artstore::ArtifactStore`].
+/// concurrent builds of the same key cannot clobber each other's staging — the same
+/// discipline as [`crate::artstore::ArtifactStore`].
 pub struct RootfsStore {
     /// The `<cache>/rootfs` root the entries live under.
     root: PathBuf,
@@ -200,7 +200,7 @@ pub struct RootfsStore {
 
 impl RootfsStore {
     /// A store rooted at `<cache_dir>/rootfs`. Opportunistically sweeps stale
-    /// `<key>.partial` temps a hard-killed `put` may have left (ATOM-3).
+    /// `<key>.partial` temps a hard-killed `put` may have left.
     pub fn new(cache_dir: &Path) -> Self {
         let root = cache_dir.join("rootfs");
         crate::gc::sweep_stale_temps(&root);
@@ -225,7 +225,7 @@ impl RootfsStore {
     /// `--refresh-rootfs` rebuild must refresh the stored bytes, so (unlike
     /// [`crate::artstore::ArtifactStore::put`]) an existing entry is not kept.
     ///
-    /// Concurrency discipline (COR-27): staging uses a pid-distinct `.partial`
+    /// Concurrency discipline: staging uses a pid-distinct `.partial`
     /// temp, so two builds of the same key cannot delete each other's in-flight
     /// staging; a prior entry is atomically moved aside rather than deleted in
     /// place, so a concurrent `get`'s exposure is one rename, not the duration
@@ -320,8 +320,8 @@ I: success in 2.7310 seconds
         std::fs::write(&tar_one, b"tar-one").unwrap();
         std::fs::write(&manifest, b"man-one").unwrap();
 
-        // A concurrent build's pid-distinct staging must survive our put
-        // (COR-27): a shared-name partial deleted on entry was the old race.
+        // A concurrent build's pid-distinct staging must survive our put: deleting a
+        // shared-name partial on entry would clobber the other build's staging.
         let foreign = tmp
             .path()
             .join("rootfs")

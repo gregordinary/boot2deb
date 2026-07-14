@@ -13,7 +13,7 @@ use std::process::Command;
 /// kernel and u-boot: the version lines of `<cross>gcc`, `<cross>as`, and
 /// `<cross>ld`, joined.
 ///
-/// Binutils is probed alongside the compiler (CACHE-5): the produced bytes come
+/// Binutils is probed alongside the compiler: the produced bytes come
 /// from the assembler and linker as much as from `gcc`, so a binutils upgrade
 /// must invalidate a cached kernel/u-boot artifact rather than restore one built
 /// by the old tools. A tool that cannot be run contributes a fallback naming it,
@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn native_identity_folds_all_three_tools_and_is_stable() {
         // The host has a native toolchain (a build prerequisite); the identity is
-        // stable across calls and carries one segment per tool (CACHE-5), so a
+        // stable across calls and carries one segment per tool, so a
         // binutils change alone re-keys the cache.
         let a = host_cc_identity(None);
         let b = host_cc_identity(None);

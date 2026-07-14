@@ -297,7 +297,7 @@ fn ancestry_probe(url: &str, reference: &str, commit: &str, ref_branch: Option<S
                 ))
             }
             // A probe error is not evidence of an orphan — report it as a skipped probe
-            // with git's own message, not a false ORPHANED verdict (SUB-4).
+            // with git's own message, not a false ORPHANED verdict.
             crate::build::ObjectProbe::Errored(detail) => Durability::Skipped(format!(
                 "could not probe the commit after a full-history fetch: {detail}"
             )),

@@ -40,7 +40,7 @@ pub(crate) fn resolve(
 ) -> Result<ResolvedBuild, boot2deb_core::ConfigError> {
     if root.list("recipes")?.iter().any(|n| n == target) {
         // A name that is both a recipe and a device resolves as the recipe; surface
-        // the ambiguity rather than silently preferring one (COR-20).
+        // the ambiguity rather than silently preferring one.
         if root.list("devices")?.iter().any(|n| n == target) {
             eprintln!("note: '{target}' is both a recipe and a device — resolving as the recipe");
         }
@@ -50,16 +50,16 @@ pub(crate) fn resolve(
     }
 }
 
-/// Validate the resolved build's cheap, local config invariants (CFG-4): the whole
+/// Validate the resolved build's cheap, local config invariants: the whole
 /// image geometry (offset ordering, alignment, GPT/rootfs fit — via the engine),
 /// that every referenced kernel `config_fragments` file and `device_dts` source
 /// exists under the config path, and that every declared apt source's signing
-/// keyring is vendored (CFG-1).
+/// keyring is vendored.
 /// Run by `resolve` (the documented first coherence gate), `update` (so a malformed
 /// axis fails before the lock is committed), and `build` (so it fails before any
 /// stage compiles) — a bad `rootfs_offset`, a typo'd fragment name, or a missing
 /// keyring surfaces at resolution rather than deep in the build, the same
-/// fail-early discipline as the device/kernel/suite checks (CFG-2/CFG-3).
+/// fail-early discipline as the device/kernel/suite checks.
 pub(crate) fn preflight_config(
     root: &ConfigRoot,
     build: &ResolvedBuild,
@@ -120,7 +120,7 @@ pub(crate) fn device_dts_paths(
 }
 
 /// Resolve each declared apt source's signing keyring to a vendored host path,
-/// erroring on the first source whose keyring is missing (CFG-1): the repo is
+/// erroring on the first source whose keyring is missing: the repo is
 /// verified during the rootfs solve, not trusted blindly, so its key is a
 /// build-host prerequisite like the Debian archive keyring. Called from
 /// [`preflight_config`] as the early existence gate and from the rootfs stage for
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn preflight_accepts_shipped_config_and_rejects_bad_geometry_or_fragment() {
-        // CFG-4: geometry + fragment existence are validated up front (by both update
+        // Geometry + fragment existence are validated up front (by both update
         // and build), so a bad axis fails at resolution, not deep in the build.
         let root = repo_root();
         let resolved = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
@@ -388,8 +388,8 @@ mod tests {
         let err = preflight_config(&root, &bad_frag).unwrap_err().to_string();
         assert!(err.contains("fragment not found"), "expected a fragment error, got: {err}");
 
-        // A declared apt source whose signing keyring is not vendored is rejected
-        // (CFG-1) — at preflight, not after the compile stages.
+        // A declared apt source whose signing keyring is not vendored is rejected at
+        // preflight, not after the compile stages.
         let mut bad_key = resolved.clone();
         bad_key.apt_sources.push(boot2deb_core::model::AptSource {
             name: "third-party".into(),

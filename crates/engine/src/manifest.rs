@@ -1,4 +1,4 @@
-//! Manifest-as-input (PLAN-1): the solved package manifest is the rootfs
+//! Manifest-as-input: the solved package manifest is the rootfs
 //! reproducibility contract, so once it is committed beside the lock — its sha256
 //! pinned in `RootfsPin.manifest_sha256` — a later build verifies that a fresh
 //! solve reproduces it.

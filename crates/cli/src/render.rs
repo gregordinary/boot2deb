@@ -94,7 +94,7 @@ pub(crate) fn warn_unreadable(kind: &str, broken: &[(String, String)]) {
 
 /// First 12 characters of a commit id for display. Truncates on a character
 /// boundary so a malformed (non-hex, hand-edited) value renders short instead
-/// of panicking on a byte slice (COR-24).
+/// of panicking on a byte slice.
 pub(crate) fn short(commit: &str) -> &str {
     match commit.char_indices().nth(12) {
         Some((i, _)) => &commit[..i],
@@ -252,7 +252,7 @@ mod tests {
     fn short_truncates_on_character_boundaries() {
         assert_eq!(short("c9acdc466e9aa96352f658b9276aa8a45b8e817d"), "c9acdc466e9a");
         assert_eq!(short("abc"), "abc");
-        // Multibyte input truncates by characters, not bytes (COR-24).
+        // Multibyte input truncates by characters, not bytes.
         assert_eq!(short("ééééééééééééééé"), "éééééééééééé");
     }
 

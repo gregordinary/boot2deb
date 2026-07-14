@@ -84,7 +84,7 @@ impl LocalRepo {
     /// freshly generated repo, not a network mirror. Its contents are exactly the
     /// `.deb`s the caller passed — the CLI seeds them from the invocation's recorded
     /// artifact ledger, not an extension-only scan of the output dir, so an unsigned
-    /// stray never rides in on the blanket trust (TRUST-3).
+    /// stray never rides in on the blanket trust.
     pub fn source_line(&self) -> String {
         format!("deb [trusted=yes] copy://{} ./", self.dir.display())
     }

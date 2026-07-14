@@ -244,10 +244,10 @@ fn assemble_lock(
 /// to. `build` calls this up front and hard-errors with the drifted axes named, rather
 /// than building a hybrid of newly resolved axes and stale pins — which would also
 /// leave the cache keyed inconsistently (some stages fold lock suite, runtime setup
-/// uses resolved suite) (CFG-2). The source-repo comparisons are what keep a commit
+/// uses resolved suite). The source-repo comparisons are what keep a commit
 /// pin meaningful: a boot-method or SoC-layer flip to a different repo would
 /// otherwise fetch that repo at the old commit — a commit that need not exist there,
-/// or worse, names an unrelated object (COR-23).
+/// or worse, names an unrelated object.
 ///
 /// Deliberately *not* checked: the refs, commits, and hashes (they come from
 /// `update`'s refs plus upstream resolution, so they have no fresh-resolve
@@ -574,8 +574,8 @@ mod tests {
         use boot2deb_core::lock::{
             BlobsPin, FfmpegPins, GitPin, KernelPin, PatchesPin, RootfsPin, UbootPin,
         };
-        // Commits are full 40-hex shas so the round-trip deserialize accepts them
-        // (SUB-3); the char picks them apart.
+        // Commits are full 40-hex shas so the round-trip deserialize accepts them;
+        // the char picks them apart.
         let git = |c: char| GitPin { source: "s".into(), reference: "r".into(), commit: std::iter::repeat_n(c, 40).collect() };
         let lock = Lock {
             kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v7.1.1".into(), commit: "a".repeat(40) }),
@@ -664,7 +664,7 @@ mod tests {
         );
         assert_eq!(kernel_pin.reference, "v7.1.1");
         assert_eq!(lock.patches.as_ref().unwrap().profile, "rk3588-accel");
-        // The u-boot source is recorded from the resolved boot method (COR-23).
+        // The u-boot source is recorded from the resolved boot method.
         let uboot_pin = lock.uboot.as_ref().unwrap();
         assert_eq!(uboot_pin.source, build.rkbin_boot().unwrap().uboot_source);
         assert_eq!(uboot_pin.reference, "v2026.04");
@@ -739,7 +739,7 @@ mod tests {
 
     #[test]
     fn lock_consistency_catches_source_and_blob_drift() {
-        // The COR-23 axes: a config flip that changes where a commit pin points
+        // The axes that matter here: a config flip that changes where a commit pin points
         // (boot method / SoC layer source) or which blob files the build consumes
         // must fail the drift gate, not fetch the old pin from the new place.
         let build = rk1_build();

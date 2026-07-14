@@ -31,7 +31,7 @@ pub(crate) const EXT4_BLOCK: u64 = 4096;
 /// Smallest rootfs filesystem the geometry accepts: one 128 MiB ext4 block
 /// group. `mke2fs` can format smaller, but a Debian rootfs cannot fit in one —
 /// rejecting here fails a mis-sized image at resolution time, before any stage
-/// runs (COR-10), instead of at the format's ENOSPC.
+/// runs, instead of at the format's ENOSPC.
 const MIN_ROOTFS_BYTES: u64 = EXT4_BLOCK * 8 * EXT4_BLOCK;
 
 /// Sectors the primary GPT reserves at the front: protective MBR (LBA 0), the

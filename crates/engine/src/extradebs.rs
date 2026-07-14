@@ -21,7 +21,7 @@ use std::time::Duration;
 /// Overall timeout for one `extra_debs` HTTP fetch.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Body-size cap for one fetched `extra_deb` (TRUST-4). A pre-built `.deb` is a
+/// Body-size cap for one fetched `extra_deb`. A pre-built `.deb` is a
 /// package, not a disk image; 512 MiB is far above any real one, so a body over the
 /// cap is a hostile/misconfigured server, refused rather than buffered into memory.
 const MAX_DEB_BYTES: u64 = 512 * 1024 * 1024;
@@ -99,7 +99,7 @@ fn read_path(root: &ConfigRoot, rel: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// HTTP(S) GET the full body of `url` under the shared bounded-fetch policy (size
-/// cap, no TLS downgrade, bounded redirects, TRUST-4). A cap overrun, disallowed
+/// cap, no TLS downgrade, bounded redirects). A cap overrun, disallowed
 /// redirect, non-2xx status, or transport failure is [`EngineError::ExtraDebFetch`].
 fn fetch_url(url: &str) -> Result<Vec<u8>, EngineError> {
     crate::netfetch::fetch_bounded(url, MAX_DEB_BYTES, FETCH_TIMEOUT).map_err(|e| {

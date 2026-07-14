@@ -1,4 +1,4 @@
-//! Opportunistic garbage collection of stale partial-publish temporaries (ATOM-3).
+//! Opportunistic garbage collection of stale partial-publish temporaries.
 //!
 //! Every atomic publish in the engine stages into a uniquely-named sibling temp and
 //! renames it into place, so a present entry is always complete: the
@@ -34,8 +34,7 @@ fn is_temp_name(name: &str) -> bool {
 }
 
 /// Remove partial-publish temps under `dir` older than `STALE_AGE`, and one level
-/// deeper (the artifact store keys its temps under per-node subdirs), best-effort
-/// (ATOM-3).
+/// deeper (the artifact store keys its temps under per-node subdirs), best-effort.
 ///
 /// Never fails and never logs: a sweep error (a permission issue, or a temp a
 /// concurrent build is mid-rename on) is ignored — GC is opportunistic, and the

@@ -15,7 +15,7 @@ use std::time::Duration;
 /// Overall timeout for one patch HTTP fetch.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Body-size cap for one fetched patch (TRUST-4). A patch/mbox is text; 64 MiB is
+/// Body-size cap for one fetched patch. A patch/mbox is text; 64 MiB is
 /// far above any real series, so a larger body is refused rather than buffered.
 const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -37,7 +37,7 @@ pub fn fetch(source: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// HTTP(S) GET the full body of `url` under the shared bounded-fetch policy (size
-/// cap, no TLS downgrade, bounded redirects, TRUST-4).
+/// cap, no TLS downgrade, bounded redirects).
 fn fetch_url(url: &str) -> Result<Vec<u8>, EngineError> {
     crate::netfetch::fetch_bounded(url, MAX_PATCH_BYTES, FETCH_TIMEOUT).map_err(|e| {
         EngineError::PatchImportFetch {

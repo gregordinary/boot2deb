@@ -41,7 +41,7 @@ pub fn ensure_tree(
     }
     std::fs::create_dir_all(cache_root).map_err(|s| EngineError::io(cache_root, s))?;
     // Sweep `.fetch-*` staging dirs a hard-killed clone may have left; the cache is
-    // durable (it survives `clean`), so leftovers would otherwise accrue (ATOM-3).
+    // durable (it survives `clean`), so leftovers would otherwise accrue.
     crate::gc::sweep_stale_temps(cache_root);
 
     // Stage into a temp sibling on the same filesystem, then rename atomically so
@@ -89,7 +89,7 @@ pub fn restore_tree(tree: &Path, base_commit: &str) -> Result<(), EngineError> {
 }
 
 /// First 12 characters of a commit id for a log line. Truncates on a character
-/// boundary so a malformed value renders short instead of panicking (COR-24).
+/// boundary so a malformed value renders short instead of panicking.
 fn short(commit: &str) -> &str {
     match commit.char_indices().nth(12) {
         Some((i, _)) => &commit[..i],

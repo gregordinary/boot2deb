@@ -37,7 +37,7 @@ pub enum ConfigError {
     /// keyring) that the shipped root also provides. Overlays are operator-supplied
     /// but not necessarily audited line-by-line, and honoring an overlay's archive
     /// keyring silently changes which `Release` signatures apt accepts — a
-    /// trust-anchor swap (TRUST-1). Resolution fails closed rather than pick the
+    /// trust-anchor swap. Resolution fails closed rather than pick the
     /// overlay's copy; `--unsafe-overlay-keyring` opts into the overlay explicitly.
     #[error(
         "overlay trust-anchor conflict: an overlay ships '{asset}', which shadows the \
@@ -399,8 +399,8 @@ pub enum ConfigError {
     /// well-formed Debian codename: it must be a bare token starting with an
     /// alphanumeric and drawn from `[A-Za-z0-9._-]`. Rejected at resolve so an
     /// invalid suite fails immediately instead of deep in `mmdebstrap`, and so a
-    /// leading `-` can never reach the bootstrap as a positional (CFG-3, pairs with
-    /// SUB-2's `--` hardening).
+    /// leading `-` can never reach the bootstrap as a positional (pairing with the
+    /// `--` option terminator in the bootstrap argv).
     #[error("invalid suite '{value}': must be a Debian codename (a bare token in [A-Za-z0-9._-] starting with an alphanumeric)")]
     InvalidSuite {
         /// The offending suite string.

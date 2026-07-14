@@ -6,7 +6,7 @@ use crate::model::ExtraDeb;
 use serde::{Deserialize, Serialize};
 
 /// Deserialize a lock commit id, enforcing the full-40-hex-sha shape at the parse
-/// boundary (SUB-3). `build` feeds these values straight into option-sensitive `git`
+/// boundary. `build` feeds these values straight into option-sensitive `git`
 /// argv positions — the detached checkout and `fetch <commit>` — where a leading `-`
 /// or other malformed value could be reinterpreted; pinning the shape at the lock
 /// boundary means a hand-edited or corrupt lock cannot smuggle one that far. The
@@ -26,7 +26,7 @@ where
     }
 }
 
-/// Shape-check one `"<filename>@sha256:<hex64>"` blob pin (TRUST-7): a bare
+/// Shape-check one `"<filename>@sha256:<hex64>"` blob pin: a bare
 /// filename (non-empty, no separators, not option-like) and a 64-char
 /// lowercase-hex digest — the exact form `update`'s pin generator emits.
 /// Returns the failure reason for a deserializer to wrap.
@@ -44,7 +44,7 @@ fn check_blob_pin(pin: &str) -> Result<(), String> {
 }
 
 /// Deserialize a blob pin, enforcing the `"<filename>@sha256:<hex64>"` shape at
-/// the parse boundary (TRUST-7, the [`de_commit`] discipline): the filename is
+/// the parse boundary (the [`de_commit`] discipline): the filename is
 /// later joined into blob-dir paths and the digest compared as bytes, so a
 /// hand-edited or corrupt lock must fail here, attributably, not downstream.
 fn de_blob_pin<'de, D>(d: D) -> Result<String, D::Error>
@@ -71,7 +71,7 @@ where
     }
 }
 
-/// Deserialize the manifest filename as a *bare* name (TRUST-7): it is joined
+/// Deserialize the manifest filename as a *bare* name: it is joined
 /// into `recipes/<manifest>` paths, so separators or dot-dirs must fail at the
 /// parse boundary rather than address a file outside `recipes/`.
 fn de_bare_filename<'de, D>(d: D) -> Result<String, D::Error>
@@ -93,7 +93,7 @@ where
     Ok(s)
 }
 
-/// Deserialize the optional manifest digest as 64 lowercase hex (TRUST-7).
+/// Deserialize the optional manifest digest as 64 lowercase hex.
 fn de_opt_sha256<'de, D>(d: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -195,13 +195,13 @@ pub struct KernelPin {
     /// A commit id is meaningful only within its repo, so every commit pin
     /// records its source; the drift gate compares it against a fresh resolve,
     /// catching a config edit that would reinterpret the pin in a different
-    /// repo (COR-23).
+    /// repo.
     pub source: String,
     /// The tag/branch that was resolved (TOML key `ref`).
     #[serde(rename = "ref")]
     pub reference: String,
     /// The exact commit the ref pointed at. Deserialization enforces the full-hex-sha
-    /// shape (SUB-3).
+    /// shape.
     #[serde(deserialize_with = "de_commit")]
     pub commit: String,
 }
@@ -213,7 +213,7 @@ pub struct PatchesPin {
     /// Patch profile name.
     pub profile: String,
     /// `patches` repo commit. Deserialization enforces the full-hex-sha
-    /// shape (SUB-3).
+    /// shape.
     #[serde(deserialize_with = "de_commit")]
     pub commit: String,
 }
@@ -225,13 +225,13 @@ pub struct UbootPin {
     /// Clone URL the commit was pinned from (the resolved boot method's
     /// `uboot_source`). The drift gate compares it against a fresh resolve, so
     /// a boot-method flip to a different repo cannot silently reinterpret the
-    /// commit there (COR-23).
+    /// commit there.
     pub source: String,
     /// The tag that was resolved (TOML key `ref`).
     #[serde(rename = "ref")]
     pub reference: String,
     /// The exact commit the ref pointed at. Deserialization enforces the full-hex-sha
-    /// shape (SUB-3).
+    /// shape.
     #[serde(deserialize_with = "de_commit")]
     pub commit: String,
 }
@@ -242,13 +242,13 @@ pub struct UbootPin {
 #[serde(deny_unknown_fields)]
 pub struct GitPin {
     /// Clone URL the commit was pinned from (the resolved SoC-layer source).
-    /// Compared against a fresh resolve by the drift gate (COR-23).
+    /// Compared against a fresh resolve by the drift gate.
     pub source: String,
     /// The branch/tag/commit that was requested (TOML key `ref`).
     #[serde(rename = "ref")]
     pub reference: String,
     /// The exact commit the ref pointed at. Deserialization enforces the full-hex-sha
-    /// shape (SUB-3).
+    /// shape.
     #[serde(deserialize_with = "de_commit")]
     pub commit: String,
 }
@@ -288,15 +288,14 @@ pub struct RootfsPin {
     /// Debian suite.
     pub suite: String,
     /// Filename of the content-pinned solved package manifest, committed beside
-    /// the lock (`recipes/<manifest>`). Deserialization enforces a bare filename
-    /// (TRUST-7).
+    /// the lock (`recipes/<manifest>`). Deserialization enforces a bare filename.
     #[serde(deserialize_with = "de_bare_filename")]
     pub manifest: String,
     /// sha256 of that committed manifest file, pinning the manifest itself so a
     /// committed-manifest that drifts from the lock is caught. `None` until
     /// the manifest is committed beside the lock — the manifest-as-input wiring
     /// sets it; a bare `update` before any build leaves it unset. Deserialization
-    /// enforces the 64-lowercase-hex shape (TRUST-7).
+    /// enforces the 64-lowercase-hex shape.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -311,15 +310,15 @@ pub struct RootfsPin {
 #[serde(deny_unknown_fields)]
 pub struct BlobsPin {
     /// ATF/BL31 blob pin. Deserialization enforces the
-    /// `"<filename>@sha256:<hex64>"` shape (TRUST-7).
+    /// `"<filename>@sha256:<hex64>"` shape.
     #[serde(deserialize_with = "de_blob_pin")]
     pub atf: String,
-    /// DDR TPL blob pin. Shape-enforced like [`atf`](Self::atf) (TRUST-7).
+    /// DDR TPL blob pin. Shape-enforced like [`atf`](Self::atf).
     #[serde(deserialize_with = "de_blob_pin")]
     pub tpl: String,
     /// OP-TEE BL32 blob pin, present only when the build has one. Absent on
     /// BL31-only boots (RK3588/RK1), so those locks serialize without the field.
-    /// Shape-enforced like [`atf`](Self::atf) when present (TRUST-7).
+    /// Shape-enforced like [`atf`](Self::atf) when present.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -548,7 +547,7 @@ mod tests {
     #[test]
     fn deserialize_rejects_a_non_sha_commit() {
         // A lock whose kernel commit is not a full 40-hex sha is refused at parse
-        // time (SUB-3), so a malformed/hand-edited value never reaches the git argv.
+        // time, so a malformed/hand-edited value never reaches the git argv.
         let text = base_lock().to_toml_string().unwrap();
         let tampered = text.replacen(
             &format!("commit = \"{}\"", "a".repeat(40)),
@@ -571,10 +570,10 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_malformed_blob_and_manifest_shapes() {
-        // Every content-pin field is shape-checked at the parse boundary
-        // (TRUST-7), so a hand-edited lock fails here, naming the field, rather
-        // than misbehaving downstream where the value is joined into paths or
-        // compared against hashes.
+        // Every content-pin field is shape-checked at the parse boundary, so a
+        // hand-edited lock fails here, naming the field, rather than misbehaving
+        // downstream where the value is joined into paths or compared against
+        // hashes.
         let good = base_lock().to_toml_string().unwrap();
         let atf = format!("atf@sha256:{}", "0".repeat(64));
         assert!(good.contains(&atf), "fixture must carry the expected pin");

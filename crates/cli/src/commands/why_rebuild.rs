@@ -32,7 +32,7 @@ pub(crate) fn run(
         work_dir: &work_dir,
         patches_dev: args.patches_path.is_some(),
         // Co-dev predictions fold the live-series fingerprint, so pass the checkout
-        // the build reads its patches from (CACHE-1); `None` in pinned mode.
+        // the build reads its patches from; `None` in pinned mode.
         patches_root: args.patches_path.as_deref(),
         include_libmali: args.build_libmali,
         device_dts: &device_dts,

@@ -76,7 +76,7 @@ pub struct PlanInputs<'a> {
     /// kernel/u-boot/ffmpeg signatures so a co-dev tree never matches a pinned stamp.
     pub patches_dev: bool,
     /// The co-dev `--patches-path` checkout, when `patches_dev`. Needed so the
-    /// prediction folds the same live-series fingerprint the build stamps (CACHE-1);
+    /// prediction folds the same live-series fingerprint the build stamps;
     /// `None` (or pinned mode) folds the series by commit only.
     pub patches_root: Option<&'a Path>,
     /// Include the optional `libmali` userspace node (built only with
@@ -95,7 +95,7 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
     let lock = inputs.lock;
     let w = inputs.work_dir;
 
-    // Co-dev tree signatures fold the live-series fingerprint (CACHE-1); recompute it
+    // Co-dev tree signatures fold the live-series fingerprint; recompute it
     // per scope exactly as each stage does so a co-dev prediction matches the stamp.
     // Pinned mode (or no patches root) folds by commit only. The `*_fp` Vecs are held
     // here so the borrowed [`PatchSeries::Dev`] outlives every use below.
@@ -185,7 +185,7 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
 }
 
 /// The [`PatchSeries`](crate::build::PatchSeries) for a predicted node: co-dev folds
-/// the live-series fingerprint `fp` (CACHE-1), pinned folds by commit. A free `fn`
+/// the live-series fingerprint `fp`, pinned folds by commit. A free `fn`
 /// (not a closure) so the borrow of `fp` is elided cleanly into the return type.
 fn patch_series(dev: bool, fp: &[String]) -> crate::build::PatchSeries<'_> {
     if dev {

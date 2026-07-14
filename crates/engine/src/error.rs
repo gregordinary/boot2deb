@@ -81,7 +81,7 @@ pub enum EngineError {
     /// lock records from the resolved build — the config drifted since `update`,
     /// so the pins no longer describe the requested point. Each listed axis names its
     /// mismatch; the fix is to re-run `update`. Refused up front so a build never mixes
-    /// newly resolved axes with stale pins (CFG-2).
+    /// newly resolved axes with stale pins.
     #[error(
         "lock is stale: the recipe resolves differently than it was locked ({}) \
          — re-run `boot2deb update <recipe>` to re-pin",

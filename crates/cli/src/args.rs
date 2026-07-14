@@ -223,7 +223,7 @@ pub(crate) struct BuildArgs {
     pub(crate) keyring: Option<PathBuf>,
     /// Trust an overlay-shipped copy of the archive keyring. By default an overlay
     /// that ships blobs/keyrings/debian-archive-keyring.gpg is refused as a
-    /// trust-anchor swap (TRUST-1); this opts into the overlay's copy explicitly.
+    /// trust-anchor swap; this opts into the overlay's copy explicitly.
     #[arg(long)]
     pub(crate) unsafe_overlay_keyring: bool,
     /// Scratch dir for clones + builds (default: build/RECIPE).

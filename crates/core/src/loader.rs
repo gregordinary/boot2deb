@@ -99,7 +99,7 @@ impl ConfigRoot {
     }
 
     /// Resolve a *trust anchor* asset (the Debian archive keyring) that overlays
-    /// must not be able to swap (TRUST-1). Unlike [`find_asset`](Self::find_asset),
+    /// must not be able to swap. Unlike [`find_asset`](Self::find_asset),
     /// which lets the highest-precedence overlay win, this resolves from the primary
     /// (shipped) root only and treats an overlay copy as a fail-closed error:
     ///  - `Ok(Some(path))` — the shipped root's copy (no overlay ships one, or
@@ -321,7 +321,7 @@ impl ConfigRoot {
     /// the root that **owns the recipe** — the same root
     /// [`lock_path`](Self::lock_path) writes to — so `update`'s write target and
     /// `build`'s read source can never address two different locks for one
-    /// recipe (COR-26). An overlay that wants different pins overlays the recipe
+    /// recipe. An overlay that wants different pins overlays the recipe
     /// and its lock as a unit; an overlay retuning a shipped recipe owns both
     /// automatically.
     pub fn lock(&self, name: &str) -> Result<crate::lock::Lock, ConfigError> {
@@ -375,7 +375,7 @@ impl ConfigRoot {
     /// and a target present in both (an overlay retuning a shipped device) appears
     /// once. An absent directory in a root contributes nothing; any *other*
     /// `read_dir` failure (a wrong/unreadable root, a permission error) is surfaced
-    /// as [`ConfigError::Io`] rather than silently yielding a success exit (COR-19).
+    /// as [`ConfigError::Io`] rather than silently yielding a success exit.
     pub fn list(&self, subdir: &str) -> Result<Vec<String>, ConfigError> {
         let mut names = std::collections::BTreeSet::new();
         for root in &self.roots {
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn lock_reads_from_the_recipe_owning_root() {
         // The lock is addressed by the recipe-owning root for read and write
-        // alike (COR-26): an overlay shipping only a stray lock (without
+        // alike: an overlay shipping only a stray lock (without
         // overlaying the recipe) does not shadow the canonical one, so
         // `update`'s write target and `build`'s read source can never diverge.
         let p = tempfile::tempdir().unwrap();

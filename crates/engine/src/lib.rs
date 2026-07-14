@@ -70,7 +70,7 @@ pub use error::EngineError;
 pub use event::{Event, EventSink, Step, Stream};
 
 /// Shared fixtures for the stage tests, so the resolved-RK1 build is defined once
-/// rather than copied into each stage module (MNT-6).
+/// rather than copied into each stage module.
 #[cfg(test)]
 pub(crate) mod test_support {
     use boot2deb_core::model::ResolvedBuild;

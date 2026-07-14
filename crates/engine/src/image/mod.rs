@@ -182,7 +182,7 @@ pub struct ImageArtifacts {
 
 /// Validate the resolved build's image geometry (offsets, size, GPT/rootfs fit)
 /// without writing anything — the cheap up-front check `build` runs right after
-/// resolution so a bad layout fails before any stage compiles (COR-10).
+/// resolution so a bad layout fails before any stage compiles.
 pub fn validate_geometry(build: &ResolvedBuild) -> Result<(), EngineError> {
     Geometry::resolve(&build.boot, &build.image_size).map(|_| ())
 }
@@ -250,7 +250,7 @@ pub fn build_image(
 
     // The payload must fit the space it was given — checked before the expensive
     // ext4 build, so an oversized boot payload fails fast rather than after
-    // formatting the whole rootfs (COR-10).
+    // formatting the whole rootfs.
     let payloads = boot_payloads(&opts.boot, kpart.as_deref())?;
     geom.check_payload_fit(&payloads)?;
 
@@ -864,7 +864,7 @@ mod tests {
         );
 
         // If `sfdisk` is around, the GPT must be parseable and name the partition —
-        // an sfdisk *failure* means a corrupt table and fails the test (MNT-8).
+        // an sfdisk *failure* means a corrupt table and fails the test.
         if have("sfdisk") {
             let o = Command::new("sfdisk").arg("-d").arg(&image).output().unwrap();
             assert!(

@@ -25,10 +25,10 @@ pub(crate) fn run(
     // Validate the local config invariants (image geometry, kernel-fragment and
     // apt-keyring existence) before resolving/committing the lock, so a bad
     // `rootfs_offset` or a typo'd fragment fails here rather than being pinned into
-    // the lock and failing at the next build (CFG-4).
+    // the lock and failing at the next build.
     preflight_config(root, &build)?;
     // An omitted per-tree ref flag preserves the *previous lock's* ref, not the
-    // config's symbolic ref (COR-12). Otherwise a routine `update` that only bumps
+    // config's symbolic ref. Otherwise a routine `update` that only bumps
     // the kernel would silently re-pin every other tree from its committed exact
     // commit back to the current branch head. Flags still override; a first update
     // (no prior lock) falls back to the config default.

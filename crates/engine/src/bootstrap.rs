@@ -28,7 +28,7 @@ pub const DEFAULT_MIRROR: &str = "http://deb.debian.org/debian";
 /// `mmdebstrap` enables only `main`, so this is passed explicitly.
 pub(crate) const COMPONENTS: &str = "main,contrib,non-free,non-free-firmware";
 
-/// mmdebstrap `--aptopt`s that bound apt's per-connection network wait (TRUST-5): a
+/// mmdebstrap `--aptopt`s that bound apt's per-connection network wait: a
 /// stalled mirror times the connection out instead of hanging the bootstrap
 /// indefinitely. apt retries a timed-out acquire, so a slow-but-live mirror still
 /// completes; only a genuinely dead connection is abandoned. Covers both transports

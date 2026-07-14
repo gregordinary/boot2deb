@@ -109,11 +109,11 @@ pub(crate) fn blob_pins(lock: &Lock) -> Result<&boot2deb_core::lock::BlobsPin, E
 /// `bwrap` wrapper, kernel/u-boot `make`, `git`, the rootfs `mmdebstrap` bootstrap,
 /// `dpkg-deb`), so it normalizes the determinism-relevant environment here — `TZ=UTC`
 /// and `LC_ALL=C.UTF-8`, matching the cross sandbox's `--clearenv` + `SANDBOX_ENV`
-/// discipline so a host's timezone/locale cannot leak into packaged output (DET-6),
+/// discipline so a host's timezone/locale cannot leak into packaged output,
 /// and the kbuild-honored flag variables (`KCFLAGS`/`KAFLAGS`/`KCPPFLAGS`) plus
 /// `MAKEFLAGS`/`GNUMAKEFLAGS` are removed, so a flag exported in the host shell
 /// cannot silently shape the kernel/u-boot bytes a lock-keyed cache entry claims
-/// to reproduce (DET-8). A full `env_clear` is unsafe on the host (it would drop
+/// to reproduce. A full `env_clear` is unsafe on the host (it would drop
 /// the `PATH`/`HOME` the tools need); the caller's own env (e.g.
 /// `SOURCE_DATE_EPOCH`) is already set and preserved.
 ///
@@ -179,7 +179,7 @@ pub fn run(
     }
 }
 
-/// git's low-speed stall-abort thresholds for network transfers (TRUST-5): a
+/// git's low-speed stall-abort thresholds for network transfers: a
 /// transfer averaging under [`GIT_STALL_BYTES_PER_SEC`] bytes/second for
 /// [`GIT_STALL_SECS`] seconds is aborted by git, so a stalled mirror/remote fails
 /// the operation instead of hanging `build`/`update` indefinitely. Stall-based
@@ -190,7 +190,7 @@ const GIT_STALL_BYTES_PER_SEC: &str = "1000";
 const GIT_STALL_SECS: &str = "60";
 
 /// Apply git's http low-speed stall abort to a network-facing git `Command` — the
-/// clone/fetch operations that talk to a remote (TRUST-5). Must be called on a fresh
+/// clone/fetch operations that talk to a remote. Must be called on a fresh
 /// `Command::new("git")` before the subcommand args, since `-c` config is only
 /// honored ahead of the subcommand. Set both as `-c` config (git's own transport)
 /// and via `GIT_HTTP_LOW_SPEED_*` env (read by the `git-remote-https` helper). Local
@@ -305,7 +305,7 @@ fn error_summary(e: &EngineError) -> String {
 /// Reads raw bytes and decodes with [`String::from_utf8_lossy`] rather than
 /// `BufRead::lines` (which yields an error and *ends the stream* on the first
 /// non-UTF-8 byte): a build tool that prints a stray non-UTF-8 byte must not sever
-/// the reader thread and starve the child of its pipe (COR-17).
+/// the reader thread and starve the child of its pipe.
 fn forward<R: Read>(reader: R, stream: Stream, tx: Sender<(Stream, String)>) {
     let mut reader = BufReader::new(reader);
     let mut buf = Vec::new();
@@ -375,7 +375,7 @@ fn fetch_commit_inner(
 
     // Fetch the *exact* locked commit first: a shallow fetch of the reference only
     // gets its current tip, so once upstream moves past the pin the ref no longer
-    // reaches the locked commit (COR-7). A shallow fetch-by-sha works for a local
+    // reaches the locked commit. A shallow fetch-by-sha works for a local
     // source, an advertised ref tip, or a server honoring SHA1-in-want.
     if try_fetch_commit(dir, &resolved, commit) {
         let mut checkout = Command::new("git");
@@ -416,7 +416,7 @@ fn fetch_commit_inner(
         // here and report it actionably, rather than letting `checkout` fail with a
         // cryptic "reference is not a tree". A probe that itself errored (bad repo,
         // git failure) surfaces as a git error with its stderr, not a false
-        // "unreachable" verdict (SUB-4).
+        // "unreachable" verdict.
         match probe_object(dir, commit) {
             ObjectProbe::Present => {}
             ObjectProbe::Absent => {
@@ -458,7 +458,7 @@ fn fetch_commit_inner(
 }
 
 /// Outcome of [`probe_object`]'s reachability check, distinguishing a commit that is
-/// genuinely absent from a probe that could not run (SUB-3/SUB-4). Collapsing both to a
+/// genuinely absent from a probe that could not run. Collapsing both to a
 /// single `false` would make a git/repo error surface as `CommitUnreachable`/`Orphaned`
 /// — a misdiagnosis — so the classifier keeps them apart.
 #[derive(Debug)]
@@ -485,9 +485,9 @@ pub(crate) enum ObjectProbe {
 /// real error (a broken repo, an unreadable object db) — so an empty stderr means
 /// [`ObjectProbe::Absent`] and a non-empty one means [`ObjectProbe::Errored`]. (The
 /// `^{commit}`-peeled form instead prints `fatal: Not a valid object name` on a
-/// genuine absence, which would masquerade as an error.) The pin is a full commit sha
-/// (SUB-3), so object-presence is equivalent to commit-presence here; a spawn failure
-/// is also `Errored` (SUB-4).
+/// genuine absence, which would masquerade as an error.) The pin is a full commit sha,
+/// so object-presence is equivalent to commit-presence here; a spawn failure is also
+/// `Errored`.
 pub(crate) fn probe_object(dir: &Path, commit: &str) -> ObjectProbe {
     match Command::new("git")
         .arg("-C")
@@ -542,7 +542,7 @@ pub(crate) fn reject_optionlike(what: &'static str, value: &str) -> Result<(), E
 /// and an embedded `=` is a variable assignment (`CC=<cmd>` injects an arbitrary
 /// tool). Legitimate defconfig targets are bare identifiers, so both shapes are
 /// refused before the value reaches `make`; call sites additionally pass the target
-/// after `--` so make cannot reinterpret it (SUB-1). Pure, so it is unit-testable.
+/// after `--` so make cannot reinterpret it. Pure, so it is unit-testable.
 pub(crate) fn reject_unsafe_make_target(what: &'static str, value: &str) -> Result<(), EngineError> {
     if value.starts_with('-') || value.contains('=') {
         Err(EngineError::UnsafeMakeTarget {
@@ -671,9 +671,9 @@ pub struct PatchSource<'a> {
 /// number of patches applied.
 ///
 /// On **any** failure the partial `tree` is removed, so a resume's `tree.exists()`
-/// check never trusts a half-cloned or half-patched tree (COR-1). This is the one
+/// check never trusts a half-cloned or half-patched tree. This is the one
 /// place the patches pin is enforced: a drifted `patches` checkout would silently
-/// apply a different series than the lock names (COR-2).
+/// apply a different series than the lock names.
 pub(crate) fn clone_pinned(spec: &ClonePinned, step: &Step) -> Result<usize, EngineError> {
     let result = clone_pinned_inner(spec, step);
     if result.is_err() {
@@ -749,7 +749,7 @@ pub(crate) struct ApplyScope<'a> {
 /// (which fetches its own tree but applies its `userspace` scope the same way),
 /// so the pin enforcement and verify-applies gate are one implementation.
 /// The caller owns removing a partial tree on failure — [`clone_pinned`] and the
-/// userspace stage both do (a resume must never reuse a half-patched tree, COR-1).
+/// userspace stage both do (a resume must never reuse a half-patched tree).
 pub(crate) fn apply_profile_scope(spec: &ApplyScope, step: &Step) -> Result<usize, EngineError> {
     let Some(patches) = spec.patches else {
         return Ok(0);
@@ -850,7 +850,7 @@ pub(crate) fn role_path(restored: &[(String, PathBuf)], role: &str) -> Option<Pa
 ///
 /// One implementation for every stage keeps the restore semantics provably
 /// identical (all-roles-or-nothing, same log shape); per-stage copies of this
-/// block are how stage behavior drifts (COR-22 grew from such a divergence).
+/// block are how stage behavior drifts.
 pub(crate) fn restore_stage_outputs(
     store_root: Option<&Path>,
     node: &str,
@@ -901,7 +901,7 @@ pub(crate) fn store_stage_outputs(
 
 /// Tier-1 gate shared by the compile stages: keep the fetched+patched tree at
 /// `tree` only when it is stamped with `man`'s signature; otherwise remove the
-/// stale tree, run `refresh` to re-materialize it, and stamp it (COR-1).
+/// stale tree, run `refresh` to re-materialize it, and stamp it.
 /// Returns `true` when the tree was reused — a stage whose configure step must
 /// clean a previously-built tree keys on it.
 ///
@@ -950,7 +950,7 @@ pub(crate) fn file_fingerprint(path: &Path) -> Result<String, EngineError> {
 /// (`--patches-path`) mode the pin is advisory — a mismatch only warns
 /// (`verify_patches_pin`) — so the on-disk files, not the commit, are what get
 /// applied; the ordered content fingerprint of the live series is folded instead so
-/// an edited patch restamps the tree rather than restoring a stale one (CACHE-1).
+/// an edited patch restamps the tree rather than restoring a stale one.
 #[derive(Clone, Copy)]
 pub enum PatchSeries<'a> {
     /// Pinned mode: the folded `patches.commit` is the series identity.
@@ -965,8 +965,8 @@ pub enum PatchSeries<'a> {
 /// scope list, in order, `"<label>=<sha256 of its bytes>"`.
 ///
 /// Folded into a Tier-1 tree signature only in co-dev mode ([`PatchSeries::Dev`]);
-/// in pinned mode `lock.patches.commit` already content-addresses the series
-/// (CACHE-1). Best-effort by design: a profile that cannot be loaded yields an empty
+/// in pinned mode `lock.patches.commit` already content-addresses the series.
+/// Best-effort by design: a profile that cannot be loaded yields an empty
 /// fingerprint and an unreadable patch file folds a stable `<unreadable>` sentinel,
 /// so computing a signature never fails here — a genuinely broken series fails loudly
 /// at apply time ([`apply_profile_scope`]) instead, and no successful build could
@@ -1041,7 +1041,7 @@ pub fn device_dts_fingerprint(sources: &[PathBuf]) -> Vec<String> {
 
 /// Fold the applied patch series' identity into a Tier-1 tree signature: the
 /// profile name and pinned commit, then either the pinned marker or (co-dev) the
-/// live-series fingerprint (CACHE-1). Shared by every compile stage's `clone_manifest`
+/// live-series fingerprint. Shared by every compile stage's `clone_manifest`
 /// so the pinned-vs-co-dev discipline is one implementation. The pinned fold is byte-
 /// identical to folding `patches_dev = "0"` alone, so a pinned tree signature is
 /// unchanged by co-dev support — only co-dev builds gain the extra fingerprint.
@@ -1074,7 +1074,7 @@ pub(crate) fn fold_patch_series(
 /// Copy `src` into `out_dir` (created if needed), returning the destination path.
 /// Used to stage a built artifact out of a scratch tree.
 ///
-/// The publish is atomic (ATOM-2): the bytes copy into a sibling `.partial` temp on
+/// The publish is atomic: the bytes copy into a sibling `.partial` temp on
 /// the same filesystem, then a rename moves it over `dest`. An interrupted copy leaves
 /// a `.partial` temp (swept by the cache/out_dir GC), never a truncated `.deb` at a
 /// valid name — which would either overwrite a previously-staged good artifact the
@@ -1103,7 +1103,7 @@ fn stage_artifact(out_dir: &Path, src: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// Set the unix mode of a single staged file/dir, so the host umask does not leak into
-/// a `.deb`'s packaged metadata (DET-5). The rootfs stage forces the same discipline on
+/// a `.deb`'s packaged metadata. The rootfs stage forces the same discipline on
 /// its generated config.
 pub(crate) fn set_mode(path: &Path, mode: u32) -> Result<(), EngineError> {
     use std::os::unix::fs::PermissionsExt;
@@ -1112,7 +1112,7 @@ pub(crate) fn set_mode(path: &Path, mode: u32) -> Result<(), EngineError> {
 }
 
 /// Normalize every mode in a staged package tree so the host umask does not leak into
-/// the `.deb` payload (DET-5): each directory to `0755`, each file to `0644`, symlinks
+/// the `.deb` payload: each directory to `0755`, each file to `0644`, symlinks
 /// left alone. Valid **only for data-only packages** (no executables or maintainer
 /// scripts) — the u-boot deb ships payload blobs plus config text, so a uniform data
 /// mode is correct and makes the packaged tree byte-identical regardless of the build
@@ -1203,7 +1203,7 @@ fn take_number(it: &mut std::iter::Peekable<std::str::Chars>) -> u64 {
 ///
 /// Sorted so the enumeration order does not depend on the filesystem's `read_dir`
 /// order — the downstream selection ([`pick_deb`]) and dependency install order are
-/// stable rather than host-dependent (DET-7).
+/// stable rather than host-dependent.
 fn deb_names(dir: &Path) -> Result<Vec<String>, EngineError> {
     let mut names = Vec::new();
     let entries = std::fs::read_dir(dir).map_err(|source| EngineError::io(dir, source))?;
@@ -1224,8 +1224,8 @@ fn deb_names(dir: &Path) -> Result<Vec<String>, EngineError> {
 /// `.deb`s: [`pick_deb`] picks the highest version and `select_debs` copies every
 /// match among whatever is present, so a leftover from a build at different pins
 /// (e.g. a higher-versioned kernel before a repin down) must be removed before
-/// fresh outputs land, or it can be selected and shipped in place of them
-/// (COR-22). Prefix-scoped so one stage's sweep cannot touch another stage's
+/// fresh outputs land, or it can be selected and shipped in place of them.
+/// Prefix-scoped so one stage's sweep cannot touch another stage's
 /// artifacts in a shared directory. An absent `dir` is a no-op.
 pub(crate) fn purge_stage_debs(dir: &Path, prefixes: &[&str]) -> Result<(), EngineError> {
     if !dir.exists() {
@@ -1413,7 +1413,7 @@ mod tests {
     #[test]
     fn run_normalizes_timezone_and_locale() {
         // Every host-side command runs with a pinned TZ/LC_ALL so the host's does not
-        // leak into packaged output (DET-6).
+        // leak into packaged output.
         let log = RefCell::new(Vec::new());
         let sink = |e: Event| log.borrow_mut().push(e);
         let step = Step::start(&sink, "t");
@@ -1485,7 +1485,7 @@ mod tests {
         for n in ["c.deb", "a.deb", "b.deb", "notes.txt"] {
             std::fs::write(tmp.path().join(n), b"x").unwrap();
         }
-        // Sorted regardless of read_dir order; the non-.deb is excluded (DET-7).
+        // Sorted regardless of read_dir order; the non-.deb is excluded.
         assert_eq!(deb_names(tmp.path()).unwrap(), vec!["a.deb", "b.deb", "c.deb"]);
     }
 
@@ -1764,7 +1764,7 @@ mod tests {
 
         // The real HEAD commit is present.
         assert!(matches!(probe_object(&repo, &head), ObjectProbe::Present));
-        // A well-formed but nonexistent sha is a clean absence (SUB-4), not an error —
+        // A well-formed but nonexistent sha is a clean absence, not an error —
         // this is what drives CommitUnreachable/Orphaned.
         let absent = "0123456789abcdef0123456789abcdef01234567";
         assert!(matches!(probe_object(&repo, absent), ObjectProbe::Absent));

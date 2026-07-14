@@ -63,7 +63,7 @@ pub struct ArtifactStore {
 
 impl ArtifactStore {
     /// Open the store rooted at `root`, creating it if needed. Opportunistically
-    /// sweeps stale `.partial` temps left by a hard-killed `put` (ATOM-3) — including
+    /// sweeps stale `.partial` temps left by a hard-killed `put` — including
     /// the per-node subdir temps — before serving this build.
     pub fn open(root: &Path) -> Result<ArtifactStore, EngineError> {
         std::fs::create_dir_all(root).map_err(|s| EngineError::io(root, s))?;

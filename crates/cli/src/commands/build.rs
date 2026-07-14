@@ -49,11 +49,11 @@ pub(crate) fn run(
     let resolved = resolve_recipe(root, recipe, &overrides)?;
     // Fail fast if the config drifted since `update`: the lock's resolved-derived axes
     // (kernel id, patch profile, suite, extra_debs) must still match a fresh resolve,
-    // or the build would mix new resolved axes with stale pins (CFG-2).
+    // or the build would mix new resolved axes with stale pins.
     boot2deb_engine::pins::check_lock_consistency(&lock, &resolved)?;
     // Validate the cheap local config invariants (image geometry, kernel-fragment
     // and apt-keyring existence) up front, so a bad layout or a missing file fails
-    // before any stage runs rather than deep in the pipeline (CFG-4/CFG-1).
+    // before any stage runs rather than deep in the pipeline.
     preflight_config(root, &resolved)?;
 
     // Snapshot activation: the effective mode is `--snapshot`, else the
@@ -109,7 +109,7 @@ pub(crate) fn run(
     mark_work_dir(&work_dir)?;
     let out_dir = absolutize(args.out_dir.unwrap_or_else(|| work_dir.join("artifacts")));
     // Sweep stale `.partial` staging temps a hard-killed prior run may have left in the
-    // artifact dir before the compile stages publish into it (ATOM-3). No-op when the
+    // artifact dir before the compile stages publish into it. No-op when the
     // dir does not exist yet.
     boot2deb_engine::gc::sweep_stale_temps(&out_dir);
     let blobs_dir = args.blobs_dir.clone().unwrap_or_else(|| {
@@ -181,7 +181,7 @@ pub(crate) fn run(
 
     // Debian archive keyring for mmdebstrap — the cross sandbox and the rootfs
     // bootstrap: the explicit flag, else the vendored keyring resolved as a
-    // non-overlayable trust anchor (an overlay copy is a fail-closed swap, TRUST-1),
+    // non-overlayable trust anchor (an overlay copy is a fail-closed swap),
     // else None (the host apt trust store, only viable on a Debian host).
     let keyring = match args.keyring.clone() {
         Some(explicit) => Some(explicit),
@@ -430,7 +430,7 @@ pub(crate) fn run(
         let identity = image_identity(recipe, &resolved);
         // The local apt repo is seeded from the artifact ledger — the exact debs the
         // compile stages recorded — not an extension-only scan of out_dir, so an
-        // unsigned stray never becomes trusted apt input (TRUST-3).
+        // unsigned stray never becomes trusted apt input.
         //
         // A build that compiles nothing stages no `.deb`s of its own, and then an empty
         // ledger is the *correct* state, not a forgotten compile stage — so the ledger
@@ -472,7 +472,7 @@ pub(crate) fn run(
         // Resolve each feature apt source's signing keyring to the vendored host
         // path mmdebstrap verifies the repo against. Existence was already gated at
         // preflight; this stage-time resolution is the backstop for a keyring
-        // removed since (CFG-1).
+        // removed since.
         let apt_repos = apt_source_keyrings(root, &resolved.apt_sources)?;
         let opts = rootfs::RootfsOptions {
             repo_debs: &repo_debs,
@@ -491,7 +491,7 @@ pub(crate) fn run(
             apt_sources: &apt_repos,
             // Clamp tarball mtimes to the locked kernel commit's date (the same
             // lock-derived seed the image identifiers use), so only the deliberate
-            // per-image password varies between builds of one lock (DET-2/DET-4). None
+            // per-image password varies between builds of one lock. None
             // on a rootfs-only build with no kernel tree in this work dir.
             source_date_epoch: kernel::source_date_epoch(&work_dir, &lock),
         };
@@ -540,7 +540,7 @@ pub(crate) fn run(
             )
             .into());
         }
-        // Structural gate, not mere existence (ATOM-1): confirm the tar is complete
+        // Structural gate, not mere existence: confirm the tar is complete
         // and readable through its appended `./etc/shadow` member. An `--stage image`
         // retry after an interrupted rootfs stage then fails cleanly here instead of
         // formatting a truncated tar into a broken ext4 image.

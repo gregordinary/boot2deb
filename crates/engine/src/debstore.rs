@@ -23,7 +23,7 @@ pub struct DebStore {
 
 impl DebStore {
     /// Open the store rooted at `dir`, creating it if needed. Opportunistically sweeps
-    /// stale `.partial` temps a hard-killed `put_bytes` may have left (ATOM-3).
+    /// stale `.partial` temps a hard-killed `put_bytes` may have left.
     pub fn open(dir: &Path) -> Result<DebStore, EngineError> {
         std::fs::create_dir_all(dir).map_err(|s| EngineError::io(dir, s))?;
         crate::gc::sweep_stale_temps(dir);

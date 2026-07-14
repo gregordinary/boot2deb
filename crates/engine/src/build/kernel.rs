@@ -39,7 +39,7 @@ const CLONE_STAGE_VERSION: u32 = 1;
 /// `.deb` name prefixes `make bindeb-pkg` drops into the work dir (beside the
 /// tree). [`build_kernel`] sweeps these before each compile so [`collect`]'s
 /// highest-version pick can only see the `.deb`s the current compile produced —
-/// a leftover from a build at different pins must not outrank them (COR-22).
+/// a leftover from a build at different pins must not outrank them.
 /// Covers everything `bindeb-pkg` emits, not just the two `collect` stages.
 const KERNEL_DEB_PREFIXES: &[&str] = &["linux-image-", "linux-headers-", "linux-libc-dev"];
 
@@ -97,7 +97,7 @@ pub fn tree_dir(work_dir: &Path) -> PathBuf {
 /// The locked kernel commit's committer date as a `SOURCE_DATE_EPOCH` — the
 /// lock-derived deterministic build timestamp, read from the cloned tree under
 /// `work_dir`. The rootfs node reuses it so its tarball mtimes are stable across builds
-/// of one lock (DET-2/DET-4).
+/// of one lock.
 ///
 /// `None` when there is no such date to read: the lock pins no kernel commit (a
 /// distro-package kernel is installed from the mirror, so no source tree exists), the
@@ -140,7 +140,7 @@ pub fn build_kernel(
     // The applied patch series' identity for the Tier-1/Tier-2 signatures:
     // pinned by `patches.commit`, or — in co-dev (`--patches-path`) mode — the
     // fingerprint of the live series, so an edited patch restamps the tree instead of
-    // restoring a stale one (CACHE-1). Computed once; `series_fp` outlives `patches`.
+    // restoring a stale one. Computed once; `series_fp` outlives `patches`.
     let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Kernel);
     let patches = build::series_identity(opts.patches, &series_fp);
 
@@ -171,7 +171,7 @@ pub fn build_kernel(
         });
     }
 
-    // Tier-1 reuse of the cloned+patched tree (COR-1): a lock bump (kernel commit
+    // Tier-1 reuse of the cloned+patched tree: a lock bump (kernel commit
     // or patch pin) rebuilds it; configure()/compile() re-run regardless.
     let man = clone_manifest(lock, patches, &dts_fp)?;
     build::reuse_or_refresh_tree(&tree, &man, "kernel", &step, || {
@@ -185,11 +185,11 @@ pub fn build_kernel(
     // Sweep kernel `.deb`s a previous build left in the work dir: `remove_dir_all`
     // above clears only the tree, and `collect` picks by highest version among
     // whatever sits beside it — a stale, higher-versioned leftover (a repin down
-    // with the artifact cache off or cleared) would silently ship (COR-22).
+    // with the artifact cache off or cleared) would silently ship.
     build::purge_stage_debs(opts.work_dir, KERNEL_DEB_PREFIXES)?;
 
     // Deterministic build timestamp from the locked base commit, not the tree's
-    // README mtime (= clone time) or HEAD (a patch commit stamped now) (COR-9).
+    // README mtime (= clone time) or HEAD (a patch commit stamped now).
     let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
     compile(build, env, &tree, epoch, &step)?;
 
@@ -334,8 +334,8 @@ fn output_manifest(
 /// excluded (a commit content-addresses the tree, so the same commit from any mirror
 /// is the same tree). The reference is folded because the patch-applicability gate
 /// keys on it, so a reference change without a commit change must restamp the tree to
-/// force the gate to re-evaluate (CACHE-4). The [`PatchSeries`] fold covers the
-/// pinned commit and — in co-dev mode — the live-series fingerprint (CACHE-1), so a
+/// force the gate to re-evaluate. The [`PatchSeries`] fold covers the
+/// pinned commit and — in co-dev mode — the live-series fingerprint, so a
 /// co-dev build never shares a stamp with a pinned one and an edited patch restamps.
 /// `device_dts` is the ordered content fingerprint from
 /// [`device_dts_fingerprint`](crate::build::device_dts_fingerprint); it is folded only
@@ -589,7 +589,7 @@ fn mrproper_if_dirty(
 }
 
 /// Run `make bindeb-pkg` with the resolved kbuild env and cross settings.
-/// `source_date_epoch` is the locked commit's committer date (COR-9).
+/// `source_date_epoch` is the locked commit's committer date.
 fn compile(
     build: &ResolvedBuild,
     env: &BuildEnv,
@@ -702,7 +702,7 @@ mod tests {
         // fingerprint (the `patches_dev` marker alone differs).
         let empty: Vec<String> = vec![];
         assert_ne!(base, sig("kc1", "pc1", PatchSeries::Dev(&empty)));
-        // A co-dev series *content* change restamps the tree (CACHE-1): editing a
+        // A co-dev series *content* change restamps the tree: editing a
         // patch file (its digest) changes the fingerprint, hence the signature.
         let fp1 = vec!["media-accel/kernel/040.patch=aaa".to_string()];
         let fp2 = vec!["media-accel/kernel/040.patch=bbb".to_string()];
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn kernel_reference_folds_into_clone_signature() {
         // The patch-applicability gate keys on kernel.reference, so a reference
-        // change with no commit change must restamp the tree (CACHE-4).
+        // change with no commit change must restamp the tree.
         let mut a = lock_with("kc1", "pc1");
         let mut b = lock_with("kc1", "pc1");
         a.kernel.as_mut().unwrap().reference = "v7.1.1".into();

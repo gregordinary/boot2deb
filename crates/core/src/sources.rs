@@ -70,7 +70,7 @@ pub fn is_full_sha(s: &str) -> bool {
 
 /// True for a 64-character *lowercase* hex sha256 digest — the shape every
 /// content pin (blob pins, `extra_debs` hashes, the manifest digest) is written
-/// with, enforced where those pins are parsed (TRUST-7). Lowercase-strict
+/// with, enforced where those pins are parsed. Lowercase-strict
 /// because the generators (`sha256_hex`) emit lowercase and the pins are
 /// compared as bytes.
 pub fn is_sha256_hex(s: &str) -> bool {

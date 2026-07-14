@@ -75,13 +75,13 @@ pub fn resolve_device(
         .suite
         .clone()
         .unwrap_or_else(|| device.default_suite.clone());
-    // A bad suite otherwise fails deep in the bootstrap; reject it here (CFG-3), and
+    // A bad suite otherwise fails deep in the bootstrap; reject it here, and
     // the shape guard also keeps a leading-`-` suite from ever reaching mmdebstrap as
-    // a positional (SUB-2 backstop).
+    // a positional.
     validate_suite(&suite)?;
     let features = overrides.features.clone().unwrap_or_default();
     // Reject a feature selected twice: its overlay + packages would otherwise apply
-    // twice (COR-15).
+    // twice.
     let mut seen_features = std::collections::HashSet::new();
     for name in &features {
         if !seen_features.insert(name) {
@@ -668,12 +668,12 @@ fn join<T: std::fmt::Display>(items: &[T]) -> String {
         .join(", ")
 }
 
-/// Reject a suite that is not a well-formed Debian codename (CFG-3). The
+/// Reject a suite that is not a well-formed Debian codename. The
 /// suite becomes an apt `sources.list` pocket (`<suite>-updates`, `<suite>-security`)
 /// and an mmdebstrap positional, so it must be a bare token starting with an
 /// alphanumeric and drawn from `[A-Za-z0-9._-]`. Requiring an alphanumeric first
 /// character also means a suite can never be read as a `-`-prefixed option by the
-/// bootstrap (the SUB-2 backstop). Pure, so it is unit-testable.
+/// bootstrap, backstopping the `--` option terminator. Pure, so it is unit-testable.
 fn validate_suite(suite: &str) -> Result<(), ConfigError> {
     let mut chars = suite.chars();
     let ok = matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
@@ -1707,7 +1707,7 @@ mod tests {
     }
 }
 
-/// Fixture-based resolution tests (MNT-11): a minimal config root written to a
+/// Fixture-based resolution tests: a minimal config root written to a
 /// tempdir so the pure merge/precedence/exclude algebra is exercised directly,
 /// not through the shipped layers (whose edits would otherwise break these
 /// tests). `soc = rk3588`, `arch = arm64`, `boot-method = rockchip-rkbin` are the
@@ -1935,7 +1935,7 @@ mod fixture_tests {
 
         assert_eq!(b.rootfs_exclude, vec!["b", "c", "a"]);
         assert_eq!(b.rootfs_packages, vec!["shared", "d", "e", "g"]);
-        // No name is both included and excluded (the reconciliation COR-16 adds).
+        // No name is both included and excluded — what the reconciliation guarantees.
         for x in &b.rootfs_exclude {
             assert!(!b.rootfs_packages.contains(x), "{x} leaked into the include set");
         }

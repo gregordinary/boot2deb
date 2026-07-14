@@ -54,12 +54,12 @@ pub struct SandboxRun<'a> {
     /// writes artifacts back to the host (a build's output/work dir).
     pub binds: &'a [PathBuf],
     /// Read-only host paths exposed inside at their host path — input-only mounts the
-    /// command reads but must not mutate (a directory of `.deb`s apt installs from,
-    /// TRUST-6). Bound `--ro-bind` so a maintainer script running as sandbox-root
-    /// cannot write back into the host dir.
+    /// command reads but must not mutate (a directory of `.deb`s apt installs from).
+    /// Bound `--ro-bind` so a maintainer script running as sandbox-root cannot write
+    /// back into the host dir.
     pub ro_binds: &'a [PathBuf],
     /// Whether the command needs host network (`apt` does; an offline compile does
-    /// not, TRUST-6). When false the sandbox keeps `--unshare-all`'s fresh network
+    /// not). When false the sandbox keeps `--unshare-all`'s fresh network
     /// namespace (loopback only), shrinking a build step's egress surface.
     pub net: bool,
     /// Environment variables exported for the command.
@@ -221,14 +221,14 @@ impl RootlessSandbox {
             format!("--components={COMPONENTS}"),
         ];
         // Bound apt's per-connection network wait so a stalled mirror fails rather
-        // than hangs (TRUST-5).
+        // than hangs.
         argv.extend(crate::bootstrap::APT_TIMEOUT_OPTS.iter().map(|s| s.to_string()));
         if let Some(kr) = keyring {
             argv.push(format!("--keyring={kr}"));
         }
         argv.push(format!("--include={}", BASE_DEPS.join(",")));
         // `--` stops option parsing so the positional suite/target/mirror cannot be
-        // read as options even if a value begins with `-` (SUB-2).
+        // read as options even if a value begins with `-`.
         argv.push("--".to_string());
         argv.push(self.suite.clone());
         argv.push(target.to_string());
@@ -240,7 +240,7 @@ impl RootlessSandbox {
     /// `sh -c`), so package names and `.deb` paths cannot be reinterpreted by a
     /// shell. `fixed` is the subcommand + flags, `extra` the package names
     /// or paths, `ro_binds` any host dirs apt must *read* from (bound read-only —
-    /// apt installs from them but never writes them, TRUST-6).
+    /// apt installs from them but never writes them).
     ///
     /// apt needs host network to fetch, so this run shares the net; `-o
     /// APT::Sandbox::User=root` keeps apt from dropping to the `_apt` user for
@@ -316,8 +316,8 @@ impl BuildSandbox for RootlessSandbox {
 
         // Extract into a sibling `.partial` dir, then rename into place: the
         // `rootfs` dir must only ever appear complete, so an interrupted extraction
-        // cannot leave a half-populated tree that `is_bootstrapped` would trust
-        // (COR-4). Any leftover `.partial` from a prior interrupted run is cleared
+        // cannot leave a half-populated tree that `is_bootstrapped` would trust.
+        // Any leftover `.partial` from a prior interrupted run is cleared
         // first. Device nodes are excluded (mknod is not permitted unprivileged;
         // `bwrap` provides `/dev` at run time), so extraction has no privileged step.
         let partial = self.partial_rootfs();
@@ -360,8 +360,8 @@ impl BuildSandbox for RootlessSandbox {
             return Ok(());
         }
         // Read-only-bind each deb's directory so apt can read the files at their host
-        // path inside the sandbox without being able to write back into it (TRUST-6;
-        // deduplicated — the userspace debs share one dir).
+        // path inside the sandbox without being able to write back into it
+        // (deduplicated — the userspace debs share one dir).
         let mut ro_binds: Vec<PathBuf> = Vec::new();
         for deb in debs {
             if let Some(parent) = deb.parent() {
@@ -398,7 +398,7 @@ impl BuildSandbox for RootlessSandbox {
 /// host env never leaks in (reproducibility, and it avoids `dpkg`/`perl` reading
 /// the host `HOME`/locale). Per-run `spec.env` entries are appended afterwards and
 /// override these. `TZ=UTC` and `LC_ALL=C.UTF-8` pin timezone and locale so packaged
-/// timestamps/collation do not vary with the build host (DET-6); the host-side
+/// timestamps/collation do not vary with the build host; the host-side
 /// [`build::run`](crate::build::run) normalizes the same two vars.
 const SANDBOX_ENV: &[(&str, &str)] = &[
     ("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"),
@@ -415,7 +415,7 @@ const SANDBOX_ENV: &[(&str, &str)] = &[
 /// `/proc`, minimal `/dev`, and `/tmp`; `resolv.conf` is bound read-only so `apt`
 /// resolves DNS. `--unshare-all` makes it rootless; `--share-net` is added only when
 /// `spec.net` is set — an `apt` run needs the network, an offline compile keeps the
-/// fresh (loopback-only) namespace (TRUST-6). `--uid 0 --gid 0` maps the caller to
+/// fresh (loopback-only) namespace. `--uid 0 --gid 0` maps the caller to
 /// root inside — `dpkg`/`dpkg-buildpackage` require it, matching "root in the chroot"
 /// of the proven build. `--clearenv` plus [`SANDBOX_ENV`] gives a clean, reproducible
 /// environment. Each read-write `bind` and the working dir are exposed at their host
@@ -497,7 +497,7 @@ mod tests {
         assert!(argv
             .iter()
             .any(|a| a.starts_with("--include=") && a.contains("build-essential") && a.contains("dpkg-dev")));
-        // `--` terminates options immediately before the positionals (SUB-2).
+        // `--` terminates options immediately before the positionals.
         assert_eq!(argv[argv.len() - 4], "--");
         // Suite, target tarball, mirror are the trailing positionals in order.
         let tail = &argv[argv.len() - 3..];
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn interrupted_bootstrap_partial_is_never_treated_as_ready() {
-        // Resume-after-interruption (rec-18, COR-4): a bootstrap that dies mid
+        // Resume-after-interruption: a bootstrap that dies mid
         // extraction leaves a half-populated `.partial` dir, never a `rootfs` a
         // later build would trust. `is_bootstrapped` checks the real rootfs, which
         // only exists after the atomic rename, so the `.partial` can never fool it.
@@ -561,15 +561,14 @@ mod tests {
         // working dir + env + rootless flags.
         assert!(joined.contains("--chdir /host/src/mpp"));
         assert!(joined.contains("--setenv DEB_CFLAGS_APPEND -Wno-error"));
-        // An offline compile gets no network share (TRUST-6).
+        // An offline compile gets no network share.
         assert!(joined.contains("--unshare-all"));
         assert!(!joined.contains("--share-net"), "offline compile must not share net");
         // root inside + clean, reproducible env.
         assert!(joined.contains("--uid 0 --gid 0"));
         assert!(joined.contains("--clearenv"));
         assert!(joined.contains("--setenv HOME /root"));
-        // Timezone + locale pinned so packaged timestamps/collation are host-independent
-        // (DET-6).
+        // Timezone + locale pinned so packaged timestamps/collation are host-independent.
         assert!(joined.contains("--setenv TZ UTC"));
         assert!(joined.contains("--setenv LC_ALL C.UTF-8"));
         // per-run env comes after --clearenv so it is not wiped.
@@ -584,7 +583,7 @@ mod tests {
     #[test]
     fn bwrap_argv_shares_net_and_ro_binds_for_apt() {
         // An apt-style run: needs the network, and its deb-input dir is read-only so
-        // a maintainer script cannot write back into the host dir (TRUST-6).
+        // a maintainer script cannot write back into the host dir.
         let ro = vec![PathBuf::from("/out/debs")];
         let argv = vec!["apt-get".to_string(), "update".to_string()];
         let spec = SandboxRun {

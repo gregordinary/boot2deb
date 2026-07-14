@@ -93,7 +93,7 @@ pub fn build_uboot(
 
     // The applied patch series' identity for the Tier-1/Tier-2 signatures:
     // pinned by `patches.commit`, or the live-series fingerprint in co-dev mode so an
-    // edited u-boot patch restamps the tree (CACHE-1). `series_fp` outlives `patches`.
+    // edited u-boot patch restamps the tree. `series_fp` outlives `patches`.
     let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Uboot);
     let patches = build::series_identity(opts.patches, &series_fp);
 
@@ -120,7 +120,7 @@ pub fn build_uboot(
         });
     }
 
-    // Tier-1 reuse of the cloned+patched tree (COR-1): a lock bump rebuilds it.
+    // Tier-1 reuse of the cloned+patched tree: a lock bump rebuilds it.
     // configure() distcleans + reconfigures a *reused* tree (keyed on the returned
     // flag) and compile() re-runs regardless.
     let man = clone_manifest(lock, patches)?;
@@ -152,7 +152,7 @@ pub fn build_uboot(
     step.progress(40);
 
     // Deterministic build timestamp from the locked commit, so `u-boot.itb` does
-    // not embed wall-clock time (COR-9).
+    // not embed wall-clock time.
     let epoch = crate::git::commit_epoch(&tree, &uboot.commit).ok();
     compile(env, &tree, &blobs, epoch, &step)?;
 
@@ -200,7 +200,7 @@ fn output_manifest(
 ) -> Result<crate::signature::SignatureManifest, EngineError> {
     // Fold the Tier-1 tree signature (carrying the co-dev series fingerprint, if any),
     // so a co-dev build never shares an output entry with a pinned one and an edited
-    // patch invalidates the cached deb (CACHE-1).
+    // patch invalidates the cached deb.
     let tree_sig = clone_manifest(lock, patches)?.signature();
     let pins = build::blob_pins(lock)?;
     let mut b = crate::signature::SignatureBuilder::new("uboot:out", OUTPUT_STAGE_VERSION);
@@ -226,7 +226,7 @@ fn output_manifest(
 /// pinned inputs that determine its content — the u-boot commit and the patch series
 /// (`build::fold_patch_series`). The source URL is excluded (the commit
 /// content-addresses the tree). The [`PatchSeries`] fold covers the pinned patch
-/// commit and — in co-dev mode — the live-series fingerprint (CACHE-1), so a co-dev
+/// commit and — in co-dev mode — the live-series fingerprint, so a co-dev
 /// build never shares a stamp with a pinned one and an edited patch restamps.
 /// Blobs/defconfig are not folded here — they gate compile, which re-runs on every
 /// invocation, not the tree reuse. Public so `why-rebuild` ([`crate::plan`])
@@ -289,7 +289,7 @@ fn configure(
         build::run(clean, "make", "make distclean", step)?;
     }
     // The defconfig comes from config; validate it and pass it after `--` so make
-    // cannot read it as an option or a `FOO=bar` variable assignment (SUB-1).
+    // cannot read it as an option or a `FOO=bar` variable assignment.
     build::reject_unsafe_make_target("uboot_defconfig", &boot.uboot_defconfig)?;
     let mut defconfig = Command::new("make");
     defconfig.arg("-C").arg(tree);
@@ -305,7 +305,7 @@ fn configure(
 }
 
 /// Build u-boot with the verified blobs passed as make variables.
-/// `source_date_epoch` is the locked commit's committer date (COR-9).
+/// `source_date_epoch` is the locked commit's committer date.
 ///
 /// `bl32` is the OP-TEE payload, passed only when the boot chain needs one. It is
 /// passed as `TEE=` — the variable mainline u-boot's binman FIT assembly reads for
@@ -427,7 +427,7 @@ fn package_deb(
     stage_tree(&pkg_stage, build, boot, &pkg, &version, arch, idbloader, uboot_itb)?;
     // Force uniform data modes (dirs 0755, files 0644) so the host umask does not leak
     // into the packaged tree — the u-boot deb is data-only, so this is byte-safe and
-    // makes the .deb reproducible across hosts (DET-5).
+    // makes the .deb reproducible across hosts.
     build::normalize_data_tree(&pkg_stage)?;
 
     let deb_name = format!("{pkg}_{version}_{arch}.deb");
@@ -651,7 +651,7 @@ mod tests {
         // A u-boot bump or a patches-pin bump each invalidate the reused tree.
         assert_ne!(base, sig("uc2", "pc1", PatchSeries::Pinned));
         assert_ne!(base, sig("uc1", "pc2", PatchSeries::Pinned));
-        // Co-dev mode splits the key; a co-dev content change restamps (CACHE-1).
+        // Co-dev mode splits the key; a co-dev content change restamps.
         let empty: Vec<String> = vec![];
         assert_ne!(base, sig("uc1", "pc1", PatchSeries::Dev(&empty)));
         let fp1 = vec!["uboot/010.patch=aaa".to_string()];

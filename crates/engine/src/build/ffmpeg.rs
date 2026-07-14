@@ -159,9 +159,9 @@ pub fn build_ffmpeg(
         .ok_or(EngineError::MissingMediaAccelPins { stage: "ffmpeg" })?;
 
     // The applied patch series identities for the signatures: ffmpeg's own tree
-    // series, plus — for the CACHE-2 userspace-dependency fold — the `userspace` scope
+    // series, plus — for the userspace-dependency fold — the `userspace` scope
     // (the MPP CMA fix). Pinned by commit, or fingerprinted from the live checkout in
-    // co-dev mode so an edited patch restamps the tree/deb (CACHE-1). The `*_fp` locals
+    // co-dev mode so an edited patch restamps the tree/deb. The `*_fp` locals
     // outlive the borrowed `PatchSeries`.
     let ffmpeg_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Ffmpeg);
     let us_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Userspace);
@@ -195,7 +195,7 @@ pub fn build_ffmpeg(
     // expensive source fetch, so a forgotten userspace stage errors immediately.
     let debs = required_userspace_debs(opts.userspace_debs)?;
 
-    // Tier-1 reuse of the fetched+patched tree (COR-1): a lock bump (base commit
+    // Tier-1 reuse of the fetched+patched tree: a lock bump (base commit
     // or patch pin) rebuilds it; configure/compile re-run regardless.
     let man = clone_manifest(ffmpeg, lock.patches.as_ref(), ffmpeg_patches);
     build::reuse_or_refresh_tree(&tree, &man, "ffmpeg", &step, || {
@@ -216,7 +216,7 @@ pub fn build_ffmpeg(
     // A stale pkg-stage from an interrupted run would poison `make install`.
     let _ = std::fs::remove_dir_all(&pkg_stage);
 
-    // Deterministic build timestamp from the locked base commit (COR-9); the
+    // Deterministic build timestamp from the locked base commit; the
     // tree's HEAD is a `git am` patch commit stamped now, so read the base explicitly.
     let build_env: Vec<(String, String)> = git::commit_epoch(&tree, &ffmpeg.base.commit)
         .ok()
@@ -272,7 +272,7 @@ pub fn build_ffmpeg(
 ///
 /// It also folds the Tier-2 output signatures of the **MPP** and **RGA** userspace
 /// packages ffmpeg build-depends on (`--enable-rkmpp`/`--enable-rkrga`), recomputed
-/// from the lock (CACHE-2): the built ffmpeg deb links against those `.deb`s, so a
+/// from the lock: the built ffmpeg deb links against those `.deb`s, so a
 /// change to a userspace pin, patch series, suite, or arch must invalidate the cached
 /// ffmpeg deb rather than restore one built against stale userspace libraries. Only
 /// MPP carries the `userspace` patch scope, so its dep folds `us_patches`
@@ -323,7 +323,7 @@ fn output_manifest(
 /// base commit and the patch series (`build::fold_patch_series`) that together
 /// determine the tree. The source URL is excluded (the commit content-addresses the
 /// base). The [`PatchSeries`] fold covers the pinned patch commit and — in co-dev
-/// mode — the live-series fingerprint (CACHE-1), so a co-dev build never shares a
+/// mode — the live-series fingerprint, so a co-dev build never shares a
 /// stamp with a pinned one and an edited patch restamps. Public so `why-rebuild`
 /// ([`crate::plan`]) recomputes the same signature it stamps here. Takes the
 /// [`FfmpegPins`] and the patch profile/commit directly rather than the whole
@@ -621,7 +621,7 @@ fn scan_binaries(pkg_stage: &Path) -> Result<Vec<PathBuf>, EngineError> {
 /// `read_dir` that treats an *absent* directory as empty but surfaces an
 /// unreadable one: an I/O or permissions failure here would otherwise silently
 /// shrink the `dpkg-shlibdeps` input set and ship an incomplete runtime
-/// `Depends` (COR-25).
+/// `Depends`.
 fn read_dir_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, EngineError> {
     match std::fs::read_dir(dir) {
         Ok(entries) => entries.map(|e| e.map_err(|s| EngineError::io(dir, s))).collect(),
@@ -672,7 +672,7 @@ fn parse_shlibs_depends(substvars: &str) -> Option<String> {
 /// Write the `DEBIAN/control` file into the staged package tree.
 ///
 /// The dir and file are mode-normalized (0755/0644) so the host umask does not leak
-/// into the packaged control metadata (DET-5). Only the metadata this code writes is
+/// into the packaged control metadata. Only the metadata this code writes is
 /// normalized — the `make install` payload carries its own explicit install modes.
 fn write_control(pkg_stage: &Path, control: &str) -> Result<(), EngineError> {
     let debian = pkg_stage.join("DEBIAN");
@@ -705,7 +705,7 @@ fn control_text(arch: &str, version: &str, depends: &str) -> String {
 }
 
 /// The Debian version for the `ffmpeg-rk` deb, derived from the lock the way
-/// u-boot's is (COR-6): the pinned base `reference` (a leading `v`/`n` tag marker
+/// u-boot's is: the pinned base `reference` (a leading `v`/`n` tag marker
 /// dropped) plus the short base commit for uniqueness, sanitized to the Debian
 /// upstream-version set ([`build::sanitize_deb_version`], which guarantees a
 /// digit-leading result).
@@ -751,7 +751,7 @@ mod tests {
         // An absent directory is a legitimate empty scan...
         assert!(read_dir_entries(&tmp.path().join("missing")).unwrap().is_empty());
         // ...but an unreadable one must surface, or `dpkg-shlibdeps` would compute
-        // an incomplete Depends from a silently-shrunk input set (COR-25).
+        // an incomplete Depends from a silently-shrunk input set.
         let dir = tmp.path().join("noread");
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -779,7 +779,7 @@ mod tests {
         // A base-tree bump or a patch-pin bump each invalidate the reused tree.
         assert_ne!(base, sig("bc2", "pc1", PatchSeries::Pinned));
         assert_ne!(base, sig("bc1", "pc2", PatchSeries::Pinned));
-        // Co-dev mode splits the key; a co-dev content change restamps (CACHE-1).
+        // Co-dev mode splits the key; a co-dev content change restamps.
         let empty: Vec<String> = vec![];
         assert_ne!(base, sig("bc1", "pc1", PatchSeries::Dev(&empty)));
         let fp1 = vec!["media-accel/ffmpeg/0001.patch=aaa".to_string()];
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn output_manifest_folds_userspace_dependency_identity() {
-        // CACHE-2: ffmpeg links against the MPP + RGA userspace debs, so a change to
+        // ffmpeg links against the MPP + RGA userspace debs, so a change to
         // either userspace pin must invalidate the cached ffmpeg deb.
         let sig = |lock: &Lock| {
             let ff = lock.ffmpeg.as_ref().unwrap();

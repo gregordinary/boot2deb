@@ -60,7 +60,7 @@ pub fn rev_parse_head(repo: &Path) -> Result<String, EngineError> {
 ///
 /// A leftover `.git/rebase-apply` from a failed `am --abort` is **not** reported by
 /// `status --porcelain`, so it is checked directly: without this, the next apply
-/// would fail deep inside `git am` far from the real cause (COR-18).
+/// would fail deep inside `git am` far from the real cause.
 pub(crate) fn is_clean(repo: &Path) -> Result<bool, EngineError> {
     let ctx = format!("status in {}", repo.display());
     let out = checked(Some(repo), &["status", "--porcelain"], &ctx)?;

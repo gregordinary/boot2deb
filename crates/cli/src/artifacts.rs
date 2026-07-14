@@ -3,7 +3,7 @@
 //! The rootfs stage stands up a `[trusted=yes]` local apt repo from the `.deb`s the
 //! compile stages produced. Its input set is this explicit ledger — the artifacts the
 //! build recorded — never an extension-only scan of the output dir, so a stray or
-//! half-written `.deb` cannot become trusted apt input (TRUST-3).
+//! half-written `.deb` cannot become trusted apt input.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 /// Name of the artifact ledger written into `out_dir` — the explicit allowlist of
 /// `.deb`s this build produced. The rootfs stage's local apt repo ingests exactly
 /// the invocation's own recorded outputs, never every `*.deb` that happens to sit in
-/// `out_dir` (TRUST-3): the repo emits `[trusted=yes]`, so an unsigned stray or a
+/// `out_dir`: the repo emits `[trusted=yes]`, so an unsigned stray or a
 /// leftover from another build must not become trusted apt input. Persisted in
 /// `out_dir` so a later `--stage rootfs` run still sees the compile stages' outputs
 /// recorded by an earlier invocation.
 const ARTIFACT_LEDGER: &str = ".boot2deb-artifacts";
 
-/// Record each produced `.deb` into the `out_dir` artifact ledger (TRUST-3),
+/// Record each produced `.deb` into the `out_dir` artifact ledger,
 /// idempotently: the ledger is the set of file names the build staged into
 /// `out_dir`, rewritten sorted so the file is deterministic. Paths not directly
 /// under `out_dir` are ignored — the ledger names local-repo inputs, which every
@@ -51,7 +51,7 @@ fn read_ledger_names(ledger: &Path) -> Result<BTreeSet<String>, Box<dyn std::err
 }
 
 /// The `.deb`s the build recorded in the `out_dir` artifact ledger that still exist,
-/// sorted — the local apt repo's trusted input set (TRUST-3). Unlike an
+/// sorted — the local apt repo's trusted input set. Unlike an
 /// extension-only scan, a stray or partially-written `.deb` the build did not record
 /// is never ingested. A missing ledger (no compile stage staged into this `out_dir`)
 /// is a hard error with the same "run the compile stages first" hint the scan gave.
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn ledger_ingests_only_recorded_debs_not_strays() {
-        // TRUST-3: the local repo seed is the recorded artifact set, never an
+        // The local repo seed is the recorded artifact set, never an
         // extension-only scan — a stray .deb dropped into out_dir is not ingested.
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path();
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn ledger_missing_is_a_clear_error() {
         // No compile stage staged into this out_dir → a hard error pointing at the
-        // compile stages, not a silent empty repo (TRUST-3).
+        // compile stages, not a silent empty repo.
         let dir = tempfile::tempdir().unwrap();
         let err = ledger_debs(dir.path()).unwrap_err().to_string();
         assert!(err.contains("run the compile stages first"), "{err}");

@@ -71,7 +71,7 @@ struct Package<'a> {
     pin: &'a GitPin,
     /// `.deb` name prefixes this package produces, for collection. Resume skips the
     /// package only when **every** prefix is already staged — a crash between a
-    /// multi-binary package's outputs must not look "done" (COR-8).
+    /// multi-binary package's outputs must not look "done".
     deb_prefixes: &'a [&'a str],
 }
 
@@ -166,7 +166,7 @@ pub fn build_userspace(
     // its pin are the same for the whole build; [`receives_userspace_patches`] decides
     // which package's tree gets the series (and folds it into that tree's signature).
     // In co-dev mode the userspace series fingerprint is folded into the MPP tree
-    // signature so an edited userspace patch restamps it (CACHE-1); `series_fp` lives
+    // signature so an edited userspace patch restamps it; `series_fp` lives
     // in the ctx so the borrowed [`PatchSeries::Dev`] outlives the package loop.
     let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Userspace);
     let patch_ctx = UserspacePatchCtx {
@@ -220,7 +220,7 @@ pub fn build_userspace(
             // The restore lands beside whatever the shared stage dir already
             // holds, and `collect` copies *every* matching name — sweep the
             // package's stale-version `.deb`s first so a leftover from a build
-            // at different pins cannot ride along with the restored set (COR-22).
+            // at different pins cannot ride along with the restored set.
             build::purge_stage_debs(&stage_root, pkg.deb_prefixes)?;
             store
                 .restore(&node_name(pkg), &out_sigs[i], &stage_root)?
@@ -258,7 +258,7 @@ fn build_one(
     let man = package_signature(pkg, patches.inputs_for(pkg.name).as_ref());
     // Skip the whole build only when the fetched+patched tree still matches the
     // locked commit *and* patch series and **all** of the package's `.deb`s are
-    // staged (COR-1/COR-8): a crash between compile and staging re-runs the
+    // staged: a crash between compile and staging re-runs the
     // package rather than skipping to a later stage that misses a `.deb`.
     if crate::signature::is_fresh(&tree, &man) && package_staged(stage_root, pkg)? {
         step.log(format!("{}: already built, skipping", pkg.name));
@@ -266,7 +266,7 @@ fn build_one(
     }
     build::reuse_or_refresh_tree(&tree, &man, pkg.name, step, || {
         // Purge stale-version `.deb`s so `collect` cannot ship an old one and
-        // `package_staged` cannot be fooled by it (COR-22).
+        // `package_staged` cannot be fooled by it.
         build::purge_stage_debs(stage_root, pkg.deb_prefixes)?;
         build::fetch_commit(pkg.source, &pkg.pin.reference, &pkg.pin.commit, pkg.name, &tree, step)?;
         // Apply the profile's `userspace` scope onto the fetched base — the MPP CMA
@@ -287,7 +287,7 @@ fn build_one(
         filter_libmali_targets(&tree.join("debian/targets"), LIBMALI_VARIANT, step)?;
     }
 
-    // Deterministic build timestamp from the locked *base* commit (COR-9). For
+    // Deterministic build timestamp from the locked *base* commit. For
     // MPP the tree now carries the patch series, so — like the kernel/ffmpeg stages —
     // read the base pin explicitly (still reachable after `git am`), not HEAD.
     let epoch = crate::git::commit_epoch(&tree, &pkg.pin.commit).ok();
@@ -324,7 +324,7 @@ fn collect(
     // re-scans it for these packages by prefix + highest version
     // (`required_userspace_debs`) — sweep each package's stale versions before
     // staging the fresh set, so a leftover from earlier pins can never outrank
-    // it there (COR-22). All sweeps run before any staging: prefixes may overlap
+    // it there. All sweeps run before any staging: prefixes may overlap
     // across packages, and a later sweep must not remove an earlier stage copy.
     for pkg in packages {
         build::purge_stage_debs(out_dir, pkg.deb_prefixes)?;
@@ -369,7 +369,7 @@ pub struct PatchInputs<'a> {
     /// build's kernel names no patch profile and nothing is applied.
     pub pin: Option<&'a boot2deb_core::lock::PatchesPin>,
     /// The applied series' identity: pinned by commit, or (co-dev) the live-series
-    /// fingerprint so an edited userspace patch restamps the MPP tree (CACHE-1).
+    /// fingerprint so an edited userspace patch restamps the MPP tree.
     pub patches: PatchSeries<'a>,
 }
 
@@ -382,7 +382,7 @@ struct UserspacePatchCtx<'a> {
     patches: Option<build::PatchSource<'a>>,
     /// The co-dev live-series fingerprint of the `userspace` scope (empty in pinned
     /// mode), folded into the MPP tree signature so an edited userspace patch restamps
-    /// it (CACHE-1).
+    /// it.
     series_fp: Vec<String>,
 }
 
@@ -473,7 +473,7 @@ fn node_name(pkg: &Package) -> String {
 ///
 /// Public and keyed by primitives (not a `Package`) so the ffmpeg stage recomputes
 /// the mpp/librga dependency signatures from the lock and folds them into its own
-/// output key (CACHE-2) — an ffmpeg build links against those `.deb`s, so a change to
+/// output key — an ffmpeg build links against those `.deb`s, so a change to
 /// them must invalidate the cached ffmpeg deb.
 pub fn output_manifest_for(
     name: &str,
@@ -536,7 +536,7 @@ fn store_package(
 /// True only if **all** of `pkg`'s `.deb`s already sit in `stage_root` (resume
 /// check). Requiring every prefix — not just one — means a crash partway through a
 /// multi-binary package's outputs re-runs it rather than skipping to a later stage
-/// that then fails on the missing `.deb` (COR-8).
+/// that then fails on the missing `.deb`.
 fn package_staged(stage_root: &Path, pkg: &Package) -> Result<bool, EngineError> {
     if !stage_root.exists() {
         return Ok(false);
@@ -550,7 +550,7 @@ fn package_staged(stage_root: &Path, pkg: &Package) -> Result<bool, EngineError>
 
 /// The env for a `dpkg-buildpackage` run: the gcc-14 warning relaxation, a
 /// `parallel=` matching the resolved job count, and — when known — the locked
-/// commit's `SOURCE_DATE_EPOCH` for a reproducible build timestamp (COR-9). Pure,
+/// commit's `SOURCE_DATE_EPOCH` for a reproducible build timestamp. Pure,
 /// so it is testable.
 fn dpkg_env(jobs: usize, source_date_epoch: Option<u64>) -> Vec<(String, String)> {
     let mut env = vec![
@@ -706,7 +706,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         assert_ne!(package_signature(&mpp, Some(&p1)), package_signature(&mpp, Some(&p2)));
         // ...and a co-dev build never shares a stamp with a pinned one.
         assert_ne!(package_signature(&mpp, Some(&p1)), package_signature(&mpp, Some(&p1_dev)));
-        // ...and a co-dev userspace-patch content change restamps the MPP tree (CACHE-1).
+        // ...and a co-dev userspace-patch content change restamps the MPP tree.
         let fp1 = vec!["media-accel/userspace/001.patch=aaa".to_string()];
         let fp2 = vec!["media-accel/userspace/001.patch=bbb".to_string()];
         let dev1 = PatchInputs { pin: Some(&pin1), patches: PatchSeries::Dev(&fp1) };
@@ -728,7 +728,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         std::fs::create_dir_all(&out_dir).unwrap();
         // A previous build (at different pins) staged 1.6.0 into out_dir. The
         // ffmpeg stage selects from out_dir by highest version, so the stale
-        // deb must not survive a fresh stage that produced 1.5.0 (COR-22).
+        // deb must not survive a fresh stage that produced 1.5.0.
         std::fs::write(out_dir.join("librockchip-mpp1_1.6.0_arm64.deb"), b"stale").unwrap();
         // Another stage's artifact in the shared out_dir stays untouched.
         std::fs::write(out_dir.join("u-boot-turing-rk1_2026.04_arm64.deb"), b"other").unwrap();

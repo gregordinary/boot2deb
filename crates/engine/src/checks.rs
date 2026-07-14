@@ -293,7 +293,7 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
 
     // Local apt repo + packaging + content-hash tools the rootfs/package stages
     // shell out to. Missing, `doctor` used to pass and the build then
-    // died mid-rootfs on a non-Debian host (DR-1).
+    // died mid-rootfs on a non-Debian host.
     checks.push(exe(pm, target, "dpkg-deb", &["dpkg-deb"], "read each fetched .deb for the content pin", true, Pkg::Dpkg));
     checks.push(exe(pm, target, "dpkg-scanpackages", &["dpkg-scanpackages"], "local apt repo Packages index", true, Pkg::DpkgDev));
     checks.push(exe(pm, target, "apt-ftparchive", &["apt-ftparchive"], "local apt repo Release", true, Pkg::AptUtils));
@@ -376,7 +376,7 @@ fn openssl_check(pm: PkgManager, target: Arch) -> Check {
 /// host forbids namespaces — Ubuntu 24.04's
 /// `apparmor_restrict_unprivileged_userns=1` and `user.max_user_namespaces=0` —
 /// and a plain `--map-root-user` probe misses absent `/etc/subuid` ranges, so
-/// the actual syscall + mapping is the authoritative check (DR-2).
+/// the actual syscall + mapping is the authoritative check.
 fn userns_check() -> Check {
     let works = Command::new("unshare")
         .args(["--map-root-user", "--map-auto", "true"])

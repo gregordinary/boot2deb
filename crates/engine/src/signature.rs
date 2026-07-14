@@ -6,7 +6,7 @@
 //! signature; on the reuse path the engine recomputes the signature and rebuilds
 //! unless it matches. This replaces unsound directory-existence reuse — a reused
 //! tree is otherwise never re-checked against the lock, so a changed pin/patch is
-//! silently built on a stale checkout (COR-1). The bias is deliberate: a spurious
+//! silently built on a stale checkout. The bias is deliberate: a spurious
 //! *miss* only wastes time, a spurious *hit* ships a stale artifact, so a node
 //! folds every input that can change its tree and treats a missing/unreadable
 //! stamp or any mismatch as "rebuild".

@@ -161,7 +161,7 @@ fn prepare_out(dir: &Path) -> Result<PathBuf, EngineError> {
 /// `CROSS_COMPILE` is passed as a `make` variable (matching the compile
 /// stage), so the config's `cc-option` probes see the target toolchain. The target
 /// is validated and passed after `--` so a config-derived defconfig cannot be read
-/// as an option or a variable assignment (SUB-1).
+/// as an option or a variable assignment.
 fn make_target(
     tree: &Path,
     out: &Path,
@@ -203,7 +203,7 @@ fn run_merge_config(
     // tree and dangles whenever `tree` itself is relative (e.g. the verify cache
     // under the default relative `--root`). Canonicalizing keeps the invocation
     // CWD-independent and fails here, naming the script, when the tree carries no
-    // merge_config.sh at all (COR-21).
+    // merge_config.sh at all.
     let script = std::fs::canonicalize(&script).map_err(|source| EngineError::io(&script, source))?;
     let context = format!("merge_config.sh for {}", tree.display());
     let mut cmd = Command::new("sh");
@@ -283,7 +283,7 @@ mod tests {
     fn merge_config_script_resolves_from_a_relative_tree_path() {
         use crate::event::Event;
         // The child `sh` chdirs into the tree before opening the script argument, so
-        // the script path must not depend on the parent CWD (COR-21). Reproduce with
+        // the script path must not depend on the parent CWD. Reproduce with
         // a *relative* tree path, which requires a known CWD: cargo runs unit tests
         // from the crate root, with the workspace target dir at ../../target. Skip
         // (rather than create stray dirs) if invoked from anywhere else.

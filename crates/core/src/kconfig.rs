@@ -66,7 +66,7 @@ impl KernelConfig {
                 if let Some(sym) = rest.strip_suffix(" is not set") {
                     // A hand-edited fragment may leave stray whitespace; a symbol
                     // name has none, so trim it and reject an empty / spaced name
-                    // rather than record a phantom symbol (COR-14).
+                    // rather than record a phantom symbol.
                     let sym = sym.trim();
                     if !sym.is_empty() && !sym.contains(char::is_whitespace) {
                         entries.insert(format!("CONFIG_{sym}"), Value::NotSet);
@@ -80,7 +80,7 @@ impl KernelConfig {
             // "CONFIG_X=<value>" — split on the first '=' so quoted string
             // values containing '=' are preserved verbatim. The symbol side is
             // trimmed (so `CONFIG_FOO =m` is `CONFIG_FOO`, not a spaced phantom) and
-            // rejected if it still carries whitespace (COR-14).
+            // rejected if it still carries whitespace.
             if let Some((sym, val)) = line.split_once('=') {
                 let sym = sym.trim();
                 if let Some(stripped) = sym.strip_prefix("CONFIG_") {
