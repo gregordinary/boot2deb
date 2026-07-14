@@ -25,7 +25,14 @@ default_kernel          = "debian-armmp"
 default_suite           = "forky"                           # validated on the hardware; trixie also boots
 default_layout          = "combined"
 hostname                = "asus-c201"
-image_size              = "4G"
+
+# The shipped image only has to hold its own content — first boot grows the rootfs
+# partition to fill whatever card it lands on and resizes the filesystem onto it. So
+# this is sized for the ~700 MB the image actually occupies, with room to spare, and
+# not for the medium: a bigger number would buy nothing on the running board and cost
+# a slower flash (the empty space compresses away in the `.xz`, but it is still written
+# to the card) and a larger minimum card.
+image_size              = "2G"
 
 # The board is a laptop: it has a keyboard under the user's hands, and it is the one
 # shipped device for which a console keymap configures anything at all (the RK1 and

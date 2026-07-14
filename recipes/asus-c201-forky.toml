@@ -9,4 +9,4 @@ features   = []                # a base image: there is no Rockchip media-accel
                                # so video decode rides the mainline V4L2 stateless
                                # path via Hantro/rkvdec with no feature to select.
 layout     = "combined"
-image_size = "4G"
+image_size = "2G"

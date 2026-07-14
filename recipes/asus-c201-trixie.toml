@@ -13,4 +13,4 @@ kernel     = "debian-armmp"    # Debian's own armhf kernel; trixie resolves 6.12
 suite      = "trixie"
 features   = []
 layout     = "combined"
-image_size = "4G"
+image_size = "2G"
