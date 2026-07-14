@@ -238,7 +238,7 @@ impl RootlessSandbox {
 
     /// Run one `apt-get` invocation inside the sandbox with **direct argv** (no
     /// `sh -c`), so package names and `.deb` paths cannot be reinterpreted by a
-    /// shell (SEC-4). `fixed` is the subcommand + flags, `extra` the package names
+    /// shell. `fixed` is the subcommand + flags, `extra` the package names
     /// or paths, `ro_binds` any host dirs apt must *read* from (bound read-only —
     /// apt installs from them but never writes them, TRUST-6).
     ///
@@ -374,7 +374,7 @@ impl BuildSandbox for RootlessSandbox {
         // apt treats an argument containing a slash as a file path; passing the
         // absolute paths as direct argv (no shell) lets apt resolve transitive
         // runtime deps from the suite while a path with shell metacharacters cannot
-        // be reinterpreted (SEC-4).
+        // be reinterpreted.
         step.log(format!("installing {} userspace .deb(s) into the sandbox", debs.len()));
         self.apt(&["update", "-q"], &[], &ro_binds, "apt-get update", step)?;
         let paths: Vec<String> = debs.iter().map(|d| d.to_string_lossy().into_owned()).collect();

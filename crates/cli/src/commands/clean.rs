@@ -1,7 +1,7 @@
 //! `clean`: remove a recipe's build scratch (or a selected subtree), to reclaim disk
 //! or force a clean rebuild. `--dry-run` previews with sizes and removes nothing.
 //!
-//! Only directories `build` stamped as boot2deb-owned are removed (SEC-7, see
+//! Only directories `build` stamped as boot2deb-owned are removed (see
 //! [`check_work_dir_removable`]); `--force` overrides. Without that guard a mistyped
 //! `--work-dir` would be a recursive delete of an arbitrary tree.
 
@@ -19,14 +19,14 @@ pub(crate) fn run(
     args: CleanArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate the recipe-name shape (reject `..`/absolute/separators) before it is
-    // joined into a filesystem path, consistent with the config write paths (SEC-2).
+    // joined into a filesystem path, consistent with the config write paths.
     root.lock_path(recipe)?;
     let work_dir = absolutize(
         args.work_dir
             .unwrap_or_else(|| PathBuf::from("build").join(recipe)),
     );
     // The whole-tree default and the cache/sandbox selectors all remove within the
-    // caller-supplied work dir, so they require the SEC-7 ownership stamp. The
+    // caller-supplied work dir, so they require the ownership stamp. The
     // artifacts selector is exempt: its target lives under the config root's own
     // cache, not at a path the caller chose.
     if !args.artifacts || args.cache || args.sandbox {

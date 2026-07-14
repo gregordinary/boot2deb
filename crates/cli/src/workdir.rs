@@ -1,4 +1,4 @@
-//! The build scratch dir's ownership stamp (SEC-7).
+//! The build scratch dir's ownership stamp.
 //!
 //! `clean --work-dir <path>` removes a tree recursively, so it must be able to
 //! prove the target is boot2deb's own scratch and not, say, a mistyped path into
@@ -8,13 +8,13 @@
 use std::path::Path;
 
 /// The marker file [`mark_work_dir`] stamps into every work dir `build` creates
-/// and [`check_work_dir_removable`] requires before `clean` removes one (SEC-7).
+/// and [`check_work_dir_removable`] requires before `clean` removes one.
 /// Its presence means "boot2deb created this scratch tree," so `clean` can prove
 /// a removal target is its own rather than an arbitrary `--work-dir` typo.
 pub(crate) const WORK_DIR_MARKER: &str = ".boot2deb-work";
 
 /// Create `work_dir` (if needed) and stamp it with the [`WORK_DIR_MARKER`], so a
-/// later `clean` recognizes it as boot2deb-owned (SEC-7).
+/// later `clean` recognizes it as boot2deb-owned.
 pub(crate) fn mark_work_dir(work_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(work_dir)
         .map_err(|e| format!("failed to create {}: {e}", work_dir.display()))?;
@@ -26,7 +26,7 @@ pub(crate) fn mark_work_dir(work_dir: &Path) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// The SEC-7 removal guard: `Ok` when `clean` may remove (within) `work_dir` —
+/// The removal guard: `Ok` when `clean` may remove (within) `work_dir` —
 /// it is stamped with the [`WORK_DIR_MARKER`], the caller forced it, or it does
 /// not exist (the removal loop then just reports it absent). `Err` carries the
 /// refusal message.
@@ -50,7 +50,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("not-a-work-dir");
         std::fs::create_dir_all(&dir).unwrap();
-        // An unmarked existing directory is refused (SEC-7): a mistyped
+        // An unmarked existing directory is refused: a mistyped
         // --work-dir must not become a recursive delete.
         let err = check_work_dir_removable(&dir, false).unwrap_err();
         assert!(err.contains("refusing to remove"), "{err}");

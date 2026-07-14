@@ -54,7 +54,7 @@ pub fn verify(dir: &Path, expected_pin: &str) -> Result<PathBuf, EngineError> {
 /// returning the staged path. The consumer reads the staged copy, so the
 /// bytes it uses are exactly the ones that were hashed — closing the
 /// verify-then-read TOCTOU where the vendored source could be swapped between the
-/// hash check and `make` re-reading it (SEC-5).
+/// hash check and `make` re-reading it.
 pub fn verify_to(dir: &Path, expected_pin: &str, stage_dir: &Path) -> Result<PathBuf, EngineError> {
     let (filename, bytes) = read_verified(dir, expected_pin)?;
     std::fs::create_dir_all(stage_dir).map_err(|source| EngineError::io(stage_dir, source))?;

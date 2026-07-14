@@ -11,12 +11,12 @@
 //!
 //! `mke2fs` writes the journal at format time and lays out a standard
 //! `sparse_super` + `resize_inode` filesystem whose reserved GDT blocks are
-//! explicitly sized for growth to [`ONLINE_RESIZE_CEILING`] (GEO-3), which the
+//! explicitly sized for growth to [`ONLINE_RESIZE_CEILING`], which the
 //! kernel's online resize (`EXT4_IOC_RESIZE_FS`) grows without a meta_bg
 //! conversion — first boot expands the rootfs while it is mounted as `/`.
 //!
 //! The staged tree is also where the unique per-image first-boot password is
-//! spliced (SEC-6): the cacheable rootfs tarball leaves the default account
+//! spliced: the cacheable rootfs tarball leaves the default account
 //! locked, and `/etc/shadow` is rewritten here — the one per-build-unique step —
 //! before `mke2fs` records the tree. Editing the extracted file in place keeps
 //! the `root:shadow` ownership the namespace set, so no fragile in-archive
@@ -45,7 +45,7 @@ use uuid::Uuid;
 ///
 /// `resize_inode` + `sparse_super` are the load-bearing pair — reserved GDT
 /// blocks give the kernel's online resize its growth headroom (sized by
-/// [`ONLINE_RESIZE_CEILING`], GEO-3) without a meta_bg conversion.
+/// [`ONLINE_RESIZE_CEILING`]) without a meta_bg conversion.
 /// `metadata_csum_seed` stores the checksum seed in the superblock instead of
 /// deriving it from the UUID, which is what lets first-boot's `tune2fs -U`
 /// re-UUID the *mounted* root without rewriting every metadata checksum. The
@@ -56,7 +56,7 @@ const EXT4_FEATURES: &str = "64bit,dir_index,dir_nlink,ext_attr,extent,extra_isi
                              metadata_csum_seed,resize_inode,sparse_super";
 
 /// Online-resize ceiling requested at format time — 8 TiB, passed to `mke2fs`
-/// as `-E resize=` (GEO-3).
+/// as `-E resize=`.
 ///
 /// First boot grows the mounted root with `resize2fs`, an *online* resize whose
 /// reach is exactly the reserved GDT blocks laid down here. Without an explicit
@@ -86,7 +86,7 @@ fn online_resize_blocks(size: u64) -> u64 {
 /// `/etc/fstab` mounts by. `uuid` is the deterministic superblock UUID the caller
 /// derived from the lock, so a rebuild reproduces it instead of `mke2fs` drawing
 /// a random one. `first_boot` is the per-image credential spliced into the staged
-/// `/etc/shadow` after extraction and before formatting (SEC-6).
+/// `/etc/shadow` after extraction and before formatting.
 ///
 /// The output is *not* byte-for-byte reproducible on its own: `mke2fs` stamps
 /// the superblock's format/check times from the wall clock, and the per-image
@@ -126,7 +126,7 @@ pub(crate) fn build_rootfs_ext4(
 }
 
 /// The per-image first-boot credential spliced into the staged rootfs before it
-/// is formatted (SEC-6). The default account is created locked in the cacheable
+/// is formatted. The default account is created locked in the cacheable
 /// rootfs tarball; this rewrites its `/etc/shadow` line with a fresh hash and
 /// forces a change at first login.
 pub(crate) struct FirstBoot<'a> {
@@ -137,7 +137,7 @@ pub(crate) struct FirstBoot<'a> {
 }
 
 /// Rewrite `first_boot.user`'s locked `/etc/shadow` line in the staged tree with
-/// the per-image hash (SEC-6), before `mke2fs -d` records the tree.
+/// the per-image hash, before `mke2fs -d` records the tree.
 ///
 /// The unique per-image password is non-reproducible, so the cacheable rootfs
 /// tarball leaves the account locked (`{user}:!:…`) and the splice happens here —
@@ -240,7 +240,7 @@ fn mkfs(
     cmd.arg("-O").arg(EXT4_FEATURES);
     // Fully initialize inode tables and the journal at format time — the image
     // content must not depend on a first mount finishing the format. `resize=`
-    // reserves GDT headroom for online growth to the ceiling (GEO-3).
+    // reserves GDT headroom for online growth to the ceiling.
     cmd.arg("-E").arg(format!(
         "lazy_itable_init=0,lazy_journal_init=0,resize={}",
         online_resize_blocks(size)
@@ -382,7 +382,7 @@ mod tests {
         // the mounted root, which needs the seed decoupled from the UUID.
         assert_ne!(sb_u32(&bytes, 0x60) & 0x2000, 0, "metadata_csum_seed must be set");
         // s_reserved_gdt_blocks at 0xCE: the online-resize growth headroom must
-        // reach the 8 TiB ceiling (GEO-3), not mke2fs's ~1024x-formatted default
+        // reach the 8 TiB ceiling, not mke2fs's ~1024x-formatted default
         // — growth to 8 TiB needs 1024 GDT blocks total (65536 groups x 64-byte
         // descriptors / 4 KiB blocks), one of which this small filesystem
         // already uses, so at least 1023 are reserved.

@@ -1,4 +1,4 @@
-//! Per-image build secrets (SEC-6).
+//! Per-image build secrets.
 //!
 //! The shipped image's default account gets a **unique per built image** first-boot
 //! password, generated here from the kernel CSPRNG (`/dev/urandom`) so there is no
@@ -23,7 +23,7 @@ const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ234567
 /// of entropy — unguessable within the first-boot window, and well beyond it.
 const LEN: usize = 20;
 
-/// Generate a fresh per-image password from `/dev/urandom` (SEC-6).
+/// Generate a fresh per-image password from `/dev/urandom`.
 ///
 /// A 20-symbol string, uniform over the 56-symbol unambiguous alphabet by
 /// rejection sampling: bytes at or above the largest multiple of the alphabet
