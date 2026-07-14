@@ -160,8 +160,23 @@ which one it got.
 
 ## Status
 
-**Hardware-confirmed** on a libreboot unit: both suites, both board profiles, booting to
-login with working Wi-Fi from USB via Ctrl+U.
+**A boot2deb-built image boots this board.** Confirmed end to end on a libreboot unit,
+from USB via Ctrl+U: forky comes up, runs first boot, reboots itself, and comes back to a
+login prompt. The per-image password works and is changed at first login; `nmtui` joins
+Wi-Fi.
+
+What that reboot proves is worth spelling out, because it is the part of the flow with no
+second chance. First boot gives the rootfs a new partition UUID and a new filesystem
+UUID, which invalidates the `root=` baked into the *signed* kernel — so the board is only
+bootable again because the `first-boot.d/10-depthcharge` hook re-signed the kernel
+partition against the new UUID before rebooting. A board that comes back to a login
+prompt has exercised that whole path.
+
+Expect a **white screen for roughly 10 seconds** after Ctrl+U before the boot messages
+appear. That is normal and not a fault: there is no display driver in the initramfs, so
+the panel holds the firmware's last frame until the kernel's DRM stack takes over.
+
+Audio and Bluetooth ship configured but are **not yet confirmed on hardware**.
 
 **Stock-firmware hardware is untested.** The stock `speedy` profile is what the image
 ships by default and there is good reason to expect it to work — the profile is
