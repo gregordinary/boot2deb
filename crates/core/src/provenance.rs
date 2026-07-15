@@ -55,6 +55,14 @@ pub struct BuildFacts<'a> {
     /// build, so it is not derivable and the rootfs `/etc/shadow` is intentionally
     /// outside the byte-reproducibility claim.
     pub password: &'a str,
+    /// boot2deb crate version that ran the build (`CARGO_PKG_VERSION`).
+    pub builder_version: &'a str,
+    /// Short git commit of the boot2deb checkout that ran the build, or `None` when
+    /// built outside a git checkout (e.g. from a source tarball).
+    pub builder_commit: Option<&'a str>,
+    /// Whether that checkout had uncommitted changes at build time. Only meaningful
+    /// when `builder_commit` is `Some`.
+    pub builder_dirty: bool,
 }
 
 /// The resolved build point + every pin, joined into one document. Each
@@ -75,6 +83,8 @@ pub struct ProvenanceManifest {
     pub blobs: Option<BlobsProvenance>,
     /// Build host / toolchain identity.
     pub toolchain: ToolchainProvenance,
+    /// Which boot2deb produced the image — the builder axis of provenance.
+    pub built_with: BuiltWithProvenance,
     /// First-boot credential — the per-image secret.
     pub credentials: CredentialsProvenance,
     /// Pre-built `extra_debs` pulled from outside the Debian mirror,
@@ -364,6 +374,26 @@ pub struct ToolchainProvenance {
     pub cross_compile: String,
 }
 
+/// Which boot2deb built the image — the builder axis of "exactly what went into this
+/// image". It is an *as-built* record, not a requirement: the exact version reproduces
+/// the image, and later versions do too until some change alters the build output for
+/// this lock — a boundary that cannot be known at build time. So it records *when the
+/// build worked*, never a forward compatibility range, and a reproduce flow reads it to
+/// advise (warn on a mismatch), never to enforce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuiltWithProvenance {
+    /// boot2deb crate version, from `Cargo.toml` (e.g. `0.1.0`).
+    pub version: String,
+    /// Short git commit of the boot2deb checkout that built the image. Absent when the
+    /// build tree was not a git checkout, leaving `version` the only builder coordinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Whether the boot2deb checkout had uncommitted changes at build time. `true` means
+    /// `commit` alone does not identify the builder — the image is not reproducible from
+    /// that commit.
+    pub dirty: bool,
+}
+
 /// The image's initial first-boot credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CredentialsProvenance {
@@ -496,6 +526,11 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             target_arch: build.arch.to_string(),
             cross: facts.cross,
             cross_compile: build.cross_compile.clone(),
+        },
+        built_with: BuiltWithProvenance {
+            version: facts.builder_version.to_string(),
+            commit: facts.builder_commit.map(str::to_string),
+            dirty: facts.builder_dirty,
         },
         credentials: CredentialsProvenance {
             user: facts.user.to_string(),
@@ -662,6 +697,9 @@ mod tests {
             package_count: 1,
             user: "debian",
             password: "Kp7rTx",
+            builder_version: "0.0.0-test",
+            builder_commit: Some("deadbeef1234"),
+            builder_dirty: false,
         };
         let manifest = assemble(&sample_build(), &lock, &facts).to_toml_string().unwrap();
         assert!(manifest.contains("Kp7rTx"), "the manifest is the document that has it");
@@ -721,6 +759,9 @@ mod tests {
             package_count: 223,
             user: "debian",
             password: "Kp7rTx",
+            builder_version: "0.0.0-test",
+            builder_commit: Some("cafef00dbabe"),
+            builder_dirty: false,
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.sources.kernel_commit.as_deref(), Some("kc"));
@@ -749,10 +790,12 @@ mod tests {
             "[rootfs]",
             "[blobs]",
             "[toolchain]",
+            "[built_with]",
             "[credentials]",
             "kernel_commit = \"kc\"",
             "manifest_sha256 = \"abc123\"",
             "password = \"Kp7rTx\"",
+            "version = \"0.0.0-test\"",
         ] {
             assert!(text.contains(needle), "provenance TOML missing {needle}:\n{text}");
         }
@@ -761,6 +804,10 @@ mod tests {
         let parsed: toml::Value = toml::from_str(&text).unwrap();
         assert_eq!(parsed["sources"]["media_accel"]["ffmpeg_base_commit"].as_str(), Some("fbc"));
         assert_eq!(parsed["image"]["features"][0].as_str(), Some("media-accel-rockchip"));
+        // The builder stamp: an as-built record of which boot2deb produced the image.
+        assert_eq!(parsed["built_with"]["version"].as_str(), Some("0.0.0-test"));
+        assert_eq!(parsed["built_with"]["commit"].as_str(), Some("cafef00dbabe"));
+        assert_eq!(parsed["built_with"]["dirty"].as_bool(), Some(false));
         // No extra_debs in this build → the array-of-tables is omitted entirely.
         assert!(!text.contains("extra_debs"));
     }
@@ -781,6 +828,9 @@ mod tests {
             package_count: 1,
             user: "debian",
             password: "pw",
+            builder_version: "0.0.0-test",
+            builder_commit: None,
+            builder_dirty: false,
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.extra_debs.len(), 1);
@@ -795,6 +845,10 @@ mod tests {
         assert_eq!(parsed["extra_debs"][0]["sha256"].as_str().unwrap().len(), 64);
         // The durability list carries every fetched source axis.
         assert_eq!(parsed["source_durability"].as_array().unwrap().len(), 6);
+        // A build outside a git checkout stamps its version but omits the commit
+        // entirely (not an empty string a reader would have to special-case).
+        assert_eq!(parsed["built_with"]["version"].as_str(), Some("0.0.0-test"));
+        assert!(parsed["built_with"].get("commit").is_none(), "no commit for a non-git build");
     }
 }
 

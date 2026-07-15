@@ -21,6 +21,7 @@
 - [CLI](reference/cli.md)
 - [Overlays](reference/overlays.md)
 - [Image identity](reference/image-identity.md)
+- [Reproducibility](reference/reproducibility.md)
 
 # Contributing
 

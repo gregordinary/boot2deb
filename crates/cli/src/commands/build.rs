@@ -651,6 +651,11 @@ pub(crate) fn run(
             package_count,
             user: rootfs::DEFAULT_USER,
             password,
+            // Stamped by build.rs from the boot2deb checkout; the commit is empty when
+            // built outside a git tree (e.g. a source tarball), leaving only the version.
+            builder_version: env!("CARGO_PKG_VERSION"),
+            builder_commit: option_env!("BOOT2DEB_GIT_COMMIT").filter(|s| !s.is_empty()),
+            builder_dirty: matches!(option_env!("BOOT2DEB_GIT_DIRTY"), Some("true")),
         };
         let prov = boot2deb_core::provenance::assemble(&resolved, &lock, &facts);
         let prov_path = out_dir.join(format!("{recipe}.provenance.toml"));
