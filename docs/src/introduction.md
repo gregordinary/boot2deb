@@ -26,7 +26,9 @@ of each board rather than making them look alike.
 - **[Turing RK1](boards/turing-rk1.md)** — the shipped RK3588 configuration, and how
   to flash it.
 - **[ASUS Chromebook C201](boards/asus-c201.md)** — the shipped RK3288 Chromebook: a
-  ChromeOS-firmware board, and a kernel that comes from Debian.
+  ChromeOS-firmware board, and a kernel that comes from Debian. Its two siblings, the
+  [C100P](boards/asus-c100p.md) and the [Chromebit CS10](boards/asus-chromebit-cs10.md),
+  are each a device file and nothing else.
 - **[Config model](reference/config-model.md)** — how a build is described across its
   axes, and how the layers resolve.
 - **[CLI](reference/cli.md)** — the command reference.

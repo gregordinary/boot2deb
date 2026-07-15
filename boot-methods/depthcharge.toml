@@ -8,20 +8,41 @@
 # GUID and picks it by the attribute bits below.
 description = "ChromeOS depthcharge: a vboot-signed kernel FIT in a ChromeOS kernel partition"
 
-# --- The kernel partition ----------------------------------------------------
+# --- The kernel slots --------------------------------------------------------
 # The firmware scans every boot medium's GPT for the ChromeOS kernel type GUID and
 # never looks at a partition's number or start sector, so the geometry is a free
 # choice. 12 MiB clears the 8 MiB region a Veyron eMMC reserves at its head (4 MiB
 # would land inside it) and costs nothing on SD or USB, so one geometry serves every
 # medium. 16 MiB matches the factory KERN-A size.
-kpart_offset  = "12MiB"                  # LBA 24576
-kpart_size    = "16MiB"                  # 32768 sectors
-rootfs_offset = "28MiB"                  # LBA 57344 — immediately after the kernel partition
+#
+# TWO slots, not one, and that is the whole kernel-upgrade story. The image ships the
+# signed kernel in KERN-A and an empty KERN-B behind it at priority 0 ("never boot").
+# An on-device kernel upgrade -- `apt` installing a new linux-image, or a hand-placed
+# .deb -- fires depthcharge-tools' /etc/kernel/postinst.d hook, which re-signs the
+# kernel and writes it to the slot it is NOT running from, marks that slot
+# highest-priority with one try, and reboots. If the new kernel boots, the running
+# system marks it successful and the upgrade is committed. If it never boots, its one
+# try is spent and the firmware falls back to the other slot, which still holds the
+# old kernel and is still marked successful. The rollback costs nothing and needs
+# nobody: it is the firmware's own selection rule.
+#
+# With ONE slot none of that is available -- `depthchargectl` has to overwrite the
+# kernel it is booted from (`--allow-current`), and a kernel that does not come up
+# leaves the board with nothing to boot and no way in but external media.
+kpart_offset  = "12MiB"                  # LBA 24576 — start of KERN-A
+kpart_size    = "16MiB"                  # 32768 sectors, per slot
+kpart_slots   = 2                        # KERN-A (payload) + KERN-B (spare) -> A/B upgrades
+rootfs_offset = "44MiB"                  # LBA 90112 — immediately after the last slot
 
-# GPT attribute bits 48-63 of the kernel partition's entry. `successful` is what
-# stops the firmware decrementing `tries` to zero and giving up on the image.
+# GPT attribute bits 48-63 of the *payload* slot's entry (KERN-A). `successful` is
+# what stops the firmware decrementing `tries` to zero and giving up on the image.
 # Packed, these are 0x015A000000000000 — plain bits in a standard GPT entry, so the
 # `gpt` crate writes them and no ChromeOS host tooling (cgpt) is needed.
+#
+# The spare slot is not authored: it ships all-zero, and priority 0 is precisely
+# "never boot", which is what an empty partition deserves. depthcharge-tools still
+# finds it — it selects slots by type GUID, not by attributes — so it is a valid
+# upgrade target from the first boot.
 kpart_priority   = 10                    # bits 51:48 — 15 highest, 0 = never boot
 kpart_tries      = 5                     # bits 55:52
 kpart_successful = true                  # bit 56

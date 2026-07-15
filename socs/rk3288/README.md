@@ -1,6 +1,6 @@
-# ASUS Chromebook C201 — vendored firmware
+# RK3288 / Veyron — vendored firmware
 
-The device layer's `overlay/` tree carries two Broadcom firmware blobs, both vendored
+The SoC layer's `overlay/` tree carries two Broadcom firmware blobs, both vendored
 because Debian ships neither, both landing in the image at
 `/usr/lib/firmware/brcm/`.
 
@@ -8,6 +8,13 @@ because Debian ships neither, both landing in the image at
 |---|---|---|---|
 | `brcmfmac4354-sdio.txt` | 2907 | `1ed835efb2aa2f295aef30f00c01a044579e5b1d1fbf65f04e95add6a146f666` | Wi-Fi board NVRAM / calibration |
 | `BCM4354.hcd` | 81417 | `22cd1a7ba3b7872cb368eab61cc4640b6638c3c3e0b25277a3cc2803a3a1de45` | Bluetooth patchram |
+
+They are here, on the SoC layer, rather than on a device, because they identify a
+**radio module** and it is the same module on every Broadcom board in the family — the
+C201 (`speedy`), the Chromebook Flip C100P (`minnie`), the Chromebit CS10 (`mickey`),
+and `brain`. One copy serves all of them. The Marvell-radio Veyrons (`jerry`, `jaq`,
+`mighty`, `fievel`, `tiger`) want `firmware-libertas` instead, which Debian packages;
+the day one of those is added, the radio half of this layer moves down to the devices.
 
 ## Why these are vendored and the Wi-Fi `.bin` is not
 
@@ -41,11 +48,12 @@ variant this board does not have. Wrong module, wrong calibration.
 
 `brcmfmac` and `hci_bcm` try a DT-compatible-suffixed name first
 (`brcmfmac4354-sdio.google,veyron-speedy-rev9.txt`) and fall back to the generic one.
-Installing under the generic name therefore serves every Veyron board revision and
-every Broadcom board in the family (speedy, minnie, mickey, brain) from one copy.
+Installing under the generic name therefore serves every board revision and every
+Broadcom board in the family from one copy — which is what lets these files sit on the
+SoC layer at all.
 
-Installing them anywhere *else* is what breaks Wi-Fi on the unit's postmarketOS
-install, which puts them under `/lib/firmware/postmarketos/brcm/` with no
+Installing them anywhere *else* is what breaks Wi-Fi on the reference unit's
+postmarketOS install, which puts them under `/lib/firmware/postmarketos/brcm/` with no
 `firmware_class.path` set — the driver looks in `/lib/firmware/brcm/` and gets `-2`.
 
 ## Licence

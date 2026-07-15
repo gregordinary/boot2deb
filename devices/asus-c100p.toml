@@ -1,0 +1,44 @@
+# devices/asus-c100p.toml — ASUS Chromebook Flip C100P / C100PA
+# (google,veyron-minnie).
+#
+# A 10.1" convertible: the C201's hardware in a body that folds. It includes the same
+# rk3288-veyron-chromebook.dtsi, so the EC keyboard, the trackpad, the SD slot, the
+# max98090 codec and the eDP panel are all the C201's and all inherited from
+# socs/rk3288 — which is why this file is short.
+#
+# Its own deltas are four, and none of them is something an image builder configures:
+# a 1280x800 auo,b101ean01 panel in place of the C201's 1366x768; volume buttons; an
+# Elan ekth3500 touchscreen on i2c3; and a bq27500 fuel gauge where the C201 has an
+# SBS battery. The last two are the board's one rough edge — see the `## Status`
+# section of docs/src/boards/asus-c100p.md.
+description             = "ASUS Chromebook Flip C100P (RK3288, google,veyron-minnie)"
+soc                     = "rk3288"                          # -> arch=armv7, dt_dir, modules, radio, network
+boot_method             = "depthcharge"
+supported_boot_methods  = ["depthcharge"]
+
+# Upstream, like every Veyron. Nothing here compiles a kernel or a bootloader, so
+# there is no `device_dts`, no `device_config_fragments`, and no `uboot_defconfig`.
+kernel_dtb              = "rockchip/rk3288-veyron-minnie.dtb"
+device_config_fragments = []
+
+supported_kernels       = ["debian-armmp"]
+default_kernel          = "debian-armmp"
+default_suite           = "forky"
+default_layout          = "combined"
+hostname                = "asus-c100p"
+
+# Sized for the image's own content; first boot grows the partition to fill the card
+# and resizes the filesystem onto it.
+image_size              = "2G"
+
+# A laptop, with a keyboard under the user's hands. The C100PA ships a US layout.
+keymap                  = "us"
+
+# --- The board profile ---------------------------------------------------------
+# One profile: depthcharge-tools carries `minnie` as a first-class board, and it ships
+# no libreboot variant for it — the family's only libreboot profile is the C201's.
+# The payload shape is the family's: a 16 MiB ceiling and firmware that ignores a FIT
+# ramdisk, so depthchargectl patches the initrd address into the DTB.
+[depthcharge]
+board            = "minnie"
+supported_boards = ["minnie"]

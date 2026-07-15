@@ -1,0 +1,16 @@
+# recipes/asus-c100p-trixie.toml — the ASUS Chromebook Flip C100P on Debian trixie
+# (armhf).
+#
+# The same board on the stable suite, and it gains a whole kernel by it:
+# `linux-image-armmp` resolves to 6.12.x here rather than 7.1.x, because the suite
+# decides the version — which is exactly why a distro kernel needs no definition of
+# its own per release.
+#
+# The two recipes are separate build points, so they get separate PARTUUIDs and can be
+# flashed to two cards without the kernel mistaking one for the other.
+device     = "asus-c100p"
+kernel     = "debian-armmp"    # Debian's own armhf kernel; trixie resolves 6.12.x
+suite      = "trixie"
+features   = []
+layout     = "combined"
+image_size = "2G"

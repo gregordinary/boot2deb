@@ -1,0 +1,55 @@
+# devices/asus-chromebit-cs10.toml — ASUS Chromebit CS10 (google,veyron-mickey).
+#
+# The odd one in the Veyron family, and the reason is one line of its device tree:
+# rk3288-veyron-mickey.dts includes rk3288-veyron.dtsi *directly* and never picks up
+# rk3288-veyron-chromebook.dtsi. That one omission is the board. It has no SD slot,
+# no ChromeOS EC and so no built-in keyboard, no trackpad, no battery, no lid, no
+# analog audio codec and no eDP panel — every one of those enters the family through
+# the file it skips. What is left is an HDMI stick: an RK3288, 2 GB of RAM, 16 GB of
+# eMMC, a Broadcom radio, and a single USB 2.0 port.
+#
+# It still boots exactly like its siblings, which is the whole point of the layer
+# model: the boot method, the radio, the initramfs and the network stack are all
+# family properties on socs/rk3288, and none of them cares that this board is a stick.
+description             = "ASUS Chromebit CS10 (RK3288, google,veyron-mickey)"
+soc                     = "rk3288"                          # -> arch=armv7, dt_dir, modules, radio, network
+boot_method             = "depthcharge"
+supported_boot_methods  = ["depthcharge"]
+
+# Upstream, like every Veyron. Nothing here compiles a kernel or a bootloader, so
+# there is no `device_dts`, no `device_config_fragments`, and no `uboot_defconfig`.
+kernel_dtb              = "rockchip/rk3288-veyron-mickey.dtb"
+device_config_fragments = []
+
+supported_kernels       = ["debian-armmp"]
+default_kernel          = "debian-armmp"
+default_suite           = "forky"
+default_layout          = "combined"
+hostname                = "asus-chromebit-cs10"
+
+# First boot grows the rootfs partition to fill the medium and resizes the filesystem
+# onto it, so the shipped image only has to hold its own content. On this board the
+# medium is a USB stick or the 16 GB eMMC, and neither is served by writing gigabytes
+# of zeros to it.
+image_size              = "2G"
+
+# A console keymap, on a board with no keyboard — and it is not a contradiction.
+# This is not a headless machine: it drives an HDMI display, and the only way to type
+# at that console is a USB keyboard, which is not optional here but the sole input
+# the hardware has. So a layout is exactly as meaningful as it is on a laptop; it just
+# describes a keyboard the user brings. US is the default because the CS10 is a
+# US/EU-market device and something has to be. Override it per build (`--keymap gb`)
+# or on the running board with `dpkg-reconfigure keyboard-configuration`.
+#
+# Note this also decides nothing about the *firmware* screens. Depthcharge reads
+# Ctrl+U with its own USB HID driver and its own fixed layout, before Linux exists.
+keymap                  = "us"
+
+# --- The board profile ---------------------------------------------------------
+# One profile: depthcharge-tools carries `mickey` as a first-class board, and there is
+# no libreboot port for the Chromebit — the family's only libreboot profile is the
+# C201's. The payload shape is the family's: a 16 MiB ceiling and firmware that
+# ignores a FIT ramdisk, so depthchargectl patches the initrd address into the DTB.
+[depthcharge]
+board            = "mickey"
+supported_boards = ["mickey"]

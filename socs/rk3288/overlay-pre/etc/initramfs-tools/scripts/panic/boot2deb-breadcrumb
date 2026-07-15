@@ -1,16 +1,16 @@
 #!/bin/sh
 # initramfs panic hook: leave evidence somewhere a host can read it.
 #
-# This board has no serial console and (by budget, see conf.d/veyron.conf) no
-# display inside the initramfs, so an initramfs failure is a silent white
-# screen. This script runs from initramfs-tools' panic() -- i.e. exactly when
-# the boot has given up -- and writes the full story (cmdline, block devices,
-# loaded modules, dmesg) to the root of every ext4 partition it can reach.
-# Pulling the SD card afterwards and looking for BOOT2DEB-PANIC.txt replaces a
-# serial log. If the file never appears AND the machine still reboots ~30 s
-# after the panic (the cmdline carries panic=30), the initramfs ran but could
-# not reach any storage; if the machine never reboots either, the kernel never
-# got as far as the initramfs.
+# These boards expose no serial console and (by budget, see the boot method's
+# conf.d/depthcharge.conf and modules.d/veyron) carry no display driver inside
+# the initramfs, so an initramfs failure is a silent white screen. This script
+# runs from initramfs-tools' panic() -- i.e. exactly when the boot has given up
+# -- and writes the full story (cmdline, block devices, loaded modules, dmesg) to
+# the root of every ext4 partition it can reach. Pulling the medium afterwards
+# and looking for BOOT2DEB-PANIC.txt replaces a serial log. If the file never
+# appears AND the machine still reboots ~30 s after the panic (the cmdline
+# carries panic=30), the initramfs ran but could not reach any storage; if the
+# machine never reboots either, the kernel never got as far as the initramfs.
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
 case $1 in

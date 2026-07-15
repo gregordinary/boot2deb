@@ -80,9 +80,17 @@ naming the file, not a value quietly carried into a build with nowhere to put it
 - **`depthcharge`** — we compile no bootloader at all. The firmware is the board's own
   (coreboot in an SPI chip), and what it loads is the **kernel itself**, vboot-signed and
   wrapped in a FIT, from a *ChromeOS kernel partition* it finds by scanning each medium's
-  GPT for a type GUID. The layer carries that partition's geometry and the GPT attribute
-  bits that make the firmware boot it (`priority` / `tries` / `successful`), plus the
-  command line to bake into the signature. The device carries a **board profile**.
+  GPT for a type GUID. The layer carries those partitions' geometry and the GPT attribute
+  bits that make the firmware boot one of them (`priority` / `tries` / `successful`), plus
+  the command line to bake into the signature. The device carries a **board profile**.
+
+  `kpart_slots` is the field worth understanding. It is how many kernel partitions the
+  image lays down, back to back, and it is **2**: the first carries the signed kernel, the
+  second ships empty at priority 0. That spare is what makes an on-device kernel upgrade
+  atomic — the upgrade writes the slot the board is *not* booted from, so a kernel that
+  fails to come up leaves the previous one intact for the firmware to fall back to. At one
+  slot there is no fallback and a bad upgrade needs external media to recover. See
+  [Upgrading the kernel](../kernel-upgrades.md).
 
 Because the requirements are method-scoped, a board is only ever asked for fields its
 own boot method reads: the C201 declares no `uboot_defconfig` and no rkbin blobs, and

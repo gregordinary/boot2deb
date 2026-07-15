@@ -56,6 +56,17 @@ Within an existing family it is pure config.
 
 Work from the bottom of the hardware stack up, adding only what is new:
 
+**First, check whether the board joins a family that is already here.** If its SoC and
+boot method are both supported, a new board can be a device file and nothing else — no
+overlay, no kernel, no engine change. That is not an aspiration: the ASUS
+[C100P](../boards/asus-c100p.md) and [Chromebit CS10](../boards/asus-chromebit-cs10.md)
+each ship as a single TOML, and the Chromebit is a stick PC with no SD slot, no keyboard,
+no EC and no analog audio. The rule that makes it work is that anything true of the whole
+family belongs on the **SoC layer**, not on the board that happened to need it first —
+`socs/rk3288/` carries the family's radio blobs, initramfs module list and network stack
+for exactly that reason. When you find yourself copying a file from one board to another,
+move it up instead.
+
 1. **arch** (`arches/<arch>.toml`) — only for a CPU architecture not already present.
    Arch-wide kbuild facts: the cross triple, the `ARCH=` values for kbuild and u-boot, the
    kernel image path.
@@ -124,7 +135,8 @@ Each layer may ship two trees of files that are copied into the rootfs:
   packages shipped, which is what nearly all config wants.
 - **`overlay-pre/`** — laid in **before** any package is installed. This is for config a
   package's own maintainer scripts must see *while they run*, where winning afterwards is
-  too late because the package already acted. Two examples, both from the C201:
+  too late because the package already acted. Two examples, both from the Veyron
+  Chromebooks:
   - initramfs settings (`MODULES=list`) must precede the kernel package, or the first
     initramfs is built at `MODULES=most` — far over the signed payload's size budget —
     and then thrown away and rebuilt.

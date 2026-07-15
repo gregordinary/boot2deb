@@ -14,17 +14,60 @@ dt_dir      = "rockchip"                 # arch/arm/boot/dts/<dt_dir> — same l
 #   rockchip_vdec  — HEVC decode (the RK3288 variant of rkvdec)
 modules = ["hantro_vpu", "rockchip_vdec"]
 
-# Broadcom SDIO wifi firmware. Debian's firmware-brcm80211 carries the
-# brcmfmac4354-sdio .bin and its .clm_blob, but neither the board NVRAM nor any
-# BCM4354 Bluetooth patchram — those two are vendored on the device layer, which is
-# also where they belong: they identify a specific radio module, not the SoC.
+# --- What every board in the family gets --------------------------------------
+# The Veyron boards differ from each other in their panel, their input, and their
+# audio codec. They do not differ in how you reach a root filesystem, how you get
+# on a network, or which radio is soldered to them — so those live here, once,
+# and a device file states only its own deltas. `overlay/` and `overlay-pre/`
+# beside this file carry the matching trees: the initramfs module list, the
+# panic breadcrumb, the btsdio blacklist, the two Broadcom blobs, and the
+# max98090 first-boot hook.
 #
-# Only the Broadcom Veyron boards (speedy/minnie/mickey/brain) need this package;
-# the Marvell-radio boards (jerry/jaq/mighty/fievel/tiger) want firmware-libertas
-# instead. It sits here rather than per-device because every board this SoC layer
-# currently serves is a Broadcom one; the day a Marvell board is added, this moves
-# down to the devices.
-packages = ["firmware-brcm80211"]
+# Wi-Fi and Bluetooth. Every Veyron is a Broadcom BCM4354 combo part on this SoC:
+# Wi-Fi over SDIO, Bluetooth over uart0. Debian's firmware-brcm80211 carries the
+# brcmfmac4354-sdio .bin and its .clm_blob; it carries neither the board NVRAM nor
+# any BCM4354 patchram, so those two are vendored in this layer's overlay (see
+# socs/rk3288/README.md). One copy of each serves the whole family — they identify
+# the radio module, and it is the same module on every board.
+#
+# Only the Broadcom Veyron boards (speedy/minnie/mickey/brain) need this package
+# and those blobs; the Marvell-radio boards (jerry/jaq/mighty/fievel/tiger) want
+# firmware-libertas instead. It all sits here rather than per-device because every
+# board this SoC layer currently serves is a Broadcom one; the day a Marvell board
+# is added, the radio half of this moves down to the devices.
+#
+# `bluez` is what makes the Bluetooth half usable. The kernel loads the vendored
+# patchram at probe whether or not anything can use it, so an image with the blob
+# and no host stack is a blob loaded for nothing.
+#
+# Networking. No Veyron has an ethernet port — they are Chromebooks — so Wi-Fi is
+# the only link on all of them and NetworkManager owns the interfaces, which means
+# dropping the base layer's dhcpcd rather than running two things that both want to
+# configure a NIC. network-manager-tui is a separate package from network-manager
+# and is not optional in practice: joining a network is the first thing anyone does
+# and everything else waits behind it. Without it the image offers `nmcli` and
+# nothing else, which is a poor thing to hand someone at a bare console on a
+# machine with no ethernet port. 568 KiB buys `nmtui`.
+#
+# alsa-utils is not a nicety on the laptops. The max98090 comes up with its DAC
+# unrouted *and* its amplifiers muted, so the board is silent until both are
+# cleared; this layer's `first-boot.d/20-audio` hook does that once and `alsactl`
+# (from this package) persists it, replaying it on every later boot. On the
+# Chromebit, which has no analog codec, it is the ordinary ALSA toolset for the
+# HDMI card.
+packages = [
+    "firmware-brcm80211",
+    "network-manager",
+    "network-manager-tui",
+    "wpasupplicant",
+    "iw",
+    "wireless-regdb",
+    "rfkill",
+    "alsa-utils",
+    "bluez",
+    "ca-certificates",
+]
+exclude = ["dhcpcd"]
 
 # No [userspace] / [ffmpeg]: there is no Rockchip media-accel userspace stack for the
 # RK3288 (MPP and RGA target the RK35xx family). Video decode here is the mainline

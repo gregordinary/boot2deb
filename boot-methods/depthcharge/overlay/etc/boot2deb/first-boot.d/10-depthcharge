@@ -1,31 +1,73 @@
 #!/bin/sh
 set -e
-# depthcharge boot flow: re-sign and re-write the kernel partition so the signed
-# command line picks up the rootfs UUID the base first-boot step just assigned.
+# depthcharge boot flow: re-sign the kernel and write it into every kernel slot, so the
+# signed command line picks up the rootfs UUID the base first-boot step just assigned.
 #
-# This is the exact counterpart of the rkbin method's 10-extlinux, and it exists for
-# the same reason — first-boot has just given the rootfs a fresh filesystem UUID and a
-# fresh partition UUID, and repointed /etc/fstab at it, so whatever the bootloader was
-# told at build time is now stale. The difference is that on this board the cmdline is
-# not a file we can edit: it is baked into the kernel's vboot signature. Changing it
-# means rebuilding and re-signing the image and writing it back to the kernel
-# partition, which is precisely what `depthchargectl write` does.
+# This is the counterpart of the rkbin method's 10-extlinux, and it exists for the same
+# reason — first-boot has just given the rootfs a fresh filesystem UUID and a fresh
+# partition UUID, and repointed /etc/fstab at it, so whatever the bootloader was told at
+# build time is now stale. The difference is that on this board the cmdline is not a file
+# we can edit: it is baked into the kernel's vboot signature. Changing it means rebuilding
+# and re-signing the image and writing it back to a kernel partition, which is precisely
+# what `depthchargectl write` does — reading root from /etc/fstab, which first-boot has
+# already rewritten.
 #
-# It reads root from /etc/fstab (already rewritten), finds the partition to write from
-# `kern_guid=` in /proc/cmdline (which the firmware substituted with the booted kernel
-# partition's PARTUUID), and re-signs. `--allow-current` because this image carries a
-# single kernel partition, so the one to rewrite is the one we booted from — the same
-# thing the package's own kernel-upgrade hook does when it finds exactly one.
+# first-boot runs this *before* it reboots, and aborts without rebooting if it fails. That
+# ordering is load-bearing: a failure here leaves a running system with a mismatched kernel
+# partition, which is recoverable; rebooting into one is not.
 #
-# first-boot runs this *before* it reboots, and aborts without rebooting if it fails.
-# That ordering is load-bearing: a failure here leaves a running system with a
-# mismatched kernel partition, which is recoverable; rebooting into one is not.
+# --- Why every slot, and not just the one we booted ---------------------------------
+#
+# The image ships two ChromeOS kernel slots: KERN-A carrying the signed kernel, KERN-B
+# empty at priority 0. That pair is what makes a later kernel upgrade survivable —
+# depthcharge-tools writes the slot it is *not* running from, so a kernel that fails to
+# come up leaves the previous one intact for the firmware to fall back to.
+#
+# But both slots have to be *correct* for that fallback to be worth anything, and at this
+# moment neither is: KERN-A is signed against the build-time rootfs PARTUUID, which the
+# step before this one has just replaced. So we write the re-signed kernel into every slot
+# and mark them all good. The board comes out of first boot with two known-good, identical
+# kernels — exactly the steady state the upgrade path assumes.
+#
+# Writing only the spare and leaving KERN-A alone is worse than it looks: KERN-A would keep
+# `successful = 1` while naming a rootfs PARTUUID that no longer exists, making it a
+# *poisoned* fallback — the one thing the firmware reaches for when a future kernel fails,
+# and it could never find its root.
+#
+# `--allow-current` is a permission, not a selection: `depthchargectl` still picks the
+# least-successful slot on its own, which is the empty spare. Writing a *specific* slot
+# means naming it with `--target`, which is why this walks the list rather than calling
+# `write` twice and hoping it alternates.
 
 # Nothing to re-sign if we did not boot through depthcharge (the firmware prepends
 # `cros_secure` when we did) — for instance if this rootfs was moved to another board.
 if ! grep -q cros_secure /proc/cmdline 2>/dev/null; then
-    echo "not booted via depthcharge; leaving the kernel partition alone" >&2
+    echo "not booted via depthcharge; leaving the kernel partitions alone" >&2
     exit 0
 fi
 
-depthchargectl write --allow-current
+slots="$(depthchargectl list --noheadings --output PATH)"
+if [ -z "$slots" ]; then
+    echo "no ChromeOS kernel partition found; cannot re-sign the kernel" >&2
+    exit 1
+fi
+
+for slot in $slots; do
+    echo "re-signing the kernel into $slot" >&2
+    # `--no-prioritize` leaves the attribute bits alone: this call is about *content*, and
+    # the bless below is what decides bootability. Separating the two means a slot is never
+    # briefly marked bootable while its kernel is still half-written.
+    depthchargectl write --target "$slot" --allow-current --no-prioritize
+
+    # successful=1, tries=1 — deliberately not `--oneshot`. These kernels were built from
+    # this very rootfs and are not on trial. A slot left at successful=0 would spend its
+    # single try on the next boot and then be unbootable; on an image where the *other*
+    # slot is equally untested, that is precisely how a board bricks on its second boot.
+    depthchargectl bless "$slot"
+done
+
+# Each bless above made its own slot the highest-priority one, so the last slot in the list
+# currently wins. Bless the booted slot once more to put it back on top. The slots are
+# byte-identical so it changes nothing that matters, but it means the board comes back up on
+# the partition it is already running rather than shuffling to a copy of it for no reason.
+depthchargectl bless

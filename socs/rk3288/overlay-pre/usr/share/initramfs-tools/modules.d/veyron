@@ -8,10 +8,12 @@
 # mkinitramfs reads modules.d/* unconditionally ("MODULES=list case. Always
 # honour."), so a drop-in here has the same effect and no packaging conflict.
 #
-# Names are the .ko basenames from the kernel's modules.order -- note the driver
-# for the IO-domain regulator is io-domain, NOT rockchip_io_domain.
-# initramfs-tools pulls each module's dependencies in automatically, so ext4
-# brings jbd2/crc16/crc32c and rockchipdrm brings drm + drm_kms_helper.
+# It sits on the SoC layer because reaching a root filesystem is the same problem
+# on every board in the family: the same PMIC, the same MMC controller, the same
+# USB controllers. Names are the .ko basenames from the kernel's modules.order --
+# note the driver for the IO-domain regulator is io-domain, NOT
+# rockchip_io_domain. initramfs-tools pulls each module's dependencies in
+# automatically, so ext4 brings jbd2/crc16/crc32c and usbhid brings hid.
 
 # The RK808 PMIC chain. These are DEVICE-TREE dependencies, not symbol
 # dependencies, so nothing pulls them in automatically -- and without them the
@@ -31,7 +33,7 @@ rk808-regulator
 # confounder in every deferred-probe listing.
 clk-rk808
 
-# Root filesystem: ext4 on the SD card, behind Rockchip's DesignWare MMC
+# Root filesystem: ext4 on eMMC or an SD card, behind Rockchip's DesignWare MMC
 # controller. mmc_block is built in (CONFIG_MMC_BLOCK=y), so it is not listed.
 dw_mmc
 dw_mmc-pltfm
@@ -40,11 +42,14 @@ io-domain
 ext4
 
 # Root on USB, which this firmware also boots (Ctrl+U reads USB sticks as
-# readily as SD cards). The RK3288's host ports are EHCI/OHCI platform
-# controllers behind the Rockchip USB PHY; dwc2 covers the other two
-# controllers. usb-storage/uas present the stick, sd_mod turns it into sdN.
-# Hardware-verified gap: an initramfs without these on a USB boot enumerates
-# eMMC and wifi happily and then waits forever for a root that cannot appear.
+# readily as SD cards) and which is the only removable medium a Chromebit has at
+# all. The RK3288's host ports are EHCI/OHCI platform controllers behind the
+# Rockchip USB PHY; dwc2 covers the other two controllers -- and on the Chromebit
+# dwc2 is the only one there is, since rk3288-veyron-mickey.dts disables both the
+# EHCI controller and usb_host1 and leaves usb_otg in host mode. usb-storage/uas
+# present the stick, sd_mod turns it into sdN. Hardware-verified gap: an
+# initramfs without these on a USB boot enumerates eMMC and wifi happily and then
+# waits forever for a root that cannot appear.
 phy-rockchip-usb
 ehci-platform
 ohci-platform
@@ -53,13 +58,27 @@ usb-storage
 uas
 sd_mod
 
-# Keyboard, so an initramfs rescue shell has input. The EC hangs off spi0, so
-# the SPI bus driver has to come too: cros_ec_spi without spi-rockchip binds
-# nothing, and a rescue shell with no keyboard is indistinguishable from a hang.
+# Input for a rescue shell, which the family needs in two flavours because it has
+# two kinds of console.
+#
+# The laptops type through the ChromeOS EC, which hangs off spi0 -- so the SPI bus
+# driver has to come too: cros_ec_spi without spi-rockchip binds nothing, and a
+# rescue shell with no keyboard is indistinguishable from a hang.
 spi-rockchip
 cros_ec
 cros_ec_spi
 cros_ec_keyb
+# The Chromebit has no EC and no built-in keyboard: rk3288-veyron-mickey.dts never
+# includes rk3288-veyron-chromebook.dtsi, so spi0 stays disabled and the four
+# modules above bind nothing there. Its only input is a USB keyboard -- which is
+# also how its *firmware* reads Ctrl+U, since the Chromebit is the one board in the
+# family whose depthcharge is built with USB HID. The initramfs needs the same
+# driver to offer a shell anyone can type at. Carried on every board rather than
+# only the Chromebit, because a USB keyboard is a real fallback on a laptop whose
+# EC keyboard has failed and the two modules cost ~40 KB against megabytes of
+# spare budget.
+usbhid
+hid-generic
 
 # NO DISPLAY STACK in the standard image -- a headroom policy, not a size limit.
 #
@@ -68,11 +87,11 @@ cros_ec_keyb
 # payload already sits above 90% with it included, and kernels grow at every
 # Debian update. The standard image therefore leaves it out and accepts a
 # console that appears only after the real root mounts -- measured 8-10 s of
-# white splash on a healthy boot. A unit with libreboot has a 32 MiB ceiling
+# white splash on a healthy boot. A C201 with libreboot has a 32 MiB ceiling
 # (`--board speedy-libreboot`), which is the headroom to carry the display stack
 # and watch the initramfs on the panel 2-3 s after Ctrl+U.
 #
-# Because a standard-image initramfs failure is invisible on this board, three
+# Because a standard-image initramfs failure is invisible on these boards, three
 # things back this list up: the rootfs stage asserts every module here resolves
 # under the installed kernel AND lands in the built initrd (so a typo fails the
 # build, not the boot); the signed cmdline carries panic=30 (so a failed boot

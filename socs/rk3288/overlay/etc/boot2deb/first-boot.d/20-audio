@@ -1,13 +1,21 @@
 #!/bin/sh
 # Give the max98090 codec a working playback path, once, and persist it.
 #
-# The board comes up silent, and muting is only half the reason. The codec's
-# speaker and headphone amplifiers are fed by DAPM mixers whose DAC input switches
-# default to *off*, so out of the box the DAC is not routed to either output at all
-# -- there is no path to unmute. On top of that the amplifier mute bits are set.
-# Both have to be cleared before anything reaches the speakers, which is why
-# `alsa-utils` alone does not fix it and why a user who only touches the obvious
-# "Speaker" volume still hears nothing.
+# Every Veyron laptop has this codec, which is why the hook is here rather than on
+# each of them. The Chromebit does not: rk3288-veyron-mickey.dts disables i2c2,
+# leaving no max98090 and no ts3a227e, and wires the sound card straight to the
+# HDMI codec instead (ALSA card ROCKCHIP-HDMI, not ROCKCHIP-MAX98090-HDMI). None
+# of the controls below exist there. The card probe further down finds nothing and
+# the hook exits without touching a mixer, which is the correct outcome: HDMI audio
+# needs no routing fixup.
+#
+# On the laptops the board comes up silent, and muting is only half the reason.
+# The codec's speaker and headphone amplifiers are fed by DAPM mixers whose DAC
+# input switches default to *off*, so out of the box the DAC is not routed to
+# either output at all -- there is no path to unmute. On top of that the amplifier
+# mute bits are set. Both have to be cleared before anything reaches the speakers,
+# which is why `alsa-utils` alone does not fix it and why a user who only touches
+# the obvious "Speaker" volume still hears nothing.
 #
 # The four routing switches below connect each DAC channel to its own side's mixer
 # (left DAC -> left speaker/headphone, right to right). The four amplifier switches
