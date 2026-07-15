@@ -9,7 +9,7 @@ commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
 
 [patches]
 profile = "rk3588-accel"
-commit = "efe52acbf97e48536b2771b2331610354c016806"
+commit = "527d03d54ea68a375b814ccb3314901530cb8b32"
 
 [uboot]
 source = "https://source.denx.de/u-boot/u-boot.git"
