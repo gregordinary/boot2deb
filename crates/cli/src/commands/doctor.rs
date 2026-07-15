@@ -47,6 +47,7 @@ pub(crate) fn run(
         target: build.arch,
         cross_compile: build.cross_compile.clone(),
         compiles_sources: build.compiles_kernel() || build.rkbin_boot().is_some(),
+        compiles_kernel: build.compiles_kernel(),
         sandbox_builds: build.userspace.is_some(),
     };
     let checks = boot2deb_engine::checks::tool_checks(&needs);

@@ -133,6 +133,25 @@ impl PkgManager {
             Pkg::E2fsprogs => "e2fsprogs".into(),
             Pkg::Bubblewrap => "bubblewrap".into(),
             Pkg::Coreutils => "coreutils".into(),
+            // Kernel `bindeb-pkg` deps. rsync/cpio/kmod share the name across managers;
+            // debhelper is Debian's, and elfutils' dev libs split by distro.
+            Pkg::Rsync => "rsync".into(),
+            Pkg::Cpio => "cpio".into(),
+            Pkg::Kmod => "kmod".into(),
+            Pkg::Debhelper => match self {
+                Pacman => "debhelper (AUR)".into(),
+                _ => "debhelper".into(),
+            },
+            Pkg::Libelf => match self {
+                Dnf => "elfutils-libelf-devel".into(),
+                Pacman | Brew => "elfutils".into(),
+                _ => "libelf-dev".into(),
+            },
+            Pkg::Libdw => match self {
+                Dnf => "elfutils-devel".into(),
+                Pacman | Brew => "elfutils".into(),
+                _ => "libdw-dev".into(),
+            },
             // dpkg / dpkg-dev / apt-utils are Debian's own tools; on non-Debian
             // hosts they come from the distro's dpkg/apt ports (or AUR).
             Pkg::DpkgDev => match self {
@@ -205,6 +224,18 @@ enum Pkg {
     Dpkg,
     /// `sha256sum` — the rootfs `.deb` content-hash capture hook.
     Coreutils,
+    /// `debhelper` (`dh`) — the kernel `make bindeb-pkg` `dpkg-buildpackage` dep.
+    Debhelper,
+    /// `libelf-dev` — kernel objtool/BTF build dep (`pkg-config libelf`).
+    Libelf,
+    /// `libdw-dev` — kernel objtool build dep (`pkg-config libdw`).
+    Libdw,
+    /// `rsync` — kernel `bindeb-pkg` staging dep.
+    Rsync,
+    /// `cpio` — kernel `bindeb-pkg` dep.
+    Cpio,
+    /// `kmod` (`depmod`) — kernel module tooling.
+    Kmod,
 }
 
 /// GNU triple for a cross toolchain targeting `arch` (the `<triple>gcc` prefix).
@@ -252,6 +283,13 @@ pub struct ToolNeeds {
     /// toolchain for the target, the kernel's build-time helpers, and `git` to fetch
     /// the trees and apply the patch series.
     pub compiles_sources: bool,
+    /// The build compiles a kernel specifically (a subset of `compiles_sources`).
+    /// The kernel's `make bindeb-pkg` runs `dpkg-buildpackage`, which enforces the
+    /// generated `debian/control` build-deps — `debhelper`, `libelf-dev`/`libdw-dev`
+    /// (objtool/BTF), plus `rsync`/`cpio`/`kmod` — none of which the plain compile
+    /// toolchain above pulls in. A bootloader-only build does not package a kernel and
+    /// needs none of them.
+    pub compiles_kernel: bool,
     /// The build compiles target-arch `.deb`s inside the rootless sandbox (the
     /// media-accel stack), which is entered with `bwrap`.
     pub sandbox_builds: bool,
@@ -289,6 +327,21 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
                 "native C toolchain for the target", true, Pkg::NativeToolchain,
             ));
         }
+    }
+
+    // Kernel `.deb` packaging: `make bindeb-pkg` shells out to `dpkg-buildpackage`,
+    // which hard-fails on the generated `debian/control`'s build-deps before it
+    // compiles a thing. These are separate from the compile toolchain above and are
+    // easy to be missing on a fresh host — a bare `doctor` that skipped them would pass
+    // and then the build would die minutes in on `dpkg-checkbuilddeps`. Gated on
+    // `compiles_kernel`: a bootloader-only build packages no kernel and needs none.
+    if needs.compiles_kernel {
+        checks.push(exe(pm, target, "dh", &["dh"], "kernel .deb build (debhelper)", true, Pkg::Debhelper));
+        checks.push(pkgconfig_check(pm, target, "libelf", "libelf", "objtool/BTF — kernel .deb build", Pkg::Libelf));
+        checks.push(pkgconfig_check(pm, target, "libdw", "libdw", "objtool — kernel .deb build", Pkg::Libdw));
+        checks.push(exe(pm, target, "rsync", &["rsync"], "kernel .deb build dependency", true, Pkg::Rsync));
+        checks.push(exe(pm, target, "cpio", &["cpio"], "kernel .deb build dependency", true, Pkg::Cpio));
+        checks.push(exe(pm, target, "depmod", &["depmod"], "kernel module tooling (kmod)", true, Pkg::Kmod));
     }
 
     // Rootfs bootstrap + rootless namespaces — needed on every build.
@@ -354,20 +407,40 @@ fn exe(
 
 /// openssl headers, probed via `pkg-config` (a dev lib, not an executable).
 fn openssl_check(pm: PkgManager, target: Arch) -> Check {
+    pkgconfig_check(
+        pm, target, "openssl", "libssl (openssl)",
+        "kernel/u-boot certificate + TLS build dep", Pkg::Openssl,
+    )
+}
+
+/// A `-dev` library the build probes with `pkg-config --exists <module>` — present
+/// only when its development package is installed. `name` is the display label and
+/// `purpose` its role; a miss maps `pkg` to the host's package name. The same shape as
+/// [`exe`] but for a library rather than an executable. If `pkg-config` itself is
+/// absent the module reads as missing (its remedy still names the `-dev` package —
+/// `pkg-config` rides in as a dependency of the toolchain check).
+fn pkgconfig_check(
+    pm: PkgManager,
+    target: Arch,
+    module: &str,
+    name: &str,
+    purpose: &'static str,
+    pkg: Pkg,
+) -> Check {
     let present = which("pkg-config").is_some()
         && Command::new("pkg-config")
-            .args(["--exists", "openssl"])
+            .args(["--exists", module])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
     let status = if present {
-        CheckStatus::Present("pkg-config openssl".into())
+        CheckStatus::Present(format!("pkg-config {module}"))
     } else {
-        CheckStatus::Missing(pm.remedy(Pkg::Openssl, target))
+        CheckStatus::Missing(pm.remedy(pkg, target))
     };
     Check {
-        name: "libssl (openssl)".into(),
-        purpose: "kernel/u-boot certificate + TLS build dep",
+        name: name.to_string(),
+        purpose,
         required: true,
         status,
     }
@@ -514,6 +587,11 @@ mod tests {
             PkgManager::Pacman.remedy(Pkg::NativeToolchain, Arch::Arm64),
             "sudo pacman -S base-devel"
         );
+        // Kernel bindeb-pkg deps: the exact package a user installs on a miss.
+        assert_eq!(PkgManager::Apt.remedy(Pkg::Debhelper, Arch::Arm64), "sudo apt install debhelper");
+        assert_eq!(PkgManager::Apt.remedy(Pkg::Libelf, Arch::Arm64), "sudo apt install libelf-dev");
+        assert_eq!(PkgManager::Apt.remedy(Pkg::Libdw, Arch::Arm64), "sudo apt install libdw-dev");
+        assert_eq!(PkgManager::Dnf.remedy(Pkg::Libelf, Arch::Arm64), "sudo dnf install elfutils-libelf-devel");
     }
 
     /// The RK1 shape: compiles a kernel and a bootloader, and builds the media-accel
@@ -523,6 +601,7 @@ mod tests {
             target: Arch::Arm64,
             cross_compile: "aarch64-linux-gnu-".into(),
             compiles_sources: true,
+            compiles_kernel: true,
             sandbox_builds: true,
         }
     }
@@ -534,6 +613,7 @@ mod tests {
             target: Arch::Armv7,
             cross_compile: "arm-linux-gnueabihf-".into(),
             compiles_sources: false,
+            compiles_kernel: false,
             sandbox_builds: false,
         }
     }
@@ -546,6 +626,29 @@ mod tests {
         }
         // Every check is a hard requirement — there are no fallback-only tools.
         assert!(checks.iter().all(|c| c.required));
+    }
+
+    #[test]
+    fn a_kernel_build_asks_for_the_bindeb_pkg_deps() {
+        // `make bindeb-pkg` runs `dpkg-buildpackage`, which enforces the generated
+        // control's build-deps before compiling. doctor must list them or it passes and
+        // the build dies on `dpkg-checkbuilddeps` minutes in (the fresh-host trap).
+        let checks = tool_checks(&compiling_build());
+        for needed in ["dh", "libelf", "libdw", "rsync", "cpio", "depmod"] {
+            assert!(
+                checks.iter().any(|c| c.name == needed && c.required),
+                "a kernel build must require {needed}"
+            );
+        }
+        // A bootloader-only build (compiles sources, but no kernel) packages no kernel,
+        // so it must NOT ask for the bindeb-pkg deps.
+        let uboot_only = ToolNeeds { compiles_kernel: false, ..compiling_build() };
+        for absent in ["dh", "libelf", "libdw", "depmod"] {
+            assert!(
+                !tool_checks(&uboot_only).iter().any(|c| c.name == absent),
+                "{absent} is a kernel-deb dep; a bootloader-only build should not ask for it"
+            );
+        }
     }
 
     #[test]
