@@ -32,16 +32,16 @@ Two properties it is built around:
   and the solved apt manifest — and each image ships a provenance manifest recording
   exactly what went into it, down to the boot2deb commit that built it. Package churn in
   a rolling suite is pinned against `snapshot.debian.org` on demand. See
-  [Reproducibility](docs/src/reference/reproducibility.md).
+  [Reproducibility](https://gregordinary.github.io/boot2deb/reference/reproducibility.html).
 
 ## Supported boards
 
 | Board | SoC | Arch | Status |
 | --- | --- | --- | --- |
-| [Turing RK1](docs/src/boards/turing-rk1.md) | RK3588 | arm64 | Boots; hardware video transcode validated |
-| [ASUS Chromebook C201](docs/src/boards/asus-c201.md) | RK3288 | armhf | Boots to login + Wi-Fi (forky & trixie) |
-| [ASUS Chromebook Flip C100P](docs/src/boards/asus-c100p.md) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
-| [ASUS Chromebit CS10](docs/src/boards/asus-chromebit-cs10.md) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
+| [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html) | RK3588 | arm64 | Boots; hardware video transcode validated |
+| [ASUS Chromebook C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html) | RK3288 | armhf | Boots to login + Wi-Fi (forky & trixie) |
+| [ASUS Chromebook Flip C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
+| [ASUS Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
 
 Each board ships one or more *recipes*, a device plus a Debian suite and any optional
 features. The RK1, for example, comes as a base image (`turing-rk1-forky`), a
@@ -78,44 +78,45 @@ rootless — no `sudo`.
    transcode, build `turing-rk1-media-accel-forky` instead.
 
 4. Flash it. This is board-specific — for the RK1 it is the Turing Pi BMC (`tpi` or the
-   web UI), or a removable card. See [Turing RK1](docs/src/boards/turing-rk1.md).
+   web UI), or a removable card. See [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html).
 
-Full walkthrough: [Getting started](docs/src/getting-started.md).
+Full walkthrough: [Getting started](https://gregordinary.github.io/boot2deb/getting-started.html).
 
 ## How it works
 
 - **Config model** — a build is a point across device × kernel × suite × features ×
   layout, resolved by merging TOML layers (`arches/ socs/ boot-methods/ devices/`, with
-  the kernel as an orthogonal axis). [Config model](docs/src/reference/config-model.md).
+  the kernel as an orthogonal axis). [Config model](https://gregordinary.github.io/boot2deb/reference/config-model.html).
 - **Recipes and locks** — a *recipe* pins a build point by name; `update` writes a
   sibling `.lock` with the exact resolved pins, and `build` reads only that lock.
 - **Kernel patches** — version-coupled patch series and kconfig fragments live on the
   kernel axis and are applied behind a verify-applies gate; `verify-sources` flags any
   pin that is not durably re-fetchable.
-  [Adding a patch](docs/src/contributing/adding-a-patch.md).
+  [Adding a patch](https://gregordinary.github.io/boot2deb/contributing/adding-a-patch.html).
 - **Your own boards** — keep out-of-tree devices and recipes in an overlay directory
-  instead of forking. [Overlays](docs/src/reference/overlays.md).
+  instead of forking. [Overlays](https://gregordinary.github.io/boot2deb/reference/overlays.html).
 
 ## Documentation
 
-The docs are an mdBook under [`docs/`](docs/) — `mdbook serve docs` (or `mdbook build
-docs`), or read the sources directly:
+The full documentation is published as a book at
+**[gregordinary.github.io/boot2deb](https://gregordinary.github.io/boot2deb/)**. The
+sources live in [`docs/`](docs/); build them locally with `mdbook serve docs`. Chapters:
 
-- [Introduction](docs/src/introduction.md)
-- [Getting started](docs/src/getting-started.md) — prerequisites and your first build
-- [Upgrading the kernel](docs/src/kernel-upgrades.md)
-- [Locale, timezone, and keyboard](docs/src/localization.md)
-- Boards — [Turing RK1](docs/src/boards/turing-rk1.md),
-  [ASUS C201](docs/src/boards/asus-c201.md),
-  [ASUS C100P](docs/src/boards/asus-c100p.md),
-  [ASUS Chromebit CS10](docs/src/boards/asus-chromebit-cs10.md)
-- Reference — [Config model](docs/src/reference/config-model.md),
-  [CLI](docs/src/reference/cli.md),
-  [Overlays](docs/src/reference/overlays.md),
-  [Image identity](docs/src/reference/image-identity.md),
-  [Reproducibility](docs/src/reference/reproducibility.md)
-- Contributing — [Adding a board](docs/src/contributing/adding-a-board.md),
-  [Adding a patch](docs/src/contributing/adding-a-patch.md)
+- [Introduction](https://gregordinary.github.io/boot2deb/introduction.html)
+- [Getting started](https://gregordinary.github.io/boot2deb/getting-started.html) — prerequisites and your first build
+- [Upgrading the kernel](https://gregordinary.github.io/boot2deb/kernel-upgrades.html)
+- [Locale, timezone, and keyboard](https://gregordinary.github.io/boot2deb/localization.html)
+- Boards — [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html),
+  [ASUS C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html),
+  [ASUS C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html),
+  [ASUS Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html)
+- Reference — [Config model](https://gregordinary.github.io/boot2deb/reference/config-model.html),
+  [CLI](https://gregordinary.github.io/boot2deb/reference/cli.html),
+  [Overlays](https://gregordinary.github.io/boot2deb/reference/overlays.html),
+  [Image identity](https://gregordinary.github.io/boot2deb/reference/image-identity.html),
+  [Reproducibility](https://gregordinary.github.io/boot2deb/reference/reproducibility.html)
+- Contributing — [Adding a board](https://gregordinary.github.io/boot2deb/contributing/adding-a-board.html),
+  [Adding a patch](https://gregordinary.github.io/boot2deb/contributing/adding-a-patch.html)
 
 ## Repository layout
 
