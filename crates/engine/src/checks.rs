@@ -138,6 +138,26 @@ impl PkgManager {
             Pkg::Rsync => "rsync".into(),
             Pkg::Cpio => "cpio".into(),
             Pkg::Kmod => "kmod".into(),
+            // u-boot pylibfdt/binman deps. swig shares its name; the Python packages
+            // are Debian's `python3-*` and split by manager elsewhere.
+            Pkg::Swig => "swig".into(),
+            Pkg::Python3Dev => match self {
+                Dnf => "python3-devel".into(),
+                Pacman | Brew => "python".into(),
+                _ => "python3-dev".into(),
+            },
+            Pkg::Python3Setuptools => match self {
+                Dnf => "python3-setuptools".into(),
+                Pacman => "python-setuptools".into(),
+                Brew => "python-setuptools".into(),
+                _ => "python3-setuptools".into(),
+            },
+            Pkg::Pyelftools => match self {
+                Dnf => "python3-pyelftools".into(),
+                Pacman => "python-pyelftools".into(),
+                Brew => "python-pyelftools".into(),
+                _ => "python3-pyelftools".into(),
+            },
             Pkg::Debhelper => match self {
                 Pacman => "debhelper (AUR)".into(),
                 _ => "debhelper".into(),
@@ -236,6 +256,14 @@ enum Pkg {
     Cpio,
     /// `kmod` (`depmod`) — kernel module tooling.
     Kmod,
+    /// `swig` — u-boot `pylibfdt` binding generator.
+    Swig,
+    /// `python3-dev` — Python headers for the `pylibfdt` C extension.
+    Python3Dev,
+    /// `python3-setuptools` — u-boot `pylibfdt` `setup.py`.
+    Python3Setuptools,
+    /// `python3-pyelftools` — u-boot `binman` ELF parsing.
+    Pyelftools,
 }
 
 /// GNU triple for a cross toolchain targeting `arch` (the `<triple>gcc` prefix).
@@ -290,6 +318,12 @@ pub struct ToolNeeds {
     /// toolchain above pulls in. A bootloader-only build does not package a kernel and
     /// needs none of them.
     pub compiles_kernel: bool,
+    /// The build compiles u-boot from source (a `rockchip-rkbin` boot method). u-boot's
+    /// build generates its device-tree Python bindings (`pylibfdt`) and runs `binman`,
+    /// which need `swig`, the Python dev headers, `setuptools`, and `pyelftools` — a
+    /// distinct dep set from the kernel's. A board that boots its own firmware compiles
+    /// no u-boot and needs none of them.
+    pub builds_uboot: bool,
     /// The build compiles target-arch `.deb`s inside the rootless sandbox (the
     /// media-accel stack), which is entered with `bwrap`.
     pub sandbox_builds: bool,
@@ -342,6 +376,17 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         checks.push(exe(pm, target, "rsync", &["rsync"], "kernel .deb build dependency", true, Pkg::Rsync));
         checks.push(exe(pm, target, "cpio", &["cpio"], "kernel .deb build dependency", true, Pkg::Cpio));
         checks.push(exe(pm, target, "depmod", &["depmod"], "kernel module tooling (kmod)", true, Pkg::Kmod));
+    }
+
+    // u-boot's build generates its `pylibfdt` device-tree bindings and runs `binman`.
+    // That needs `swig` + the Python dev headers to compile the extension, plus the
+    // `setuptools`/`pyelftools` modules — a fresh host has none by default, and the
+    // failure is a mid-build Python traceback rather than a clear "missing dep".
+    if needs.builds_uboot {
+        checks.push(exe(pm, target, "swig", &["swig"], "u-boot pylibfdt bindings", true, Pkg::Swig));
+        checks.push(pkgconfig_check(pm, target, "python3", "python3-dev", "u-boot pylibfdt extension headers", Pkg::Python3Dev));
+        checks.push(python_module_check(pm, target, "setuptools", "python3-setuptools", "u-boot pylibfdt build", Pkg::Python3Setuptools));
+        checks.push(python_module_check(pm, target, "elftools", "python3-pyelftools", "u-boot binman image assembly", Pkg::Pyelftools));
     }
 
     // Rootfs bootstrap + rootless namespaces — needed on every build.
@@ -435,6 +480,38 @@ fn pkgconfig_check(
             .unwrap_or(false);
     let status = if present {
         CheckStatus::Present(format!("pkg-config {module}"))
+    } else {
+        CheckStatus::Missing(pm.remedy(pkg, target))
+    };
+    Check {
+        name: name.to_string(),
+        purpose,
+        required: true,
+        status,
+    }
+}
+
+/// A Python module the build imports at runtime — probed with `python3 -c "import
+/// <module>"`, so it catches a package installed under the wrong interpreter, which a
+/// dpkg presence test would miss. Named after the *distro package* (`name`) since that
+/// is what a miss tells the user to install. When `python3` itself is absent the module
+/// reads as missing.
+fn python_module_check(
+    pm: PkgManager,
+    target: Arch,
+    module: &str,
+    name: &str,
+    purpose: &'static str,
+    pkg: Pkg,
+) -> Check {
+    let present = which("python3").is_some()
+        && Command::new("python3")
+            .args(["-c", &format!("import {module}")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    let status = if present {
+        CheckStatus::Present(format!("python3 import {module}"))
     } else {
         CheckStatus::Missing(pm.remedy(pkg, target))
     };
@@ -592,6 +669,10 @@ mod tests {
         assert_eq!(PkgManager::Apt.remedy(Pkg::Libelf, Arch::Arm64), "sudo apt install libelf-dev");
         assert_eq!(PkgManager::Apt.remedy(Pkg::Libdw, Arch::Arm64), "sudo apt install libdw-dev");
         assert_eq!(PkgManager::Dnf.remedy(Pkg::Libelf, Arch::Arm64), "sudo dnf install elfutils-libelf-devel");
+        // u-boot pylibfdt/binman deps.
+        assert_eq!(PkgManager::Apt.remedy(Pkg::Swig, Arch::Arm64), "sudo apt install swig");
+        assert_eq!(PkgManager::Apt.remedy(Pkg::Python3Setuptools, Arch::Arm64), "sudo apt install python3-setuptools");
+        assert_eq!(PkgManager::Apt.remedy(Pkg::Pyelftools, Arch::Arm64), "sudo apt install python3-pyelftools");
     }
 
     /// The RK1 shape: compiles a kernel and a bootloader, and builds the media-accel
@@ -602,6 +683,7 @@ mod tests {
             cross_compile: "aarch64-linux-gnu-".into(),
             compiles_sources: true,
             compiles_kernel: true,
+            builds_uboot: true,
             sandbox_builds: true,
         }
     }
@@ -614,6 +696,7 @@ mod tests {
             cross_compile: "arm-linux-gnueabihf-".into(),
             compiles_sources: false,
             compiles_kernel: false,
+            builds_uboot: false,
             sandbox_builds: false,
         }
     }
@@ -640,13 +723,33 @@ mod tests {
                 "a kernel build must require {needed}"
             );
         }
-        // A bootloader-only build (compiles sources, but no kernel) packages no kernel,
-        // so it must NOT ask for the bindeb-pkg deps.
-        let uboot_only = ToolNeeds { compiles_kernel: false, ..compiling_build() };
+        // A kernel-less build packages no kernel, so it must NOT ask for the deb deps.
+        let no_kernel = ToolNeeds { compiles_kernel: false, ..compiling_build() };
         for absent in ["dh", "libelf", "libdw", "depmod"] {
             assert!(
-                !tool_checks(&uboot_only).iter().any(|c| c.name == absent),
-                "{absent} is a kernel-deb dep; a bootloader-only build should not ask for it"
+                !tool_checks(&no_kernel).iter().any(|c| c.name == absent),
+                "{absent} is a kernel-deb dep; a kernel-less build should not ask for it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_uboot_build_asks_for_the_pylibfdt_deps() {
+        // u-boot compiles its pylibfdt bindings + runs binman; a fresh host has none of
+        // this and fails on a mid-build Python traceback, not a clear missing-dep error.
+        let checks = tool_checks(&compiling_build());
+        for needed in ["swig", "python3-dev", "python3-setuptools", "python3-pyelftools"] {
+            assert!(
+                checks.iter().any(|c| c.name == needed && c.required),
+                "a u-boot build must require {needed}"
+            );
+        }
+        // A board that boots its own firmware compiles no u-boot and skips them.
+        let no_uboot = ToolNeeds { builds_uboot: false, ..compiling_build() };
+        for absent in ["swig", "python3-dev", "python3-setuptools", "python3-pyelftools"] {
+            assert!(
+                !tool_checks(&no_uboot).iter().any(|c| c.name == absent),
+                "{absent} is a u-boot dep; a firmware-boot board should not ask for it"
             );
         }
     }
