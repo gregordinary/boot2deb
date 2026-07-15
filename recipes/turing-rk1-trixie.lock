@@ -17,8 +17,8 @@ ref = "v2026.04"
 commit = "88dc2788777babfd6322fa655df549a019aa1e69"
 
 [rootfs]
-suite = "forky"
-manifest = "turing-rk1-forky.pkgs.lock"
+suite = "trixie"
+manifest = "turing-rk1-trixie.pkgs.lock"
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"

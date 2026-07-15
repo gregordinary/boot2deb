@@ -1,21 +1,47 @@
 # Turing RK1
 
-The `turing-rk1-forky` recipe builds a bootable Debian **forky** image for the
-[Turing RK1](https://turingpi.com/product/turing-rk1/) — an RK3588 compute module
-that seats in a Turing Pi 2 cluster board. It pins kernel `v7.1.1` (linux-stable),
-u-boot `v2026.04`, and the RGA / VEPU / VDPU hardware-transcode modules via the
+The [Turing RK1](https://turingpi.com/product/turing-rk1/) is an RK3588 compute
+module that seats in a Turing Pi 2 cluster board. boot2deb ships it as a small family
+of recipes over one validated hardware base — kernel `v7.1.1` (linux-stable), u-boot
+`v2026.04`, and the RGA / VEPU / VDPU (and NPU) drivers carried in-kernel via the
 `rk3588-accel` patch profile. It is a supported configuration in its own right and a
 good starting point for any RK3588 board.
 
-Build it exactly as in [Getting started](../getting-started.md):
+The variants differ along two independent axes — the Debian suite, and whether the
+Rockchip media **userspace** is built in:
+
+| Recipe | Suite | Media userspace |
+| --- | --- | --- |
+| `turing-rk1-forky` | forky | — (base) |
+| `turing-rk1-trixie` | trixie | — (base) |
+| `turing-rk1-media-accel-forky` | forky | ffmpeg-rk + MPP + RGA |
+| `turing-rk1-media-accel-trixie` | trixie | ffmpeg-rk + MPP + RGA |
+
+Every variant carries the **same accel kernel**: the VEPU / VDPU / RGA and NPU drivers
+are present in all of them, because the patches and kconfig live on the kernel axis. A
+**base** image simply omits the Rockchip media userspace — the hardware blocks are
+there but dark. A **media-accel** image adds the `media-accel-rockchip` feature, which
+builds and installs `ffmpeg-rk`, `librockchip-mpp1`, and `librga2` on top. The split is
+deliberate: because the kernel already carries the capability, those debs can equally be
+installed onto a running base image later. `forky` is the RK1's validated suite.
+
+Build the base image as in [Getting started](../getting-started.md):
 
 ```sh
 cargo run -p boot2deb-cli -- build turing-rk1-forky
 ```
 
-That produces `build/turing-rk1-forky/artifacts/turing-rk1.img.xz` — a whole-disk
-image (GPT, u-boot in the reserved gap ahead of the first partition, then the ext4
-rootfs), so a single write lays down everything, bootloader included.
+or, for a ready hardware-transcode host, the media-accel variant:
+
+```sh
+cargo run -p boot2deb-cli -- build turing-rk1-media-accel-forky
+```
+
+Either produces `build/<recipe>/artifacts/turing-rk1.img.xz` — a whole-disk image (GPT,
+u-boot in the reserved gap ahead of the first partition, then the ext4 rootfs), so a
+single write lays down everything, bootloader included. The flashing and boot notes
+below use `turing-rk1-forky`; they are identical for any variant (the bootloader and
+disk layout do not change), so substitute your recipe name in the artifact path.
 
 ## Flash
 
@@ -100,6 +126,8 @@ Log in as user **`debian`** with the password the build printed. It is expired, 
 are required to set a new one immediately. The `debian` account has passwordless
 `sudo`, and the hostname is `turing-rk1`.
 
-That is a booted Debian system. To confirm the hardware-transcode stack came up, check
-for the RGA / VEPU / VDPU devices (`/dev/dri`, `/dev/rga`) and exercise ffmpeg's
-`rkmpp` / `rkrga` paths.
+That is a booted Debian system. The kernel's transcode devices come up on **every**
+variant — check for `/dev/dri` and `/dev/rga`. A **media-accel** image also installs the
+`ffmpeg-rk` userspace, so you can exercise the `rkmpp` / `rkrga` paths directly; on a base
+image the blocks are present but idle until you install the media-accel debs (or build a
+`turing-rk1-media-accel-*` image).

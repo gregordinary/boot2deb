@@ -72,10 +72,11 @@ For orientation, the checks fall into a few groups:
 | Sandbox | `bwrap`, to enter the rootless target-arch build sandbox | the recipe builds target-arch packages (the media-accel stack) — on any host |
 
 **`doctor` asks only for what *your recipe* will actually invoke**, so the table above
-is a superset. `doctor turing-rk1-forky` wants the whole list; `doctor asus-c201-forky`
-wants no compiler at all, because that board installs Debian's kernel and boots its own
-firmware. That is deliberate: a requirement you do not need is somewhere a requirement
-you *do* need can hide.
+is a superset. `doctor turing-rk1-media-accel-forky` wants the whole list; the base
+`doctor turing-rk1-forky` drops the sandbox row (it builds no target-arch userspace);
+`doctor asus-c201-forky` wants no compiler at all, because that board installs Debian's
+kernel and boots its own firmware. That is deliberate: a requirement you do not need is
+somewhere a requirement you *do* need can hide.
 
 The "cross" row applies when your host arch differs from the target — i.e. any x86_64
 host building an arm64 or armhf image. An arm64 host runs the target's binaries directly

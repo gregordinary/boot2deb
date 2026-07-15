@@ -2,7 +2,8 @@
 # use case. The scenario lives in the recipe name; the reusable building blocks
 # are the features it composes: the `jellyfin` application feature plus the
 # `media-accel-rockchip` capability feature that provides HW transcode on RK35xx.
-# Same device and kernel as turing-rk1-forky, just a different feature set.
+# The same device and kernel as the rest of the RK1 family: this is
+# turing-rk1-media-accel-forky plus the `jellyfin` application feature.
 #
 # `jellyfin` installs from its signed upstream apt repository (keyring vendored
 # at blobs/keyrings/jellyfin.gpg); see features/jellyfin/README.md. The sibling

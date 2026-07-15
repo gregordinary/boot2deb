@@ -20,9 +20,10 @@ A build is a single point across the axes a user selects:
 - **features** — a *list* of composable rootfs add-ins stacked onto the base image:
   a **capability** feature that provides a hardware stack (`media-accel-rockchip`, the
   RK35xx HW-transcode userspace) or an **application** feature that installs an app
-  (`jellyfin`). Features are the knob the two shipped recipes differ by —
-  `turing-rk1-forky` and `turing-rk1-jellyfin` share a device and kernel and differ
-  only here. Override with `--feature` (repeatable; values from `list-features`).
+  (`jellyfin`). Features are the knob the RK1 recipes differ by over one shared device
+  and kernel: `turing-rk1-forky` (base) selects none, `turing-rk1-media-accel-forky` adds
+  the capability, and `turing-rk1-jellyfin` adds the app on top of it. Override with
+  `--feature` (repeatable; values from `list-features`).
 
 Three more knobs round out a build without being headline axes: `--boot-method` (a
 device property, rarely overridden), `--board` (the depthcharge board profile — see

@@ -593,7 +593,7 @@ mod tests {
             }),
             rootfs: RootfsPin {
                 suite: "forky".into(),
-                manifest: "turing-rk1-forky.pkgs.lock".into(),
+                manifest: "turing-rk1-media-accel-forky.pkgs.lock".into(),
                 manifest_sha256: Some("mh".into()),
             },
             blobs: Some(BlobsPin {
@@ -618,8 +618,12 @@ mod tests {
 
     fn sample_build() -> ResolvedBuild {
         // A resolution over the shipped config gives a real build point to join.
-        crate::resolve_recipe(&config_root(), "turing-rk1-forky", &crate::Overrides::default())
-            .unwrap()
+        crate::resolve_recipe(
+            &config_root(),
+            "turing-rk1-media-accel-forky",
+            &crate::Overrides::default(),
+        )
+        .unwrap()
     }
 
     /// A depthcharge build — the boot method that *has* a board profile.

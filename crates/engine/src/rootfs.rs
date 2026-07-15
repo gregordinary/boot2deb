@@ -1492,7 +1492,9 @@ mod tests {
     }
 
     fn rk1() -> ResolvedBuild {
-        resolve_recipe(&repo_root(), "turing-rk1-forky", &Overrides::default()).unwrap()
+        // The media-accel build: these rootfs tests assert the bootstrap includes the
+        // feature packages (ffmpeg-rk et al.), so they need the userspace-carrying recipe.
+        resolve_recipe(&repo_root(), "turing-rk1-media-accel-forky", &Overrides::default()).unwrap()
     }
 
     /// A lock with nothing pinned. These tests exercise how the rootfs node *stages* the

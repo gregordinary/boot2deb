@@ -1,0 +1,15 @@
+# recipes/turing-rk1-media-accel-forky.toml — the Turing RK1 with the Rockchip
+# hardware video-transcode userspace on Debian forky. The turing-rk1-forky base
+# plus the media-accel-rockchip capability feature, which builds and installs
+# ffmpeg-rk + MPP + RGA against the accel kernel the base already carries.
+#
+# This is the "bare-ffmpeg box": a ready HW-transcode host with no media
+# application layered on top. A media server (Jellyfin/Plex/Emby) belongs on a
+# recipe of its own that composes this feature plus the app.
+# Constraints only; the exact resolution is written to the sibling .lock.
+device     = "turing-rk1"
+kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
+suite      = "forky"                     # omit -> device default_suite
+features   = ["media-accel-rockchip"]    # HW transcode userspace (MPP + RGA + ffmpeg-rk)
+layout     = "combined"                  # omit -> device default_layout
+image_size = "2G"

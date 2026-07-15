@@ -445,8 +445,9 @@ mod tests {
         // media-accel ones. The ffmpeg `rockchip` pin is provenance-only, so it is not
         // an axis — pinning it against a URL nothing clones would be a false report.
         let root = repo_root();
-        let build = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
-        let lock = root.lock("turing-rk1-forky").unwrap();
+        let build =
+            resolve_recipe(&root, "turing-rk1-media-accel-forky", &Overrides::default()).unwrap();
+        let lock = root.lock("turing-rk1-media-accel-forky").unwrap();
         let axes = source_axes(&build, &lock).unwrap();
         let names: Vec<&str> = axes.iter().map(|a| a.name).collect();
         assert_eq!(names, ["kernel", "u-boot", "mpp", "librga", "libmali", "ffmpeg-base"]);

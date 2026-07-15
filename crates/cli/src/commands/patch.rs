@@ -232,12 +232,14 @@ mod tests {
 
     #[test]
     fn recipes_using_profile_finds_the_locks_an_import_invalidates() {
-        // Both shipped RK1 recipes resolve to the rk3588-accel profile, so a
-        // `patch import` into it names both update commands; an unknown profile
-        // (or an unusable root) degrades to the generic hint.
+        // Every shipped RK1 recipe — base, media-accel, and jellyfin — resolves to the
+        // rk3588-accel profile, because the patch profile lives on the shared kernel
+        // axis. A `patch import` into it names each recipe's update command; an unknown
+        // profile (or an unusable root) degrades to the generic hint.
         let root = repo_root();
         let recipes = recipes_using_profile(&root, "rk3588-accel");
         assert!(recipes.contains(&"turing-rk1-forky".to_string()), "{recipes:?}");
+        assert!(recipes.contains(&"turing-rk1-media-accel-forky".to_string()), "{recipes:?}");
         assert!(recipes.contains(&"turing-rk1-jellyfin".to_string()), "{recipes:?}");
         assert!(recipes_using_profile(&root, "no-such-profile").is_empty());
         let empty = tempfile::tempdir().unwrap();

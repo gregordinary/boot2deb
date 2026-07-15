@@ -1197,9 +1197,9 @@ mod tests {
     }
 
     #[test]
-    fn rk1_recipe_resolves_expected_axes() {
+    fn rk1_media_accel_recipe_resolves_expected_axes() {
         let root = repo_root();
-        let b = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
+        let b = resolve_recipe(&root, "turing-rk1-media-accel-forky", &Overrides::default()).unwrap();
         assert_eq!(b.arch, Arch::Arm64);
         assert_eq!(b.soc, Soc::Rk3588);
         assert_eq!(b.boot_method, BootMethod::RockchipRkbin);
@@ -1244,6 +1244,58 @@ mod tests {
         assert_eq!(boot.offsets.rootfs, "16MiB");
         assert_eq!(boot.rkbin.atf, "rk3588_bl31_v1.51.elf");
         assert!(b.depthcharge_boot().is_none());
+    }
+
+    #[test]
+    fn rk1_base_recipe_keeps_the_accel_kernel_but_no_media_userspace() {
+        // The base image is the media-accel build minus the Rockchip userspace: the
+        // capability still ships, because the accel patch profile and the accel/full
+        // kconfig live on the kernel axis, not the feature. A base build carries the
+        // same kernel (VEPU/VDPU/RGA + NPU drivers) and only omits the ffmpeg-rk / MPP
+        // / RGA userspace, which installs later from the media-accel debs.
+        let root = repo_root();
+        let b = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
+        assert_eq!(b.suite, "forky");
+        assert!(b.features.is_empty(), "a base recipe selects no features");
+        // No feature sets `requires_media_accel`, so no userspace/ffmpeg source trees
+        // are scheduled and no media userspace lands in the rootfs.
+        assert!(b.userspace.is_none(), "base carries no userspace sources");
+        assert!(b.ffmpeg.is_none(), "base carries no ffmpeg sources");
+        assert!(!b.rootfs_packages.contains(&"ffmpeg-rk".to_string()));
+        assert!(b.rootfs_packages.contains(&"openssh-server".to_string()));
+        // The kernel is the accel kernel: accel/full is present exactly as on the
+        // media-accel build. This split — capability in the kernel, userspace in the
+        // feature — is what lets a base image light up transcode later.
+        let kernel = b.kernel.compiled().expect("the RK1 compiles its kernel");
+        assert!(kernel.config_fragments.contains(&"accel/full".to_string()));
+        assert_eq!(b.kernel.id(), "rk3588-mainline-7.1");
+    }
+
+    #[test]
+    fn rk1_trixie_variants_resolve_the_accel_kernel_over_trixie() {
+        // The forky/trixie split is purely the Debian userland: every source pin
+        // (kernel, u-boot, userspace, ffmpeg, blobs) is suite-independent, so only the
+        // rootfs suite changes. Both trixie variants resolve, carry the accel kernel,
+        // and differ from their forky siblings only in `suite`.
+        let root = repo_root();
+
+        let base = resolve_recipe(&root, "turing-rk1-trixie", &Overrides::default()).unwrap();
+        assert_eq!(base.suite, "trixie");
+        assert!(base.features.is_empty());
+        assert!(base.userspace.is_none());
+        assert!(base
+            .kernel
+            .compiled()
+            .unwrap()
+            .config_fragments
+            .contains(&"accel/full".to_string()));
+
+        let accel =
+            resolve_recipe(&root, "turing-rk1-media-accel-trixie", &Overrides::default()).unwrap();
+        assert_eq!(accel.suite, "trixie");
+        assert_eq!(accel.features, vec!["media-accel-rockchip"]);
+        assert!(accel.userspace.is_some(), "the media-accel variant carries userspace");
+        assert!(accel.ffmpeg.is_some());
     }
 
     #[test]

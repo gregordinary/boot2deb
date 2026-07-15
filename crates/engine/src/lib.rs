@@ -90,10 +90,10 @@ pub(crate) mod test_support {
         )
     }
 
-    /// The resolved `turing-rk1-forky` build, for stage tests that need real
-    /// device / offset / soc values.
+    /// The resolved `turing-rk1-media-accel-forky` build, for stage tests that need
+    /// real device / offset / soc values *and* the media userspace + ffmpeg pins.
     pub(crate) fn rk1_build() -> ResolvedBuild {
-        resolve_recipe(&repo_root(), "turing-rk1-forky", &Overrides::default()).unwrap()
+        resolve_recipe(&repo_root(), "turing-rk1-media-accel-forky", &Overrides::default()).unwrap()
     }
 }
 
