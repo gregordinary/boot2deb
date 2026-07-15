@@ -15,6 +15,9 @@ rkbin blobs are vendored under `blobs/<soc>/`.
 - Covers bullseye/bookworm/trixie primary keys; verifies the current `forky`
   `InRelease` (signed by the trixie/bookworm automatic signing subkeys).
 
+The keys it is allowed to contain are vetted in `debian-archive-keyring.fingerprints`
+and enforced on every build; see `README.md` in this directory.
+
 Refreshing: when Debian rotates archive keys (a new release, rare), re-fetch the
-current `debian-archive-keyring` and replace this file — a deliberate
-re-validation event, like a kernel bump.
+current `debian-archive-keyring`, replace this file, and re-vet the new key's
+fingerprint into the manifest — a deliberate re-validation event, like a kernel bump.

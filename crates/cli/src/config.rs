@@ -120,11 +120,12 @@ pub(crate) fn device_dts_paths(
 }
 
 /// Resolve each declared apt source's signing keyring to a vendored host path,
-/// erroring on the first source whose keyring is missing: the repo is
-/// verified during the rootfs solve, not trusted blindly, so its key is a
-/// build-host prerequisite like the Debian archive keyring. Called from
-/// [`preflight_config`] as the early existence gate and from the rootfs stage for
-/// the paths it actually mounts.
+/// erroring on the first source whose keyring is missing or does not match its
+/// fingerprint manifest: the repo is verified during the rootfs solve, not trusted
+/// blindly, so its key is a build-host prerequisite like the Debian archive keyring —
+/// and the key itself is held to the fingerprints a human vetted, so a swapped blob
+/// cannot quietly become a trust anchor. Called from [`preflight_config`] as the early
+/// gate and from the rootfs stage for the paths it actually mounts.
 pub(crate) fn apt_source_keyrings<'a>(
     root: &ConfigRoot,
     sources: &'a [boot2deb_core::model::AptSource],
@@ -139,6 +140,7 @@ pub(crate) fn apt_source_keyrings<'a>(
                 source.name, rel
             )
         })?;
+        boot2deb_engine::keyring::verify(&keyring)?;
         repos.push(rootfs::AptRepo { source, keyring });
     }
     Ok(repos)

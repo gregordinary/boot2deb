@@ -16,7 +16,7 @@
 //! it — the rootfs partition, the filesystem, the backup table — is shared.
 
 use crate::error::EngineError;
-use boot2deb_core::chromeos::kpart_flags;
+use boot2deb_core::chromeos::{kpart_flags, SPARE_KPART_FLAGS};
 use boot2deb_core::model::{Offsets, ResolvedBoot};
 use boot2deb_core::size::parse_size;
 
@@ -53,18 +53,27 @@ pub(crate) enum BootGeometry {
         /// `u-boot.itb` byte offset.
         uboot_itb_off: u64,
     },
-    /// `depthcharge`: one signed kernel FIT in a ChromeOS kernel partition, which
-    /// the firmware finds by scanning the GPT for its type GUID.
+    /// `depthcharge`: a signed kernel FIT in a ChromeOS kernel partition, which the
+    /// firmware finds by scanning the GPT for its type GUID.
     Kpart {
-        /// Partition start byte offset.
-        offset: u64,
-        /// Partition first LBA.
-        first_lba: u64,
-        /// Partition length in sectors.
-        length_lba: u64,
-        /// The GPT entry's 64-bit attribute word (priority / tries / successful).
-        flags: u64,
+        /// The kernel slots, in on-disk order and back to back. `slots[0]` carries
+        /// the signed payload; the rest ship empty at priority 0 so an on-device
+        /// upgrade has a slot to write that is not the one it booted from.
+        slots: Vec<KpartSlot>,
     },
+}
+
+/// One ChromeOS kernel slot's placement and attribute word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KpartSlot {
+    /// Partition start byte offset.
+    pub(crate) offset: u64,
+    /// Partition first LBA.
+    pub(crate) first_lba: u64,
+    /// Partition length in sectors.
+    pub(crate) length_lba: u64,
+    /// The GPT entry's 64-bit attribute word (priority / tries / successful).
+    pub(crate) flags: u64,
 }
 
 /// The resolved byte/LBA layout of one image.
@@ -198,10 +207,14 @@ impl Geometry {
         ))
     }
 
-    /// The ChromeOS kernel partition: a real GPT partition, so it must be
-    /// sector-aligned and clear the primary GPT table. Returns the geometry and the
-    /// byte the partition ends at — which the caller checks against the rootfs offset,
-    /// the same as it does for a raw gap.
+    /// The ChromeOS kernel slots: real GPT partitions, so they must be sector-aligned
+    /// and clear the primary GPT table. Returns the geometry and the byte the **last**
+    /// slot ends at — which the caller checks against the rootfs offset, the same as it
+    /// does for a raw gap.
+    ///
+    /// The slots are laid back to back from `kpart.offset`, so they cannot overlap each
+    /// other by construction; the only placement question left is whether the set as a
+    /// whole clears the GPT at the front and the rootfs behind it.
     fn kpart(
         boot: &boot2deb_core::model::ResolvedDepthchargeBoot,
     ) -> Result<(BootGeometry, u64), EngineError> {
@@ -221,25 +234,38 @@ impl Geometry {
                 GPT_FRONT_SECTORS * SECTOR
             )));
         }
-        let end = offset.checked_add(size).ok_or_else(|| {
-            geom(format!(
-                "kpart offset ({offset}) + size ({size}) overflows the offset arithmetic"
-            ))
-        })?;
-        // The attribute word is recomputed from the resolved fields rather than
-        // trusted: resolution already range-checked them, so this cannot fail, and
-        // keeping the packing in one place means the disk can only ever carry what
-        // `kpart_flags` produces.
-        let flags = kpart_flags(boot.kpart.priority, boot.kpart.tries, boot.kpart.successful)?;
-        Ok((
-            BootGeometry::Kpart {
-                offset,
-                first_lba: offset / SECTOR,
+        // The payload slot's attribute word is recomputed from the resolved fields
+        // rather than trusted: resolution already range-checked them, so this cannot
+        // fail, and keeping the packing in one place means the disk can only ever carry
+        // what `kpart_flags` produces.
+        let payload_flags =
+            kpart_flags(boot.kpart.priority, boot.kpart.tries, boot.kpart.successful)?;
+
+        let mut slots = Vec::with_capacity(usize::from(boot.kpart.slots));
+        let mut start = offset;
+        for i in 0..boot.kpart.slots {
+            let end = start.checked_add(size).ok_or_else(|| {
+                geom(format!(
+                    "kernel slot {i} at {start} + size ({size}) overflows the offset arithmetic"
+                ))
+            })?;
+            slots.push(KpartSlot {
+                offset: start,
+                first_lba: start / SECTOR,
                 length_lba: size / SECTOR,
-                flags,
-            },
-            end,
-        ))
+                // Only the first slot ships a payload. Every other is empty, and an
+                // empty slot must never be a boot candidate — priority 0 is exactly
+                // that, and it is what `SPARE_KPART_FLAGS` encodes.
+                flags: if i == 0 {
+                    payload_flags
+                } else {
+                    SPARE_KPART_FLAGS
+                },
+            });
+            start = end;
+        }
+        // `start` has advanced past the last slot, which is where the rootfs may begin.
+        Ok((BootGeometry::Kpart { slots }, start))
     }
 
     /// Verify the boot payload(s) fit the space the geometry gave them, before any
@@ -280,16 +306,27 @@ impl Geometry {
                 fits("idbloader.img", *idb_len, idbloader_off, uboot_itb_off, "u-boot.itb offset")?;
                 fits("u-boot.itb", *itb_len, uboot_itb_off, self.rootfs_off, "rootfs offset")?;
             }
-            BootGeometry::Kpart {
-                offset, length_lba, ..
-            } => {
+            BootGeometry::Kpart { ref slots } => {
                 let [(what, len)] = payloads else {
                     return Err(geom(format!(
                         "the kernel partition takes exactly 1 payload, got {}",
                         payloads.len()
                     )));
                 };
-                fits(what, *len, offset, offset + length_lba * SECTOR, "kernel partition")?;
+                // Only the first slot is written at build time; the spares ship empty
+                // and are filled by the first on-device kernel upgrade. They are the
+                // same size, so a payload that fits the first fits any of them — which
+                // is what makes an upgrade to a spare safe.
+                let payload = slots.first().ok_or_else(|| {
+                    geom("the depthcharge geometry resolved to no kernel slots".into())
+                })?;
+                fits(
+                    what,
+                    *len,
+                    payload.offset,
+                    payload.offset + payload.length_lba * SECTOR,
+                    "kernel partition",
+                )?;
             }
         }
         Ok(())
@@ -329,17 +366,19 @@ mod tests {
         })
     }
 
-    /// The C201 kernel-partition layout (boot-methods/depthcharge.toml).
+    /// The C201 kernel-slot layout (boot-methods/depthcharge.toml): two 16 MiB slots
+    /// from 12 MiB, rootfs behind them at 44 MiB.
     fn c201_boot() -> ResolvedBoot {
-        c201_boot_with("12MiB", "16MiB", "28MiB")
+        c201_boot_with("12MiB", "16MiB", 2, "44MiB")
     }
 
-    fn c201_boot_with(offset: &str, size: &str, rootfs: &str) -> ResolvedBoot {
+    fn c201_boot_with(offset: &str, size: &str, slots: u8, rootfs: &str) -> ResolvedBoot {
         ResolvedBoot::Depthcharge(ResolvedDepthchargeBoot {
             board: "speedy".into(),
             kpart: Kpart {
                 offset: offset.into(),
                 size: size.into(),
+                slots,
                 priority: 10,
                 tries: 5,
                 successful: true,
@@ -374,29 +413,62 @@ mod tests {
     }
 
     #[test]
-    fn resolves_the_c201_kernel_partition_layout() {
-        // The exact numbers the booting C201 image carries: the kernel partition at
-        // LBA 24576 spanning 32768 sectors, and the rootfs immediately after it at
-        // LBA 57344.
+    fn resolves_the_c201_kernel_slot_layout() {
+        // The exact numbers the C201 image carries: KERN-A at LBA 24576 spanning 32768
+        // sectors, KERN-B abutting it at LBA 57344, and the rootfs behind both at LBA
+        // 90112.
         let g = Geometry::resolve(&c201_boot(), "4G").unwrap();
         assert_eq!(
             g.boot,
             BootGeometry::Kpart {
-                offset: 12 * 1024 * 1024,
-                first_lba: 24_576,
-                length_lba: 32_768,
-                flags: 0x015A_0000_0000_0000,
+                slots: vec![
+                    KpartSlot {
+                        offset: 12 * 1024 * 1024,
+                        first_lba: 24_576,
+                        length_lba: 32_768,
+                        flags: 0x015A_0000_0000_0000,
+                    },
+                    KpartSlot {
+                        offset: 28 * 1024 * 1024,
+                        first_lba: 57_344,
+                        length_lba: 32_768,
+                        // The spare ships empty, and priority 0 is "never boot" — the
+                        // firmware must not pick a slot with no kernel in it.
+                        flags: SPARE_KPART_FLAGS,
+                    },
+                ],
             }
         );
-        assert_eq!(g.rootfs_first_lba, 57_344);
+        assert_eq!(g.rootfs_first_lba, 90_112);
         assert!(g.rootfs_bytes.is_multiple_of(EXT4_BLOCK));
         assert_eq!(g.rootfs_bytes, g.rootfs_length_lba * SECTOR);
-        // The rootfs starts exactly where the kernel partition ends — they abut,
-        // and neither overlaps the other.
-        let BootGeometry::Kpart { offset, length_lba, .. } = g.boot else {
-            panic!("expected a kernel partition")
+        // The slots abut each other, and the rootfs starts exactly where the last one
+        // ends: nothing overlaps, and nothing is wasted between them.
+        let BootGeometry::Kpart { ref slots } = g.boot else {
+            panic!("expected kernel slots")
         };
-        assert_eq!(offset + length_lba * SECTOR, g.rootfs_off);
+        for pair in slots.windows(2) {
+            assert_eq!(
+                pair[0].offset + pair[0].length_lba * SECTOR,
+                pair[1].offset,
+                "kernel slots must abut, never overlap"
+            );
+        }
+        let last = slots.last().unwrap();
+        assert_eq!(last.offset + last.length_lba * SECTOR, g.rootfs_off);
+    }
+
+    /// One slot is expressible — it is the shape with no fallback, and the geometry
+    /// must not quietly invent a spare that the on-device upgrade path would then
+    /// believe in.
+    #[test]
+    fn a_single_slot_layout_leaves_no_spare() {
+        let g = Geometry::resolve(&c201_boot_with("12MiB", "16MiB", 1, "28MiB"), "4G").unwrap();
+        let BootGeometry::Kpart { ref slots } = g.boot else {
+            panic!("expected kernel slots")
+        };
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].flags, 0x015A_0000_0000_0000);
     }
 
     #[test]
@@ -410,15 +482,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_kernel_partition_that_collides() {
+    fn rejects_kernel_slots_that_collide() {
         // Overlapping the primary GPT: the firmware's own table would be destroyed.
-        assert!(Geometry::resolve(&c201_boot_with("512", "16MiB", "28MiB"), "4G").is_err());
-        // Running into the rootfs: 12 MiB + 20 MiB > 28 MiB.
-        assert!(Geometry::resolve(&c201_boot_with("12MiB", "20MiB", "28MiB"), "4G").is_err());
-        // A zero-size kernel partition could hold no kernel.
-        assert!(Geometry::resolve(&c201_boot_with("12MiB", "0", "28MiB"), "4G").is_err());
-        // A gap between the partitions is allowed — only an overlap is not.
-        assert!(Geometry::resolve(&c201_boot_with("12MiB", "8MiB", "28MiB"), "4G").is_ok());
+        assert!(Geometry::resolve(&c201_boot_with("512", "16MiB", 2, "44MiB"), "4G").is_err());
+        // The *second* slot runs into the rootfs: 12 + 2*16 = 44 MiB, past a rootfs at
+        // 40 MiB. This is the collision a one-slot geometry cannot have, and the reason
+        // the rootfs offset is checked against the last slot rather than the first — a
+        // spare silently overlapping the rootfs would be a kernel upgrade that eats the
+        // filesystem.
+        assert!(Geometry::resolve(&c201_boot_with("12MiB", "16MiB", 2, "40MiB"), "4G").is_err());
+        // A zero-size kernel slot could hold no kernel.
+        assert!(Geometry::resolve(&c201_boot_with("12MiB", "0", 2, "44MiB"), "4G").is_err());
+        // A gap between the last slot and the rootfs is allowed — only an overlap is not.
+        assert!(Geometry::resolve(&c201_boot_with("12MiB", "8MiB", 2, "44MiB"), "4G").is_ok());
     }
 
     #[test]
@@ -451,13 +527,17 @@ mod tests {
     }
 
     #[test]
-    fn a_kernel_payload_must_fit_its_partition() {
+    fn a_kernel_payload_must_fit_its_slot() {
         let g = Geometry::resolve(&c201_boot(), "4G").unwrap();
         let kpart = |len: u64| g.check_payload_fit(&[("vmlinuz.kpart", len)]);
-        // The measured signed payload — 14,569,472 bytes — fits the 16 MiB partition.
+        // The measured signed payload — 14,569,472 bytes — fits the 16 MiB slot.
         assert!(kpart(14_569_472).is_ok());
-        // Exactly filling it is fine; one byte more is not. A kernel spilling past
-        // its partition would be written over the start of the rootfs.
+        // Exactly filling the slot is fine; one byte more is not. A kernel spilling
+        // past KERN-A would be written over the head of KERN-B — corrupting the very
+        // slot the upgrade path falls back to, which is the failure this bound exists
+        // to prevent. The check is against the *slot*, not the whole kernel region:
+        // the slots are equal-sized, so a payload that fits one fits any of them, and
+        // that is exactly what makes writing a spare safe.
         assert!(kpart(16 * 1024 * 1024).is_ok());
         assert!(kpart(16 * 1024 * 1024 + 1).is_err());
         assert!(kpart(u64::MAX).is_err());

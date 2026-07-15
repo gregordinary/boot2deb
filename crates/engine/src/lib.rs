@@ -47,6 +47,7 @@ pub mod gc;
 pub mod git;
 pub mod image;
 pub mod kconfig;
+pub mod keyring;
 pub mod manifest;
 pub mod netfetch;
 pub mod patches;

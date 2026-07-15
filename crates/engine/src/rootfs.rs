@@ -74,6 +74,21 @@ pub struct RootfsOptions<'a> {
     /// The boot-method-specific configuration written into the pre-install overlay
     /// ([`BootConfig`]), or `None` where the boot method generates none.
     pub boot_config: Option<BootConfig<'a>>,
+    /// The image's account of itself
+    /// ([`SystemIdentity`](boot2deb_core::provenance::SystemIdentity)), written into the
+    /// rootfs at `/etc/boot2deb/image.toml`.
+    ///
+    /// It ships *inside* the image because its whole purpose is to be readable when the
+    /// image is all you have: from other media, without mounting it, and possibly on a
+    /// machine that is not this board. That last case is the one that decides its
+    /// contents — `depthchargectl` recovers a board profile from the *running* board's
+    /// HWID, so a tool re-signing this image's kernel from somewhere else has no way to
+    /// learn it except by being told here.
+    ///
+    /// Written as part of the staged overlay, so it folds into the rootfs cache key with
+    /// every other generated file ([`rootcache::dir_fingerprints`]) and a cached tree can
+    /// never be reused under an identity that disagrees with it.
+    pub image_identity: &'a boot2deb_core::provenance::SystemIdentity,
     /// The rootfs partition's PARTUUID, as the image node will write it.
     ///
     /// Under `depthcharge` this is an *input* to the rootfs, not an output of the
@@ -236,6 +251,7 @@ impl Rootfs for MmdebstrapRootfs {
             build,
             opts.rootfs_label,
             opts.rootfs_partuuid,
+            opts.image_identity,
             &step,
         )?;
 
@@ -693,6 +709,7 @@ fn stage_overlay(
     build: &ResolvedBuild,
     rootfs_label: &str,
     rootfs_partuuid: uuid::Uuid,
+    image_identity: &boot2deb_core::provenance::SystemIdentity,
     step: &Step,
 ) -> Result<(), EngineError> {
     copy_overlay_trees(staging, overlay_dirs, step)?;
@@ -709,6 +726,16 @@ fn stage_overlay(
         staging,
         "etc/boot2deb/board.conf",
         &config::board_conf(&build.kernel_dtb),
+    )?;
+    // The image's own account of what it is, beside the board config, for a tool that
+    // reads this disk from outside — from other media, without mounting it, on a machine
+    // that may not be this board. Everything in it but the depthcharge board profile is a
+    // cross-check against what such a reader can already infer from the disk; the board
+    // profile is the part it cannot.
+    write_staged(
+        staging,
+        "etc/boot2deb/image.toml",
+        &image_identity.to_toml_string()?,
     )?;
     // Empty machine-id → systemd regenerates it on first boot.
     write_staged(staging, "etc/machine-id", "")?;
@@ -983,12 +1010,27 @@ fn depthcharge_finalize(board: &str) -> String {
          \x20 esac\n\
          done\n\
          # Arm the package's kernel hooks for the *shipped* system: from here on, an\n\
-         # apt kernel upgrade on the running board re-signs and re-writes the kernel\n\
-         # partition itself. They were off during the build so they could not go looking\n\
-         # for a ChromeOS kernel partition on the build host's disks.\n\
+         # apt kernel upgrade on the running board re-signs the kernel and writes it to\n\
+         # the slot it is not booted from, itself. They were off during the build so they\n\
+         # could not go looking for a ChromeOS kernel partition on the build host's disks.\n\
          cat > \"$rootfs/etc/depthcharge-tools/config\" <<'B2D_EOF'\n\
          {enabled_config}B2D_EOF\n\
-         grep -q '^enable-system-hooks = True$' \"$rootfs/etc/depthcharge-tools/config\"\n",
+         grep -q '^enable-system-hooks = True$' \"$rootfs/etc/depthcharge-tools/config\"\n\
+         # And assert the other half of the upgrade protocol is armed: depthcharge-tools\n\
+         # .service runs `depthchargectl bless` once a boot completes, which is what turns\n\
+         # a freshly-written slot from \"on trial, one try left\" into \"known good\".\n\
+         #\n\
+         # Without it every kernel upgrade quietly self-destructs: `write` leaves the new\n\
+         # slot at tries=1/successful=0, the firmware spends that try booting it, and with\n\
+         # nothing to set successful the *next* boot finds it exhausted and falls back —\n\
+         # so a working upgrade would be rolled back one reboot after it landed. The\n\
+         # package's own postinst enables the unit; nothing else in this build does, and a\n\
+         # silently-not-enabled unit is invisible until the board is in front of you.\n\
+         chroot \"$rootfs\" systemctl is-enabled depthcharge-tools.service >/dev/null || {{\n\
+         \x20 echo 'depthcharge-tools.service is not enabled: a kernel upgrade would be' >&2\n\
+         \x20 echo 'rolled back one reboot after it succeeded (nothing would bless it)' >&2\n\
+         \x20 exit 1\n\
+         }}\n",
         enabled_config = config::depthcharge_config(board, true),
         REQUIRED_INITRD_MODULES = REQUIRED_INITRD_MODULES.join(" "),
     )
@@ -1453,6 +1495,33 @@ mod tests {
         resolve_recipe(&repo_root(), "turing-rk1-forky", &Overrides::default()).unwrap()
     }
 
+    /// A lock with nothing pinned. These tests exercise how the rootfs node *stages* the
+    /// identity document, not what it contains — the contents are unit-tested where they
+    /// are assembled, in `core::provenance`.
+    fn empty_lock() -> boot2deb_core::lock::Lock {
+        boot2deb_core::lock::Lock {
+            kernel: None,
+            patches: None,
+            uboot: None,
+            userspace: None,
+            ffmpeg: None,
+            rootfs: boot2deb_core::lock::RootfsPin {
+                suite: "forky".into(),
+                manifest: "m.pkgs.lock".into(),
+                manifest_sha256: None,
+            },
+            blobs: None,
+            extra_debs: vec![],
+            snapshot: None,
+        }
+    }
+
+    /// The `/etc/boot2deb/image.toml` document for a build, for the `RootfsOptions`
+    /// fixtures below.
+    fn ident(build: &ResolvedBuild) -> boot2deb_core::provenance::SystemIdentity {
+        boot2deb_core::provenance::system_identity(build, &empty_lock())
+    }
+
     /// Every first-boot hook any layer ships must be executable.
     ///
     /// The overlay trees are copied with `cp -a`, so a hook's mode in the repo is its
@@ -1470,17 +1539,23 @@ mod tests {
             .nth(2)
             .unwrap()
             .to_path_buf();
-        let mut checked = 0usize;
-        // Every layer that may carry an overlay: the base, and each boot method / device.
-        let layer_dirs = std::iter::once(root.join("base"))
-            .chain(["boot-methods", "devices"].iter().flat_map(|kind| {
-                std::fs::read_dir(root.join(kind))
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_dir())
-            }));
+        let mut checked: Vec<std::path::PathBuf> = Vec::new();
+        // Every layer kind that can carry an overlay tree, which is every kind the
+        // rootfs stage merges: base, then soc, boot method, device, feature. This list
+        // must stay in step with the CLI's `overlay_dirs` — a kind missing here is not a
+        // failing test but a *vacuous* one, silently exempting whatever it holds.
+        let layer_dirs = std::iter::once(root.join("base")).chain(
+            ["socs", "boot-methods", "devices", "features"]
+                .iter()
+                .flat_map(|kind| {
+                    std::fs::read_dir(root.join(kind))
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.is_dir())
+                }),
+        );
 
         for layer in layer_dirs {
             for overlay in ["overlay", "overlay-pre"] {
@@ -1498,12 +1573,25 @@ mod tests {
                         path.display(),
                         mode & 0o7777,
                     );
-                    checked += 1;
+                    checked.push(path);
                 }
             }
         }
-        // A path typo that found no hooks at all would make the assertions above vacuous.
-        assert!(checked >= 3, "expected to find the shipped hooks, saw {checked}");
+        // A path typo that found no hooks at all would make the assertions above vacuous,
+        // and so would a layer kind missing from the list above. Name one hook from each
+        // kind that ships one, so losing a whole kind fails here instead of quietly
+        // shrinking the test's reach.
+        for expected in [
+            "boot-methods/depthcharge/overlay/etc/boot2deb/first-boot.d/10-depthcharge",
+            "boot-methods/rockchip-rkbin/overlay/etc/boot2deb/first-boot.d/10-extlinux",
+            "socs/rk3288/overlay/etc/boot2deb/first-boot.d/20-audio",
+            "devices/turing-rk1/overlay/etc/boot2deb/first-boot.d/20-network",
+        ] {
+            assert!(
+                checked.contains(&root.join(expected)),
+                "{expected} was never checked — the layer-kind list above has a hole in it",
+            );
+        }
     }
 
     /// The other shape: a depthcharge board with a distro kernel.
@@ -1619,6 +1707,15 @@ mod tests {
             script.contains("enable-system-hooks = True"),
             "arms on-device kernel upgrades before shipping"
         );
+        // The other half of the upgrade protocol. `write` leaves a new slot on trial
+        // (tries=1, successful=0); this unit is what marks it good once it has actually
+        // booted. Un-enabled, a *successful* kernel upgrade is rolled back one reboot
+        // later, when the firmware finds the slot's single try spent and nothing saying
+        // it worked — a failure that shows up only on the hardware, a reboot too late.
+        assert!(
+            script.contains("systemctl is-enabled depthcharge-tools.service"),
+            "asserts the unit that blesses a booted kernel slot is enabled"
+        );
         // A raw-gap board gets none of it — the tail is the depthcharge method's.
         let rkbin = customize_hook_script(Path::new("/w/overlay"), DEFAULT_USER, &rk1(), None);
         assert!(!rkbin.contains("depthchargectl"));
@@ -1647,11 +1744,13 @@ mod tests {
             crate::DEFAULT_MIRROR.to_string(),
             "https://snapshot.debian.org/archive/debian/20260628T083000Z/".to_string(),
         ];
+        let identity = ident(&build);
         let opts = RootfsOptions {
             repo_debs: &[],
             overlay_dirs: &[],
             preinstall_overlay_dirs: &[],
             boot_config: None,
+            image_identity: &identity,
             rootfs_partuuid: PARTUUID,
             out_dir: Path::new("/w/out"),
             keyring: Some(Path::new("/kr.gpg")),
@@ -1758,11 +1857,13 @@ mod tests {
         let build = rk1();
         let extra = vec!["linux-image-7.1.1-1-arm64".to_string()];
         let mirrors = vec![crate::DEFAULT_MIRROR.to_string()];
+        let identity = ident(&build);
         let opts = RootfsOptions {
             repo_debs: &[],
             overlay_dirs: &[],
             preinstall_overlay_dirs: &[],
             boot_config: None,
+            image_identity: &identity,
             rootfs_partuuid: PARTUUID,
             out_dir: Path::new("/w/out"),
             keyring: Some(Path::new("/kr.gpg")),
@@ -1824,11 +1925,13 @@ mod tests {
             apt_source_line(&repos[0]),
             "deb [signed-by=/kr/jellyfin.gpg] https://repo.jellyfin.org/debian trixie main"
         );
+        let identity = ident(&build);
         let opts = RootfsOptions {
             repo_debs: &[],
             overlay_dirs: &[],
             preinstall_overlay_dirs: &[],
             boot_config: None,
+            image_identity: &identity,
             rootfs_partuuid: PARTUUID,
             out_dir: Path::new("/w/out"),
             keyring: Some(Path::new("/kr.gpg")),
@@ -1941,6 +2044,55 @@ mod tests {
             !tmp.path().join("etc/default/locale").exists(),
             "must not write /etc/default/locale — tmpfiles force-replaces it with a symlink"
         );
+    }
+
+    /// The identity document reaches the image, at the path a tool reading this disk
+    /// from outside looks for it.
+    ///
+    /// The two assertions are the two halves of why the file exists. The board profile
+    /// is the value that is **not** recoverable from the disk — `depthchargectl` gets it
+    /// from the *running* board's HWID, so a tool re-signing this image's kernel from
+    /// other media, or from a machine that is not this board, can only be told. And the
+    /// document ships *inside* the image, so it must never carry the per-image first-boot
+    /// password that its sibling — the provenance manifest, which stays with the build —
+    /// exists to record.
+    #[test]
+    fn the_staged_overlay_carries_the_image_identity() {
+        let build = c201();
+        let identity = ident(&build);
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "test");
+        stage_overlay(tmp.path(), &[], &build, "rootfs", uuid::Uuid::nil(), &identity, &step).unwrap();
+
+        let path = tmp.path().join("etc/boot2deb/image.toml");
+        let text = std::fs::read_to_string(&path).expect("identity staged into the rootfs");
+
+        assert!(
+            text.contains("board = \"speedy\""),
+            "the depthcharge board profile is the one value an outside tool cannot \
+             derive from the disk; without it the file has no reason to exist:\n{text}"
+        );
+        assert!(text.contains("device = \"asus-c201\""));
+        assert!(text.contains("version = 1"), "a wire format read by other programs");
+
+        let data: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect();
+        assert!(
+            !data.contains("password"),
+            "the first-boot secret must never ship inside an image:\n{text}"
+        );
+
+        // A rockchip-rkbin board has no board profile, so it records none rather than an
+        // empty string a reader would have to special-case.
+        let rk = rk1();
+        let tmp2 = tempfile::tempdir().unwrap();
+        stage_overlay(tmp2.path(), &[], &rk, "rootfs", uuid::Uuid::nil(), &ident(&rk), &step).unwrap();
+        let rk_text = std::fs::read_to_string(tmp2.path().join("etc/boot2deb/image.toml")).unwrap();
+        assert!(rk_text.contains("boot_method = \"rockchip-rkbin\""));
+        assert!(!rk_text.contains("board ="));
     }
 
     #[test]

@@ -30,6 +30,7 @@ mod gpt;
 
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
+use boot2deb_core::chromeos::MAX_KPART_SLOTS;
 use boot2deb_core::model::{Layout, ResolvedBoot};
 use boot2deb_core::ResolvedBuild;
 use geometry::{BootGeometry, Geometry};
@@ -113,9 +114,16 @@ pub struct ImageIdentity {
     pub disk_guid: Uuid,
     /// The rootfs partition's GUID — its **PARTUUID**.
     pub rootfs_partuuid: Uuid,
-    /// The ChromeOS kernel partition's GUID. Unused under a boot method that writes
-    /// no such partition.
-    pub kpart_guid: Uuid,
+    /// The ChromeOS kernel slots' partition GUIDs, in on-disk order. Unused under a
+    /// boot method that writes no kernel partition.
+    ///
+    /// **Distinct per slot, and that is load-bearing.** depthcharge substitutes the
+    /// booted slot's PARTUUID into `kern_guid=` on the kernel command line, which is
+    /// how the running system knows *which* slot it came up from — and therefore which
+    /// slot it may safely overwrite on the next kernel upgrade. Two slots sharing a
+    /// GUID would make that answer ambiguous, and the upgrade could overwrite the
+    /// kernel it is running.
+    pub kpart_guids: [Uuid; MAX_KPART_SLOTS as usize],
 }
 
 impl ImageIdentity {
@@ -130,7 +138,12 @@ impl ImageIdentity {
             ext4_uuid: derive_uuid(seed, device, "ext4-rootfs"),
             disk_guid: derive_uuid(seed, device, "gpt-disk"),
             rootfs_partuuid: derive_uuid(seed, device, "gpt-partition"),
-            kpart_guid: derive_uuid(seed, device, "gpt-kernel-partition"),
+            // A distinct domain per slot, so the slots never collide with each other
+            // (see the field's own note on why that matters), while each stays a pure
+            // function of the seed.
+            kpart_guids: std::array::from_fn(|i| {
+                derive_uuid(seed, device, &format!("gpt-kernel-partition-{i}"))
+            }),
         }
     }
 }
@@ -424,7 +437,7 @@ fn assemble_disk(
         opts.rootfs_label,
         opts.identity.disk_guid,
         opts.identity.rootfs_partuuid,
-        opts.identity.kpart_guid,
+        &opts.identity.kpart_guids,
     )?;
     splice_file(image, geom.rootfs_off, ext4)?;
     if with_boot {
@@ -442,12 +455,23 @@ fn assemble_disk(
                 splice_file(image, *idbloader_off, idbloader)?;
                 splice_file(image, *uboot_itb_off, uboot_itb)?;
             }
-            (BootGeometry::Kpart { offset, .. }, BootPayload::Depthcharge) => {
+            (BootGeometry::Kpart { slots }, BootPayload::Depthcharge) => {
                 let kpart = kpart.ok_or(EngineError::StageNotApplicable {
                     stage: "image",
                     why: "the signed kernel partition was not extracted from the rootfs",
                 })?;
-                splice_file(image, *offset, kpart)?;
+                // Only the first slot. The spares are left as the zeroes the sparse
+                // image file already holds — an empty slot at priority 0, which the
+                // firmware will not boot and the first on-device kernel upgrade will
+                // fill. Writing a copy of the payload into them instead would give the
+                // upgrade nothing to fall back *to*: both slots would then hold the
+                // same kernel, and a bad upgrade would have overwritten the only other
+                // copy of the one that worked.
+                let payload = slots.first().ok_or(EngineError::StageNotApplicable {
+                    stage: "image",
+                    why: "the depthcharge geometry resolved to no kernel slots",
+                })?;
+                splice_file(image, payload.offset, kpart)?;
             }
             // The geometry and the payload both come from the same resolved boot
             // method, so they cannot disagree — but they are separate values, and a

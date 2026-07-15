@@ -383,27 +383,41 @@ pub struct RockchipRkbinLayer {
 pub struct DepthchargeLayer {
     /// Human-readable description.
     pub description: String,
-    /// Byte offset of the ChromeOS kernel partition (authored string, e.g.
+    /// Byte offset of the **first** ChromeOS kernel slot (authored string, e.g.
     /// `12MiB`). The firmware scans every medium's GPT for the type GUID and never
     /// looks at a partition's number or start, so this is a free choice — but it
     /// must clear the 8 MiB region a Veyron eMMC reserves at its head, which
     /// `12MiB` does on eMMC and costs nothing on SD/USB.
     pub kpart_offset: String,
-    /// Size of the ChromeOS kernel partition (e.g. `16MiB`). It bounds the signed
+    /// Size of **each** ChromeOS kernel slot (e.g. `16MiB`). It bounds the signed
     /// payload the image can carry; the *firmware's* own ceiling is a property of
     /// the board profile and is enforced by `depthchargectl`.
     pub kpart_size: String,
-    /// Start offset of the rootfs partition (e.g. `28MiB`) — at or after the end
-    /// of the kernel partition.
+    /// How many kernel slots the image lays down, back to back from
+    /// [`kpart_offset`](Self::kpart_offset). Range
+    /// 1..=[`MAX_KPART_SLOTS`](crate::chromeos::MAX_KPART_SLOTS).
+    ///
+    /// **Two is what makes a kernel upgrade survivable.** The first slot carries the
+    /// signed payload; the rest ship empty at
+    /// [`SPARE_KPART_FLAGS`](crate::chromeos::SPARE_KPART_FLAGS). An on-device
+    /// upgrade then writes the *spare* and leaves the running kernel intact as a
+    /// fallback the firmware returns to on its own if the new one does not boot. At
+    /// one slot there is no spare, so `depthchargectl` overwrites the running kernel
+    /// in place and a bad upgrade needs external media to recover. See
+    /// [`chromeos`](crate::chromeos) for the protocol.
+    pub kpart_slots: u8,
+    /// Start offset of the rootfs partition (e.g. `44MiB`) — at or after the end of
+    /// the **last** kernel slot.
     pub rootfs_offset: String,
-    /// GPT attribute bits 51:48 — boot priority among candidate kernel partitions.
-    /// 15 is highest; 0 means never boot. Range 0-15.
+    /// GPT attribute bits 51:48 — boot priority of the slot that ships the payload.
+    /// 15 is highest; 0 means never boot. Range 0-15. Spare slots are not authored:
+    /// they take [`SPARE_KPART_FLAGS`](crate::chromeos::SPARE_KPART_FLAGS).
     pub kpart_priority: u8,
-    /// GPT attribute bits 55:52 — remaining boot attempts, decremented by the
-    /// firmware on each failure unless [`kpart_successful`](Self::kpart_successful)
-    /// is set. Range 0-15.
+    /// GPT attribute bits 55:52 — remaining boot attempts for the slot that ships
+    /// the payload, decremented by the firmware on each attempt unless
+    /// [`kpart_successful`](Self::kpart_successful) is set. Range 0-15.
     pub kpart_tries: u8,
-    /// GPT attribute bit 56 — mark the partition as known-good, so the firmware
+    /// GPT attribute bit 56 — mark the shipped slot known-good, so the firmware
     /// stops decrementing `tries` and never gives up on it.
     pub kpart_successful: bool,
     /// Kernel command line baked into the signed FIT — **without** `root=`, which
@@ -1239,25 +1253,36 @@ pub struct Offsets {
     pub rootfs: String,
 }
 
-/// The resolved ChromeOS kernel partition: where it sits and the attribute bits
-/// that make the firmware boot it.
+/// The resolved ChromeOS kernel slots: where they sit and the attribute bits that
+/// make the firmware boot one of them.
+///
+/// An image lays down [`slots`](Self::slots) partitions of the ChromeOS kernel type,
+/// back to back from [`offset`](Self::offset), each [`size`](Self::size) long. The
+/// **first** carries the signed payload and the attributes below; every other ships
+/// empty at [`SPARE_KPART_FLAGS`](crate::chromeos::SPARE_KPART_FLAGS), waiting for the
+/// first on-device kernel upgrade to write it. The spare is the entire reason an
+/// upgrade can be rolled back — see [`chromeos`](crate::chromeos).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Kpart {
-    /// Partition start (authored string, parsed to bytes by the image node).
+    /// Start of the first slot (authored string, parsed to bytes by the image node).
     pub offset: String,
-    /// Partition size (authored string).
+    /// Size of each slot (authored string).
     pub size: String,
-    /// Boot priority (GPT attribute bits 51:48).
+    /// Number of slots. Resolution guarantees `1..=MAX_KPART_SLOTS`; the image node
+    /// derives each slot's start from `offset + i * size` and need not re-check it.
+    pub slots: u8,
+    /// Boot priority of the payload slot (GPT attribute bits 51:48).
     pub priority: u8,
-    /// Remaining boot attempts (bits 55:52).
+    /// Remaining boot attempts for the payload slot (bits 55:52).
     pub tries: u8,
-    /// Known-good flag (bit 56).
+    /// Known-good flag for the payload slot (bit 56).
     pub successful: bool,
-    /// The three fields above packed into the GPT entry's 64-bit attribute word —
-    /// what actually lands on disk. Computed at resolution by
+    /// The three fields above packed into the payload slot's 64-bit GPT attribute
+    /// word — what actually lands on disk. Computed at resolution by
     /// [`kpart_flags`](crate::chromeos::kpart_flags), which also range-checks
     /// `priority` and `tries`, so the image node writes a value it does not have to
-    /// re-validate.
+    /// re-validate. Spare slots carry
+    /// [`SPARE_KPART_FLAGS`](crate::chromeos::SPARE_KPART_FLAGS) instead.
     pub flags: u64,
 }
 

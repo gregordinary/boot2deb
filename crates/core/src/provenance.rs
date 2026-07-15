@@ -21,6 +21,19 @@ const BANNER: &str = "\
 # ([credentials]) — treat this file as sensitive.
 ";
 
+/// Banner prepended to a serialized [`SystemIdentity`].
+const IDENTITY_BANNER: &str = "\
+# boot2deb image identity. Written at build time, and read by tools that operate on
+# this system from outside it — including when it cannot be booted or mounted.
+#
+# Carries no secrets. The build's provenance manifest holds the first-boot credential
+# and the full pin list; it stays with the build and never ships inside the image.
+";
+
+/// Schema version of [`SystemIdentity`]. Bumped when a field changes meaning or is
+/// removed; adding an optional field does not bump it.
+const IDENTITY_VERSION: u32 = 1;
+
 /// The build-time facts the engine supplies to [`assemble`] beyond the [`Lock`]
 /// and [`ResolvedBuild`]: the host/cross identity, the solved manifest's digest +
 /// size, and the generated first-boot credential. The engine owns these because
@@ -95,6 +108,107 @@ pub struct SourceDurability {
     /// ([`PinForm::as_str`](crate::sources::PinForm::as_str)): `named-ref` or
     /// `bare-commit`.
     pub form: String,
+}
+
+/// The image's account of itself, written into the rootfs at
+/// `/etc/boot2deb/image.toml`.
+///
+/// This is what an image tells a tool that operates on it **from outside**: a rescue
+/// tool reading the disk from other media, quite possibly without mounting it and on a
+/// machine that is not this board. It ships *inside* the image because the image is all
+/// such a tool has.
+///
+/// It is deliberately a **subset** of [`ProvenanceManifest`] rather than the same
+/// document, and the line between them is a security boundary: the manifest carries the
+/// per-image first-boot password, and nothing that ships inside an image may. The
+/// manifest also carries the solved-manifest digest, which *cannot* be here — that
+/// digest is an output of the rootfs bootstrap, so it is not yet known when the file
+/// being described is written into the rootfs it describes.
+///
+/// Most fields below are recoverable from the disk by other means, and exist so a
+/// reader can cross-check what it inferred against what the image claims.
+/// [`board`](IdentityImage::board) is the exception, and the reason the file
+/// exists at all: the depthcharge board profile is not derivable from the image, and
+/// `depthchargectl` normally recovers it by reading the *running* board's HWID and
+/// device-tree compatibles — which is exactly what a tool running somewhere else cannot
+/// do.
+///
+/// [`version`](Self::version) makes this a stable wire format. It is parsed by programs
+/// versioned independently of boot2deb, so a reader must be able to tell which schema it
+/// is looking at, and must tolerate fields it does not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SystemIdentity {
+    /// Schema version of this document. Declared first so it serializes ahead of every
+    /// `[table]`, which TOML requires of a top-level scalar.
+    pub version: u32,
+    /// What this system is.
+    pub image: IdentityImage,
+    /// The kernel it boots, and how a new one reaches it.
+    pub kernel: IdentityKernel,
+}
+
+/// What the system is: the resolved build point, minus every value that is either
+/// meaningless once the image is on a device or must not leave the build host.
+///
+/// Omitted deliberately, and each for its own reason: the first-boot credential (a
+/// secret), the toolchain identity (a property of the build host, not the board),
+/// `image_size` (superseded by the first-boot resize), and the locale/timezone/keymap
+/// (already queryable from the system itself).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IdentityImage {
+    /// Device name.
+    pub device: String,
+    /// Human-readable board description.
+    pub description: String,
+    /// Target architecture.
+    pub arch: String,
+    /// Target SoC.
+    pub soc: String,
+    /// Selected boot method. A reader detects this from the disk; the value here is a
+    /// cross-check, and a disagreement is itself worth reporting.
+    pub boot_method: String,
+    /// The depthcharge board profile the kernel partition was signed for. **The one
+    /// field here that is not recoverable from the disk**, and what an off-board
+    /// `depthchargectl --board` needs. Absent under a boot method with no board profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
+    /// Debian suite.
+    pub suite: String,
+    /// Selected rootfs features (empty for a plain base image).
+    pub features: Vec<String>,
+    /// Image layout (`combined` / `split`). On `split` the boot payload and the root
+    /// filesystem live on *different media*, so a reader that finds no bootloader beside
+    /// this rootfs is looking at an expected state, not a fault.
+    pub layout: String,
+    /// Image hostname.
+    pub hostname: String,
+}
+
+/// The kernel the image boots, and the fact that decides how a new one reaches it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IdentityKernel {
+    /// Kernel definition id.
+    pub id: String,
+    /// `mainline`, `vendor`, or `distro-package` — and the reason this section exists.
+    /// It is what tells an outside tool how a kernel upgrade gets here: a distro kernel
+    /// arrives through `apt`, a compiled one is a `.deb` that somebody has to hand it.
+    pub flavor: String,
+    /// The kernel package a distro-package build installs. Absent for a compiled kernel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    /// The pinned kernel ref. Absent for a distro-package kernel, which is not fetched
+    /// from git at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The exact kernel commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The patch profile applied to that kernel. It is the difference between two boards
+    /// running the same kernel version and having different hardware working, so it
+    /// belongs on the device rather than only in the build's records. Absent when the
+    /// kernel applied no series.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_profile: Option<String>,
 }
 
 /// The resolved build point (from [`ResolvedBuild`]).
@@ -259,6 +373,56 @@ pub struct CredentialsProvenance {
     pub password: String,
     /// How the credential behaves on the shipped image.
     pub note: String,
+}
+
+/// Assemble the image's on-device [`SystemIdentity`] from the resolved build and its
+/// lock. Pure — no I/O.
+///
+/// Unlike [`assemble`] this takes no [`BuildFacts`], and that is what makes the document
+/// possible at all: every value here is known *before* the rootfs is bootstrapped, so it
+/// can be staged into the rootfs it describes. The provenance manifest cannot be — its
+/// solved-manifest digest and per-image password are both produced by the bootstrap it
+/// would have to be written into.
+pub fn system_identity(build: &ResolvedBuild, lock: &Lock) -> SystemIdentity {
+    SystemIdentity {
+        version: IDENTITY_VERSION,
+        image: IdentityImage {
+            device: build.device.clone(),
+            description: build.description.clone(),
+            arch: build.arch.to_string(),
+            soc: build.soc.to_string(),
+            boot_method: build.boot_method.to_string(),
+            board: build.depthcharge_boot().map(|b| b.board.clone()),
+            suite: build.suite.clone(),
+            features: build.features.clone(),
+            layout: build.layout.to_string(),
+            hostname: build.hostname.clone(),
+        },
+        kernel: IdentityKernel {
+            // From the resolved build, so they are recorded even for a kernel the lock
+            // pins no commit for.
+            id: build.kernel.id().to_string(),
+            flavor: build.kernel.flavor().to_string(),
+            package: match &build.kernel {
+                crate::model::ResolvedKernel::Distro(k) => Some(k.package.clone()),
+                crate::model::ResolvedKernel::Compiled(_) => None,
+            },
+            reference: lock.kernel.as_ref().map(|k| k.reference.clone()),
+            commit: lock.kernel.as_ref().map(|k| k.commit.clone()),
+            patch_profile: lock.patches.as_ref().map(|p| p.profile.clone()),
+        },
+    }
+}
+
+impl SystemIdentity {
+    /// Serialize to the canonical form: the banner followed by the TOML body.
+    pub fn to_toml_string(&self) -> Result<String, crate::ConfigError> {
+        let body = toml::to_string(self).map_err(|source| crate::ConfigError::Serialize {
+            what: "image identity",
+            source,
+        })?;
+        Ok(format!("{IDENTITY_BANNER}{body}"))
+    }
 }
 
 /// Join a resolved build, its lock, and the engine's build-time facts into a
@@ -442,16 +606,104 @@ mod tests {
         }
     }
 
-    fn sample_build() -> ResolvedBuild {
-        // A resolution over the shipped config gives a real build point to join.
-        let root = crate::ConfigRoot::new(
+    fn config_root() -> crate::ConfigRoot {
+        crate::ConfigRoot::new(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .ancestors()
                 .nth(2)
                 .unwrap()
                 .to_path_buf(),
-        );
-        crate::resolve_recipe(&root, "turing-rk1-forky", &crate::Overrides::default()).unwrap()
+        )
+    }
+
+    fn sample_build() -> ResolvedBuild {
+        // A resolution over the shipped config gives a real build point to join.
+        crate::resolve_recipe(&config_root(), "turing-rk1-forky", &crate::Overrides::default())
+            .unwrap()
+    }
+
+    /// A depthcharge build — the boot method that *has* a board profile.
+    fn depthcharge_build() -> ResolvedBuild {
+        crate::resolve_recipe(&config_root(), "asus-c201-forky", &crate::Overrides::default())
+            .unwrap()
+    }
+
+    /// The identity document ships **inside** the image, so the one thing it must never
+    /// carry is the one thing the provenance manifest exists to record: the per-image
+    /// first-boot password. The two documents are assembled from overlapping inputs, so
+    /// this asserts the boundary rather than trusting it — a field added to
+    /// `SystemIdentity` by copying a line from `assemble` would fail here.
+    #[test]
+    fn the_on_device_identity_carries_no_secret() {
+        let lock = sample_lock();
+        let text = system_identity(&sample_build(), &lock).to_toml_string().unwrap();
+        // The banner *documents* that the file carries no secret, so it says the words.
+        // What must not contain them is the data.
+        let body: String = text.lines().filter(|l| !l.trim_start().starts_with('#')).collect();
+
+        // The password `assemble` would have put in the manifest.
+        assert!(!body.contains("Kp7rTx"), "identity leaked the first-boot password:\n{text}");
+        for forbidden in ["password", "credentials", "shadow", "secret"] {
+            assert!(
+                !body.contains(forbidden),
+                "identity data contains `{forbidden}`, which must not ship inside an image:\n{text}"
+            );
+        }
+        // And it is genuinely a subset — the manifest *does* carry the secret, so the
+        // two documents are being compared, not two spellings of the same thing.
+        let facts = BuildFacts {
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc",
+            package_count: 1,
+            user: "debian",
+            password: "Kp7rTx",
+        };
+        let manifest = assemble(&sample_build(), &lock, &facts).to_toml_string().unwrap();
+        assert!(manifest.contains("Kp7rTx"), "the manifest is the document that has it");
+    }
+
+    /// The board profile is the reason the file exists: it is not recoverable from the
+    /// disk, and `depthchargectl` otherwise reads it off the *running* board's HWID —
+    /// which a tool running somewhere else cannot do.
+    #[test]
+    fn the_identity_records_the_depthcharge_board_and_omits_it_otherwise() {
+        let lock = sample_lock();
+
+        let dc = system_identity(&depthcharge_build(), &lock);
+        assert_eq!(dc.image.boot_method, "depthcharge");
+        assert_eq!(dc.image.board.as_deref(), Some("speedy"));
+        assert!(dc.to_toml_string().unwrap().contains("board = \"speedy\""));
+
+        // A boot method with no board profile records none, rather than an empty string
+        // a reader would have to special-case.
+        let rk = system_identity(&sample_build(), &lock);
+        assert_eq!(rk.image.boot_method, "rockchip-rkbin");
+        assert_eq!(rk.image.board, None);
+        assert!(!rk.to_toml_string().unwrap().contains("board"));
+    }
+
+    /// The document is a wire format read by independently-versioned programs, so the
+    /// schema version must be present, must serialize ahead of every table (TOML rejects
+    /// a top-level scalar after one), and the whole thing must re-parse.
+    #[test]
+    fn the_identity_is_a_versioned_parseable_document() {
+        let text = system_identity(&depthcharge_build(), &sample_lock()).to_toml_string().unwrap();
+        assert!(text.starts_with("# boot2deb image identity"));
+
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["version"].as_integer(), Some(1));
+        assert_eq!(parsed["image"]["device"].as_str(), Some("asus-c201"));
+        assert_eq!(parsed["image"]["layout"].as_str(), Some("combined"));
+
+        // A distro kernel names its package and pins no commit; that pairing is what
+        // tells a reader an upgrade arrives via apt rather than a hand-placed .deb.
+        assert_eq!(parsed["kernel"]["flavor"].as_str(), Some("distro-package"));
+        assert_eq!(parsed["kernel"]["package"].as_str(), Some("linux-image-armmp"));
+
+        // `version` must precede `[image]` in the serialized text, not merely exist.
+        let v = text.find("version = 1").expect("version scalar");
+        assert!(v < text.find("[image]").expect("image table"));
     }
 
     #[test]
@@ -541,3 +793,4 @@ mod tests {
         assert_eq!(parsed["source_durability"].as_array().unwrap().len(), 6);
     }
 }
+

@@ -17,6 +17,10 @@ toml.workspace = true
 toml_edit = "0.22"
 thiserror.workspace = true
 sha2.workspace = true
+# v4 OpenPGP fingerprints (keyring.rs) are SHA-1 by definition of the format
+# (RFC 4880 §12.2) — a format constant, not a security choice. Pure Rust, same
+# RustCrypto family as sha2.
+sha1 = "0.10"
 # Pure-Rust image assembly: GPT tables and .xz compression — no C deps.
 # lzma-rust2's `optimization` feature (its only `unsafe`) is left off. The ext4
 # filesystem itself comes from host `mke2fs -d` (see the engine's image::ext4).

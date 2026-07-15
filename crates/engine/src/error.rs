@@ -242,6 +242,64 @@ pub enum EngineError {
         pin: String,
     },
 
+    /// A vendored keyring has no sibling fingerprint manifest. The manifest is what
+    /// makes the keyring reviewable, so its absence is a hard error rather than an
+    /// unchecked pass — otherwise deleting one file would silently disable the
+    /// trust-anchor audit.
+    #[error(
+        "keyring {keyring} has no fingerprint manifest at {manifest} — every vendored \
+         keyring ships one (see blobs/keyrings/README.md)"
+    )]
+    KeyringManifestMissing {
+        /// The keyring that was to be verified.
+        keyring: String,
+        /// The manifest path that was expected beside it.
+        manifest: String,
+    },
+
+    /// A fingerprint manifest could not be parsed (a bad fingerprint, a duplicate, or
+    /// no entries at all).
+    #[error("keyring manifest {manifest} is malformed: {reason}")]
+    KeyringManifestMalformed {
+        /// The manifest that could not be parsed.
+        manifest: String,
+        /// What was wrong, with the offending line number.
+        reason: String,
+    },
+
+    /// A keyring could not be parsed as an OpenPGP packet stream. Fails closed: a
+    /// keyring whose contents cannot be fully accounted for is never declared
+    /// verified.
+    #[error("keyring {keyring} is not a parseable OpenPGP keyring: {reason}")]
+    KeyringMalformed {
+        /// The keyring that could not be parsed.
+        keyring: String,
+        /// What the parser choked on.
+        reason: String,
+    },
+
+    /// A keyring's primary keys are not the ones its manifest vets. An `unexpected`
+    /// key is a trust anchor nobody reviewed; a `missing` one means the manifest is
+    /// stale (a key rotation, which is a deliberate re-validation event). Either way
+    /// the build stops rather than bootstrapping against unvetted keys.
+    #[error(
+        "keyring {keyring} does not match its vetted fingerprints in {manifest}\
+         {}{}\n  \
+         refresh both together, or restore the keyring — see blobs/keyrings/README.md",
+        crate::error::fmt_keys("\n  unexpected key (not vetted): ", unexpected),
+        crate::error::fmt_keys("\n  vetted key not in the keyring: ", missing),
+    )]
+    KeyringFingerprintMismatch {
+        /// The keyring whose contents were rejected.
+        keyring: String,
+        /// The manifest it was held to.
+        manifest: String,
+        /// Fingerprints present in the keyring but absent from the manifest.
+        unexpected: Vec<String>,
+        /// Manifest entries (fingerprint and label) absent from the keyring.
+        missing: Vec<String>,
+    },
+
     /// A checkout resolved to a different commit than the lock pins — the build
     /// reads only the lock, so a source that does not match it is a hard error
     /// rather than a silently different artifact.
@@ -595,4 +653,17 @@ fn pin_mismatch_remedy(relation: PinRelation, dirty: bool, root: &str, expected:
              re-checkout the patches repo at {expected}"
         ),
     }
+}
+
+/// Render a list of keys under `heading`, one per line, or nothing when empty — so a
+/// [`EngineError::KeyringFingerprintMismatch`] naming only unexpected keys does not
+/// also print an empty "missing" heading.
+fn fmt_keys(heading: &str, keys: &[String]) -> String {
+    if keys.is_empty() {
+        return String::new();
+    }
+    keys.iter()
+        .map(|k| format!("{heading}{k}"))
+        .collect::<Vec<_>>()
+        .join("")
 }

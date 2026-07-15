@@ -316,6 +316,12 @@ fn resolve_boot(
                 crate::size::parse_size(s)?;
             }
             validate_depthcharge_cmdline(&l.cmdline)?;
+            if l.kpart_slots == 0 || l.kpart_slots > crate::chromeos::MAX_KPART_SLOTS {
+                return Err(ConfigError::InvalidKpartSlots {
+                    value: l.kpart_slots,
+                    max: crate::chromeos::MAX_KPART_SLOTS,
+                });
+            }
             let flags =
                 crate::chromeos::kpart_flags(l.kpart_priority, l.kpart_tries, l.kpart_successful)?;
             Ok(ResolvedBoot::Depthcharge(ResolvedDepthchargeBoot {
@@ -323,6 +329,7 @@ fn resolve_boot(
                 kpart: Kpart {
                     offset: l.kpart_offset.clone(),
                     size: l.kpart_size.clone(),
+                    slots: l.kpart_slots,
                     priority: l.kpart_priority,
                     tries: l.kpart_tries,
                     successful: l.kpart_successful,
@@ -1270,15 +1277,24 @@ mod tests {
         assert!(b.kernel.compiled().is_none());
         assert!(b.rootfs_packages.contains(&"linux-image-armmp".to_string()));
 
-        // The boot half is the kernel partition, with the bits that make the firmware
-        // boot it. These are the values read back off the image that boots the unit.
+        // The boot half is the kernel slots, with the bits that make the firmware boot
+        // one of them. These are the values read back off the image that boots the unit.
         assert!(b.rkbin_boot().is_none(), "this board has no rkbin chain");
         let boot = b.depthcharge_boot().expect("a depthcharge board");
         assert_eq!(boot.board, "speedy", "the stock profile, which boots both firmwares");
         assert_eq!(boot.kpart.offset, "12MiB");
         assert_eq!(boot.kpart.size, "16MiB");
         assert_eq!(boot.kpart.flags, 0x015A_0000_0000_0000);
-        assert_eq!(boot.rootfs_offset, "28MiB");
+        // Two slots, and this is the assertion that keeps kernel upgrades survivable:
+        // `depthchargectl` writes the slot it is NOT booted from, so a kernel that fails
+        // to come up leaves the previous one intact for the firmware to fall back to. At
+        // one slot it would have to overwrite the running kernel in place, and a bad
+        // upgrade would need external media to recover.
+        assert_eq!(boot.kpart.slots, 2, "an A/B pair — the spare is the rollback");
+        assert_eq!(
+            boot.rootfs_offset, "44MiB",
+            "behind both 16 MiB slots (12 + 16 + 16), not behind one"
+        );
         assert!(!boot.cmdline.contains("root="), "root= is depthchargectl's to derive");
 
         // A laptop whose primary link is wifi: NetworkManager owns the interfaces, so
@@ -1305,6 +1321,87 @@ mod tests {
         assert_eq!(b.suite, "trixie");
         assert_eq!(b.kernel.id(), "debian-armmp");
         assert_eq!(b.device, "asus-c201");
+    }
+
+    #[test]
+    fn a_veyron_sibling_is_a_device_file_and_nothing_else() {
+        // The claim the SoC layer exists to make. The Veyron boards share a radio, an
+        // initramfs, a network stack and an audio codec; they differ in a DTB, a
+        // depthcharge profile, and a hostname. So a new board in the family must resolve
+        // to the *same* rootfs as the board that was validated on hardware — if a
+        // sibling needed packages of its own, the family layer would be a fiction.
+        let root = repo_root();
+        let c201 = resolve_recipe(&root, "asus-c201-forky", &Overrides::default()).unwrap();
+        let c100p = resolve_recipe(&root, "asus-c100p-forky", &Overrides::default()).unwrap();
+        let cs10 =
+            resolve_recipe(&root, "asus-chromebit-cs10-forky", &Overrides::default()).unwrap();
+
+        for b in [&c100p, &cs10] {
+            assert_eq!(b.rootfs_packages, c201.rootfs_packages);
+            assert_eq!(b.rootfs_exclude, c201.rootfs_exclude);
+            assert_eq!(b.arch, Arch::Armv7);
+            assert_eq!(b.soc, Soc::Rk3288);
+            assert_eq!(b.boot_method, BootMethod::Depthcharge);
+            // Debian's kernel, so nothing is compiled and no DTB is built: the board's
+            // device tree is already upstream.
+            assert!(!b.compiles_kernel());
+            assert_eq!(b.kernel.id(), "debian-armmp");
+            // Same kernel-partition geometry and cmdline — those are the boot method's,
+            // not the board's.
+            let boot = b.depthcharge_boot().expect("a depthcharge board");
+            let c201_boot = c201.depthcharge_boot().unwrap();
+            assert_eq!(boot.kpart.offset, c201_boot.kpart.offset);
+            assert_eq!(boot.kpart.flags, c201_boot.kpart.flags);
+            assert_eq!(boot.cmdline, c201_boot.cmdline);
+        }
+
+        // And the deltas are exactly the three that make it a different board.
+        assert_eq!(c100p.kernel_dtb, "rockchip/rk3288-veyron-minnie.dtb");
+        assert_eq!(c100p.depthcharge_boot().unwrap().board, "minnie");
+        assert_eq!(c100p.hostname, "asus-c100p");
+
+        assert_eq!(cs10.kernel_dtb, "rockchip/rk3288-veyron-mickey.dtb");
+        assert_eq!(cs10.depthcharge_boot().unwrap().board, "mickey");
+        assert_eq!(cs10.hostname, "asus-chromebit-cs10");
+    }
+
+    #[test]
+    fn the_chromebit_declares_a_keymap_despite_having_no_keyboard() {
+        // Not an oversight, and the reason is the distinction `keymap` is *for*. The
+        // field asks "does a console keymap configure anything on this board?", not
+        // "does the board ship a keyboard". The Chromebit drives an HDMI console that a
+        // USB keyboard is the only way to type at — so a layout is as meaningful there
+        // as on a laptop. A headless board (the RK1) is the case that declares none.
+        let root = repo_root();
+        let cs10 = resolve_device(&root, "asus-chromebit-cs10", &Overrides::default()).unwrap();
+        assert_eq!(cs10.keymap.as_ref().map(|k| k.layout.as_str()), Some("us"));
+
+        let rk1 = resolve_device(&root, "turing-rk1", &Overrides::default()).unwrap();
+        assert!(rk1.keymap.is_none(), "a headless board defaults no layout");
+    }
+
+    #[test]
+    fn a_stock_only_board_offers_exactly_one_profile() {
+        // depthcharge-tools ships a libreboot profile for `speedy` and for no other
+        // Veyron. The two new boards therefore support one profile each, and asking for
+        // the C201's is rejected here rather than by firmware that silently declines to
+        // boot the image.
+        let root = repo_root();
+        for (device, profile) in [("asus-c100p", "minnie"), ("asus-chromebit-cs10", "mickey")] {
+            let b = resolve_device(&root, device, &Overrides::default()).unwrap();
+            assert_eq!(b.depthcharge_boot().unwrap().board, profile);
+
+            let ov = Overrides {
+                board: Some("speedy-libreboot".to_string()),
+                ..Default::default()
+            };
+            match resolve_device(&root, device, &ov).unwrap_err() {
+                ConfigError::UnknownBoardProfile { supported, .. } => {
+                    assert!(supported.contains(profile));
+                }
+                other => panic!("expected UnknownBoardProfile, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1490,8 +1587,8 @@ mod tests {
         std::fs::write(
             p.join("boot-methods/depthcharge.toml"),
             "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
-             rootfs_offset = \"28MiB\"\nkpart_priority = 10\nkpart_tries = 5\n\
-             kpart_successful = true\ncmdline = \"ro\"\n",
+             kpart_slots = 2\nrootfs_offset = \"44MiB\"\nkpart_priority = 10\n\
+             kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -1548,8 +1645,8 @@ mod tests {
         std::fs::write(
             p.join("boot-methods/depthcharge.toml"),
             "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
-             rootfs_offset = \"28MiB\"\nkpart_priority = 10\nkpart_tries = 5\n\
-             kpart_successful = true\ncmdline = \"ro\"\n",
+             kpart_slots = 2\nrootfs_offset = \"44MiB\"\nkpart_priority = 10\n\
+             kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -1579,6 +1676,80 @@ mod tests {
         }
     }
 
+    /// A slot count outside `1..=MAX_KPART_SLOTS` is a typed error, not a clamp. Zero
+    /// slots would leave the firmware nothing to boot at all; past the cap is a typo,
+    /// and the slots run back to back, so a large one would quietly march into the
+    /// rootfs. Neither should be silently repaired into something that builds.
+    #[test]
+    fn a_kernel_slot_count_out_of_range_is_a_typed_error() {
+        for bad in [0, crate::chromeos::MAX_KPART_SLOTS + 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path();
+            write_minimal_depthcharge_root(p, bad);
+            match resolve_device(&ConfigRoot::new(p), "dev", &Overrides::default()).unwrap_err() {
+                ConfigError::InvalidKpartSlots { value, max } => {
+                    assert_eq!(value, bad);
+                    assert_eq!(max, crate::chromeos::MAX_KPART_SLOTS);
+                }
+                other => panic!("expected InvalidKpartSlots for {bad}, got {other:?}"),
+            }
+        }
+        // The bounds themselves resolve: one slot (no spare) and the cap both build.
+        for ok in [1, crate::chromeos::MAX_KPART_SLOTS] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path();
+            write_minimal_depthcharge_root(p, ok);
+            let b = resolve_device(&ConfigRoot::new(p), "dev", &Overrides::default())
+                .unwrap_or_else(|e| panic!("{ok} slots should resolve, got {e:?}"));
+            assert_eq!(b.depthcharge_boot().unwrap().kpart.slots, ok);
+        }
+    }
+
+    /// The smallest config tree that resolves a depthcharge board, parameterized on the
+    /// slot count — enough layers for `resolve_device` to reach the boot method.
+    fn write_minimal_depthcharge_root(p: &std::path::Path, slots: u8) {
+        for sub in ["arches", "socs", "boot-methods", "devices", "kernels"] {
+            std::fs::create_dir_all(p.join(sub)).unwrap();
+        }
+        std::fs::write(
+            p.join("arches/armv7.toml"),
+            "kernel_arch = \"arm\"\nuboot_arch = \"arm\"\n\
+             kbuild_image = \"arch/arm/boot/zImage\"\ncross_compile = \"\"\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("base.toml"), "packages = []\nexclude = []\n").unwrap();
+        std::fs::write(
+            p.join("socs/rk3288.toml"),
+            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("boot-methods/depthcharge.toml"),
+            format!(
+                "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
+                 kpart_slots = {slots}\nrootfs_offset = \"76MiB\"\nkpart_priority = 10\n\
+                 kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("kernels/k.toml"),
+            "flavor = \"distro-package\"\npackage = \"linux-image-armmp\"\n\
+             supported_socs = [\"rk3288\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("devices/dev.toml"),
+            "description = \"d\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
+             supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/d.dtb\"\n\
+             device_config_fragments = []\nsupported_kernels = [\"k\"]\ndefault_kernel = \"k\"\n\
+             default_suite = \"forky\"\ndefault_layout = \"combined\"\nhostname = \"d\"\n\
+             image_size = \"4G\"\n\n[depthcharge]\nboard = \"speedy\"\n\
+             supported_boards = [\"speedy\"]\n",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn a_boot_method_layer_rejects_another_methods_fields() {
         // The variant is chosen by the filename, so a raw-gap offset in the depthcharge
@@ -1590,8 +1761,9 @@ mod tests {
         std::fs::write(
             p.join("boot-methods/depthcharge.toml"),
             "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
-             rootfs_offset = \"28MiB\"\nkpart_priority = 10\nkpart_tries = 5\n\
-             kpart_successful = true\ncmdline = \"ro\"\nidbloader_offset = \"32KiB\"\n",
+             kpart_slots = 2\nrootfs_offset = \"44MiB\"\nkpart_priority = 10\n\
+             kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n\
+             idbloader_offset = \"32KiB\"\n",
         )
         .unwrap();
         let root = ConfigRoot::new(p);

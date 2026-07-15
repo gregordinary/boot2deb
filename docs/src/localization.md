@@ -44,11 +44,17 @@ The locale and the timezone are **distro policy**: no board has an opinion about
 so they sit in `base.toml`.
 
 A keymap is different — whether a console keymap configures anything at all is a
-property of the hardware. The C201 is a laptop with a keyboard under the user's hands
-and a US layout; the Turing RK1 and the H96 are headless, and a layout declared for a
-console nobody types at is a claim the config cannot back. So `keymap` sits on the
-**device**, and a headless board simply omits it: boot2deb then writes no
+property of the hardware. The C201 and the C100P are laptops with keyboards under the
+user's hands and a US layout; the Turing RK1 and the H96 are headless, and a layout
+declared for a console nobody types at is a claim the config cannot back. So `keymap`
+sits on the **device**, and a headless board simply omits it: boot2deb then writes no
 `/etc/default/keyboard` and Debian's own default (`pc105` / `us`) stands.
+
+The Chromebit CS10 shows what the field is really asking. It has no keyboard at all, and
+it declares `keymap = "us"` anyway — because it is not headless: it drives an HDMI
+console, and a USB keyboard is the only way to type at it. The question is "does a
+console layout configure anything here?", not "does the board ship keys". It does, so it
+answers.
 
 You can still pass `--keymap` to a headless board. `console-setup` ships on every
 image, so a keymap is always *actionable* — plugging a USB keyboard into the RK1's HDMI

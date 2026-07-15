@@ -65,6 +65,36 @@ pub(crate) fn run(
             }
         }
     }
+    // Trust anchors: every keyring this build bootstraps against, and the vetted keys
+    // each one carries. Printed in full rather than summarized — the point of the
+    // fingerprint manifests is that whose keys you trust is something you can *see*,
+    // and a preflight that only says "ok" would put that back behind a binary blob.
+    println!();
+    println!("trust anchors (apt keyrings verified against blobs/keyrings/*.fingerprints):");
+    let mut anchors: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(archive) = root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", false)? {
+        anchors.push(archive);
+    }
+    for source in &build.apt_sources {
+        if let Some(path) = root.find_asset(format!("blobs/keyrings/{}", source.signed_by)) {
+            anchors.push(path);
+        }
+    }
+    if anchors.is_empty() {
+        println!("  none vendored — bootstrapping against the host's apt trust store");
+    }
+    for anchor in &anchors {
+        let name = anchor.file_name().unwrap_or_default().to_string_lossy();
+        // A keyring that fails its manifest is a blocking finding, not a printed
+        // warning: doctor doubles as a CI gate, and an unvetted trust anchor is
+        // exactly the thing that must not slip through one.
+        let keys = boot2deb_engine::keyring::verify(anchor)?;
+        println!("  ok      {name} — {} vetted key(s)", keys.len());
+        for key in &keys {
+            println!("            {key}");
+        }
+    }
+
     println!();
     if blocking == 0 {
         println!("result    : all required host tools present");

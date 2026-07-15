@@ -185,6 +185,20 @@ pub enum ConfigError {
         value: u8,
     },
 
+    /// `kpart_slots` is outside `1..=MAX_KPART_SLOTS`. Zero slots would leave the
+    /// firmware nothing to boot; above the cap is a typo, not an intent — see
+    /// [`MAX_KPART_SLOTS`](crate::chromeos::MAX_KPART_SLOTS).
+    #[error(
+        "kpart_slots = {value} is out of range (1-{max}); 2 is what gives a kernel \
+         upgrade a slot to fall back to"
+    )]
+    InvalidKpartSlots {
+        /// The authored value.
+        value: u8,
+        /// The cap ([`MAX_KPART_SLOTS`](crate::chromeos::MAX_KPART_SLOTS)).
+        max: u8,
+    },
+
     /// A boot method's kernel command line carries something the signing tool cannot
     /// or will not honour, so the value would not survive into the booted kernel.
     #[error("invalid kernel cmdline {value:?}: {why}")]

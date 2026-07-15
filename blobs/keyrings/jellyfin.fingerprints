@@ -1,0 +1,12 @@
+# Primary keys `jellyfin.gpg` is allowed to contain.
+#
+# The build fails closed unless the keyring holds exactly this set. The fingerprint is
+# published by Jellyfin at https://repo.jellyfin.org/jellyfin_team.gpg.key and can be
+# checked without trusting this repo.
+#
+# See debian-archive-keyring.fingerprints for the format and why only primary keys are
+# listed.
+#
+# <40-hex v4 fingerprint>  <uid>
+
+4918AABC486CA052358D778D49023CD01DE21A7B  Jellyfin Team <team@jellyfin.org>

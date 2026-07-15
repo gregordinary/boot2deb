@@ -1,0 +1,27 @@
+# Primary keys `debian-archive-keyring.gpg` is allowed to contain.
+#
+# The build fails closed unless the keyring holds exactly this set, so a swapped or
+# injected archive key is a review-visible line here rather than an invisible change
+# to a 55 KB binary. Every fingerprint below is published by Debian and can be checked
+# without trusting this repo:
+#
+#   https://ftp-master.debian.org/keys.html
+#   /usr/share/keyrings/debian-archive-keyring.gpg on any Debian host
+#
+# Primary keys only. A subkey cannot enter a certificate without a binding signature
+# from its primary key — which gpgv verifies during the bootstrap and which cannot be
+# forged without the primary secret — so pinning the primaries pins the whole keyring.
+#
+# <40-hex v4 fingerprint>  <uid>
+
+1F89983E0081FDE018F3CC9673A4F27B8DD47936  Debian Archive Automatic Signing Key (11/bullseye) <ftpmaster@debian.org>
+AC530D520F2F3269F5E98313A48449044AAD5C5D  Debian Security Archive Automatic Signing Key (11/bullseye) <ftpmaster@debian.org>
+A4285295FC7B1A81600062A9605C66F00D6C9793  Debian Stable Release Key (11/bullseye) <debian-release@lists.debian.org>
+
+B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8  Debian Archive Automatic Signing Key (12/bookworm) <ftpmaster@debian.org>
+05AB90340C0C5E797F44A8C8254CF3B5AEC0A8F0  Debian Security Archive Automatic Signing Key (12/bookworm) <ftpmaster@debian.org>
+4D64FEC119C2029067D6E791F8D2585B8783D481  Debian Stable Release Key (12/bookworm) <debian-release@lists.debian.org>
+
+04B54C3CDCA79751B16BC6B5225629DF75B188BD  Debian Archive Automatic Signing Key (13/trixie) <ftpmaster@debian.org>
+5E04A1E3223A19A20706E20F9904613D4CCE68C6  Debian Security Archive Automatic Signing Key (13/trixie) <ftpmaster@debian.org>
+41587F7DB8C774BCCF131416762F67A0B2C39DE4  Debian Stable Release Key (13/trixie) <debian-release@lists.debian.org>

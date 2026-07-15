@@ -18,6 +18,7 @@
 
 use crate::error::EngineError;
 use crate::image::geometry::{BootGeometry, Geometry, SECTOR};
+use boot2deb_core::chromeos::MAX_KPART_SLOTS;
 use gpt::disk::LogicalBlockSize;
 use gpt::mbr::ProtectiveMBR;
 use gpt::{partition_types, GptConfig};
@@ -25,6 +26,15 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use uuid::Uuid;
+
+/// GPT entry labels for the kernel slots, in on-disk order. ChromeOS names its kernel
+/// partitions `KERN-A`, `KERN-B`, ... and every tool and guide on these boards speaks
+/// that language, so the table says so too.
+///
+/// The length of this array *is*
+/// [`MAX_KPART_SLOTS`](boot2deb_core::chromeos::MAX_KPART_SLOTS) — resolution rejects a
+/// slot count above it, so indexing here cannot run off the end.
+const KPART_NAMES: [&str; MAX_KPART_SLOTS as usize] = ["KERN-A", "KERN-B", "KERN-C", "KERN-D"];
 
 /// One partition to write: everything the GPT entry needs.
 struct PartitionSpec<'a> {
@@ -68,28 +78,26 @@ pub(crate) fn write_table(
     rootfs_label: &str,
     disk_guid: Uuid,
     rootfs_guid: Uuid,
-    kpart_guid: Uuid,
+    kpart_guids: &[Uuid],
 ) -> Result<(), EngineError> {
-    let mut parts = Vec::with_capacity(2);
-    // The kernel partition comes first, both on the medium and in the table.
-    if let BootGeometry::Kpart {
-        first_lba,
-        length_lba,
-        flags,
-        ..
-    } = geom.boot
-    {
-        parts.push(PartitionSpec {
-            index: 1,
-            // The conventional ChromeOS name. The firmware selects by type GUID and
-            // attributes, never by name, so this is for whoever reads the table.
-            name: "KERN-A",
-            first_lba,
-            length_lba,
-            part_type: partition_types::CHROME_KERNEL,
-            flags,
-            guid: kpart_guid,
-        });
+    let mut parts = Vec::with_capacity(usize::from(MAX_KPART_SLOTS) + 1);
+    // The kernel slots come first, both on the medium and in the table.
+    if let BootGeometry::Kpart { ref slots } = geom.boot {
+        for (i, slot) in slots.iter().enumerate() {
+            parts.push(PartitionSpec {
+                index: i as u32 + 1,
+                // The conventional ChromeOS names. The firmware selects by type GUID
+                // and attributes, never by name, so this is for whoever reads the
+                // table — but it is the name every ChromeOS tool and guide uses for
+                // these, so it is worth getting right.
+                name: KPART_NAMES[i],
+                first_lba: slot.first_lba,
+                length_lba: slot.length_lba,
+                part_type: partition_types::CHROME_KERNEL,
+                flags: slot.flags,
+                guid: kpart_guids[i],
+            });
+        }
     }
     parts.push(PartitionSpec {
         index: parts.len() as u32 + 1,
@@ -202,19 +210,25 @@ mod tests {
             kpart: Kpart {
                 offset: "12MiB".into(),
                 size: "16MiB".into(),
+                slots: 2,
                 priority: 10,
                 tries: 5,
                 successful: true,
                 flags: 0x015A_0000_0000_0000,
             },
             cmdline: "console=tty1 rootwait ro".into(),
-            rootfs_offset: "28MiB".into(),
+            rootfs_offset: "44MiB".into(),
         })
     }
 
     const DISK_GUID: Uuid = Uuid::from_bytes([0xa1; 16]);
     const ROOTFS_GUID: Uuid = Uuid::from_bytes([0xb2; 16]);
-    const KPART_GUID: Uuid = Uuid::from_bytes([0xc3; 16]);
+    const KPART_GUIDS: [Uuid; MAX_KPART_SLOTS as usize] = [
+        Uuid::from_bytes([0xc3; 16]),
+        Uuid::from_bytes([0xc4; 16]),
+        Uuid::from_bytes([0xc5; 16]),
+        Uuid::from_bytes([0xc6; 16]),
+    ];
 
     /// With the disk + partition GUIDs fixed, the whole GPT-bearing image is
     /// byte-identical across independent writes — the last random inputs in the
@@ -228,8 +242,8 @@ mod tests {
 
         let a = sized_image(tmp.path(), "a.img", size);
         let b = sized_image(tmp.path(), "b.img", size);
-        write_table(&a, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, KPART_GUID).unwrap();
-        write_table(&b, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, KPART_GUID).unwrap();
+        write_table(&a, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS).unwrap();
+        write_table(&b, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS).unwrap();
 
         let ba = std::fs::read(&a).unwrap();
         assert_eq!(ba, std::fs::read(&b).unwrap(), "GPT image must reproduce byte-for-byte");
@@ -251,17 +265,23 @@ mod tests {
         );
     }
 
-    /// The depthcharge table is the whole boot mechanism, so every field the
-    /// firmware reads is asserted: the ChromeOS kernel type GUID, the exact LBA
-    /// range, and the attribute word that says "boot this". A wrong value here is a
-    /// board that silently refuses the image.
+    /// The depthcharge table is the whole boot mechanism, so every field the firmware
+    /// reads is asserted: the ChromeOS kernel type GUID, the exact LBA range, and the
+    /// attribute word that says "boot this". A wrong value here is a board that
+    /// silently refuses the image.
+    ///
+    /// The **spare** slot is asserted just as closely, because it is what makes a
+    /// kernel upgrade recoverable and each of its fields is load-bearing in a different
+    /// direction: the type GUID is how `depthchargectl` finds it as an upgrade target
+    /// at all, and priority 0 is what stops the firmware booting a partition that so
+    /// far contains nothing but zeroes.
     #[test]
-    fn a_depthcharge_table_carries_a_bootable_chromeos_kernel_partition() {
+    fn a_depthcharge_table_carries_a_bootable_kernel_slot_and_an_unbootable_spare() {
         let tmp = tempfile::tempdir().unwrap();
         let size = 512 * 1024 * 1024;
         let geom = Geometry::resolve(&depthcharge_boot(), "512MiB").unwrap();
         let img = sized_image(tmp.path(), "c201.img", size);
-        write_table(&img, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, KPART_GUID).unwrap();
+        write_table(&img, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS).unwrap();
 
         let disk = GptConfig::new()
             .writable(false)
@@ -269,25 +289,53 @@ mod tests {
             .open(&img)
             .unwrap();
         let parts = disk.partitions();
-        assert_eq!(parts.len(), 2);
+        assert_eq!(parts.len(), 3, "KERN-A + KERN-B + rootfs");
 
-        let kern = parts.get(&1).unwrap();
+        let cros_kernel = Uuid::parse_str("FE3A2A5D-4F32-41A7-B725-ACCC3285A309").unwrap();
+
+        let kern_a = parts.get(&1).unwrap();
         assert_eq!(
-            kern.part_type_guid.guid,
-            Uuid::parse_str("FE3A2A5D-4F32-41A7-B725-ACCC3285A309").unwrap(),
+            kern_a.part_type_guid.guid, cros_kernel,
             "the firmware finds the kernel by this type GUID and nothing else"
         );
-        assert_eq!(kern.first_lba, 24_576);
-        assert_eq!(kern.last_lba - kern.first_lba + 1, 32_768);
+        assert_eq!(kern_a.name, "KERN-A");
+        assert_eq!(kern_a.first_lba, 24_576);
+        assert_eq!(kern_a.last_lba - kern_a.first_lba + 1, 32_768);
         assert_eq!(
-            kern.flags, 0x015A_0000_0000_0000,
+            kern_a.flags, 0x015A_0000_0000_0000,
             "priority=10 tries=5 successful=1 — the bits that make it boot"
         );
-        assert_eq!(kern.part_guid, KPART_GUID);
+        assert_eq!(kern_a.part_guid, KPART_GUIDS[0]);
 
-        let root = parts.get(&2).unwrap();
+        let kern_b = parts.get(&2).unwrap();
+        assert_eq!(
+            kern_b.part_type_guid.guid, cros_kernel,
+            "the spare carries the kernel type GUID too — that is how depthchargectl \
+             discovers it as an upgrade target, since it selects by type, not attributes"
+        );
+        assert_eq!(kern_b.name, "KERN-B");
+        assert_eq!(
+            kern_b.first_lba, 57_344,
+            "the spare abuts KERN-A, so a payload sized for one slot cannot overrun into \
+             the other"
+        );
+        assert_eq!(kern_b.last_lba - kern_b.first_lba + 1, 32_768);
+        assert_eq!(
+            kern_b.flags, 0,
+            "priority 0 — the spare ships empty, and the firmware must never boot it \
+             until an upgrade has put a kernel in it"
+        );
+        assert_ne!(
+            kern_b.part_guid, kern_a.part_guid,
+            "the slots must be distinguishable: depthcharge substitutes the booted slot's \
+             PARTUUID into kern_guid=, which is how the running system knows which slot it \
+             came up from and therefore which one it may overwrite"
+        );
+        assert_eq!(kern_b.part_guid, KPART_GUIDS[1]);
+
+        let root = parts.get(&3).unwrap();
         assert_eq!(root.part_type_guid, partition_types::LINUX_FS);
-        assert_eq!(root.first_lba, 57_344);
+        assert_eq!(root.first_lba, 90_112, "the rootfs sits behind both slots");
         assert_eq!(root.flags, 0, "an ordinary rootfs carries no attributes");
         assert_eq!(
             root.part_guid, ROOTFS_GUID,
