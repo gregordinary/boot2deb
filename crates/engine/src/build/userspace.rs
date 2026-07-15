@@ -110,11 +110,10 @@ pub struct UserspaceArtifacts {
 
 /// Run the userspace stage, emitting its [`Event`](crate::event::Event)s to `sink`.
 ///
-/// Reads only the [`Lock`] for the source pins. The `sandbox` supplies the
-/// target-arch build environment ([`NativeSandbox`](crate::sandbox::NativeSandbox)
-/// natively, [`RootlessSandbox`](crate::sandbox::RootlessSandbox) cross); this
-/// stage is agnostic to which. A package whose `.deb`s are already staged in the
-/// work dir is skipped (resume).
+/// Reads only the [`Lock`] for the source pins. The `sandbox` supplies the userland
+/// for the build's suite + arch ([`RootlessSandbox`](crate::sandbox::RootlessSandbox));
+/// this stage is agnostic to the backend. A package whose `.deb`s are already staged
+/// in the work dir is skipped (resume).
 pub fn build_userspace(
     lock: &Lock,
     opts: &UserspaceOptions,

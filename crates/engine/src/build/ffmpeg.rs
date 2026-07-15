@@ -405,9 +405,9 @@ fn configure(
     sandbox.run(&spec, step)
 }
 
-/// Run `make -j` inside the sandbox. The build is target-native there (arm64 in
-/// the cross sandbox via qemu-user), so no `CROSS_COMPILE` — unlike the
-/// host-cross-compiled kernel/u-boot nodes.
+/// Run `make -j` inside the sandbox. The build is target-native there (the sandbox
+/// is a target-arch userland, reached via qemu-user on a cross host), so no
+/// `CROSS_COMPILE` — unlike the host-cross-compiled kernel/u-boot nodes.
 fn compile(
     sandbox: &dyn BuildSandbox,
     env: &BuildEnv,

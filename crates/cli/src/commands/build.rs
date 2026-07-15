@@ -24,7 +24,7 @@ use boot2deb_engine::debstore::DebStore;
 use boot2deb_engine::event::{Event, Step};
 use boot2deb_engine::image::{self, ImageOutput};
 use boot2deb_engine::rootfs::{self, MmdebstrapRootfs, Rootfs};
-use boot2deb_engine::sandbox::{BuildSandbox, NativeSandbox, RootlessSandbox};
+use boot2deb_engine::sandbox::{BuildSandbox, RootlessSandbox};
 use boot2deb_engine::{extradebs, pins};
 use std::path::PathBuf;
 
@@ -183,18 +183,33 @@ pub(crate) fn run(
     // bootstrap: the explicit flag, else the vendored keyring resolved as a
     // non-overlayable trust anchor (an overlay copy is a fail-closed swap),
     // else None (the host apt trust store, only viable on a Debian host).
+    //
+    // A vendored keyring is additionally held to its fingerprint manifest: it decides
+    // whose Release signatures the bootstrap accepts, and as a binary blob it is the
+    // one vendored file a reviewer cannot read. An explicit --keyring is the
+    // operator's own anchor, chosen deliberately, and is used as given.
     let keyring = match args.keyring.clone() {
         Some(explicit) => Some(explicit),
-        None => root.find_trust_anchor(
-            "blobs/keyrings/debian-archive-keyring.gpg",
-            args.unsafe_overlay_keyring,
-        )?,
+        None => {
+            let vendored = root.find_trust_anchor(
+                "blobs/keyrings/debian-archive-keyring.gpg",
+                args.unsafe_overlay_keyring,
+            )?;
+            if let Some(path) = &vendored {
+                boot2deb_engine::keyring::verify(path)?;
+            }
+            vendored
+        }
     };
 
-    // The userspace/ffmpeg stages compile arm64 .debs in a sandbox: the host
-    // directly when native, else a rootless arm64 userland. Bootstrapped
-    // lazily on first use under WORK_DIR/sandbox.
-    let sandbox: Box<dyn BuildSandbox> = if pf.cross {
+    // The userspace/ffmpeg stages compile the target's .debs inside a rootless
+    // userland for the build's suite + arch — never on the host, even when the host
+    // arch matches. Those .debs are packaged for the target suite, and their runtime
+    // Depends come from `dpkg-shlibdeps` reading the libraries present at build time;
+    // building on the host would link against the host's libraries and stamp the
+    // host's package names and versions into Depends. Bootstrapped lazily on first
+    // use under WORK_DIR/sandbox, keyed by arch + suite so one host can serve several.
+    let sandbox: Box<dyn BuildSandbox> = {
         let rootfs = work_dir
             .join("sandbox")
             .join(format!("{}-{}", resolved.arch.debian_arch(), resolved.suite));
@@ -204,8 +219,6 @@ pub(crate) fn run(
             resolved.arch.debian_arch().to_string(),
             keyring.clone(),
         ))
-    } else {
-        Box::new(NativeSandbox)
     };
 
     // Resolve the patches source only when there is a series to apply: the lock pins
@@ -474,11 +487,17 @@ pub(crate) fn run(
         // preflight; this stage-time resolution is the backstop for a keyring
         // removed since.
         let apt_repos = apt_source_keyrings(root, &resolved.apt_sources)?;
+        // The image's account of itself, staged into the rootfs at
+        // `/etc/boot2deb/image.toml`. Assembled here rather than beside the provenance
+        // manifest below because it has to exist *before* the rootfs is bootstrapped —
+        // it ships inside the tree the bootstrap produces.
+        let system_identity = boot2deb_core::provenance::system_identity(&resolved, &lock);
         let opts = rootfs::RootfsOptions {
             repo_debs: &repo_debs,
             overlay_dirs: &overlay_dirs,
             preinstall_overlay_dirs: &preinstall_overlay_dirs,
             boot_config,
+            image_identity: &system_identity,
             rootfs_partuuid: identity.rootfs_partuuid,
             out_dir: &out_dir,
             keyring: keyring.as_deref(),

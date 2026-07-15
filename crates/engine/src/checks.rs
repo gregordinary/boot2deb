@@ -11,9 +11,13 @@
 //!   toolchain (native `cc`, else the `<triple>gcc` cross toolchain), the kernel's
 //!   `bc`/`flex`/`bison`/openssl build deps, `mmdebstrap` (rootfs bootstrap),
 //!   and unprivileged user namespaces (the rootless bootstrap + sandbox).
-//! - **Cross-arch only** (host arch ≠ target arch): `bwrap` (rootless sandbox
-//!   entry), a `qemu-<arch>` interpreter, and a registered+enabled binfmt
-//!   handler for the target. Same-arch builds skip these entirely.
+//! - **Sandbox package builds** (a build with a media-accel stack): `bwrap`, which
+//!   enters the target-arch sandbox those `.deb`s are built in. Required on *any*
+//!   host — a host whose arch already matches the target builds in the sandbox too,
+//!   since it is the target *suite*, not the arch, that the sandbox provides.
+//! - **Cross-arch only** (host arch ≠ target arch): a `qemu-<arch>` interpreter and
+//!   a registered+enabled binfmt handler for the target. A same-arch host runs the
+//!   target's binaries directly and skips these entirely.
 //! - **Image path:** `mke2fs` (formats the rootfs ext4 from a userns-staged
 //!   tree) and `e2fsck` (the clean-verify gate); the staging itself rides on the
 //!   same unprivileged-userns capability the rootless bootstrap needs.
@@ -291,6 +295,14 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     checks.push(exe(pm, target, "mmdebstrap", &["mmdebstrap"], "rootfs bootstrap", true, Pkg::Mmdebstrap));
     checks.push(userns_check());
 
+    // `bwrap` enters the sandbox the target-arch package builds run in — needed by
+    // any build that has some, on *any* host. The sandbox is what makes those `.deb`s
+    // belong to the target suite rather than the host's, so a host whose arch already
+    // matches the target uses it too and needs `bwrap` just the same.
+    if needs.sandbox_builds {
+        checks.push(exe(pm, target, "bwrap", &["bwrap"], "rootless sandbox entry", true, Pkg::Bubblewrap));
+    }
+
     // Local apt repo + packaging + content-hash tools the rootfs/package stages
     // shell out to. Missing, `doctor` used to pass and the build then
     // died mid-rootfs on a non-Debian host.
@@ -299,9 +311,10 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     checks.push(exe(pm, target, "apt-ftparchive", &["apt-ftparchive"], "local apt repo Release", true, Pkg::AptUtils));
     checks.push(exe(pm, target, "sha256sum", &["sha256sum"], "rootfs .deb content-hash capture", true, Pkg::Coreutils));
 
-    // Cross-arch: the target's maintainer scripts run under the host's qemu-user
-    // binfmt handler during the rootfs bootstrap, whatever else the build does — so
-    // this is needed even by a board that compiles nothing.
+    // Cross-arch: the target's maintainer scripts and compiles run under the host's
+    // qemu-user binfmt handler — during the rootfs bootstrap whatever else the build
+    // does, so this is needed even by a board that compiles nothing. A host whose arch
+    // already matches the target runs them directly and needs no qemu at all.
     if cross {
         let qa = qemu_arch(target);
         let qnames = [format!("qemu-{qa}-static"), format!("qemu-{qa}")];
@@ -311,11 +324,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
             "run target binaries under binfmt", true, Pkg::QemuUser,
         ));
         checks.push(binfmt_check(pm, target, qa));
-        // `bwrap` only enters the sandbox the target-arch package builds happen in, so
-        // it is needed only by a build that has some.
-        if needs.sandbox_builds {
-            checks.push(exe(pm, target, "bwrap", &["bwrap"], "rootless sandbox entry", true, Pkg::Bubblewrap));
-        }
     }
 
     // Image assembly path: `mke2fs -d` formats the rootfs ext4 from a
@@ -538,6 +546,28 @@ mod tests {
         }
         // Every check is a hard requirement — there are no fallback-only tools.
         assert!(checks.iter().all(|c| c.required));
+    }
+
+    #[test]
+    fn a_sandbox_build_needs_bwrap_on_any_host_but_qemu_only_when_cross() {
+        // The package stages build in the sandbox on *every* host: a host whose arch
+        // already matches the target does not get to skip it, because the sandbox is
+        // what makes the produced `.deb`s belong to the target suite rather than the
+        // host's. So `bwrap` is a hard requirement of any build with sandbox stages,
+        // cross or not — on a matching-arch host this assertion is the whole point.
+        let checks = tool_checks(&compiling_build());
+        assert!(
+            checks.iter().any(|c| c.name == "bwrap" && c.required),
+            "a sandbox build must require bwrap regardless of the host arch"
+        );
+        // qemu-user is the genuinely cross-only half: a matching-arch host runs the
+        // target's binaries directly and never consults a binfmt handler.
+        let host = HostInfo::detect();
+        assert_eq!(
+            checks.iter().any(|c| c.name == "qemu-aarch64-static"),
+            host.is_cross_for(Arch::Arm64),
+            "qemu-user is needed exactly when the host cannot run the target's binaries"
+        );
     }
 
     #[test]

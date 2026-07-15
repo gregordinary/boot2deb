@@ -69,7 +69,7 @@ For orientation, the checks fall into a few groups:
 | Image assembly | `mke2fs` + `e2fsck` (format the rootfs ext4 and verify it clean) | always |
 | Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler (native, or the `<triple>gcc` cross compiler) | only if the recipe compiles a kernel or a bootloader |
 | Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | cross only |
-| Sandbox | `bwrap`, to enter the rootless target-arch build sandbox | cross **and** the recipe builds target-arch packages (the media-accel stack) |
+| Sandbox | `bwrap`, to enter the rootless target-arch build sandbox | the recipe builds target-arch packages (the media-accel stack) — on any host |
 
 **`doctor` asks only for what *your recipe* will actually invoke**, so the table above
 is a superset. `doctor turing-rk1-forky` wants the whole list; `doctor asus-c201-forky`
@@ -77,9 +77,16 @@ wants no compiler at all, because that board installs Debian's kernel and boots 
 firmware. That is deliberate: a requirement you do not need is somewhere a requirement
 you *do* need can hide.
 
-The "cross" rows apply when your host arch differs from the target — i.e. any x86_64
-host building an arm64 or armhf image. An arm64 host builds an arm64 image natively and
-skips them.
+The "cross" row applies when your host arch differs from the target — i.e. any x86_64
+host building an arm64 or armhf image. An arm64 host runs the target's binaries directly
+and needs no emulation.
+
+The sandbox row is **not** a cross-only requirement. Packages like `ffmpeg-rk` and
+`librga2` are built inside a userland bootstrapped for the target *suite*, never on your
+host, even when your host arch already matches the target. Their runtime `Depends` are
+derived from the libraries present at build time, so building them against your host's
+libraries would stamp your host's package names and versions into a `.deb` bound for a
+Debian `forky` image. An arm64 host building an arm64 image still needs `bwrap`.
 
 ### The user-namespace check (common blocker on Ubuntu 24.04)
 

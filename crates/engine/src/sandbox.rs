@@ -1,19 +1,29 @@
-//! Target-arch build sandboxes — the environment the userspace and ffmpeg
-//! package stages ([`crate::build`]) compile their arm64 `.deb`s in.
+//! Target-arch build sandbox — the environment the userspace and ffmpeg
+//! package stages ([`crate::build`]) compile their `.deb`s in.
 //!
-//! A [`BuildSandbox`] hides one difference: on a host whose arch already matches
-//! the target the build runs directly ([`NativeSandbox`]); cross-building (e.g.
-//! arm64 on x86_64) runs inside an arm64 Debian userland ([`RootlessSandbox`]).
-//! Both reach the same three-operation contract — bootstrap, install build-deps,
-//! run a command with host paths visible — so the stage code reads identically on
-//! either path.
+//! The package stages **always** build inside a [`RootlessSandbox`]: a Debian
+//! userland bootstrapped for the build's suite and arch. They never build on the
+//! host, not even when the host's arch already matches the target's.
 //!
-//! The cross path is **unprivileged**: the rootfs is bootstrapped with
-//! `mmdebstrap --mode=unshare` (user namespaces, no `sudo`) and entered with
-//! `bwrap`, under which arm64 binaries execute via the host's `qemu-user` binfmt
-//! handler — registered with the `F` (fix-binary) flag, so the interpreter is
-//! preloaded and nothing is copied into the rootfs. This is deliberately the same
-//! rootless-userland machinery the rootfs assembly is built on: the
+//! The suite, not the arch, is what makes this necessary. These stages emit `.deb`s
+//! for the target suite, and `dpkg-shlibdeps` derives each one's runtime `Depends`
+//! from the libraries present at build time — it maps every `NEEDED` soname to the
+//! package that provides it *here*. Building on the host would link against the
+//! host's libraries and stamp the host's package names and versions into `Depends`,
+//! producing a `.deb` that does not install in the target rootfs even on a
+//! matching-arch host. The sandbox is also the only place the stages can see the
+//! build's *own* userspace `.deb`s: ffmpeg links against `librga2`/`librockchip-mpp1`,
+//! which this build produces, and `dpkg-shlibdeps` resolves `librga.so.2` to
+//! `Depends: librga2` only because that deb — and its `shlibs` — is installed in
+//! here ([`BuildSandbox::install_local_debs`]).
+//!
+//! The sandbox is **unprivileged**: the rootfs is bootstrapped with `mmdebstrap
+//! --mode=unshare` (user namespaces, no `sudo`) and entered with `bwrap`. When the
+//! host arch differs from the target's, the target's binaries execute via the host's
+//! `qemu-user` binfmt handler — registered with the `F` (fix-binary) flag, so the
+//! interpreter is preloaded and nothing is copied into the rootfs; when the arches
+//! match they simply run, and `qemu-user` is never consulted. This is deliberately
+//! the same rootless-userland machinery the rootfs assembly is built on: the
 //! bootstrapped tree is the seed of the base-rootfs cache, not a throwaway.
 //!
 //! The sandbox is a rootless *convenience* — a clean, reproducible target-arch
@@ -72,11 +82,10 @@ pub struct SandboxRun<'a> {
 
 /// An environment in which target-arch package builds run.
 ///
-/// Implemented by [`NativeSandbox`] (host arch = target) and [`RootlessSandbox`]
-/// (cross, via `mmdebstrap` + `bwrap` + `qemu-user`). A stage selects one from
-/// [`preflight`](crate::preflight) and drives it through these three operations;
-/// the backend is otherwise opaque, so the rootfs sandbox can satisfy the
-/// same contract.
+/// Implemented by [`RootlessSandbox`] — a userland bootstrapped for the build's
+/// suite and arch via `mmdebstrap` + `bwrap`. A stage drives it through these three
+/// operations and is otherwise agnostic to the backend, so another rootfs provider
+/// can satisfy the same contract.
 pub trait BuildSandbox {
     /// Short label for logs (e.g. `native`, `rootless arm64`).
     fn describe(&self) -> String;
@@ -91,11 +100,17 @@ pub trait BuildSandbox {
     fn install(&self, packages: &[&str], step: &Step) -> Result<(), EngineError>;
 
     /// Install local `.deb` files into the environment — the userspace packages a
-    /// later stage build-depends on (the ffmpeg stage needs the `librockchip-mpp-dev`
-    /// and `librga-dev` packages). Native is a no-op: host deps are the
-    /// caller's responsibility (checked by `doctor`), so the userspace
-    /// `.deb`s must already be installed. The cross backend binds each deb's
-    /// directory and `apt-get install`s the paths, letting apt pull transitive deps.
+    /// later stage build-depends on (the ffmpeg stage builds against
+    /// `librockchip-mpp-dev` + `librga-dev` and links against `librockchip-mpp1` +
+    /// `librga2`). Each deb's directory is bound read-only and `apt-get install` is
+    /// given the paths, so apt pulls their transitive deps from the suite.
+    ///
+    /// This build *produces* those `.deb`s, so installing them here is the only way a
+    /// later stage can see them — and the reason `dpkg-shlibdeps` can resolve
+    /// `librga.so.2` to `Depends: librga2` at all: it maps the soname through the
+    /// `shlibs` of the package installed here that provides it. Without this the
+    /// linker would fall back to whatever `librga` the *host* happens to carry, and
+    /// `dpkg-shlibdeps` would fail on a library no package in the sandbox owns.
     fn install_local_debs(&self, debs: &[PathBuf], step: &Step) -> Result<(), EngineError>;
 
     /// Run one command in the environment per `spec`, streaming its output to
@@ -104,56 +119,18 @@ pub trait BuildSandbox {
     fn run(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError>;
 }
 
-/// Host-native sandbox: the host arch already matches the target, so commands run
-/// directly on the host with no rootfs and no emulation.
-///
-/// A native build does not mutate the host, so [`ensure_ready`](BuildSandbox::ensure_ready)
-/// and [`install`](BuildSandbox::install) are no-ops — host build-deps are the
-/// caller's responsibility (checked by `doctor`), and a missing one surfaces
-/// as the build subprocess's own error.
-pub struct NativeSandbox;
-
-impl BuildSandbox for NativeSandbox {
-    fn describe(&self) -> String {
-        "native".to_string()
-    }
-
-    fn ensure_ready(&self, _step: &Step) -> Result<(), EngineError> {
-        Ok(())
-    }
-
-    fn install(&self, _packages: &[&str], _step: &Step) -> Result<(), EngineError> {
-        Ok(())
-    }
-
-    fn install_local_debs(&self, _debs: &[PathBuf], _step: &Step) -> Result<(), EngineError> {
-        Ok(())
-    }
-
-    fn run(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
-        let (prog, rest) = spec
-            .argv
-            .split_first()
-            .expect("sandbox run argv is non-empty");
-        let mut cmd = Command::new(prog);
-        cmd.args(rest).current_dir(spec.work);
-        for (k, v) in spec.env {
-            cmd.env(k, v);
-        }
-        build::run(cmd, prog, spec.context, step)
-    }
-}
-
-/// Cross-arch rootless sandbox: an arm64 Debian userland bootstrapped and
-/// entered without root.
+/// Rootless sandbox: a Debian userland for the build's suite and arch, bootstrapped
+/// and entered without root.
 ///
 /// The rootfs is created once with `mmdebstrap --mode=unshare` and reused; each
-/// command runs under `bwrap` with the rootfs bound as `/`, so arm64 binaries
-/// execute via the host's `F`-flagged `qemu-user` binfmt handler with no
-/// interpreter copy. See the [module docs](self).
+/// command runs under `bwrap` with the rootfs bound as `/`. On a cross host the
+/// target's binaries execute via the `F`-flagged `qemu-user` binfmt handler with no
+/// interpreter copy; on a matching-arch host they run directly. See the
+/// [module docs](self) for why the package stages always build in here rather than
+/// on the host.
 pub struct RootlessSandbox {
-    /// arm64 rootfs directory — bootstrapped once, reused across builds (the seed
-    /// of the base-rootfs cache).
+    /// Target-arch rootfs directory — bootstrapped once, reused across builds (the
+    /// seed of the base-rootfs cache).
     rootfs: PathBuf,
     /// Debian suite to bootstrap (e.g. `forky`).
     suite: String,
@@ -602,14 +579,8 @@ mod tests {
     }
 
     #[test]
-    fn native_describe_and_noops() {
-        let sb = NativeSandbox;
-        assert_eq!(sb.describe(), "native");
-        // ensure_ready / install do not touch the host on the native path.
-        let sink = |_: crate::event::Event| {};
-        let step = Step::start(&sink, "userspace");
-        assert!(sb.ensure_ready(&step).is_ok());
-        assert!(sb.install(&["cmake"], &step).is_ok());
-        assert!(sb.install_local_debs(&[PathBuf::from("/x/librga2_2_arm64.deb")], &step).is_ok());
+    fn describe_names_the_target_arch() {
+        let sb = RootlessSandbox::new(PathBuf::from("/w/rootfs"), "forky", "arm64", None);
+        assert_eq!(sb.describe(), "rootless arm64");
     }
 }
