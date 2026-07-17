@@ -1,0 +1,15 @@
+# kernels/rk3288-mainline-7.1.toml — compiled mainline 7.1.y for RK3288 boards.
+#
+# The RK3288's platform support is fully upstream, so unlike the RK3588 this
+# definition exists for control, not enablement: it carries driver fixes ahead
+# of the distro kernel (profile `rk3288-fixes`) and gives a board a kconfig seam
+# to customize. The Debian kernel stays the default on every RK3288 device; a
+# recipe opts in by naming this kernel.
+flavor           = "mainline"
+source           = "linux-stable"          # 7.1.y stable releases live in linux-stable
+track            = "7.1.y"                 # the lock pins the exact tag (update --kernel-ref)
+base_defconfig   = "multi_v7_defconfig"    # in-tree 32-bit multiplatform base; fragments merge onto it
+config_fragments = ["base/debian-armhf", "soc/rk3288"]
+patch_profile    = "rk3288-fixes"
+patches_url      = "https://github.com/gregordinary/patches.git"
+supported_socs   = ["rk3288"]

@@ -1,0 +1,13 @@
+# recipes/asus-c201-mainline-forky.toml — the C201 on a boot2deb-compiled kernel.
+#
+# Same board and suite as asus-c201-forky, but the kernel is compiled from
+# mainline 7.1.y instead of installed from Debian: kconfig comes from the
+# fragments (Debian-parity baseline + rk3288 slice) and the `rk3288-fixes`
+# patch profile rides on top. This is the customization seam — pick this recipe
+# to change the kernel; pick asus-c201-forky to track Debian's.
+device     = "asus-c201"
+kernel     = "rk3288-mainline-7.1"
+suite      = "forky"
+features   = []                # a base image, same surface as asus-c201-forky
+layout     = "combined"
+image_size = "2G"
