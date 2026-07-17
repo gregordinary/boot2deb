@@ -193,7 +193,9 @@ Expect a **white screen for roughly 10 seconds** after Ctrl+U before the boot me
 appear. That is normal and not a fault: there is no display driver in the initramfs, so
 the panel holds the firmware's last frame until the kernel's DRM stack takes over.
 
-Audio and Bluetooth ship configured but are **not yet confirmed on hardware**.
+Audio is **confirmed on hardware**: the internal speakers and volume control work out
+of the box. Bluetooth ships configured — the kernel log shows the radio initialize and
+load its patchram — but has not yet been exercised against a device.
 
 **Stock-firmware hardware is untested.** The stock `speedy` profile is what the image
 ships by default and there is good reason to expect it to work — the profile is

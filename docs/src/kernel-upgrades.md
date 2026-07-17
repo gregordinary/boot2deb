@@ -90,6 +90,63 @@ sudo reboot
 Then pin or downgrade the kernel package so the next `apt upgrade` does not simply put it
 back.
 
+## When the write fails: the payload ceiling
+
+The signed blob must fit its kernel slot — 16 MiB on stock firmware (a board page may
+list roomier firmware profiles). `depthchargectl` builds the new image first and writes
+second, so when nothing it tries fits under the ceiling, it fails **without touching the
+slot**:
+
+```
+Couldn't build a small enough image for this board
+```
+
+Nothing is broken when this prints. The slot still holds the payload the board booted
+from and the board keeps booting — but the change that triggered the rebuild has not
+reached the slot, and nothing will until the payload fits again.
+
+The payload is kernel + device tree + initramfs, and the part that grows is the
+initramfs. The image ships it deliberately small — an explicit module list
+(`MODULES=list`) and xz compression — which leaves about 2 MB of headroom under the
+stock ceiling.
+
+**What spends that headroom is initramfs-tools hooks**, and the one that spends it all at
+once is plymouth. Desktop metapackages (`cinnamon-desktop-environment`,
+`task-gnome-desktop`, and the rest) pull plymouth in through Recommends, `desktop-base`
+registers a graphical boot theme, and plymouth's hook then copies the splash daemon, its
+renderers, the theme, and the text plugin with its whole font stack into every initramfs
+built afterwards. That is several MB, and the next slot write — a kernel upgrade, or any
+package that triggers `update-initramfs` — fails as above.
+
+The cost buys nothing on these boards. The initramfs carries no DRM modules, so plymouth
+cannot draw before the root pivot regardless — it says so itself during the rebuild:
+
+```
+W: plymouth: not including drm modules since MODULES=list
+```
+
+Remove it:
+
+```sh
+sudo apt purge 'plymouth*'
+```
+
+The purge re-triggers the initramfs rebuild and the slot write; watch the
+`depthchargectl` run in the output succeed. Nothing depends on plymouth — desktops only
+recommend it — and no configuration keeps an installed plymouth out of the initramfs
+(its initramfs-tools fragment overrides any admin setting), so removing the package is
+the supported answer. If the original failure aborted an `apt` run partway, finish it
+first with `sudo dpkg --configure -a`.
+
+If the write still fails, something else grew the initramfs. List its contents by size
+and look for what does not belong:
+
+```sh
+lsinitramfs -l /boot/initrd.img-$(uname -r) | sort -k5 -rn | head -20
+```
+
+A healthy initramfs for these boards is 7–8 MB compressed (`ls -lh /boot/initrd.img-*`).
+
 ## Does it differ with a compiled kernel?
 
 **No — the mechanism is identical.** The hook that re-signs and writes a slot is triggered
