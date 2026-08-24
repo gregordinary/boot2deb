@@ -2240,16 +2240,15 @@ mod tests {
                 "CONFIG_FDRV_NO_REG_SDIO=y"
             ]
         );
-        // The compat shims are bare filenames under `kmods/aic8800/patches/`, in apply
-        // order — the SDIO 7.1 cfg80211 port, the two quieting patches, then the
-        // suspend fix.
+        // The local patches are bare filenames under `kmods/aic8800/patches/`, in apply
+        // order — the two quieting patches, then the suspend fix. Every build guard
+        // comes from radxa's own series, so none of these is one.
         assert_eq!(
             kmod.local_patches,
             [
-                "0001-sdio-linux-7.1.patch",
-                "0002-quiet-log-level.patch",
-                "0003-quiet-bare-printk.patch",
-                "0004-suspend-quiesce-sdio.patch"
+                "0001-quiet-log-level.patch",
+                "0002-quiet-bare-printk.patch",
+                "0003-suspend-quiesce-sdio.patch"
             ]
         );
         let fw = kmod

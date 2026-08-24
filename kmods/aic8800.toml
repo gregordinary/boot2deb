@@ -17,9 +17,14 @@ ref    = "main"
 subdir = "src/SDIO/driver_fw/driver/aic8800"
 
 # The subset of radxa's `debian/patches/series` the SDIO build needs, in series order
-# (firmware path, the SDIO fall-through fix, the cumulative per-kernel build guards
-# through 6.19, and the low-memory/vmalloc fixes). The PCIE/USB/Allwinner/BT entries
-# radxa also ships are irrelevant to an SDIO arm64 build and are omitted.
+# (firmware path, the SDIO fall-through fix, the cumulative per-kernel build guards,
+# and the low-memory/vmalloc fixes). The PCIE/USB/Allwinner/BT entries radxa also
+# ships are irrelevant to an SDIO arm64 build and are omitted.
+#
+# The 7.1 and 7.2 guards are what carry this driver onto a current kernel. 7.1 moved
+# the cfg80211 key and station ops from `net_device *` to `wireless_dev *`; 7.2 removed
+# `strncpy()` from the kernel and gave `remain_on_channel` a trailing receive-address
+# filter. Both patches reach the SDIO tree, so this build needs no local equivalent.
 repo_patches = [
     "fix-sdio-firmware-path.patch",
     "fix-sdio-fall-through.patch",
@@ -32,25 +37,22 @@ repo_patches = [
     "fix-linux-6.19-build.patch",
     "fix-vmalloc-not-include.patch",
     "fix-build-on-low-memory-devices.patch",
+    "fix-linux-7.1-build.patch",
+    "fix-linux-7.2-build.patch",
 ]
 
-# Ours, from kmods/aic8800/patches/, applied after radxa's. 0001 and 0002 are the SDIO
-# subsets of radxa patches whose full form touches the PCIE/USB trees an SDIO build does
-# not build; 0003 is ours outright.
+# Ours, from kmods/aic8800/patches/, applied after radxa's. All three are behaviour
+# changes this image wants, not build fixes -- the build guards all come from radxa's
+# series above.
 #
-#  - 0001: radxa's 7.1 build fix touches only the USB tree, so the SDIO cfg80211 ops
-#    (add_key/get_key/.../tdls) still carry the pre-7.1 `net_device *` signature and will
-#    not compile on 7.1. This ports radxa's USB fix onto the SDIO `rwnx_main.c`/
-#    `rwnx_tdls.c`; its guard is `>=7.1.0`, so it also covers 7.2+. Carried until radxa
-#    merges the equivalent SDIO fix upstream.
-#  - 0002: lowers both modules' compiled-in debug default to errors only, so a quiet
+#  - 0001: lowers both modules' compiled-in debug default to errors only, so a quiet
 #    console does not depend on a modprobe.d file reaching the image.
-#  - 0003: reaches what 0002 cannot. The debug default governs the AICWFDBG macros; a
+#  - 0002: reaches what 0001 cannot. The debug default governs the AICWFDBG macros; a
 #    bare `printk()` takes CONFIG_MESSAGE_LOGLEVEL_DEFAULT instead, which is a warning
 #    on a Debian kernel, so the firmware-download trace and get_txpwr_max() survive both
-#    0002 and `loglevel=`. The tx-power one is the reason this exists: it is on
+#    0001 and `loglevel=`. The tx-power one is the reason this exists: it is on
 #    rwnx_cfg80211_get_tx_power(), so it reprints for as long as the system runs.
-#  - 0004: makes system suspend survivable. `CONFIG_FDRV_NO_REG_SDIO` (below) skips
+#  - 0003: makes system suspend survivable. `CONFIG_FDRV_NO_REG_SDIO` (below) skips
 #    `sdio_register_driver()`, so the `dev_pm_ops` that driver struct carries never
 #    attach and the driver's own suspend/resume never run -- leaving `is_bus_suspend`,
 #    the flag its three bus threads gate on, permanently clear. They then touch SDIO
@@ -59,10 +61,9 @@ repo_patches = [
 #    delivers the same two callbacks from a PM notifier, which fires whether or not a
 #    bus driver is bound. Required for the board to wake from s2idle at all.
 local_patches = [
-    "0001-sdio-linux-7.1.patch",
-    "0002-quiet-log-level.patch",
-    "0003-quiet-bare-printk.patch",
-    "0004-suspend-quiesce-sdio.patch",
+    "0001-quiet-log-level.patch",
+    "0002-quiet-bare-printk.patch",
+    "0003-suspend-quiesce-sdio.patch",
 ]
 
 # `CONFIG_FDRV_NO_REG_SDIO=y` takes the driver's direct-probe SDIO path (the registered-

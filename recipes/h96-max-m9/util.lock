@@ -10,7 +10,7 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["h96-max-m9-util"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "6c3eccbeb78205ff3b612923c05afed800348c5f"
+commit = "ddc856cdd91e135ba792e16a6fc1edc2a279c36a"
 
 [blobs]
 atf = "rk3576_bl31_v1.24.elf@sha256:e2cf4e0e920dfe1daa6412c05f49dc7e5c0f9888d3a3e8eecc85fbe1e86a23d1"
