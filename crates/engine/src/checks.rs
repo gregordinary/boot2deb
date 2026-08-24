@@ -145,6 +145,13 @@ impl PkgManager {
                 PkgManager::Pacman => "qemu-user-static-binfmt (AUR)".into(),
                 _ => "qemu-user-static".into(),
             },
+            // Debian/Ubuntu package both 32- and 64-bit Arm system emulators as
+            // `qemu-system-arm`; Fedora and Arch split per target.
+            Pkg::QemuSystemArm64 => match self {
+                PkgManager::Apt => "qemu-system-arm".into(),
+                _ => "qemu-system-aarch64".into(),
+            },
+            Pkg::QemuSystemArmv7 => "qemu-system-arm".into(),
         }
     }
 
@@ -175,6 +182,11 @@ enum Pkg {
     /// tree. Laying that tree into the provisioned rootfs is in-process, through the
     /// identity map the rootfs is owned under, so it needs no host tool.
     Coreutils,
+    /// `qemu-system-aarch64` — boots an arm64 image under `boot2deb try`.
+    /// Fallback-only: nothing in a build invokes it.
+    QemuSystemArm64,
+    /// `qemu-system-arm` — the armv7 counterpart, same contract.
+    QemuSystemArmv7,
 }
 
 /// What a *particular build* needs from the host — the input to [`tool_checks`].
@@ -365,6 +377,30 @@ pub fn tool_checks_on(host: HostInfo, needs: &ToolNeeds) -> Vec<Check> {
         false,
         Pkg::E2fsprogs,
     ));
+
+    // The system emulator `boot2deb try` boots the finished image under.
+    // Fallback-only: no build stage invokes it, and `try` itself names the
+    // package when it is missing — this line is where an operator planning to
+    // use `try` learns about it ahead of time.
+    if needs.assembles_image {
+        let system = match needs.target {
+            Arch::Arm64 => Some(("qemu-system-aarch64", Pkg::QemuSystemArm64)),
+            Arch::Armv7 => Some(("qemu-system-arm", Pkg::QemuSystemArmv7)),
+            // `try` supports no other guest yet, so asking for an emulator it
+            // would never launch would be noise.
+            _ => None,
+        };
+        if let Some((name, pkg)) = system {
+            checks.push(exe(
+                pm,
+                name,
+                &[name],
+                "boot the built image under `boot2deb try` (optional)",
+                false,
+                pkg,
+            ));
+        }
+    }
 
     checks
 }
@@ -790,6 +826,7 @@ mod tests {
                 "qemu-aarch64-static",
                 "binfmt",
                 "e2fsck",
+                "qemu-system-aarch64",
             ],
             "the host requirement list is a documented claim; a new entry belongs in \
              docs/src/getting-started.md too"
@@ -843,20 +880,21 @@ mod tests {
                 "{gone} is a package of a provisioned root, not a host requirement"
             );
         }
-        // Every remaining check is a hard requirement but one: `e2fsck` is the optional
-        // cross-check of a filesystem ferrosys already scanned in-process.
+        // Every remaining check is a hard requirement but two: `e2fsck` is the
+        // optional cross-check of a filesystem ferrosys already scanned in-process,
+        // and the system emulator only matters to an operator who runs `try`.
         assert!(
             checks
                 .iter()
-                .filter(|c| c.name != "e2fsck")
+                .filter(|c| c.name != "e2fsck" && !c.name.starts_with("qemu-system-"))
                 .all(|c| c.required),
-            "only e2fsck is optional"
+            "only e2fsck and qemu-system-* are optional"
         );
         let e2fsck = checks
             .iter()
             .find(|c| c.name == "e2fsck")
             .expect("e2fsck check present");
-        assert!(!e2fsck.required, "e2fsck is an optional cross-check");
+        assert!(!e2fsck.required, "e2fsck must be optional");
     }
 
     #[test]
@@ -953,10 +991,14 @@ mod tests {
             os: "linux",
         };
         let armhf = tool_checks_on(arm64, &assembling_build());
+        // `qemu-system-arm` (the optional `try` emulator) stays: system emulation
+        // of a whole guest is orthogonal to whether the host can execute the
+        // target's binaries directly.
         assert!(
-            !armhf
-                .iter()
-                .any(|c| c.name.contains("qemu") || c.name.contains("binfmt")),
+            !armhf.iter().any(|c| {
+                (c.name.contains("qemu") && !c.name.starts_with("qemu-system-"))
+                    || c.name.contains("binfmt")
+            }),
             "an arm64 host runs armhf binaries directly: {:?}",
             armhf.iter().map(|c| &c.name).collect::<Vec<_>>()
         );
@@ -971,6 +1013,8 @@ mod tests {
         // It is also the case that makes "boot2deb needs no dpkg-family host" a plain
         // claim rather than a technicality: for this recipe the whole host list is
         // `tar`, `cp`, user namespaces, and — on a host that cannot run armhf — qemu.
+        // The tail is the two optional entries — the ext4 cross-check and the `try`
+        // emulator — which block nothing.
         assert_eq!(
             check_names(&assembling_build()),
             [
@@ -980,6 +1024,7 @@ mod tests {
                 "qemu-arm-static",
                 "binfmt",
                 "e2fsck",
+                "qemu-system-arm",
             ]
         );
     }

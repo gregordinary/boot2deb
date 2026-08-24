@@ -18,8 +18,9 @@
 use crate::error::EngineError;
 use boot2deb_core::chromeos::{kpart_flags, SPARE_KPART_FLAGS};
 use boot2deb_core::model::{Offsets, ResolvedBoot};
+use boot2deb_core::press::SEED_PARTITION_BYTES;
 use boot2deb_core::size::{parse_size, Slack as CoreSlack};
-use ferrosys::ext::Slack;
+use ferrosys::Slack;
 
 /// Disk logical block (sector) size. RK images use 512-byte sectors, matching the
 /// raw-gap `bs`/`seek` arithmetic and the `gpt` crate's default.
@@ -91,6 +92,9 @@ pub(crate) struct Geometry {
     pub(crate) total_size: u64,
     /// What the boot method places ahead of the rootfs.
     pub(crate) boot: BootGeometry,
+    /// Seed partition start byte offset (see [`BootRegion::seed_off`]). The
+    /// partition is exactly [`SEED_PARTITION_BYTES`] long.
+    pub(crate) seed_off: u64,
     /// Rootfs partition start byte offset.
     pub(crate) rootfs_off: u64,
     /// Rootfs partition first LBA (`rootfs_off / SECTOR`).
@@ -116,6 +120,15 @@ pub(crate) struct Geometry {
 pub(crate) struct BootRegion {
     /// What the boot method places ahead of the rootfs.
     pub(crate) boot: BootGeometry,
+    /// Seed partition start byte offset: the 1 MiB per-unit personalization
+    /// partition ([`SEED_PARTITION_BYTES`]), placed in space the boot method
+    /// already leaves free so no authored offset moves. Under `rockchip-rkbin`
+    /// it is the last MiB before the rootfs — carved out of the `u-boot.itb`
+    /// slot's tail, which [`check_payload_fit`](Self::check_payload_fit) then
+    /// bounds at this offset. Under `depthcharge` it sits directly below the
+    /// kernel slots, whose 12 MiB offset leaves the room; the slots' own end
+    /// still abuts the rootfs exactly.
+    pub(crate) seed_off: u64,
     /// Rootfs partition start byte offset — a multiple of both [`SECTOR`] and
     /// [`EXT4_BLOCK`], and at or past the byte the boot region ends at.
     pub(crate) rootfs_off: u64,
@@ -157,8 +170,55 @@ impl BootRegion {
             )));
         }
 
+        // Place the seed partition in the space the boot method leaves free (see
+        // the field's docs). Alignment is inherited: the anchor is sector-aligned
+        // (and, before the rootfs, 4 KiB-aligned) and the seed size is a multiple
+        // of both, so subtraction preserves it.
+        let seed_off = match &boot_geom {
+            BootGeometry::RawGap { uboot_itb_off, .. } => {
+                let seed_off = rootfs_off
+                    .checked_sub(SEED_PARTITION_BYTES)
+                    .ok_or_else(|| {
+                        geom(format!(
+                            "rootfs offset ({rootfs_off}) leaves no room for the \
+                         {SEED_PARTITION_BYTES}-byte seed partition ahead of it"
+                        ))
+                    })?;
+                // The seed comes out of the u-boot.itb slot's tail, which must
+                // still start below it — a slot the seed swallowed whole is a
+                // layout with nowhere to put the bootloader.
+                if *uboot_itb_off >= seed_off {
+                    return Err(geom(format!(
+                        "the u-boot.itb offset ({uboot_itb_off}) leaves no room for the \
+                         {SEED_PARTITION_BYTES}-byte seed partition before the rootfs \
+                         ({rootfs_off}) — move the rootfs offset up"
+                    )));
+                }
+                seed_off
+            }
+            BootGeometry::Kpart { slots } => {
+                let first_slot = slots.first().ok_or_else(|| {
+                    geom("the depthcharge geometry resolved to no kernel slots".into())
+                })?;
+                let seed_off = first_slot
+                    .offset
+                    .checked_sub(SEED_PARTITION_BYTES)
+                    .filter(|off| *off >= GPT_FRONT_SECTORS * SECTOR)
+                    .ok_or_else(|| {
+                        geom(format!(
+                            "the kernel slot offset ({}) leaves no room for the \
+                             {SEED_PARTITION_BYTES}-byte seed partition between the primary \
+                             GPT and the slots",
+                            first_slot.offset
+                        ))
+                    })?;
+                seed_off
+            }
+        };
+
         Ok(BootRegion {
             boot: boot_geom,
+            seed_off,
             rootfs_off,
         })
     }
@@ -301,12 +361,16 @@ impl BootRegion {
                     uboot_itb_off,
                     "u-boot.itb offset",
                 )?;
+                // The seed partition owns the last MiB before the rootfs, so the
+                // itb's budget ends where the seed begins, not where the rootfs
+                // does — an itb that spilled into the seed would be corrupted by
+                // the very first `flash --hostname`.
                 fits(
                     "u-boot.itb",
                     *itb_len,
                     uboot_itb_off,
-                    self.rootfs_off,
-                    "rootfs offset",
+                    self.seed_off,
+                    "seed partition offset",
                 )?;
             }
             BootGeometry::Kpart { ref slots } => {
@@ -485,6 +549,7 @@ impl Geometry {
         Ok(Geometry {
             total_size,
             boot: region.boot,
+            seed_off: region.seed_off,
             rootfs_off,
             rootfs_first_lba,
             rootfs_length_lba,
@@ -680,6 +745,38 @@ mod tests {
         };
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].flags, 0x015A_0000_0000_0000);
+    }
+
+    /// The seed partition's placement, both shapes: the MiB directly below the
+    /// rootfs on a raw-gap layout, the MiB directly below the kernel slots on a
+    /// depthcharge one — and the refusals when the space is not there.
+    #[test]
+    fn the_seed_partition_takes_the_free_mib_each_method_leaves() {
+        let g = Geometry::resolve(&rk1_boot(), 2 << 30).unwrap();
+        assert_eq!(g.seed_off, 15 * 1024 * 1024, "rootfs 16 MiB − 1 MiB");
+
+        let g = Geometry::resolve(&c201_boot(), 4 << 30).unwrap();
+        assert_eq!(g.seed_off, 11 * 1024 * 1024, "kpart 12 MiB − 1 MiB");
+        // The slots themselves still abut the rootfs exactly — the seed took
+        // nothing from them.
+        assert_eq!(g.rootfs_off, 44 * 1024 * 1024);
+
+        // A u-boot.itb slot the seed would swallow whole is refused: rootfs at
+        // 8.5 MiB puts the seed at 7.5 MiB, below the itb at 8 MiB. (8.5 MiB is
+        // 4 KiB-aligned, so the alignment gate does not mask this one.)
+        assert!(Geometry::resolve(&rk1_boot_with("32KiB", "8MiB", "8912896"), 2 << 30).is_err());
+        // Kernel slots at 1 MiB leave the seed nowhere above the primary GPT.
+        assert!(Geometry::resolve(&c201_boot_with("1MiB", "16MiB", 2, "36MiB"), 4 << 30).is_err());
+
+        // The itb budget ends at the seed, not at the rootfs: a payload that fits the
+        // raw gap but spills into the seed's MiB is refused.
+        let region = BootRegion::resolve(&rk1_boot()).unwrap();
+        assert!(region
+            .check_payload_fit(&[("idbloader.img", 1024), ("u-boot.itb", 7 << 20)])
+            .is_ok());
+        assert!(region
+            .check_payload_fit(&[("idbloader.img", 1024), ("u-boot.itb", (7 << 20) + 1)])
+            .is_err());
     }
 
     #[test]

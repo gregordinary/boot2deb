@@ -7,8 +7,8 @@ supported_boot_methods  = ["rockchip-rkbin"]
 uboot_defconfig         = "turing-rk1-rk3588_defconfig"
 kernel_dtb              = "rockchip/rk3588-turing-rk1.dtb"
 device_config_fragments = ["device/turing-rk1"]    # board-specific kconfig only
-supported_kernels       = ["rk3588-mainline-7.1"]
-default_kernel          = "rk3588-mainline-7.1"
+supported_kernels       = ["rk3588-mainline-7.2"]
+default_kernel          = "rk3588-mainline-7.2"
 
 # The board's u-boot series. `turing-rk1-recovery` ships with every image because
 # of what a compute module lacks: no front-panel USB, one OTG-capable controller,

@@ -1,0 +1,252 @@
+#!/bin/sh
+# Apply the per-unit seed (PARTLABEL=b2d-seed): a FAT volume holding seed.txt
+# with `key=value` lines (hostname, authorized_key, wifi_ssid, wifi_psk,
+# static_ip). `boot2deb press`/`boot2deb seed` write it, and an operator can
+# edit it from any laptop before first boot.
+#
+# Every failure here logs and exits 0: a board that does not come up is worse
+# than a board with the wrong name, so a missing partition, an unmountable
+# filesystem, and a malformed line all degrade to "personalize nothing".
+# Idempotent: the parent runs first-boot hooks once, but re-running would only
+# re-apply the same hostname and skip already-present keys.
+
+dev=/dev/disk/by-partlabel/b2d-seed
+[ -e "$dev" ] || exit 0
+
+mnt=$(mktemp -d) || exit 0
+if ! mount -t vfat -o ro "$dev" "$mnt" 2>/dev/null; then
+    echo "boot2deb seed: cannot mount $dev; skipping personalization" >&2
+    rmdir "$mnt"
+    exit 0
+fi
+# The seed is read whole before anything is applied, so the unmount cannot be
+# missed on an early exit.
+seed_hostname=''
+seed_keys=''
+seed_wifi_ssid=''
+seed_wifi_psk=''
+seed_static_ip=''
+if [ -f "$mnt/seed.txt" ]; then
+    cr=$(printf '\r')
+    # `read` with default IFS trims surrounding whitespace; the last value of a
+    # single-valued key wins, and unknown keys are ignored (a newer boot2deb may
+    # know more).
+    while IFS=' 	' read -r line || [ -n "$line" ]; do
+        line=${line%"$cr"}
+        case "$line" in
+            ''|\#*) ;;
+            hostname=*)
+                seed_hostname=${line#hostname=}
+                ;;
+            authorized_key=*)
+                seed_keys="$seed_keys${line#authorized_key=}
+"
+                ;;
+            wifi_ssid=*)
+                seed_wifi_ssid=${line#wifi_ssid=}
+                ;;
+            wifi_psk=*)
+                seed_wifi_psk=${line#wifi_psk=}
+                ;;
+            static_ip=*)
+                seed_static_ip=${line#static_ip=}
+                ;;
+        esac
+    done < "$mnt/seed.txt"
+fi
+umount "$mnt" 2>/dev/null || true
+rmdir "$mnt" 2>/dev/null || true
+
+# static_ip is address/prefix[,gateway[,dns...]], IPv4 throughout. The grammar
+# has no whitespace, so any that hand-editing left is shed here rather than
+# smuggled into a config file another parser reads; the three parts are split
+# once and rendered per stack below.
+static_addr=''
+static_gw=''
+static_dns=''
+if [ -n "$seed_static_ip" ]; then
+    seed_static_ip=$(printf '%s' "$seed_static_ip" | tr -d ' 	')
+    static_addr=${seed_static_ip%%,*}
+    rest=''
+    case "$seed_static_ip" in
+        *,*) rest=${seed_static_ip#*,} ;;
+    esac
+    static_gw=${rest%%,*}
+    case "$rest" in
+        *,*) static_dns=${rest#*,} ;;
+    esac
+fi
+
+# The [ipv4] section body for a NetworkManager profile: manual with the seeded
+# address when a static_ip is present, DHCP otherwise. NM's keyfile puts the
+# gateway on the address line and semicolon-separates DNS.
+nm_ipv4_section() {
+    if [ -z "$seed_static_ip" ]; then
+        echo 'method=auto'
+        return
+    fi
+    echo 'method=manual'
+    if [ -n "$static_gw" ]; then
+        printf 'address1=%s,%s\n' "$static_addr" "$static_gw"
+    else
+        printf 'address1=%s\n' "$static_addr"
+    fi
+    if [ -n "$static_dns" ]; then
+        printf 'dns=%s;\n' "$(printf '%s' "$static_dns" | tr ',' ';')"
+    fi
+}
+
+if [ -n "$seed_hostname" ]; then
+    # A hostname the kernel refuses (bad characters, too long) fails hostnamectl;
+    # /etc/hosts is only rewritten once the name is actually set, so the two
+    # cannot disagree.
+    if hostnamectl set-hostname "$seed_hostname" 2>/dev/null; then
+        sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$seed_hostname/" /etc/hosts 2>/dev/null \
+            || true
+        echo "boot2deb seed: hostname set to $seed_hostname"
+    else
+        echo "boot2deb seed: hostnamectl refused '$seed_hostname'; keeping the image's" >&2
+    fi
+fi
+
+if [ -n "$seed_keys" ]; then
+    # The default account: UID 1000, which is the account every image creates.
+    account=$(getent passwd 1000 | cut -d: -f1)
+    home=$(getent passwd 1000 | cut -d: -f6)
+    if [ -n "$account" ] && [ -d "$home" ]; then
+        install -d -m 700 -o "$account" -g "$account" "$home/.ssh"
+        touch "$home/.ssh/authorized_keys"
+        chown "$account:$account" "$home/.ssh/authorized_keys"
+        chmod 600 "$home/.ssh/authorized_keys"
+        printf '%s' "$seed_keys" | while IFS= read -r key; do
+            [ -n "$key" ] || continue
+            if ! grep -qxF "$key" "$home/.ssh/authorized_keys"; then
+                printf '%s\n' "$key" >> "$home/.ssh/authorized_keys"
+                echo "boot2deb seed: authorized an SSH key for $account"
+            fi
+        done
+    else
+        echo "boot2deb seed: no UID-1000 account; skipping SSH keys" >&2
+    fi
+fi
+
+# Set when a static_ip has been written into some connection's config, so the
+# wired fallback below does not apply it a second time.
+static_ip_done=''
+
+if [ -n "$seed_wifi_ssid" ]; then
+    # A NetworkManager keyfile — the stack every Wi-Fi-capable image carries.
+    # An image without it (a wired-only board) logs and skips: the seed is a
+    # request, and "personalize nothing" stays the failure mode. The profile is
+    # rewritten whole on a re-run, so re-applying the seed is idempotent.
+    nmdir=/etc/NetworkManager/system-connections
+    if [ -d "$nmdir" ]; then
+        conn="$nmdir/b2d-seed.nmconnection"
+        # NetworkManager wants a connection UUID; the kernel's generator is
+        # always there. Mode 600 before content: NM refuses (and the psk must
+        # never be) a world-readable profile.
+        uuid=$(cat /proc/sys/kernel/random/uuid)
+        umask 077
+        {
+            echo '[connection]'
+            printf 'id=%s\n' "$seed_wifi_ssid"
+            printf 'uuid=%s\n' "$uuid"
+            echo 'type=wifi'
+            echo ''
+            echo '[wifi]'
+            echo 'mode=infrastructure'
+            printf 'ssid=%s\n' "$seed_wifi_ssid"
+            if [ -n "$seed_wifi_psk" ]; then
+                echo ''
+                echo '[wifi-security]'
+                echo 'key-mgmt=wpa-psk'
+                printf 'psk=%s\n' "$seed_wifi_psk"
+            fi
+            echo ''
+            echo '[ipv4]'
+            nm_ipv4_section
+            echo ''
+            echo '[ipv6]'
+            echo 'method=auto'
+        } > "$conn"
+        [ -n "$seed_static_ip" ] && static_ip_done=1
+        # Best-effort: NM picks the file up at startup anyway; reload only
+        # matters when it is already running by the time this hook fires.
+        nmcli connection reload 2>/dev/null || true
+        echo "boot2deb seed: wrote a Wi-Fi profile for '$seed_wifi_ssid'"
+    else
+        echo "boot2deb seed: wifi_ssid set but this image has no NetworkManager; skipping" >&2
+    fi
+fi
+
+if [ -n "$seed_static_ip" ] && [ -z "$static_ip_done" ]; then
+    # static_ip rides the connection the seed sets up: the Wi-Fi profile above
+    # when wifi_ssid was seeded, the wired interface otherwise. A seeded Wi-Fi
+    # profile that could not be written keeps the address with it — it names a
+    # host on that network, not on whatever happens to be plugged in.
+    if [ -n "$seed_wifi_ssid" ]; then
+        echo "boot2deb seed: static_ip rides the Wi-Fi profile, which was not written; skipping" >&2
+    elif [ -d /etc/NetworkManager/system-connections ]; then
+        # A wired profile with no interface-name matches any ethernet device;
+        # the priority puts it ahead of NM's own auto-generated DHCP profile.
+        conn=/etc/NetworkManager/system-connections/b2d-seed-wired.nmconnection
+        uuid=$(cat /proc/sys/kernel/random/uuid)
+        umask 077
+        {
+            echo '[connection]'
+            echo 'id=b2d-seed-wired'
+            printf 'uuid=%s\n' "$uuid"
+            echo 'type=ethernet'
+            echo 'autoconnect-priority=1'
+            echo ''
+            echo '[ipv4]'
+            nm_ipv4_section
+            echo ''
+            echo '[ipv6]'
+            echo 'method=auto'
+        } > "$conn"
+        nmcli connection reload 2>/dev/null || true
+        echo "boot2deb seed: pinned the wired interface to $static_addr"
+    elif [ -f /etc/dhcpcd.conf ]; then
+        # dhcpcd has no include directory, so the stanza is appended to the one
+        # config file behind a marker that makes a re-run skip instead of stack
+        # duplicates. The interface block scopes the address to the first wired
+        # interface by name — the boards that ship this stack have exactly one.
+        if grep -q '^# boot2deb seed static ip$' /etc/dhcpcd.conf; then
+            echo "boot2deb seed: dhcpcd.conf already carries a seeded static ip; skipping"
+        else
+            wired=''
+            for path in /sys/class/net/*; do
+                iface=${path##*/}
+                [ "$iface" = lo ] && continue
+                [ -d "$path/wireless" ] && continue
+                wired=$iface
+                break
+            done
+            if [ -n "$wired" ]; then
+                {
+                    echo '# boot2deb seed static ip'
+                    printf 'interface %s\n' "$wired"
+                    printf 'static ip_address=%s\n' "$static_addr"
+                    if [ -n "$static_gw" ]; then
+                        printf 'static routers=%s\n' "$static_gw"
+                    fi
+                    if [ -n "$static_dns" ]; then
+                        printf 'static domain_name_servers=%s\n' \
+                            "$(printf '%s' "$static_dns" | tr ',' ' ')"
+                    fi
+                } >> /etc/dhcpcd.conf
+                # Best-effort, like the NM reload: only matters when dhcpcd
+                # already configured the interface before this hook ran.
+                systemctl try-restart dhcpcd 2>/dev/null || true
+                echo "boot2deb seed: pinned $wired to $static_addr via dhcpcd"
+            else
+                echo "boot2deb seed: static_ip set but no wired interface found; skipping" >&2
+            fi
+        fi
+    else
+        echo "boot2deb seed: static_ip set but this image has neither NetworkManager nor dhcpcd; skipping" >&2
+    fi
+fi
+
+exit 0

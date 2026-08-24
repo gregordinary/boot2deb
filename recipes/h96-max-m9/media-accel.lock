@@ -2,16 +2,16 @@
 # Exact resolved pins for the recipe. `boot2deb build` reads only this;
 # re-run `boot2deb update` to re-resolve within the recipe's constraints.
 [kernel]
-id = "rk3576-mainline-7.1"
+id = "rk3576-mainline-7.2"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.1.6"
-commit = "2609d60e2f6d0b8a96563baa08b56482962cebaa"
+ref = "v7.2"
+commit = "8d3ae59288f1e7d58d76558a6ee96d533bc5019f"
 
 [patches]
 series = ["rk3576-fixes", "rk3576-npu", "rk3576-rga"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "a94470409cea5f63b3287f88c94c61cc5c0fa0f1"
+commit = "6c3eccbeb78205ff3b612923c05afed800348c5f"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,9 +22,10 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["rk3576-display"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "a94470409cea5f63b3287f88c94c61cc5c0fa0f1"
+commit = "6c3eccbeb78205ff3b612923c05afed800348c5f"
 
-[userspace.librga]
+[[userspace]]
+name = "librga"
 source = "https://github.com/tsukumijima/librga-rockchip.git"
 ref = "master"
 commit = "2cffdf6f332c3ddb93eb087841d78e8b487db2a3"

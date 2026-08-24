@@ -3,7 +3,7 @@
 The H96 MAX M9 (and the M9S, the same board) is an Android TV box built on the
 Rockchip **RK3576** — octa-core (4x Cortex-A72 + 4x Cortex-A53), Mali-G52 MC3,
 LPDDR4X, eMMC 5.1, Gigabit ethernet, and HDMI. boot2deb turns it into a mainline
-Debian box: kernel `v7.1.6`, u-boot `v2026.07`, no vendor BSP.
+Debian box: kernel `v7.2`, u-boot `v2026.07`, no vendor BSP.
 
 It is a cheap and widely available RK3576 board, which makes it a practical target —
 and an awkward one. There is no SD slot (the pads are depopulated), no reset button,
@@ -48,17 +48,30 @@ the u-boot prompt:
 ums 0 mmc 0
 ```
 
-The eMMC appears on your laptop as a USB block device. Write the image to it as you
-would any disk:
+The eMMC appears on your laptop as a USB block device. Press the image into a
+verified raw file, then write it with any flasher — confirm the device with
+`lsblk` first, since the eMMC reports as an ordinary fixed disk:
 
 ```sh
-xzcat build/h96-max-m9/forky/artifacts/h96-max-m9-forky.img.xz \
-  | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
+boot2deb press h96-max-m9/forky h96.img --hostname h96-01
+sudo dd if=h96.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-**2. Over rockusb**, with `rkdeveloptool` and Rockchip's `RK3576_MiniLoaderAll.bin`.
-This is the route community documentation describes; it works, and it is the fallback
-if you have no u-boot on the board yet and prefer the vendor path to streaming ours.
+See [Producing images](../press.md) for verification and the per-unit seed keys
+(`--wifi-ssid` joins this box to your network at first boot).
+
+**2. Over rockusb**, with the board in maskrom mode (below): load the build's
+own maskrom loader (`*-maskrom.bin`, from `build --stage uboot`), then write
+the raw pressed image from sector 0:
+
+```sh
+rkdeveloptool db build/h96-max-m9/forky/artifacts/h96-max-m9-forky-maskrom.bin
+rkdeveloptool wl 0 h96.img
+```
+
+`rkdeveloptool` takes the raw file `press` produces (not the `.img.xz`). This
+route is also the fallback if you have no u-boot on the board yet; a failed
+`db` almost always means no board in maskrom mode on USB.
 
 Reading the eMMC back over rockusb does **not** work — the read path truncates at
 32 MiB. Use `ums` (above) or `dd` from a booted system.
@@ -107,7 +120,7 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | Ethernet (GMAC0) | works |
 | eMMC (HS400-ES) | works |
 | HDMI video | works — up to 340 MHz TMDS, so 1080p60, 1440p60 and 4K30 |
-| HDMI hotplug + EDID | works — unplug/replug re-reads EDID |
+| HDMI hotplug + EDID | works — unplug/replug re-reads EDID, desktop included |
 | GPU (Mali-G52 / panfrost) + Mesa GL | works — GL 3.1 / GLES 3.1, full desktop composites on it |
 | Wi-Fi, 2.4 + 5 GHz | works (AIC8800D80) |
 | Bluetooth | works — `hci0` up, LE + classic scan, A2DP audio |
@@ -120,10 +133,12 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | HDMI audio | works |
 | S/PDIF (optical) | works |
 | Analog audio (3.5 mm) | fixed in tree — the DAC is on `sdo2`; end-to-end confirmation on a shipped image still owed |
-| HW video decode | works — 1080p H.264 and HEVC on the VDPU383, NV12 out |
+| HW video decode, HEVC | works — 1080p and 4K on the VDPU383, bit-exact against software |
+| HW video decode, H.264 | decodes, but not reliably — see below before using it |
 | HW video encode | no mainline driver |
+| RGA 2D accelerator | works — both RGA2 cores, over DMA-BUF only; see below |
 | SD card | absent — the slot is depopulated |
-| USB 3.0 SuperSpeed | not available on any port — see below |
+| USB 3.0 SuperSpeed | blue port only, and unconfirmed — enabled in tree, never yet trained on hardware; the black ports cannot, see below |
 
 Things the board needs that are worth knowing about:
 
@@ -140,15 +155,22 @@ Things the board needs that are worth knowing about:
 - **`cpuidle.off=1` is in the kernel command line.** A core suspended into the DT
   `CPU_SLEEP` state can miss its wakeup on this platform's BL31. It is a board-level
   workaround, stated in `devices/h96-max-m9.toml` with the condition to drop it.
-- **No port on the box delivers USB 3.0**, for two unrelated reasons. The blue port
-  beside HDMI is `drd0`, capped to high speed in the board `.dts` because SuperSpeed
-  training collapses into a `-62/-71` SetAddress loop that takes the boot medium with
-  it. The black ports are `drd1`, and they sit behind an internal `1a86:8091` 4-port
-  **USB 2.0** hub that also carries the bundled remote's receiver. `drd1` does register
-  a SuperSpeed root hub, but its lane reaches no connector, so that bus is always empty.
-- **4K60 is not reachable on any `dw-hdmi-qp` board**, this one included. The bridge
-  rejects every mode above 340 MHz TMDS because it has no SCDC/scrambling support, so
-  4K30 (297 MHz) is the ceiling even when the display advertises 4K60. This is upstream
+- **Only the blue port beside HDMI can ever carry SuperSpeed**, and whether it does is
+  not yet settled. That port is `drd0`, and it runs SuperSpeed on the usbdp PHY with
+  `snps,dis_rxdet_inp3_quirk` — dwc3's receiver-detection workaround is what turned SS
+  training into a `-62/-71` SetAddress loop, and suppressing it is the lever this board
+  has. No SuperSpeed device has trained on it yet, so treat the port as high speed until
+  you have measured otherwise. The black ports are `drd1`, and they cannot: they sit
+  behind an internal `1a86:8091` 4-port **USB 2.0** hub that also carries the bundled
+  remote's receiver, and `drd1`'s own SuperSpeed lane reaches no connector, so its SS
+  phy is left off the controller entirely.
+- **4K60 is not reachable on any `dw-hdmi-qp` board**, this one included, and you see it
+  in the mode list rather than as a failure: on a 4K60 display the connector offers
+  3840x2160 at 30, 29.97, 25, 24 and 23.98 Hz with 30 preferred, 2560x1440 at 60, and
+  1920x1080 at 60 — no 4K60 entry at all, because the driver rejects the mode before
+  userspace sees it. The bridge rejects every mode above 340 MHz TMDS because it has no
+  SCDC/scrambling support, so 4K30 (297 MHz) is the ceiling even when the display
+  advertises 4K60. This is upstream
   behaviour, not a board or device-tree limitation.
 - **The 3.5 mm analog jack needed both a device-tree and a kernel fix.** Its DAC sits on
   SAI1's `sdo2`, and reaching it takes `rockchip,sai-tx-route = <0 1 0>` — in
@@ -159,6 +181,83 @@ Things the board needs that are worth knowing about:
   The `rk3576-fixes` series carries the driver fix, as patch 103. Verified at the register
   level by driving each SDO port in turn and listening; the device tree alone cannot fix
   this board.
+
+## Hardware video decode and RGA
+
+`h96-max-m9/media-accel` adds the `media-accel-v4l2` feature on top of the base image:
+`ffmpeg-rk` built with V4L2-request decode, and `librga2` with the out-of-tree RGA
+driver the feature's own patch series and kconfig fragment bring in. The base image
+carries neither — the VDPU383 driver is on the SoC layer either way, but nothing in a
+base image can drive it.
+
+```sh
+boot2deb build h96-max-m9/media-accel
+```
+
+This is a **decode-and-2D** capability, not a transcode one. There is no mainline
+encoder for the RK3576, so an ffmpeg that decodes in hardware still encodes on the CPU.
+
+### Decode: `drm_prime` is not optional
+
+```sh
+ffmpeg-rk -hwaccel v4l2request -hwaccel_output_format drm_prime -i in.mkv -f null -
+```
+
+Both flags matter, and the second one is the difference between an accelerator and a
+regression. `-hwaccel v4l2request` alone leaves the frames going back to system memory
+one at a time, and at 1080p the download costs more than software decoding the stream
+would have: the hardware path ends up *slower* than no hardware path. With
+`-hwaccel_output_format drm_prime` the decoded frames stay in DMA-BUF handles, and 4K
+HEVC runs at real time for about 1/130th of the CPU.
+
+So anything that consumes the output has to speak DMA-BUF — a KMS plane, a GL or Vulkan
+importer, or librga. A filter chain that cannot takes the download and the loss with it.
+
+### H.264 decode is not reliable on this SoC
+
+HEVC is bit-exact against the software decoder on every run. **H.264 is not**: roughly
+one decode session in three to six comes out visibly wrong, and when it does the whole
+session is wrong — it diverges from the first frame at about 17 dB PSNR rather than
+glitching in places. Re-running the same file usually succeeds, which is what makes it
+easy to miss.
+
+The fault is latched when the decoder powers up, not accumulated during a decode, so no
+warm-up or sacrificial first frame avoids it; holding the block resumed across a batch
+is clean, and letting it power-gate between decodes is not. It is specific to this
+SoC's decoder generation — the same clips on an RK3588 are correct in every session.
+
+Until it is fixed, do not rely on hardware H.264 here. The software decoder is correct
+and quick enough on eight cores — about 160 fps at 1080p and 40 at 4K — and HEVC in
+hardware is unaffected. This is stated as a caveat on the SoC, so it prints at the end
+of any build for this board and appears in the
+[support matrix](../reference/support-matrix.md#caveats).
+
+### RGA: pass it DMA-BUF file descriptors
+
+Both RGA2 cores work, and `librga2` is installed for programs that speak its API.
+ffmpeg is not one of them here: `scale_rkrga` and `vpp_rkrga` need MPP, which needs a
+vendor kernel framework mainline does not have, so this ffmpeg scales on CPU or GPU and
+RGA is reached directly.
+
+**Import buffers with `importbuffer_fd`, never `wrapbuffer_virtualaddr`.** The
+virtual-address path builds an IOMMU mapping per call over ordinary process memory and
+faults roughly a third of jobs — the job times out after a second, the core is soft
+reset, and the destination is left untouched. It is also about seven times slower when
+it does work. The same operations over DMA-BUF run clean on both cores.
+
+One consequence worth knowing if a client dies without a message: librga does not fail
+gracefully when it cannot open `/dev/rga` or a DMA-BUF heap — it segfaults. The image
+ships udev rules that make both accessible, so a segfault on a board where they were
+removed is a permissions problem rather than a library bug.
+
+### 10-bit stops at the decoder
+
+10-bit content decodes in hardware, but the VDPU383 writes `NV15` — packed 10-bit 4:2:0
+— and nothing downstream in this image can take it. Vulkan has no such format, and
+neither Mesa nor ffmpeg's filters can import it. A 10-bit transcode therefore converts
+on the CPU. RGA can convert `NV15` to `P010` for a program that drives it directly, and
+the display controller scans `NV15` out unconverted, so playback straight to a KMS plane
+is unaffected.
 
 ## HDMI-CEC
 

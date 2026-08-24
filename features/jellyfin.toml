@@ -1,11 +1,23 @@
 # features/jellyfin.toml — the Jellyfin media server, an *application* feature.
-# Named for the app, not for any hardware: it is portable (no
-# `requires_soc` / `requires_arch` gate) and carries no transcode stack of its
+# Named for the app, not for any hardware: it carries no transcode stack of its
 # own. Hardware-accelerated transcode comes from composing this with a capability
 # feature that matches the target — e.g. `media-accel-rockchip` on an RK35xx board
 # — plus the glue feature that points Jellyfin at that stack's encoder
-# (`jellyfin-rockchip`); see recipes/turing-rk1/jellyfin-forky.toml. Without them,
-# Jellyfin still installs and runs; transcode falls back to software.
+# (`jellyfin-rockchip`); see recipes/turing-rk1/jellyfin-forky.toml.
+#
+# One of those siblings is required, not optional. This feature installs no FFmpeg
+# at all (see `packages` below), and Jellyfin refuses to start without a working
+# one — it validates the encoder during startup and throws rather than running
+# with transcoding disabled. So an image composing `jellyfin` alone has a server
+# that exits at boot; something has to put an encoder on the image and name it.
+#
+# It is `arm64` only, and that gate comes from the vendored ICU deb below, not
+# from anything about the application: an `extra_debs` entry pins one file by
+# sha256, the local apt repo takes exactly one architecture, and a `.deb` whose
+# `Architecture` is neither the build's nor `all` fails the build rather than
+# being skipped. So the arch-pinned bytes decide the feature's arch. Supporting
+# `amd64` means a sibling feature carrying that arch's deb; the rest of this file
+# is arch-neutral and would be shared.
 #
 # Jellyfin is not in the Debian mirror, so this feature adds its signed upstream
 # apt repository (`[[apt_sources]]`) — apt then resolves the packages and their
@@ -14,31 +26,64 @@
 # Jellyfin's releases: a network-facing server that could only be updated by
 # reflashing would be the worse system. The repo's signing key is a build-host prerequisite,
 # vendored under blobs/keyrings/ like the Debian archive keyring; see
-# blobs/keyrings/README.md. An overlay tree at features/jellyfin/overlay/ is
-# merged if present; this feature ships none — configuration that presumes a
-# particular transcode stack belongs to the glue feature, not here.
+# blobs/keyrings/README.md.
+#
+# The overlay tree at features/jellyfin/overlay/ carries one thing, and it is the
+# consequence of the no-bundled-FFmpeg decision rather than a transcode-stack
+# setting: a jellyfin.service drop-in that removes the `--ffmpeg=` argument
+# Debian puts on the command line, pointing at the jellyfin-ffmpeg this feature
+# does not install. Without it no configured encoder can be reached, because the
+# command-line path outranks the config file. Which encoder to name is still the
+# glue feature's business, not this one's; see features/jellyfin/README.md.
 description = "Jellyfin media server (composes with a media-accel-* capability feature)"
+requires_arch = ["arm64"]
+
+# The encoder requirement, enforced rather than documented. This feature installs no
+# FFmpeg, and Jellyfin exits at startup rather than running with transcoding
+# disabled, so `jellyfin` with no provider is a bootable image whose server is dead —
+# the kind of composition that is cheapest to reject at resolve. Both
+# `media-accel-rockchip` (RK3588) and `media-accel-v4l2` (RK3576) provide it.
+#
+# A capability name, not a list of provider names, so a provider for another platform
+# satisfies this without editing this file. It validates the composition and does not
+# complete it: nothing is added to the selection, and the recipe still names every
+# feature (non-goal: no provider auto-resolution).
+requires_capability = ["ffmpeg"]
+
+# What this feature supplies. The glue feature that points Jellyfin at a particular
+# transcode stack — `jellyfin-rockchip` — configures a server it does not install, so
+# on its own it seeds `/etc/jellyfin/encoding.xml` into an image with no Jellyfin to
+# read it. Naming the capability here is what lets that feature require it, rather
+# than reasoning that nobody would select the glue without the application.
+provides = ["jellyfin"]
 
 # The server and the web client, not the `jellyfin` metapackage. The metapackage's
-# Depends line is `jellyfin-server, jellyfin-web, jellyfin-ffmpeg8`, so it drags in
+# Depends line is `jellyfin-server, jellyfin-web, jellyfin-ffmpeg7`, so it drags in
 # a second complete FFmpeg; `jellyfin-server` itself only *Recommends*
-# `jellyfin-ffmpeg8 | ffmpeg`, and this builder never installs Recommends. Naming
+# `jellyfin-ffmpeg7 | ffmpeg`, and this builder never installs Recommends. Naming
 # the two real packages keeps the bundled FFmpeg out, which is what an image that
-# supplies its own encoder wants: `jellyfin-ffmpeg8` is linked against library
+# supplies its own encoder wants: `jellyfin-ffmpeg7` is linked against library
 # sonames its own pocket carries, so pulling it onto a different Debian suite drags
 # that pocket's versions in behind it and perturbs the codec libraries the rest of
 # the image resolved against.
 #
 # The consequence is deliberate and worth stating: with no bundled FFmpeg there is
-# no fallback encoder. An image that composes this feature and gets the encoder
-# path wrong has no transcoding at all, rather than silently falling back to a
-# binary that cannot reach the hardware.
+# no fallback encoder, and no encoder means no server. Jellyfin validates the path
+# it resolves and throws if it does not run, so an image that composes this feature
+# and gets the encoder path wrong fails to start — rather than falling back to a
+# binary that cannot reach the hardware, or starting with transcoding switched off.
+# The overlay drop-in above is what makes that path come from the config file; the
+# value in it comes from a glue feature.
 packages = ["jellyfin-server", "jellyfin-web"]
 
 # Jellyfin keys its pockets on the base OS codename, and publishes no `forky`
 # pocket — `https://repo.jellyfin.org/debian/dists/forky/` is absent, while
-# `trixie` is current and lists `Architectures: amd64 arm64`. The trixie packages
-# install and run on a forky rootfs. Retarget when a forky pocket ships.
+# `trixie` is current and lists `Architectures: amd64 arm64`. So a forky image
+# takes trixie packages, and they are self-contained .NET publishes that link the
+# *system* ICU by soname: `jellyfin-server` declares `Depends: libicu76`, which is
+# trixie's ICU. Forky ships `libicu78` and carries no `libicu76` at all, so the
+# dependency is unsatisfiable from the mirror — see the `extra_debs` entry below,
+# which supplies exactly that one library. Retarget both when a forky pocket ships.
 #
 # `main` only. The repository also publishes an `unstable` component — Jellyfin's
 # pre-release channel, which their install instructions enable so that release
@@ -49,3 +94,24 @@ uri        = "https://repo.jellyfin.org/debian"
 suite      = "trixie"
 components = ["main"]
 signed_by  = "jellyfin.gpg"
+
+# trixie's `libicu76`, the ICU the Jellyfin packages above were built against.
+#
+# Nothing here names it for install: `jellyfin-server`'s own `Depends: libicu76`
+# does, once the bytes are in the local apt repo for the solve to find. That is
+# the whole point of routing it through the repo rather than a `dpkg -i` — the
+# dependency is *satisfied*, so the image's apt stays consistent.
+#
+# Without it the failure is much larger than one dead service. The resolver drops
+# a dependency group it cannot satisfy and dpkg runs `--force-depends`, so
+# `jellyfin-server` installs and is marked configured; then it FailFasts at
+# startup with "Couldn't find a valid ICU package installed", **and every
+# subsequent `apt install` on the device fails** on the unmet dependency —
+# measured on hardware, an image that could not install `bc`.
+#
+# `libicu76` and forky's `libicu78` coinstall: ICU is soname-versioned precisely
+# so several runtimes can sit side by side, and nothing else in the image links
+# the older one. The pin is the sha256; the URL is where those bytes came from.
+[[extra_debs]]
+url    = "http://deb.debian.org/debian/pool/main/i/icu/libicu76_76.1-4+b1_arm64.deb"
+sha256 = "ff00a45df31aba9990fdb281a8def3a06df8a67d97b845b20af4b4796d3c6694"

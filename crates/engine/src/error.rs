@@ -25,6 +25,37 @@ pub enum EngineError {
         os: String,
     },
 
+    /// A staged build root does not satisfy its own declared dependencies.
+    ///
+    /// The base is provisioned once and cached; the layer over it is resolved against
+    /// the archive as it stands when the build runs. When those two describe different
+    /// archive states, a layer package can install whose declared dependency the base
+    /// does not meet. Nothing fails at that moment — the failure arrives later as a
+    /// link or compile error naming a library that is present and correct, which sends
+    /// a reader after the wrong thing entirely.
+    ///
+    /// Raised as soon as the layer is staged, naming the package, the constraint it
+    /// declared, and what is actually installed, so the skew is stated rather than
+    /// inferred. Dropping the cached build roots is what clears it: they are provisioned
+    /// again against the archive as it stands, and
+    /// [`build_root_trees`](crate::sandbox::build_root_trees) is the set that has to go.
+    ///
+    /// `RECIPE` in the message is a placeholder — the engine knows the stage that staged
+    /// the layer, not the build point the caller named it under.
+    #[error(
+        "the {stage} build root does not satisfy its own dependencies — the cached base \
+         and the freshly resolved layer describe different archive states:\n{}\n\
+         Drop the cached build roots so the next build provisions them against the \
+         current archive: `boot2deb clean RECIPE --build-roots`.",
+        .unmet.join("\n")
+    )]
+    LayerIncoherent {
+        /// The stage whose root was staged (e.g. `ffmpeg`).
+        stage: String,
+        /// One rendered line per unmet dependency, already ordered.
+        unmet: Vec<String>,
+    },
+
     /// `git` could not be spawned at all (not installed, not on `PATH`).
     #[error("failed to run git ({context}): {source}")]
     GitSpawn {
@@ -241,6 +272,19 @@ pub enum EngineError {
         source: ferroday_cage::Error,
     },
 
+    /// A `boot2deb try` run failed: the guest never reached a login prompt,
+    /// authentication with the generated password was refused, a unit failed,
+    /// the selftest failed, or first-boot re-ran on the second boot. Carries
+    /// the phase and what the console showed — the message is the whole
+    /// diagnosis, since the guest is gone by the time the error is read.
+    #[error("try: {context}: {message}")]
+    TryBoot {
+        /// What the harness was doing (`first boot`, `log in to the guest`, …).
+        context: String,
+        /// What went wrong, with the console or QEMU stderr tail where useful.
+        message: String,
+    },
+
     /// The rootless Debian bootstrap (ferroday-cage's in-process provisioner)
     /// could not produce the target-arch rootfs — a configuration error, a
     /// download/verification failure, or a failed in-cage dpkg wave. Carries the
@@ -280,6 +324,37 @@ pub enum EngineError {
     EmptyArgv {
         /// What the engine was trying to run inside the sandbox.
         context: String,
+    },
+
+    /// [`shell::open`](crate::shell::open) was called with a standard input that is
+    /// not a terminal.
+    ///
+    /// The session is a relay between the caller's terminal and the sandbox's own, so
+    /// it has two ends: without a terminal on this side there is nothing to put in raw
+    /// mode, no window size to follow, and no way to type into the sandbox. Refused at
+    /// the start rather than discovered as a session that echoes nothing.
+    #[error(
+        "`shell` needs a terminal on standard input, and this one is not a terminal. \
+         It relays the caller's terminal to a pseudoterminal inside the sandbox, so \
+         there has to be one to relay. To run a command in the same root without a \
+         terminal, use the build stages."
+    )]
+    ShellNeedsTerminal,
+
+    /// An operation on the caller's own terminal failed — reading its window size,
+    /// putting it in raw mode, restoring it, or the `signalfd` the session follows
+    /// `SIGWINCH` through.
+    ///
+    /// Distinct from [`Sandbox`](Self::Sandbox), which carries what the sandbox
+    /// library refused: this is the *caller's* end of the relay, which the library
+    /// never touches.
+    #[error("failed to {context}: {source}")]
+    Terminal {
+        /// What was being done to the caller's terminal, as a verb phrase.
+        context: &'static str,
+        /// The underlying `errno`.
+        #[source]
+        source: std::io::Error,
     },
 
     /// A build subprocess ran but exited non-zero.
@@ -566,6 +641,71 @@ pub enum EngineError {
         /// What the engine was doing (e.g. `add rootfs partition`).
         context: String,
         /// The crate's error rendered to text.
+        detail: String,
+    },
+
+    /// The named path is not an image artifact this engine reads or writes: an
+    /// extension outside the set a build produces, or a compressed stream whose
+    /// container does not parse.
+    #[error("cannot read {target} as an image: {detail}")]
+    ImageFileInvalid {
+        /// The path as the caller named it.
+        target: String,
+        /// Why it is not a readable image.
+        detail: String,
+    },
+
+    /// The written file handed back fewer bytes than were written — a truncated
+    /// copy, which a filesystem that ran out of space mid-write (or a medium that
+    /// silently drops writes) produces.
+    #[error(
+        "verification failed on {target}: wrote {expected_bytes} bytes but could read \
+         back only {read_bytes} — the destination did not keep what it acknowledged"
+    )]
+    ImageVerifyShortRead {
+        /// The written file.
+        target: String,
+        /// Bytes the write put down.
+        expected_bytes: u64,
+        /// Bytes the re-read produced before EOF.
+        read_bytes: u64,
+    },
+
+    /// The written bytes read back differently than they were written. The write
+    /// itself succeeded, so something between the stream and the re-read changed
+    /// the data.
+    #[error(
+        "verification failed on {target}: the re-read bytes hash to {actual}, the \
+         written stream hashed to {expected} — the destination corrupted the image"
+    )]
+    ImageVerifyDigest {
+        /// The written file.
+        target: String,
+        /// SHA-256 of the written stream.
+        expected: String,
+        /// SHA-256 of what came back.
+        actual: String,
+    },
+
+    /// The partition table in the written file does not match the one the source
+    /// artifact carries (or could not be read back at all).
+    #[error("partition-table verification failed on {target}: {detail}")]
+    ImageVerifyGpt {
+        /// The written file (or the artifact, for the planned-table half).
+        target: String,
+        /// What differed or failed to parse.
+        detail: String,
+    },
+
+    /// A `press` tree addition cannot be placed: an invalid destination path, a
+    /// destination the image holds a directory at, an unreadable source file, or
+    /// two additions claiming one path. Named per destination so a multi-flag
+    /// press fails pointing at the flag that is wrong.
+    #[error("cannot add {dest} to the image: {detail}")]
+    PressAddition {
+        /// The in-image destination path the addition named.
+        dest: String,
+        /// Why it cannot be placed.
         detail: String,
     },
 

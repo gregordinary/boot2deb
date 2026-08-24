@@ -6,7 +6,7 @@
 # the `speedy-libreboot` board profile and the 32 MiB kernel slot that firmware's
 # buffer allows, which puts the rootfs at 76 MiB and leaves room for the display
 # stack in the initramfs — so a failed boot is something you can read rather than a
-# blank screen. From `rk3288-libre-7.1` it takes the deblobbed 7.1.y tree, and with
+# blank screen. From `rk3288-libre-7.2` it takes the deblobbed 7.2.y tree, and with
 # it the loss of the SoC layer's Broadcom firmware and an apt that offers `main`
 # alone.
 #
@@ -16,7 +16,7 @@
 # Debian `main`, and is already on the image. See asus-c201/libre-forky for the
 # stock-firmware sibling, which boots on either firmware.
 device     = "asus-c201-libreboot"
-kernel     = "rk3288-libre-7.1"
+kernel     = "rk3288-libre-7.2"
 suite      = "forky"
 features   = []                # a base image, same surface as the other C201 recipes
 layout     = "combined"
@@ -25,12 +25,12 @@ layout     = "combined"
 # and first boot grows the partition to fill the card regardless.
 image_size = "2G"
 
-# Assessed over the same pin as asus-c201/libre-forky; see that recipe for why the
-# deblobbed tree does not move this board. Neither opt-in — the firmware or the
+# Assessed over the same v7.2 pin as asus-c201/libre-forky; see that recipe for why
+# the deblobbed tree does not move this board. Neither opt-in — the firmware or the
 # kernel — touches the other's evidence, so this stands where its two parents do.
 [support]
 status = "expected"
-date   = "2026-08-04"
+date   = "2026-08-21"
 caveats = [
   "The internal BCM4354 Wi-Fi and Bluetooth do not work. linux-libre removes brcmfmac's firmware request and btbcm's patchram filename, and this radio is the one part of the board that cannot run without a blob. An AR9271 USB adapter (firmware-ath9k-htc, in Debian main and already installed) is the supported way onto a network.",
 ]

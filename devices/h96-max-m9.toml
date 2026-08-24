@@ -73,8 +73,8 @@ packages                = [
     "libgbm1",
 ]
 
-supported_kernels       = ["rk3576-mainline-7.1"]
-default_kernel          = "rk3576-mainline-7.1"
+supported_kernels       = ["rk3576-mainline-7.2"]
+default_kernel          = "rk3576-mainline-7.2"
 # The u-boot variant is its own axis. This board uses the SoC-generic display
 # u-boot for its shipped image (rk3576-display), and a board-specific util tool
 # that adds this board's ethernet (h96-max-m9-util, a u-boot-only recipe). The
@@ -98,6 +98,41 @@ image_size              = "2G"
 # What no build lifts on this board, beyond what socs/rk3576.toml already states of
 # the silicon. Rendered in the support matrix and printed at the end of a build.
 caveats = [
-  "No port on the box delivers USB 3.0. The blue port beside HDMI is capped to high speed in the board device tree, because SuperSpeed training collapses into a SetAddress loop that takes the boot medium down with it; the black ports sit behind an internal USB 2.0 hub, and their SuperSpeed lane reaches no connector.",
+  "Only the blue port beside HDMI carries USB 3.0. It reaches 5 Gbps and holds ~154 MB/s over sustained reads. The black ports never will -- they sit behind an internal USB 2.0 hub, and their SuperSpeed lane reaches no connector.",
+  "A drive in the blue port that enumerates at 480 Mb/s is usually not seated. With the board sitting back from the enclosure's front panel a plug bottoms out on the case before the connector's recessed SuperSpeed contacts mate, so USB 2.0 works perfectly and SuperSpeed is silent. Push the plug fully home, or reseat the board against the panel.",
   "There is no SD-card slot: it is depopulated on this box. eMMC and USB are the only storage.",
 ]
+
+# What this board must present at runtime, beyond the SoC checks it inherits.
+# Each of these is a subsystem the board's own DT wires up, so its absence is a
+# regression in this device's config, not the silicon's.
+#
+# The three sound cards, by the names the DT gives them. The analog card in
+# particular has been silently dead before (an unrouted SAI path), so a card
+# registering is the minimum bar — it says the DT and the codec probe agree.
+[[expect]]
+check = "sound-card"
+name  = "H96 Analog"
+
+[[expect]]
+check = "sound-card"
+name  = "H96 SPDIF"
+
+[[expect]]
+check = "sound-card"
+name  = "HDMI"
+
+# HDMI-CEC (the cec-* units drive it) and the IR receiver (ir-keymap-h96
+# loads its keymap) — both exist on a fresh boot before any unit is enabled.
+[[expect]]
+check = "devnode"
+path  = "/dev/cec0"
+
+[[expect]]
+check = "devnode"
+path  = "/dev/lirc0"
+
+# The NPU this board's device_config_fragments + rk3576-npu series enable.
+[[expect]]
+check = "devnode"
+path  = "/dev/accel/accel0"

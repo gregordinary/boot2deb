@@ -194,6 +194,26 @@ mod tests {
     }
 
     #[test]
+    fn a_gz_build_pipes_through_zcat() {
+        // The pipe is read off the recorded container, so a `.gz` image has to reach
+        // the operator with the reader that can actually open it — handing a `.gz`
+        // to `xzcat` produces a command that fails at the worst moment.
+        let gz = [compressed(
+            "/out/asus-c201-libreboot-mainline-forky.img",
+            ImageCompression::Gz,
+        )];
+        let lines = hint(&flashables(
+            &combined("asus-c201-libreboot-mainline-forky"),
+            &gz,
+        ));
+        assert_eq!(
+            lines[1].trim(),
+            "zcat /out/asus-c201-libreboot-mainline-forky.img.gz | sudo dd \
+             of=/dev/sdX bs=4M status=progress conv=fsync"
+        );
+    }
+
+    #[test]
     fn an_uncompressed_image_is_written_without_a_pipe() {
         let lines = hint(&flashables(&combined("x"), &[]));
         assert_eq!(

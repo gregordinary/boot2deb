@@ -72,10 +72,20 @@ metapackage, so `jellyfin-ffmpeg` never lands. It would be a second complete FFm
 that cannot reach the hardware, and it pulls its own pocket's library versions in
 behind it.
 
-The consequence is worth knowing: there is no fallback encoder. If you point
-Jellyfin at a path that does not exist, you get no transcoding at all rather than
-slow transcoding. If you want the bundled build available as a safety net, add
-`jellyfin-ffmpeg8` to a copy of the `jellyfin` feature's package list.
+The consequence is worth knowing: there is no fallback encoder, and on this
+application no encoder means no server. Jellyfin validates the FFmpeg path during
+startup and exits if the binary does not run — it does not start with transcoding
+switched off. So if you point it at a path that does not exist, the service dies at
+boot. Check with `journalctl -u jellyfin`; the giveaway is
+`Failed to find valid ffmpeg`. If you want the bundled build available as a safety
+net, add `jellyfin-ffmpeg7` to a copy of the `jellyfin` feature's package list.
+
+**Set the path in the dashboard, not on the command line.** The image ships a
+`jellyfin.service` drop-in that clears the `--ffmpeg=` argument Debian normally
+passes, precisely so that Jellyfin reads the path from its config — which is what
+**Dashboard > Playback > Transcoding > FFmpeg path** edits. Putting a path back on
+the command line (by editing `/etc/default/jellyfin-encoder`) would override that
+field and leave the dashboard silently ineffective.
 
 ## Keeping it updated
 
@@ -122,8 +132,18 @@ have. The ones that matter (RKVENC, RKVENC_CCU, RKVDEC, JPEG_DEC) are present.
 
 ## Status
 
-Both recipes are `experimental`. The image builds and the pieces are individually
-proven on hardware, but the transcode path has not yet been exercised end to end
-through Jellyfin on the board. See the
-[support matrix](reference/support-matrix.md) for what each recipe has been taken
-through.
+Both recipes are `experimental`, and the gap is Jellyfin rather than the hardware
+underneath it.
+
+The transcode path itself is measured on a boot2deb-built RK1 image. `h264_rkmpp` and
+`hevc_rkmpp` produce correct streams — every frame of a 90-frame clip in both codecs,
+from software frames and through `hwupload` alike, verified against a stock FFmpeg on
+another machine rather than against the build that produced them. Hardware decode
+through `-hwaccel v4l2request` cuts decode CPU cost by 53x at 1080p and up to 143x at
+4K, and HEVC decode is bit-exact against software.
+
+What has not been done is driving that path *from Jellyfin* on the board: playing a
+file through the server and confirming the transcode it launches is the accelerated
+one. Until that happens, treat the settings above as configured rather than proven.
+See the [support matrix](reference/support-matrix.md) for what each recipe has been
+taken through.

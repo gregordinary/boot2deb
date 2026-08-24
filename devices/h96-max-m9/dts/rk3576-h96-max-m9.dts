@@ -303,12 +303,12 @@
  * a SATA port, and (for combphy1_psu alone) usb_drd1's SuperSpeed lane. This board
  * brings up no PCIe and no SATA, so combphy0_ps has no consumer at all and stays
  * disabled; combphy1_psu is enabled because usb_drd1_dwc3 names it as its
- * "usb3-phy". That PHY logs `wait phy status ready timeout` on every boot and no
- * device has ever trained at SuperSpeed on this board -- see the usb_drd1 note.
+ * "usb3-phy", which that controller cannot do without — see its node.
  *
- * Keeping it enabled may also be what keeps usb_drd1's *high* speed working: the
- * SoC design guide (2.3.4.2) states that with this combo PHY muxed to PCIe or
- * SATA, the controller's USB2 PHY is unusable as well.
+ * Keeping it in its USB mux is also what keeps usb_drd1's *high* speed working: the
+ * SoC design guide (2.3.4.2) states that with this combo PHY muxed to PCIe or SATA,
+ * that controller's USB2 PHY is unusable as well, and the box's four black ports
+ * are its.
  */
 &combphy1_psu {
 	status = "okay";
@@ -1015,19 +1015,22 @@
 };
 
 /*
- * The USB 3.0 Type-A port, run as a High-Speed-only host on the USB2 PHY
- * alone. SuperSpeed link training on this board is marginal: a device
- * enumerates at SS, then collapses into a -62/-71 SetAddress loop the
- * host cannot reset out of, taking the boot medium with it. Capping the
- * speed requires BOTH properties: `maximum-speed` with the usbdp phy
- * still attached leaves the port dead (no connect at any speed), so the
- * SS phy is dropped from `phys` as well — the same pairing u-boot's
- * rk3576-generic.dts uses for this controller. To re-test SS (after
- * usbdp PHY tuning or with different hardware): delete both overrides
- * and re-enable &usbdp_phy with `rockchip,dp-lane-mux = <2 3>`.
- */
-/*
- * `dis_u2_susphy_quirk` on both host controllers to fix an xHC resume error
+ * The USB 3.0 Type-A port, the only connector on the box a SuperSpeed lane reaches:
+ * drd1's SS lane is routed nowhere, and its ports sit behind an internal USB 2.0 hub
+ * besides. It runs at SuperSpeed on the usbdp PHY, and needs nothing beyond the SoC
+ * dtsi to do it — measured at 5 Gbps, ~154 MB/s sustained over 92 GB of continuous
+ * reads with no link error, which is the drive's flash rather than the link.
+ *
+ * A device landing at 480 Mb/s here is a mechanical fault, not a configuration one:
+ * with the board seated back from the enclosure's front panel, a plug bottoms out on
+ * the case before the connector's five recessed SuperSpeed contacts mate, while the
+ * four USB 2.0 contacts at the leading edge do. That enumerates flawlessly at high
+ * speed and leaves the SuperSpeed root hub completely silent — no failed training, no
+ * error, nothing — because receiver detection is a DC test for the device's
+ * termination and an unmated pair simply reads as absent. Check the seating before
+ * touching this node.
+ *
+ * `dis_u2_susphy_quirk` on both host controllers fixes an xHC resume error
  * (`xHC error in resume, USBSTS 0x401, Reinit`) after s2idle. The SoC dtsi sets
  * `dis_enblslpm_quirk`, which makes dwc3 assert BOTH the ENBLSLPM and SUSPHY bits
  * of GUSB2PHYCFG on host suspend, but the resume path clears SUSPHY only when
@@ -1036,31 +1039,41 @@
  */
 &usb_drd0_dwc3 {
 	dr_mode = "host";
-	maximum-speed = "high-speed";
-	phys = <&u2phy0_otg>;
-	phy-names = "usb2-phy";
 	snps,dis_u2_susphy_quirk;
 	status = "okay";
 };
 
 /*
- * The USB 2.0 Type-A port. It keeps the SoC dtsi's SuperSpeed wiring -- the
- * combphy1_psu "usb3-phy" -- so the controller registers a SuperSpeed root hub,
- * but that PHY never comes ready (`2b060000.phy: wait phy status ready timeout`
- * on every boot) and nothing has enumerated above high speed here. Whether the
- * SS lane reaches a connector at all is unconfirmed; settle it by plugging a
- * SuperSpeed device into each port and reading which bus it lands on. If this
- * port is high-speed-only, drop the SS phy the way usb_drd0_dwc3 does above.
+ * The black USB 2.0 Type-A ports, which reach this controller through an internal
+ * 1a86:8091 four-port USB 2.0 hub that also carries the bundled remote's receiver.
  *
- * Do not disable combphy1_psu along with it without testing that separately.
- * Combo PHY 1 is shared with PCIe1 and SATA1, and the SoC design guide (2.3.4.2)
- * states that with the mux set to PCIe or SATA the USB2 PHY on this controller
- * is unusable too -- so the enabled combphy may be what keeps the USB 2.0 port
- * alive, not just its SuperSpeed.
+ * It keeps the SoC dtsi's SuperSpeed wiring — the combphy1_psu "usb3-phy" — and has
+ * to. Nothing on RK3576 gates this controller's SuperSpeed port: the combo PHY
+ * driver carries no `u3otg1_port_en` for this SoC, so xHCI enumerates the port
+ * whether or not a PHY is attached, and a PORTSC access with the PIPE interface
+ * unpowered takes an external abort that arrives as an SError and panics the kernel
+ * during root-hub init. Dropping the SS phy from `phys` is therefore not a way to
+ * retire the port; it is a way to make the machine unbootable.
+ *
+ * The lane the PHY drives reaches no connector — measured by plugging a SuperSpeed
+ * device into every port on the box and reading which bus it lands on — so the port
+ * never trains and `2b060000.phy: wait phy status ready timeout` on every boot is
+ * that. The message is cosmetic.
  */
 &usb_drd1_dwc3 {
 	dr_mode = "host";
 	snps,dis_u2_susphy_quirk;
+	status = "okay";
+};
+
+/*
+ * The USB/DP combo PHY, carrying usb_drd0's SuperSpeed lane. `rockchip,dp-lane-mux`
+ * assigns lanes 2 and 3 to DisplayPort and leaves 0 and 1 to USB3, which is the
+ * split the four-lane PHY needs to serve USB at all; the board routes no DP
+ * connector, so nothing consumes the two DP lanes.
+ */
+&usbdp_phy {
+	rockchip,dp-lane-mux = <2 3>;
 	status = "okay";
 };
 

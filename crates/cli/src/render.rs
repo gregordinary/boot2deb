@@ -255,16 +255,16 @@ pub(crate) fn human_size(bytes: u64) -> String {
 /// for an artifact that has neither — and a blank locale line reads as a bug rather
 /// than as an axis that does not exist here.
 pub(crate) fn print_build(b: &ResolvedBuild) {
-    let image = b.produces_image();
+    let image = b.image.as_ref();
     println!("device       : {} — {}", b.device, b.description);
     println!("arch / soc   : {} / {}", b.arch, b.soc);
     println!("boot method  : {}", b.boot_method);
-    if !image {
+    if image.is_none() {
         println!("deliverable  : u-boot only — no kernel, suite, rootfs, or image");
     }
     // A kernel prints only what it has: a compiled one is described by its source and
     // config inputs, a distro one by the package that installs it.
-    match &b.kernel {
+    match image.map(|i| &i.kernel) {
         Some(ResolvedKernel::Compiled(k)) => {
             println!(
                 "kernel       : {} ({}, base {})",
@@ -298,61 +298,61 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
         // Stated once above; a second "(none)" here would be noise.
         None => {}
     }
-    if let Some(s) = &b.suite {
-        println!("suite        : {s}");
+    if let Some(i) = image {
+        println!("suite        : {}", i.suite);
     }
     // Which suite's `dpkg` archives this build's `.deb`s. Printed only where it is not
     // the image's own — that is the common case and would just restate the line above.
     // Where it differs, it is the only suite this build has, and it decides both which
     // root gets provisioned and the artifact-cache key of every `.deb` archived in it.
-    if b.suite.as_deref() != Some(b.packaging_suite.as_str()) {
+    if image.map(|i| i.suite.as_str()) != Some(b.packaging_suite.as_str()) {
         println!(
             "packaged by  : {} (the device default — this deliverable resolves no suite \
              of its own)",
             b.packaging_suite
         );
     }
-    if image {
+    if let Some(i) = image {
         println!(
             "features     : {}",
-            if b.features.is_empty() {
+            if i.features.is_empty() {
                 "-".to_string()
             } else {
-                b.features.join(", ")
+                i.features.join(", ")
             }
         );
-        println!("rootfs pkgs  : {}", b.rootfs_packages.join(", "));
-    }
-    if !b.apt_sources.is_empty() {
-        println!(
-            "apt sources  : {}",
-            b.apt_sources
-                .iter()
-                .map(|s| format!("{} ({})", s.name, s.uri))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    if !b.extra_debs.is_empty() {
-        println!(
-            "extra debs   : {}",
-            b.extra_debs
-                .iter()
-                .map(|d| format!("{} ({})", d.locator_label(), short(&d.sha256)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        println!("rootfs pkgs  : {}", i.rootfs_packages.join(", "));
+        if !i.apt_sources.is_empty() {
+            println!(
+                "apt sources  : {}",
+                i.apt_sources
+                    .iter()
+                    .map(|s| format!("{} ({})", s.name, s.uri))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !i.extra_debs.is_empty() {
+            println!(
+                "extra debs   : {}",
+                i.extra_debs
+                    .iter()
+                    .map(|d| format!("{} ({})", d.locator_label(), short(&d.sha256)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
     // The layout is read on both paths: it decides whether the bootloader is written
     // into the image's raw gap or emitted as its own file.
     println!("layout       : {}", b.layout);
-    if image {
-        println!("image size   : {}", b.image_size);
+    if let Some(i) = image {
+        println!("image size   : {}", i.image_size);
         // Printed only when the build declares one: a line reading "none" on every
         // other board would imply an axis most images have no opinion about. Each
         // entry names the disk it looks for, so the operator can see what first boot
         // will and will not touch before flashing.
-        for v in &b.data_volumes {
+        for v in &i.data_volumes {
             let source = match &v.match_ {
                 boot2deb_core::datavolume::VolumeMatch::Kind(k) => k.as_str().to_string(),
                 boot2deb_core::datavolume::VolumeMatch::Device(d) => d.clone(),
@@ -368,28 +368,28 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
                 v.fstype.fstab_type()
             );
         }
-        println!("hostname     : {}", b.hostname);
+        println!("hostname     : {}", i.hostname);
         println!(
             "locale       : {} (generated: {})",
-            b.locale,
-            b.locales_generate.join(", ")
+            i.locale,
+            i.locales_generate.join(", ")
         );
-        println!("timezone     : {}", b.timezone);
+        println!("timezone     : {}", i.timezone);
         // Naming the pool on the empty case rather than printing nothing: "no servers
         // configured" and "no time source" look identical otherwise, and only the
         // first is true.
         println!(
             "ntp servers  : {}",
-            if b.ntp_servers.is_empty() {
+            if i.ntp_servers.is_empty() {
                 "(Debian fallback pool)".to_string()
             } else {
-                b.ntp_servers.join(", ")
+                i.ntp_servers.join(", ")
             }
         );
         // A headless board has no keymap and prints none — an empty line would suggest
         // the knob exists and was left blank, when in fact Debian's default is what
         // ships.
-        if let Some(k) = &b.keymap {
+        if let Some(k) = &i.keymap {
             let mut km = k.layout.clone();
             if !k.variant.is_empty() {
                 km.push_str(&format!(" ({})", k.variant));
@@ -399,14 +399,14 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
         // Who can reach the finished image, on one line. The key count rather than the
         // keys: a single line stays scannable, and the keys themselves are in the
         // recipe the reader just resolved.
-        let keys = match b.ssh_authorized_keys.len() {
+        let keys = match i.ssh_authorized_keys.len() {
             0 => "no ssh keys".to_string(),
             1 => "1 ssh key".to_string(),
             n => format!("{n} ssh keys"),
         };
         println!(
             "access       : sudo {}, {}-char first-boot password, {keys}",
-            b.sudo, b.first_boot_password_length,
+            i.sudo, i.first_boot_password_length,
         );
         println!("dtb          : {}", b.kernel_dtb);
         // Only a board carrying its own (not-yet-upstream) device tree has sources to
@@ -463,27 +463,22 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     }
     // The SoC's initramfs module list is a kernel-axis value, so it has no meaning
     // for a build that compiles no kernel.
-    if image {
+    if image.is_some() {
         println!("modules      : {}", b.modules.join(", "));
     }
     println!("cross-compile: {}", b.cross_compile);
-    if !image {
+    let Some(i) = image else {
         return;
-    }
+    };
     // Media-accel source trees print only when the build compiles the stack; a base
     // build reports it plainly instead of empty source lines.
-    match (&b.userspace, &b.ffmpeg) {
-        (Some(us), Some(ff)) => {
-            // One line per tree the SoC declares — which trees appear is itself the
-            // useful signal, since it says what this SoC's stack is made of.
-            for (label, src) in [
-                ("mpp          ", &us.mpp),
-                ("librga       ", &us.librga),
-                ("libmali      ", &us.libmali),
-            ] {
-                if let Some(s) = src {
-                    println!("{label}: {} ({})", s.git, s.git_ref);
-                }
+    match (i.userspace.is_empty(), &i.ffmpeg) {
+        (false, Some(ff)) => {
+            // One line per tree this build compiles — which trees appear is itself the
+            // useful signal, since it says what this SoC's stack is made of and which
+            // optional trees the build asked for.
+            for tree in &i.userspace {
+                println!("{:<13}: {} ({})", tree.name, tree.git, tree.git_ref);
             }
             println!("ffmpeg base  : {} ({})", ff.base.git, ff.base.git_ref);
             if let Some(rk) = &ff.rockchip {
@@ -491,6 +486,18 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             }
         }
         _ => println!("media-accel  : none (no feature builds the transcode stack)"),
+    }
+    // The layers' selftest expectations, one count per declaring layer: the
+    // checks themselves live on the image (`/etc/boot2deb/selftest.d/`), so the
+    // resolve report says who expects how much rather than repeating every line.
+    if !i.expectations.is_empty() {
+        let groups = i
+            .expectations
+            .iter()
+            .map(|g| format!("{}-{} ({})", g.scope.as_str(), g.name, g.expect.len()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("expectations : {groups}");
     }
     // Last, and as sentences rather than a field: what this point does *not* do is
     // not an axis of the build, it is what the axes above add up to leaving out.

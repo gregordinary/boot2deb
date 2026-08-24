@@ -26,8 +26,9 @@ use std::path::Path;
 
 /// Password alphabet: mixed case + digits with the visually ambiguous characters
 /// (`0`/`O`/`o`, `1`/`l`/`I`) removed, so the one-time secret transcribes cleanly
-/// at a console. All 56 symbols are shell-safe (no quoting/metacharacters), so the
-/// value bakes directly into the customize-hook's `chpasswd` line. 56 symbols.
+/// at a console. 56 symbols; the character class is a legibility choice, not a safety
+/// one — the plaintext never leaves this process, since the hash is computed here and
+/// spliced into `/etc/shadow` at image assembly.
 const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /// Raw salt bytes drawn per hash. `sha512crypt` encodes the salt in its 6-bit crypt
 /// alphabet, so 12 bytes become the 16 salt characters the format allows at most.
@@ -51,7 +52,7 @@ fn fill_random(buf: &mut [u8]) -> Result<(), EngineError> {
 /// statement. Fails only if the CSPRNG cannot be read.
 ///
 /// `len` comes from
-/// [`ResolvedBuild::first_boot_password_length`](boot2deb_core::model::ResolvedBuild::first_boot_password_length),
+/// [`ResolvedImage::first_boot_password_length`](boot2deb_core::model::ResolvedImage::first_boot_password_length),
 /// which resolution has already bounded — so this imposes no floor of its own. It has
 /// no business second-guessing a validated config value, and a second, quieter bound
 /// here would be a place for the two to disagree.

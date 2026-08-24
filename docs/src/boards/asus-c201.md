@@ -8,7 +8,7 @@ first 32-bit Arm board and first ChromeOS-firmware board boot2deb supports.
 | --- | --- | --- |
 | `asus-c201/forky` | Debian's `armmp`, installed from the archive | validated |
 | `asus-c201/trixie` | the same, on the stable suite | expected |
-| `asus-c201/mainline-forky` | compiled here from mainline 7.1.y | expected |
+| `asus-c201/mainline-forky` | compiled here from mainline 7.2.y | expected |
 | `asus-c201/libre-forky` | the same, from GNU Linux-libre — no blobs | expected |
 
 The first two are the board as Debian ships it. The third is the seam for changing the
@@ -63,7 +63,7 @@ new kernel fails to boot, the firmware falls back to the old one by itself. See
 ## A kernel of your own
 
 `asus-c201/mainline-forky` is the same board and the same suite, with the kernel compiled
-here from **mainline 7.1.y** instead of installed from the archive. Its kconfig comes from
+here from **mainline 7.2.y** instead of installed from the archive. Its kconfig comes from
 the fragments — a Debian-parity baseline plus the RK3288 slice — on top of the in-tree
 `multi_v7_defconfig`, and the `rk3288-fixes` patch series rides along. Everything else is
 identical: the same signed-kernel boot payload, the same board profiles, the same
@@ -79,10 +79,21 @@ so any user of the shash export/import path gets a truncated state; the fix is f
 and nothing about it is board-specific — it is simply not in a released kernel yet. A
 compiled recipe is where a fix like that lives until it is.
 
+Being ahead of the archive is the other half of it, and 7.2 is a good example on this
+board specifically. `analogix_dp` — the eDP bridge the panel hangs off — fixed a shift
+mismatch between the pre-emphasis and voltage-swing values it programs during link
+training, which is on the one path between this machine and a picture. And the in-tree
+V4L2 RGA driver, which the RK3288 does use, took the rework that carried RGA3 support
+into mainline: on the RGA2 side that means colorimetry is announced and synchronised
+rather than ignored, offsets are computed from the stride instead of the width, strides
+are aligned to four bytes, odd frame sizes are refused for YUV, and the scaling factor is
+range-checked. Debian's armhf kernel reaches all of that too, on Debian's schedule; this
+recipe reaches it when you rebuild.
+
 The trade is what you would expect. This recipe compiles a kernel, so a cold build
 provisions a cross root and takes real time, where `asus-c201/forky` is a rootfs
 bootstrap and an image assembly. It also takes on the maintenance Debian was doing for
-you: a `7.1.y` point release is an `update --kernel-ref` and a rebuild, not an
+you: a `7.2.y` point release is an `update --kernel-ref` and a rebuild, not an
 `apt upgrade`. Take it when you need a kernel change; stay on `asus-c201/forky` when you
 do not.
 
@@ -90,7 +101,7 @@ do not.
 
 `asus-c201/libre-forky` is `asus-c201/mainline-forky` with one thing changed: the kernel
 comes from the [GNU Linux-libre](https://www.fsfla.org/ikiwiki/selibre/linux-libre/)
-tree instead of `linux-stable`. Same 7.1.6 release, same `multi_v7_defconfig` base, same
+tree instead of `linux-stable`. Same 7.2 release, same `multi_v7_defconfig` base, same
 fragments, same `rk3288-fixes` series — the source is deblobbed, and nothing else
 differs. The two locks are worth a diff; the kernel's three lines are all of it.
 
@@ -111,10 +122,10 @@ kernel definition carries `libre = true`, and resolution reads it:
 
 Moving it to a newer release works like any compiled recipe, with one difference worth
 knowing: linux-libre publishes its trees under a tag namespace and appends `-gnu` to the
-version, so the ref is `sources/v7.1.7-gnu` rather than `v7.1.7`.
+version, so the ref is `sources/v7.2-gnu` rather than `v7.2`.
 
 ```sh
-boot2deb update asus-c201/libre-forky --kernel-ref sources/v7.1.7-gnu
+boot2deb update asus-c201/libre-forky --kernel-ref sources/v7.2-gnu
 ```
 
 ### What stops working
@@ -200,12 +211,19 @@ boot2deb build asus-c201-libreboot/forky
 
 ## Flash and boot
 
-Write the image to a microSD card or a USB stick:
+Press the image — with the install payload embedded, if the card's job is to
+put the OS on the internal eMMC — and write it to a microSD card or USB stick:
 
 ```sh
-xzcat build/asus-c201/forky/artifacts/asus-c201-forky.img.xz \
-  | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
+boot2deb press asus-c201/forky card.img --embed-image --hostname c201-01
+sudo dd if=card.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
+
+`press` verifies the file it wrote, `--hostname`/`--ssh-key` personalize the
+unit, and `--embed-image` carries the compressed artifact for
+[installing to the eMMC](#installing-to-the-emmc) later — see
+[Producing images](../press.md). Confirm the device with `lsblk` first; `dd`
+overwrites it whole.
 
 The unit must be in **developer mode**. Then, from a full power-off, boot the medium
 with **Ctrl+U** at the developer-mode screen.
@@ -227,6 +245,26 @@ under its 16 MiB ceiling, so the console appears only once the real root is moun
 about 5 seconds from eMMC, about 8 from USB, the difference being the time the initramfs
 spends enumerating the stick. The `asus-c201-libreboot` image carries the DRM stack, so
 the panel lights during the initramfs instead.
+
+## Installing to the eMMC
+
+The board has 16 GB of internal eMMC, and the image is a whole-disk image, so putting
+the OS there is one command from a card pressed with `--embed-image`:
+
+```sh
+sudo boot2deb-install-to /dev/mmcblk0
+sudo reboot                 # Ctrl+D boots the eMMC, Ctrl+U the card
+```
+
+The helper finds the embedded artifact, refuses the disk the system is running from
+and anything mounted, and asks you to type the target's name before it writes. A card
+pressed without `--embed-image` can still do it by hand: copy the `.img.xz` over and
+`xzcat` it into `dd` yourself.
+
+The eMMC needs no kernel patch, contrary to the usual advice. The Veyron eMMC ships
+with its primary GPT deliberately corrupted — ChromeOS marks it `IGNOREME` and uses the
+secondary, and a stock kernel cannot read a table like that. That only bites if you
+*keep* the factory GPT; writing a whole-disk image lays down a fresh, valid one.
 
 ## Keyboard
 
@@ -307,6 +345,13 @@ the image ships `bluez` so there is a host stack to use it.
 `btsdio` is blacklisted. The BCM4354's SDIO side also advertises a Bluetooth function,
 and if `btsdio` claims it, Wi-Fi does not survive suspend and resume.
 
+Bluetooth **audio** takes one package beyond that, if you install a desktop. Sound reaches
+a headset through PipeWire's Bluetooth plugin, `libspa-0.2-bluetooth`, and both
+`wireplumber` and `pipewire-pulse` merely *Suggest* it — so no desktop metapackage pulls it
+in, and its absence looks like a headset that pairs and connects but offers nothing to play
+to. Install it alongside the desktop. Images are headless and carry no PipeWire, so it is
+not in the image.
+
 ## Display
 
 An eDP panel and a real HDMI port, both driven by mainline `rockchip-drm`.
@@ -336,12 +381,12 @@ ships signed and correct; the empty KERN-B spare is first populated by a kernel 
 which writes the slot it is not running from and leaves the proven one as the fallback.
 
 **The compiled-kernel recipe boots too.** An `asus-c201/mainline-forky` image came up on
-the same unit with no self-test failures, no warnings, and taint 0 — so the mainline 7.1.y
+the same unit with no self-test failures, no warnings, and taint 0 — so a mainline 7.1.y
 kernel and the `rk3288-fixes` patch are both proven on silicon. A later build of it
 also booted from USB and **installed cleanly to internal eMMC**, which exercises the whole
-image path rather than just the boot. That was `v7.1.3`; the recipe now pins `v7.1.6`,
-which is why its claim reads `expected` rather than `validated` — the point release has
-not been on the board.
+image path rather than just the boot. That was `v7.1.3`; the recipe now pins `v7.2`,
+which is why its claim reads `expected` rather than `validated` — that kernel has not
+been on the board.
 
 Expect a **white screen of a few seconds** after Ctrl+U before the boot messages appear —
 measured at about 5 seconds from eMMC and about 8 from USB. That is normal and not a

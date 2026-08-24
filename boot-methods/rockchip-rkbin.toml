@@ -22,3 +22,20 @@ patches_ref  = "main"                    # default constraint; the exact commit 
 idbloader_offset = "32KiB"
 uboot_itb_offset = "8MiB"
 rootfs_offset    = "16MiB"
+
+# What this method's kernel-install hooks must have left on /boot for u-boot's
+# distro-boot to find. Boards on this method have booted with all of it missing
+# and said nothing until the bootloader shrugged, so the selftest asserts each
+# piece. The DTB check is emitted by the build (it knows the resolved
+# kernel_dtb), so it is not restated here.
+[[expect]]
+check = "file"
+path  = "/boot/vmlinuz-*"
+
+[[expect]]
+check = "file"
+path  = "/boot/initrd.img-*"
+
+[[expect]]
+check = "file"
+path  = "/boot/extlinux/extlinux.conf"

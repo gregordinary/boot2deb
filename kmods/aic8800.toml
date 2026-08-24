@@ -78,3 +78,12 @@ modules   = ["aic8800_bsp", "aic8800_fdrv"]
 # of the per-kernel modules deb so two coexisting kernels never collide over the firmware
 # path. `install` is the path fix-sdio-firmware-path.patch compiles into the BSP loader.
 firmware = { subdir = "src/SDIO/driver_fw/fw/aic8800D80", install = "usr/lib/firmware/aic8800_fw/SDIO/aic8800D80" }
+
+# The driver's runtime contract, checked by boot2deb-selftest on every board
+# that names this kmod: the firmware directory is where the BSP loader's
+# compiled-in path (fix-sdio-firmware-path.patch) looks. Firmware from anywhere
+# else does not pair with the driver revision, so presence of this exact path
+# is the check.
+[[expect]]
+check = "firmware"
+path  = "aic8800_fw/SDIO/aic8800D80"

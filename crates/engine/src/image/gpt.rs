@@ -19,6 +19,7 @@
 use crate::error::EngineError;
 use crate::image::geometry::{BootGeometry, Geometry, SECTOR};
 use boot2deb_core::chromeos::MAX_KPART_SLOTS;
+use boot2deb_core::press::{SEED_PARTITION_BYTES, SEED_PARTLABEL};
 use gpt::disk::LogicalBlockSize;
 use gpt::mbr::ProtectiveMBR;
 use gpt::{partition_types, GptConfig};
@@ -78,14 +79,29 @@ pub(crate) fn write_table(
     rootfs_label: &str,
     disk_guid: Uuid,
     rootfs_guid: Uuid,
+    seed_guid: Uuid,
     kpart_guids: &[Uuid],
 ) -> Result<(), EngineError> {
-    let mut parts = Vec::with_capacity(usize::from(MAX_KPART_SLOTS) + 1);
-    // The kernel slots come first, both on the medium and in the table.
+    let mut parts = Vec::with_capacity(usize::from(MAX_KPART_SLOTS) + 2);
+    // The seed sits below the kernel slots on depthcharge and below the rootfs
+    // on rkbin (see the geometry), so pushing it here keeps the list in on-disk
+    // order for the former; the sort below settles the latter.
+    parts.push(PartitionSpec {
+        index: 0, // re-numbered after the sort
+        name: SEED_PARTLABEL,
+        first_lba: geom.seed_off / SECTOR,
+        length_lba: SEED_PARTITION_BYTES / SECTOR,
+        // Basic data, not Linux-filesystem: the seed is the partition an operator
+        // edits from any laptop, and this is the type GUID that desktop OSes
+        // auto-mount a FAT volume under. The device side finds it by its label.
+        part_type: partition_types::BASIC,
+        flags: 0,
+        guid: seed_guid,
+    });
     if let BootGeometry::Kpart { ref slots } = geom.boot {
         for (i, slot) in slots.iter().enumerate() {
             parts.push(PartitionSpec {
-                index: i as u32 + 1,
+                index: 0,
                 // The conventional ChromeOS names. The firmware selects by type GUID
                 // and attributes, never by name, so this is for whoever reads the
                 // table — but it is the name every ChromeOS tool and guide uses for
@@ -100,7 +116,7 @@ pub(crate) fn write_table(
         }
     }
     parts.push(PartitionSpec {
-        index: parts.len() as u32 + 1,
+        index: 0,
         name: rootfs_label,
         first_lba: geom.rootfs_first_lba,
         length_lba: geom.rootfs_length_lba,
@@ -108,6 +124,13 @@ pub(crate) fn write_table(
         flags: 0,
         guid: rootfs_guid,
     });
+    // Table order = disk order, whatever the boot method: an operator reading
+    // `lsblk` sees partitions in the order they sit on the medium, and the
+    // first-boot resize grows "the partition `/` is on", not "partition N".
+    parts.sort_by_key(|p| p.first_lba);
+    for (i, p) in parts.iter_mut().enumerate() {
+        p.index = i as u32 + 1;
+    }
 
     let cfg = GptConfig::new()
         .writable(true)
@@ -228,6 +251,7 @@ mod tests {
 
     const DISK_GUID: Uuid = Uuid::from_bytes([0xa1; 16]);
     const ROOTFS_GUID: Uuid = Uuid::from_bytes([0xb2; 16]);
+    const SEED_GUID: Uuid = Uuid::from_bytes([0x5e; 16]);
     const KPART_GUIDS: [Uuid; MAX_KPART_SLOTS as usize] = [
         Uuid::from_bytes([0xc3; 16]),
         Uuid::from_bytes([0xc4; 16]),
@@ -247,8 +271,26 @@ mod tests {
 
         let a = sized_image(tmp.path(), "a.img", size);
         let b = sized_image(tmp.path(), "b.img", size);
-        write_table(&a, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS).unwrap();
-        write_table(&b, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS).unwrap();
+        write_table(
+            &a,
+            &geom,
+            "rootfs",
+            DISK_GUID,
+            ROOTFS_GUID,
+            SEED_GUID,
+            &KPART_GUIDS,
+        )
+        .unwrap();
+        write_table(
+            &b,
+            &geom,
+            "rootfs",
+            DISK_GUID,
+            ROOTFS_GUID,
+            SEED_GUID,
+            &KPART_GUIDS,
+        )
+        .unwrap();
 
         let ba = std::fs::read(&a).unwrap();
         assert_eq!(
@@ -270,9 +312,19 @@ mod tests {
             "header carries the derived disk GUID"
         );
         let parts = disk.partitions();
-        assert_eq!(parts.len(), 1, "a raw-gap bootloader is not a GPT entry");
         assert_eq!(
-            parts.get(&1).unwrap().part_guid,
+            parts.len(),
+            2,
+            "seed + rootfs — a raw-gap bootloader is not a GPT entry"
+        );
+        // The seed sits in the MiB directly below the rootfs (16 MiB here), so
+        // in disk order it is entry 1 and the rootfs entry 2.
+        let seed = parts.get(&1).unwrap();
+        assert_eq!(seed.name, "b2d-seed");
+        assert_eq!(seed.first_lba, 15 * 1024 * 1024 / 512);
+        assert_eq!(seed.part_guid, SEED_GUID);
+        assert_eq!(
+            parts.get(&2).unwrap().part_guid,
             ROOTFS_GUID,
             "partition carries the derived GUID"
         );
@@ -298,10 +350,16 @@ mod tests {
             let img = sized_image(tmp.path(), &format!("{name}-fit.img"), geom.total_size);
             // The writer refuses a partition past the usable range, so reaching here at
             // all is the assertion: the disk is one sector-perfect fit.
-            write_table(&img, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS)
-                .unwrap_or_else(|e| {
-                    panic!("{name}: fitted geometry rejected by the GPT writer: {e}")
-                });
+            write_table(
+                &img,
+                &geom,
+                "rootfs",
+                DISK_GUID,
+                ROOTFS_GUID,
+                SEED_GUID,
+                &KPART_GUIDS,
+            )
+            .unwrap_or_else(|e| panic!("{name}: fitted geometry rejected by the GPT writer: {e}"));
 
             let disk = GptConfig::new()
                 .writable(false)
@@ -350,7 +408,16 @@ mod tests {
         let size = 512 * 1024 * 1024;
         let geom = Geometry::resolve(&depthcharge_boot(), 512 << 20).unwrap();
         let img = sized_image(tmp.path(), "c201.img", size);
-        write_table(&img, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS).unwrap();
+        write_table(
+            &img,
+            &geom,
+            "rootfs",
+            DISK_GUID,
+            ROOTFS_GUID,
+            SEED_GUID,
+            &KPART_GUIDS,
+        )
+        .unwrap();
 
         let disk = GptConfig::new()
             .writable(false)
@@ -358,11 +425,23 @@ mod tests {
             .open(&img)
             .unwrap();
         let parts = disk.partitions();
-        assert_eq!(parts.len(), 3, "KERN-A + KERN-B + rootfs");
+        assert_eq!(parts.len(), 4, "seed + KERN-A + KERN-B + rootfs");
+
+        // The seed sits below the kernel slots (11 MiB, directly under the 12 MiB
+        // slot offset), so in a disk-ordered table it is entry 1 and the slots
+        // follow. The firmware selects by type GUID, never by index, so the shift
+        // costs nothing on the boot path.
+        let seed = parts.get(&1).unwrap();
+        assert_eq!(seed.name, "b2d-seed");
+        assert_eq!(seed.first_lba, 11 * 1024 * 1024 / 512);
+        assert_eq!(seed.last_lba - seed.first_lba + 1, 2048, "1 MiB");
+        assert_eq!(seed.part_type_guid, partition_types::BASIC);
+        assert_eq!(seed.part_guid, SEED_GUID);
+        assert_eq!(seed.flags, 0);
 
         let cros_kernel = Uuid::parse_str("FE3A2A5D-4F32-41A7-B725-ACCC3285A309").unwrap();
 
-        let kern_a = parts.get(&1).unwrap();
+        let kern_a = parts.get(&2).unwrap();
         assert_eq!(
             kern_a.part_type_guid.guid, cros_kernel,
             "the firmware finds the kernel by this type GUID and nothing else"
@@ -376,7 +455,7 @@ mod tests {
         );
         assert_eq!(kern_a.part_guid, KPART_GUIDS[0]);
 
-        let kern_b = parts.get(&2).unwrap();
+        let kern_b = parts.get(&3).unwrap();
         assert_eq!(
             kern_b.part_type_guid.guid, cros_kernel,
             "the spare carries the kernel type GUID too — that is how depthchargectl \
@@ -402,7 +481,7 @@ mod tests {
         );
         assert_eq!(kern_b.part_guid, KPART_GUIDS[1]);
 
-        let root = parts.get(&3).unwrap();
+        let root = parts.get(&4).unwrap();
         assert_eq!(root.part_type_guid, partition_types::LINUX_FS);
         assert_eq!(root.first_lba, 90_112, "the rootfs sits behind both slots");
         assert_eq!(root.flags, 0, "an ordinary rootfs carries no attributes");

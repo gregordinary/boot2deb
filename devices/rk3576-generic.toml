@@ -23,8 +23,8 @@ uboot_defconfig         = "generic-rk3576_defconfig"
 # mainline DTB is a valid placeholder; no device_dts, so nothing is compiled.
 kernel_dtb              = "rockchip/rk3576-evb1-v10.dtb"
 device_config_fragments = []
-supported_kernels       = ["rk3576-mainline-7.1"]
-default_kernel          = "rk3576-mainline-7.1"
+supported_kernels       = ["rk3576-mainline-7.2"]
+default_kernel          = "rk3576-mainline-7.2"
 
 # The SoC-generic u-boot tools this device hosts. loader = minimal rockusb
 # bring-up; util = the recovery/diagnostic tool. Both are board-neutral.

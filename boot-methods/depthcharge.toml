@@ -76,3 +76,21 @@ cmdline = "console=tty1 rootwait ro panic=30"
 # structural twin of the rockchip-rkbin method's extlinux hook. It pulls in vboot-utils
 # (futility), which the build uses to verify the signature it just produced.
 packages = ["depthcharge-tools"]
+
+# What this method must have left in the filesystem, checked by boot2deb-selftest.
+# The signed payload itself lives in a GPT partition no file check can see; what is
+# checkable is the machinery that re-signs it on a kernel upgrade — the kernel and
+# initramfs the hook packs, and the config that names the board profile. A missing
+# initramfs here is the classic silent failure: the board still boots (the old
+# signed slot keeps working) right up until the first kernel upgrade bricks it.
+[[expect]]
+check = "file"
+path  = "/boot/vmlinuz-*"
+
+[[expect]]
+check = "file"
+path  = "/boot/initrd.img-*"
+
+[[expect]]
+check = "file"
+path  = "/etc/depthcharge-tools/config"

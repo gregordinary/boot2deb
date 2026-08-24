@@ -2,16 +2,16 @@
 # Exact resolved pins for the recipe. `boot2deb build` reads only this;
 # re-run `boot2deb update` to re-resolve within the recipe's constraints.
 [kernel]
-id = "rk3288-mainline-7.1"
+id = "rk3288-mainline-7.2"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.1.6"
-commit = "2609d60e2f6d0b8a96563baa08b56482962cebaa"
+ref = "v7.2"
+commit = "8d3ae59288f1e7d58d76558a6ee96d533bc5019f"
 
 [patches]
 series = ["rk3288-fixes"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "ced7afe82f85e7da3a87f8cb69d48bf33fb24805"
+commit = "6c3eccbeb78205ff3b612923c05afed800348c5f"
 
 [rootfs]
 suite = "forky"

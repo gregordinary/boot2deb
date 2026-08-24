@@ -1,0 +1,5 @@
+#!/bin/sh
+# The PATH-visible name for the on-image selftest; the implementation lives
+# with the other boot2deb machinery. Run as root so dmesg and the initramfs
+# are readable -- the runner says which checks it had to skip otherwise.
+exec /usr/lib/boot2deb/selftest "$@"

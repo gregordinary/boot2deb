@@ -65,8 +65,14 @@ axis of the model, so the nearest example to a board you care about is usually o
 | [ASUS C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html) · [Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 / armhf | What a board costs once its family is here: one device file each, no overlay, no kernel, no code — everything shared lives on the SoC layer |
 | [RK3576 EVB1 v10](https://gregordinary.github.io/boot2deb/boards/rk3576-evb1-v10.html) | RK3576 / arm64 | The reference board beside the retail one, sharing a SoC layer and a kernel while carrying none of the TV box's peripherals |
 
-The RK1's headline capability — hardware video transcode — has its kernel side shipped and
-its userspace building, but no boot2deb image has been measured transcoding on it.
+Hardware video transcode is the RK1's headline capability, and it has been measured on a
+boot2deb-built image: the `h264_rkmpp` and `hevc_rkmpp` encoders produce correct streams,
+and hardware decode through `-hwaccel v4l2request` cuts decode CPU cost by 53x at 1080p
+and up to 143x at 4K. What is not yet exercised end to end is Jellyfin driving that path
+itself — see [Accelerated Jellyfin](https://gregordinary.github.io/boot2deb/jellyfin.html).
+On the RK3576 the picture is narrower: decode and 2D are driven, encode has no mainline
+driver at all, and hardware H.264 decode is not yet reliable — see
+[H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html).
 
 ## Quick start
 
@@ -165,8 +171,13 @@ live in [`docs/`](docs/); build them locally with `mdbook serve docs`.
 
 - [Introduction](https://gregordinary.github.io/boot2deb/introduction.html)
 - User guide — [Getting started](https://gregordinary.github.io/boot2deb/getting-started.html),
+  [Producing images](https://gregordinary.github.io/boot2deb/press.html),
   [Upgrading the kernel](https://gregordinary.github.io/boot2deb/kernel-upgrades.html),
-  [Locale, timezone, and keyboard](https://gregordinary.github.io/boot2deb/localization.html)
+  [Locale, timezone, and keyboard](https://gregordinary.github.io/boot2deb/localization.html),
+  [The clock and time sync](https://gregordinary.github.io/boot2deb/clock.html),
+  [The account, sudo, and SSH keys](https://gregordinary.github.io/boot2deb/access.html),
+  [Data volumes](https://gregordinary.github.io/boot2deb/data-volumes.html),
+  [Accelerated Jellyfin](https://gregordinary.github.io/boot2deb/jellyfin.html)
 - Tutorials — [Adapting a shipped recipe](https://gregordinary.github.io/boot2deb/tutorials/adapting-a-recipe.html),
   [Moving a board to a newer kernel](https://gregordinary.github.io/boot2deb/tutorials/newer-kernel.html),
   [Authoring a recipe](https://gregordinary.github.io/boot2deb/tutorials/authoring-a-recipe.html)
@@ -177,10 +188,16 @@ live in [`docs/`](docs/); build them locally with `mdbook serve docs`.
   [ASUS C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html),
   [ASUS Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html)
 - Reference — [Config model](https://gregordinary.github.io/boot2deb/reference/config-model.html),
+  [What the base image contains](https://gregordinary.github.io/boot2deb/reference/base-image.html),
   [CLI](https://gregordinary.github.io/boot2deb/reference/cli.html),
+  [Every flag](https://gregordinary.github.io/boot2deb/reference/cli-flags.html),
   [Support matrix](https://gregordinary.github.io/boot2deb/reference/support-matrix.html),
+  [The on-image self-test](https://gregordinary.github.io/boot2deb/reference/self-test.html),
+  [Trying an image before flashing](https://gregordinary.github.io/boot2deb/reference/try.html),
+  [RK3576 u-boot images](https://gregordinary.github.io/boot2deb/reference/rk3576-uboot-images.html),
   [Overlays](https://gregordinary.github.io/boot2deb/reference/overlays.html),
   [Image identity](https://gregordinary.github.io/boot2deb/reference/image-identity.html),
+  [The maskrom loader](https://gregordinary.github.io/boot2deb/reference/maskrom-loader.html),
   [Reproducibility](https://gregordinary.github.io/boot2deb/reference/reproducibility.html)
 - Contributing — [Adding a board](https://gregordinary.github.io/boot2deb/contributing/adding-a-board.html),
   [Adding a patch](https://gregordinary.github.io/boot2deb/contributing/adding-a-patch.html)

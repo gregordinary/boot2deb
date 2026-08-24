@@ -1,5 +1,5 @@
 # recipes/h96-max-m9/media-accel.toml -- the H96 MAX M9 with hardware video
-# decode and the RGA 2D accelerator, on mainline 7.1 / Debian forky. Constraints
+# decode and the RGA 2D accelerator, on mainline 7.2 / Debian forky. Constraints
 # only; the exact resolution is written to the sibling .lock by
 # `boot2deb update h96-max-m9/media-accel`.
 #
@@ -12,7 +12,7 @@
 # because the rkrga ffmpeg filters require MPP. See features/media-accel-v4l2.toml
 # for the full capability statement.
 device     = "h96-max-m9"
-kernel     = "rk3576-mainline-7.1"
+kernel     = "rk3576-mainline-7.2"
 uboot_series = "rk3576-display"
 suite      = "forky"
 features   = ["media-accel-v4l2"]
@@ -23,14 +23,38 @@ image_size = "3G"
 # and Panfrost + Mesa render first-party at 4K. The decode and RGA paths in this
 # recipe are not yet exercised on hardware, so the recipe as a whole is
 # `experimental` until an image built from it decodes and binds RGA on the box.
-# Unchanged over the v7.1.6 kernel: nothing about either path was exercised on the
-# previous pin either, and v7.1.6 leaves `rkvdec` and the rk3576 device trees
-# byte-identical to v7.1.5, so it moves neither path.
 #
-# One thing to know before that test, because it is the decode path: v7.1.6 lists
-# `vdec`'s `reg`/`reg-names` in the order its binding declares, where earlier 7.1.x
-# transposed "link" and "function". Each name keeps the same address either way, so
-# this reaches only a consumer that indexes the banks instead of naming them.
+# What the move from v7.1.7 to v7.2 changes on this SoC's paths. v7.2 is a .0
+# release, so it carries no stable point release yet.
+#
+# The `rk3576-fixes` series crosses unchanged -- all six patches read the same on both
+# generations, so nothing in it was rebased. `rockchip-iommu` clears the AUTO_GATING
+# fetch-DTE time limit, which upstream reports as the cause of RGA3 hangs and of the
+# vendor kernel's VOP black screens; every accelerator here maps through that IOMMU.
+# `rkvdec` moves its H.264 and HEVC backends off local bitfield structs onto a shared
+# bitwriter -- a codegen fix aimed at clang on armhf and hexagon, writing the same
+# register payloads -- and this board's own read-cache patch (rk3576/104) sits beside
+# it unchanged, since it maps the "cache" bank by name. `rockchip_sai` takes a
+# `guard()` conversion for its spin locks, partly reverted in the same release; the
+# board's SAI routing patch (rk3576/103) applies over the result untouched. The
+# `rk3576.dtsi` changes are additions for other boards -- Khadas Edge 2L peripherals,
+# `pinctrl-names`, HDMI FRL enable GPIOs -- and none of them names this one.
+#
+# Mainline still has no Rockchip video *encoder*, so nothing changes there.
+#
+# Two of those land on this recipe's own paths. The RGA it builds is the multicore
+# vendor driver, and 7.2's in-tree V4L2 RGA3 support is RK3588 silicon only, so this
+# board's RGA2 cores and the `rk3576-rga` series that wires them are untouched by it --
+# but the IOMMU fetch-DTE change upstream ties to RGA3 hangs is on the same shared
+# driver these cores map through. And `rkvdec`'s bitwriter move is on the decode path
+# this recipe exists to exercise.
+#
+# The board evidence behind this recipe was taken on the v7.1.6 pin, not this one: an
+# image from that build boots to a login and brings up the GPU, NPU core 0, HDMI,
+# Wi-Fi, Bluetooth and both USB controllers, and it is where usb_drd0's SuperSpeed is
+# measured -- 5 Gbps, ~154 MB/s over 92 GB of continuous reads, no link error. What
+# keeps the claim `experimental` is the decode and RGA paths alone, which no pin has
+# exercised.
 [support]
 status = "experimental"
-date   = "2026-08-03"
+date   = "2026-08-21"

@@ -26,12 +26,12 @@ pub const DEFAULT_MIRROR: &str = "http://deb.debian.org/debian";
 /// Also the image's set on every build but a libre one — see [`components`].
 pub(crate) const COMPONENTS: &str = "main,contrib,non-free,non-free-firmware";
 
-/// The components a [`libre`](boot2deb_core::ResolvedBuild::libre) image is
+/// The components a [`libre`](boot2deb_core::ResolvedImage::libre) image is
 /// provisioned from and boots with — Debian's free archive, and nothing else.
 pub(crate) const FREE_COMPONENTS: &str = "main";
 
 /// The archive components *this image* resolves against: [`FREE_COMPONENTS`] for a
-/// [`libre`](boot2deb_core::ResolvedBuild::libre) build, [`COMPONENTS`] otherwise.
+/// [`libre`](boot2deb_core::ResolvedImage::libre) build, [`COMPONENTS`] otherwise.
 ///
 /// It is one answer for two questions that must not diverge — what the rootfs solve
 /// may install, and what the booted image's `sources.list` offers — so a package
@@ -40,8 +40,8 @@ pub(crate) const FREE_COMPONENTS: &str = "main";
 /// environment that is never shipped, and narrowing the toolchain it draws from
 /// would change what a libre image is *compiled by* without changing a byte of what
 /// is in it.
-pub(crate) fn components(build: &boot2deb_core::ResolvedBuild) -> &'static str {
-    if build.libre {
+pub(crate) fn components(image: &boot2deb_core::ResolvedImage) -> &'static str {
+    if image.libre {
         FREE_COMPONENTS
     } else {
         COMPONENTS

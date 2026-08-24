@@ -208,6 +208,7 @@ mod tests {
                 env: &[],
                 argv: &argv,
                 context: "build a fixture deb",
+                probe: None,
             },
             step,
         )
@@ -352,7 +353,7 @@ mod tests {
         // opens the remainder as a path. Percent-encoding the base would turn a
         // working path into a literal `%20` lookup, so this is what stops that from
         // ever looking like a fix.
-        use ferroday_cage::provision::debian::{Fetch, FetchRequest, HttpFetch};
+        use ferroday_cage::provision::{Fetch, FetchRequest, HttpFetch};
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "repo");
         let Some(root) = crate::sandbox::packaging_root_for_tests(&step) else {

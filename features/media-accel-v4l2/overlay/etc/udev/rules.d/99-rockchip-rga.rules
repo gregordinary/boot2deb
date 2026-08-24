@@ -1,0 +1,12 @@
+# Let the `video` group open the RGA 2D accelerator.
+#
+# rga3.ko registers /dev/rga as a misc character device, which udev creates
+# root-only. librga opens it directly, so without this rule no unprivileged
+# consumer can use the accelerator at all — and librga does not fail gracefully
+# when the open is refused, it dereferences the context it never built and the
+# calling process dies on SIGSEGV.
+#
+# The rule lives with the feature because the device only exists when the
+# feature's out-of-tree driver is installed; the DMA-BUF heaps an RGA client
+# also needs are the SoC layer's, since every accelerated path wants them.
+KERNEL=="rga", GROUP="video", MODE="0660"

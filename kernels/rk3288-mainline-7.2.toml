@@ -1,4 +1,4 @@
-# kernels/rk3288-mainline-7.1.toml — compiled mainline 7.1.y for RK3288 boards.
+# kernels/rk3288-mainline-7.2.toml — compiled mainline 7.2.y for RK3288 boards.
 #
 # The RK3288's platform support is fully upstream, so unlike the RK3588 this
 # definition exists for control, not enablement: it carries driver fixes ahead
@@ -6,10 +6,25 @@
 # to customize. The Debian kernel stays the default on every RK3288 device; a
 # recipe opts in by naming this kernel.
 flavor           = "mainline"
-source           = "linux-stable"          # 7.1.y stable releases live in linux-stable
-track            = "7.1.y"                 # the lock pins the exact tag (update --kernel-ref)
+source           = "linux-stable"          # 7.2.y releases live in linux-stable
+track            = "7.2.y"                 # the lock pins the exact tag (update --kernel-ref)
 base_defconfig   = "multi_v7_defconfig"    # in-tree 32-bit multiplatform base; fragments merge onto it
 config_fragments = ["base/debian-armhf", "soc/rk3288"]
 patch_series   = ["rk3288-fixes"]
 patches_url      = "https://github.com/gregordinary/patches.git"
 supported_socs   = ["rk3288"]
+
+# The BCM4354 radio firmware — on the kernel axis, not the SoC layer, because a
+# libre kernel drops these blobs by design; see kernels/debian-armmp.toml for
+# the full rationale and what each file is.
+[[expect]]
+check = "firmware"
+path  = "brcm/brcmfmac4354-sdio.bin"
+
+[[expect]]
+check = "firmware"
+path  = "brcm/brcmfmac4354-sdio.txt"
+
+[[expect]]
+check = "firmware"
+path  = "brcm/BCM4354.hcd"

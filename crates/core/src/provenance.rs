@@ -2,7 +2,7 @@
 //! into one document answering "exactly what went into this image," for support
 //! and security response.
 //!
-//! Pure: a deterministic join of values the [`Lock`] and [`ResolvedBuild`] already
+//! Pure: a deterministic join of values the [`Lock`] and [`ImageBuild`] already
 //! hold, plus the build-time facts the engine supplies ([`BuildFacts`] — the
 //! solved manifest's content hash + package count, the host/cross identity, the
 //! filesystem contract, the sandbox profile every build command ran under, and
@@ -17,7 +17,7 @@
 //! outside boot2deb reads an image's account of itself.
 
 use crate::lock::Lock;
-use crate::model::ResolvedBuild;
+use crate::model::ImageBuild;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -42,7 +42,7 @@ const IDENTITY_BANNER: &str = "\
 const IDENTITY_VERSION: u32 = 1;
 
 /// The build-time facts the engine supplies to [`assemble`] beyond the [`Lock`]
-/// and [`ResolvedBuild`]: the host/cross identity, the solved manifest's digest +
+/// and [`ImageBuild`]: the host/cross identity, the solved manifest's digest +
 /// size, and the generated first-boot credential. The engine owns these because
 /// they are side effects (hashing the manifest, reading the RNG) that the pure
 /// core does not perform.
@@ -436,6 +436,16 @@ pub struct ProvenanceManifest {
     /// tar. Declared with the other arrays-of-tables. See [`ArchiveProvenance`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archives: Vec<ArchiveProvenance>,
+    /// One row per media-accel userspace tree this image's build compiled, in the order
+    /// the SoC declares them. Empty for an image that compiled none — a tree the part
+    /// does not have, or an optional one this build did not ask for, has no row rather
+    /// than a row reading "none", which would claim a fetch that never happened.
+    ///
+    /// Its own array rather than keys in `[sources.media_accel]` because the count is
+    /// the SoC's to decide and every `[section]` here is a flat table of scalars.
+    /// Declared with the other arrays-of-tables. See [`UserspaceSourceProvenance`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub userspace: Vec<UserspaceSourceProvenance>,
     /// Pre-built `extra_debs` pulled from outside the Debian mirror,
     /// each content-pinned by sha256 — part of "exactly what went into this image."
     /// Omitted when none. Declared before the durability list so both arrays-of-tables
@@ -509,6 +519,38 @@ pub struct SystemIdentity {
     pub image: IdentityImage,
     /// The kernel it boots, and how a new one reaches it.
     pub kernel: IdentityKernel,
+    /// Present only on an image `press` re-assembled with tree additions: what was
+    /// added on top of the recipe's canonical artifact. Absent on every image a
+    /// build emits — its absence is what says "this file is the artifact".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressed: Option<IdentityPressed>,
+}
+
+/// The `[pressed]` table: a pressed-with-additions image's account of how it
+/// differs from the recipe's canonical artifact.
+///
+/// A pressed image is **derived, not canonical** — `reproduce` reproduces builds,
+/// and the recipe's artifacts and provenance stay untouched — so this table is
+/// the derived file's only record of its own ancestry. It lists what was added
+/// *by kind and destination*, never by content: no file bodies, no seed values.
+/// (The seed partition is deliberately not summarized here either — it is
+/// self-describing and `boot2deb seed` can rewrite it later without touching the
+/// filesystem, so a copy here would go stale.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityPressed {
+    /// The artifact stem this image derives from (e.g. `turing-rk1-forky`) — which
+    /// build's artifacts were re-assembled.
+    pub source: String,
+    /// Destination paths of `--copy` additions, in the tree's own absolute form.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<String>,
+    /// File names of `--deb` packages staged for first-boot installation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debs: Vec<String>,
+    /// File name of the `--embed-image` artifact carried for a later
+    /// install-to-internal-storage, when one was embedded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_image: Option<String>,
 }
 
 /// What the system is: the resolved build point, minus every value that is either
@@ -575,7 +617,7 @@ pub struct IdentityKernel {
     pub patch_series: Vec<String>,
 }
 
-/// The resolved build point (from [`ResolvedBuild`]).
+/// The resolved build point (from [`ImageBuild`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageProvenance {
     /// Device name.
@@ -679,30 +721,15 @@ pub struct SourcesProvenance {
     pub media_accel: Option<MediaAccelProvenance>,
 }
 
-/// The pinned media-accel source trees — the MPP/RGA/Mali userspace forks plus
-/// the ffmpeg V4L2 base and its Rockchip graft-provenance tree — as `ref` +
-/// exact `commit` pairs (from the [`Lock`]). Present in a [`SourcesProvenance`]
-/// only when the image compiled the transcode stack.
+/// The pinned ffmpeg sources — the V4L2 base and its Rockchip graft-provenance tree —
+/// as `ref` + exact `commit` pairs (from the [`Lock`]). Present in a
+/// [`SourcesProvenance`] only when the image compiled the transcode stack.
+///
+/// The userspace forks it links are **not** here: there is a variable number of them,
+/// and every `[section]` of this manifest is a flat table of scalars. They ride as their
+/// own top-level array instead ([`ProvenanceManifest::userspace`]), like `[[archives]]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaAccelProvenance {
-    /// MPP ref. Absent when the SoC declares no such tree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mpp_ref: Option<String>,
-    /// MPP commit. Absent when the SoC declares no such tree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mpp_commit: Option<String>,
-    /// librga ref. Absent when the SoC declares no such tree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub librga_ref: Option<String>,
-    /// librga commit. Absent when the SoC declares no such tree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub librga_commit: Option<String>,
-    /// libmali ref. Absent when the SoC declares no such tree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub libmali_ref: Option<String>,
-    /// libmali commit. Absent when the SoC declares no such tree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub libmali_commit: Option<String>,
     /// ffmpeg V4L2-base ref.
     pub ffmpeg_base_ref: String,
     /// ffmpeg V4L2-base commit.
@@ -713,6 +740,21 @@ pub struct MediaAccelProvenance {
     /// ffmpeg Rockchip provenance-tree commit. Absent when no graft applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg_rockchip_commit: Option<String>,
+}
+
+/// One compiled userspace tree, as `name` + `ref` + exact `commit`.
+///
+/// Named rather than positional so a reader of the manifest can tell which fork a pin
+/// belongs to without knowing the SoC's declaration order — and so a part with a
+/// different stack records its own trees without this type changing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserspaceSourceProvenance {
+    /// The tree's name, as the SoC's `[[userspace]]` entry gives it.
+    pub name: String,
+    /// The human-readable ref the pin came from.
+    pub reference: String,
+    /// The exact commit that ref pointed at.
+    pub commit: String,
 }
 
 /// The rootfs suite plus the content-pinned solved-manifest reference.
@@ -1127,21 +1169,21 @@ pub struct CredentialsProvenance {
 /// can be staged into the rootfs it describes. The provenance manifest cannot be — its
 /// solved-manifest digest and per-image password are both produced by the bootstrap it
 /// would have to be written into.
-pub fn system_identity(build: &ResolvedBuild, lock: &Lock) -> SystemIdentity {
-    let kernel = build.kernel.as_ref().expect(IMAGE_ONLY);
+pub fn system_identity(ib: ImageBuild, lock: &Lock) -> SystemIdentity {
+    let kernel = &ib.image.kernel;
     SystemIdentity {
         version: IDENTITY_VERSION,
         image: IdentityImage {
-            device: build.device.clone(),
-            description: build.description.clone(),
-            arch: build.arch.to_string(),
-            soc: build.soc.to_string(),
-            boot_method: build.boot_method.to_string(),
-            board: build.depthcharge_boot().map(|b| b.board.clone()),
-            suite: build.suite.clone().expect(IMAGE_ONLY),
-            features: build.features.clone(),
-            layout: build.layout.to_string(),
-            hostname: build.hostname.clone(),
+            device: ib.build.device.clone(),
+            description: ib.build.description.clone(),
+            arch: ib.build.arch.to_string(),
+            soc: ib.build.soc.to_string(),
+            boot_method: ib.build.boot_method.to_string(),
+            board: ib.build.depthcharge_boot().map(|b| b.board.clone()),
+            suite: ib.image.suite.clone(),
+            features: ib.image.features.clone(),
+            layout: ib.build.layout.to_string(),
+            hostname: ib.image.hostname.clone(),
         },
         kernel: IdentityKernel {
             // From the resolved build, so they are recorded even for a kernel the lock
@@ -1160,13 +1202,17 @@ pub fn system_identity(build: &ResolvedBuild, lock: &Lock) -> SystemIdentity {
                 .map(|p| p.series.clone())
                 .unwrap_or_default(),
         },
+        // Every image a build emits is the canonical artifact; only a `press`
+        // re-assembly sets this.
+        pressed: None,
     }
 }
 
-/// Provenance and the system-identity file are emitted by the image node, which
-/// runs only for an image build — so the kernel, suite, and rootfs pin are present.
-const IMAGE_ONLY: &str =
-    "provenance is emitted only for an image build (kernel, suite, and rootfs pin present)";
+/// Provenance is emitted by the image node, which runs only after the rootfs node has
+/// written its pin — so the lock's `[rootfs]` table is present by the time this reads it.
+/// The build's own image axis needs no such assertion: [`assemble`] takes the
+/// [`ResolvedImage`], so a deliverable without one cannot reach here.
+const ROOTFS_PIN: &str = "provenance is assembled after the rootfs node, which writes the pin";
 
 impl SystemIdentity {
     /// Serialize to the canonical form: the banner followed by the TOML body.
@@ -1198,32 +1244,82 @@ impl SystemIdentity {
     }
 }
 
+/// Read just the `[credentials]` table out of a provenance manifest.
+///
+/// For a reader that wants the account and password and nothing else —
+/// `boot2deb try` logs in with them. Scoped to the one table it reads rather
+/// than deserializing the whole [`ProvenanceManifest`], so a reader of the
+/// credential is a reader of the credential and not a validator of every other
+/// record the manifest keeps.
+///
+/// # Errors
+///
+/// [`ConfigError::Parse`](crate::ConfigError::Parse) when the text has no
+/// well-formed `[credentials]` table. `path` names the file in that error and
+/// is not read from.
+pub fn manifest_credentials(
+    text: &str,
+    path: &str,
+) -> Result<CredentialsProvenance, crate::ConfigError> {
+    /// The one-table view; every other manifest key is ignored.
+    #[derive(Deserialize)]
+    struct CredentialsOnly {
+        credentials: CredentialsProvenance,
+    }
+    toml::from_str::<CredentialsOnly>(text)
+        .map(|m| m.credentials)
+        .map_err(|source| crate::ConfigError::Parse {
+            path: path.to_string(),
+            source,
+        })
+}
+
+/// Read a whole provenance manifest back from its text.
+///
+/// The counterpart of [`ProvenanceManifest::to_toml_string`]. It exists here, beside the
+/// writer, for the reason [`manifest_credentials`] does: a reader that lives with the
+/// type cannot parse a field the writer moved, and a consumer that hand-parsed the TOML
+/// would be a second, untested definition of the document.
+///
+/// The banner the writer prefixes is a comment, so it round-trips without stripping.
+///
+/// # Errors
+///
+/// [`ConfigError::Parse`](crate::ConfigError::Parse) when the text is not a well-formed
+/// manifest. `path` names the file in that error and is not read from.
+pub fn parse_manifest(text: &str, path: &str) -> Result<ProvenanceManifest, crate::ConfigError> {
+    toml::from_str(text).map_err(|source| crate::ConfigError::Parse {
+        path: path.to_string(),
+        source,
+    })
+}
+
 /// Join a resolved build, its lock, and the engine's build-time facts into a
 /// [`ProvenanceManifest`]. Pure — no I/O — so the join is unit-testable.
-pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceManifest {
-    let kernel = build.kernel.as_ref().expect(IMAGE_ONLY);
-    let rootfs = lock.rootfs.as_ref().expect(IMAGE_ONLY);
+pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceManifest {
+    let kernel = &ib.image.kernel;
+    let rootfs = lock.rootfs.as_ref().expect(ROOTFS_PIN);
     ProvenanceManifest {
         image: ImageProvenance {
-            device: build.device.clone(),
-            description: build.description.clone(),
-            arch: build.arch.to_string(),
-            soc: build.soc.to_string(),
-            boot_method: build.boot_method.to_string(),
-            board: build.depthcharge_boot().map(|b| b.board.clone()),
-            suite: build.suite.clone().expect(IMAGE_ONLY),
-            features: build.features.clone(),
-            layout: build.layout.to_string(),
-            image_size: build.image_size.clone(),
+            device: ib.build.device.clone(),
+            description: ib.build.description.clone(),
+            arch: ib.build.arch.to_string(),
+            soc: ib.build.soc.to_string(),
+            boot_method: ib.build.boot_method.to_string(),
+            board: ib.build.depthcharge_boot().map(|b| b.board.clone()),
+            suite: ib.image.suite.clone(),
+            features: ib.image.features.clone(),
+            layout: ib.build.layout.to_string(),
+            image_size: ib.image.image_size.clone(),
             image_bytes: facts.image_bytes,
-            hostname: build.hostname.clone(),
-            locale: build.locale.clone(),
-            locales_generate: build.locales_generate.clone(),
-            timezone: build.timezone.clone(),
-            ntp_servers: build.ntp_servers.clone(),
+            hostname: ib.image.hostname.clone(),
+            locale: ib.image.locale.clone(),
+            locales_generate: ib.image.locales_generate.clone(),
+            timezone: ib.image.timezone.clone(),
+            ntp_servers: ib.image.ntp_servers.clone(),
             // The layout alone identifies the keymap for a reader; the XKB model,
             // variant, and options are build inputs, recoverable from the config.
-            keymap: build.keymap.as_ref().map(|k| k.layout.clone()),
+            keymap: ib.image.keymap.as_ref().map(|k| k.layout.clone()),
         },
         sources: SourcesProvenance {
             // The id and flavor come from the resolved build, so they are recorded
@@ -1246,22 +1342,12 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             uboot_commit: lock.uboot.as_ref().map(|u| u.commit.clone()),
             // Present in lockstep: resolution pins userspace and ffmpeg together or
             // not at all, so a single `zip` yields the whole block or `None`.
-            media_accel: lock
-                .userspace
-                .as_ref()
-                .zip(lock.ffmpeg.as_ref())
-                .map(|(us, ff)| MediaAccelProvenance {
-                    mpp_ref: us.mpp.as_ref().map(|p| p.reference.clone()),
-                    mpp_commit: us.mpp.as_ref().map(|p| p.commit.clone()),
-                    librga_ref: us.librga.as_ref().map(|p| p.reference.clone()),
-                    librga_commit: us.librga.as_ref().map(|p| p.commit.clone()),
-                    libmali_ref: us.libmali.as_ref().map(|p| p.reference.clone()),
-                    libmali_commit: us.libmali.as_ref().map(|p| p.commit.clone()),
-                    ffmpeg_base_ref: ff.base.reference.clone(),
-                    ffmpeg_base_commit: ff.base.commit.clone(),
-                    ffmpeg_rockchip_ref: ff.rockchip.as_ref().map(|p| p.reference.clone()),
-                    ffmpeg_rockchip_commit: ff.rockchip.as_ref().map(|p| p.commit.clone()),
-                }),
+            media_accel: lock.ffmpeg.as_ref().map(|ff| MediaAccelProvenance {
+                ffmpeg_base_ref: ff.base.reference.clone(),
+                ffmpeg_base_commit: ff.base.commit.clone(),
+                ffmpeg_rockchip_ref: ff.rockchip.as_ref().map(|p| p.reference.clone()),
+                ffmpeg_rockchip_commit: ff.rockchip.as_ref().map(|p| p.commit.clone()),
+            }),
         },
         rootfs: RootfsProvenance {
             suite: rootfs.suite.clone(),
@@ -1285,9 +1371,9 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
         }),
         toolchain: ToolchainProvenance {
             host_arch: facts.host_arch.to_string(),
-            target_arch: build.arch.to_string(),
+            target_arch: ib.build.arch.to_string(),
             cross: facts.cross,
-            cross_compile: build.cross_compile.clone(),
+            cross_compile: ib.build.cross_compile.clone(),
             jobs: facts.jobs,
             qemu: facts.qemu.clone(),
         },
@@ -1304,14 +1390,25 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             note: "expired at first login (passwd -e); unique per built image".to_string(),
             // From the resolved build rather than from `BuildFacts`: both are properties
             // of the build point, known before anything is built, unlike the password.
-            sudo: build.sudo.as_str().to_string(),
-            authorized_keys: build.ssh_authorized_keys.clone(),
+            sudo: ib.image.sudo.as_str().to_string(),
+            authorized_keys: ib.image.ssh_authorized_keys.clone(),
         },
         // The one fact the engine hands over as a unit, split here because its three
         // parts sit on opposite sides of the table/array-of-tables boundary.
         sandbox: facts.sandbox.posture.clone(),
         sandbox_env: facts.sandbox.env.clone(),
         archives: facts.archives.to_vec(),
+        // The trees this build compiled, from the lock: one row per pin, in the SoC's
+        // declared order.
+        userspace: lock
+            .userspace
+            .iter()
+            .map(|p| UserspaceSourceProvenance {
+                name: p.name.clone(),
+                reference: p.reference.clone(),
+                commit: p.commit.clone(),
+            })
+            .collect(),
         extra_debs: lock.extra_debs.clone(),
         // Every source axis the build actually *fetches*, classified offline by pin
         // form. A source the build never fetches has no re-fetch durability to report,
@@ -1337,18 +1434,10 @@ fn source_durability_rows(lock: &Lock) -> Vec<SourceDurability> {
     if let Some(u) = &lock.uboot {
         rows.push(source_durability("uboot", &u.reference, &u.commit));
     }
-    if let Some(us) = &lock.userspace {
-        // Only the trees the SoC declares: a row for an absent tree would claim a
-        // fetch this build never makes.
-        for (name, pin) in [
-            ("mpp", &us.mpp),
-            ("librga", &us.librga),
-            ("libmali", &us.libmali),
-        ] {
-            if let Some(p) = pin {
-                rows.push(source_durability(name, &p.reference, &p.commit));
-            }
-        }
+    // Only the trees this build compiles: a row for a tree the SoC does not have would
+    // claim a fetch that never happens.
+    for pin in &lock.userspace {
+        rows.push(source_durability(&pin.name, &pin.reference, &pin.commit));
     }
     if let Some(ff) = &lock.ffmpeg {
         rows.push(source_durability(
@@ -1468,8 +1557,20 @@ impl ProvenanceManifest {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    /// A [`UserspacePin`] from a name and a [`GitPin`]-shaped fixture — the two now
+    /// travel as one value.
+    fn named_pin(name: &str, p: crate::lock::GitPin) -> crate::lock::UserspacePin {
+        crate::lock::UserspacePin {
+            name: name.into(),
+            source: p.source,
+            reference: p.reference,
+            commit: p.commit,
+        }
+    }
     use super::*;
     use crate::lock::*;
+    use crate::model::ResolvedBuild;
 
     fn sample_lock() -> Lock {
         let git = |r: &str, c: &str| GitPin {
@@ -1496,11 +1597,11 @@ pub(crate) mod tests {
                 commit: "uc".into(),
             }),
             uboot_patches: None,
-            userspace: Some(UserspacePins {
-                mpp: Some(git("mainline-cma-fix", "mc")),
-                librga: Some(git("master", "rc")),
-                libmali: Some(git("master", "lc")),
-            }),
+            userspace: vec![
+                named_pin("mpp", git("mainline-cma-fix", "mc")),
+                named_pin("librga", git("master", "rc")),
+                named_pin("libmali", git("master", "lc")),
+            ],
             ffmpeg: Some(FfmpegPins {
                 base: git("v4l2-request-n8.1", "fbc"),
                 rockchip: Some(git("8.1", "frc")),
@@ -1684,6 +1785,21 @@ pub(crate) mod tests {
         .unwrap()
     }
 
+    /// [`assemble`] over an owned fixture build, so a test writes one expression rather
+    /// than binding the build to keep its image half alive.
+    fn assembled(build: ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceManifest {
+        assemble(
+            build.as_image().expect("the fixture builds an image"),
+            lock,
+            facts,
+        )
+    }
+
+    /// [`system_identity`] over an owned fixture build, for the same reason.
+    fn identity_of(build: ResolvedBuild, lock: &Lock) -> SystemIdentity {
+        system_identity(build.as_image().expect("the fixture builds an image"), lock)
+    }
+
     /// A depthcharge build — the boot method that *has* a board profile.
     fn depthcharge_build() -> ResolvedBuild {
         crate::resolve_recipe(
@@ -1711,8 +1827,9 @@ pub(crate) mod tests {
             path: None,
             sha256: "cc".repeat(32),
         }];
+        let build = sample_build();
         assemble(
-            &sample_build(),
+            build.as_image().expect("the fixture builds an image"),
             &lock,
             &BuildFacts {
                 host_arch: "x86_64",
@@ -1748,11 +1865,60 @@ pub(crate) mod tests {
     /// this asserts the boundary rather than trusting it — a field added to
     /// `SystemIdentity` by copying a line from `assemble` would fail here.
     #[test]
+    fn manifest_credentials_reads_one_table_and_only_its_shape() {
+        // A full manifest, rendered and read back through the scoped reader:
+        // the credential arrives, and nothing else in the manifest is validated
+        // — asserted by reading a document whose other tables are junk.
+        let facts = BuildFacts {
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc",
+            package_count: 1,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &sample_archives(),
+            user: "debian",
+            password: "Kp7rTx",
+            builder_version: "0.0.0-test",
+            builder_commit: None,
+            builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
+            filesystem: sample_filesystem(),
+            rootfs_verified_with: &sample_verified_with(),
+            qemu: None,
+            jobs: 8,
+            sandbox: sample_sandbox(),
+            build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
+        };
+        let manifest = assembled(sample_build(), &sample_lock(), &facts);
+        let text = manifest.to_toml_string().unwrap();
+        let creds = manifest_credentials(&text, "m.toml").unwrap();
+        assert_eq!(creds.password, "Kp7rTx");
+        assert_eq!(creds.user, manifest.credentials.user);
+
+        let scoped = "[image]\nnot_a_real_key = 1\n\n[credentials]\nuser = \"debian\"\n\
+                      password = \"pw\"\nnote = \"n\"\nsudo = \"nopasswd\"\n\
+                      authorized_keys = []\n";
+        assert_eq!(
+            manifest_credentials(scoped, "m.toml").unwrap().user,
+            "debian"
+        );
+
+        // A document with no credentials table is an error naming the path.
+        let err = manifest_credentials("[image]\n", "old.toml")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("old.toml"), "{err}");
+    }
+
+    #[test]
     fn the_on_device_identity_carries_no_secret() {
         let lock = sample_lock();
-        let text = system_identity(&sample_build(), &lock)
-            .to_toml_string()
-            .unwrap();
+        let text = identity_of(sample_build(), &lock).to_toml_string().unwrap();
         // The banner *documents* that the file carries no secret, so it says the words.
         // What must not contain them is the data.
         let body: String = text
@@ -1803,7 +1969,7 @@ pub(crate) mod tests {
             cross_sandbox: None,
             packaging_root: None,
         };
-        let manifest = assemble(&sample_build(), &lock, &facts)
+        let manifest = assembled(sample_build(), &lock, &facts)
             .to_toml_string()
             .unwrap();
         assert!(
@@ -1819,14 +1985,14 @@ pub(crate) mod tests {
     fn the_identity_records_the_depthcharge_board_and_omits_it_otherwise() {
         let lock = sample_lock();
 
-        let dc = system_identity(&depthcharge_build(), &lock);
+        let dc = identity_of(depthcharge_build(), &lock);
         assert_eq!(dc.image.boot_method, "depthcharge");
         assert_eq!(dc.image.board.as_deref(), Some("speedy"));
         assert!(dc.to_toml_string().unwrap().contains("board = \"speedy\""));
 
         // A boot method with no board profile records none, rather than an empty string
         // a reader would have to special-case.
-        let rk = system_identity(&sample_build(), &lock);
+        let rk = identity_of(sample_build(), &lock);
         assert_eq!(rk.image.boot_method, "rockchip-rkbin");
         assert_eq!(rk.image.board, None);
         assert!(!rk.to_toml_string().unwrap().contains("board"));
@@ -1837,7 +2003,7 @@ pub(crate) mod tests {
     /// a top-level scalar after one), and the whole thing must re-parse.
     #[test]
     fn the_identity_is_a_versioned_parseable_document() {
-        let text = system_identity(&depthcharge_build(), &sample_lock())
+        let text = identity_of(depthcharge_build(), &sample_lock())
             .to_toml_string()
             .unwrap();
         assert!(text.starts_with("# boot2deb image identity"));
@@ -1893,7 +2059,7 @@ pub(crate) mod tests {
             cross_sandbox: None,
             packaging_root: None,
         };
-        let text = assemble(&sample_build(), &sample_lock(), &facts)
+        let text = assembled(sample_build(), &sample_lock(), &facts)
             .to_toml_string()
             .unwrap();
         let parsed: toml::Value = toml::from_str(&text).unwrap();
@@ -1959,9 +2125,9 @@ pub(crate) mod tests {
             packaging_root: None,
         };
         let mut build = sample_build();
-        build.image_size = "fit+20%".into();
+        build.image.as_mut().unwrap().image_size = "fit+20%".into();
 
-        let text = assemble(&build, &sample_lock(), &facts(917_533_184))
+        let text = assembled(build, &sample_lock(), &facts(917_533_184))
             .to_toml_string()
             .unwrap();
         let parsed: toml::Value = toml::from_str(&text).unwrap();
@@ -2003,7 +2169,7 @@ pub(crate) mod tests {
             cross_sandbox: None,
             packaging_root: None,
         };
-        let text = assemble(&sample_build(), &sample_lock(), &facts)
+        let text = assembled(sample_build(), &sample_lock(), &facts)
             .to_toml_string()
             .unwrap();
         let stamp = builder_stamp(&text, "sample.provenance.toml").unwrap();
@@ -2026,7 +2192,7 @@ pub(crate) mod tests {
             patches: None,
             uboot: None,
             uboot_patches: None,
-            userspace: None,
+            userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(RootfsPin {
                 suite: "forky".into(),
@@ -2066,8 +2232,8 @@ pub(crate) mod tests {
             path: None,
             sha256: "aa".repeat(32),
         }];
-        let full = assemble(
-            &sample_build(),
+        let full = assembled(
+            sample_build(),
             &lock,
             &BuildFacts {
                 host_arch: "x86_64",
@@ -2106,8 +2272,8 @@ pub(crate) mod tests {
             full
         );
 
-        let bare = assemble(
-            &depthcharge_build(),
+        let bare = assembled(
+            depthcharge_build(),
             &bare_lock(),
             &BuildFacts {
                 host_arch: "x86_64",
@@ -2155,7 +2321,7 @@ pub(crate) mod tests {
     /// boot2deb, so it round-trips for the same reason the manifest does.
     #[test]
     fn a_rendered_identity_parses_back_to_the_value_that_wrote_it() {
-        let identity = system_identity(&depthcharge_build(), &sample_lock());
+        let identity = identity_of(depthcharge_build(), &sample_lock());
         let text = identity.to_toml_string().unwrap();
         assert_eq!(
             SystemIdentity::from_toml_str(&text, "image.toml").unwrap(),
@@ -2167,6 +2333,32 @@ pub(crate) mod tests {
         let extended = format!("{text}\n[future]\nkey = \"value\"\n");
         assert_eq!(
             SystemIdentity::from_toml_str(&extended, "image.toml").unwrap(),
+            identity
+        );
+    }
+
+    /// The pressed marker serializes as a `[pressed]` table and round-trips; an
+    /// un-pressed identity carries no trace of it, which is what lets a reader take
+    /// the table's absence as "this file is the canonical artifact".
+    #[test]
+    fn the_pressed_marker_rides_the_identity_document() {
+        let mut identity = identity_of(depthcharge_build(), &sample_lock());
+        assert!(!identity.to_toml_string().unwrap().contains("[pressed]"));
+
+        identity.pressed = Some(IdentityPressed {
+            source: "asus-c201-forky".into(),
+            copies: vec!["/etc/site.conf".into()],
+            debs: vec!["myapp_1.0_armhf.deb".into()],
+            embedded_image: None,
+        });
+        let text = identity.to_toml_string().unwrap();
+        assert!(text.contains("[pressed]"), "{text}");
+        assert!(
+            !text.contains("embedded_image"),
+            "an absent addition kind is omitted, not null: {text}"
+        );
+        assert_eq!(
+            SystemIdentity::from_toml_str(&text, "image.toml").unwrap(),
             identity
         );
     }
@@ -2205,7 +2397,7 @@ pub(crate) mod tests {
             cross_sandbox: None,
             packaging_root: None,
         };
-        let prov = assemble(&build, &lock, &facts);
+        let prov = assembled(build, &lock, &facts);
         assert_eq!(prov.sources.kernel_commit.as_deref(), Some("kc"));
         assert_eq!(prov.sources.kernel_flavor, "mainline");
         let media = prov
@@ -2398,7 +2590,7 @@ pub(crate) mod tests {
             cross_sandbox: None,
             packaging_root: None,
         };
-        let prov = assemble(&build, &sample_lock(), &facts);
+        let prov = assembled(build.clone(), &sample_lock(), &facts);
         assert_eq!(prov.credentials.sudo, "password");
         assert_eq!(prov.credentials.authorized_keys, vec![KEY]);
 
@@ -2419,9 +2611,7 @@ pub(crate) mod tests {
         // A key is not a secret, but `/etc/boot2deb/image.toml` is readable by anyone
         // holding the disk, and an image that inventories its own access rules hands a
         // reader the list of accounts to go after.
-        let identity = system_identity(&build, &sample_lock())
-            .to_toml_string()
-            .unwrap();
+        let identity = identity_of(build, &sample_lock()).to_toml_string().unwrap();
         assert!(
             !identity.contains(KEY),
             "identity leaked a key:\n{identity}"
@@ -2469,7 +2659,7 @@ pub(crate) mod tests {
             cross_sandbox: None,
             packaging_root: None,
         };
-        let prov = assemble(&build, &lock, &facts);
+        let prov = assembled(build, &lock, &facts);
         assert_eq!(prov.extra_debs.len(), 1);
         let text = prov.to_toml_string().unwrap();
         // Both arrays-of-tables serialize, and the whole document is still valid TOML
@@ -2529,7 +2719,7 @@ pub(crate) mod tests {
             cross_sandbox: None,
             packaging_root: None,
         };
-        let text = assemble(&sample_build(), &sample_lock(), &facts)
+        let text = assembled(sample_build(), &sample_lock(), &facts)
             .to_toml_string()
             .unwrap();
 
@@ -2607,7 +2797,7 @@ pub(crate) mod tests {
             build_sandbox,
         };
         let render = |bs| {
-            assemble(&sample_build(), &sample_lock(), &facts(bs))
+            assembled(sample_build(), &sample_lock(), &facts(bs))
                 .to_toml_string()
                 .unwrap()
         };
@@ -2684,7 +2874,7 @@ pub(crate) mod tests {
             packaging_root,
         };
         let render = |bs, pr| {
-            assemble(&sample_build(), &sample_lock(), &facts(bs, pr))
+            assembled(sample_build(), &sample_lock(), &facts(bs, pr))
                 .to_toml_string()
                 .unwrap()
         };
@@ -2771,7 +2961,7 @@ pub(crate) mod tests {
             sandbox: sample_sandbox(),
         };
         let render = |cs, bs| {
-            assemble(&sample_build(), &sample_lock(), &facts(cs, bs))
+            assembled(sample_build(), &sample_lock(), &facts(cs, bs))
                 .to_toml_string()
                 .unwrap()
         };

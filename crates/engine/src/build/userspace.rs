@@ -14,17 +14,27 @@
 //! full variant matrix.
 
 use crate::build::{
-    self, deb_names, probe, stage_artifact, BuildEnv, PatchScope, PatchSource, SeriesIdentity,
+    self, deb_names, stage_artifact, BuildEnv, PatchScope, PatchSource, SeriesIdentity,
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, SandboxRun};
-use boot2deb_core::lock::{GitPin, Lock};
+use boot2deb_core::lock::{Lock, UserspacePin};
+use boot2deb_core::model::UserspaceTree;
 use std::path::{Path, PathBuf};
 
 /// Stage-recipe version for a userspace tree signature: bump when the
 /// fetch/build logic that shapes a reused tree changes.
 const FETCH_STAGE_VERSION: u32 = 1;
+
+/// Where this stage's package trees and its produced `.deb`s live under `work_dir`
+/// (`<work_dir>/userspace`) — one directory per package inside it. Exposed for the same
+/// reason [`kernel::tree_dir`](crate::build::kernel::tree_dir) is: a reader of the tree
+/// — [`crate::shell`], which starts an interactive session in it — should not restate
+/// the layout literal.
+pub fn stage_dir(work_dir: &Path) -> PathBuf {
+    work_dir.join("userspace")
+}
 
 /// Stage-recipe version for a userspace **output** signature (Tier-2 artifact cache):
 /// bump when the build/package logic changes a package's `.deb`s in a way the
@@ -36,7 +46,8 @@ const OUTPUT_STAGE_VERSION: u32 = 2;
 /// investigation.
 const LOOKUP_PROBE_REPORT: &str = "lookup-probe.log";
 
-/// Debian build-deps installed in the sandbox for MPP + RGA.
+/// Debian build-deps every userspace tree's packaging needs. What one tree needs *on
+/// top* of these is its own [`build_deps`](boot2deb_core::model::UserspaceTree::build_deps).
 const USERSPACE_DEPS: &[&str] = &[
     "cmake",
     "meson",
@@ -46,32 +57,28 @@ const USERSPACE_DEPS: &[&str] = &[
     "libdrm-dev",
 ];
 
-/// Additional build-deps only Mali's variants probe (X11/Wayland `.pc` files).
-const LIBMALI_DEPS: &[&str] = &[
-    "libgbm-dev",
-    "libwayland-dev",
-    "libx11-dev",
-    "libx11-xcb-dev",
-    "libxcb-dri2-0-dev",
-    "libxdamage-dev",
-    "libxext-dev",
-];
-
 /// The build-dependency set this stage layers over the sandbox base.
 ///
 /// One function, read by the [`BuildRootSpec`] that stages the layer *and* by
 /// [`output_manifest_for`], which keys every package of the stage on it — so a package
-/// cannot reach a `./configure` without reaching the key.
+/// cannot reach a `./configure` without reaching the key. [`crate::shell`] reads it too,
+/// so an interactive session lands in the root this stage compiles in rather than one
+/// that resembles it.
 ///
-/// The `build_libmali` increment is one layer for the *whole stage*, not one per
-/// package, which is why it is an input to MPP's and librga's signatures as much as to
-/// Mali's: those X11 and Wayland `.pc` files are present in the root their `cmake` and
-/// `meson` runs probe, whether or not Mali is the thing being built.
-pub fn layer_packages(build_libmali: bool) -> Vec<&'static str> {
-    let mut deps: Vec<&'static str> = USERSPACE_DEPS.to_vec();
-    if build_libmali {
-        deps.extend_from_slice(LIBMALI_DEPS);
+/// A tree's own `build_deps` are an increment to the layer for the *whole stage*, not a
+/// per-package one, which is why they are an input to every tree's signature and not
+/// only their own: those `.pc` files are present in the root every tree's `cmake` and
+/// `meson` runs probe, whether or not the tree that asked for them is being built.
+///
+/// De-duplicated and sorted, so two trees naming one dependency layer it once and the
+/// declaration order cannot move a cache key.
+pub fn layer_packages(trees: &[UserspaceTree]) -> Vec<String> {
+    let mut deps: Vec<String> = USERSPACE_DEPS.iter().map(|d| (*d).to_string()).collect();
+    for t in trees {
+        deps.extend(t.build_deps.iter().cloned());
     }
+    deps.sort();
+    deps.dedup();
     deps
 }
 
@@ -82,37 +89,50 @@ pub fn layer_packages(build_libmali: bool) -> Vec<&'static str> {
 const RELAX_CFLAGS: &str =
     "-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration";
 
-/// Default Mali variant kept when building libmali — the RK3588 Valhall G610.
-/// Filtering to it skips the ~140 other-GPU variants.
-const LIBMALI_VARIANT: &str = "aarch64-linux-gnu/libmali-valhall-g610";
-
-/// One buildable userspace package: where to fetch it and which `.deb`s it emits.
+/// One buildable userspace package: the tree as the SoC declares it, where to fetch it,
+/// and the exact commit the lock pins.
+///
+/// The declaration is carried whole rather than copied field by field, so a tree that
+/// gains a knob reaches the stage without this type changing.
 struct Package<'a> {
-    /// Directory name under `<work>/userspace/` and the label in logs.
-    name: &'a str,
-    /// Clone source (git URL or local checkout path).
+    /// The SoC's `[[userspace]]` entry: name, `.deb`s, patch scope, variant filter.
+    tree: &'a UserspaceTree,
+    /// Clone source (git URL or local checkout path; a local checkout is far faster).
     source: &'a str,
-    /// Locked commit pin.
-    pin: &'a GitPin,
-    /// `.deb` name prefixes this package produces, for collection. Resume skips the
-    /// package only when **every** prefix is already staged — a crash between a
-    /// multi-binary package's outputs must not look "done".
-    deb_prefixes: &'a [&'a str],
+    /// The lock's pin for it.
+    pin: &'a UserspacePin,
+}
+
+impl Package<'_> {
+    /// The tree's name — its directory under `<work>/userspace/`, its cache node, and
+    /// its label in logs.
+    fn name(&self) -> &str {
+        &self.tree.name
+    }
+
+    /// The `.deb` file-name prefixes this package produces. A produced file is
+    /// `<name>_<version>_<arch>.deb`, so the trailing underscore is what keeps
+    /// `librga2_` from also matching `librga2-foo_`.
+    ///
+    /// Resume skips the package only when **every** prefix is already staged: a crash
+    /// between a multi-binary package's outputs must not look finished.
+    fn deb_prefixes(&self) -> Vec<String> {
+        self.tree.debs.iter().map(|d| format!("{d}_")).collect()
+    }
 }
 
 /// Filesystem inputs for the userspace stage.
 pub struct UserspaceOptions<'a> {
-    /// MPP clone source (git URL or local path; a local checkout is far faster).
-    pub mpp_src: &'a str,
-    /// librga clone source.
-    pub librga_src: &'a str,
-    /// libmali clone source (used only when `build_libmali`).
-    pub libmali_src: &'a str,
-    /// Build the Mali userspace too (off by default — unused on a headless box).
-    pub build_libmali: bool,
-    /// The `userspace` patch scope's checkout + pin — the MPP CMA fix. The MPP tree
-    /// receives it; librga/libmali build unpatched. `None` when the resolved kernel
-    /// names no patch series.
+    /// The userspace trees this build compiles, as the SoC declares them and resolution
+    /// narrowed them: an optional tree is here only when the build asked for it.
+    pub trees: &'a [UserspaceTree],
+    /// Per-tree clone-source overrides (`(name, source)`), from `--userspace-src`. A
+    /// tree absent here is cloned from its declared `git`; a local checkout is far
+    /// faster than a fresh clone.
+    pub sources: &'a [(String, String)],
+    /// The `userspace` patch scope's checkout + pin — the MPP CMA fix. The tree that
+    /// declares [`patched`](UserspaceTree::patched) receives it; the rest build
+    /// unpatched upstream. `None` when the resolved kernel names no patch series.
     pub patches: Option<PatchSource<'a>>,
     /// Scratch dir; sources are cloned under `<work>/userspace/<name>` and the
     /// `.deb`s `dpkg-buildpackage` drops land in `<work>/userspace/`.
@@ -148,49 +168,37 @@ pub fn build_userspace(
     sink: &dyn EventSink,
 ) -> Result<UserspaceArtifacts, EngineError> {
     let step = Step::start(sink, "userspace");
-    let stage_root = opts.work_dir.join("userspace");
+    let stage_root = stage_dir(opts.work_dir);
 
     // The CLI schedules this stage only for a media-accel build, whose lock pins
     // the userspace sources; reaching it without pins is an internal bug.
-    let userspace = lock
-        .userspace
-        .as_ref()
-        .ok_or(EngineError::MissingMediaAccelPins { stage: "userspace" })?;
+    if lock.userspace.is_empty() {
+        return Err(EngineError::MissingMediaAccelPins { stage: "userspace" });
+    }
+    let userspace = &lock.userspace;
 
-    // One entry per tree the SoC declares. An absent pin is not a missing input —
-    // it is a SoC that has no such tree (no vendor `mpp_service` to talk to, or a
-    // GPU whose userspace is Mesa from the mirror), so the package simply is not
-    // built and nothing downstream expects its `.deb`.
-    let mut packages = Vec::new();
-    if let Some(pin) = &userspace.mpp {
-        packages.push(Package {
-            name: "mpp",
-            source: opts.mpp_src,
-            pin,
-            deb_prefixes: &[
-                "librockchip-mpp1_",
-                "librockchip-mpp-dev_",
-                "librockchip-vpu0_",
-                "rockchip-mpp-demos_",
-            ],
-        });
-    }
-    if let Some(pin) = &userspace.librga {
-        packages.push(Package {
-            name: "librga",
-            source: opts.librga_src,
-            pin,
-            deb_prefixes: &["librga2_", "librga-dev_"],
-        });
-    }
-    if let (true, Some(pin)) = (opts.build_libmali, &userspace.libmali) {
-        packages.push(Package {
-            name: "libmali",
-            source: opts.libmali_src,
-            pin,
-            deb_prefixes: &["libmali-"],
-        });
-    }
+    // One entry per tree the build resolved *and* the lock pinned. A tree the SoC does
+    // not declare is not a missing input — it is a part that has no such tree (no vendor
+    // `mpp_service` to talk to, or a GPU whose userspace is Mesa from the mirror) — and
+    // an optional tree this build did not ask for is likewise simply absent. Either way
+    // nothing downstream expects its `.deb`.
+    let packages: Vec<Package> = opts
+        .trees
+        .iter()
+        .filter_map(|tree| {
+            let pin = userspace.iter().find(|p| p.name == tree.name)?;
+            Some(Package {
+                tree,
+                source: opts
+                    .sources
+                    .iter()
+                    .find(|(name, _)| name == &tree.name)
+                    .map(|(_, src)| src.as_str())
+                    .unwrap_or(&tree.git),
+                pin,
+            })
+        })
+        .collect();
 
     // Patch context: the series' `userspace` scope — the MPP CMA fix — is
     // applied to the MPP tree; librga/libmali build unpatched upstream. The series +
@@ -224,18 +232,11 @@ pub fn build_userspace(
     let out_sigs: Vec<String> = packages
         .iter()
         .map(|p| {
-            let pi = patch_ctx.inputs_for(p.name);
-            package_output_manifest(
-                p,
-                suite,
-                arch,
-                &env.sandbox_id,
-                opts.build_libmali,
-                pi.as_ref(),
-            )
-            .signature()
-            .as_str()
-            .to_string()
+            let pi = patch_ctx.inputs_for(p.tree);
+            package_output_manifest(p, suite, arch, &env.sandbox_id, opts.trees, pi.as_ref())
+                .signature()
+                .as_str()
+                .to_string()
         })
         .collect();
     let cached: Vec<bool> = packages
@@ -256,7 +257,8 @@ pub fn build_userspace(
     } else {
         sandbox.ensure_ready(&step)?;
         step.progress(15);
-        let deps = layer_packages(opts.build_libmali);
+        let deps = layer_packages(opts.trees);
+        let deps: Vec<&str> = deps.iter().map(String::as_str).collect();
         Some(sandbox.build_root(
             &BuildRootSpec {
                 packages: &deps,
@@ -281,14 +283,14 @@ pub fn build_userspace(
             // holds, and `collect` copies *every* matching name — sweep the
             // package's stale-version `.deb`s first so a leftover from a build
             // at different pins cannot ride along with the restored set.
-            build::purge_stage_debs(&stage_root, pkg.deb_prefixes)?;
+            build::purge_stage_debs(&stage_root, &prefix_refs(&pkg.deb_prefixes()))?;
             store
                 .restore(&node_name(pkg), &out_sigs[i], &stage_root)?
                 .inspect(|_| {
                     // Per package, not per step: this stage is the one that can restore
                     // some of its `.deb`s and compile the rest, so it reports both.
                     step.restored();
-                    step.log(format!("{}: restored from artifact cache", pkg.name))
+                    step.log(format!("{}: restored from artifact cache", pkg.name()))
                 })
                 .is_some()
         } else {
@@ -330,25 +332,25 @@ fn build_one(
     patches: &UserspacePatchCtx,
     step: &Step,
 ) -> Result<(), EngineError> {
-    let tree = stage_root.join(pkg.name);
-    let man = package_signature(pkg, patches.inputs_for(pkg.name).as_ref());
+    let tree = stage_root.join(pkg.name());
+    let man = package_signature(pkg, patches.inputs_for(pkg.tree).as_ref());
     // Skip the whole build only when the fetched+patched tree still matches the
     // locked commit *and* patch series and **all** of the package's `.deb`s are
     // staged: a crash between compile and staging re-runs the
     // package rather than skipping to a later stage that misses a `.deb`.
     if crate::signature::is_fresh(&tree, &man) && package_staged(stage_root, pkg)? {
-        step.log(format!("{}: already built, skipping", pkg.name));
+        step.log(format!("{}: already built, skipping", pkg.name()));
         return Ok(());
     }
-    build::reuse_or_refresh_tree(&tree, &man, pkg.name, step, || {
+    build::reuse_or_refresh_tree(&tree, &man, pkg.name(), step, || {
         // Purge stale-version `.deb`s so `collect` cannot ship an old one and
         // `package_staged` cannot be fooled by it.
-        build::purge_stage_debs(stage_root, pkg.deb_prefixes)?;
+        build::purge_stage_debs(stage_root, &prefix_refs(&pkg.deb_prefixes()))?;
         build::fetch_commit(
             pkg.source,
             &pkg.pin.reference,
             &pkg.pin.commit,
-            pkg.name,
+            pkg.name(),
             &tree,
             step,
         )?;
@@ -357,7 +359,7 @@ fn build_one(
         // MPP is patched; librga/libmali are unpatched upstream. The series is
         // materialized in the patches repo (durable base + patch), so the pin
         // is a re-fetchable tag rather than a locally-authored commit.
-        if receives_userspace_patches(pkg.name) {
+        if receives_userspace_patches(pkg.tree) {
             apply_patches(pkg, &tree, patches, step).inspect_err(|_| {
                 // Never leave a half-patched, unstamped tree a resume would trust.
                 let _ = std::fs::remove_dir_all(&tree);
@@ -366,8 +368,8 @@ fn build_one(
         Ok(())
     })?;
 
-    if pkg.name == "libmali" {
-        filter_libmali_targets(&tree.join("debian/targets"), LIBMALI_VARIANT, step)?;
+    if let Some(variant) = &pkg.tree.targets_filter {
+        filter_targets(&tree.join("debian/targets"), variant, step)?;
     }
 
     // Deterministic build timestamp from the locked *base* commit. For
@@ -382,18 +384,19 @@ fn build_one(
     // The stage that has never lost a header, instrumented on the same terms as the one
     // that has: this root is layered and emulated exactly as ffmpeg's is, and it stays
     // a control only for as long as something is watching it.
-    let argv = probe::wrap(&build, &stage_root.join(LOOKUP_PROBE_REPORT));
+    let report = stage_root.join(LOOKUP_PROBE_REPORT);
     let binds = [stage_root.to_path_buf()];
-    let context = format!("dpkg-buildpackage {}", pkg.name);
+    let context = format!("dpkg-buildpackage {}", pkg.name());
     let spec = SandboxRun {
         work: &tree,
         binds: &binds,
         env: &dpkg_env,
-        argv: &argv,
+        argv: &build,
         context: &context,
+        probe: Some(&report),
     };
     root.run(&spec, step)?;
-    step.log(format!("{}: built", pkg.name));
+    step.log(format!("{}: built", pkg.name()));
     Ok(())
 }
 
@@ -412,12 +415,12 @@ fn collect(
     // it there. All sweeps run before any staging: prefixes may overlap
     // across packages, and a later sweep must not remove an earlier stage copy.
     for pkg in packages {
-        build::purge_stage_debs(out_dir, pkg.deb_prefixes)?;
+        build::purge_stage_debs(out_dir, &prefix_refs(&pkg.deb_prefixes()))?;
     }
     let mut debs = Vec::new();
     let mut seen = Vec::new();
     for pkg in packages {
-        for name in select_debs(&names, pkg.deb_prefixes) {
+        for name in select_debs(&names, &pkg.deb_prefixes()) {
             if seen.contains(name) {
                 continue;
             }
@@ -435,13 +438,15 @@ fn collect(
     Ok(UserspaceArtifacts { debs })
 }
 
-/// Whether a userspace package receives the series' `userspace` patch scope.
-/// Only MPP carries a local patch — the CMA fix (`allocator_dma_heap`);
-/// librga/libmali build unpatched upstream. The single source of truth so the stage
-/// and `why-rebuild` ([`crate::plan`]) agree on which package's tree gets the series
-/// and folds it into its signature.
-pub fn receives_userspace_patches(name: &str) -> bool {
-    name == "mpp"
+/// Whether a userspace tree receives the series' `userspace` patch scope.
+///
+/// The tree says so itself ([`UserspaceTree::patched`]) rather than the stage comparing
+/// a name: on the RK35xx family that is MPP alone — the CMA fix
+/// (`allocator_dma_heap`) — and librga builds unpatched upstream, but a second family's
+/// patched tree needs a config edit and no code. Read by the stage *and* by `why-rebuild`
+/// ([`crate::plan`]), so the two agree on which tree's signature folds the series.
+pub fn receives_userspace_patches(tree: &UserspaceTree) -> bool {
+    tree.patched
 }
 
 /// The patch inputs folded into a userspace package's tree signature when it
@@ -474,8 +479,8 @@ struct UserspacePatchCtx<'a> {
 impl UserspacePatchCtx<'_> {
     /// The [`PatchInputs`] a package folds into its signature — `Some` iff it
     /// receives the userspace scope, `None` otherwise.
-    fn inputs_for(&self, name: &str) -> Option<PatchInputs<'_>> {
-        receives_userspace_patches(name).then_some(PatchInputs {
+    fn inputs_for(&self, tree: &UserspaceTree) -> Option<PatchInputs<'_>> {
+        receives_userspace_patches(tree).then_some(PatchInputs {
             pin: self.patches.map(|p| p.pin),
             patches: build::series_identity(self.patches, &self.series_fp),
         })
@@ -493,7 +498,7 @@ fn apply_patches(
     ctx: &UserspacePatchCtx,
     step: &Step,
 ) -> Result<(), EngineError> {
-    let target = format!("{} @ {}", pkg.name, pkg.pin.reference);
+    let target = format!("{} @ {}", pkg.name(), pkg.pin.reference);
     let n = build::apply_series_scope(
         &build::ApplyScope {
             tree,
@@ -507,7 +512,7 @@ fn apply_patches(
     if let Some(p) = ctx.patches {
         step.log(format!(
             "{}: applied {n} userspace patch(es) ({})",
-            pkg.name,
+            pkg.name(),
             p.pin.series.join(", ")
         ));
     }
@@ -540,13 +545,23 @@ fn package_signature(
     pkg: &Package,
     patches: Option<&PatchInputs>,
 ) -> crate::signature::SignatureManifest {
-    signature_manifest(pkg.name, &pkg.pin.commit, patches)
+    signature_manifest(pkg.name(), &pkg.pin.commit, patches)
 }
 
 /// The artifact-store node name for a package's `.deb`s, e.g. `userspace:mpp`
 /// (matching the Tier-1 per-package node name).
 fn node_name(pkg: &Package) -> String {
-    format!("userspace:{}", pkg.name)
+    node_name_for(pkg.name())
+}
+
+/// The same, from a bare tree name — for [`why-rebuild`](crate::plan), which predicts
+/// against the store before any `Package` exists.
+///
+/// Public because the prediction and the store lookup must be the *same string*: the
+/// store is keyed by `(node, signature)`, so a prediction computed under a different
+/// name would answer a question about an entry no build ever wrote.
+pub fn node_name_for(name: &str) -> String {
+    format!("userspace:{name}")
 }
 
 /// The Tier-2 output signature manifest of a userspace package's `.deb`s from
@@ -560,7 +575,8 @@ fn node_name(pkg: &Package) -> String {
 /// executes its compiler — so a snapshot-pinned build and a live-mirror build never
 /// restore each other's `.deb`s. Libmali also folds its variant filter. On a
 /// signature hit the store restores this package's `.deb`s rather than rebuilding; a
-/// patch change reaches this output signature through the folded tree dependency.
+/// patch change reaches this output signature through the folded tree dependency. A
+/// tree with a `targets_filter` folds that too, since it decides what was compiled.
 ///
 /// Public and keyed by primitives (not a `Package`) so the ffmpeg stage recomputes
 /// the mpp/librga dependency signatures from the lock and folds them into its own
@@ -572,7 +588,7 @@ pub fn output_manifest_for(
     suite: &str,
     arch: &str,
     sandbox_id: &str,
-    build_libmali: bool,
+    trees: &[UserspaceTree],
     patches: Option<&PatchInputs>,
 ) -> crate::signature::SignatureManifest {
     let tree_sig = signature_manifest(name, commit, patches).signature();
@@ -587,11 +603,15 @@ pub fn output_manifest_for(
         .fold_scalar("sandbox", sandbox_id)
         // The base root's identity above covers what the sandbox is; this covers what
         // was layered over it. Both reach the compile, so both reach the key — see
-        // [`layer_packages`] for why `build_libmali` is an input to every package of the
-        // stage rather than to Mali's alone.
-        .fold_set("build_deps", &layer_packages(build_libmali));
-    if name == "libmali" {
-        b.fold_scalar("libmali_variant", LIBMALI_VARIANT);
+        // [`layer_packages`] for why one tree's `build_deps` are an input to every
+        // package of the stage rather than to its own alone.
+        .fold_set("build_deps", &layer_packages(trees));
+    if let Some(variant) = trees
+        .iter()
+        .find(|t| t.name == name)
+        .and_then(|t| t.targets_filter.as_deref())
+    {
+        b.fold_scalar("targets_filter", variant);
     }
     b.manifest()
 }
@@ -603,16 +623,16 @@ fn package_output_manifest(
     suite: &str,
     arch: &str,
     sandbox_id: &str,
-    build_libmali: bool,
+    trees: &[UserspaceTree],
     patches: Option<&PatchInputs>,
 ) -> crate::signature::SignatureManifest {
     output_manifest_for(
-        pkg.name,
+        pkg.name(),
         &pkg.pin.commit,
         suite,
         arch,
         sandbox_id,
-        build_libmali,
+        trees,
         patches,
     )
 }
@@ -630,7 +650,7 @@ fn store_package(
     step: &Step,
 ) -> Result<(), EngineError> {
     let names = deb_names(stage_root)?;
-    let paths: Vec<PathBuf> = select_debs(&names, pkg.deb_prefixes)
+    let paths: Vec<PathBuf> = select_debs(&names, &pkg.deb_prefixes())
         .iter()
         .map(|n| stage_root.join(n))
         .collect();
@@ -638,7 +658,7 @@ fn store_package(
     store.put(node, sig, &refs)?;
     step.log(format!(
         "{}: stored {} .deb(s) to the artifact cache",
-        pkg.name,
+        pkg.name(),
         refs.len()
     ));
     Ok(())
@@ -654,7 +674,7 @@ fn package_staged(stage_root: &Path, pkg: &Package) -> Result<bool, EngineError>
     }
     let names = deb_names(stage_root)?;
     Ok(pkg
-        .deb_prefixes
+        .deb_prefixes()
         .iter()
         .all(|prefix| names.iter().any(|n| n.starts_with(prefix))))
 }
@@ -674,44 +694,49 @@ fn dpkg_env(jobs: usize, source_date_epoch: Option<u64>) -> Vec<(String, String)
     env
 }
 
+/// Borrow a prefix list as `&str`s, for the helpers that take a slice of them.
+fn prefix_refs(prefixes: &[String]) -> Vec<&str> {
+    prefixes.iter().map(String::as_str).collect()
+}
+
 /// `.deb` file names in `names` matching any of `prefixes`. Pure selection so
 /// collection is testable without a build.
-fn select_debs<'a>(names: &'a [String], prefixes: &[&str]) -> Vec<&'a String> {
+fn select_debs<'a>(names: &'a [String], prefixes: &[String]) -> Vec<&'a String> {
     names
         .iter()
         .filter(|n| prefixes.iter().any(|p| n.starts_with(p)))
         .collect()
 }
 
-/// Rewrite libmali's `debian/targets` to only the lines naming the board's Mali
-/// variant, skipping the full variant matrix. A no-op if the file is absent; if
-/// the variant matches nothing, leaves the file untouched (build all) with a
-/// warning, rather than producing an empty target set.
-fn filter_libmali_targets(targets: &Path, variant: &str, step: &Step) -> Result<(), EngineError> {
+/// Rewrite a tree's `debian/targets` to only the lines naming
+/// [`targets_filter`](UserspaceTree::targets_filter), skipping the rest of a vendor
+/// variant matrix — libmali's is ~140 GPU variants, of which one board needs one.
+///
+/// A no-op if the file is absent; if the filter matches nothing, the file is left
+/// untouched (build all) with a warning, rather than producing an empty target set.
+fn filter_targets(targets: &Path, variant: &str, step: &Step) -> Result<(), EngineError> {
     if !targets.exists() {
         return Ok(());
     }
     let content = std::fs::read_to_string(targets).map_err(|s| EngineError::io(targets, s))?;
-    let filtered = filter_targets(&content, variant);
+    let filtered = keep_variant_lines(&content, variant);
     if filtered.trim().is_empty() {
         step.emit(
             crate::event::Stream::Stderr,
             crate::event::LogOrigin::Stage,
-            format!("warning: libmali variant '{variant}' matched no targets; building all"),
+            format!("warning: targets filter '{variant}' matched nothing; building all"),
         );
         return Ok(());
     }
     std::fs::write(targets, &filtered).map_err(|s| EngineError::io(targets, s))?;
     let kept = filtered.lines().count();
-    step.log(format!(
-        "libmali: filtered to {kept} target(s) matching {variant}"
-    ));
+    step.log(format!("filtered to {kept} target(s) matching {variant}"));
     Ok(())
 }
 
 /// Keep the lines of `content` containing `variant` (each newline-terminated).
 /// Pure, so the filter is testable.
-fn filter_targets(content: &str, variant: &str) -> String {
+fn keep_variant_lines(content: &str, variant: &str) -> String {
     content
         .lines()
         .filter(|l| l.contains(variant))
@@ -721,6 +746,34 @@ fn filter_targets(content: &str, variant: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A tree fixture: the declaration the SoC would author, minus the knobs a
+    /// signature test does not exercise.
+    fn tree(name: &str) -> UserspaceTree {
+        UserspaceTree {
+            name: name.into(),
+            git: "s".into(),
+            git_ref: "master".into(),
+            debs: vec![format!("lib{name}")],
+            links: Vec::new(),
+            ffmpeg_flag: None,
+            ffmpeg_requires: Vec::new(),
+            patched: name == "mpp",
+            optional: false,
+            build_deps: Vec::new(),
+            targets_filter: None,
+        }
+    }
+
+    /// A pin fixture for a tree.
+    fn pin_at(name: &str, commit: &str) -> UserspacePin {
+        UserspacePin {
+            name: name.into(),
+            source: "s".into(),
+            reference: "master".into(),
+            commit: commit.into(),
+        }
+    }
     use super::*;
 
     #[test]
@@ -731,12 +784,18 @@ mod tests {
             "librga2_2.2.0_arm64.deb".to_string(),
             "unrelated_1_arm64.deb".to_string(),
         ];
-        let mpp = select_debs(&names, &["librockchip-mpp1_", "librockchip-mpp-dev_"]);
+        let mpp = select_debs(
+            &names,
+            &[
+                "librockchip-mpp1_".to_string(),
+                "librockchip-mpp-dev_".to_string(),
+            ],
+        );
         assert_eq!(mpp.len(), 2);
         assert!(mpp.iter().all(|n| n.starts_with("librockchip-mpp")));
-        let rga = select_debs(&names, &["librga2_"]);
+        let rga = select_debs(&names, &["librga2_".to_string()]);
         assert_eq!(rga.len(), 1);
-        assert!(select_debs(&names, &["nonexistent_"]).is_empty());
+        assert!(select_debs(&names, &["nonexistent_".to_string()]).is_empty());
     }
 
     #[test]
@@ -766,48 +825,38 @@ aarch64-linux-gnu/libmali-bifrost-g52 gbm
 aarch64-linux-gnu/libmali-valhall-g610 wayland
 arm-linux-gnueabihf/libmali-utgard-450 x11
 ";
-        let kept = filter_targets(content, "aarch64-linux-gnu/libmali-valhall-g610");
+        let kept = keep_variant_lines(content, "aarch64-linux-gnu/libmali-valhall-g610");
         assert_eq!(kept.lines().count(), 2);
         assert!(kept.lines().all(|l| l.contains("valhall-g610")));
         // An unmatched variant yields an empty set (caller warns + skips).
-        assert!(filter_targets(content, "libmali-nonexistent").is_empty());
+        assert!(keep_variant_lines(content, "libmali-nonexistent").is_empty());
     }
 
     #[test]
     fn package_signature_tracks_commit_and_name() {
-        let pin_a = GitPin {
-            source: "s".into(),
-            reference: "master".into(),
-            commit: "c1".into(),
-        };
-        let pin_b = GitPin {
-            source: "s".into(),
-            reference: "master".into(),
-            commit: "c2".into(),
-        };
+        let (mpp_tree, rga_tree) = (tree("mpp"), tree("librga"));
+        let pin_a = pin_at("mpp", "c1");
+        let pin_b = pin_at("mpp", "c2");
+        let rga_pin = pin_at("librga", "c1");
         let mpp_a = Package {
-            name: "mpp",
+            tree: &mpp_tree,
             source: "",
             pin: &pin_a,
-            deb_prefixes: &[],
         };
         let mpp_a2 = Package {
-            name: "mpp",
+            tree: &mpp_tree,
             source: "x",
             pin: &pin_a,
-            deb_prefixes: &["y_"],
         };
         let mpp_b = Package {
-            name: "mpp",
+            tree: &mpp_tree,
             source: "",
             pin: &pin_b,
-            deb_prefixes: &[],
         };
         let rga_a = Package {
-            name: "librga",
+            tree: &rga_tree,
             source: "",
-            pin: &pin_a,
-            deb_prefixes: &[],
+            pin: &rga_pin,
         };
         // Same commit → same signature (source/prefixes are not tree-shaping).
         assert_eq!(
@@ -828,21 +877,17 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
 
     #[test]
     fn patch_series_folds_into_the_patched_package_signature() {
-        // Only MPP receives the userspace scope.
-        assert!(receives_userspace_patches("mpp"));
-        assert!(!receives_userspace_patches("librga"));
-        assert!(!receives_userspace_patches("libmali"));
+        // The tree says so itself, rather than the stage comparing a name.
+        assert!(receives_userspace_patches(&tree("mpp")));
+        assert!(!receives_userspace_patches(&tree("librga")));
+        assert!(!receives_userspace_patches(&tree("libmali")));
 
-        let pin = GitPin {
-            source: "s".into(),
-            reference: "v1.5.0-1-20260121-750e76e".into(),
-            commit: "750e76ec2d9287babfaf08c8bf395ebc5e8778ea".into(),
-        };
+        let mpp_tree = tree("mpp");
+        let pin = pin_at("mpp", "750e76ec2d9287babfaf08c8bf395ebc5e8778ea");
         let mpp = Package {
-            name: "mpp",
+            tree: &mpp_tree,
             source: "",
             pin: &pin,
-            deb_prefixes: &[],
         };
         let pin_at = |commit: &str| boot2deb_core::lock::PatchesPin {
             series: vec!["rk3588-accel".into()],
@@ -930,16 +975,13 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         )
         .unwrap();
 
-        let pin = GitPin {
-            source: "s".into(),
-            reference: "c".into(),
-            commit: "c".into(),
-        };
+        let mut mpp_tree = tree("mpp");
+        mpp_tree.debs = vec!["librockchip-mpp1".into()];
+        let pin = pin_at("mpp", "c");
         let mpp = Package {
-            name: "mpp",
+            tree: &mpp_tree,
             source: "",
             pin: &pin,
-            deb_prefixes: &["librockchip-mpp1_"],
         };
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "userspace");
@@ -958,16 +1000,13 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         let tmp = tempfile::tempdir().unwrap();
         let stage_root = tmp.path().join("userspace");
         std::fs::create_dir_all(&stage_root).unwrap();
-        let pin = GitPin {
-            source: "s".into(),
-            reference: "c".into(),
-            commit: "c".into(),
-        };
+        let mut mpp_tree = tree("mpp");
+        mpp_tree.debs = vec!["librockchip-mpp1".into(), "librockchip-mpp-dev".into()];
+        let pin = pin_at("mpp", "c");
         let mpp = Package {
-            name: "mpp",
+            tree: &mpp_tree,
             source: "",
             pin: &pin,
-            deb_prefixes: &["librockchip-mpp1_", "librockchip-mpp-dev_"],
         };
         // Only the runtime lib present: a crash before the -dev deb → NOT staged.
         std::fs::write(stage_root.join("librockchip-mpp1_1.5.0_arm64.deb"), b"x").unwrap();
@@ -990,24 +1029,22 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         ] {
             std::fs::write(stage_root.join(n), b"x").unwrap();
         }
-        let mpp_pin = GitPin {
-            source: "s".into(),
-            reference: "c".into(),
-            commit: "c".into(),
-        };
-        let rga_pin = mpp_pin.clone();
+        let mut mpp_tree = tree("mpp");
+        mpp_tree.debs = vec!["librockchip-mpp1".into()];
+        let mut rga_tree = tree("librga");
+        rga_tree.debs = vec!["librga2".into(), "librga-dev".into()];
+        let mpp_pin = pin_at("mpp", "c");
+        let rga_pin = pin_at("librga", "c");
         let packages = vec![
             Package {
-                name: "mpp",
+                tree: &mpp_tree,
                 source: "",
                 pin: &mpp_pin,
-                deb_prefixes: &["librockchip-mpp1_"],
             },
             Package {
-                name: "librga",
+                tree: &rga_tree,
                 source: "",
                 pin: &rga_pin,
-                deb_prefixes: &["librga2_", "librga-dev_"],
             },
         ];
         let sink = |_: crate::event::Event| {};
@@ -1030,28 +1067,22 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
 
     #[test]
     fn package_output_manifest_covers_commit_suite_and_arch() {
-        fn mpp(p: &GitPin) -> Package<'_> {
-            Package {
-                name: "mpp",
-                source: "",
-                pin: p,
-                deb_prefixes: &["librockchip-mpp1_"],
-            }
-        }
-        let pin = |c: &str| GitPin {
-            source: "s".into(),
-            reference: "r".into(),
-            commit: c.into(),
+        let mpp_tree = tree("mpp");
+        let mpp = |p| Package {
+            tree: &mpp_tree,
+            source: "",
+            pin: p,
         };
-        let p1 = pin("c1");
+        let p1 = pin_at("mpp", "c1");
+        let trees = [mpp_tree.clone()];
         let sig = |pkg: &Package, suite: &str, arch: &str| {
-            package_output_manifest(pkg, suite, arch, SANDBOX, false, None).signature
+            package_output_manifest(pkg, suite, arch, SANDBOX, &trees, None).signature
         };
         let base = sig(&mpp(&p1), "forky", "arm64");
         // Stable under identical inputs.
         assert_eq!(base, sig(&mpp(&p1), "forky", "arm64"));
         // A source-pin bump reaches the output signature through the fetch dependency.
-        let p2 = pin("c2");
+        let p2 = pin_at("mpp", "c2");
         assert_ne!(base, sig(&mpp(&p2), "forky", "arm64"));
         // Suite (the sandbox toolchain proxy) and arch each split the key.
         assert_ne!(base, sig(&mpp(&p1), "sid", "arm64"));
@@ -1069,15 +1100,15 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         };
         assert_ne!(
             base,
-            package_output_manifest(&mpp(&p1), "forky", "arm64", SANDBOX, false, Some(&patches))
+            package_output_manifest(&mpp(&p1), "forky", "arm64", SANDBOX, &trees, Some(&patches))
                 .signature
         );
         // Distinct packages never share an output entry (their node names differ).
+        let rga_tree = tree("librga");
         let rga = Package {
-            name: "librga",
+            tree: &rga_tree,
             source: "",
             pin: &p1,
-            deb_prefixes: &["librga2_"],
         };
         assert_ne!(base, sig(&rga, "forky", "arm64"));
     }
@@ -1092,14 +1123,9 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
     /// sandbox's `.deb`s.
     #[test]
     fn the_sandbox_that_compiled_a_package_splits_its_output_key() {
-        let pin = GitPin {
-            source: "s".into(),
-            reference: "r".into(),
-            commit: "c1".into(),
-        };
+        let trees = [tree("mpp")];
         let sig = |sandbox: &str| {
-            output_manifest_for("mpp", &pin.commit, "forky", "arm64", sandbox, false, None)
-                .signature
+            output_manifest_for("mpp", "c1", "forky", "arm64", sandbox, &trees, None).signature
         };
         let base = sig(SANDBOX);
         assert_eq!(base, sig(SANDBOX), "stable under an identical sandbox");
@@ -1118,29 +1144,41 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
     /// What was *layered over* the sandbox splits the key too, for every package of the
     /// stage rather than for the one the layer was widened for.
     ///
-    /// `--build-libmali` adds X11 and Wayland `.pc` files to the one build root the whole
-    /// stage shares, so MPP's and librga's `cmake`/`meson` probes see them whether or not
-    /// Mali is what is being built. Without this fold, turning the flag on would change
+    /// Enabling an optional tree adds *its* `build_deps` to the one build root the whole
+    /// stage shares, so every other tree's `cmake`/`meson` probes see them whether or not
+    /// that tree is what is being built. Without this fold, asking for it would change
     /// what the compile detects while leaving the artifact store answering the same
     /// question — which is how a `.deb` built in one environment gets restored into
     /// another.
     #[test]
     fn the_layer_over_that_sandbox_splits_it_for_every_package_in_the_stage() {
-        let sig = |name: &str, build_libmali: bool| {
-            output_manifest_for(name, "c1", "forky", "arm64", SANDBOX, build_libmali, None)
-                .signature
+        let mut mali = tree("libmali");
+        mali.optional = true;
+        mali.build_deps = vec!["libgbm-dev".into(), "libwayland-dev".into()];
+        let narrow = [tree("mpp"), tree("librga")];
+        let wide = [tree("mpp"), tree("librga"), mali];
+        let sig = |name: &str, trees: &[UserspaceTree]| {
+            output_manifest_for(name, "c1", "forky", "arm64", SANDBOX, trees, None).signature
         };
         for name in ["mpp", "librga", "libmali"] {
             assert_ne!(
-                sig(name, false),
-                sig(name, true),
+                sig(name, &narrow),
+                sig(name, &wide),
                 "{name} compiles in the widened root too"
             );
         }
-        // And the fold is of the resolved set, not of the flag: the same declaration
-        // yields the same key.
-        assert_eq!(sig("mpp", true), sig("mpp", true));
-        assert_eq!(layer_packages(false), USERSPACE_DEPS.to_vec());
-        assert!(layer_packages(true).ends_with(LIBMALI_DEPS));
+        // And the fold is of the resolved set, not of a flag: the same declarations
+        // yield the same key.
+        assert_eq!(sig("mpp", &wide), sig("mpp", &wide));
+        // Sorted and de-duplicated, which is what makes the key independent of the
+        // SoC's declaration order.
+        let mut base: Vec<String> = USERSPACE_DEPS.iter().map(|d| (*d).to_string()).collect();
+        base.sort();
+        assert_eq!(layer_packages(&narrow), base);
+        // De-duplicated and sorted, so two trees naming one dependency layer it once and
+        // the declaration order cannot move a key.
+        let widened = layer_packages(&wide);
+        assert!(widened.contains(&"libgbm-dev".to_string()));
+        assert!(widened.windows(2).all(|w| w[0] < w[1]), "sorted and unique");
     }
 }

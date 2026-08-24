@@ -44,10 +44,10 @@ boot_method = "rockchip-rkbin"
 ...
 
 [kernel]
-id = "rk3588-mainline-7.1"
+id = "rk3588-mainline-7.2"
 flavor = "mainline"
-reference = "v7.1.6"
-commit = "2609d60e2f6d0b8a96563baa08b56482962cebaa"
+reference = "v7.2"
+commit = "8d3ae59288f1e7d58d76558a6ee96d533bc5019f"
 patch_series = "rk3588-accel"
 ```
 
@@ -82,6 +82,27 @@ put a kernel on this system needs to know which.
 Under `layout = "split"` the boot payload and the root filesystem live on **different
 media** — u-boot on the eMMC, the OS on NVMe. A reader that finds this rootfs with no
 bootloader beside it is looking at an expected state, not a fault.
+
+## `pressed` marks a derived image
+
+An image `press` re-assembled with tree additions carries one extra table:
+
+```toml
+[pressed]
+source = "turing-rk1-forky"
+copies = ["/etc/myapp/site.conf"]
+debs = ["myapp_1.2_arm64.deb"]
+embedded_image = "turing-rk1-forky.img.xz"
+```
+
+Its **absence is the claim**: no `[pressed]` table means this filesystem is the
+recipe's canonical artifact, byte for byte. Where it is present, `source` names
+the artifact stem the file derives from and the remaining keys list what was
+added, by kind and destination — never by content. `reproduce` reproduces
+builds, not pressings. The seed partition is deliberately not summarized here:
+it is self-describing, and `boot2deb seed` can rewrite it later without
+touching the filesystem, so a copy of it in this file would go stale. See
+[Producing images](../press.md).
 
 ## It carries no secrets
 

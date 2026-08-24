@@ -7,9 +7,37 @@
 # rather than a library anything links — so no `Depends` pulls it in and it has to be
 # asked for. This feature is that ask.
 #
-# It is separate from the media-accel features because it is not free: see the size
-# note below. An image that wants hardware transcode does not automatically want a
-# GPU stack, and on a headless box the two are genuinely different decisions.
+# `libvulkan1` is in this list for the same reason, and it is not redundant: ffmpeg is
+# built with `!CONFIG_VULKAN_STATIC`, so it **dlopens** the loader rather than linking
+# it, and `dpkg-shlibdeps` therefore never sees it. `ffmpeg-rk` Depends on
+# `libplacebo360` and `libshaderc1` — which are DT_NEEDED — and on no Vulkan loader at
+# all. Without this feature an image has every Vulkan filter compiled in and nothing to
+# open: the dlopen fails and ffmpeg reports no Vulkan device. That degrades gracefully,
+# which is why it is not a packaging bug, but it does mean this feature is the only
+# thing that makes any of it work. Do not drop `libvulkan1` on the theory that the deb
+# pulls it in.
+#
+# It is a feature of its own, and it is a default on the RK3588 bare-ffmpeg recipes
+# (recipes/turing-rk1/media-accel-*.toml). Those two facts sit together because the
+# question it answers is per-recipe, not per-stack: on a box whose consumer is the
+# FFmpeg command line, the Vulkan filters are the fastest scale, tone-map and
+# composite route the hardware has — `scale_vulkan` measures 53.8 dB against swscale
+# at 18x the efficiency and 2.8x the speed, and libplacebo is the only compositor in
+# this build that runs anywhere but the CPU. Shipping the filters without a driver
+# would leave an image that quietly does the slow thing, so those recipes carry it.
+#
+# It stays opt-in everywhere else, and the Jellyfin recipes are the case that matters:
+# Jellyfin's `HardwareAccelerationType` is a closed enum with no Vulkan member, and
+# under the `rkmpp` type it configures it emits `rkmpp`/`rkrga` filter chains and never
+# a Vulkan one. So on a Jellyfin image these packages are reachable from a shell and
+# from nothing the server does — a large cost against no path — and that recipe names
+# `+vulkan` when its operator wants the command line too.
+#
+# The gate below is `requires_arch`, not `requires_soc`, but the *default* is scoped to
+# RK3588 by the recipes rather than by this file, because conformance is per-GPU: PanVk
+# is conformant on the RK3588's Mali-G610 and is not on the RK3576's Mali-G52. Widening
+# the gate to arm64 as a default would hand the RK3576 boards 305 MiB they cannot use
+# conformantly.
 #
 # `mesa-vulkan-drivers` supplies PanVk for the Mali in these SoCs. It also supplies
 # `lvp` (llvmpipe), a software Vulkan device that enumerates alongside PanVk — pin the
@@ -32,7 +60,7 @@ packages     = ["mesa-vulkan-drivers", "libvulkan1", "vulkan-tools"]
 requires_arch = ["arm64"]
 
 caveats = [
-  "This feature adds roughly 165 MB to the installed system, and about 147 MB of that is `mesa-vulkan-drivers` alone. Debian ships every Mesa Vulkan driver in that one package — the AMD, Intel, NVIDIA, virtio and software back ends as well as the Mali one this hardware can use — and offers no per-driver package, so an image that wants PanVk takes all of them.",
+  "This feature adds 25 packages and roughly 305 MiB to the installed system, measured against the RK3588 media-accel package set on forky. Two thirds of it is not the driver: `mesa-vulkan-drivers` is 144 MiB, and it depends on `libllvm21` (127 MiB) and through it `libz3-4` (25 MiB), which are there for the `lvp` software rasterizer Debian ships in the same package rather than for PanVk. Debian offers no per-driver package — that one carries the AMD, Intel, NVIDIA, virtio and software back ends as well as the Mali one this hardware uses — so an image that wants PanVk takes all of them and the LLVM they imply.",
   "Vulkan conformance is a per-GPU fact, not a per-feature one. PanVk is conformant on the RK3588's Mali-G610 and is not conformant on the RK3576's Mali-G52; the same package installs on both and only the first carries a conformance claim.",
   "A software Vulkan device (`lvp`, llvmpipe) enumerates alongside the hardware one. Anything that leaves device selection to the default can bind it and run GPU work on the CPU, which is slower than not using this feature at all and does not announce itself.",
 ]

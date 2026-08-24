@@ -1,0 +1,368 @@
+#!/bin/sh
+# boot2deb-selftest -- compare what this image claims to be against what is
+# actually running, and say so out loud.
+#
+# The checks are not authored here. The build flattens each config layer's
+# [[expect]] entries into /etc/boot2deb/selftest.d/<layer>.checks, one check
+# per line, plus an identity.checks derived from the image's own pins -- so
+# this runner reads plain lines and never parses TOML. Line grammar: blank
+# lines and full-line `#` comments are skipped; otherwise the first word is
+# the check kind and the rest of the line is its argument text, split into
+# two words only for `driver-bound`. Unknown kinds are reported as skipped,
+# not failed, so an image built by an older boot2deb than its config tree
+# does not fail spuriously.
+#
+# Two modes. `hardware` (the default) runs everything and is what an operator
+# runs on the board. `userland` marks the checks that only mean something on
+# the board -- driver-bound, devnode, sound-card, no-dmesg-match, and the
+# running-kernel half of the kernel checks -- as not applicable, and checks
+# the disk-content half (files, firmware, the initramfs) against /boot
+# instead of `uname`: it is how `boot2deb try` runs this rootfs under a
+# generic QEMU kernel without failing on hardware the emulator does not have.
+#
+# --root exists for reading a mounted image from outside (and for the build's
+# own tests): every path this script examines is taken relative to it.
+#
+# Exit: 0 when nothing failed; 1 on any failure; 2 on a usage error or when
+# no checks are installed. Not-applicable and skipped checks never fail --
+# a skip is loud in the output instead, because a check that silently stops
+# running looks exactly like a check that passes.
+
+set -u
+
+usage() {
+    echo "usage: boot2deb-selftest [--mode hardware|userland] [--root DIR]" >&2
+    echo "                         [--uname RELEASE] [--dmesg-file FILE]" >&2
+    exit 2
+}
+
+mode=hardware
+root=
+unamer=
+dmesg_file=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --mode)       [ $# -ge 2 ] || usage; mode=$2; shift 2 ;;
+        --root)       [ $# -ge 2 ] || usage; root=${2%/}; shift 2 ;;
+        --uname)      [ $# -ge 2 ] || usage; unamer=$2; shift 2 ;;
+        --dmesg-file) [ $# -ge 2 ] || usage; dmesg_file=$2; shift 2 ;;
+        *) usage ;;
+    esac
+done
+case "$mode" in hardware|userland) ;; *) usage ;; esac
+[ -n "$unamer" ] || unamer=$(uname -r)
+
+ok=0 failed=0 na=0 skipped=0
+
+# report <ok|fail|na|skip> <kind> <args> [note] -- one output line per check,
+# aligned with the .checks files themselves so the two read side by side.
+report() {
+    case "$1" in
+        ok)   ok=$((ok + 1));           printf '  ok      %-17s %s\n' "$2" "$3" ;;
+        fail) failed=$((failed + 1));   printf '  FAILED  %-17s %s%s\n' "$2" "$3" "${4:+  ($4)}" ;;
+        na)   na=$((na + 1));           printf '  n/a     %-17s %s\n' "$2" "$3" ;;
+        skip) skipped=$((skipped + 1)); printf '  skipped %-17s %s%s\n' "$2" "$3" "${4:+  ($4)}" ;;
+    esac
+}
+
+# True when any expansion of the (unquoted, so globbing) patterns exists.
+# Every path argument is validated whitespace-free at build time, so word
+# splitting cannot tear one apart.
+any_path() {
+    for _p in "$@"; do
+        [ -e "$_p" ] && return 0
+    done
+    return 1
+}
+
+# The newest kernel release installed on /boot, for the disk-content checks in
+# userland mode (where `uname -r` names the emulator's fixture kernel, not this
+# image's). Lexicographic order is fine for the single-kernel images we build.
+disk_kver=
+for _v in "$root"/boot/vmlinuz-*; do
+    [ -e "$_v" ] && disk_kver=${_v##*/vmlinuz-}
+done
+
+# The release the disk checks compare against: the running kernel on hardware,
+# the installed kernel in userland mode.
+target_kver() {
+    if [ "$mode" = hardware ]; then
+        echo "$unamer"
+    else
+        echo "$disk_kver"
+    fi
+}
+
+check_kernel_release() {
+    if [ "$mode" = hardware ]; then
+        # A prefix match: the pin says 7.1.6, the running kernel says
+        # 7.1.6-1-arm64. The flavor check owns the suffix.
+        case "$unamer" in
+            "$1" | "$1"-*) report ok kernel-release "$1" ;;
+            *) report fail kernel-release "$1" "running $unamer" ;;
+        esac
+    elif any_path "$root/boot/vmlinuz-$1" "$root"/boot/vmlinuz-"$1"-*; then
+        report ok kernel-release "$1"
+    else
+        report fail kernel-release "$1" "no /boot/vmlinuz-$1*"
+    fi
+}
+
+check_kernel_flavor() {
+    if [ "$mode" = hardware ]; then
+        # `-rt-arm64` also ends in `-arm64`, so the RT spelling is refused
+        # first -- this is the check that catches an accidental PREEMPT_RT
+        # kernel, which otherwise boots and quietly changes scheduling.
+        case "$unamer" in
+            *-rt-"$1") report fail kernel-flavor "$1" "running an -rt kernel: $unamer" ;;
+            *-"$1") report ok kernel-flavor "$1" ;;
+            *) report fail kernel-flavor "$1" "running $unamer" ;;
+        esac
+        return
+    fi
+    _good=
+    for _v in "$root"/boot/vmlinuz-*-"$1"; do
+        [ -e "$_v" ] || continue
+        case "$_v" in *-rt-"$1") ;; *) _good=1 ;; esac
+    done
+    if [ -n "$_good" ]; then
+        report ok kernel-flavor "$1"
+    else
+        report fail kernel-flavor "$1" "no non-rt /boot/vmlinuz-*-$1"
+    fi
+}
+
+check_file() {
+    if any_path "$root"$1; then
+        report ok file "$1"
+    else
+        report fail file "$1" "missing"
+    fi
+}
+
+check_dtb() {
+    # Every layout a shipped kernel installs DTBs into: the rkbin hooks'
+    # /boot/<name>-<kver>, a bindeb-pkg kernel's /usr/lib/linux-image-<ver>/,
+    # Debian's flat armhf /usr/lib/modules/<ver>/dtb/, and a plain /boot copy.
+    _base=${1##*/}
+    if any_path "$root/boot/$_base" "$root"/boot/"$_base"-* \
+        "$root"/usr/lib/linux-image-*/"$1" \
+        "$root"/usr/lib/modules/*/dtb/"$_base" \
+        "$root"/boot/dtbs/*/"$1"; then
+        report ok dtb "$1"
+    else
+        report fail dtb "$1" "not installed in any known layout"
+    fi
+}
+
+check_firmware() {
+    # /lib/firmware and /usr/lib/firmware are the same tree on a merged-usr
+    # image, but --root may point at something older; the compressed spellings
+    # are what the kernel's firmware loader also accepts.
+    if any_path "$root/usr/lib/firmware/$1" "$root/usr/lib/firmware/$1.zst" \
+        "$root/usr/lib/firmware/$1.xz" "$root/lib/firmware/$1" \
+        "$root/lib/firmware/$1.zst" "$root/lib/firmware/$1.xz"; then
+        report ok firmware "$1"
+    else
+        report fail firmware "$1" "not under /lib/firmware"
+    fi
+}
+
+check_initramfs_module() {
+    # The invariant is "the boot path can load it": built into the kernel or
+    # present in its initramfs. modprobe treats `-` and `_` as one character,
+    # so both sides are normalized before comparing.
+    _mod=$(printf '%s' "$1" | tr - _)
+    _kver=$(target_kver)
+    if [ -z "$_kver" ]; then
+        report skip initramfs-module "$1" "no kernel on /boot to check against"
+        return
+    fi
+    for _b in "$root/lib/modules/$_kver/modules.builtin" \
+        "$root/usr/lib/modules/$_kver/modules.builtin"; do
+        if [ -r "$_b" ] && tr - _ <"$_b" | grep -q "/$_mod\.ko"; then
+            report ok initramfs-module "$1"
+            return
+        fi
+    done
+    _initrd="$root/boot/initrd.img-$_kver"
+    if [ ! -e "$_initrd" ]; then
+        report fail initramfs-module "$1" "no initrd.img-$_kver"
+    elif ! command -v lsinitramfs >/dev/null 2>&1; then
+        report skip initramfs-module "$1" "lsinitramfs unavailable"
+    elif lsinitramfs "$_initrd" 2>/dev/null | tr - _ | grep -q "/$_mod\.ko"; then
+        report ok initramfs-module "$1"
+    else
+        report fail initramfs-module "$1" "not built in and not in initrd.img-$_kver"
+    fi
+}
+
+# The image is built to carry exactly one kernel: the solved plan installs one
+# linux-image and nothing in the build dist-upgrades, so a second version means
+# either a feature or a --deb addition pulled one in, or the running system has
+# installed one since it was imaged. Reported, never repaired -- deleting a
+# kernel is not a check's business, and a build should fail rather than lose one.
+check_single_kernel() {
+    _kvers=
+    _n=0
+    for _v in "$root"/boot/vmlinuz-*; do
+        [ -e "$_v" ] || continue
+        _n=$((_n + 1))
+        _kvers="${_kvers:+$_kvers }${_v##*/vmlinuz-}"
+    done
+    # /lib/modules and /usr/lib/modules are one tree on a merged-usr image, so
+    # only one of them is counted or every version would appear twice. The
+    # merged path is tried first because under --root the /lib symlink is
+    # absolute and would resolve outside the root being examined.
+    _moddir="$root/usr/lib/modules"
+    [ -d "$_moddir" ] || _moddir="$root/lib/modules"
+    _mvers=
+    _m=0
+    for _d in "$_moddir"/*; do
+        [ -d "$_d" ] || continue
+        _m=$((_m + 1))
+        _mvers="${_mvers:+$_mvers }${_d##*/}"
+    done
+    if [ "$_n" -ne 1 ]; then
+        report fail single-kernel "${_kvers:-none}" "$_n kernels on /boot"
+    elif [ "$_m" -ne 1 ]; then
+        report fail single-kernel "${_mvers:-none}" "$_m module trees in ${_moddir#"$root"}"
+    elif [ "$_kvers" != "$_mvers" ]; then
+        report fail single-kernel "$_kvers" "its modules are for $_mvers"
+    else
+        report ok single-kernel "$_kvers"
+    fi
+}
+
+check_driver_bound() {
+    if [ "$mode" = userland ]; then
+        report na driver-bound "$1"
+        return
+    fi
+    # $1 is "<device> <driver>"; both words are validated whitespace-free.
+    set -- $1
+    if any_path "$root"/sys/bus/*/drivers/"$2"/"$1"; then
+        report ok driver-bound "$1 $2"
+    else
+        report fail driver-bound "$1 $2" "no /sys/bus/*/drivers/$2/$1"
+    fi
+}
+
+check_devnode() {
+    if [ "$mode" = userland ]; then
+        report na devnode "$1"
+    elif any_path "$root"$1; then
+        report ok devnode "$1"
+    else
+        report fail devnode "$1" "absent"
+    fi
+}
+
+check_sound_card() {
+    if [ "$mode" = userland ]; then
+        report na sound-card "$1"
+        return
+    fi
+    _cards="$root/proc/asound/cards"
+    if [ ! -r "$_cards" ]; then
+        report fail sound-card "$1" "no $_cards (no sound support at all)"
+    elif grep -Fq -- "$1" "$_cards"; then
+        report ok sound-card "$1"
+    else
+        report fail sound-card "$1" "not in /proc/asound/cards"
+    fi
+}
+
+check_no_dmesg_match() {
+    if [ "$mode" = userland ]; then
+        report na no-dmesg-match "$1"
+        return
+    fi
+    if [ -n "$dmesg_file" ]; then
+        _log=$(cat "$dmesg_file" 2>/dev/null)
+    elif ! _log=$(dmesg 2>/dev/null); then
+        # dmesg_restrict makes the log root-only; a silent pass here would
+        # report a boot as clean that was never actually read.
+        report skip no-dmesg-match "$1" "cannot read the kernel log; run as root"
+        return
+    fi
+    if printf '%s\n' "$_log" | grep -Eq -- "$1"; then
+        report fail no-dmesg-match "$1" "pattern matched the kernel log"
+    else
+        report ok no-dmesg-match "$1"
+    fi
+}
+
+run_check() {
+    # Every known kind requires its argument text; a known kind with none is a
+    # malformed line, and saying so beats guessing what it meant.
+    case "$1" in
+        kernel-release | kernel-flavor | file | dtb | firmware | \
+            initramfs-module | driver-bound | devnode | sound-card | no-dmesg-match)
+            if [ -z "$2" ]; then
+                report skip "$1" "" "malformed line: no argument"
+                return
+            fi
+            ;;
+    esac
+    case "$1" in
+        kernel-release)   check_kernel_release "$2" ;;
+        single-kernel)    check_single_kernel ;;
+        kernel-flavor)    check_kernel_flavor "$2" ;;
+        file)             check_file "$2" ;;
+        dtb)              check_dtb "$2" ;;
+        firmware)         check_firmware "$2" ;;
+        initramfs-module) check_initramfs_module "$2" ;;
+        driver-bound)     check_driver_bound "$2" ;;
+        devnode)          check_devnode "$2" ;;
+        sound-card)       check_sound_card "$2" ;;
+        no-dmesg-match)   check_no_dmesg_match "$2" ;;
+        *)                report skip "$1" "$2" "unknown check kind" ;;
+    esac
+}
+
+# Display header only: the identity the checks cross-check is already flattened
+# into the .checks files, so nothing below *depends* on reading image.toml.
+identity="$root/etc/boot2deb/image.toml"
+if [ -r "$identity" ]; then
+    _dev=$(sed -n 's/^device = "\(.*\)"$/\1/p' "$identity" | head -n 1)
+    _suite=$(sed -n 's/^suite = "\(.*\)"$/\1/p' "$identity" | head -n 1)
+    _kid=$(sed -n 's/^id = "\(.*\)"$/\1/p' "$identity" | head -n 1)
+    echo "${_dev:-unknown} / ${_suite:-unknown} / ${_kid:-unknown}"
+    echo
+fi
+
+dir="$root/etc/boot2deb/selftest.d"
+found=
+for f in "$dir"/*.checks; do
+    [ -e "$f" ] || continue
+    found=1
+    _name=${f##*/}
+    echo "${_name%.checks}"
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in '' | \#*) continue ;; esac
+        kind=${line%%[ 	]*}
+        args=${line#"$kind"}
+        while [ "${args# }" != "$args" ] || [ "${args#	}" != "$args" ]; do
+            args=${args# }
+            args=${args#	}
+        done
+        run_check "$kind" "$args"
+    done <"$f"
+done
+if [ -z "$found" ]; then
+    echo "no checks installed under $dir" >&2
+    exit 2
+fi
+
+echo
+summary="$ok ok"
+[ $failed -gt 0 ] && summary="$summary, $failed failed"
+[ $na -gt 0 ] && summary="$summary, $na not applicable"
+[ $skipped -gt 0 ] && summary="$summary, $skipped skipped"
+if [ $failed -gt 0 ]; then
+    echo "$summary. Failures are what this image was expected to have and does not."
+    exit 1
+fi
+echo "$summary."
+exit 0

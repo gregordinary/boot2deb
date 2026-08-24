@@ -26,12 +26,26 @@ requires_soc = ["rk3588"]
 # The two providers both build an `ffmpeg-rk` deb; only one can win.
 conflicts    = ["media-accel-v4l2"]
 
+# What this feature supplies to the rest of the selection. An application feature
+# that cannot function without an encoder — `jellyfin` installs none of its own and
+# its server exits at startup without one — declares `requires_capability =
+# ["ffmpeg"]` and is satisfied by this or by any other provider naming the same
+# capability. It is a capability name rather than this feature's name so that a
+# provider for another platform needs no edit to any consumer.
+#
+# `ffmpeg` here means the FFmpeg *binaries*, at /opt/ffmpeg-rk/bin with `-rk`-suffixed
+# links in /usr/bin. It deliberately does not claim /usr/bin/ffmpeg, so a consumer
+# has to be told the path; it cannot find this build by name on $PATH.
+provides     = ["ffmpeg"]
+
 # What this stack does not deliver. Both are properties of the `ffmpeg-rk` build,
 # which is what this feature provides — so they hold in every recipe that composes
 # it, on any RK3588 board, and belong here rather than being restated by each.
 caveats = [
   "Scaling inside a hardware transcode runs on the CPU. The RGA filters (`scale_rkrga`, `vpp_rkrga`, `overlay_rkrga`) accept only frames carrying an RKMPP hardware context, and the mainline V4L2 decoder hands out plain DRM PRIME frames, which they reject; `hwmap` does not bridge the two either. A decode/scale/encode chain therefore downloads frames to system memory, scales them with swscale, and re-uploads them to the encoder. RGA still accelerates a scale fed from software-decoded frames, and the 2D engine itself works.",
   "The `h264_rkmpp`, `hevc_rkmpp`, `vp8_rkmpp` and `vp9_rkmpp` *decoders* are compiled in but fail to open: MPP finds no decode client on a mainline kernel, where `rkvdec` is a V4L2 stateless driver rather than an MPP service. Hardware decode is reached with `-hwaccel v4l2request`. The matching `*_rkmpp` encoders do work.",
+  "10-bit content decodes in hardware, but a 10-bit transcode still converts on the CPU. The V4L2 decoder emits `NV12` for 8-bit and `NV15` — 10-bit packed 4:2:0 — for 10-bit, and no filter or encoder in this build imports `NV15`. The decoder cannot be asked for `P010` instead; the hardware writes `NV15` natively. RGA converts `NV15` to `P010`, but only for a program that speaks librga directly, since the RGA filters reject these frames as described above.",
+  "Every `ffmpeg-rk` invocation writes `mpp_platform: client N driver is not ready!` to standard error, once per vendor service client MPP looks for and does not find on a mainline kernel. It is harmless and appears even for `ffmpeg -version`, but it is captured by anything that logs the process's stderr.",
 ]
 
 # This feature's packages are built from the SoC's media-accel source trees
@@ -39,3 +53,12 @@ caveats = [
 # the resolved SoC to supply those stanzas and schedules the userspace/ffmpeg
 # compile nodes; a build without this feature carries no sources and skips them.
 requires_media_accel = true
+
+# The capability's own proof, checked by boot2deb-selftest wherever this feature
+# is selected: the binary the whole stack exists to deliver, at the path the
+# `provides = ["ffmpeg"]` contract names. This is the disk half of the historic
+# no-RUNPATH failure (a binary that shipped and could not start); the build now
+# asserts the RUNPATH at link time, which is strictly earlier.
+[[expect]]
+check = "file"
+path  = "/opt/ffmpeg-rk/bin/ffmpeg"

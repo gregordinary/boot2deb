@@ -5,7 +5,7 @@
 //! The bootstrap is in-process and rootless — no `sudo`, no persistent chroot, no
 //! external bootstrap binary. [`build_rootfs`] drives ferroday-cage's Debian
 //! provisioner: it installs the merged rootfs package set
-//! ([`ResolvedBuild::rootfs_packages`]) from the build's own
+//! ([`ResolvedImage::rootfs_packages`]) from the build's own
 //! [`LocalDistsRepo`](crate::repo::LocalDistsRepo) plus the suite mirror — so each
 //! `.deb`'s dependencies resolve together — lays the staged overlay in, runs the
 //! target config (user account, ssh first-boot, group membership), and re-runs the
@@ -37,7 +37,7 @@ pub use provisioner::{
 
 use crate::error::EngineError;
 use crate::event::Step;
-use boot2deb_core::model::{AptSource, InitramfsCompress, ResolvedBuild};
+use boot2deb_core::model::{AptSource, ImageBuild, InitramfsCompress, ResolvedImage};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -163,7 +163,7 @@ pub struct RootfsOptions<'a> {
     /// apt tries them in order, so a `fallback` snapshot backfills the first
     /// mirror's 404s from the second.
     pub mirrors: &'a [String],
-    /// Extra package names to install beyond [`ResolvedBuild::rootfs_packages`] —
+    /// Extra package names to install beyond [`ResolvedImage::rootfs_packages`] —
     /// build artifacts whose names are version-specific and thus unknowable to the
     /// static config, above all the freshly built kernel image.
     pub extra_packages: &'a [String],
@@ -178,7 +178,7 @@ pub struct RootfsOptions<'a> {
     /// (`--refresh-rootfs`). The solve still runs and the fresh tree is re-stored.
     pub refresh: bool,
     /// Third-party apt repositories the selected features contribute
-    /// ([`ResolvedBuild::apt_sources`]), each paired with the host
+    /// ([`ResolvedImage::apt_sources`]), each paired with the host
     /// path its `signed_by` keyring resolved to. Rendered into signed `deb` positionals
     /// so apt resolves an out-of-mirror app (e.g. Jellyfin) during the bootstrap solve.
     /// Empty when no feature adds one.
@@ -446,7 +446,7 @@ fn set_times(path: &Path, secs: i64) -> Result<(), EngineError> {
 fn stage_preinstall_overlay(
     staging: &Path,
     overlay_dirs: &[PathBuf],
-    build: &ResolvedBuild,
+    image: &ResolvedImage,
     boot: Option<BootConfig>,
     source_date_epoch: Option<u64>,
     step: &Step,
@@ -474,35 +474,44 @@ fn stage_preinstall_overlay(
     write_staged(
         staging,
         "etc/locale.conf",
-        &config::locale_conf(&build.locale),
+        &config::locale_conf(&image.locale),
     )?;
     write_staged(
         staging,
         "etc/locale.gen",
-        &config::locale_gen(&build.locales_generate),
+        &config::locale_gen(&image.locales_generate),
     )?;
     // The zone is the symlink and nothing else — see `config::localtime_target`.
     symlink_staged(
         staging,
         "etc/localtime",
-        &config::localtime_target(&build.timezone),
+        &config::localtime_target(&image.timezone),
     )?;
     // Only a board with a keyboard writes one. On a headless board the file is absent
     // and `keyboard-configuration` installs its own default, which is the honest
     // outcome: nothing here knows better than Debian what layout an unused console has.
-    if let Some(keymap) = &build.keymap {
+    if let Some(keymap) = &image.keymap {
         write_staged(staging, "etc/default/keyboard", &config::keyboard(keymap))?;
     }
     // Same rule as the keymap: configure nothing when nothing is configured. An empty
     // list is not "no time source" — it is Debian's compiled-in pool, and writing an
     // empty `NTP=` would say the opposite.
-    if !build.ntp_servers.is_empty() {
+    if !image.ntp_servers.is_empty() {
         write_staged(
             staging,
             "etc/systemd/timesyncd.conf.d/10-boot2deb.conf",
-            &config::timesyncd_conf(&build.ntp_servers),
+            &config::timesyncd_conf(&image.ntp_servers),
         )?;
     }
+
+    // The placeholder that keeps the install from building an initrd it cannot
+    // build correctly — see INITRAMFS_STUB. Executable, and the only staged file
+    // that is.
+    write_staged_exec(
+        staging,
+        INITRAMFS_STUB.trim_start_matches('/'),
+        &config::initramfs_stub(),
+    )?;
 
     normalize_overlay_modes(staging)?;
     normalize_overlay_times(staging, source_date_epoch)?;
@@ -522,30 +531,31 @@ fn stage_preinstall_overlay(
 fn stage_overlay(
     staging: &Path,
     overlay_dirs: &[PathBuf],
-    build: &ResolvedBuild,
+    ib: ImageBuild,
     rootfs_partuuid: uuid::Uuid,
     image_identity: &boot2deb_core::provenance::SystemIdentity,
     source_date_epoch: Option<u64>,
     step: &Step,
 ) -> Result<(), EngineError> {
+    let ImageBuild { build, image } = ib;
     copy_overlay_trees(staging, overlay_dirs, step)?;
     // Generated config, mirroring rootfs paths.
-    write_staged(staging, "etc/fstab", &config::fstab(build, rootfs_partuuid))?;
+    write_staged(staging, "etc/fstab", &config::fstab(ib, rootfs_partuuid))?;
     // Only written when the build declares volumes: an image with none should not
     // ship a config file suggesting the mechanism is live.
-    if !build.data_volumes.is_empty() {
+    if !image.data_volumes.is_empty() {
         write_staged(
             staging,
             boot2deb_core::datavolume::CONFIG_PATH,
-            &boot2deb_core::datavolume::render_config(&build.data_volumes),
+            &boot2deb_core::datavolume::render_config(&image.data_volumes),
         )?;
     }
-    write_staged(staging, "etc/hostname", &config::hostname(&build.hostname))?;
-    write_staged(staging, "etc/hosts", &config::hosts(&build.hostname))?;
+    write_staged(staging, "etc/hostname", &config::hostname(&image.hostname))?;
+    write_staged(staging, "etc/hosts", &config::hosts(&image.hostname))?;
     write_staged(
         staging,
         "etc/apt/sources.list",
-        &config::apt_sources(build.image_suite(), crate::bootstrap::components(build)),
+        &config::apt_sources(&image.suite, crate::bootstrap::components(image)),
     )?;
     write_staged(staging, "etc/kernel-img.conf", &config::kernel_img_conf())?;
     // Two files that exist because the build host is not the board. `dhcpcd` cannot
@@ -578,6 +588,40 @@ fn stage_overlay(
         "etc/boot2deb/image.toml",
         &image_identity.to_toml_string()?,
     )?;
+    // The image's expectations of itself, read on the device by
+    // `boot2deb-selftest`: one derived file cross-checking the identity above
+    // against the running system, then one file per config layer that declared
+    // `[[expect]]` checks. Written here — pre-flattened by the build, which has
+    // the TOML parser — so the on-device runner reads plain lines and nothing
+    // richer.
+    write_staged(
+        staging,
+        &format!("{}/identity.checks", boot2deb_core::expect::CHECKS_DIR),
+        &config::selftest_identity(build, image_identity),
+    )?;
+    for group in &image.expectations {
+        write_staged(
+            staging,
+            &format!(
+                "{}/{}",
+                boot2deb_core::expect::CHECKS_DIR,
+                group.file_name()
+            ),
+            &group.render(),
+        )?;
+    }
+    // The boot-time selftest unit ships in the base overlay on every image;
+    // the enable symlink is laid in only when the recipe asked for it, so a
+    // disabled unit costs its bytes and nothing else. Same mechanism as the
+    // first-boot unit's shipped symlink, generated instead of checked in
+    // because it is conditional.
+    if image.selftest_on_boot {
+        symlink_staged(
+            staging,
+            "etc/systemd/system/multi-user.target.wants/boot2deb-selftest.service",
+            "../boot2deb-selftest.service",
+        )?;
+    }
     // Empty machine-id → systemd regenerates it on first boot.
     write_staged(staging, "etc/machine-id", "")?;
     // The sudoers drop-in is written by the customize-hook directly into the chroot,
@@ -607,6 +651,14 @@ fn write_staged(staging: &Path, rel: &str, content: &str) -> Result<(), EngineEr
     set_mode(&path, 0o644)
 }
 
+/// [`write_staged`] for a file that must be executable — a hook or, in the
+/// pre-install overlay, the [`INITRAMFS_STUB`] placeholder. Mode `0755` rather
+/// than `0644`, which `normalize_overlay_modes` then preserves.
+fn write_staged_exec(staging: &Path, rel: &str, content: &str) -> Result<(), EngineError> {
+    write_staged(staging, rel, content)?;
+    set_mode(&staging.join(rel), 0o755)
+}
+
 /// Create `staging/<rel>` as a symlink to `target`, replacing whatever is there.
 ///
 /// The overlay copy preserves symlinks (`cp -dR`), so the link — not a copy of what it
@@ -628,6 +680,31 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), EngineError> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .map_err(|s| EngineError::io(path, s))
 }
+
+/// Where the pre-install overlay lays the `update-initramfs` placeholder that
+/// shadows the real one for the length of the package install.
+///
+/// `/usr/local/sbin` is first on the `PATH` every maintainer script runs with,
+/// so this is the `update-initramfs` the kernel package's `postinst.d` hook and
+/// the `initramfs-tools` trigger reach — and neither of them can build a usable
+/// initrd at the point they run. The overlay this build ships is laid in *after*
+/// the packages, so an initrd built during the install has neither the board's
+/// `initramfs-tools` configuration nor the `modules.dep` the `depmod` hook
+/// writes; the rootfs stage discards it and builds the real one afterwards, in
+/// [`customize_script`](crate::rootfs::provisioner). Suppressing the two costs
+/// nothing and saves two full initramfs builds, which on a cross host run under
+/// `qemu-user` like everything else a maintainer script invokes.
+///
+/// Removed by the same customize step that builds the real initrd, so it never
+/// reaches the image — and it is a file in the staging tree only, not a
+/// `dpkg-divert`, so a build that dies before that leaves nothing to undo: the
+/// staging tree is discarded, and no cached artifact ever holds it.
+pub(crate) const INITRAMFS_STUB: &str = "/usr/local/sbin/update-initramfs";
+
+/// Where the placeholder records the calls it absorbed, so the build can report
+/// how many initramfs builds it suppressed rather than claiming a saving it did
+/// not make. Deleted with the placeholder.
+pub(crate) const INITRAMFS_STUB_LOG: &str = "/var/lib/boot2deb/initramfs-stub.log";
 
 /// Modules that must end up **inside the built initramfs** of a depthcharge board,
 /// asserted after it is built and before it is signed.
@@ -706,7 +783,7 @@ pub fn validate_tar(tarball: &Path) -> Result<(), EngineError> {
 /// each returns the exact file content — so the config is unit-testable.
 mod config {
     use boot2deb_core::model::{
-        InitramfsCompress, Keymap, ResolvedBoot, ResolvedBuild, CONSOLE_LOGLEVEL_ARG,
+        ImageBuild, InitramfsCompress, Keymap, ResolvedBoot, ResolvedBuild, CONSOLE_LOGLEVEL_ARG,
     };
     use std::fmt::Write;
     use uuid::Uuid;
@@ -732,24 +809,27 @@ mod config {
     ///    label would work for the kernel but not for the tool: it resolves root from
     ///    fstab and strips any `root=` that disagrees, so whatever is here is what
     ///    gets signed.
-    pub fn fstab(build: &ResolvedBuild, rootfs_partuuid: Uuid) -> String {
-        let (source, note) = match &build.boot {
-            ResolvedBoot::RockchipRkbin(_) => (
-                format!("PARTUUID={}", rootfs_partuuid.hyphenated()),
-                "# regenerate extlinux.conf via /boot/mk_extlinux after editing the root entry",
-            ),
-            ResolvedBoot::Depthcharge(_) => (
-                format!("PARTUUID={}", rootfs_partuuid.hyphenated()),
+    pub fn fstab(ib: ImageBuild, rootfs_partuuid: Uuid) -> String {
+        // One root entry for both methods, because both root by PARTUUID. Only the
+        // note differs: it tells an editor what else has to be regenerated, and the
+        // two methods carry that value in different places.
+        let source = format!("PARTUUID={}", rootfs_partuuid.hyphenated());
+        let note = match &ib.build.boot {
+            ResolvedBoot::RockchipRkbin(_) => {
+                "# regenerate extlinux.conf via /boot/mk_extlinux after editing the root entry"
+            }
+            ResolvedBoot::Depthcharge(_) => {
                 "# depthchargectl derives the signed kernel's root= from this line; after\n\
-                 # editing it, re-sign with `depthchargectl write --allow-current`",
-            ),
+                 # editing it, re-sign with `depthchargectl write --allow-current`"
+            }
         };
         // Data volumes follow root, mounted by LABEL and with `nofail`, so a board
         // whose data disk is absent or slow to enumerate still boots. The
         // first-boot hook creates or adopts the volume these lines name; the lines
         // themselves are here at build time so the mount survives every later boot
         // without the hook, which runs exactly once.
-        let data: String = build
+        let data: String = ib
+            .image
             .data_volumes
             .iter()
             .map(|v| format!("{}\n", v.fstab_line()))
@@ -760,6 +840,124 @@ mod config {
              {source}\t/\text4\terrors=remount-ro\t0      1\n\
              {data}"
         )
+    }
+
+    /// The `update-initramfs` placeholder the pre-install overlay lays at
+    /// [`INITRAMFS_STUB`](super::INITRAMFS_STUB).
+    ///
+    /// It answers `--version` as `initramfs-tools` on purpose: the kernel
+    /// package's `postinst.d` hook checks that before calling, and a placeholder
+    /// that failed the check would be skipped silently instead of taking the
+    /// call and recording it. Every other invocation is a no-op that appends its
+    /// arguments to [`INITRAMFS_STUB_LOG`](super::INITRAMFS_STUB_LOG), which is
+    /// what lets the customize step report the suppression as a number rather
+    /// than an assumption.
+    pub fn initramfs_stub() -> String {
+        format!(
+            "#!/bin/sh\n\
+             # Placeholder for initramfs-tools' update-initramfs, in place only\n\
+             # while boot2deb's package install runs. An initrd built here would\n\
+             # predate this image's initramfs-tools configuration and the\n\
+             # modules.dep the depmod hook writes, so the build discards these\n\
+             # calls and builds the real initrd afterwards. Removed by the\n\
+             # customize step that does.\n\
+             case \"$1\" in\n\
+             \x20 --version) echo 'initramfs-tools boot2deb-placeholder'; exit 0 ;;\n\
+             esac\n\
+             mkdir -p \"$(dirname '{log}')\"\n\
+             echo \"update-initramfs $*\" >> '{log}'\n\
+             exit 0\n",
+            log = super::INITRAMFS_STUB_LOG,
+        )
+    }
+
+    /// `/etc/boot2deb/selftest.d/identity.checks` — the checks derived from the
+    /// build itself, as opposed to the authored `[[expect]]` files written beside
+    /// it. Derived rather than authored because each restates something the lock
+    /// or the device layer already owns, and a layer restating it could drift:
+    ///
+    ///  - `kernel-release` — from the pinned kernel ref, for a compiled kernel
+    ///    whose ref reads as a version tag (`v7.1.6` → `7.1.6`, matched as a
+    ///    prefix of `uname -r`). A distro kernel's version belongs to the suite,
+    ///    and a vendor branch or bare commit names no version — neither emits
+    ///    the line.
+    ///  - `kernel-flavor` — the `uname -r` suffix: the arch tail `bindeb-pkg`
+    ///    bakes into a compiled kernel's `LOCALVERSION`, or the distro package's
+    ///    flavor (`linux-image-armmp` → `armmp`). The runner rejects an `-rt-`
+    ///    variant of the same flavor — the check that catches an accidental
+    ///    PREEMPT_RT kernel.
+    ///  - `dtb` — the resolved `kernel_dtb`, on the boot method that installs
+    ///    DTBs into the filesystem (`rockchip-rkbin`). A depthcharge board's DTB
+    ///    rides inside the signed FIT, where no file check can see it.
+    ///  - `single-kernel` — unconditional, and the one line here that restates
+    ///    nothing: every image installs one solved plan with one `linux-image`
+    ///    in it and never dist-upgrades mid-build, so a second version on `/boot`
+    ///    means a feature or a `--deb` addition pulled one in. It is a check
+    ///    rather than a sweep because losing a kernel is worse than shipping two,
+    ///    so the build fails and says which versions it found.
+    pub fn selftest_identity(
+        build: &ResolvedBuild,
+        identity: &boot2deb_core::provenance::SystemIdentity,
+    ) -> String {
+        let mut out = String::from(
+            "# Checks derived from this image's identity (etc/boot2deb/image.toml).\n\
+             # Run by boot2deb-selftest; see the boot2deb manual (reference/self-test).\n",
+        );
+        if let Some(release) = identity
+            .kernel
+            .reference
+            .as_deref()
+            .and_then(version_from_ref)
+        {
+            let _ = writeln!(
+                out,
+                "{}",
+                boot2deb_core::expect::render_line("kernel-release", release)
+            );
+        }
+        if let Some(flavor) = kernel_flavor(identity) {
+            let _ = writeln!(
+                out,
+                "{}",
+                boot2deb_core::expect::render_line("kernel-flavor", &flavor)
+            );
+        }
+        if build.rkbin_boot().is_some() {
+            let _ = writeln!(
+                out,
+                "{}",
+                boot2deb_core::expect::render_line("dtb", &build.kernel_dtb)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "{}",
+            boot2deb_core::expect::render_line("single-kernel", "")
+        );
+        out
+    }
+
+    /// The version a pinned kernel ref names, when it names one: a leading `v`
+    /// stripped, accepted only when the remainder starts with a digit and
+    /// carries a dot (`v7.1.6` → `7.1.6`). A branch name or a bare commit fails
+    /// the shape and yields no `kernel-release` check — a prefix match against
+    /// `uname -r` would be meaningless for either.
+    fn version_from_ref(reference: &str) -> Option<&str> {
+        let bare = reference.strip_prefix('v').unwrap_or(reference);
+        (bare.starts_with(|c: char| c.is_ascii_digit()) && bare.contains('.')).then_some(bare)
+    }
+
+    /// The `uname -r` flavor suffix this image's kernel boots with: the arch
+    /// tail of a compiled kernel's `LOCALVERSION`
+    /// ([`localversion`](crate::build::kernel)), or a distro package's flavor.
+    fn kernel_flavor(identity: &boot2deb_core::provenance::SystemIdentity) -> Option<String> {
+        match identity.kernel.package.as_deref() {
+            // `linux-image-armmp` → `armmp`; a package spelled without the
+            // conventional prefix names no derivable flavor.
+            Some(package) => package.strip_prefix("linux-image-").map(str::to_string),
+            // Compiled: `LOCALVERSION=-<rev>-<arch>` makes the arch the suffix.
+            None => Some(identity.image.arch.clone()),
+        }
     }
 
     /// `/etc/depthcharge-tools/config` — which board profile to sign for, and whether
@@ -1015,7 +1213,7 @@ mod config {
     /// `EXTL_CMD_LINE` carries the arguments `mk_extlinux` writes into the boot
     /// entry: `rootwait`, then the base console gate
     /// ([`CONSOLE_LOGLEVEL_ARG`]), then any extra arguments the board asked for
-    /// ([`ResolvedBuild::kernel_cmdline`]). It overrides `mk_extlinux`'s own
+    /// ([`ResolvedImage::kernel_cmdline`]). It overrides `mk_extlinux`'s own
     /// `rootwait` default — board.conf is sourced after that default, so the
     /// assignment must carry `rootwait` itself. The board's arguments come last so a
     /// board can override the gate. Resolution guarantees the value is safe to embed
@@ -1039,6 +1237,19 @@ mod config {
 
 #[cfg(test)]
 mod tests {
+    use boot2deb_core::model::ResolvedBuild;
+
+    /// The image half of a fixture build. Every fixture here resolves a shipped image
+    /// recipe, so the axis is there; the unwrap states that rather than threading an
+    /// `Option` through every assertion.
+    fn image_of(build: &boot2deb_core::ResolvedBuild) -> &boot2deb_core::ResolvedImage {
+        pair_of(build).image
+    }
+
+    /// The same fixture build as an [`ImageBuild`] pair, for the stages that take one.
+    fn pair_of(build: &boot2deb_core::ResolvedBuild) -> boot2deb_core::ImageBuild<'_> {
+        build.as_image().expect("the fixture recipes build images")
+    }
     use super::*;
     use boot2deb_core::{resolve_recipe, ConfigRoot, Overrides};
 
@@ -1072,7 +1283,7 @@ mod tests {
             patches: None,
             uboot: None,
             uboot_patches: None,
-            userspace: None,
+            userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(boot2deb_core::lock::RootfsPin {
                 suite: "forky".into(),
@@ -1089,7 +1300,7 @@ mod tests {
     /// The `/etc/boot2deb/image.toml` document for a build, for the `RootfsOptions`
     /// fixtures below.
     fn ident(build: &ResolvedBuild) -> boot2deb_core::provenance::SystemIdentity {
-        boot2deb_core::provenance::system_identity(build, &empty_lock())
+        boot2deb_core::provenance::system_identity(pair_of(build), &empty_lock())
     }
 
     /// The staged tree's modes are the image's modes, and they must not depend on the
@@ -1338,7 +1549,10 @@ mod tests {
         // must name the partition the image node stamps into the GPT. It is the
         // device's boot identity for life — first-boot grows the partition but never
         // rewrites its PARTUUID — so no label and no filesystem UUID appears here.
-        let f = config::fstab(&rk1(), PARTUUID);
+        let f = {
+            let b = rk1();
+            config::fstab(pair_of(&b), PARTUUID)
+        };
         let expected = format!("PARTUUID={}\t/\text4", PARTUUID.hyphenated());
         assert!(
             f.contains(&expected),
@@ -1354,7 +1568,10 @@ mod tests {
         // This line is what depthchargectl signs into the kernel, so it must name the
         // partition the image node is about to create — not a label, which the tool
         // would not resolve, and not a filesystem UUID, which does not exist yet.
-        let f = config::fstab(&c201(), PARTUUID);
+        let f = {
+            let b = c201();
+            config::fstab(pair_of(&b), PARTUUID)
+        };
         let expected = format!("PARTUUID={}\t/\text4", PARTUUID.hyphenated());
         assert!(
             f.contains(&expected),
@@ -1372,14 +1589,14 @@ mod tests {
             CreatePolicy, DataVolume, DiskKind, VolumeFs, VolumeMatch,
         };
         let mut b = rk1();
-        b.data_volumes = vec![DataVolume {
+        b.image.as_mut().unwrap().data_volumes = vec![DataVolume {
             match_: VolumeMatch::Kind(DiskKind::Nvme),
             label: "b2d-data".into(),
             fstype: VolumeFs::Ext4,
             mount: "/srv".into(),
             create: CreatePolicy::IfBlank,
         }];
-        let f = config::fstab(&b, PARTUUID);
+        let f = config::fstab(pair_of(&b), PARTUUID);
         let lines: Vec<&str> = f.lines().filter(|l| !l.starts_with('#')).collect();
 
         // Root still comes first and still roots on the PARTUUID.
@@ -1398,7 +1615,10 @@ mod tests {
     fn a_build_with_no_data_volumes_writes_the_fstab_it_always_did() {
         // The feature is opt-in, so an image that declares none must not gain a line,
         // a blank, or a comment about an axis it does not use.
-        let f = config::fstab(&rk1(), PARTUUID);
+        let f = {
+            let b = rk1();
+            config::fstab(pair_of(&b), PARTUUID)
+        };
         assert_eq!(f.lines().filter(|l| !l.starts_with('#')).count(), 1);
         assert!(!f.contains("LABEL="));
     }
@@ -1441,7 +1661,7 @@ mod tests {
         stage_preinstall_overlay(
             tmp.path(),
             &[],
-            &c201(),
+            image_of(&c201()),
             Some(BootConfig::Depthcharge {
                 board: "speedy-libreboot",
                 cmdline: "console=tty1 ro",
@@ -1461,7 +1681,7 @@ mod tests {
 
         // A raw-gap board has no signed payload and generates none of this.
         let rkbin = tempfile::tempdir().unwrap();
-        stage_preinstall_overlay(rkbin.path(), &[], &rk1(), None, None, &step).unwrap();
+        stage_preinstall_overlay(rkbin.path(), &[], image_of(&rk1()), None, None, &step).unwrap();
         assert!(!rkbin
             .path()
             .join("etc/initramfs-tools/conf.d/depthcharge.conf")
@@ -1496,10 +1716,10 @@ mod tests {
 
     #[test]
     fn apt_sources_omits_the_pockets_unstable_does_not_publish() {
-        // Debian publishes neither `sid-security` nor `sid-updates` — both 404. The
-        // generator used to emit them unconditionally, so a `sid` image booted and then
-        // reported two dead sources on every `apt update`. `sid` is a documented,
-        // deliberate suite value, so the fix belongs here and not in suite validation.
+        // Debian publishes neither `sid-security` nor `sid-updates` — both 404, so an
+        // image emitting them reports two dead sources on every `apt update`. `sid` is a
+        // documented, deliberate suite value, so the pocket set belongs here and not in
+        // suite validation.
         assert_eq!(
             config::apt_sources("sid", crate::bootstrap::COMPONENTS),
             "deb http://deb.debian.org/debian sid main contrib non-free non-free-firmware\n"
@@ -1582,7 +1802,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(tmp.path(), &[], &rk1(), None, None, &step).unwrap();
+        stage_preinstall_overlay(tmp.path(), &[], image_of(&rk1()), None, None, &step).unwrap();
 
         assert!(tmp.path().join("etc/locale.conf").is_file());
         assert!(
@@ -1611,7 +1831,7 @@ mod tests {
         stage_overlay(
             tmp.path(),
             &[],
-            &build,
+            pair_of(&build),
             uuid::Uuid::nil(),
             &identity,
             None,
@@ -1649,7 +1869,7 @@ mod tests {
         stage_overlay(
             tmp2.path(),
             &[],
-            &rk,
+            pair_of(&rk),
             uuid::Uuid::nil(),
             &ident(&rk),
             None,
@@ -1659,6 +1879,146 @@ mod tests {
         let rk_text = std::fs::read_to_string(tmp2.path().join("etc/boot2deb/image.toml")).unwrap();
         assert!(rk_text.contains("boot_method = \"rockchip-rkbin\""));
         assert!(!rk_text.contains("board ="));
+    }
+
+    /// The selftest check files reach the image: the derived `identity.checks`
+    /// plus one file per layer-declared expectation group, all under the
+    /// directory the on-device runner globs.
+    ///
+    /// The derived file's contents differ by what the build is, and both shapes
+    /// are asserted: a compiled-kernel rkbin board states its flavor and its DTB;
+    /// a distro-kernel depthcharge board states the package's flavor and no DTB
+    /// (its DTB rides inside the signed FIT, invisible to a file check). Neither
+    /// states a `kernel-release` here because the fixture lock pins no kernel —
+    /// exactly the distro case, and the compiled case is covered by the
+    /// `version_from_ref` unit test below.
+    #[test]
+    fn the_staged_overlay_carries_the_selftest_checks() {
+        let rk = rk1();
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "test");
+        stage_overlay(
+            tmp.path(),
+            &[],
+            pair_of(&rk),
+            uuid::Uuid::nil(),
+            &ident(&rk),
+            None,
+            &step,
+        )
+        .unwrap();
+        let dir = tmp.path().join(boot2deb_core::expect::CHECKS_DIR);
+        let identity = std::fs::read_to_string(dir.join("identity.checks")).unwrap();
+        assert!(identity.contains("kernel-flavor     arm64\n"), "{identity}");
+        assert!(
+            identity.contains("dtb               rockchip/rk3588-turing-rk1.dtb\n"),
+            "{identity}"
+        );
+        // The one unconditional line, and the one that takes no argument — so it
+        // must render as the bare word rather than a word and the padding of an
+        // argument that is not there.
+        assert!(identity.contains("\nsingle-kernel\n"), "{identity}");
+        // Every group the build resolved is a file in the directory, named for
+        // its declaring layer.
+        for group in &image_of(&rk).expectations {
+            assert!(
+                dir.join(group.file_name()).is_file(),
+                "missing {}",
+                group.file_name()
+            );
+        }
+
+        let c2 = c201();
+        let tmp2 = tempfile::tempdir().unwrap();
+        stage_overlay(
+            tmp2.path(),
+            &[],
+            pair_of(&c2),
+            uuid::Uuid::nil(),
+            &ident(&c2),
+            None,
+            &step,
+        )
+        .unwrap();
+        let identity = std::fs::read_to_string(
+            tmp2.path()
+                .join(boot2deb_core::expect::CHECKS_DIR)
+                .join("identity.checks"),
+        )
+        .unwrap();
+        assert!(identity.contains("kernel-flavor     armmp\n"), "{identity}");
+        assert!(!identity.contains("dtb "), "{identity}");
+    }
+
+    /// The boot-time selftest service is enabled by the recipe flag and only by
+    /// it: without the flag no `.wants` symlink is staged (the unit itself ships
+    /// from the base overlay, which these bare-overlay fixtures do not copy).
+    #[test]
+    fn the_selftest_service_symlink_follows_the_recipe_flag() {
+        let mut build = rk1();
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "test");
+        let link = "etc/systemd/system/multi-user.target.wants/boot2deb-selftest.service";
+        stage_overlay(
+            tmp.path(),
+            &[],
+            pair_of(&build),
+            uuid::Uuid::nil(),
+            &ident(&build),
+            None,
+            &step,
+        )
+        .unwrap();
+        assert!(
+            !tmp.path().join(link).symlink_metadata().is_ok(),
+            "no symlink unless the recipe opts in"
+        );
+
+        build.image.as_mut().unwrap().selftest_on_boot = true;
+        let tmp2 = tempfile::tempdir().unwrap();
+        stage_overlay(
+            tmp2.path(),
+            &[],
+            pair_of(&build),
+            uuid::Uuid::nil(),
+            &ident(&build),
+            None,
+            &step,
+        )
+        .unwrap();
+        let target = std::fs::read_link(tmp2.path().join(link)).expect("enable symlink staged");
+        assert_eq!(target, Path::new("../boot2deb-selftest.service"));
+    }
+
+    /// The `kernel-release` line is derived only from a ref that names a version.
+    #[test]
+    fn a_kernel_release_check_needs_a_version_shaped_ref() {
+        let mut build = rk1();
+        let mut lock = empty_lock();
+        lock.kernel = Some(boot2deb_core::lock::KernelPin {
+            id: "rk3588-mainline-7.1".into(),
+            source: "https://git.example/linux.git".into(),
+            reference: "v7.1.6".into(),
+            commit: "0".repeat(40),
+        });
+        let identity = boot2deb_core::provenance::system_identity(pair_of(&build), &lock);
+        let checks = config::selftest_identity(&build, &identity);
+        assert!(checks.contains("kernel-release    7.1.6\n"), "{checks}");
+
+        // A bare commit pins the tree but names no version to compare uname against.
+        lock.kernel.as_mut().unwrap().reference = "95a6c488".into();
+        let identity = boot2deb_core::provenance::system_identity(pair_of(&build), &lock);
+        let checks = config::selftest_identity(&build, &identity);
+        assert!(!checks.contains("kernel-release"), "{checks}");
+
+        // The dtb line follows the boot method, already asserted both ways above;
+        // here only that a split-layout rkbin build still emits it (the rootfs
+        // half is the one being checked, wherever the bootloader lives).
+        build.layout = boot2deb_core::model::Layout::Split;
+        let identity = boot2deb_core::provenance::system_identity(pair_of(&build), &lock);
+        assert!(config::selftest_identity(&build, &identity).contains("dtb "));
     }
 
     /// The two files the image needs because it is built on a machine that is not the
@@ -1674,7 +2034,7 @@ mod tests {
         stage_overlay(
             tmp.path(),
             &[],
-            &build,
+            pair_of(&build),
             uuid::Uuid::nil(),
             &ident(&build),
             None,
@@ -1716,7 +2076,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(tmp.path(), &[], &rk1(), None, None, &step).unwrap();
+        stage_preinstall_overlay(tmp.path(), &[], image_of(&rk1()), None, None, &step).unwrap();
 
         let link = tmp.path().join("etc/localtime");
         assert_eq!(
@@ -1763,7 +2123,7 @@ mod tests {
         // empty `NTP=` would say the opposite, so the file is absent instead.
         let bare = tempfile::tempdir().unwrap();
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(bare.path(), &[], &rk1(), None, None, &step).unwrap();
+        stage_preinstall_overlay(bare.path(), &[], image_of(&rk1()), None, None, &step).unwrap();
         assert!(
             !bare
                 .path()
@@ -1786,7 +2146,8 @@ mod tests {
         .unwrap();
         let lan = tempfile::tempdir().unwrap();
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(lan.path(), &[], &configured, None, None, &step).unwrap();
+        stage_preinstall_overlay(lan.path(), &[], image_of(&configured), None, None, &step)
+            .unwrap();
         let conf = std::fs::read_to_string(
             lan.path()
                 .join("etc/systemd/timesyncd.conf.d/10-boot2deb.conf"),
@@ -1803,7 +2164,7 @@ mod tests {
         // the one keyboard-configuration seeds its debconf answers from.
         let laptop = tempfile::tempdir().unwrap();
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(laptop.path(), &[], &c201(), None, None, &step).unwrap();
+        stage_preinstall_overlay(laptop.path(), &[], image_of(&c201()), None, None, &step).unwrap();
         let kb = std::fs::read_to_string(laptop.path().join("etc/default/keyboard")).unwrap();
         assert!(kb.contains("XKBLAYOUT=\"us\""));
         assert!(kb.contains("XKBMODEL=\"pc105\""));
@@ -1812,8 +2173,43 @@ mod tests {
         // a claim we cannot back; Debian's own default stands instead.
         let headless = tempfile::tempdir().unwrap();
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(headless.path(), &[], &rk1(), None, None, &step).unwrap();
+        stage_preinstall_overlay(headless.path(), &[], image_of(&rk1()), None, None, &step)
+            .unwrap();
         assert!(!headless.path().join("etc/default/keyboard").exists());
+    }
+
+    /// The pre-install overlay carries an executable `update-initramfs`
+    /// placeholder, and it is a real shell script that answers `--version` the
+    /// way the kernel package's hook checks for.
+    #[test]
+    fn the_preinstall_overlay_shadows_update_initramfs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "test");
+        stage_preinstall_overlay(
+            tmp.path(),
+            &[],
+            image_of(&rk1()),
+            None,
+            Some(1_700_000_000),
+            &step,
+        )
+        .unwrap();
+        let stub = tmp.path().join(INITRAMFS_STUB.trim_start_matches('/'));
+        let text = std::fs::read_to_string(&stub).unwrap();
+        assert!(text.starts_with("#!/bin/sh\n"), "{text}");
+        assert!(
+            text.contains("echo 'initramfs-tools boot2deb-placeholder'"),
+            "the kernel hook skips a tool whose --version does not name \
+             initramfs-tools, which would suppress the call without recording it:\n{text}"
+        );
+        assert!(text.contains(INITRAMFS_STUB_LOG), "{text}");
+        assert_eq!(
+            std::fs::metadata(&stub).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "a placeholder that is not executable is not on the PATH at all"
+        );
     }
 
     #[test]

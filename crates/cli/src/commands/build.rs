@@ -28,7 +28,7 @@ use boot2deb_engine::debstore::DebStore;
 use boot2deb_engine::event::{Event, Step};
 use boot2deb_engine::image::{self, ImageOutput};
 use boot2deb_engine::rootfs;
-use boot2deb_engine::sandbox::{BuildSandbox, PackagingSandbox, RootlessSandbox, SandboxRole};
+use boot2deb_engine::sandbox::BuildSandbox;
 use boot2deb_engine::{extradebs, pins};
 use std::path::PathBuf;
 
@@ -171,11 +171,15 @@ pub(crate) fn run(
         }
     }
 
-    let work_dir = crate::workdir::work_dir_for(root, recipe, args.work_dir);
+    let work_dir = crate::workdir::work_dir_for(root, recipe, args.work_dir.clone());
     // Stamp the scratch tree as boot2deb-owned before anything writes into it:
     // `clean` removes only stamped work dirs.
     mark_work_dir(&work_dir)?;
-    let out_dir = absolutize(args.out_dir.unwrap_or_else(|| work_dir.join("artifacts")));
+    let out_dir = absolutize(
+        args.out_dir
+            .clone()
+            .unwrap_or_else(|| work_dir.join("artifacts")),
+    );
     // The content-addressed caches — provisioner downloads and finished rootfs trees —
     // live under the work dir, so they persist across `--stage` invocations and are
     // shared by every build using this work dir.
@@ -202,6 +206,22 @@ pub(crate) fn run(
     // for explicitly.
     let compiles_kernel = resolved.compiles_kernel();
     let builds_uboot = resolved.rkbin_boot().is_some();
+    // The build and its image half as a pair, absent for a u-boot deliverable. Every
+    // stage below the bootloader reads through it, so "this build has no rootfs" is one
+    // `None` rather than a dozen fields that happen to be neutral.
+    let image = resolved.as_image();
+    // The board's out-of-tree modules, empty for a deliverable with no kernel to build
+    // one against.
+    let device_kmods = image
+        .map(|ib| ib.image.device_kmods.as_slice())
+        .unwrap_or(&[]);
+    // The userspace trees this run compiles: the SoC's whole set, less the optional ones
+    // `--userspace` did not name. Resolved once, so the userspace stage's layer, the
+    // ffmpeg key and the provenance all read the same answer.
+    let userspace = crate::config::enabled_userspace(
+        image.map(|ib| ib.image.userspace.as_slice()).unwrap_or(&[]),
+        &args.userspace,
+    )?;
     // A `--kmod-src` naming no declared module would be silently ignored — the kmod
     // node looks its overrides up by name and falls back to the locked source, so a
     // mistyped name would fetch from upstream and report nothing. Checked here, before
@@ -209,13 +229,9 @@ pub(crate) fn run(
     if let Some((name, _)) = args
         .kmod_srcs
         .iter()
-        .find(|(n, _)| !resolved.device_kmods.iter().any(|k| &k.name == n))
+        .find(|(n, _)| !device_kmods.iter().any(|k| &k.name == n))
     {
-        let declared: Vec<&str> = resolved
-            .device_kmods
-            .iter()
-            .map(|k| k.name.as_str())
-            .collect();
+        let declared: Vec<&str> = device_kmods.iter().map(|k| k.name.as_str()).collect();
         return Err(format!(
             "--kmod-src names '{name}', which recipe '{recipe}' does not build. \
              Declared modules: {}",
@@ -230,7 +246,7 @@ pub(crate) fn run(
 
     let kernel_src = match (
         &args.kernel_src,
-        resolved.kernel.as_ref().and_then(|k| k.compiled()),
+        image.and_then(|ib| ib.image.kernel.compiled()),
     ) {
         (Some(s), _) => s.clone(),
         (None, Some(k)) => pins::kernel_source_url(&k.source)?,
@@ -256,18 +272,7 @@ pub(crate) fn run(
     // megabytes. Refused up front rather than at the first stage that needs one: a host
     // this cannot name has no architecture to provision a root at, and every deliverable
     // both compiles and packages.
-    let host_deb_arch = pf
-        .host
-        .debian_arch()
-        .ok_or_else(|| -> Box<dyn std::error::Error> {
-            format!(
-                "cannot name a Debian architecture for this host ({}) — boot2deb \
-                 provisions host-arch roots to compile and archive in, and has no name \
-                 to provision one under",
-                pf.host.arch
-            )
-            .into()
-        })?;
+    let host_deb_arch = crate::sandboxes::host_deb_arch(&pf)?;
     // The cross root emits the target's objects → pass CROSS_COMPILE; it *is* the
     // target's architecture → none. The question is about the root the compile happens
     // in rather than about the host's own `cc`, which no stage invokes any more.
@@ -277,7 +282,7 @@ pub(crate) fn run(
     // cache of the compile nodes' output `.deb`s under <root>/cache/artifacts, keyed
     // by each node's output signature.
     let artifact_store: Option<PathBuf> =
-        (!args.no_artifact_cache).then(|| absolutize(root.path().join("cache").join("artifacts")));
+        (!args.no_artifact_cache).then(|| crate::config::artifact_cache(root));
     // The one host binary that still shapes a compiled byte: the `qemu-user` interpreter
     // that executes the *target-arch* sandbox's compiler. It runs on the host's binfmt
     // handler, not inside any root, so it is probed rather than resolved. The compilers
@@ -304,10 +309,10 @@ pub(crate) fn run(
         // the same function that names its tree, plus the interpreter that runs it.
         // Empty where the build resolves no suite and so stands up no sandbox — the
         // nodes that read this never run on such a build.
-        sandbox_id: resolved.suite.as_deref().map_or_else(String::new, |suite| {
+        sandbox_id: image.map_or_else(String::new, |ib| {
             boot2deb_engine::build::sandbox_identity(
                 resolved.arch.debian_arch(),
-                suite,
+                &ib.image.suite,
                 &mirrors,
                 &toolchain,
             )
@@ -358,117 +363,36 @@ pub(crate) fn run(
         ),
     );
 
-    // Debian archive keyring for both bootstraps — the cross sandbox and the rootfs:
-    // the explicit flag, else the vendored keyring resolved as a
-    // non-overlayable trust anchor (an overlay copy is a fail-closed swap),
-    // else None (the host apt trust store, only viable on a Debian host).
-    //
-    // A vendored keyring is additionally held to its fingerprint manifest: it decides
-    // whose Release signatures the bootstrap accepts, and as a binary blob it is the
-    // one vendored file a reviewer cannot read. An explicit --keyring is the
-    // operator's own anchor, chosen deliberately, and is used as given.
-    let keyring = match args.keyring.clone() {
-        Some(explicit) => Some(explicit),
-        None => {
-            let vendored = root.find_trust_anchor(
-                "blobs/keyrings/debian-archive-keyring.gpg",
-                args.unsafe_overlay_keyring,
-            )?;
-            if let Some(path) = &vendored {
-                boot2deb_engine::keyring::verify(path)?;
-            }
-            vendored
-        }
-    };
+    // Debian archive keyring for both bootstraps — the cross sandbox and the rootfs.
+    let keyring =
+        crate::sandboxes::keyring(root, args.keyring.clone(), args.unsafe_overlay_keyring)?;
 
-    // The userspace/ffmpeg stages compile the target's .debs inside a rootless
-    // userland for the build's suite + arch — never on the host, even when the host
-    // arch matches. Those .debs are packaged for the target suite, and their runtime
-    // Depends come from `dpkg-shlibdeps` reading the libraries present at build time;
-    // building on the host would link against the host's libraries and stamp the
-    // host's package names and versions into Depends. Bootstrapped lazily on first
-    // use under WORK_DIR/sandbox, keyed by arch + suite so one host can serve several.
-    // Only an image build has a suite to bootstrap a sandbox for; the userspace/ffmpeg
-    // stages that use it run only on a media-accel image build. A u-boot-only build
-    // resolves no suite and stands up no sandbox.
-    let sandbox: Option<Box<dyn BuildSandbox>> = resolved.suite.as_ref().map(|suite| {
-        // The mirror list is in the path as well as in the sandbox, because
-        // `ensure_ready` reuses an existing tree without re-checking its origin — see
-        // `build_sandbox_dir`.
-        let rootfs = boot2deb_engine::sandbox::build_sandbox_dir(
-            &work_dir,
-            SandboxRole::Target,
-            resolved.arch.debian_arch(),
-            suite,
-            &mirrors,
-        );
-        Box::new(RootlessSandbox::new(
-            SandboxRole::Target,
-            rootfs,
-            // The same directory `doctor`'s overlay check probes, so a build root is
-            // established where the host was cleared to establish one.
-            boot2deb_engine::sandbox::build_root_uppers(&work_dir),
-            suite.clone(),
-            resolved.arch.debian_arch().to_string(),
+    // The three roots this build compiles, cross-compiles and archives in. Which of them
+    // a run actually provisions is decided by the stages it reaches: each is bootstrapped
+    // lazily, on the first `ensure_ready`, so a build whose artifacts all restore from
+    // the cache stands up none of them.
+    //
+    // The target-arch one is the userspace and ffmpeg stages' — those `.deb`s are
+    // packaged for the target suite and their runtime `Depends` come from
+    // `dpkg-shlibdeps` reading the libraries present at build time, which is only correct
+    // at the target's architecture. It is `None` for a build that resolves no image
+    // suite, which is also a build whose stages never ask for it.
+    let crate::sandboxes::Roots {
+        target: sandbox,
+        cross,
+        packaging,
+    } = crate::sandboxes::roots(
+        &resolved,
+        &crate::sandboxes::RootInputs {
+            work_dir: &work_dir,
+            host_deb_arch,
             // The build's own mirror list, not the default: under `--snapshot pin` the
-            // compiler that produces the target `.deb`s must come from the same
-            // point-in-time archive their runtime does.
-            mirrors.clone(),
-            keyring.clone(),
-            Some(deb_cache.clone()),
-        )) as Box<dyn BuildSandbox>
-    });
-
-    // The root the kernel, u-boot and kmod stages *compile* in: host-arch, carrying a
-    // cross toolchain that emits the target's objects, so the compile runs natively and
-    // a multi-minute kernel build never passes through `qemu-user`.
-    //
-    // Unconditional and lazily bootstrapped, like the packaging root and for the same
-    // reasons — a `deliverable = uboot` build compiles without resolving an image suite,
-    // so this reads `packaging_suite` too, and a build whose artifacts all restore from
-    // the cache never provisions it. It shares that board's tree with its image builds
-    // rather than standing up a second one.
-    let cross_role = SandboxRole::Cross {
-        target: resolved.arch.debian_arch(),
-    };
-    let cross = RootlessSandbox::new(
-        cross_role,
-        boot2deb_engine::sandbox::build_sandbox_dir(
-            &work_dir,
-            cross_role,
-            host_deb_arch,
-            &resolved.packaging_suite,
-            &mirrors,
-        ),
-        boot2deb_engine::sandbox::build_root_uppers(&work_dir),
-        resolved.packaging_suite.clone(),
-        host_deb_arch,
-        mirrors.clone(),
-        keyring.clone(),
-        Some(deb_cache.clone()),
-    );
-
-    // The root the u-boot and kmod `.deb`s are archived in. Unconditional, unlike the
-    // build sandbox above: every deliverable packages something, including a
-    // `deliverable = uboot` build that resolves no image suite at all — which is why
-    // it reads `packaging_suite` (its own suite where it has one, the device's default
-    // otherwise) rather than `suite`. Constructing one costs nothing; the stages that
-    // archive call `ensure_ready` and pay for the bootstrap only if they reach it.
-    let packaging = PackagingSandbox::new(
-        boot2deb_engine::sandbox::packaging_root_dir(
-            &work_dir,
-            host_deb_arch,
-            &resolved.packaging_suite,
-            &mirrors,
-        ),
-        resolved.packaging_suite.clone(),
-        host_deb_arch,
-        // The same mirror list, for the same reason the build sandbox takes it: under
-        // `--snapshot pin` the tool that archives the `.deb`s comes from the same
-        // point-in-time archive their contents do.
-        mirrors.clone(),
-        keyring.clone(),
-        Some(deb_cache.clone()),
+            // compiler that produces the target `.deb`s, and the `dpkg` that archives
+            // them, must come from the same point-in-time archive their runtime does.
+            mirrors: &mirrors,
+            keyring: keyring.clone(),
+            deb_cache: deb_cache.clone(),
+        },
     );
 
     // Resolve the patches source only when there is a series to apply: the lock pins
@@ -595,84 +519,18 @@ pub(crate) fn run(
             },
         );
 
-    // The rootfs tarball the image stage consumes: produced by the rootfs stage,
-    // or supplied directly via --rootfs-tar for an image-only build.
-    let mut rootfs_tar = args.rootfs_tar.clone();
-    // The solved manifest, captured when this run builds the rootfs; joins the
-    // image stage's per-image password to emit the provenance manifest at the end.
-    let mut rootfs_manifest: Option<PathBuf> = None;
-    // The plan document that stage published beside it — the install set plus the
-    // archive state it resolved against, which the provenance manifest records and a
-    // later `reproduce` replays.
-    let mut rootfs_plan: Option<PathBuf> = None;
-    // The per-image first-boot password, captured when this run assembles the image
-    // (the image stage owns it, splicing it into the staged rootfs).
-    let mut first_boot_password: Option<String> = None;
-    // Which checks the image stage ran over the finished rootfs filesystem — reported
-    // by that stage rather than re-probed here, since one of them depends on a host
-    // tool being present. Recorded in the provenance manifest.
-    let mut rootfs_verified_with: Vec<String> = Vec::new();
-    // The on-disk contract that stage formatted the rootfs to, likewise reported rather
-    // than re-derived: its geometry answers to the image's size, so nothing outside the
-    // format itself knows it. `None` until the image stage runs — which is also when the
-    // provenance manifest becomes writable at all.
-    let mut rootfs_filesystem: Option<boot2deb_core::provenance::FilesystemProvenance> = None;
-    // The whole-disk size that stage laid out. Reported by it rather than re-parsed from
-    // the recipe, because a fitted `image_size` names a rule and not a number — the
-    // format decides how large the rootfs is and the disk is sized around it.
-    let mut image_bytes: Option<u64> = None;
-    // What this run left to write, for the closing hint: the image files themselves,
-    // paired with the medium each goes to. Empty for every run that stops short of the
-    // image node, which is what makes the hint absent rather than wrong there.
-    let mut flashables: Vec<crate::nextstep::Flashable> = Vec::new();
-    // The freshly-solved manifest's sha256, set by the rootfs stage — verified
-    // against the committed pin and recorded into the lock by `--save-manifest`.
-    let mut solved_manifest_digest: Option<String> = None;
-    // The `linux-image-*` .deb this run built, if the kernel stage ran here. The
-    // rootfs stage installs the kernel by this exact artifact rather than by
-    // scanning out_dir, so its package set never depends on stale debs left by
-    // earlier builds of other kernel versions.
-    let mut kernel_image_deb: Option<PathBuf> = None;
-
     // Asking for a stage this build does not have is a user error worth naming, not a
     // silent skip — otherwise `--stage kernel` on a board that installs Debian's
-    // kernel would exit 0 having done nothing.
-    if matches!(args.stage, StageArg::Kernel | StageArg::Dtb) && !compiles_kernel {
-        return Err(format!(
-            "recipe '{recipe}' uses kernel '{}', which is a distro package installed from \
-             the Debian mirror — there is no kernel tree to compile, so the requested \
-             stage has nothing to build",
-            resolved
-                .kernel
-                .as_ref()
-                .map(|k| k.id())
-                .unwrap_or("(none — u-boot-only recipe)")
-        )
-        .into());
-    }
-    if matches!(args.stage, StageArg::Uboot) && !builds_uboot {
-        return Err(format!(
-            "recipe '{recipe}' boots via '{}', whose firmware is the board's own — no \
-             bootloader is built, so the requested stage has nothing to build",
-            resolved.boot_method
-        )
-        .into());
-    }
-    // A u-boot-only recipe (deliverable = uboot) resolves no rootfs or image, so an
-    // explicit rootfs/image stage has nothing to build — name it rather than skip.
-    if matches!(args.stage, StageArg::Rootfs | StageArg::Image) && !resolved.produces_image() {
-        return Err(format!(
-            "recipe '{recipe}' builds only a bootloader (deliverable = uboot), so it \
-             resolves no rootfs or image — build it with `--stage uboot` (or omit --stage)"
-        )
-        .into());
-    }
+    // kernel would exit 0 having done nothing. Each node states its own predicate and
+    // its own message, so the pair cannot drift apart.
+    let has_kmods = !device_kmods.is_empty();
+    let media_accel = !userspace.is_empty();
 
     // Kernel-tree inputs, shared by the kernel/dtb stages and the kmod stage (which
     // builds its modules against the same `<work>/linux` tree). Resolved once when the
     // build compiles a kernel; a distro kernel resolves none of this and runs none of
     // these stages. The fragment/dts Vecs are bound first so the borrowed
-    // `KernelOptions` outlives both stage blocks.
+    // `KernelOptions` outlives every stage that reads it.
     let kernel_inputs = if compiles_kernel {
         Some((
             fragment_paths(root, &resolved)?,
@@ -693,654 +551,335 @@ pub(crate) fn run(
             out_dir: &out_dir,
             store: artifact_store.as_deref(),
         });
+    // The device's boot2deb-side compat patches (e.g. the SDIO-7.1 shim), resolved from
+    // config-root-relative to absolute along the config search path. Bound here so the
+    // kmod stage's borrowed `KmodOptions` outlives it.
+    let kmod_local = if has_kmods {
+        kmod_local_patches(root, &resolved)?
+    } else {
+        Vec::new()
+    };
 
-    // The kernel stage and the DTB fast path share every filesystem input; both
-    // prepare the same `<work>/linux` tree.
-    if matches!(args.stage, StageArg::All | StageArg::Kernel | StageArg::Dtb) && compiles_kernel {
-        let opts = kernel_opts
-            .as_ref()
-            .expect("a kernel-compiling build resolved kernel options");
-        if matches!(args.stage, StageArg::Dtb) {
-            let dtb = kernel::build_dtb(&resolved, &lock, opts, &build_env, &sink)?;
-            emit_artifact(&sink, "dtb", "dtb", &dtb);
-        } else {
-            let artifacts = kernel::build_kernel(&resolved, &lock, opts, &build_env, &sink)?;
-            emit_artifact(&sink, "kernel", "image_deb", &artifacts.image_deb);
-            emit_artifact(&sink, "kernel", "headers_deb", &artifacts.headers_deb);
-            record_artifacts(
-                &out_dir,
-                &[artifacts.image_deb.clone(), artifacts.headers_deb.clone()],
-            )?;
-            kernel_image_deb = Some(artifacts.image_deb.clone());
-        }
-    }
-
-    // The kmod stage builds each board `device_kmods` module out-of-tree against the
-    // kernel tree and stages a `<name>-modules-<kver>` `.deb`. It runs only when the
-    // build compiles a kernel and the board declares kmods; a distro-kernel board is
-    // already rejected for any `device_kmods` at resolve. Its `.deb`s join the ledger,
-    // so the rootfs stage installs them from the local repo like the kernel deb.
-    let has_kmods = !resolved.device_kmods.is_empty();
-    if matches!(args.stage, StageArg::Kmod) && !(compiles_kernel && has_kmods) {
-        return Err(format!(
-            "recipe '{recipe}' declares no out-of-tree kernel modules — the requested kmod \
-             stage has nothing to build"
-        )
-        .into());
-    }
-    let mut kmod_debs: Vec<PathBuf> = Vec::new();
-    if matches!(args.stage, StageArg::All | StageArg::Kmod) && compiles_kernel && has_kmods {
-        let kernel = kernel_opts
-            .as_ref()
-            .expect("a kernel-compiling build resolved kernel options");
-        // The device's boot2deb-side compat patches (e.g. the SDIO-7.1 shim), resolved
-        // from config-root-relative to absolute along the config search path.
-        let local_patches = kmod_local_patches(root, &resolved)?;
-        let opts = kmod::KmodOptions {
-            kernel,
-            sources: &args.kmod_srcs,
-            local_patches: &local_patches,
-            work_dir: &work_dir,
-            out_dir: &out_dir,
-            packaging: &packaging,
-            store: artifact_store.as_deref(),
-        };
-        let artifacts = kmod::build_kmods(&resolved, &lock, &opts, &build_env, &sink)?;
-        for deb in &artifacts.debs {
-            emit_artifact(&sink, "kmod", "deb", deb);
-        }
-        record_artifacts(&out_dir, &artifacts.debs)?;
-        kmod_debs = artifacts.debs;
-    }
-
-    if matches!(args.stage, StageArg::All | StageArg::Uboot) && builds_uboot {
-        let opts = uboot::UbootOptions {
-            source: &uboot_src,
-            patches: uboot_patches,
-            blobs_dir: &blobs_dir,
-            work_dir: &work_dir,
-            cross: &cross,
-            out_dir: &out_dir,
-            packaging: &packaging,
-            stem: &stem,
-            store: artifact_store.as_deref(),
-        };
-        let artifacts = uboot::build_uboot(&resolved, &lock, &opts, &build_env, &sink)?;
-        emit_artifact(&sink, "uboot", "idbloader", &artifacts.idbloader);
-        emit_artifact(&sink, "uboot", "uboot_itb", &artifacts.uboot_itb);
-        emit_artifact(&sink, "uboot", "deb", &artifacts.deb);
-        // The maskrom USB boot images, when this board's u-boot builds them: the
-        // CODE471/CODE472 payloads for running this u-boot from RAM over USB.
-        // pyrographer streams the raw usb471/usb472 pair; `maskrom_loader` is the two
-        // packed into the single RKBOOT file `rkdeveloptool db` consumes directly.
-        if let Some(m) = &artifacts.maskrom {
-            emit_artifact(&sink, "uboot", "usb471", &m.usb471);
-            emit_artifact(&sink, "uboot", "usb472", &m.usb472);
-            emit_artifact(&sink, "uboot", "maskrom_loader", &m.loader);
-        }
-        record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
-        // A uboot-only build also emits a standalone, directly-flashable bootloader
-        // image (`<stem>-boot.img`) — the eMMC/SPI medium for a split install
-        // whose OS lives on another disk. Emitted for an explicit `--stage uboot`, and
-        // for a u-boot-only recipe's full build (which has no image stage to fold u-boot
-        // into). An image build's `--stage all` skips it: the image stage folds u-boot
-        // into the combined image, or emits `-boot.img` for `split`.
-        if matches!(args.stage, StageArg::Uboot) || !resolved.produces_image() {
-            let boot_img = image::build_bootloader_image(
-                &resolved,
-                &stem,
-                &artifacts.idbloader,
-                &artifacts.uboot_itb,
-                &out_dir,
-                &sink,
-            )?;
-            emit_artifact(&sink, "bootloader-image", "boot_img", &boot_img);
-        }
-    }
-
-    // The userspace/ffmpeg stages run only for a media-accel build (the resolved
-    // build carries the sources). An explicit `--stage userspace|ffmpeg` on a base
-    // recipe is a user error worth naming rather than silently skipping.
-    let media_accel = resolved.userspace.is_some();
-    if matches!(args.stage, StageArg::Userspace | StageArg::Ffmpeg) && !media_accel {
-        return Err(format!(
-            "recipe '{recipe}' builds no media-accel stack (no selected feature requires it), \
-             so the requested userspace/ffmpeg stage has nothing to build — add a \
-             media-accel feature to the recipe or omit --stage"
-        )
-        .into());
-    }
-
-    if matches!(args.stage, StageArg::All | StageArg::Userspace) && media_accel {
-        let us = resolved
-            .userspace
-            .as_ref()
-            .expect("media-accel build has userspace sources");
-        // A tree the SoC does not declare has no clone source; the userspace stage
-        // skips it, so the empty string is never read.
-        let src = |flag: &Option<String>, decl: &Option<boot2deb_core::model::GitSource>| {
-            flag.clone()
-                .or_else(|| decl.as_ref().map(|s| s.git.clone()))
-                .unwrap_or_default()
-        };
-        let mpp_src = src(&args.mpp_src, &us.mpp);
-        let librga_src = src(&args.librga_src, &us.librga);
-        let libmali_src = src(&args.libmali_src, &us.libmali);
-        let opts = userspace::UserspaceOptions {
-            mpp_src: &mpp_src,
-            librga_src: &librga_src,
-            libmali_src: &libmali_src,
-            build_libmali: args.build_libmali,
-            work_dir: &work_dir,
-            out_dir: &out_dir,
-            patches: kernel_patches,
-            store: artifact_store.as_deref(),
-        };
-        let artifacts = userspace::build_userspace(
-            &lock,
-            &opts,
-            resolved.arch.debian_arch(),
-            &build_env,
-            sandbox
-                .as_deref()
-                .expect("a media-accel build resolves a suite and a sandbox"),
-            &sink,
-        )?;
-        for deb in &artifacts.debs {
-            emit_artifact(&sink, "userspace", "deb", deb);
-        }
-        record_artifacts(&out_dir, &artifacts.debs)?;
-    }
-
-    if matches!(args.stage, StageArg::All | StageArg::Ffmpeg) && media_accel {
-        let ff = resolved
-            .ffmpeg
-            .as_ref()
-            .expect("media-accel build has ffmpeg sources");
-        let ffmpeg_base_src = args
-            .ffmpeg_base_src
-            .clone()
-            .unwrap_or_else(|| ff.base.git.clone());
-        // ffmpeg build-depends on the userspace .debs; they are staged in
-        // out_dir by the userspace stage (run it first, or with --stage all).
-        let opts = ffmpeg::FfmpegOptions {
-            base_src: &ffmpeg_base_src,
-            patches: kernel_patches,
-            userspace_debs: &out_dir,
-            // The same flag the userspace stage above ran under, so this stage
-            // recomputes the userspace packages' keys for the layer they were actually
-            // built in rather than for a default.
-            build_libmali: args.build_libmali,
-            work_dir: &work_dir,
-            out_dir: &out_dir,
-            store: artifact_store.as_deref(),
-        };
-        let artifacts = ffmpeg::build_ffmpeg(
-            &lock,
-            &opts,
-            resolved.arch.debian_arch(),
-            &build_env,
-            sandbox
-                .as_deref()
-                .expect("a media-accel build resolves a suite and a sandbox"),
-            &sink,
-        )?;
-        emit_artifact(&sink, "ffmpeg", "deb", &artifacts.deb);
-        record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
-    }
-
-    if matches!(args.stage, StageArg::All | StageArg::Rootfs) && resolved.produces_image() {
-        // The rootfs stage runs only for an image build, which pins a rootfs.
-        let rootfs_pin = lock.rootfs.as_ref().expect("an image build pins a rootfs");
-        // Bootstrap the device rootfs: stand up a local apt repo from the
-        // built .debs in out_dir, install the merged package set, apply the layered
-        // overlay, and emit the tarball the image stage formats into ext4.
-        let preinstall_overlay_dirs = overlay_dirs(root, &resolved, OverlayStage::PreInstall);
-        let overlay_dirs = overlay_dirs(root, &resolved, OverlayStage::Customize);
-        // The boot-method config the rootfs generates for itself. Only depthcharge has
-        // any: its boot payload is a signed kernel built *inside* the rootfs, so the
-        // rootfs has to know which board profile to sign for and what cmdline to bake in.
-        let boot_config = resolved
-            .depthcharge_boot()
-            .map(|b| rootfs::BootConfig::Depthcharge {
-                board: &b.board,
-                cmdline: &b.cmdline,
-                initramfs_compress: b.initramfs_compress,
-            });
-        // The rootfs PARTUUID is an *input* here, not an output of the image node: under
-        // depthcharge the signed kernel's root= is derived from this rootfs's own
-        // /etc/fstab, so the partition has to be named before the filesystem exists.
-        let identity = image_identity(recipe, &resolved);
-        // The local apt repo is seeded from the artifact ledger — the exact debs the
-        // compile stages recorded — not an extension-only scan of out_dir, so an
-        // unsigned stray never becomes trusted apt input.
-        //
-        // A build that compiles nothing stages no `.deb`s of its own, and then an empty
-        // ledger is the *correct* state, not a forgotten compile stage — so the ledger
-        // is only consulted where artifacts are actually produced. Its local repo is
-        // empty (or holds only `extra_debs`), and every package, kernel included, comes
-        // from the mirror.
-        let produces_debs = compiles_kernel || builds_uboot || media_accel;
-        let mut repo_debs = if produces_debs {
-            ledger_debs(&out_dir)?
-        } else {
-            Vec::new()
-        };
-        // Materialize the pre-built extra_debs into the content store and
-        // add them to the local apt repo's deb set — the way a feature's packages
-        // reach the solve, but for bytes pulled from outside the mirror. They then
-        // fold into the rootfs cache key by content (via `file_fingerprints`), so a
-        // changed extra_deb re-bootstraps. The local repo is the trust boundary for
-        // these unsigned debs; a package set entry (or another package's
-        // dependency) is what actually installs them.
-        if !lock.extra_debs.is_empty() {
-            let extra = {
-                let step = Step::start(&sink, "extra-debs");
-                let store = DebStore::open(&extra_debs_store(root))?;
-                let paths = extradebs::materialize(root, &lock.extra_debs, &store, &step)?;
-                step.finish();
-                paths
-            };
-            repo_debs.extend(extra);
-        }
-        // Scope the local repo to the kernel and modules this build produced. The repo is
-        // `--multiversion` and both rootfs backends resolve a bare package name
-        // highest-version-wins, so a stale higher-versioned deb an earlier build left in
-        // out_dir would outrank the fresh one — and a kernel's `git describe` version
-        // *regresses* when patches are dropped, so a newer build can sort below older
-        // residue. Dropping the stale versions makes the by-name installs below land on
-        // this build's artifacts (and keeps the repo index honest for both backends).
-        scope_repo_to_current_artifacts(&mut repo_debs, &kernel_image_deb, &kmod_debs);
-        // The kernel image is a build artifact with a version-specific package
-        // name, so install it by the name discovered from the built .deb, on top of
-        // the resolved set (the static config can't name a version it hasn't built).
-        // The out-of-tree modules debs join it — same rationale (their name embeds the
-        // kernel release), so they too are installed by discovered name from the ledger.
-        let mut extra_packages = kernel_packages(&kernel_image_deb, &repo_debs)?;
-        extra_packages.extend(kmod_packages(&kmod_debs, &repo_debs)?);
-        // Published under the point's stem, not the lock's `manifest` name: that name
-        // is a bare leaf, correct beside the lock in its device folder and ambiguous in
-        // a flat output directory two boards' `forky` recipes can share. The committed
-        // copy `--save-manifest` writes keeps the lock's name.
-        let manifest_out = out_dir.join(format!("{stem}.pkgs.lock"));
-        // Resolve each feature apt source's signing keyring to the vendored host
-        // path the bootstrap verifies the repo against. Existence was already gated at
-        // preflight; this stage-time resolution is the backstop for a keyring
-        // removed since.
-        let apt_repos = apt_source_keyrings(root, &resolved.apt_sources)?;
-        // The image's account of itself, staged into the rootfs at
-        // `/etc/boot2deb/image.toml`. Assembled here rather than beside the provenance
-        // manifest below because it has to exist *before* the rootfs is bootstrapped —
-        // it ships inside the tree the bootstrap produces.
-        let system_identity = boot2deb_core::provenance::system_identity(&resolved, &lock);
-        // The interpreter that will run the tree's maintainer scripts, from the
-        // toolchain probed above — `None` on a native build, where nothing is
-        // interpreted. Bound here so the borrow outlives `opts`.
-        let interpreter_id = toolchain.qemu_identity();
-        let opts = rootfs::RootfsOptions {
-            repo_debs: &repo_debs,
-            overlay_dirs: &overlay_dirs,
-            preinstall_overlay_dirs: &preinstall_overlay_dirs,
-            boot_config,
-            image_identity: &system_identity,
-            rootfs_partuuid: identity.rootfs_partuuid,
-            out_dir: &out_dir,
-            stem: &stem,
-            // The build's own scratch tree: the provisioned userland is multi-GB and
-            // carries xattrs, so it must not land on whatever `TMPDIR` names.
-            scratch_dir: &work_dir,
-            keyring: keyring.as_deref(),
-            interpreter_id: interpreter_id.as_deref(),
-            manifest_out: &manifest_out,
-            pinned_plan,
-            mirrors: &mirrors,
-            extra_packages: &extra_packages,
-            cache_dir: Some(&cache_dir),
-            refresh: args.refresh_rootfs,
-            apt_sources: &apt_repos,
-            // Clamp tarball mtimes to the locked kernel commit's date (the same
-            // lock-derived seed the image identifiers use), so only the deliberate
-            // per-image password varies between builds of one lock. None
-            // on a rootfs-only build with no kernel tree in this work dir.
-            source_date_epoch: kernel::source_date_epoch(&work_dir, &lock),
-        };
-        let artifacts = rootfs::build_rootfs(&resolved, &opts, &sink)?;
-        emit_artifact(&sink, "rootfs", "tar", &artifacts.tar);
-        emit_artifact(&sink, "rootfs", "manifest", &artifacts.manifest);
-        emit_artifact(&sink, "rootfs", "plan", &artifacts.plan);
-        // Manifest-as-input verification: unless `--save-manifest` re-pins,
-        // a fresh solve must reproduce the committed pin — a drift means the live
-        // mirror moved off the pinned package set. Hard error unless the drift is
-        // explicitly allowed.
-        let solved_digest = boot2deb_engine::manifest::digest(&artifacts.manifest)?;
-        if !args.save_manifest {
-            if let Some(pinned) = &rootfs_pin.manifest_sha256 {
-                match boot2deb_engine::manifest::verify_reproduced(pinned, &solved_digest) {
-                    Ok(()) => note(
-                        json,
-                        verbosity,
+    // The build graph, in order. Every node is here — including the ones this build does
+    // not have, which carry `applies: false` and the sentence that says why.
+    let stages: Vec<Stage> = vec![
+        // The kernel stage and the DTB fast path share every filesystem input; both
+        // prepare the same `<work>/linux` tree, which is why they are one node.
+        Stage {
+            selectors: &[StageArg::Kernel, StageArg::Dtb],
+            applies: compiles_kernel,
+            inapplicable: format!(
+                "recipe '{recipe}' uses kernel '{}', which is a distro package installed from \
+                 the Debian mirror — there is no kernel tree to compile, so the requested \
+                 stage has nothing to build",
+                image
+                    .map(|ib| ib.image.kernel.id())
+                    .unwrap_or("(none — u-boot-only recipe)")
+            ),
+            run: Box::new(|state: &mut BuildState| {
+                let opts = kernel_opts
+                    .as_ref()
+                    .expect("`applies` is `compiles_kernel`, which resolves kernel options");
+                if matches!(args.stage, StageArg::Dtb) {
+                    let dtb = kernel::build_dtb(&resolved, &lock, opts, &build_env, &sink)?;
+                    emit_artifact(&sink, "dtb", "dtb", &dtb);
+                    return Ok(());
+                }
+                let artifacts = kernel::build_kernel(&resolved, &lock, opts, &build_env, &sink)?;
+                emit_artifact(&sink, "kernel", "image_deb", &artifacts.image_deb);
+                emit_artifact(&sink, "kernel", "headers_deb", &artifacts.headers_deb);
+                record_artifacts(
+                    &out_dir,
+                    &[artifacts.image_deb.clone(), artifacts.headers_deb.clone()],
+                )?;
+                state.kernel_image_deb = Some(artifacts.image_deb);
+                Ok(())
+            }),
+        },
+        // The kmod stage builds each board `device_kmods` module out-of-tree against the
+        // kernel tree and stages a `<name>-modules-<kver>` `.deb`. It runs only when the
+        // build compiles a kernel and the board declares kmods; a distro-kernel board is
+        // already rejected for any `device_kmods` at resolve. Its `.deb`s join the
+        // ledger, so the rootfs stage installs them from the local repo like the kernel
+        // deb.
+        Stage {
+            selectors: &[StageArg::Kmod],
+            applies: compiles_kernel && has_kmods,
+            inapplicable: format!(
+                "recipe '{recipe}' declares no out-of-tree kernel modules — the requested \
+                 kmod stage has nothing to build"
+            ),
+            run: Box::new(|state: &mut BuildState| {
+                // `has_kmods` implies an image: only a build with a kernel to compile
+                // against declares one, and only an image resolves a kernel.
+                let ib = image.expect("a build with kmods resolves an image");
+                let kernel = kernel_opts
+                    .as_ref()
+                    .expect("`applies` is `compiles_kernel`, which resolves kernel options");
+                let opts = kmod::KmodOptions {
+                    kernel,
+                    sources: &args.kmod_srcs,
+                    local_patches: &kmod_local,
+                    work_dir: &work_dir,
+                    out_dir: &out_dir,
+                    packaging: &packaging,
+                    store: artifact_store.as_deref(),
+                };
+                let artifacts = kmod::build_kmods(ib, &lock, &opts, &build_env, &sink)?;
+                for deb in &artifacts.debs {
+                    emit_artifact(&sink, "kmod", "deb", deb);
+                }
+                record_artifacts(&out_dir, &artifacts.debs)?;
+                state.kmod_debs = artifacts.debs;
+                Ok(())
+            }),
+        },
+        Stage {
+            selectors: &[StageArg::Uboot],
+            applies: builds_uboot,
+            inapplicable: format!(
+                "recipe '{recipe}' boots via '{}', whose firmware is the board's own — no \
+                 bootloader is built, so the requested stage has nothing to build",
+                resolved.boot_method
+            ),
+            run: Box::new(|_state: &mut BuildState| {
+                let opts = uboot::UbootOptions {
+                    source: &uboot_src,
+                    patches: uboot_patches,
+                    blobs_dir: &blobs_dir,
+                    work_dir: &work_dir,
+                    cross: &cross,
+                    out_dir: &out_dir,
+                    packaging: &packaging,
+                    stem: &stem,
+                    store: artifact_store.as_deref(),
+                };
+                let artifacts = uboot::build_uboot(&resolved, &lock, &opts, &build_env, &sink)?;
+                emit_artifact(&sink, "uboot", "idbloader", &artifacts.idbloader);
+                emit_artifact(&sink, "uboot", "uboot_itb", &artifacts.uboot_itb);
+                emit_artifact(&sink, "uboot", "deb", &artifacts.deb);
+                // The maskrom USB boot images, when this board's u-boot builds them: the
+                // CODE471/CODE472 payloads for running this u-boot from RAM over USB.
+                // pyrographer streams the raw usb471/usb472 pair; `maskrom_loader` is the
+                // two packed into the single RKBOOT file `rkdeveloptool db` consumes
+                // directly.
+                if let Some(m) = &artifacts.maskrom {
+                    emit_artifact(&sink, "uboot", "usb471", &m.usb471);
+                    emit_artifact(&sink, "uboot", "usb472", &m.usb472);
+                    emit_artifact(&sink, "uboot", "maskrom_loader", &m.loader);
+                }
+                record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
+                // A uboot-only build also emits a standalone, directly-flashable
+                // bootloader image (`<stem>-boot.img`) — the eMMC/SPI medium for a split
+                // install whose OS lives on another disk. Emitted for an explicit
+                // `--stage uboot`, and for a u-boot-only recipe's full build (which has
+                // no image stage to fold u-boot into). An image build's `--stage all`
+                // skips it: the image stage folds u-boot into the combined image, or
+                // emits `-boot.img` for `split`.
+                if matches!(args.stage, StageArg::Uboot) || !resolved.produces_image() {
+                    let boot_img = image::build_bootloader_image(
+                        &resolved,
+                        &stem,
+                        &artifacts.idbloader,
+                        &artifacts.uboot_itb,
+                        &out_dir,
                         &sink,
-                        "rootfs",
-                        "manifest OK  : reproduces the committed pin".into(),
-                    ),
-                    Err(e) if args.allow_manifest_drift => eprintln!("warning: {e}"),
-                    Err(e) => return Err(e.into()),
+                    )?;
+                    emit_artifact(&sink, "bootloader-image", "boot_img", &boot_img);
                 }
-            }
-        }
-        solved_manifest_digest = Some(solved_digest);
-        // The account is locked in the tarball; the unique per-image first-boot
-        // password is assigned at image assembly (surfaced there), not here.
-        rootfs_tar = Some(artifacts.tar);
-        rootfs_manifest = Some(artifacts.manifest);
-        rootfs_plan = Some(artifacts.plan);
-    }
+                Ok(())
+            }),
+        },
+        // The userspace and ffmpeg nodes run only for a media-accel build — the one whose
+        // resolved image carries the SoC's transcode sources.
+        Stage {
+            selectors: &[StageArg::Userspace],
+            applies: media_accel,
+            inapplicable: MEDIA_ACCEL_ABSENT.replace("{recipe}", recipe),
+            run: Box::new(|_state: &mut BuildState| {
+                let opts = userspace::UserspaceOptions {
+                    trees: &userspace,
+                    sources: &args.userspace_srcs,
+                    work_dir: &work_dir,
+                    out_dir: &out_dir,
+                    patches: kernel_patches,
+                    store: artifact_store.as_deref(),
+                };
+                let artifacts = userspace::build_userspace(
+                    &lock,
+                    &opts,
+                    resolved.arch.debian_arch(),
+                    &build_env,
+                    sandbox
+                        .as_deref()
+                        .expect("a media-accel build resolves a suite and a sandbox"),
+                    &sink,
+                )?;
+                for deb in &artifacts.debs {
+                    emit_artifact(&sink, "userspace", "deb", deb);
+                }
+                record_artifacts(&out_dir, &artifacts.debs)?;
+                Ok(())
+            }),
+        },
+        Stage {
+            selectors: &[StageArg::Ffmpeg],
+            applies: media_accel,
+            inapplicable: MEDIA_ACCEL_ABSENT.replace("{recipe}", recipe),
+            run: Box::new(|_state: &mut BuildState| {
+                let ib = image.expect("`applies` is media_accel, which resolves an image");
+                let ff = ib
+                    .image
+                    .ffmpeg
+                    .as_ref()
+                    .expect("`applies` is media_accel, which resolves ffmpeg sources");
+                let ffmpeg_base_src = args
+                    .ffmpeg_base_src
+                    .clone()
+                    .unwrap_or_else(|| ff.base.git.clone());
+                // ffmpeg build-depends on the userspace .debs; they are staged in
+                // out_dir by the userspace stage (run it first, or with --stage all).
+                let opts = ffmpeg::FfmpegOptions {
+                    base_src: &ffmpeg_base_src,
+                    patches: kernel_patches,
+                    userspace_debs: &out_dir,
+                    // The licence flavour is resolved from the selected features, not
+                    // chosen here: there is no `--nonfree` flag, because which FFmpeg an
+                    // image carries is a property of the build point and belongs in the
+                    // recipe or its variant reference, where it is recorded, rather than
+                    // in a shell history.
+                    nonfree: ib.image.ffmpeg_nonfree,
+                    trees: &userspace,
+                    work_dir: &work_dir,
+                    out_dir: &out_dir,
+                    store: artifact_store.as_deref(),
+                };
+                let artifacts = ffmpeg::build_ffmpeg(
+                    &lock,
+                    &opts,
+                    resolved.arch.debian_arch(),
+                    &build_env,
+                    sandbox
+                        .as_deref()
+                        .expect("a media-accel build resolves a suite and a sandbox"),
+                    &sink,
+                )?;
+                emit_artifact(&sink, "ffmpeg", "deb", &artifacts.deb);
+                record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
+                Ok(())
+            }),
+        },
+        Stage {
+            selectors: &[StageArg::Rootfs],
+            applies: image.is_some(),
+            inapplicable: UBOOT_ONLY_ABSENT.replace("{recipe}", recipe),
+            run: Box::new(|state: &mut BuildState| {
+                let ib = image.expect("`applies` is image.is_some()");
+                rootfs_stage(RootfsStage {
+                    ib,
+                    state,
+                    root,
+                    recipe,
+                    stem: &stem,
+                    lock: &lock,
+                    args: &args,
+                    resolved: &resolved,
+                    out_dir: &out_dir,
+                    work_dir: &work_dir,
+                    cache_dir: &cache_dir,
+                    mirrors: &mirrors,
+                    keyring: keyring.as_deref(),
+                    toolchain: &toolchain,
+                    pinned_plan,
+                    produces_debs: compiles_kernel || builds_uboot || media_accel,
+                    json,
+                    verbosity,
+                    sink: &sink,
+                })
+            }),
+        },
+        Stage {
+            selectors: &[StageArg::Image],
+            applies: image.is_some(),
+            inapplicable: UBOOT_ONLY_ABSENT.replace("{recipe}", recipe),
+            run: Box::new(|state: &mut BuildState| {
+                let ib = image.expect("`applies` is image.is_some()");
+                image_stage(ImageStage {
+                    ib,
+                    state,
+                    recipe,
+                    stem: &stem,
+                    args: &args,
+                    resolved: &resolved,
+                    out_dir: &out_dir,
+                    work_dir: &work_dir,
+                    compress: &compress,
+                    jobs: build_env.jobs,
+                    json,
+                    verbosity,
+                    sink: &sink,
+                })
+            }),
+        },
+    ];
 
-    if matches!(args.stage, StageArg::All | StageArg::Image) && resolved.produces_image() {
-        // The image node consumes the rootfs tarball plus the u-boot raw-gap
-        // payloads staged in out_dir by the earlier stages. The rootfs tar comes
-        // from the rootfs stage in this run, else --rootfs-tar, else the
-        // conventionally-named artifact the rootfs stage leaves in out_dir — the
-        // same auto-discovery the u-boot payloads get below.
-        let rootfs_tar = rootfs_tar
-            .clone()
-            .unwrap_or_else(|| out_dir.join(format!("{stem}-rootfs.tar")));
-        if !rootfs_tar.exists() {
-            return Err(format!(
-                "rootfs tar not found at {} — run `build {recipe} --stage rootfs` first (or pass --rootfs-tar)",
-                rootfs_tar.display()
-            )
-            .into());
+    let mut state = BuildState {
+        // The rootfs tarball the image stage consumes: produced by the rootfs stage, or
+        // supplied directly via `--rootfs-tar` for an image-only build. The only field
+        // a caller can seed.
+        rootfs_tar: args.rootfs_tar.clone(),
+        ..BuildState::default()
+    };
+    for stage in stages {
+        let named = stage.selectors.contains(&args.stage);
+        if !named && args.stage != StageArg::All {
+            continue;
         }
-        // Structural gate, not mere existence: confirm the tar is complete
-        // and readable through its appended `./etc/shadow` member. An `--stage image`
-        // retry after an interrupted rootfs stage then fails cleanly here instead of
-        // formatting a truncated tar into a broken ext4 image.
-        rootfs::validate_tar(&rootfs_tar)?;
-        // The boot payload, per method. A raw-gap bootloader was staged into out_dir
-        // by the u-boot stage; a depthcharge board's signed kernel needs nothing here,
-        // because it is already inside the rootfs tarball (`depthchargectl` built it
-        // there, so the same tool re-signs it on the running board).
-        let idbloader = out_dir.join(format!("{stem}-idbloader.img"));
-        let uboot_itb = out_dir.join(format!("{stem}-u-boot.itb"));
-        // Matched on the resolved boot method, not on a boolean, so adding a third
-        // method is a compile error here rather than a silent route into the wrong arm.
-        let boot = match &resolved.boot {
-            ResolvedBoot::RockchipRkbin(_) => {
-                for p in [&idbloader, &uboot_itb] {
-                    if !p.exists() {
-                        return Err(format!(
-                            "{} not found — run `build {recipe} --stage uboot` first",
-                            p.display()
-                        )
-                        .into());
-                    }
-                }
-                image::BootPayload::RockchipRkbin {
-                    idbloader: &idbloader,
-                    uboot_itb: &uboot_itb,
-                }
+        if !stage.applies {
+            // Named and absent is a user error; absent under `--stage all` is simply a
+            // node this build does not have.
+            if named {
+                return Err(stage.inapplicable.into());
             }
-            ResolvedBoot::Depthcharge(_) => image::BootPayload::Depthcharge,
-        };
-        let opts = image::ImageOptions {
-            rootfs_tar: &rootfs_tar,
-            boot,
-            out_dir: &out_dir,
+            continue;
+        }
+        (stage.run)(&mut state)?;
+    }
+    // The provenance manifest and, on request, the SBOM beside it: the record of what
+    // this run produced and what produced it. Its own function because it reads a
+    // dozen of the run's locals and none of the stages' — and because a build that
+    // stopped before the image node writes none of it, which is a decision worth
+    // making in one place.
+    if let Some(ib) = image {
+        write_provenance(Provenance {
+            ib,
+            state: &state,
             stem: &stem,
-            work_dir: &work_dir,
-            rootfs_label: &args.rootfs_label,
-            identity: image_identity(recipe, &resolved),
-            compress: &compress,
-            keep_raw: args.keep_raw,
-            jobs: build_env.jobs,
-        };
-        let artifacts = image::build_image(&resolved, &opts, &sink)?;
-        // The raw paths are deleted after compression unless --keep-raw, so only
-        // print them when they still exist on disk.
-        if !artifacts.raw_removed {
-            match &artifacts.output {
-                ImageOutput::Combined { image } => emit_artifact(&sink, "image", "image", image),
-                ImageOutput::Split { bootloader, rootfs } => {
-                    emit_artifact(&sink, "image", "boot_img", bootloader);
-                    emit_artifact(&sink, "image", "rootfs_img", rootfs);
-                }
-            }
-        }
-        for c in &artifacts.compressed {
-            emit_artifact(&sink, "image", "compressed", &c.path);
-        }
-        flashables = crate::nextstep::flashables(&artifacts.output, &artifacts.compressed);
-        // The per-image first-boot password: unique per build, expired so it
-        // must be changed at first login. Surfaced here since it exists nowhere else
-        // the operator can read it except the provenance manifest.
-        note(
+            lock: &lock,
+            args: &args,
+            resolved: &resolved,
+            out_dir: &out_dir,
+            pf: &pf,
+            toolchain: &toolchain,
+            host_deb_arch,
+            jobs: build_env.jobs(),
+            config_stamp: &config_stamp,
+            sandbox: sandbox.as_deref(),
+            cross: &cross,
+            packaging: &packaging,
             json,
             verbosity,
-            &sink,
-            "image",
-            format!(
-                "first-boot pw: {}  (user {}, expired — change at first login)",
-                artifacts.password,
-                rootfs::DEFAULT_USER
-            ),
-        );
-        first_boot_password = Some(artifacts.password);
-        rootfs_verified_with = artifacts.rootfs_verified_with;
-        rootfs_filesystem = Some(artifacts.rootfs_filesystem);
-        image_bytes = Some(artifacts.image_bytes);
-    }
-
-    // The solved manifest describing the rootfs inside the image this run assembled:
-    // from this run's own rootfs stage, else the one the rootfs stage left in `out_dir`
-    // beside the tar — the same auto-discovery the tar itself gets, and correct for the
-    // same reason, since one rootfs run writes both. An explicit `--rootfs-tar` names a
-    // tree from outside this directory, whose manifest is not knowable here.
-    let image_manifest: Option<PathBuf> = rootfs_manifest.clone().or_else(|| {
-        if args.rootfs_tar.is_some() {
-            return None;
-        }
-        lock.rootfs
-            .as_ref()
-            .map(|_| out_dir.join(format!("{stem}.pkgs.lock")))
-            .filter(|p| p.exists())
-    });
-    // The plan document beside that manifest, found the same way and for the same
-    // reason: one rootfs run writes the tar, the manifest and the plan together, so an
-    // image-only re-run over that tar records the plan that produced it rather than
-    // dropping the section.
-    let image_plan: Option<PathBuf> = rootfs_plan
-        .clone()
-        .or_else(|| {
-            if args.rootfs_tar.is_some() {
-                return None;
-            }
-            Some(out_dir.join(format!("{stem}.plan")))
-        })
-        .filter(|p| p.exists());
-
-    // The provenance manifest describes the image beside it, so it is emitted by every
-    // run that assembles one — including an image-only run, whose freshly generated
-    // first-boot password would otherwise leave the previous run's document standing
-    // over a different image, misstating the one credential it exists to record.
-    // It joins the lock's pins, the resolved build point, the solved-manifest digest,
-    // the blob hashes, the toolchain identity, and the first-boot credential into
-    // one "exactly what went into this image" document for support/security.
-    let prov_path = out_dir.join(format!("{stem}.provenance.toml"));
-    if first_boot_password.is_some() && image_manifest.is_none() {
-        // An image was built and no manifest describes it. Any document here belongs to
-        // an earlier image; removing it beats leaving one that reads as authoritative.
-        if prov_path.exists() {
-            std::fs::remove_file(&prov_path)
-                .map_err(|e| format!("remove stale provenance {}: {e}", prov_path.display()))?;
-            note(
-                json,
-                verbosity,
-                &sink,
-                "image",
-                format!(
-                    "removed {} — it described an earlier image, and this run has no \
-                     solved manifest to write a new one from",
-                    prov_path.display()
-                ),
-            );
-        }
-    }
-    // All four come from the image stage, so the manifest is writable exactly when that
-    // stage ran. Naming them together makes that structural rather than a comment: a
-    // build stopping before the image writes no provenance, because the record it would
-    // describe does not exist.
-    if let (Some(manifest_path), Some(password), Some(filesystem), Some(image_bytes)) = (
-        &image_manifest,
-        &first_boot_password,
-        &rootfs_filesystem,
-        image_bytes,
-    ) {
-        let manifest_bytes = std::fs::read(manifest_path)
-            .map_err(|e| format!("read solved manifest {}: {e}", manifest_path.display()))?;
-        let manifest_sha256 = boot2deb_engine::blobs::sha256_hex(&manifest_bytes);
-        let package_count = String::from_utf8_lossy(&manifest_bytes)
-            .lines()
-            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-            .count();
-        // The plan document beside it, read back off the published file so the digest
-        // recorded is of what a reader will open. One rootfs run writes both, so a
-        // manifest without a plan means the directory was edited between the two runs —
-        // an error rather than a silently thinner record, since the archive state is
-        // exactly what this section exists to carry.
-        let plan_path = image_plan.as_deref().ok_or_else(|| {
-            format!(
-                "no plan document beside the solved manifest {} — the rootfs stage \
-                 publishes {stem}.plan with it; re-run `--stage rootfs`",
-                manifest_path.display()
-            )
+            sink: &sink,
         })?;
-        let plan_record = boot2deb_engine::rootfs::read_plan_record(plan_path)?;
-        let plan_name = format!("{stem}.plan");
-        // The three provisioned roots that produced this build's `.deb`s — the
-        // target-arch base that compiled the media-accel ones, the host-arch cross root
-        // that compiled the kernel, u-boot and modules, and the host-arch root whose
-        // `dpkg` archived the staged trees. Each keeps its manifest in the work dir
-        // beside the tree it describes; publish a copy beside the image so the record
-        // travels with what it describes rather than staying behind in a scratch tree
-        // `clean` removes.
-        //
-        // Any can be absent, and each for its own reason: no target-arch sandbox is
-        // stood up by a build that compiles no media-accel `.deb`s, no cross root by one
-        // that compiles no kernel, u-boot or module, and no packaging root by one whose
-        // archived artifacts all came back from the artifact cache. A `None` here is
-        // therefore "nothing of this kind was produced", never "not recorded".
-        let build_sandbox = match (
-            resolved.suite.as_ref(),
-            sandbox.as_ref().and_then(|s| s.base_manifest()),
-        ) {
-            // Paired, not defaulted: the sandbox is bootstrapped *for* the resolved
-            // suite, so a base without one is not a state this can reach.
-            (Some(suite), Some(base_manifest)) => Some(publish_root_manifest(
-                &out_dir,
-                &format!("{stem}.sandbox.pkgs"),
-                "sandbox-manifest",
-                suite,
-                resolved.arch.debian_arch(),
-                &base_manifest,
-                &sink,
-            )?),
-            _ => None,
-        };
-        let cross_sandbox = match cross.base_manifest() {
-            // Recorded at the *host's* architecture, beside a `[build_sandbox]` recording
-            // the target's — which is the whole distinction between the two compile roots
-            // and the one a reader most needs the record to make.
-            Some(base_manifest) => Some(publish_root_manifest(
-                &out_dir,
-                &format!("{stem}.cross.pkgs"),
-                "cross-manifest",
-                &resolved.packaging_suite,
-                host_deb_arch,
-                &base_manifest,
-                &sink,
-            )?),
-            None => None,
-        };
-        let packaging_root = match packaging.base_manifest() {
-            Some(base_manifest) => Some(publish_root_manifest(
-                &out_dir,
-                &format!("{stem}.packaging.pkgs"),
-                "packaging-manifest",
-                &resolved.packaging_suite,
-                host_deb_arch,
-                &base_manifest,
-                &sink,
-            )?),
-            None => None,
-        };
-        let facts = boot2deb_core::provenance::BuildFacts {
-            cross_sandbox,
-            packaging_root,
-            host_arch: pf.host.arch,
-            cross: pf.cross_toolchain,
-            manifest_sha256: &manifest_sha256,
-            package_count,
-            image_bytes,
-            // Named by the leaf the rootfs stage publishes it under, so the manifest
-            // refers to a sibling rather than to a path on this machine.
-            plan: &plan_name,
-            plan_sha256: &plan_record.sha256,
-            archives: &plan_record.archives,
-            user: rootfs::DEFAULT_USER,
-            password,
-            // Stamped by build.rs from the boot2deb checkout; the commit is empty when
-            // built outside a git tree (e.g. a source tarball), leaving only the version.
-            builder_version: env!("CARGO_PKG_VERSION"),
-            builder_commit: crate::builder::commit(),
-            builder_dirty: crate::builder::dirty(),
-            // The other half of "what produced this image": the config tree the layers,
-            // recipe and lock were read from. Probed here rather than stamped, because
-            // unlike the binary it is a run-time input — the same boot2deb resolves
-            // whatever `--root` names, and which tree that was is not knowable until it
-            // is named. Absent when the root is not a checkout, which a generated or
-            // unpacked config tree legitimately is not.
-            config_commit: config_stamp.as_ref().map(|(commit, _)| commit.as_str()),
-            config_dirty: config_stamp.as_ref().is_some_and(|(_, dirty)| *dirty),
-            // Reported by the image stage that formatted it, so the manifest states the
-            // contract the rootfs actually carries and the geometry that actually came
-            // out — neither of them a value re-derived here from a declaration.
-            filesystem: filesystem.clone(),
-            // Reported by the image stage that ran them: the external cross-check is
-            // present only where the host carries e2fsprogs, so verification depth is
-            // host-determined and belongs in the record.
-            rootfs_verified_with: &rootfs_verified_with,
-            // The one host binary behind the arch selection above. The compilers are
-            // not here: each is a package of a provisioned root, and the root records
-            // it sha256-pinned in its own manifest below.
-            qemu: toolchain.qemu(),
-            jobs: build_env.jobs(),
-            // Resolved from the sandbox's own profile, likewise: the environment and
-            // mounts every build command ran under, which no source pin covers and
-            // which the sandbox library is free to change between releases.
-            sandbox: boot2deb_engine::sandbox::resolved_inputs()?,
-            // The package set behind that profile: the environment above says what a
-            // compile ran in, this says what it compiled against.
-            build_sandbox,
-        };
-        let prov = boot2deb_core::provenance::assemble(&resolved, &lock, &facts);
-        // The provenance lands in this recipe's own out_dir, named for the leaf
-        // (slash-free), matching the committed manifest's leaf-based filename.
-        std::fs::write(&prov_path, prov.to_toml_string()?)
-            .map_err(|e| format!("write provenance {}: {e}", prov_path.display()))?;
-        emit_artifact(&sink, "image", "provenance", &prov_path);
-
-        // `--sbom`: the bill of materials, rendered from the two documents just
-        // written rather than from the values still in memory, so it describes exactly
-        // what shipped. Off unless asked for — an image build never silently gains a
-        // file — and the same documents are producible later from the manifest above
-        // by `boot2deb sbom`, which is what someone handed an image will use.
-        for path in
-            crate::commands::sbom::write_beside(&prov, &stem, &out_dir, manifest_path, &args.sbom)?
-        {
-            emit_artifact(&sink, "image", "sbom", &path);
-        }
     }
+    // Only the record above reads the stages' outputs as a whole; what is left is the
+    // two lock updates and the closing summary, each of which names its own field.
+    let BuildState {
+        rootfs_manifest,
+        flashables,
+        solved_manifest_digest,
+        ..
+    } = state;
 
     // `--save-snapshot` / `--save-manifest`: persist the captured snapshot timestamp
     // and/or the freshly-solved manifest into the committed lock. Both mutate
@@ -1424,12 +963,737 @@ pub(crate) fn run(
         }
         let hint = crate::nextstep::hint(&flashables);
         if !hint.is_empty() {
+            // Before the flash commands, because it comes before flashing: a
+            // QEMU boot catches a broken userland while the fix is still a
+            // rebuild rather than a reflash-and-serial-console session.
+            println!("\nnext: boot it under QEMU first: boot2deb try {recipe}");
             println!();
             for line in hint {
                 println!("{line}");
             }
         }
     }
+    Ok(())
+}
+
+/// Everything the provenance record reads. A struct for the reason [`RootfsStage`] is
+/// one: it is a long list of the run's locals, most of them `&Path`-shaped.
+struct Provenance<'a> {
+    /// The build and its image half.
+    ib: boot2deb_core::ImageBuild<'a>,
+    /// What the stages left — the manifest, the plan, the password, the filesystem
+    /// contract and the image's size all come from here.
+    state: &'a BuildState,
+    /// The artifact stem every produced file is named for.
+    stem: &'a str,
+    /// The recipe's lock.
+    lock: &'a boot2deb_core::lock::Lock,
+    /// The command's own arguments.
+    args: &'a BuildArgs,
+    /// The resolved build.
+    resolved: &'a ResolvedBuild,
+    /// Where produced artifacts land.
+    out_dir: &'a std::path::Path,
+    /// The host preflight: its architecture and whether the build cross-compiles.
+    pf: &'a boot2deb_engine::Preflight,
+    /// The probed host toolchain, for the `qemu-user` binary behind an emulated build.
+    toolchain: &'a boot2deb_engine::toolchain::HostToolchain,
+    /// The host's Debian architecture.
+    host_deb_arch: &'a str,
+    /// The resolved parallelism this build ran at.
+    jobs: usize,
+    /// The config tree's commit and dirtiness, probed at startup.
+    config_stamp: &'a Option<(String, bool)>,
+    /// The target-arch build sandbox, if this build stood one up.
+    sandbox: Option<&'a dyn BuildSandbox>,
+    /// The host-arch cross root.
+    cross: &'a boot2deb_engine::sandbox::RootlessSandbox,
+    /// The host-arch packaging root.
+    packaging: &'a boot2deb_engine::sandbox::PackagingSandbox,
+    /// `--json`.
+    json: bool,
+    /// `--quiet`/`--verbose`.
+    verbosity: Verbosity,
+    /// The event sink every stage streams to.
+    sink: &'a dyn boot2deb_engine::event::EventSink,
+}
+
+/// Write the provenance manifest for the image this run assembled, and the SBOM beside
+/// it when `--sbom` asked for one.
+///
+/// Writes nothing when the run stopped before the image node: the manifest's own
+/// contract is that every field describes something that exists, and four of them —
+/// the solved manifest, the per-image password, the filesystem contract, the image's
+/// size — only exist once that node has run. Naming them together in one pattern is
+/// what makes "a partial build writes no provenance" structural rather than a comment.
+fn write_provenance(r: Provenance) -> Result<(), Box<dyn std::error::Error>> {
+    // The solved manifest describing the rootfs inside the image this run assembled:
+    // from this run's own rootfs stage, else the one the rootfs stage left in `out_dir`
+    // beside the tar — the same auto-discovery the tar itself gets, and correct for the
+    // same reason, since one rootfs run writes both. An explicit `--rootfs-tar` names a
+    // tree from outside this directory, whose manifest is not knowable here.
+    let image_manifest: Option<PathBuf> = r.state.rootfs_manifest.clone().or_else(|| {
+        if r.args.rootfs_tar.is_some() {
+            return None;
+        }
+        r.lock
+            .rootfs
+            .as_ref()
+            .map(|_| {
+                r.out_dir
+                    .join(boot2deb_core::manifest::manifest_name(r.stem))
+            })
+            .filter(|p| p.exists())
+    });
+    // The plan document beside that manifest, found the same way and for the same
+    // reason: one rootfs run writes the tar, the manifest and the plan together, so an
+    // image-only re-run over that tar records the plan that produced it rather than
+    // dropping the section.
+    let image_plan: Option<PathBuf> = r
+        .state
+        .rootfs_plan
+        .clone()
+        .or_else(|| {
+            if r.args.rootfs_tar.is_some() {
+                return None;
+            }
+            Some(r.out_dir.join(format!("{}.plan", r.stem)))
+        })
+        .filter(|p| p.exists());
+
+    // The provenance manifest describes the image beside it, so it is emitted by every
+    // run that assembles one — including an image-only run, whose freshly generated
+    // first-boot password would otherwise leave the previous run's document standing
+    // over a different image, misstating the one credential it exists to record.
+    // It joins the lock's pins, the resolved build point, the solved-manifest digest,
+    // the blob hashes, the toolchain identity, and the first-boot credential into
+    // one "exactly what went into this image" document for support/security.
+    let prov_path = r.out_dir.join(format!("{}.provenance.toml", r.stem));
+    if r.state.first_boot_password.is_some() && image_manifest.is_none() {
+        // An image was built and no manifest describes it. Any document here belongs to
+        // an earlier image; removing it beats leaving one that reads as authoritative.
+        if prov_path.exists() {
+            std::fs::remove_file(&prov_path)
+                .map_err(|e| format!("remove stale provenance {}: {e}", prov_path.display()))?;
+            note(
+                r.json,
+                r.verbosity,
+                r.sink,
+                "image",
+                format!(
+                    "removed {} — it described an earlier image, and this run has no \
+                     solved manifest to write a new one from",
+                    prov_path.display()
+                ),
+            );
+        }
+    }
+    // All four come from the image stage, so the manifest is writable exactly when that
+    // stage ran. Naming them together makes that structural rather than a comment: a
+    // build stopping before the image writes no provenance, because the record it would
+    // describe does not exist.
+    if let (Some(manifest_path), Some(password), Some(filesystem), Some(image_bytes)) = (
+        &image_manifest,
+        &r.state.first_boot_password,
+        &r.state.rootfs_filesystem,
+        r.state.image_bytes,
+    ) {
+        let manifest_bytes = std::fs::read(manifest_path)
+            .map_err(|e| format!("read solved manifest {}: {e}", manifest_path.display()))?;
+        let manifest_sha256 = boot2deb_engine::blobs::sha256_hex(&manifest_bytes);
+        let package_count = String::from_utf8_lossy(&manifest_bytes)
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .count();
+        // The plan document beside it, read back off the published file so the digest
+        // recorded is of what a reader will open. One rootfs run writes both, so a
+        // manifest without a plan means the directory was edited between the two runs —
+        // an error rather than a silently thinner record, since the archive state is
+        // exactly what this section exists to carry.
+        let plan_path = image_plan.as_deref().ok_or_else(|| {
+            format!(
+                "no plan document beside the solved manifest {} — the rootfs stage \
+                 publishes {}.plan with it; re-run `--stage rootfs`",
+                manifest_path.display(),
+                r.stem
+            )
+        })?;
+        let plan_record = boot2deb_engine::rootfs::read_plan_record(plan_path)?;
+        let plan_name = format!("{}.plan", r.stem);
+        // The three provisioned roots that produced this build's `.deb`s — the
+        // target-arch base that compiled the media-accel ones, the host-arch cross root
+        // that compiled the kernel, u-boot and modules, and the host-arch root whose
+        // `dpkg` archived the staged trees. Each keeps its manifest in the work dir
+        // beside the tree it describes; publish a copy beside the image so the record
+        // travels with what it describes rather than staying behind in a scratch tree
+        // `clean` removes.
+        //
+        // Any can be absent, and each for its own reason: no target-arch sandbox is
+        // stood up by a build that compiles no media-accel `.deb`s, no cross root by one
+        // that compiles no kernel, u-boot or module, and no packaging root by one whose
+        // archived artifacts all came back from the artifact cache. A `None` here is
+        // therefore "nothing of this kind was produced", never "not recorded".
+        let build_sandbox = match (
+            Some(&r.ib.image.suite),
+            r.sandbox.and_then(|s| s.base_manifest()),
+        ) {
+            // Paired, not defaulted: the sandbox is bootstrapped *for* the resolved
+            // suite, so a base without one is not a state this can reach.
+            (Some(suite), Some(base_manifest)) => Some(publish_root_manifest(
+                r.out_dir,
+                &format!("{}.sandbox.pkgs", r.stem),
+                "sandbox-manifest",
+                suite,
+                r.resolved.arch.debian_arch(),
+                &base_manifest,
+                r.sink,
+            )?),
+            _ => None,
+        };
+        let cross_sandbox = match r.cross.base_manifest() {
+            // Recorded at the *host's* architecture, beside a `[build_sandbox]` recording
+            // the target's — which is the whole distinction between the two compile roots
+            // and the one a reader most needs the record to make.
+            Some(base_manifest) => Some(publish_root_manifest(
+                r.out_dir,
+                &format!("{}.cross.pkgs", r.stem),
+                "cross-manifest",
+                &r.resolved.packaging_suite,
+                r.host_deb_arch,
+                &base_manifest,
+                r.sink,
+            )?),
+            None => None,
+        };
+        let packaging_root = match r.packaging.base_manifest() {
+            Some(base_manifest) => Some(publish_root_manifest(
+                r.out_dir,
+                &format!("{}.packaging.pkgs", r.stem),
+                "packaging-manifest",
+                &r.resolved.packaging_suite,
+                r.host_deb_arch,
+                &base_manifest,
+                r.sink,
+            )?),
+            None => None,
+        };
+        let facts = boot2deb_core::provenance::BuildFacts {
+            cross_sandbox,
+            packaging_root,
+            host_arch: r.pf.host.arch,
+            cross: r.pf.cross_toolchain,
+            manifest_sha256: &manifest_sha256,
+            package_count,
+            image_bytes,
+            // Named by the leaf the rootfs stage publishes it under, so the manifest
+            // refers to a sibling rather than to a path on this machine.
+            plan: &plan_name,
+            plan_sha256: &plan_record.sha256,
+            archives: &plan_record.archives,
+            user: rootfs::DEFAULT_USER,
+            password,
+            // Stamped by build.rs from the boot2deb checkout; the commit is empty when
+            // built outside a git tree (e.g. a source tarball), leaving only the version.
+            builder_version: env!("CARGO_PKG_VERSION"),
+            builder_commit: crate::builder::commit(),
+            builder_dirty: crate::builder::dirty(),
+            // The other half of "what produced this image": the config tree the layers,
+            // recipe and lock were read from. Probed here rather than stamped, because
+            // unlike the binary it is a run-time input — the same boot2deb resolves
+            // whatever `--root` names, and which tree that was is not knowable until it
+            // is named. Absent when the root is not a checkout, which a generated or
+            // unpacked config tree legitimately is not.
+            config_commit: r.config_stamp.as_ref().map(|(commit, _)| commit.as_str()),
+            config_dirty: r.config_stamp.as_ref().is_some_and(|(_, dirty)| *dirty),
+            // Reported by the image stage that formatted it, so the manifest states the
+            // contract the rootfs actually carries and the geometry that actually came
+            // out — neither of them a value re-derived here from a declaration.
+            filesystem: filesystem.clone(),
+            // Reported by the image stage that ran them: the external cross-check is
+            // present only where the host carries e2fsprogs, so verification depth is
+            // host-determined and belongs in the record.
+            rootfs_verified_with: &r.state.rootfs_verified_with,
+            // The one host binary behind the arch selection above. The compilers are
+            // not here: each is a package of a provisioned root, and the root records
+            // it sha256-pinned in its own manifest below.
+            qemu: r.toolchain.qemu(),
+            jobs: r.jobs,
+            // Resolved from the sandbox's own profile, likewise: the environment and
+            // mounts every build command ran under, which no source pin covers and
+            // which the sandbox library is free to change between releases.
+            sandbox: boot2deb_engine::sandbox::resolved_inputs()?,
+            // The package set behind that profile: the environment above says what a
+            // compile ran in, this says what it compiled against.
+            build_sandbox,
+        };
+        let prov = boot2deb_core::provenance::assemble(r.ib, r.lock, &facts);
+        // The provenance lands in this recipe's own out_dir, named for the leaf
+        // (slash-free), matching the committed manifest's leaf-based filename.
+        std::fs::write(&prov_path, prov.to_toml_string()?)
+            .map_err(|e| format!("write provenance {}: {e}", prov_path.display()))?;
+        emit_artifact(r.sink, "image", "provenance", &prov_path);
+
+        // `--sbom`: the bill of materials, rendered from the two documents just
+        // written rather than from the values still in memory, so it describes exactly
+        // what shipped. Off unless asked for — an image build never silently gains a
+        // file — and the same documents are producible later from the manifest above
+        // by `boot2deb sbom`, which is what someone handed an image will use.
+        for path in crate::commands::sbom::write_beside(
+            &prov,
+            r.stem,
+            r.out_dir,
+            manifest_path,
+            &r.args.sbom,
+        )? {
+            emit_artifact(r.sink, "image", "sbom", &path);
+        }
+    }
+
+    Ok(())
+}
+
+/// What one stage leaves for the stages after it, and for the provenance record at the
+/// end — the whole of the state that crosses a stage boundary.
+///
+/// A struct rather than a dozen `let mut` bindings threaded down the function: every
+/// field is written by exactly one stage and read by a later one, and naming that as a
+/// type is what lets the stages be a *list* rather than a sequence of blocks. A field is
+/// `None`/empty for a run that stopped before the stage that sets it, which is what
+/// makes a partial build's provenance absent rather than wrong.
+#[derive(Default)]
+struct BuildState {
+    /// The `linux-image-*` `.deb` this run built, if the kernel stage ran here. The
+    /// rootfs stage installs the kernel by this exact artifact rather than by scanning
+    /// `out_dir`, so its package set never depends on stale debs left by earlier builds
+    /// of other kernel versions.
+    kernel_image_deb: Option<PathBuf>,
+    /// The out-of-tree module `.deb`s this run built, in declared order. Installed by
+    /// discovered name for the same reason the kernel deb is: the name embeds the
+    /// kernel release.
+    kmod_debs: Vec<PathBuf>,
+    /// The rootfs tarball the image stage formats. Set by the rootfs stage, or seeded
+    /// from `--rootfs-tar` for an image-only run.
+    rootfs_tar: Option<PathBuf>,
+    /// The solved manifest, captured when this run builds the rootfs; joins the image
+    /// stage's per-image password to emit the provenance manifest at the end.
+    rootfs_manifest: Option<PathBuf>,
+    /// The plan document that stage published beside it — the install set plus the
+    /// archive state it resolved against, which the provenance manifest records and a
+    /// later `reproduce` replays.
+    rootfs_plan: Option<PathBuf>,
+    /// The freshly-solved manifest's sha256, set by the rootfs stage — verified against
+    /// the committed pin and recorded into the lock by `--save-manifest`.
+    solved_manifest_digest: Option<String>,
+    /// The per-image first-boot password, captured when this run assembles the image
+    /// (the image stage owns it, splicing it into the staged rootfs).
+    first_boot_password: Option<String>,
+    /// Which checks the image stage ran over the finished rootfs filesystem — reported
+    /// by that stage rather than re-probed here, since one of them depends on a host
+    /// tool being present. Recorded in the provenance manifest.
+    rootfs_verified_with: Vec<String>,
+    /// The on-disk contract that stage formatted the rootfs to, likewise reported rather
+    /// than re-derived: its geometry answers to the image's size, so nothing outside the
+    /// format itself knows it. `None` until the image stage runs — which is also when
+    /// the provenance manifest becomes writable at all.
+    rootfs_filesystem: Option<boot2deb_core::provenance::FilesystemProvenance>,
+    /// The whole-disk size that stage laid out. Reported by it rather than re-parsed
+    /// from the recipe, because a fitted `image_size` names a rule and not a number —
+    /// the format decides how large the rootfs is and the disk is sized around it.
+    image_bytes: Option<u64>,
+    /// What this run left to write, for the closing hint: the image files themselves,
+    /// paired with the medium each goes to. Empty for every run that stops short of the
+    /// image node, which is what makes the hint absent rather than wrong there.
+    flashables: Vec<crate::nextstep::Flashable>,
+}
+
+/// One node's own work: everything it does, over the state the nodes before it left.
+///
+/// A named type because the inline form is unreadable, and because it states the node
+/// contract in one place: a node reads the run's locals it captured, writes what the
+/// nodes after it need into [`BuildState`], and reports a failure as this command's
+/// error type.
+type StageRun<'a> = Box<dyn FnOnce(&mut BuildState) -> Result<(), Box<dyn std::error::Error>> + 'a>;
+
+/// One build node: what `--stage` names it, whether this build has it, what to say when
+/// it is asked for and does not, and how to run it.
+///
+/// **The list of these is the build graph**, in order. One value per node rather than an
+/// `if matches!(args.stage, …) && <predicate>` block paired with a separate
+/// `if matches!(…) && !<predicate> { return Err(…) }` guard elsewhere: with both halves
+/// in one place the pairing cannot drift, and "skipped" and "refused" are decided by the
+/// same line of the driver rather than by two conditions written apart from each other.
+struct Stage<'a> {
+    /// The `--stage` values that select this node. More than one where a node serves
+    /// two: `--stage dtb` is the kernel node stopping after the device tree.
+    selectors: &'static [StageArg],
+    /// Whether this build has this node at all.
+    applies: bool,
+    /// What to say when `--stage` names this node and it does not apply. Held even when
+    /// it does, because building it is cheap and conditioning it would put the pairing
+    /// back where it was.
+    inapplicable: String,
+    /// The node.
+    run: StageRun<'a>,
+}
+
+/// What `--stage userspace|ffmpeg` gets on a recipe that builds no transcode stack.
+/// `{recipe}` is substituted; the two nodes share it because they share the condition.
+const MEDIA_ACCEL_ABSENT: &str =
+    "recipe '{recipe}' builds no media-accel stack (no selected feature requires it), so \
+     the requested userspace/ffmpeg stage has nothing to build — add a media-accel \
+     feature to the recipe or omit --stage";
+
+/// What `--stage rootfs|image` gets on a `deliverable = "uboot"` recipe, which resolves
+/// neither.
+const UBOOT_ONLY_ABSENT: &str =
+    "recipe '{recipe}' builds only a bootloader (deliverable = uboot), so it resolves no \
+     rootfs or image — build it with `--stage uboot` (or omit --stage)";
+
+/// Everything the rootfs node reads that is not already in the [`ImageBuild`](boot2deb_core::ImageBuild) or the
+/// [`BuildState`].
+///
+/// A struct because the node needs eleven of the run's locals and a positional list of
+/// them would be unreadable and unsafe in equal measure — most are `&Path`.
+struct RootfsStage<'a> {
+    /// The build and its image half.
+    ib: boot2deb_core::ImageBuild<'a>,
+    /// What this node writes for the nodes after it.
+    state: &'a mut BuildState,
+    /// The config root, for the overlay trees and the apt keyrings.
+    root: &'a ConfigRoot,
+    /// The build point's reference, for error messages.
+    recipe: &'a str,
+    /// The artifact stem every produced file is named for.
+    stem: &'a str,
+    /// The recipe's lock.
+    lock: &'a boot2deb_core::lock::Lock,
+    /// The command's own arguments.
+    args: &'a BuildArgs,
+    /// The resolved build.
+    resolved: &'a ResolvedBuild,
+    /// Where produced artifacts land.
+    out_dir: &'a std::path::Path,
+    /// The build's scratch tree.
+    work_dir: &'a std::path::Path,
+    /// The durable download cache.
+    cache_dir: &'a std::path::Path,
+    /// The resolved mirror list.
+    mirrors: &'a [String],
+    /// The vendored archive keyring, if one was resolved.
+    keyring: Option<&'a std::path::Path>,
+    /// The probed host toolchain, for the interpreter identity.
+    toolchain: &'a boot2deb_engine::toolchain::HostToolchain,
+    /// `reproduce`'s published plan, replayed instead of resolved.
+    pinned_plan: Option<&'a std::path::Path>,
+    /// Whether any compile stage in this build stages `.deb`s of its own. A build that
+    /// compiles nothing has an empty ledger *correctly*, so the ledger is only consulted
+    /// where artifacts are actually produced.
+    produces_debs: bool,
+    /// `--json`.
+    json: bool,
+    /// `--quiet`/`--verbose`.
+    verbosity: Verbosity,
+    /// The event sink every stage streams to.
+    sink: &'a dyn boot2deb_engine::event::EventSink,
+}
+
+/// Everything the image node reads that is not already in the [`ImageBuild`](boot2deb_core::ImageBuild) or the
+/// [`BuildState`]. A struct for the reason [`RootfsStage`] is one.
+struct ImageStage<'a> {
+    /// The build and its image half.
+    ib: boot2deb_core::ImageBuild<'a>,
+    /// What this node writes for the record at the end.
+    state: &'a mut BuildState,
+    /// The build point's reference, for error messages.
+    recipe: &'a str,
+    /// The artifact stem every produced file is named for.
+    stem: &'a str,
+    /// The command's own arguments.
+    args: &'a BuildArgs,
+    /// The resolved build.
+    resolved: &'a ResolvedBuild,
+    /// Where produced artifacts land.
+    out_dir: &'a std::path::Path,
+    /// The build's scratch tree.
+    work_dir: &'a std::path::Path,
+    /// The containers to compress the finished image into, in preference order.
+    compress: &'a [image::ImageCompression],
+    /// The worker bound `--jobs` set, honoured by the `.xz` encoder.
+    jobs: Option<usize>,
+    /// `--json`.
+    json: bool,
+    /// `--quiet`/`--verbose`.
+    verbosity: Verbosity,
+    /// The event sink every stage streams to.
+    sink: &'a dyn boot2deb_engine::event::EventSink,
+}
+
+/// Bootstrap the device rootfs: stand up a local apt repo from the built `.deb`s in
+/// `out_dir`, install the merged package set, apply the layered overlay, and emit the
+/// tarball the image stage formats into ext4.
+///
+/// Its own function rather than a block in [`run`] because it is the longest node and
+/// the only one that reads most of the build's locals; taking them as a struct is what
+/// keeps the stage list above readable as a list.
+fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
+    // The rootfs stage runs only for an image build, which pins a rootfs.
+    let rootfs_pin = s
+        .lock
+        .rootfs
+        .as_ref()
+        .expect("an image build pins a rootfs");
+    // Bootstrap the device rootfs: stand up a local apt repo from the
+    // built .debs in out_dir, install the merged package set, apply the layered
+    // overlay, and emit the tarball the image stage formats into ext4.
+    let preinstall_overlay_dirs = overlay_dirs(s.root, s.resolved, OverlayStage::PreInstall);
+    let overlay_dirs = overlay_dirs(s.root, s.resolved, OverlayStage::Customize);
+    // The boot-method config the rootfs generates for itself. Only depthcharge has
+    // any: its boot payload is a signed kernel built *inside* the rootfs, so the
+    // rootfs has to know which board profile to sign for and what cmdline to bake in.
+    let boot_config = s
+        .resolved
+        .depthcharge_boot()
+        .map(|b| rootfs::BootConfig::Depthcharge {
+            board: &b.board,
+            cmdline: &b.cmdline,
+            initramfs_compress: b.initramfs_compress,
+        });
+    // The rootfs PARTUUID is an *input* here, not an output of the image node: under
+    // depthcharge the signed kernel's root= is derived from this rootfs's own
+    // /etc/fstab, so the partition has to be named before the filesystem exists.
+    let identity = image_identity(s.recipe, s.resolved);
+    // The local apt repo is seeded from the artifact ledger — the exact debs the
+    // compile stages recorded — not an extension-only scan of out_dir, so an
+    // unsigned stray never becomes trusted apt input.
+    //
+    // A build that compiles nothing stages no `.deb`s of its own, and then an empty
+    // ledger is the *correct* state, not a forgotten compile stage — so the ledger
+    // is only consulted where artifacts are actually produced. Its local repo is
+    // empty (or holds only `extra_debs`), and every package, kernel included, comes
+    // from the mirror.
+    let mut repo_debs = if s.produces_debs {
+        ledger_debs(s.out_dir)?
+    } else {
+        Vec::new()
+    };
+    // Materialize the pre-built extra_debs into the content store and
+    // add them to the local apt repo's deb set — the way a feature's packages
+    // reach the solve, but for bytes pulled from outside the mirror. They then
+    // fold into the rootfs cache key by content (via `file_fingerprints`), so a
+    // changed extra_deb re-bootstraps. The local repo is the trust boundary for
+    // these unsigned debs; a package set entry (or another package's
+    // dependency) is what actually installs them.
+    if !s.lock.extra_debs.is_empty() {
+        let extra = {
+            let step = Step::start(s.sink, "extra-debs");
+            let store = DebStore::open(&extra_debs_store(s.root))?;
+            let paths = extradebs::materialize(s.root, &s.lock.extra_debs, &store, &step)?;
+            step.finish();
+            paths
+        };
+        repo_debs.extend(extra);
+    }
+    // Scope the local repo to the kernel and modules this build produced. The repo is
+    // `--multiversion` and both rootfs backends resolve a bare package name
+    // highest-version-wins, so a stale higher-versioned deb an earlier build left in
+    // out_dir would outrank the fresh one — and a kernel's `git describe` version
+    // *regresses* when patches are dropped, so a newer build can sort below older
+    // residue. Dropping the stale versions makes the by-name installs below land on
+    // this build's artifacts (and keeps the repo index honest for both backends).
+    scope_repo_to_current_artifacts(
+        &mut repo_debs,
+        &s.state.kernel_image_deb,
+        &s.state.kmod_debs,
+    );
+    // The kernel image is a build artifact with a version-specific package
+    // name, so install it by the name discovered from the built .deb, on top of
+    // the resolved set (the static config can't name a version it hasn't built).
+    // The out-of-tree modules debs join it — same rationale (their name embeds the
+    // kernel release), so they too are installed by discovered name from the ledger.
+    let mut extra_packages = kernel_packages(&s.state.kernel_image_deb, &repo_debs)?;
+    extra_packages.extend(kmod_packages(&s.state.kmod_debs, &repo_debs)?);
+    // Published under the point's stem, not the lock's `manifest` name: that name
+    // is a bare leaf, correct beside the lock in its device folder and ambiguous in
+    // a flat output directory two boards' `forky` recipes can share. The committed
+    // copy `--save-manifest` writes keeps the lock's name.
+    let manifest_out = s
+        .out_dir
+        .join(boot2deb_core::manifest::manifest_name(s.stem));
+    // Resolve each feature apt source's signing keyring to the vendored host
+    // path the bootstrap verifies the repo against. Existence was already gated at
+    // preflight; this stage-time resolution is the backstop for a keyring
+    // removed since.
+    let apt_repos = apt_source_keyrings(s.root, &s.ib.image.apt_sources)?;
+    // The image's account of itself, staged into the rootfs at
+    // `/etc/boot2deb/image.toml`. Assembled here rather than beside the provenance
+    // manifest below because it has to exist *before* the rootfs is bootstrapped —
+    // it ships inside the tree the bootstrap produces.
+    let system_identity = boot2deb_core::provenance::system_identity(s.ib, s.lock);
+    // The interpreter that will run the tree's maintainer scripts, from the
+    // toolchain probed above — `None` on a native build, where nothing is
+    // interpreted. Bound here so the borrow outlives `opts`.
+    let interpreter_id = s.toolchain.qemu_identity();
+    let opts = rootfs::RootfsOptions {
+        repo_debs: &repo_debs,
+        overlay_dirs: &overlay_dirs,
+        preinstall_overlay_dirs: &preinstall_overlay_dirs,
+        boot_config,
+        image_identity: &system_identity,
+        rootfs_partuuid: identity.rootfs_partuuid,
+        out_dir: s.out_dir,
+        stem: s.stem,
+        // The build's own scratch tree: the provisioned userland is multi-GB and
+        // carries xattrs, so it must not land on whatever `TMPDIR` names.
+        scratch_dir: s.work_dir,
+        keyring: s.keyring,
+        interpreter_id: interpreter_id.as_deref(),
+        manifest_out: &manifest_out,
+        pinned_plan: s.pinned_plan,
+        mirrors: s.mirrors,
+        extra_packages: &extra_packages,
+        cache_dir: Some(s.cache_dir),
+        refresh: s.args.refresh_rootfs,
+        apt_sources: &apt_repos,
+        // Clamp tarball mtimes to the locked kernel commit's date (the same
+        // lock-derived seed the image identifiers use), so only the deliberate
+        // per-image password varies between builds of one lock. None
+        // on a rootfs-only build with no kernel tree in this work dir.
+        source_date_epoch: kernel::source_date_epoch(s.work_dir, s.lock),
+    };
+    let artifacts = rootfs::build_rootfs(s.ib, &opts, s.sink)?;
+    emit_artifact(s.sink, "rootfs", "tar", &artifacts.tar);
+    emit_artifact(s.sink, "rootfs", "manifest", &artifacts.manifest);
+    emit_artifact(s.sink, "rootfs", "plan", &artifacts.plan);
+    // Manifest-as-input verification: unless `--save-manifest` re-pins,
+    // a fresh solve must reproduce the committed pin — a drift means the live
+    // mirror moved off the pinned package set. Hard error unless the drift is
+    // explicitly allowed.
+    let solved_digest = boot2deb_engine::manifest::digest(&artifacts.manifest)?;
+    if !s.args.save_manifest {
+        if let Some(pinned) = &rootfs_pin.manifest_sha256 {
+            match boot2deb_engine::manifest::verify_reproduced(pinned, &solved_digest) {
+                Ok(()) => note(
+                    s.json,
+                    s.verbosity,
+                    s.sink,
+                    "rootfs",
+                    "manifest OK  : reproduces the committed pin".into(),
+                ),
+                Err(e) if s.args.allow_manifest_drift => eprintln!("warning: {e}"),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    s.state.solved_manifest_digest = Some(solved_digest);
+    // The account is locked in the tarball; the unique per-image first-boot
+    // password is assigned at image assembly (surfaced there), not here.
+    s.state.rootfs_tar = Some(artifacts.tar);
+    s.state.rootfs_manifest = Some(artifacts.manifest);
+    s.state.rootfs_plan = Some(artifacts.plan);
+    Ok(())
+}
+
+/// Assemble the finished image from the rootfs tarball plus the boot method's payload,
+/// compress it into the requested containers, and report what the format realized.
+///
+/// Its own function for the reason [`rootfs_stage`] is.
+fn image_stage(s: ImageStage) -> Result<(), Box<dyn std::error::Error>> {
+    // The image node consumes the rootfs tarball plus the u-boot raw-gap
+    // payloads staged in out_dir by the earlier stages. The rootfs tar comes
+    // from the rootfs stage in this run, else --rootfs-tar, else the
+    // conventionally-named artifact the rootfs stage leaves in out_dir — the
+    // same auto-discovery the u-boot payloads get below.
+    let rootfs_tar = s
+        .state
+        .rootfs_tar
+        .clone()
+        .unwrap_or_else(|| s.out_dir.join(format!("{}-rootfs.tar", s.stem)));
+    if !rootfs_tar.exists() {
+        return Err(format!(
+            "rootfs tar not found at {} — run `build {} --stage rootfs` first (or pass --rootfs-tar)",
+        rootfs_tar.display(),
+        s.recipe
+        )
+        .into());
+    }
+    // Structural gate, not mere existence: confirm the tar is complete
+    // and readable through its appended `./etc/shadow` member. An `--stage image`
+    // retry after an interrupted rootfs stage then fails cleanly here instead of
+    // formatting a truncated tar into a broken ext4 image.
+    rootfs::validate_tar(&rootfs_tar)?;
+    // The boot payload, per method. A raw-gap bootloader was staged into out_dir
+    // by the u-boot stage; a depthcharge board's signed kernel needs nothing here,
+    // because it is already inside the rootfs tarball (`depthchargectl` built it
+    // there, so the same tool re-signs it on the running board).
+    let idbloader = s.out_dir.join(format!("{}-idbloader.img", s.stem));
+    let uboot_itb = s.out_dir.join(format!("{}-u-boot.itb", s.stem));
+    // Matched on the resolved boot method, not on a boolean, so adding a third
+    // method is a compile error here rather than a silent route into the wrong arm.
+    let boot = match &s.resolved.boot {
+        ResolvedBoot::RockchipRkbin(_) => {
+            for p in [&idbloader, &uboot_itb] {
+                if !p.exists() {
+                    return Err(format!(
+                        "{} not found — run `build {} --stage uboot` first",
+                        p.display(),
+                        s.recipe
+                    )
+                    .into());
+                }
+            }
+            image::BootPayload::RockchipRkbin {
+                idbloader: &idbloader,
+                uboot_itb: &uboot_itb,
+            }
+        }
+        ResolvedBoot::Depthcharge(_) => image::BootPayload::Depthcharge,
+    };
+    let opts = image::ImageOptions {
+        rootfs_tar: &rootfs_tar,
+        boot,
+        out_dir: s.out_dir,
+        stem: s.stem,
+        work_dir: s.work_dir,
+        rootfs_label: &s.args.rootfs_label,
+        identity: image_identity(s.recipe, s.resolved),
+        compress: s.compress,
+        keep_raw: s.args.keep_raw,
+        jobs: s.jobs,
+    };
+    let artifacts = image::build_image(s.ib, &opts, s.sink)?;
+    // The raw paths are deleted after compression unless --keep-raw, so only
+    // print them when they still exist on disk.
+    if !artifacts.raw_removed {
+        match &artifacts.output {
+            ImageOutput::Combined { image } => emit_artifact(s.sink, "image", "image", image),
+            ImageOutput::Split { bootloader, rootfs } => {
+                emit_artifact(s.sink, "image", "boot_img", bootloader);
+                emit_artifact(s.sink, "image", "rootfs_img", rootfs);
+            }
+        }
+    }
+    for c in &artifacts.compressed {
+        emit_artifact(s.sink, "image", "compressed", &c.path);
+    }
+    s.state.flashables = crate::nextstep::flashables(&artifacts.output, &artifacts.compressed);
+    // The per-image first-boot password: unique per build, expired so it
+    // must be changed at first login. Surfaced here since it exists nowhere else
+    // the operator can read it except the provenance manifest.
+    note(
+        s.json,
+        s.verbosity,
+        s.sink,
+        "image",
+        format!(
+            "first-boot pw: {}  (user {}, expired — change at first login)",
+            artifacts.password,
+            rootfs::DEFAULT_USER
+        ),
+    );
+    s.state.first_boot_password = Some(artifacts.password);
+    s.state.rootfs_verified_with = artifacts.rootfs_verified_with;
+    s.state.rootfs_filesystem = Some(artifacts.rootfs_filesystem);
+    s.state.image_bytes = Some(artifacts.image_bytes);
     Ok(())
 }
 

@@ -10,7 +10,7 @@
 # at blobs/keyrings/jellyfin.gpg); see features/jellyfin/README.md. The sibling
 # .lock holds the exact resolved pins; re-pin with `boot2deb update`.
 device     = "turing-rk1"
-kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
+kernel     = "rk3588-mainline-7.2"       # omit -> device default_kernel
 suite      = "forky"                     # omit -> device default_suite
 features   = ["jellyfin", "media-accel-rockchip", "jellyfin-rockchip"]
 layout     = "combined"                  # omit -> device default_layout
@@ -27,16 +27,17 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 
 # turing-rk1/media-accel-forky plus the application layer, and still under bring-up:
 # the transcode path this recipe exists to serve has not been exercised through
-# Jellyfin. Unchanged over the v7.1.6 kernel, which leaves the decode and encode
-# drivers as they were — see turing-rk1/forky for the full delta.
+# Jellyfin. Re-assessed over the v7.2 kernel: the encode path this recipe uses is the
+# VEPU580 out-of-tree driver, which 7.2 does not touch — mainline still has no Rockchip
+# video encoder. See turing-rk1/forky for the full delta.
 [support]
 status = "experimental"
-date   = "2026-08-05"
+date   = "2026-08-21"
 
 # What an operator gets, stated up front, because the shape of the acceleration is
 # not the shape the Jellyfin dashboard implies. The two limits underneath these ride
 # in from the `media-accel-rockchip` feature and print alongside them.
 caveats = [
   "Transcoding is hardware-*encode* only. The seeded /etc/jellyfin/encoding.xml selects the `rkmpp` acceleration type with an empty hardware-decoding codec list, so video is decoded and scaled on the CPU and encoded on the VEPU580. Re-enabling any codec under Playback > Transcoding > \"Enable hardware decoding for\" makes Jellyfin emit `-hwaccel rkmpp`, whose decoder cannot open on a mainline kernel, and those streams fail outright rather than falling back to software.",
-  "Jellyfin's bundled FFmpeg is not installed — the recipe supplies /opt/ffmpeg-rk/bin/ffmpeg instead, which is the only build here that can reach the VEPU580. There is therefore no second encoder to fall back to if that path is changed to something invalid.",
+  "Jellyfin's bundled FFmpeg is not installed — the recipe supplies /opt/ffmpeg-rk/bin/ffmpeg instead, which is the only build here that can reach the VEPU580. There is therefore no second encoder to fall back to: Jellyfin validates the path during startup and exits if the binary does not run, so pointing Dashboard > Playback > Transcoding > \"FFmpeg path\" at something invalid leaves the server failing to start rather than transcoding in software.",
 ]

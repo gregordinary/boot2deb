@@ -1,0 +1,98 @@
+#!/bin/sh
+set -eu
+# Install this system's embedded boot2deb image onto an internal disk.
+#
+# `boot2deb press --embed-image` carries the recipe's own compressed image at
+# /var/lib/boot2deb/install/; this script writes it to a target disk from the
+# booted board — the boot-from-card, install-to-eMMC workflow. It wraps the
+# documented dd procedure with the checks a tired operator skips: the target
+# must be a whole disk, must not be the disk this system is running from, and
+# must have nothing mounted; the confirmation requires typing the target's
+# name. There is no --yes.
+#
+# The write overwrites the target completely. The image carries its own
+# partition table and grows to fill the disk on its first boot.
+#
+# Re-running it is safe, and deliberately still writes: the operation is "put
+# this image on that disk", not "provision the disk if it looks empty", so a
+# repeat lands the identical bytes and a repeat after an interrupted write
+# repairs it. Probing the target for an existing filesystem and skipping would
+# turn the second run into a silent no-op, which is the opposite of what an
+# operator re-running this wants. Nothing is rescued off the target either:
+# there is no separate boot partition to lose, since a combined image keeps
+# /boot inside the root filesystem and the bootloader in the raw gap ahead of
+# the partition table.
+
+payload_dir=/var/lib/boot2deb/install
+
+usage() {
+    echo "usage: boot2deb-install-to <whole-disk, e.g. /dev/mmcblk0>" >&2
+    exit 64
+}
+
+fail() {
+    echo "boot2deb-install-to: $*" >&2
+    exit 1
+}
+
+[ "$#" -eq 1 ] || usage
+target=$1
+[ "$(id -u)" = 0 ] || fail "must run as root (sudo boot2deb-install-to $target)"
+
+# Exactly one embedded payload: none means the image was pressed without
+# --embed-image, several means leftovers to clean up first.
+set -- "$payload_dir"/*.img.xz "$payload_dir"/*.img.gz "$payload_dir"/*.img.zst
+payload=''
+for candidate in "$@"; do
+    [ -e "$candidate" ] || continue
+    [ -z "$payload" ] || fail "several embedded images under $payload_dir; remove all but one"
+    payload=$candidate
+done
+[ -n "$payload" ] || fail "no embedded image under $payload_dir — this image was pressed without --embed-image"
+
+case "$payload" in
+    *.xz)  decompress='xzcat' ;;
+    *.gz)  decompress='zcat' ;;
+    *.zst) decompress='zstdcat' ;;
+esac
+command -v "$decompress" >/dev/null 2>&1 || fail "$decompress is not installed (needed for $payload)"
+
+# The target must be a whole disk: a partition's sysfs entry lives under its
+# parent, not /sys/block, so this one test rejects files and partitions both.
+name=$(basename "$(readlink -f "$target")")
+[ -e "/sys/block/$name" ] || fail "$target is not a whole-disk block device (write to the disk, not a partition)"
+
+# The disk a device ultimately sits on. Followed to the top rather than read
+# once, because one hop is not always the disk: an LVM or LUKS root reports its
+# immediate parent as the partition it sits in, and a whole-disk filesystem
+# reports no parent at all. Both would leave the comparison below matching
+# nothing and the running system overwritable.
+whole_disk() {
+    _dev=$1
+    while :; do
+        _parent=$(lsblk -no pkname "$_dev" 2>/dev/null | head -n1)
+        [ -n "$_parent" ] || break
+        _dev="/dev/$_parent"
+    done
+    printf '%s\n' "${_dev##*/}"
+}
+
+# Never the disk this system runs from — that is the card being copied, not
+# the disk being installed to, and there is deliberately no override.
+rootdisk=$(whole_disk "$(findmnt -no source /)")
+[ "$name" != "$rootdisk" ] || fail "$target is the disk this system is running from"
+
+# Nothing on the target may be mounted; its filesystems are about to vanish.
+for mounted in $(lsblk -no mountpoint "/dev/$name" 2>/dev/null); do
+    [ -z "$mounted" ] || fail "/dev/$name has $mounted mounted — unmount everything on it first"
+done
+
+size=$(blockdev --getsize64 "/dev/$name" 2>/dev/null || echo unknown)
+echo "about to overwrite /dev/$name ($size bytes) with $(basename "$payload")"
+printf 'type the device name (%s) to continue: ' "$name"
+read -r answer
+[ "$answer" = "$name" ] || fail "confirmation did not match; nothing written"
+
+"$decompress" "$payload" | dd of="/dev/$name" bs=4M conv=fsync
+sync
+echo "done. Power off, remove this boot medium, and the board boots from /dev/$name."

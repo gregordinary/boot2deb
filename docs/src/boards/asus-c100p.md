@@ -40,13 +40,19 @@ runs stock ChromeOS firmware and the `crossystem` step below is required.
 
 ## Flash and boot
 
-Write the image to a microSD card or a USB stick (the C100P has both, and two USB ports,
-so unlike the [Chromebit](asus-chromebit-cs10.md) nothing here needs a hub):
+Press the image — `--embed-image` if the card will install the OS to the internal
+eMMC — and write it to a microSD card or a USB stick (the C100P has both, and two
+USB ports, so unlike the [Chromebit](asus-chromebit-cs10.md) nothing here needs a
+hub):
 
 ```sh
-xzcat build/asus-c100p/forky/artifacts/asus-c100p-forky.img.xz \
-  | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
+boot2deb press asus-c100p/forky card.img --embed-image
+sudo dd if=card.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
+
+`press` verifies the file it wrote and `--hostname`/`--ssh-key` personalize the
+unit — see [Producing images](../press.md). Confirm the device with `lsblk`
+first; `dd` overwrites it whole.
 
 The unit must be in **developer mode**: power off, hold **Esc + Refresh** and briefly press
 **Power**, keep Esc+Refresh held until the recovery screen appears, then **Ctrl+D** and
@@ -84,13 +90,17 @@ USB, the difference being the time the initramfs spends enumerating the stick.
 ## Installing to the eMMC
 
 The board has 16 GB of internal eMMC, and the image is a whole-disk image, so putting the
-OS there is one command from a booted card:
+OS there is one command from a card pressed with `--embed-image`:
 
 ```sh
-lsblk                       # the eMMC is mmcblk0 — the one with mmcblk0boot0 beside it
-xzcat asus-c100p-forky.img.xz | sudo dd of=/dev/mmcblk0 bs=4M status=progress conv=fsync
-sudo reboot                 # Ctrl+D boots the eMMC, Ctrl+U the card
+sudo boot2deb-install-to /dev/mmcblk0    # the eMMC — the one with mmcblk0boot0 beside it
+sudo reboot                              # Ctrl+D boots the eMMC, Ctrl+U the card
 ```
+
+The helper finds the embedded artifact, refuses the disk the system is running from and
+anything mounted, and asks you to type the target's name before it writes. Without
+`--embed-image` the manual form is the same write: copy the `.img.xz` to the booted
+board and `xzcat asus-c100p-forky.img.xz | sudo dd of=/dev/mmcblk0 bs=4M conv=fsync`.
 
 This needs no kernel patch, contrary to the usual advice. The Veyron eMMC ships with its
 primary GPT deliberately corrupted — ChromeOS marks it `IGNOREME` and uses the secondary,
@@ -153,7 +163,10 @@ The radio is the family's Broadcom BCM4354 and needs two blobs Debian does not s
 are vendored on the SoC layer and are already in the image. Bluetooth works as it does on
 the C201 — the BCM4354's Bluetooth half is on `uart0`, the kernel loads the vendored
 patchram, and `bluez` is installed to use it. `btsdio` is blacklisted, because if it claims
-the BCM4354's SDIO Bluetooth function, Wi-Fi does not survive suspend and resume.
+the BCM4354's SDIO Bluetooth function, Wi-Fi does not survive suspend and resume. Bluetooth
+**audio** takes `libspa-0.2-bluetooth` on top, for the same reason as on the C201: PipeWire's
+Bluetooth plugin is only a *Suggests* of `wireplumber` and `pipewire-pulse`, so a desktop
+install does not bring it in and a headset pairs with no sink to play to.
 
 ## Audio
 

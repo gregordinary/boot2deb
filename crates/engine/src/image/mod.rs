@@ -7,8 +7,8 @@
 //! from the rootfs tar (the `ext4` submodule), the partition table is written
 //! in Rust (`gpt`), the boot payload is placed by seek+write, and the result is
 //! compressed with pure-Rust encoders — `.xz` via `lzma-rust2`, `.gz` via `flate2`
-//! ([`ImageCompression`]). All byte/LBA arithmetic is resolved and validated up
-//! front by the `geometry` submodule.
+//! ([`ImageCompression`]). All byte/LBA arithmetic is resolved and validated up front
+//! by the `geometry` submodule.
 //!
 //! **Where the boot payload comes from is the boot method's business.** Under
 //! `rockchip-rkbin` it is two blobs the u-boot stage compiled, written into a raw gap
@@ -28,16 +28,19 @@ mod depthcharge;
 mod ext4;
 mod geometry;
 mod gpt;
+pub mod inspect;
 
 pub use ext4::ROOTFS_FS_KIND;
 
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
+use crate::press::additions::TreeAdditions;
 use boot2deb_core::chromeos::MAX_KPART_SLOTS;
 use boot2deb_core::model::{Layout, ResolvedBoot};
+use boot2deb_core::press::ArtifactRole;
 use boot2deb_core::provenance::FilesystemProvenance;
 use boot2deb_core::size::{parse_image_size, ImageSize};
-use boot2deb_core::ResolvedBuild;
+use boot2deb_core::{ImageBuild, ResolvedBuild};
 use geometry::{BootGeometry, Geometry};
 use lzma_rust2::{XzOptions, XzWriterMt};
 use sha2::{Digest, Sha256};
@@ -56,16 +59,21 @@ const GZ_LEVEL: u32 = 6;
 
 /// A container a finished image is compressed into.
 ///
-/// The two are not interchangeable. `.xz` is smaller and is what an operator
-/// pipes through `xzcat` into `dd`; `.gz` exists because **u-boot has no xz
-/// decompressor** — its `gzwrite` command reads gzip only — so an image meant to
-/// be written to a disk by the bootloader itself has to be in this container.
+/// The two are not interchangeable, and each has a distinct reason to exist: `.xz`
+/// is the smallest and is what an operator pipes through `xzcat` into `dd`; `.gz`
+/// exists because **u-boot has no xz decompressor** — its `gzwrite` command reads
+/// gzip only — so an image meant to be written to a disk by the bootloader itself
+/// has to be in that container.
+///
+/// Size and speed run in opposite directions: `.xz` is the smaller and the slower
+/// to produce, `.gz` the larger and the faster.
 ///
 /// [`ImageOptions::compress`] is an ordered preference, not a set: the first
 /// format a build asks for is the one the finished-build hint points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageCompression {
-    /// `.xz`, via the pure-Rust multithreaded `lzma-rust2` encoder. The default.
+    /// `.xz`, via the pure-Rust multithreaded `lzma-rust2` encoder. The default,
+    /// and the smaller artifact.
     Xz,
     /// `.gz`, via the pure-Rust `miniz_oxide` backend of `flate2`. Single-threaded
     /// (the format has no parallel container the way `.xz` blocks do), and a worse
@@ -215,6 +223,11 @@ pub struct ImageIdentity {
     pub disk_guid: Uuid,
     /// The rootfs partition's GUID — its **PARTUUID**.
     pub rootfs_partuuid: Uuid,
+    /// The seed partition's GUID. Its leading four bytes double as the seed
+    /// FAT's volume serial, so the volume needs no identity source of its own
+    /// and a `--seed-only` rewrite (which reads the GUID back off the GPT)
+    /// reproduces the same serial.
+    pub seed_partuuid: Uuid,
     /// The ChromeOS kernel slots' partition GUIDs, in on-disk order. Unused under a
     /// boot method that writes no kernel partition.
     ///
@@ -239,6 +252,7 @@ impl ImageIdentity {
             ext4_uuid: derive_uuid(seed, device, "ext4-rootfs"),
             disk_guid: derive_uuid(seed, device, "gpt-disk"),
             rootfs_partuuid: derive_uuid(seed, device, "gpt-partition"),
+            seed_partuuid: derive_uuid(seed, device, "gpt-seed-partition"),
             // A distinct domain per slot, so the slots never collide with each other
             // (see the field's own note on why that matters), while each stays a pure
             // function of the seed.
@@ -246,6 +260,18 @@ impl ImageIdentity {
                 derive_uuid(seed, device, &format!("gpt-kernel-partition-{i}"))
             }),
         }
+    }
+
+    /// The seed FAT's volume serial: the [`seed_partuuid`](Self::seed_partuuid)'s
+    /// leading four bytes, read the way `flash --seed-only` re-derives it from
+    /// the GPT it finds on the medium.
+    #[must_use]
+    pub fn seed_volume_id(&self) -> u32 {
+        u32::from_le_bytes(
+            self.seed_partuuid.as_bytes()[..4]
+                .try_into()
+                .expect("a UUID has 16 bytes"),
+        )
     }
 }
 
@@ -325,11 +351,17 @@ pub struct ImageArtifacts {
 /// does not exist until several stages later. What *is* checkable now is the slack spec
 /// and the head of the disk — which is where a mis-authored offset lives, and the whole
 /// of what this check was ever catching for an authored size beyond the size itself.
+///
+/// A u-boot deliverable has neither a size nor a rootfs, so only the boot region is
+/// resolved: that is the whole of the disk it writes.
 pub fn validate_geometry(build: &ResolvedBuild) -> Result<(), EngineError> {
-    match parse_image_size(&build.image_size)? {
+    let Some(image) = build.image.as_ref() else {
+        return geometry::BootRegion::resolve(&build.boot).map(|_| ());
+    };
+    match parse_image_size(&image.image_size)? {
         ImageSize::Fixed(total) => Geometry::resolve(&build.boot, total).map(|_| ()),
         ImageSize::Fit(slack) => {
-            geometry::fit_slack(&build.image_size, slack)?;
+            geometry::fit_slack(&image.image_size, slack)?;
             geometry::BootRegion::resolve(&build.boot).map(|_| ())
         }
     }
@@ -369,12 +401,13 @@ fn derive_uuid(seed: &str, device: &str, domain: &str) -> Uuid {
 /// The boot payload's size is checked against the space the geometry gave it
 /// before any bytes are placed.
 pub fn build_image(
-    build: &ResolvedBuild,
+    ib: ImageBuild,
     opts: &ImageOptions,
     sink: &dyn EventSink,
 ) -> Result<ImageArtifacts, EngineError> {
+    let ImageBuild { build, image } = ib;
     let step = Step::start(sink, "image");
-    let size = parse_image_size(&build.image_size)?;
+    let size = parse_image_size(&image.image_size)?;
     // The head of the disk resolves first and on its own, because under a fitted size the
     // rest of the layout answers to the filesystem rather than the other way round: the
     // format decides how large the rootfs is, and the disk is then sized to carry it. The
@@ -413,7 +446,7 @@ pub fn build_image(
     // and each built image gets its own credential — spliced into the staged
     // `/etc/shadow` before formatting, not surgically into the tar. Its length is the
     // resolved config's, already bounded there.
-    let password = crate::secret::generate_password(build.first_boot_password_length as usize)?;
+    let password = crate::secret::generate_password(image.first_boot_password_length as usize)?;
     let password_hash = crate::secret::crypt_password(&password)?;
 
     // The ext4 rootfs partition is identical across layouts — build it once. An authored
@@ -430,7 +463,7 @@ pub fn build_image(
         }
         ImageSize::Fit(slack) => (
             None,
-            ext4::RootfsSize::Fit(geometry::fit_slack(&build.image_size, slack)?),
+            ext4::RootfsSize::Fit(geometry::fit_slack(&image.image_size, slack)?),
         ),
     };
     let rootfs_fs = ext4::build_rootfs_ext4(
@@ -443,6 +476,7 @@ pub fn build_image(
             user: crate::rootfs::DEFAULT_USER,
             password_hash: &password_hash,
         },
+        None,
         &step,
     )?;
     let geom = match geom {
@@ -458,10 +492,33 @@ pub fn build_image(
     };
     step.progress(50);
 
+    // The built-in seed: an empty template an operator (or `flash --hostname`)
+    // later replaces. Deterministic — the volume serial comes off the derived
+    // identity and the timestamp is the rootfs's own — so the image stays a
+    // function of the lock.
+    let seed_image = crate::press::seed::partition_image(
+        &crate::press::seed::SeedKeys::default(),
+        opts.identity.seed_volume_id(),
+        rootfs_fs.time_secs,
+        u32::try_from(geom.seed_off / geometry::SECTOR).unwrap_or(0),
+    )?;
+
     let output = match build.layout {
         Layout::Combined => {
             let image = opts.out_dir.join(format!("{}.img", opts.stem));
-            assemble_disk(&image, &geom, &ext4, kpart.as_deref(), true, opts, &step)?;
+            assemble_disk(
+                &image,
+                &geom,
+                &DiskContents {
+                    ext4: &ext4,
+                    seed_image: &seed_image,
+                    kpart: kpart.as_deref(),
+                },
+                Some(&opts.boot),
+                opts.rootfs_label,
+                &opts.identity,
+                &step,
+            )?;
             step.log(format!("wrote combined image {}", image.display()));
             ImageOutput::Combined { image }
         }
@@ -485,8 +542,21 @@ pub fn build_image(
                 });
             };
             // Rootfs image: GPT + rootfs partition, empty raw gap (bootloader-agnostic).
+            // The seed rides with the rootfs — it is the OS that reads it.
             let rootfs = opts.out_dir.join(format!("{}-rootfs.img", opts.stem));
-            assemble_disk(&rootfs, &geom, &ext4, None, false, opts, &step)?;
+            assemble_disk(
+                &rootfs,
+                &geom,
+                &DiskContents {
+                    ext4: &ext4,
+                    seed_image: &seed_image,
+                    kpart: None,
+                },
+                None,
+                opts.rootfs_label,
+                &opts.identity,
+                &step,
+            )?;
             // Bootloader image: just the raw-gap payloads on a gap-sized medium.
             let bootloader = opts.out_dir.join(format!("{}-boot.img", opts.stem));
             assemble_bootloader(&bootloader, &region, idbloader, uboot_itb, &step)?;
@@ -585,6 +655,191 @@ pub fn build_bootloader_image(
     Ok(image)
 }
 
+/// Inputs for one pressed re-assembly — see [`press_image`].
+pub struct PressOptions<'a> {
+    /// The build's kept rootfs tarball (`<stem>-rootfs.tar`), exactly as the
+    /// image node consumed it.
+    pub rootfs_tar: &'a Path,
+    /// The boot payload, required for a [`Combined`](ArtifactRole::Combined)
+    /// press and absent for a split rootfs image (whose boot half is a separate
+    /// file `press` streams unchanged).
+    pub boot: Option<BootPayload<'a>>,
+    /// Which artifact this output derives from: `Combined` or `Rootfs`. A
+    /// [`Boot`](ArtifactRole::Boot) image carries no filesystem, so it is never
+    /// re-assembled.
+    pub role: ArtifactRole,
+    /// The file to write — the caller's named output, not an artifact directory.
+    pub output: &'a Path,
+    /// Scratch directory for the intermediate ext4 partition image.
+    pub work_dir: &'a Path,
+    /// ext4 volume label and GPT partition name (≤ 16 bytes), e.g. `rootfs`.
+    pub rootfs_label: &'a str,
+    /// The recipe's deterministic on-disk identifiers — the same values the
+    /// build derived, so a pressed image keeps the artifact's identity.
+    pub identity: ImageIdentity,
+    /// What this press adds to the tree. Never empty: a press with nothing to
+    /// add streams the existing artifact instead of re-assembling.
+    pub additions: &'a TreeAdditions,
+}
+
+/// What [`press_image`] produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PressedImage {
+    /// The pressed image's own first-boot password — fresh for this file, since
+    /// re-assembly runs the same per-image credential step a build does. The
+    /// caller surfaces it; the recipe's provenance manifest still describes the
+    /// build's artifact, not this derivative.
+    pub password: String,
+    /// The whole-disk size this press laid out, in bytes. Under a fitted
+    /// `image_size` it grows with the additions.
+    pub image_bytes: u64,
+}
+
+/// Re-assemble one pressed image from a build's kept artifacts, with
+/// [`TreeAdditions`] merged into the rootfs and the `[pressed]` marker stamped
+/// into its `/etc/boot2deb/image.toml`.
+///
+/// The same assembly a build runs — geometry, ext4-from-tar, seed template, GPT,
+/// splice — pointed at one output file: no compression, no artifact directory,
+/// and the recipe's artifacts untouched. Under a `fit`-sized recipe the
+/// filesystem grows to hold whatever was added; under a fixed `image_size` a
+/// press that does not fit fails in the format, naming the size. The rootfs is
+/// verified exactly as a build's is (the in-process scan, plus `e2fsck -fn`
+/// where present) before the disk is laid out.
+///
+/// # Errors
+///
+/// [`EngineError::StageNotApplicable`] for a role that carries no rootfs or a
+/// combined press without its boot payload; [`EngineError::PressAddition`] when
+/// an addition cannot be placed; otherwise the image node's own geometry,
+/// format, and I/O errors.
+pub fn press_image(
+    ib: ImageBuild,
+    opts: &PressOptions,
+    sink: &dyn EventSink,
+) -> Result<PressedImage, EngineError> {
+    let ImageBuild { build, image } = ib;
+    let step = Step::start(sink, "press");
+    let with_boot = match opts.role {
+        ArtifactRole::Combined => true,
+        ArtifactRole::Rootfs => false,
+        ArtifactRole::Boot => {
+            return Err(EngineError::StageNotApplicable {
+                stage: "press (re-assembly)",
+                why: "a boot image carries no rootfs to add anything to",
+            })
+        }
+    };
+    let size = parse_image_size(&image.image_size)?;
+    let region = geometry::BootRegion::resolve(&build.boot)?;
+    std::fs::create_dir_all(opts.work_dir).map_err(|s| EngineError::io(opts.work_dir, s))?;
+    if let Some(parent) = opts.output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|s| EngineError::io(parent, s))?;
+    }
+
+    // The boot payload, exactly as the image node resolves it: a combined press
+    // places it, and under depthcharge that means taking the signed kernel out
+    // of the rootfs tarball and holding it to this identity's root PARTUUID.
+    let kpart = match (with_boot, &opts.boot) {
+        (true, Some(BootPayload::Depthcharge)) => {
+            let kpart = depthcharge::extract_kpart(opts.rootfs_tar, opts.work_dir, &step)?;
+            depthcharge::verify_kpart(&kpart, opts.identity.rootfs_partuuid)?;
+            Some(kpart)
+        }
+        (true, Some(BootPayload::RockchipRkbin { .. })) => None,
+        (true, None) => {
+            return Err(EngineError::StageNotApplicable {
+                stage: "press (re-assembly)",
+                why: "a combined image needs its boot payload",
+            })
+        }
+        (false, _) => None,
+    };
+    if with_boot {
+        let boot = opts.boot.as_ref().expect("checked above");
+        let payloads = boot_payloads(boot, kpart.as_deref())?;
+        region.check_payload_fit(&payloads)?;
+    }
+
+    // A fresh per-unit credential: the kept rootfs tar has the account locked
+    // (the build's password was spliced into the build's image, not the tar),
+    // so a pressed image gets its own, surfaced by the caller.
+    let password = crate::secret::generate_password(image.first_boot_password_length as usize)?;
+    let password_hash = crate::secret::crypt_password(&password)?;
+
+    let ext4 = opts.work_dir.join("press-rootfs.ext4");
+    let (geom, rootfs_size) = match size {
+        ImageSize::Fixed(total) => {
+            let geom = Geometry::resolve(&build.boot, total)?;
+            let rootfs_size = ext4::RootfsSize::Exact(geom.rootfs_bytes);
+            (Some(geom), rootfs_size)
+        }
+        ImageSize::Fit(slack) => (
+            None,
+            ext4::RootfsSize::Fit(geometry::fit_slack(&image.image_size, slack)?),
+        ),
+    };
+    let rootfs_fs = ext4::build_rootfs_ext4(
+        &ext4,
+        rootfs_size,
+        opts.rootfs_tar,
+        opts.rootfs_label,
+        opts.identity.ext4_uuid,
+        ext4::FirstBoot {
+            user: crate::rootfs::DEFAULT_USER,
+            password_hash: &password_hash,
+        },
+        Some(opts.additions),
+        &step,
+    )?;
+    let geom = match geom {
+        Some(geom) => geom,
+        None => {
+            let geom = Geometry::around_rootfs(&build.boot, rootfs_fs.size_bytes)?;
+            step.log(format!(
+                "sized the pressed image to its contents: {} bytes on disk",
+                geom.total_size
+            ));
+            geom
+        }
+    };
+
+    // The built-in empty seed template, exactly as a build splices it; the
+    // caller personalizes it afterwards where keys were named.
+    let seed_image = crate::press::seed::partition_image(
+        &crate::press::seed::SeedKeys::default(),
+        opts.identity.seed_volume_id(),
+        rootfs_fs.time_secs,
+        u32::try_from(geom.seed_off / geometry::SECTOR).unwrap_or(0),
+    )?;
+    assemble_disk(
+        opts.output,
+        &geom,
+        &DiskContents {
+            ext4: &ext4,
+            seed_image: &seed_image,
+            kpart: kpart.as_deref(),
+        },
+        opts.boot.as_ref().filter(|_| with_boot),
+        opts.rootfs_label,
+        &opts.identity,
+        &step,
+    )?;
+    // The scratch ext4 is press-local; a build's is kept for stage reuse, but a
+    // press leaves nothing behind except its output.
+    std::fs::remove_file(&ext4).map_err(|s| EngineError::io(&ext4, s))?;
+    step.log(format!(
+        "pressed {} ({} bytes)",
+        opts.output.display(),
+        geom.total_size
+    ));
+    step.finish();
+    Ok(PressedImage {
+        password,
+        image_bytes: geom.total_size,
+    })
+}
+
 /// The boot payloads to place, as `(name, length)` pairs in the order the boot
 /// method writes them — the input to [`Geometry::check_payload_fit`].
 fn boot_payloads<'a>(
@@ -612,31 +867,46 @@ fn boot_payloads<'a>(
     }
 }
 
+/// What goes onto a disk beyond its table: the filesystems, and (for a combined
+/// image) the signed kernel partition. One value because the three travel
+/// together through both `assemble_disk` calls.
+struct DiskContents<'a> {
+    /// The rootfs ext4 partition image, spliced at the rootfs offset.
+    ext4: &'a Path,
+    /// The seed partition's whole content, spliced at the seed offset.
+    seed_image: &'a [u8],
+    /// The signed kernel partition, under `depthcharge` with a boot payload.
+    kpart: Option<&'a Path>,
+}
+
 /// Write a whole-disk image: a full-size file, the GPT table, the rootfs ext4
-/// filesystem spliced at its partition offset, and — when `with_boot` — the boot
-/// method's payload. Shared by combined (with the boot payload) and the split rootfs
-/// image (without).
+/// filesystem and seed partition spliced at their offsets, and — when `boot` is
+/// given — the boot method's payload. Shared by combined (with the boot
+/// payload), the split rootfs image (without), and a press re-assembly (either).
 fn assemble_disk(
     image: &Path,
     geom: &Geometry,
-    ext4: &Path,
-    kpart: Option<&Path>,
-    with_boot: bool,
-    opts: &ImageOptions,
+    contents: &DiskContents<'_>,
+    boot: Option<&BootPayload<'_>>,
+    rootfs_label: &str,
+    identity: &ImageIdentity,
     step: &Step,
 ) -> Result<(), EngineError> {
+    let kpart = contents.kpart;
     create_sized_image(image, geom.total_size)?;
     gpt::write_table(
         image,
         geom,
-        opts.rootfs_label,
-        opts.identity.disk_guid,
-        opts.identity.rootfs_partuuid,
-        &opts.identity.kpart_guids,
+        rootfs_label,
+        identity.disk_guid,
+        identity.rootfs_partuuid,
+        identity.seed_partuuid,
+        &identity.kpart_guids,
     )?;
-    splice_file(image, geom.rootfs_off, ext4)?;
-    if with_boot {
-        match (&geom.boot, &opts.boot) {
+    splice_bytes(image, geom.seed_off, contents.seed_image)?;
+    splice_file(image, geom.rootfs_off, contents.ext4)?;
+    if let Some(boot) = boot {
+        match (&geom.boot, boot) {
             (
                 BootGeometry::RawGap {
                     idbloader_off,
@@ -681,7 +951,11 @@ fn assemble_disk(
     }
     step.log(format!(
         "laid GPT + rootfs partition{} into {}",
-        if with_boot { " + boot payload" } else { "" },
+        if boot.is_some() {
+            " + boot payload"
+        } else {
+            ""
+        },
         image.display()
     ));
     Ok(())
@@ -739,6 +1013,22 @@ fn create_sized_image(path: &Path, size: u64) -> Result<(), EngineError> {
 /// (via [`create_sized_image`]) to cover `offset + len(src)`, so seeking over a
 /// trailing hole never shortens the file; the skipped bytes were already zero from
 /// the sparse `set_len`.
+/// Write `bytes` into the image at `offset` — the seed partition, whose whole
+/// content is built in memory. Zero runs are written as-is rather than
+/// hole-punched: the partition is 1 MiB, so sparseness buys nothing.
+fn splice_bytes(image: &Path, offset: u64, bytes: &[u8]) -> Result<(), EngineError> {
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .open(image)
+        .map_err(|s| EngineError::io(image, s))?;
+    dst.seek(SeekFrom::Start(offset))
+        .map_err(|s| EngineError::io(image, s))?;
+    dst.write_all(bytes)
+        .map_err(|s| EngineError::io(image, s))?;
+    dst.flush().map_err(|s| EngineError::io(image, s))?;
+    Ok(())
+}
+
 fn splice_file(image: &Path, offset: u64, src: &Path) -> Result<(), EngineError> {
     /// Sparse-copy block size; also the zero-run granularity.
     const CHUNK: usize = 1 << 20; // 1 MiB
@@ -873,6 +1163,18 @@ fn append_ext(path: &Path, ext: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    /// The image half of a fixture build. Every fixture here resolves a shipped image
+    /// recipe, so the axis is there; the unwrap states that rather than threading an
+    /// `Option` through every assertion.
+    fn image_of(build: &boot2deb_core::ResolvedBuild) -> &boot2deb_core::ResolvedImage {
+        pair_of(build).image
+    }
+
+    /// The same fixture build as an [`ImageBuild`] pair, for the stages that take one.
+    fn pair_of(build: &boot2deb_core::ResolvedBuild) -> boot2deb_core::ImageBuild<'_> {
+        build.as_image().expect("the fixture recipes build images")
+    }
     use super::*;
     use boot2deb_core::{resolve_recipe, ConfigRoot, Overrides};
     use std::process::Command;
@@ -893,7 +1195,7 @@ mod tests {
     fn small_rk1_build(image_size: &str) -> ResolvedBuild {
         let mut b =
             resolve_recipe(&repo_root(), "turing-rk1/forky", &Overrides::default()).unwrap();
-        b.image_size = image_size.to_string();
+        b.image.as_mut().unwrap().image_size = image_size.to_string();
         b
     }
 
@@ -907,10 +1209,30 @@ mod tests {
     /// Build a tiny rootfs tarball (a few dirs + files) at `path`.
     fn make_rootfs_tar(dir: &Path, path: &Path) {
         let root = dir.join("rootfs");
-        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::create_dir_all(root.join("etc/boot2deb")).unwrap();
         std::fs::create_dir_all(root.join("usr/bin")).unwrap();
         std::fs::write(root.join("etc/hostname"), b"turing-rk1\n").unwrap();
         std::fs::write(root.join("usr/bin/true"), b"#!/bin/true\n").unwrap();
+        // The identity document every rootfs carries — what the pressed marker is
+        // written into.
+        std::fs::write(
+            root.join("etc/boot2deb/image.toml"),
+            "version = 1\n\
+             [image]\n\
+             device = \"turing-rk1\"\n\
+             description = \"fixture\"\n\
+             arch = \"arm64\"\n\
+             soc = \"rk3588\"\n\
+             boot_method = \"rockchip-rkbin\"\n\
+             suite = \"forky\"\n\
+             features = []\n\
+             layout = \"combined\"\n\
+             hostname = \"turing-rk1\"\n\
+             [kernel]\n\
+             id = \"fixture\"\n\
+             flavor = \"mainline\"\n",
+        )
+        .unwrap();
         // The default account is locked in the tarball; the image stage splices the
         // per-image first-boot hash into it before formatting.
         std::fs::write(
@@ -950,6 +1272,24 @@ mod tests {
             ),
             Path::new("/o/turing-rk1.img.gz")
         );
+    }
+
+    #[test]
+    fn every_container_parses_from_its_own_names_and_pairs_with_a_decompressor() {
+        // The `next:` hint pipes the artifact through `decompressor()`, so a wrong
+        // pairing here hands an operator a command that cannot read their image.
+        use std::str::FromStr;
+        for (spelling, want) in [
+            ("xz", ImageCompression::Xz),
+            ("gz", ImageCompression::Gz),
+            ("gzip", ImageCompression::Gz),
+        ] {
+            assert_eq!(ImageCompression::from_str(spelling), Ok(want), "{spelling}");
+        }
+        assert!(ImageCompression::from_str("bz2").is_err());
+        assert!(ImageCompression::from_str("zst").is_err());
+        assert_eq!(ImageCompression::Xz.decompressor(), "xzcat");
+        assert_eq!(ImageCompression::Gz.decompressor(), "zcat");
     }
 
     #[test]
@@ -1056,9 +1396,8 @@ mod tests {
 
     #[test]
     fn jobs_bounds_the_xz_worker_pool() {
-        // `--jobs N` used to bound `make` and nothing else, so a `build --jobs 4` on a
-        // shared machine still fanned image compression across every core. The flag
-        // means "for this build".
+        // The flag means "for this build", not "for `make`": an unbounded compressor
+        // on a shared machine would fan across every core no matter what `--jobs` said.
         assert_eq!(xz_workers(Some(4)), 4);
         assert_eq!(xz_workers(Some(1)), 1);
         // `--jobs 0` is not a request for no workers; the encoder needs at least one.
@@ -1102,6 +1441,205 @@ mod tests {
         assert_eq!(&bytes[510..512], &[0x00, 0x00]);
     }
 
+    /// A press with additions re-assembles from the kept tar: the added files land
+    /// with their modes and synthesized parents, the pressed marker is stamped —
+    /// and every other file in the rootfs is identical to what a plain build of
+    /// the same inputs carries. `/etc/shadow` is the one deliberate exception:
+    /// each press draws its own first-boot password.
+    #[test]
+    fn a_pressed_image_adds_files_and_changes_nothing_else() {
+        use ferrosys::ext::{OpenOptions as ExtOpen, Reader as ExtReader};
+        use std::collections::BTreeMap;
+
+        if !require_host_tools(&["tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs_tar = tmp.path().join("rootfs.tar");
+        make_rootfs_tar(tmp.path(), &rootfs_tar);
+        let idb = tmp.path().join("idbloader.img");
+        let itb = tmp.path().join("u-boot.itb");
+        std::fs::write(&idb, b"IDBLOADER-PAYLOAD").unwrap();
+        std::fs::write(&itb, b"UBOOT-ITB-PAYLOAD").unwrap();
+        let build = small_rk1_build("fit+20%");
+        let identity = ImageIdentity::derive("test-seed", "turing-rk1");
+        let sink = |_: crate::event::Event| {};
+
+        // The baseline: the build's own combined image, raw.
+        let out = tmp.path().join("out");
+        let arts = build_image(
+            pair_of(&build),
+            &ImageOptions {
+                rootfs_tar: &rootfs_tar,
+                boot: BootPayload::RockchipRkbin {
+                    idbloader: &idb,
+                    uboot_itb: &itb,
+                },
+                out_dir: &out,
+                stem: "turing-rk1-forky",
+                work_dir: &tmp.path().join("work-build"),
+                rootfs_label: "rootfs",
+                identity,
+                compress: &[],
+                keep_raw: false,
+                jobs: None,
+            },
+            &sink,
+        )
+        .unwrap();
+        let ImageOutput::Combined { image: baseline } = &arts.output else {
+            panic!("expected combined, got {:?}", arts.output)
+        };
+
+        // The press: one config copied over a shipped file, one new file with
+        // missing parents, one first-boot deb, one embedded artifact.
+        let site = tmp.path().join("site.conf");
+        std::fs::write(&site, b"site\n").unwrap();
+        let hostname = tmp.path().join("hostname");
+        std::fs::write(&hostname, b"rk1-site\n").unwrap();
+        let deb = tmp.path().join("app_1.0_arm64.deb");
+        std::fs::write(&deb, b"DEB-BYTES").unwrap();
+        let embedded = tmp.path().join("turing-rk1-forky.img.xz");
+        std::fs::write(&embedded, b"EMBEDDED-ARTIFACT").unwrap();
+        let mut additions = TreeAdditions::new("turing-rk1-forky", "turing-rk1/forky", identity);
+        additions.copy(&site, "/opt/site/site.conf").unwrap();
+        additions.copy(&hostname, "/etc/hostname").unwrap();
+        additions.deb(&deb).unwrap();
+        additions.embed_image(&embedded).unwrap();
+
+        let pressed_path = tmp.path().join("card.img");
+        let pressed = press_image(
+            pair_of(&build),
+            &PressOptions {
+                rootfs_tar: &rootfs_tar,
+                boot: Some(BootPayload::RockchipRkbin {
+                    idbloader: &idb,
+                    uboot_itb: &itb,
+                }),
+                role: ArtifactRole::Combined,
+                output: &pressed_path,
+                work_dir: &tmp.path().join("work-press"),
+                rootfs_label: "rootfs",
+                identity,
+                additions: &additions,
+            },
+            &sink,
+        )
+        .unwrap();
+        assert!(!pressed.password.is_empty());
+        assert_eq!(
+            std::fs::metadata(&pressed_path).unwrap().len(),
+            pressed.image_bytes
+        );
+
+        // The boot payload is placed exactly as a build places it.
+        let bytes = std::fs::read(&pressed_path).unwrap();
+        assert_eq!(&bytes[32 * 1024..32 * 1024 + 17], b"IDBLOADER-PAYLOAD");
+
+        // Walk both filesystems (they sit at the same 16 MiB offset) into
+        // path -> (mode, uid, content) maps.
+        type Snapshot = BTreeMap<Vec<u8>, (u16, u32, Option<Vec<u8>>)>;
+        let walk = |path: &Path| -> Snapshot {
+            let file = std::fs::File::open(path).unwrap();
+            let mut reader =
+                ExtReader::open_with(file, &ExtOpen::new().base(16 * 1024 * 1024)).unwrap();
+            let entries = reader.walk().unwrap();
+            entries
+                .into_iter()
+                .map(|e| {
+                    // Regular files compare by content; everything else by shape.
+                    let body = (e.inode.mode & 0xF000 == 0x8000)
+                        .then(|| reader.read_data(&e.inode).unwrap());
+                    (e.path, (e.inode.mode, e.inode.uid, body))
+                })
+                .collect()
+        };
+        let base_map = walk(baseline);
+        let press_map = walk(&pressed_path);
+
+        // The additions landed: contents, modes, synthesized parents.
+        let added = &press_map[b"/opt/site/site.conf".as_slice()];
+        assert_eq!(added.2.as_deref(), Some(b"site\n".as_slice()));
+        assert_eq!(added.0 & 0o7777, 0o644);
+        assert_eq!(added.1, 0, "additions are root-owned");
+        assert!(press_map[b"/opt/site".as_slice()].0 & 0xF000 == 0x4000);
+        assert_eq!(
+            press_map[b"/etc/hostname".as_slice()].2.as_deref(),
+            Some(b"rk1-site\n".as_slice()),
+            "a copy replaces the shipped file"
+        );
+        assert_eq!(
+            press_map[b"/var/lib/boot2deb/firstboot-debs/app_1.0_arm64.deb".as_slice()]
+                .2
+                .as_deref(),
+            Some(b"DEB-BYTES".as_slice())
+        );
+        assert_eq!(
+            press_map[b"/var/lib/boot2deb/install/turing-rk1-forky.img.xz".as_slice()]
+                .2
+                .as_deref(),
+            Some(b"EMBEDDED-ARTIFACT".as_slice())
+        );
+
+        // The marker names the source and everything added, by kind.
+        let marker = press_map[b"/etc/boot2deb/image.toml".as_slice()]
+            .2
+            .clone()
+            .unwrap();
+        let identity_doc = boot2deb_core::provenance::SystemIdentity::from_toml_str(
+            std::str::from_utf8(&marker).unwrap(),
+            "image.toml",
+        )
+        .unwrap();
+        let pressed_table = identity_doc.pressed.expect("pressed table present");
+        assert_eq!(pressed_table.source, "turing-rk1-forky");
+        assert_eq!(
+            pressed_table.copies,
+            ["/etc/hostname", "/opt/site/site.conf"]
+        );
+        assert_eq!(pressed_table.debs, ["app_1.0_arm64.deb"]);
+        assert_eq!(
+            pressed_table.embedded_image.as_deref(),
+            Some("turing-rk1-forky.img.xz")
+        );
+        assert!(
+            base_map[b"/etc/boot2deb/image.toml".as_slice()]
+                .2
+                .as_deref()
+                .is_some_and(|body| !body.windows(9).any(|w| w == b"[pressed]")),
+            "the build's own image carries no pressed table"
+        );
+
+        // Everything the press did not touch is identical to the baseline —
+        // content, mode, and ownership alike.
+        let touched: &[&[u8]] = &[
+            b"/etc/hostname",
+            b"/etc/boot2deb/image.toml",
+            b"/etc/shadow",
+        ];
+        for (path, entry) in &base_map {
+            if touched.contains(&path.as_slice()) || !press_map.contains_key(path) {
+                assert!(
+                    touched.contains(&path.as_slice()),
+                    "baseline path {} missing from the pressed image",
+                    String::from_utf8_lossy(path)
+                );
+                continue;
+            }
+            assert_eq!(
+                entry,
+                &press_map[path],
+                "untouched path {} differs",
+                String::from_utf8_lossy(path)
+            );
+        }
+        // The password entry differs by design: each press draws its own.
+        assert_ne!(
+            base_map[b"/etc/shadow".as_slice()].2,
+            press_map[b"/etc/shadow".as_slice()].2
+        );
+    }
+
     /// A fitted image is the whole orchestration in the other direction: the format
     /// decides the filesystem's size, and every later step — the GPT, the splices, the
     /// disk itself — is laid out around what it decided. Nothing else covers that path;
@@ -1139,7 +1677,7 @@ mod tests {
             jobs: None,
         };
         let sink = |_: crate::event::Event| {};
-        let arts = build_image(&build, &opts, &sink).unwrap();
+        let arts = build_image(pair_of(&build), &opts, &sink).unwrap();
         let ImageOutput::Combined { image } = &arts.output else {
             panic!("expected combined, got {:?}", arts.output)
         };
@@ -1204,7 +1742,7 @@ mod tests {
             jobs: None,
         };
         let sink = |_: crate::event::Event| {};
-        let arts = build_image(&build, &opts, &sink).unwrap();
+        let arts = build_image(pair_of(&build), &opts, &sink).unwrap();
         let image = match &arts.output {
             ImageOutput::Combined { image } => image.clone(),
             other => panic!("expected combined, got {other:?}"),
@@ -1230,7 +1768,8 @@ mod tests {
         // sizes the filesystem to exactly the partition; assert the on-disk
         // superblock agrees. s_blocks_count_lo is a little-endian u32 at superblock
         // offset 0x04, and the superblock starts 1024 bytes into the partition.
-        let ImageSize::Fixed(total) = parse_image_size(&build.image_size).unwrap() else {
+        let ImageSize::Fixed(total) = parse_image_size(&image_of(&build).image_size).unwrap()
+        else {
             unreachable!("the fixture names an explicit size")
         };
         let geom = Geometry::resolve(&build.boot, total).unwrap();
@@ -1297,7 +1836,10 @@ mod tests {
                 keep_raw,
                 jobs: None,
             };
-            build_image(&small_rk1_build("192MiB"), &opts, &sink).unwrap()
+            {
+                let b = small_rk1_build("192MiB");
+                build_image(pair_of(&b), &opts, &sink).unwrap()
+            }
         };
 
         // Default: raw deleted, only .xz remains.
@@ -1353,7 +1895,8 @@ mod tests {
             jobs: None,
         };
         let sink = |_: crate::event::Event| {};
-        let arts = build_image(&small_rk1_build("192MiB"), &opts, &sink).unwrap();
+        let b = small_rk1_build("192MiB");
+        let arts = build_image(pair_of(&b), &opts, &sink).unwrap();
 
         assert_eq!(arts.compressed.len(), 2);
         // Request order is preserved, so the first entry is the preferred container.
@@ -1399,7 +1942,7 @@ mod tests {
             jobs: None,
         };
         let sink = |_: crate::event::Event| {};
-        let arts = build_image(&build, &opts, &sink).unwrap();
+        let arts = build_image(pair_of(&build), &opts, &sink).unwrap();
         match &arts.output {
             ImageOutput::Split { bootloader, rootfs } => {
                 // Bootloader image is gap-sized with the payloads at their offsets.

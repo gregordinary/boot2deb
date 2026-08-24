@@ -24,6 +24,26 @@ pub fn snapshot_mirror(timestamp: &str) -> String {
     format!("{SNAPSHOT_ARCHIVE}/{timestamp}/")
 }
 
+/// Whether a resolved mirror list holds a point-in-time archive — one whose `Release`
+/// is past its `Valid-Until` by design.
+///
+/// This is the question every provisioner configuration site asks before relaxing the
+/// release freshness check, and it is answered here because this module is the one that
+/// knows which URLs are snapshots. Asking it of the list *contents* rather than of the
+/// list *shape* is what makes [`Pin`](SnapshotMode::Pin) work: a pin has exactly one
+/// mirror and it is the snapshot, so a site keying on "are there fallbacks?" would
+/// refuse the stale release in the one mode where every fetch comes from a deliberately
+/// expired archive.
+///
+/// The posture the caller then takes is repository-wide — it relaxes freshness for every
+/// mirror in the list, not just the snapshot — which is why it is taken only when a
+/// snapshot is actually present. A [`Fallback`](SnapshotMode::Fallback) list pays that
+/// price knowingly: the live mirror loses its freshness check so the backstop can be
+/// read at all.
+pub fn has_snapshot(mirrors: &[String]) -> bool {
+    mirrors.iter().any(|m| m.starts_with(SNAPSHOT_ARCHIVE))
+}
+
 /// Resolve the ordered mirror list the rootfs bootstrap fetches from, honoring the
 /// active snapshot mode. `base_mirror` is the live Debian mirror ([`crate::DEFAULT_MIRROR`]);
 /// `mode` is the effective mode (a `--snapshot` override, else the lock's captured
@@ -137,6 +157,39 @@ mod tests {
                 other => panic!("expected SnapshotUnavailable, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn the_stale_release_posture_follows_the_mode_not_the_list_length() {
+        // The posture a provisioner takes is decided by whether a point-in-time archive
+        // is in the list. `pin` has one mirror and it is the snapshot, so a rule keyed
+        // on "has fallbacks" would get this mode — the only one where *every* fetch is
+        // from an expired archive — exactly backwards.
+        let live = "http://deb.debian.org/debian";
+        for (mode, expected) in [
+            (SnapshotMode::Off, false),
+            (SnapshotMode::Fallback, true),
+            (SnapshotMode::Pin, true),
+        ] {
+            let p = pin("20260628T083000Z", mode);
+            let mirrors = resolve_mirrors(live, Some(&p), mode).unwrap();
+            assert_eq!(
+                has_snapshot(&mirrors),
+                expected,
+                "{} mirrors {mirrors:?}",
+                mode.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_live_only_mirror_list_is_not_a_snapshot() {
+        assert!(!has_snapshot(&[]));
+        assert!(!has_snapshot(&["http://deb.debian.org/debian".to_string()]));
+        // A mirror that merely mentions the host in a path is not the archive.
+        assert!(!has_snapshot(&[
+            "http://example.invalid/snapshot.debian.org/archive/debian/".to_string()
+        ]));
     }
 
     #[test]

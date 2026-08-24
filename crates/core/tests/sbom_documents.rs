@@ -139,8 +139,11 @@ fn both_formats_render_from_the_shipped_configuration() {
     );
 
     let verified = vec!["ferrosys-scan".to_string()];
+    let image = build
+        .as_image()
+        .expect("the shipped media-accel recipe builds an image");
     let provenance = assemble(
-        &build,
+        image,
         &lock,
         &facts(
             &[],

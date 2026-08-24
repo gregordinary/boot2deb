@@ -1039,9 +1039,9 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ferroday-cage"
-version = "0.2.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1af72917cc73cb8dfc49bb840e7a9e2cfc6efeef4945beb33c124128eb3a1aef"
+checksum = "545b257f955ca535c179db7b76b3c8e40485d5a7c8c521d19352ecf0f815f009"
 dependencies = [
  "flate2",
  "lzma-rust2",
@@ -1054,10 +1054,11 @@ dependencies = [
 
 [[package]]
 name = "ferrosys"
-version = "0.3.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c49dbd7db19c41507412846219456d8eadbcee2afaa35af4ad45cacff6dd4662"
+checksum = "4ea78d7dd23d61328977aed4070be18792f541a7757ca6fb22db28d148b4d878"
 dependencies = [
+ "rustix",
  "tar",
  "thiserror",
 ]

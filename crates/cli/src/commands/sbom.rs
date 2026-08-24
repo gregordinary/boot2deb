@@ -49,7 +49,7 @@ pub(crate) fn run(
     // different name, and it is the wrong file to read: it describes the recipe's
     // pinned package set, not necessarily the one this image shipped.
     let stem = artifact_stem(&path)?;
-    let packages_path = path.with_file_name(format!("{stem}.pkgs.lock"));
+    let packages_path = path.with_file_name(boot2deb_core::manifest::manifest_name(&stem));
     let packages_text = std::fs::read_to_string(&packages_path).map_err(|e| {
         format!(
             "read the solved package manifest {}: {e}\nIt is published beside the provenance \

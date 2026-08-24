@@ -38,7 +38,7 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 #
 # None of it reaches a libre build: `nonfree_firmware_packages` and the
 # `overlay-nonfree/` tree are exactly what a GNU Linux-libre kernel drops, which on
-# this SoC costs the internal radio outright — see `kernels/rk3288-libre-7.1.toml`.
+# this SoC costs the internal radio outright — see `kernels/rk3288-libre-7.2.toml`.
 # What is left works: an AR9271 USB adapter, whose firmware is Free and packaged
 # below, is the supported way onto a network there.
 #
@@ -51,11 +51,17 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 # Networking. No Veyron has an ethernet port — they are Chromebooks — so Wi-Fi is
 # the only link on all of them and NetworkManager owns the interfaces, which means
 # dropping the base layer's dhcpcd rather than running two things that both want to
-# configure a NIC. network-manager-tui is a separate package from network-manager
-# and is not optional in practice: joining a network is the first thing anyone does
-# and everything else waits behind it. Without it the image offers `nmcli` and
-# nothing else, which is a poor thing to hand someone at a bare console on a
-# machine with no ethernet port. 568 KiB buys `nmtui`.
+# configure a NIC. `nmtui` is not optional in practice: joining a network is the
+# first thing anyone does and everything else waits behind it. Without it the image
+# offers `nmcli` and nothing else, which is a poor thing to hand someone at a bare
+# console on a machine with no ethernet port. 568 KiB buys it.
+#
+# Which package carries `nmtui` depends on the suite. It left `network-manager` for a
+# `network-manager-tui` of its own at 1.56.0-4 — forky's entry declares
+# `Replaces: network-manager (<< 1.56.0-4~)`, which is that move recorded — so forky
+# and sid need the separate package named and trixie (1.52.1-1) must not name it,
+# because trixie's archive has no such package and its `network-manager` already
+# ships the binary.
 #
 # alsa-utils is not a nicety on the laptops. The max98090 comes up with its DAC
 # unrouted *and* its amplifiers muted, so the board is silent until both are
@@ -73,7 +79,9 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 packages = [
     "firmware-ath9k-htc",
     "network-manager",
-    "network-manager-tui",
+    # Split out of `network-manager` at 1.56.0-4; trixie predates that and carries
+    # `nmtui` inside `network-manager`, where naming this would fail the resolve.
+    { name = "network-manager-tui", suites = ["forky", "sid"] },
     "wpasupplicant",
     "iw",
     "wireless-regdb",
@@ -101,3 +109,41 @@ caveats = [
 # RK3288 (MPP and RGA target the RK35xx family). Video decode here is the mainline
 # V4L2 stateless path via Hantro/rkvdec. Resolution therefore rejects a
 # `requires_media_accel` feature on this SoC, which is the correct outcome.
+
+# What every booted Veyron image must have, checked by boot2deb-selftest.
+#
+# The Mali-T764 is a Midgard part driven by mainline panfrost; Midgard needs no
+# firmware blob, so the GPU checks are binding and node only.
+[[expect]]
+check  = "driver-bound"
+device = "ffa30000.gpu"
+driver = "panfrost"
+
+[[expect]]
+check = "devnode"
+path  = "/dev/dri/renderD128"
+
+# The initramfs modules whose absence was each, at some point, a white screen
+# that said nothing (the build asserts them at image time; this catches an
+# on-device initramfs regeneration losing one). The IO-domain driver is
+# `io-domain`, not `rockchip_io_domain` — the historical trap, worth checking
+# by its correct name forever.
+[[expect]]
+check  = "initramfs-module"
+module = "dw_mmc-rockchip"
+
+[[expect]]
+check  = "initramfs-module"
+module = "i2c-rk3x"
+
+[[expect]]
+check  = "initramfs-module"
+module = "rk808-regulator"
+
+[[expect]]
+check  = "initramfs-module"
+module = "io-domain"
+
+[[expect]]
+check  = "initramfs-module"
+module = "ext4"

@@ -274,7 +274,7 @@ fn next_steps(
     ));
     if let Some(kernel) = compiled_kernel {
         s.push_str(&format!(
-            "\n\n<tag> is the kernel version to pin (e.g. v7.1.1) — '{kernel}' compiles from \
+            "\n\n<tag> is the kernel version to pin (e.g. v7.2) — '{kernel}' compiles from \
              source, so\nthe first update has no previous lock to inherit a ref from. Later \
              updates may omit it."
         ));
@@ -390,8 +390,12 @@ mod tests {
         //. (The device alone has no features; they live in the recipe.)
         let build = resolve_recipe(&root, "test-board/forky", &Overrides::default()).unwrap();
         assert_eq!(build.soc, Soc::Rk3588);
-        assert_eq!(build.features, vec!["media-accel-rockchip"]);
-        assert!(build.userspace.is_some());
+        let image = build
+            .image
+            .as_ref()
+            .expect("the generated recipe builds an image");
+        assert_eq!(image.features, vec!["media-accel-rockchip"]);
+        assert!(!image.userspace.is_empty());
     }
 
     #[test]

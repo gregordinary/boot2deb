@@ -12,11 +12,14 @@
 //! documents a build already wrote); `sbom` (export an image's bill of materials as
 //! SPDX or CycloneDX); `size` (break down what an image's package set weighs, from the
 //! published plan); `why-rebuild` (explain, offline, which compile nodes the next
-//! build reuses vs. rebuilds); and `clean` (remove a recipe's build scratch).
+//! build reuses vs. rebuilds); `shell` (open an interactive session in the root a build
+//! stage compiles in); `try` (boot the built image under QEMU and assert the
+//! userland works before flashing); and `clean` (remove a recipe's build scratch).
 //!
 //! This module is the entry point only: it parses the argument tree ([`crate::args`]),
 //! composes the config root, and dispatches to the handler in [`crate::commands`] that
-//! owns each subcommand. Every error surfaces here once, as the process's exit code.
+//! owns each subcommand. Every error surfaces here once, as the process's exit code —
+//! with one exception, `shell`, whose result is a command's own exit status.
 
 mod args;
 mod artifacts;
@@ -27,6 +30,7 @@ mod fsutil;
 mod nextstep;
 mod prompt;
 mod render;
+mod sandboxes;
 #[cfg(test)]
 mod testsupport;
 mod timing;
@@ -57,10 +61,17 @@ fn main() -> ExitCode {
     let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
     match run(&root, cli.command, cli.json, verbosity) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
+        // `shell` is the one command whose result is a *command's* exit status rather
+        // than a verdict of its own, so its status is adopted as the process's and is
+        // not announced as an error. A shell that exits 2 because the last thing run in
+        // it exited 2 has not failed at anything boot2deb did.
+        Err(e) => match e.downcast::<commands::shell::SessionExit>() {
+            Ok(session) => ExitCode::from(session.0),
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
 
@@ -132,6 +143,9 @@ fn run(
             commands::verify_config::run(root, &recipe, args, json, verbosity)
         }
         Command::VerifyPackages { recipe } => commands::verify_packages::run(root, &recipe, json),
+        Command::VerifyImage { recipe, out_dir } => {
+            commands::verify_image::run(root, &recipe, out_dir, json)
+        }
         Command::VerifySources { recipe } => commands::verify_sources::run(root, &recipe, json),
         Command::Patch { action } => match action {
             PatchAction::Import { source, args } => commands::patch::import(root, &source, args),
@@ -178,7 +192,15 @@ fn run(
         ),
         Command::Outdated { recipes } => commands::outdated::run(root, &recipes, json),
         Command::WhyRebuild { recipe, args } => commands::why_rebuild::run(root, &recipe, args),
-        Command::Clean { recipe, args } => commands::clean::run(root, &recipe, args),
+        Command::Shell { recipe, args } => commands::shell::run(root, &recipe, args, verbosity),
+        Command::Clean { recipe, args } => commands::clean::run(root, recipe.as_deref(), args),
+        Command::Press {
+            recipe,
+            output,
+            args,
+        } => commands::press::run(root, &recipe, output, args, verbosity),
+        Command::Seed { image, args } => commands::seed::run(&image, args, verbosity),
+        Command::Try { recipe, args } => commands::try_boot::run(root, &recipe, args, verbosity),
     }
 }
 
@@ -189,26 +211,44 @@ fn run(
 /// either produce a file (`support-matrix --markdown`, `new-device`) or are read by a
 /// person deciding what to do next, and giving those a machine form would be inventing
 /// a schema nothing asked for.
+///
+/// Exhaustive, like [`command_name`], so a new subcommand is a compile error here
+/// rather than a silent `false` — which the `--json` guard would then reject, with
+/// nothing to say the omission was an oversight.
 fn supports_json(command: &Command) -> bool {
-    matches!(
-        command,
+    match command {
         Command::ListDevices
-            | Command::ListRecipes
-            | Command::ListKernels
-            | Command::ListFeatures
-            | Command::ListKmods
-            | Command::Resolve { .. }
-            | Command::Doctor { .. }
-            | Command::VerifyPatches { .. }
-            | Command::VerifyConfig { .. }
-            | Command::VerifyPackages { .. }
-            | Command::VerifySources { .. }
-            | Command::Build { .. }
-            | Command::Reproduce { .. }
-            | Command::Diff { .. }
-            | Command::Size { .. }
-            | Command::Outdated { .. }
-    )
+        | Command::ListRecipes
+        | Command::ListKernels
+        | Command::ListFeatures
+        | Command::ListKmods
+        | Command::Resolve { .. }
+        | Command::Doctor { .. }
+        | Command::VerifyPatches { .. }
+        | Command::VerifyConfig { .. }
+        | Command::VerifyImage { .. }
+        | Command::VerifyPackages { .. }
+        | Command::VerifySources { .. }
+        | Command::Build { .. }
+        | Command::Reproduce { .. }
+        | Command::Diff { .. }
+        | Command::Size { .. }
+        | Command::Outdated { .. } => true,
+        Command::SupportMatrix { .. }
+        | Command::CliReference { .. }
+        | Command::Completions { .. }
+        | Command::Man
+        | Command::NewDevice { .. }
+        | Command::Update { .. }
+        | Command::Patch { .. }
+        | Command::Sbom { .. }
+        | Command::WhyRebuild { .. }
+        | Command::Shell { .. }
+        | Command::Clean { .. }
+        | Command::Press { .. }
+        | Command::Seed { .. }
+        | Command::Try { .. } => false,
+    }
 }
 
 /// The subcommand's name as typed, for the `--json` rejection message.
@@ -229,6 +269,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Update { .. } => "update",
         Command::VerifyPatches { .. } => "verify-patches",
         Command::VerifyConfig { .. } => "verify-config",
+        Command::VerifyImage { .. } => "verify-image",
         Command::VerifyPackages { .. } => "verify-packages",
         Command::VerifySources { .. } => "verify-sources",
         Command::Patch { .. } => "patch import",
@@ -239,7 +280,11 @@ fn command_name(command: &Command) -> &'static str {
         Command::Size { .. } => "size",
         Command::Outdated { .. } => "outdated",
         Command::WhyRebuild { .. } => "why-rebuild",
+        Command::Shell { .. } => "shell",
         Command::Clean { .. } => "clean",
+        Command::Press { .. } => "press",
+        Command::Seed { .. } => "seed",
+        Command::Try { .. } => "try",
     }
 }
 

@@ -147,8 +147,55 @@ pub(crate) fn preflight_config(root: &ConfigRoot, build: &ResolvedBuild) -> Resu
     device_dts_paths(root, build)?;
     // Resolve each keyring purely to assert it exists; the rootfs stage re-resolves
     // the paths it verifies each feature repository against.
-    apt_source_keyrings(root, &build.apt_sources)?;
+    apt_source_keyrings(
+        root,
+        build
+            .image
+            .as_ref()
+            .map(|i| i.apt_sources.as_slice())
+            .unwrap_or(&[]),
+    )?;
     Ok(())
+}
+
+/// The userspace trees a build actually compiles: every tree the SoC declares, less the
+/// [`optional`](boot2deb_core::model::UserspaceTree::optional) ones this run did not name
+/// with `--userspace`.
+///
+/// The narrowing is here rather than in resolution because it is a *build-time* choice:
+/// the lock pins every tree the part has, and a run decides which of the optional ones
+/// to spend the minutes on. Every consumer of the set — the userspace stage's layer, the
+/// ffmpeg key, `why-rebuild`'s prediction, `shell`'s root — has to agree on it, which is
+/// why they all call this rather than filtering their own way.
+///
+/// An `--userspace` naming a tree the SoC does not declare is an error rather than a
+/// silent no-op: it is the same mistake `--kmod-src` on an undeclared module is, and
+/// left unreported it would compile nothing and say nothing.
+pub(crate) fn enabled_userspace(
+    trees: &[boot2deb_core::model::UserspaceTree],
+    asked: &[String],
+) -> Result<Vec<boot2deb_core::model::UserspaceTree>> {
+    if let Some(name) = asked.iter().find(|n| !trees.iter().any(|t| &&t.name == n)) {
+        let declared: Vec<&str> = trees
+            .iter()
+            .filter(|t| t.optional)
+            .map(|t| t.name.as_str())
+            .collect();
+        return Err(format!(
+            "--userspace names '{name}', which this SoC does not declare. Optional trees: {}",
+            if declared.is_empty() {
+                "none".to_string()
+            } else {
+                declared.join(", ")
+            }
+        )
+        .into());
+    }
+    Ok(trees
+        .iter()
+        .filter(|t| !t.optional || asked.iter().any(|n| n == &t.name))
+        .cloned()
+        .collect())
 }
 
 /// Resolve a build's kernel fragment names to `fragments/<name>.config` paths
@@ -158,7 +205,7 @@ pub(crate) fn preflight_config(root: &ConfigRoot, build: &ResolvedBuild) -> Resu
 pub(crate) fn fragment_paths(root: &ConfigRoot, build: &ResolvedBuild) -> Result<Vec<PathBuf>> {
     // A distro kernel merges no fragments — Debian owns its config — so it resolves
     // to an empty list rather than an error.
-    let Some(kernel) = build.kernel.as_ref().and_then(|k| k.compiled()) else {
+    let Some(kernel) = build.image.as_ref().and_then(|i| i.kernel.compiled()) else {
         return Ok(Vec::new());
     };
     let mut paths = Vec::new();
@@ -199,8 +246,13 @@ pub(crate) fn kmod_local_patches(
     root: &ConfigRoot,
     build: &ResolvedBuild,
 ) -> Result<Vec<(String, Vec<PathBuf>)>> {
-    let mut out = Vec::with_capacity(build.device_kmods.len());
-    for kmod in &build.device_kmods {
+    let kmods = build
+        .image
+        .as_ref()
+        .map(|i| i.device_kmods.as_slice())
+        .unwrap_or(&[]);
+    let mut out = Vec::with_capacity(kmods.len());
+    for kmod in kmods {
         let mut paths = Vec::with_capacity(kmod.local_patches.len());
         for file in &kmod.local_patches {
             let rel = format!("kmods/{}/patches/{file}", kmod.name);
@@ -307,7 +359,7 @@ pub(crate) fn apt_source_keyrings<'a>(
 ///
 /// The two hardware layers may also carry an [`OVERLAY_NONFREE`] tree, which stacks
 /// directly after their own and is skipped entirely on a
-/// [`libre`](ResolvedBuild::libre) build.
+/// [`libre`](boot2deb_core::ResolvedImage::libre) build.
 ///
 /// `stage` selects *when* the tree is laid into the rootfs, which is a different
 /// question from what is in it (see [`OverlayStage`]).
@@ -319,9 +371,10 @@ pub(crate) fn overlay_dirs(
     let dir = stage.dir_name();
     // A hardware layer contributes its own tree, then — unless this build is libre —
     // its vendored-blob tree, so a board's own file still wins over what it extends.
+    let libre = b.image.as_ref().is_some_and(|i| i.libre);
     let hardware = |prefix: String| {
         let mut trees = vec![format!("{prefix}/{dir}")];
-        if !b.libre && stage == OverlayStage::Customize {
+        if !libre && stage == OverlayStage::Customize {
             trees.push(format!("{prefix}/{OVERLAY_NONFREE}"));
         }
         trees
@@ -332,7 +385,7 @@ pub(crate) fn overlay_dirs(
     for device in &b.device_lineage {
         rels.extend(hardware(format!("devices/{device}")));
     }
-    for feature in &b.features {
+    for feature in b.image.iter().flat_map(|i| &i.features) {
         rels.push(format!("features/{feature}/{dir}"));
     }
     rels.iter()
@@ -342,7 +395,8 @@ pub(crate) fn overlay_dirs(
 
 /// The tree a SoC or device layer vendors **nonfree firmware** in: files Debian does
 /// not package, laid into the rootfs exactly like that layer's `overlay/` and left out
-/// of a [`libre`](ResolvedBuild::libre) image, whose kernel could not load them.
+/// of a [`libre`](boot2deb_core::ResolvedImage::libre) image, whose kernel could not
+/// load them.
 ///
 /// It is a tree of its own rather than a subtraction from `overlay/` because the
 /// blobs are then visible as blobs — one directory to audit, and a `libre` build that
@@ -397,12 +451,49 @@ impl OverlayStage {
     }
 }
 
+/// The config root's durable cache tree (`<root>/cache`), parent of every store
+/// below. Root-scoped and shared across recipes, so it is untouched by a `clean` of
+/// one recipe's work dir; `clean --all-caches` names this directory.
+///
+/// Always absolute: a store path is handed to sandboxes that chdir elsewhere, and is
+/// printed in `clean`'s removal report.
+pub(crate) fn cache_dir(root: &ConfigRoot) -> PathBuf {
+    absolutize(root.path().join("cache"))
+}
+
+/// The durable Tier-2 artifact store (`<root>/cache/artifacts`): completed node
+/// outputs keyed by node signature, written and read by `build` and consulted by
+/// `why-rebuild`. Shared across recipes — it is what makes a revalidation build cheap.
+pub(crate) fn artifact_cache(root: &ConfigRoot) -> PathBuf {
+    cache_dir(root).join("artifacts")
+}
+
 /// The durable, shared cache of auto-fetched verify checkouts (`<root>/cache/verify-trees`),
 /// commit-addressed by [`boot2deb_engine::srcfetch::ensure_tree`]. Sibling to the
 /// patches and artifact caches; survives `clean` and is reused across recipes and
 /// verify runs.
 pub(crate) fn verify_trees_cache(root: &ConfigRoot) -> PathBuf {
-    root.path().join("cache").join("verify-trees")
+    cache_dir(root).join("verify-trees")
+}
+
+/// The commit-addressed cache of auto-fetched `patches` checkouts
+/// (`<root>/cache/patches`), filled by [`resolve_patches_source`] when no local
+/// checkout is co-located. Keyed on the lock's `[patches] commit`, so it is swept by
+/// the same liveness rule as [`verify_trees_cache`].
+pub(crate) fn patches_cache(root: &ConfigRoot) -> PathBuf {
+    cache_dir(root).join("patches")
+}
+
+/// `verify-config`'s scratch tree (`<root>/cache/kconfig`), one work dir per recipe
+/// slug. Pure scratch — each holds a provisioned cross root and an out-of-tree kbuild
+/// output dir, both re-created on the next run — which is why `clean --kconfig`
+/// removes the whole tree rather than pruning within it.
+///
+/// Under the config root's cache and deliberately **not** under `TMPDIR`: the config
+/// builds run inside a cage that mounts its own `/tmp`, so a scratch dir in the host's
+/// temp dir is shadowed by that tmpfs and everything kbuild writes there is discarded.
+pub(crate) fn kconfig_cache(root: &ConfigRoot) -> PathBuf {
+    cache_dir(root).join("kconfig")
 }
 
 /// Auto-fetch a pinned source tree for verification, wrapping
@@ -429,7 +520,7 @@ pub(crate) fn fetch_verify_tree(
 /// `build` (which reads it). It sits outside any recipe work dir, so `clean` leaves
 /// it intact — the build no longer depends on the source staying put.
 pub(crate) fn extra_debs_store(root: &ConfigRoot) -> PathBuf {
-    root.path().join("cache").join("extra-debs")
+    cache_dir(root).join("extra-debs")
 }
 
 /// The default `patches` repo checkout: the config root's sibling `patches/`
@@ -492,7 +583,7 @@ pub(crate) fn resolve_patches_source(
         .ok_or_else(|| EngineError::PatchesNoSource {
             commit: pin.commit.clone(),
         })?;
-    let cache_root = root.path().join("cache").join("patches");
+    let cache_root = patches_cache(root);
     let step = Step::start(sink, "patches");
     let dir = patchfetch::fetch_series(url, &pin.commit, &cache_root, &step)?;
     step.finish();
@@ -527,7 +618,7 @@ pub(crate) fn source_axes<'a>(
     // board builds no bootloader, so neither contributes an axis.
     let mut axes = Vec::new();
     if let (Some(kernel), Some(pin)) = (
-        build.kernel.as_ref().and_then(|k| k.compiled()),
+        build.image.as_ref().and_then(|i| i.kernel.compiled()),
         &lock.kernel,
     ) {
         axes.push(SourceAxis {
@@ -550,23 +641,20 @@ pub(crate) fn source_axes<'a>(
     // `Some` together.
     // One axis per tree the SoC declares; a tree it does not have is fetched by
     // nobody, so listing it would name a source this build never reads.
-    if let (Some(us), Some(us_pins)) = (&build.userspace, &lock.userspace) {
-        for (name, src, pin) in [
-            ("mpp", &us.mpp, &us_pins.mpp),
-            ("librga", &us.librga, &us_pins.librga),
-            ("libmali", &us.libmali, &us_pins.libmali),
-        ] {
-            if let (Some(s), Some(p)) = (src, pin) {
-                axes.push(SourceAxis {
-                    name: name.into(),
-                    url: s.git.clone(),
-                    reference: &p.reference,
-                    commit: &p.commit,
-                });
-            }
+    for tree in build.image.iter().flat_map(|i| &i.userspace) {
+        if let Some(p) = lock.userspace.iter().find(|p| p.name == tree.name) {
+            axes.push(SourceAxis {
+                name: tree.name.clone().into(),
+                url: tree.git.clone(),
+                reference: &p.reference,
+                commit: &p.commit,
+            });
         }
     }
-    if let (Some(ff), Some(ff_pins)) = (&build.ffmpeg, &lock.ffmpeg) {
+    if let (Some(ff), Some(ff_pins)) = (
+        build.image.as_ref().and_then(|i| i.ffmpeg.as_ref()),
+        &lock.ffmpeg,
+    ) {
         axes.push(SourceAxis {
             name: "ffmpeg-base".into(),
             url: ff.base.git.clone(),
@@ -613,6 +701,18 @@ pub(crate) fn source_axes<'a>(
 
 #[cfg(test)]
 mod tests {
+
+    /// The image half of a fixture build. Every fixture here resolves a shipped image
+    /// recipe, so the axis is there; the unwrap states that rather than threading an
+    /// `Option` through every assertion.
+    fn image_of(build: &boot2deb_core::ResolvedBuild) -> &boot2deb_core::ResolvedImage {
+        pair_of(build).image
+    }
+
+    /// The same fixture build as an [`ImageBuild`] pair, for the stages that take one.
+    fn pair_of(build: &boot2deb_core::ResolvedBuild) -> boot2deb_core::ImageBuild<'_> {
+        build.as_image().expect("the fixture recipes build images")
+    }
     use super::*;
     use crate::testsupport::{repo_root, repo_root_path};
 
@@ -637,7 +737,9 @@ mod tests {
 
         // A referenced-but-missing kernel fragment is rejected.
         let mut bad_frag = resolved.clone();
-        if let Some(boot2deb_core::model::ResolvedKernel::Compiled(k)) = &mut bad_frag.kernel {
+        if let boot2deb_core::model::ResolvedKernel::Compiled(k) =
+            &mut bad_frag.image.as_mut().unwrap().kernel
+        {
             k.config_fragments
                 .push("definitely-no-such-fragment".to_string());
         }
@@ -650,13 +752,18 @@ mod tests {
         // A declared apt source whose signing keyring is not vendored is rejected at
         // preflight, not after the compile stages.
         let mut bad_key = resolved.clone();
-        bad_key.apt_sources.push(boot2deb_core::model::AptSource {
-            name: "third-party".into(),
-            uri: "https://example.invalid/debian".into(),
-            suite: "trixie".into(),
-            components: vec!["main".into()],
-            signed_by: "no-such-keyring.gpg".into(),
-        });
+        bad_key
+            .image
+            .as_mut()
+            .unwrap()
+            .apt_sources
+            .push(boot2deb_core::model::AptSource {
+                name: "third-party".into(),
+                uri: "https://example.invalid/debian".into(),
+                suite: "trixie".into(),
+                components: vec!["main".into()],
+                signed_by: "no-such-keyring.gpg".into(),
+            });
         let err = preflight_config(&root, &bad_key).unwrap_err().to_string();
         assert!(
             err.contains("no-such-keyring.gpg") && err.contains("not vendored"),
@@ -719,7 +826,10 @@ mod tests {
         let resolved =
             resolve_recipe(&root, "turing-rk1/jellyfin-forky", &Overrides::default()).unwrap();
         assert!(
-            resolved.apt_sources.iter().any(|s| s.name == "jellyfin"),
+            image_of(&resolved)
+                .apt_sources
+                .iter()
+                .any(|s| s.name == "jellyfin"),
             "the jellyfin feature declares its apt source"
         );
         preflight_config(&root, &resolved).unwrap();
@@ -964,6 +1074,64 @@ mod tests {
     }
 
     #[test]
+    fn jellyfin_clears_the_ffmpeg_argument_that_outranks_its_configured_encoder() {
+        // Another silent-at-build, fatal-at-boot one. `jellyfin-server` puts
+        // `--ffmpeg=/usr/lib/jellyfin-ffmpeg/ffmpeg` on the service command line, the
+        // `jellyfin` feature declines to install the package owning that path, and
+        // Jellyfin reads the command line *before* `<EncoderAppPath>` — so without this
+        // tree the seeded encoding.xml is never consulted and the server throws
+        // `Failed to find valid ffmpeg` during startup. The build cannot notice: the
+        // overlay is found by path, and a misplaced one contributes nothing.
+        let root = ConfigRoot::new(repo_root_path());
+        let b = resolve_recipe(&root, "turing-rk1/jellyfin-forky", &Overrides::default()).unwrap();
+        let dirs = overlay_dirs(&root, &b, OverlayStage::Customize);
+
+        let tree = root
+            .find_asset("features/jellyfin/overlay")
+            .expect("the jellyfin feature ships a customize tree");
+        assert!(
+            dirs.contains(&tree),
+            "the jellyfin feature's overlay tree is missing from {dirs:?}"
+        );
+
+        // Both halves, because either alone is inert: the drop-in only orders a file
+        // that has to exist, and the file is only read because the drop-in names it.
+        let dropin = tree.join("etc/systemd/system/jellyfin.service.d/no-bundled-ffmpeg.conf");
+        let env = tree.join("etc/default/jellyfin-encoder");
+        let dropin_text = std::fs::read_to_string(&dropin).expect("the drop-in is a real file");
+        let env_text = std::fs::read_to_string(&env).expect("the env file is a real file");
+        assert!(
+            dropin_text.contains("EnvironmentFile=/etc/default/jellyfin-encoder"),
+            "the drop-in must point at {env:?}"
+        );
+        assert!(
+            env_text.contains(r#"JELLYFIN_FFMPEG_OPT="""#),
+            "the argument must be cleared, not repointed -- a path here would outrank \
+             the dashboard's own FFmpeg path field"
+        );
+
+        // It has to be an `EnvironmentFile=`. systemd applies environment files after
+        // `Environment=` whatever order they appear in, so an `Environment=` line would
+        // lose to /etc/default/jellyfin and the drop-in would do nothing at all.
+        assert!(
+            !dropin_text.contains("\nEnvironment="),
+            "an Environment= line loses to /etc/default/jellyfin"
+        );
+
+        // The glue feature supplies the value the cleared argument falls through to, so
+        // the two have to agree on the encoder path or the server still dies.
+        let encoding = root
+            .find_asset("features/jellyfin-rockchip/overlay-pre")
+            .expect("the glue feature ships a pre-install tree")
+            .join("etc/jellyfin/encoding.xml");
+        let encoding_text = std::fs::read_to_string(&encoding).expect("the seed is a real file");
+        assert!(
+            encoding_text.contains("<EncoderAppPath>/opt/ffmpeg-rk/bin/ffmpeg</EncoderAppPath>"),
+            "the seeded encoder path is what the cleared argument falls through to"
+        );
+    }
+
+    #[test]
     fn the_libreboot_c201_ships_its_display_stack_into_the_initramfs() {
         // Also a silent failure: a modules.d drop-in that is never collected costs
         // nothing at build time and simply does not exist at boot, leaving the board on
@@ -1023,7 +1191,7 @@ mod tests {
             kernel: Some(kernel.to_string()),
             ..Default::default()
         };
-        let blobbed = resolve_device(&root, "asus-c201", &ov("rk3288-mainline-7.1")).unwrap();
+        let blobbed = resolve_device(&root, "asus-c201", &ov("rk3288-mainline-7.2")).unwrap();
         let dirs = overlay_dirs(&root, &blobbed, OverlayStage::Customize);
         assert!(dirs.contains(&blobs), "blobs missing from {dirs:?}");
         let soc = root.find_asset("socs/rk3288/overlay").unwrap();
@@ -1035,17 +1203,17 @@ mod tests {
 
         // The libre kernel gets neither the tree nor the package — and still gets the
         // layer's ordinary overlay, so this is a gate and not a lost SoC layer.
-        let libre = resolve_device(&root, "asus-c201", &ov("rk3288-libre-7.1")).unwrap();
-        assert!(libre.libre);
+        let libre = resolve_device(&root, "asus-c201", &ov("rk3288-libre-7.2")).unwrap();
+        assert!(image_of(&libre).libre);
         let dirs = overlay_dirs(&root, &libre, OverlayStage::Customize);
         assert!(!dirs.contains(&blobs), "a libre image carries {blobs:?}");
         assert!(dirs.contains(&soc));
-        assert!(!libre
+        assert!(!image_of(&libre)
             .rootfs_packages
             .contains(&"firmware-brcm80211".to_string()));
         // The Free firmware is not gated with it: an AR9271 adapter is the only way
         // onto a network here, so its firmware has to be on the image.
-        assert!(libre
+        assert!(image_of(&libre)
             .rootfs_packages
             .contains(&"firmware-ath9k-htc".to_string()));
     }
@@ -1060,11 +1228,13 @@ mod tests {
         let base = resolve_device(&root, "h96-max-m9", &Overrides::default()).unwrap();
         let variant = resolve_device(&root, "h96-max-m9-variant", &Overrides::default()).unwrap();
         assert_eq!(
-            base.device_kmods, variant.device_kmods,
+            image_of(&base).device_kmods,
+            image_of(&variant).device_kmods,
             "the variant's kmods must be exactly what it extends"
         );
         assert_eq!(
-            base.device_kmods
+            image_of(&base)
+                .device_kmods
                 .iter()
                 .map(|k| k.name.as_str())
                 .collect::<Vec<_>>(),
@@ -1079,10 +1249,8 @@ mod tests {
         // RK3576 support compiled in -- an image that boots fine and has no /dev/accel.
         let (_overlay, root) = root_with_variant();
         let series = |name: &str| {
-            resolve_device(&root, name, &Overrides::default())
-                .unwrap()
+            image_of(&resolve_device(&root, name, &Overrides::default()).unwrap())
                 .kernel
-                .expect("the H96 resolves a compiled kernel")
                 .patch_series()
                 .to_vec()
         };
@@ -1195,10 +1363,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recipe.device, variant.device);
-        assert_eq!(recipe.suite, variant.suite);
-        assert!(recipe.features.is_empty());
+        assert_eq!(image_of(&recipe).suite, image_of(&variant).suite);
+        assert!(image_of(&recipe).features.is_empty());
         assert_eq!(
-            variant
+            image_of(&variant)
                 .features
                 .iter()
                 .map(String::as_str)
@@ -1208,9 +1376,8 @@ mod tests {
         // And the feature reaches the kernel, which is what makes a variant more than
         // a package list — the RGA series is on the variant and not on the recipe.
         fn series(b: &ResolvedBuild) -> Vec<&str> {
-            b.kernel
-                .as_ref()
-                .unwrap()
+            image_of(b)
+                .kernel
                 .patch_series()
                 .iter()
                 .map(String::as_str)

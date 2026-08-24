@@ -1,7 +1,7 @@
 //! Parse human-authored size / offset strings (`32KiB`, `8MiB`, `2G`) to bytes.
 //!
 //! Config carries the raw-gap offsets and the image size as authored strings
-//! ([`Offsets`](crate::model::Offsets), [`ResolvedBuild::image_size`](crate::model::ResolvedBuild));
+//! ([`Offsets`](crate::model::Offsets), [`ResolvedImage::image_size`](crate::model::ResolvedBuild));
 //! they are parsed to exact byte counts only when an artifact is written — the
 //! u-boot deb's documented `dd` offsets and the image node's partition
 //! geometry. This is that parse: pure and deterministic, so the geometry

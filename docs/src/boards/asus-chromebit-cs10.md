@@ -65,12 +65,18 @@ plus a flash drive on a bus-powered hub is a real brown-out risk.
 
 ## Flash and boot
 
-Write the image to a USB stick:
+Press the image and write it to a USB stick. A stick-shaped computer has no
+Ethernet, so this is the board where the Wi-Fi seed keys earn their keep — the
+unit joins your network on its first boot:
 
 ```sh
-xzcat build/asus-chromebit-cs10/forky/artifacts/asus-chromebit-cs10-forky.img.xz \
-  | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
+boot2deb press asus-chromebit-cs10/forky stick.img \
+    --hostname cs10-01 --wifi-ssid "your network" --wifi-psk '...'
+sudo dd if=stick.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
+
+`press` verifies the file it wrote — see [Producing images](../press.md).
+Confirm the device with `lsblk` first; `dd` overwrites it whole.
 
 **Entering developer mode.** The Chromebit has no power button — it boots the instant DC
 is applied — so the usual "hold keys and tap power" does not exist here. The sequence is:
@@ -191,7 +197,10 @@ sudo nmtui        # pick "Activate a connection", choose the network, enter the 
 The radio is the family's Broadcom BCM4354 and needs two blobs Debian does not ship; they
 are vendored on the SoC layer and are already in the image. Bluetooth works the same way
 as on the laptops — the BCM4354's Bluetooth half is on `uart0`, the kernel loads the
-vendored patchram, and `bluez` is installed to use it.
+vendored patchram, and `bluez` is installed to use it. Bluetooth **audio** takes
+`libspa-0.2-bluetooth` on top: PipeWire's Bluetooth plugin is only a *Suggests* of
+`wireplumber` and `pipewire-pulse`, so a desktop install does not bring it in and a headset
+pairs with no sink to play to.
 
 ## Audio and display
 

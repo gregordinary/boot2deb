@@ -245,6 +245,43 @@ What is kept out:
   additionally *declares* the build-dependencies it layers over that base, and the
   declaration is folded into the artifact key — because a compile probes for what is
   present, and a package added to the layer is a different build.
+
+  The base is provisioned once and cached, and the layer over it is resolved against the
+  archive as it stands when the build runs — so the two could describe different archive
+  states, which is what would leave a layer package's declared dependency unmet. Two
+  things keep that from happening.
+
+  **The base is checked against the archive every time it is reused.** A cached base
+  records the exact package set its bootstrap installed. Before reusing one, the build
+  resolves that set against the archive as it stands now and compares: if the archive has
+  moved past the tree, the tree is discarded and provisioned again, and the build says
+  which packages moved.
+
+  ```console
+  the archive has moved past the arm64 rootfs at
+  build/turing-rk1/forky/sandbox/build-arm64-forky-1d64cce0ea48: 1 package(s) resolve
+  differently now, so it is being re-provisioned:
+    libc6:arm64 2.42-17 -> 2.43-3
+  ```
+
+  The check is on the *solved package set*, not on the suite's `Release` date. A suite
+  republishes its `Release` several times a day and almost never touches the handful of
+  packages a base holds, so expiring on the date would re-bootstrap for nothing. Under
+  `--snapshot pin` the archive does not move at all and the check never fires.
+
+  **A staged root is checked against its own dependencies.** This is the backstop, for a
+  skew the first check cannot see. Before any compile runs in it, a build root is checked
+  against its own `Depends` and `Pre-Depends`, and a build whose base and layer disagree
+  stops there, naming the package, the constraint it declared, and the version actually
+  installed:
+
+  ```console
+  error: the ffmpeg build root does not satisfy its own dependencies — the cached base
+  and the freshly resolved layer describe different archive states:
+    libglib2.0-0t64 2.88.3-3 requires `libc6 (>= 2.43)` — installed 2.42-17
+  Drop the cached build roots so the next build provisions them against the current
+  archive: `boot2deb clean RECIPE --build-roots`.
+  ```
 - **Your `TMPDIR`.** The provisioned rootfs — the whole target userland, carrying xattrs
   and mapped ownership — is staged in the build's work dir. On `/tmp` it would land on a
   RAM-backed `tmpfs` on most desktops, making "does the build fit" a property of your
@@ -436,6 +473,11 @@ blobs reproduce the compiled inputs — and replaces one step: the rootfs instal
 plan's exact package set instead of solving for a new one. Point `--from` at wherever the
 image, its provenance manifest and its `.plan` were published; omit it to use this build
 point's own output directory, which is where a build on this machine already wrote them.
+
+`reproduce` reproduces **builds, not pressings**: an image `press` extended with
+per-site additions is a derived copy (marked as such in its own
+[`image.toml`](image-identity.md)), and what reproduces is the artifact it was
+pressed from.
 
 The command reads the `[built_with]` stamp beside the plan and reports how the running
 checkout compares. That is advice, not a gate — the stamp is a floor, not a ceiling: a

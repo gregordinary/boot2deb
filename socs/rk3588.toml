@@ -43,17 +43,53 @@ tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
 # VEPU580 encoder needs is applied from the series' `userspace` scope as a
 # `git am` patch — a durable base plus a versioned patch, not a
 # locally-authored commit.
-[userspace.mpp]
-git = "https://github.com/tsukumijima/mpp-rockchip.git"
-ref = "v1.5.0-1-20260121-750e76e"
+# Rockchip Media Process Platform. Present because this part's kernel offers the
+# vendor `mpp_service` the library binds to; without it ffmpeg gets no `--enable-rkmpp`.
+# It is the one tree that takes the series' `userspace` scope — the CMA fix.
+[[userspace]]
+name        = "mpp"
+git         = "https://github.com/tsukumijima/mpp-rockchip.git"
+ref         = "v1.5.0-1-20260121-750e76e"
+debs        = ["librockchip-mpp1", "librockchip-mpp-dev", "librockchip-vpu0", "rockchip-mpp-demos"]
+links       = ["librockchip-mpp1", "librockchip-mpp-dev"]
+ffmpeg_flag = "--enable-rkmpp"
+patched     = true
 
-[userspace.librga]
-git = "https://github.com/tsukumijima/librga-rockchip.git"
-ref = "master"
+# The 2D raster engine's userspace, speaking the vendor `/dev/rga` ABI. Its ffmpeg
+# filters allocate `AVRKMPPFramesContext` frames and ffmpeg's own `./configure` rejects
+# `--enable-rkrga` without `--enable-rkmpp`, so `ffmpeg_requires` names that dependency
+# rather than leaving it to a rule in the code.
+[[userspace]]
+name            = "librga"
+git             = "https://github.com/tsukumijima/librga-rockchip.git"
+ref             = "master"
+debs            = ["librga2", "librga-dev"]
+links           = ["librga2", "librga-dev"]
+ffmpeg_flag     = "--enable-rkrga"
+ffmpeg_requires = ["mpp"]
 
-[userspace.libmali]
-git = "https://github.com/tsukumijima/libmali-rockchip.git"
-ref = "master"
+# The Mali GPU userspace blob, for the G610 — a CSF part with no mainline driver.
+# Optional: the transcode pipeline rides the VPU and the RGA, not the GPU, so a headless
+# box never needs it and compiling the variant matrix is minutes for nothing. Ask for it
+# with `--userspace libmali`. Nothing links it, so it names no `links` and no ffmpeg
+# flag; its `build_deps` are the X11/Wayland `.pc` files its variants probe for, and
+# `targets_filter` keeps the one variant this family's boards use out of ~140.
+[[userspace]]
+name           = "libmali"
+git            = "https://github.com/tsukumijima/libmali-rockchip.git"
+ref            = "master"
+debs           = ["libmali"]
+optional       = true
+targets_filter = "aarch64-linux-gnu/libmali-valhall-g610"
+build_deps     = [
+    "libgbm-dev",
+    "libwayland-dev",
+    "libx11-dev",
+    "libx11-xcb-dev",
+    "libxcb-dri2-0-dev",
+    "libxdamage-dev",
+    "libxext-dev",
+]
 
 # ffmpeg source pair: mainline V4L2-request decode base (Kwiboo) plus the Rockchip
 # rkmpp-encode / rkrga-filter graft (nyanmisaka). The graft is materialized as an
@@ -68,3 +104,38 @@ ref = "v4l2-request-n8.1"
 [ffmpeg.rockchip]
 git = "https://github.com/nyanmisaka/ffmpeg-rockchip.git"
 ref = "8.1"
+
+# What every booted RK3588 image must have, checked by boot2deb-selftest.
+#
+# The Mali-G610 is a Valhall CSF part driven by mainline panthor, which builds
+# the firmware path from the GPU_ID register — arch10.8 is hardware-fixed for
+# the G610 (never arch14.8, a different GPU's blob). The blob ships in
+# firmware-misc-nonfree above; this check is what catches that package ever
+# moving or dropping the path, which otherwise surfaces as a GPU that is
+# silently absent.
+[[expect]]
+check = "firmware"
+path  = "arm/mali/arch10.8/mali_csffw.bin"
+
+[[expect]]
+check  = "driver-bound"
+device = "fb000000.gpu"
+driver = "panthor"
+
+# The render node exists on a headless box with no display attached; its
+# absence means the GPU stack is down, not that nothing is plugged in.
+[[expect]]
+check = "devnode"
+path  = "/dev/dri/renderD128"
+
+# The mainline stateless decoder (rkvdec) is first in probe order.
+[[expect]]
+check = "devnode"
+path  = "/dev/video0"
+
+# The failure class that cost the longest debugging sessions on this family:
+# a power-domain or bus fault that leaves a block dead while the boot looks
+# clean. Either spelling in the kernel log is a failed boot.
+[[expect]]
+check   = "no-dmesg-match"
+pattern = "SError|Synchronous External Abort"

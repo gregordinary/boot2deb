@@ -6,7 +6,6 @@
 
 use crate::args::WhyRebuildArgs;
 use crate::config::{device_dts_paths, fragment_paths, kmod_local_patches};
-use crate::fsutil::absolutize;
 use crate::workdir::work_dir_for;
 use boot2deb_core::lock::SnapshotMode;
 use boot2deb_core::model::Overrides;
@@ -73,10 +72,10 @@ pub(crate) fn run(
             .unwrap_or_default(),
         // The target-arch sandbox's identity. Empty where the build resolves no suite
         // and so stands up none, matching what the build itself would compose.
-        sandbox_id: build.suite.as_deref().map_or_else(String::new, |suite| {
+        sandbox_id: build.image.as_ref().map_or_else(String::new, |image| {
             boot2deb_engine::build::sandbox_identity(
                 build.arch.debian_arch(),
-                suite,
+                &image.suite,
                 &mirrors,
                 &toolchain,
             )
@@ -92,9 +91,19 @@ pub(crate) fn run(
         // count has a bug), so the prediction need not know the build's `--jobs`.
         jobs: None,
     };
-    let artifact_store =
-        (!args.no_artifact_cache).then(|| absolutize(root.path().join("cache").join("artifacts")));
+    let artifact_store = (!args.no_artifact_cache).then(|| crate::config::artifact_cache(root));
 
+    // The same narrowing `build` applies: an optional tree changes what the whole
+    // userspace stage layers, so a prediction under a different set answers a question
+    // about nodes that build would not run.
+    let userspace = crate::config::enabled_userspace(
+        build
+            .image
+            .as_ref()
+            .map(|i| i.userspace.as_slice())
+            .unwrap_or(&[]),
+        &args.userspace,
+    )?;
     let nodes = plan::plan_nodes(&plan::PlanInputs {
         lock: &lock,
         work_dir: &work_dir,
@@ -102,9 +111,13 @@ pub(crate) fn run(
         // Co-dev predictions fold the live-series fingerprint, so pass the checkout
         // the build reads its patches from; `None` in pinned mode.
         patches_root: args.patches_path.as_deref(),
-        include_libmali: args.build_libmali,
+        userspace: &userspace,
         device_dts: &device_dts,
-        device_kmods: &build.device_kmods,
+        device_kmods: build
+            .image
+            .as_ref()
+            .map(|i| i.device_kmods.as_slice())
+            .unwrap_or(&[]),
         kmod_local_patches: &kmod_local_patches,
         build: &build,
         env: &env,

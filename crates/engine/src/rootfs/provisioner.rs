@@ -55,18 +55,17 @@ use crate::event::{EventSink, Step};
 use crate::repo::LocalDistsRepo;
 use crate::rootcache::{self, RootfsStore};
 use crate::sandbox::{forward_bootstrap_event, StepObserver};
-use boot2deb_core::model::ResolvedBuild;
+use boot2deb_core::model::{ImageBuild, ResolvedImage};
 use boot2deb_core::weight::PlannedWeight;
 use ferroday_cage::provision::debian::{Debian, DebianEvent, Plan, Priority, Repository};
 use ferroday_cage::provision::{self, Export};
 use ferroday_cage::IdentityMap;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// The name of the build's own `.deb` pool as a provisioner [`Repository`], and so
 /// the stem of the `/etc/apt/sources.list.d/<name>.list` entry ferroday-cage writes
 /// for it. This repo is a **build-time-only** trusted `file://` mirror living under a
-/// temp dir that is gone by the time the image runs, so [`customize_script`] deletes
+/// temp dir that is gone by the time the image runs, so [`CUSTOMIZE`] deletes
 /// its sources entry before export — unlike the feature repositories, whose entries
 /// are meant to persist for on-device updates.
 ///
@@ -84,10 +83,11 @@ const ROOTFS_MANIFEST_HEADER: &str =
 /// [`Event`](crate::event::Event)s to `sink`: the `tar` archive the image node
 /// formats and the content-pinned package manifest beside it.
 pub fn build_rootfs(
-    build: &ResolvedBuild,
+    ib: ImageBuild,
     opts: &RootfsOptions,
     sink: &dyn EventSink,
 ) -> Result<RootfsArtifacts, EngineError> {
+    let ImageBuild { build, image } = ib;
     let step = Step::start(sink, "rootfs");
     std::fs::create_dir_all(opts.out_dir).map_err(|s| EngineError::io(opts.out_dir, s))?;
     if opts.mirrors.is_empty() {
@@ -119,7 +119,7 @@ pub fn build_rootfs(
     stage_preinstall_overlay(
         &preinstall,
         opts.preinstall_overlay_dirs,
-        build,
+        image,
         opts.boot_config,
         opts.source_date_epoch,
         &step,
@@ -128,7 +128,7 @@ pub fn build_rootfs(
     stage_overlay(
         &overlay,
         opts.overlay_dirs,
-        build,
+        ib,
         opts.rootfs_partuuid,
         opts.image_identity,
         opts.source_date_epoch,
@@ -161,7 +161,7 @@ pub fn build_rootfs(
     let localrepo = LocalDistsRepo::assemble(
         &pool_dir,
         opts.repo_debs,
-        build.image_suite(),
+        &image.suite,
         arch,
         opts.source_date_epoch,
         &step,
@@ -180,7 +180,7 @@ pub fn build_rootfs(
             None => {
                 let mut sink_fn = |event: DebianEvent<'_>| forward_bootstrap_event(&step, event);
                 let mut resolver = build_debian(
-                    build,
+                    ib,
                     opts,
                     localrepo.file_url(),
                     feature_repositories(opts.apt_sources)?,
@@ -228,7 +228,7 @@ pub fn build_rootfs(
     //    hit can never be stale.
     let cache = match opts.cache_dir {
         Some(dir) => {
-            let key = rootfs_key(build, opts, &plan, &preinstall, &overlay)?;
+            let key = rootfs_key(ib, opts, &plan, &preinstall, &overlay)?;
             step.log(format!("rootfs cache key {}", key.short()));
             Some((RootfsStore::new(dir), key))
         }
@@ -253,8 +253,7 @@ pub fn build_rootfs(
         step.progress(20);
         step.log(format!(
             "bootstrapping {} {} rootfs into a staging tree (subordinate id-map, real ownership)",
-            build.arch,
-            build.image_suite(),
+            build.arch, image.suite,
         ));
         // A transient provisioned tree carrying subordinate-mapped ownership
         // the caller cannot unlink; the guard removes it through the map. Kept
@@ -279,7 +278,7 @@ pub fn build_rootfs(
         // set. Handing the plan back also drops the second resolution's release
         // and index fetches, which are the bulk of what a resolve costs.
         let mut installer = build_debian(
-            build,
+            ib,
             opts,
             localrepo.file_url(),
             feature_repositories(opts.apt_sources)?,
@@ -300,7 +299,7 @@ pub fn build_rootfs(
         customize(
             &rootfs_dir,
             &overlay,
-            build,
+            image,
             opts.boot_config,
             DEFAULT_USER,
             &step,
@@ -528,8 +527,9 @@ impl Drop for PoolDir {
 /// Assemble the [`Debian`] provisioner from the resolved build and options, either to
 /// **resolve** a plan (`plan` is `None`) or to **install** one it was already given.
 ///
-/// The primary mirror (plus any `snapshot.debian.org` backstop, which relaxes
-/// freshness) is configured on the builder; the local trusted `dists/` pool and the
+/// The resolved mirror list is configured on the builder, primary first; a
+/// `snapshot.debian.org` mirror anywhere in it relaxes the release freshness check
+/// ([`snapshot::has_snapshot`](crate::snapshot::has_snapshot)); the local trusted `dists/` pool and the
 /// feature repositories are merged in as additional [`Repository`] sources. The
 /// subordinate map gives the tree real ownership, the pre-install overlay is handed to
 /// the provisioner's pre-configure hook, and the download cache is content-addressed
@@ -556,7 +556,7 @@ impl Drop for PoolDir {
 /// per call by [`Debian::observe`] — so it is a `Debian<'static>` that outlives
 /// every observed run.
 fn build_debian(
-    build: &ResolvedBuild,
+    ib: ImageBuild,
     opts: &RootfsOptions,
     local_url: &str,
     feature_repos: Vec<Repository>,
@@ -564,15 +564,16 @@ fn build_debian(
     preinstall: &Path,
     plan: Option<Plan>,
 ) -> Result<Debian<'static>, EngineError> {
+    let ImageBuild { build, image } = ib;
     let arch = build.arch.debian_arch();
     let (primary, fallbacks) = opts
         .mirrors
         .split_first()
         .expect("mirrors are non-empty (checked by the caller)");
 
-    let mut b = Debian::builder(build.image_suite())
+    let mut b = Debian::builder(&image.suite)
         .architecture(arch)
-        .components(components(build).split(','))
+        .components(components(image).split(','))
         .identity_map(IdentityMap::Subordinate)
         .cache_dir(deb_cache)
         .pre_configure_overlay(preinstall)
@@ -585,16 +586,16 @@ fn build_debian(
         Some(plan) => b.plan(plan),
         None => b
             .base_priority(Priority::Important)
-            .include(build.rootfs_packages.iter().cloned())
+            .include(image.rootfs_packages.iter().cloned())
             .include(opts.extra_packages.iter().cloned())
-            .exclude(build.rootfs_exclude.iter().cloned()),
+            .exclude(image.rootfs_exclude.iter().cloned()),
     };
     for fallback in fallbacks {
         b = b.mirror_fallback(fallback);
     }
-    // A snapshot backstop's release is expired by design; accepting a
+    // A point-in-time archive's release is expired by design; accepting a
     // signed-but-stale release is a repository-wide posture.
-    if !fallbacks.is_empty() {
+    if crate::snapshot::has_snapshot(opts.mirrors) {
         b = b.allow_stale_release(true);
     }
     if let Some(keyring) = opts.keyring {
@@ -602,7 +603,7 @@ fn build_debian(
     }
 
     // The build's own `.deb`s: a trusted `file://` pool, apt's `[trusted=yes]`.
-    let local = Repository::builder(build.image_suite())
+    let local = Repository::builder(&image.suite)
         .mirror(local_url)
         .components(["main"])
         .trust_unsigned(true)
@@ -618,11 +619,7 @@ fn build_debian(
     }
 
     b.build().map_err(|e| EngineError::Bootstrap {
-        context: format!(
-            "configure the {} {} bootstrap",
-            build.arch,
-            build.image_suite()
-        ),
+        context: format!("configure the {} {} bootstrap", build.arch, image.suite),
         message: e.to_string(),
     })
 }
@@ -671,12 +668,13 @@ pub(crate) fn feature_repositories(
 /// an authorized key or tightened `sudo` would key alike with one that had not, and be
 /// served the older tree.
 fn rootfs_key(
-    build: &ResolvedBuild,
+    ib: ImageBuild,
     opts: &RootfsOptions,
     plan: &Plan,
     preinstall: &Path,
     overlay: &Path,
 ) -> Result<crate::signature::Signature, EngineError> {
+    let ImageBuild { build, image } = ib;
     let solved = plan_solved(plan);
     let mut overlay_fp = Vec::new();
     for (stage, dir) in [("overlay", overlay), ("overlay-pre", preinstall)] {
@@ -695,11 +693,11 @@ fn rootfs_key(
         repo_debs: &repo_fp,
         apt_sources: &apt_fp,
         arch: &arch,
-        suite: build.image_suite(),
-        components: components(build),
+        suite: &image.suite,
+        components: components(image),
         interpreter: opts.interpreter_id,
-        sudo: build.sudo.as_str(),
-        authorized_keys: &build.ssh_authorized_keys,
+        sudo: image.sudo.as_str(),
+        authorized_keys: &image.ssh_authorized_keys,
     }))
 }
 
@@ -760,12 +758,12 @@ fn write_plan_manifest(plan: &Plan, out: &Path, step: &Step) -> Result<(), Engin
 ///
 /// The copy is the mirror of [`export_rootfs_tar`]'s [`Export`]: both enter the
 /// subordinate map, one to write the tree at the ownership it intends and one to read it
-/// back. That leaves no host tool on this path, which is the same argument that removed
-/// `mke2fs` and the external bootstrap.
+/// back. No host tool is on this path — the same posture the filesystem write and the
+/// bootstrap hold to.
 fn customize(
     rootfs: &Path,
     overlay: &Path,
-    build: &ResolvedBuild,
+    image: &ResolvedImage,
     boot: Option<BootConfig>,
     user: &str,
     step: &Step,
@@ -813,29 +811,118 @@ fn customize(
     // (`useradd`, `run-parts`, `depthchargectl`) run directly, or via the host's
     // `qemu-user` binfmt when cross-arch — as the build sandbox's do.
     step.log("running the target-chroot customize steps in a cage");
-    run_customize_cage(rootfs, &customize_script(user, build, boot), step)
+    run_customize_cage(rootfs, &customize_env(user, image, boot), step)
 }
 
-/// Run one `sh -c` script in a subordinate-mapped cage rooted at `rootfs`,
-/// streaming output to `step`. Customize needs no network, and the profile's
+/// The target-side customize program: one committed POSIX `sh` file, byte-identical for
+/// every build.
+///
+/// **Nothing this build resolved is interpolated into it.** Every value arrives through
+/// the environment ([`customize_env`]), so a hostname carrying a newline or a board
+/// profile spelling a heredoc delimiter cannot change what runs — it can only be a wrong
+/// value in a right program. That is the same split
+/// [`core::expect`](boot2deb_core::expect) and the on-image selftest runner use, and it
+/// is what makes the program reviewable as a file rather than as the output of six
+/// `format!` calls: `shellcheck` reads it, a diff shows what changed, and the tests below
+/// drive these exact bytes through `dash`.
+const CUSTOMIZE: &str = include_str!("customize/customize.sh");
+
+/// The environment [`CUSTOMIZE`] reads, from the resolved build.
+///
+/// Every entry is a value, never syntax. The absent cases are the empty string rather
+/// than a missing variable, because the script runs under `set -u` and a branch on
+/// `[ -n "$X" ]` reads better than one on whether a variable exists at all: an image
+/// that authorizes nobody, generates no locale, or boots from a raw gap takes the empty
+/// string and the script's own `if` decides.
+fn customize_env(
+    user: &str,
+    image: &ResolvedImage,
+    boot: Option<BootConfig>,
+) -> Vec<(String, String)> {
+    let depthcharge_board = match boot {
+        Some(BootConfig::Depthcharge { board, .. }) => board,
+        _ => "",
+    };
+    vec![
+        ("B2D_USER".into(), user.to_string()),
+        ("B2D_SUDOERS".into(), image.sudo.sudoers_spec().to_string()),
+        // One key per line, exactly as authored. Resolution guarantees each entry is a
+        // single well-formed `authorized_keys` line, which is what makes the join
+        // unambiguous.
+        (
+            "B2D_AUTHORIZED_KEYS".into(),
+            image.ssh_authorized_keys.join("\n"),
+        ),
+        ("B2D_LOCAL_REPO".into(), LOCAL_REPO_NAME.to_string()),
+        (
+            "B2D_INITRAMFS_STUB".into(),
+            crate::rootfs::INITRAMFS_STUB.to_string(),
+        ),
+        (
+            "B2D_INITRAMFS_STUB_LOG".into(),
+            crate::rootfs::INITRAMFS_STUB_LOG.to_string(),
+        ),
+        ("B2D_TIMEZONE".into(), image.timezone.clone()),
+        // A flag, not the list: the script only asks whether `locale-gen` was given
+        // anything to do, and the list itself reaches the image through
+        // `/etc/locale.gen` in the pre-install overlay.
+        (
+            "B2D_LOCALES_GENERATED".into(),
+            if image.locales_generate.is_empty() {
+                String::new()
+            } else {
+                "1".to_string()
+            },
+        ),
+        (
+            "B2D_DEPTHCHARGE_BOARD".into(),
+            depthcharge_board.to_string(),
+        ),
+        // The armed form — `enable-system-hooks = True` — which the build-time config in
+        // the pre-install overlay deliberately is not: during the build the hooks must
+        // not hunt the build host's disks.
+        (
+            "B2D_DEPTHCHARGE_CONFIG".into(),
+            if depthcharge_board.is_empty() {
+                String::new()
+            } else {
+                config::depthcharge_config(depthcharge_board, true)
+            },
+        ),
+        (
+            "B2D_REQUIRED_INITRD_MODULES".into(),
+            REQUIRED_INITRD_MODULES.join(" "),
+        ),
+    ]
+}
+
+/// Run [`CUSTOMIZE`] in a subordinate-mapped cage rooted at `rootfs`, streaming its
+/// output to `step`. Customize needs no network, and the profile's
 /// [`Network::Isolated`] gives it none.
 ///
 /// It runs under the same [`baseline`](crate::sandbox::baseline) profile as the package
 /// stages, and adds only the subordinate map its ownership-preserving tree needs. The
-/// maintainer scripts this runs are sensitive to `LC_ALL`, `TZ`, and `DEBIAN_FRONTEND`,
+/// maintainer scripts it runs are sensitive to `LC_ALL`, `TZ`, and `DEBIAN_FRONTEND`,
 /// and the profile declares all three — so what they see is the environment the image's
-/// provenance records.
-fn run_customize_cage(rootfs: &Path, script: &str, step: &Step) -> Result<(), EngineError> {
-    let cage = crate::sandbox::baseline(rootfs)
+/// provenance records. The `B2D_*` entries are this run's own, applied over the
+/// profile's.
+fn run_customize_cage(
+    rootfs: &Path,
+    env: &[(String, String)],
+    step: &Step,
+) -> Result<(), EngineError> {
+    let mut builder = crate::sandbox::baseline(rootfs)
         .identity_map(IdentityMap::Subordinate)
         .command("sh")
-        .args(["-c", script])
-        .current_dir("/")
-        .build()
-        .map_err(|source| EngineError::Sandbox {
-            context: "customize the rootfs".into(),
-            source,
-        })?;
+        .args(["-c", CUSTOMIZE])
+        .current_dir("/");
+    for (key, value) in env {
+        builder = builder.env(key, value);
+    }
+    let cage = builder.build().map_err(|source| EngineError::Sandbox {
+        context: "customize the rootfs".into(),
+        source,
+    })?;
     let mut observer = StepObserver::new(step);
     let status = cage
         .run_with(&mut observer)
@@ -854,215 +941,6 @@ fn run_customize_cage(rootfs: &Path, script: &str, step: &Step) -> Result<(), En
             stderr: observer.stderr_tail(),
         })
     }
-}
-
-/// The customize script, run in a cage where the rootfs is `/` — so it needs no
-/// `chroot` and no `$rootfs` prefix.
-///
-/// It creates the default account **locked** (the per-image password is spliced in
-/// at image assembly, so the tree stays cacheable), grants group access, writes the
-/// resolved [`SudoPolicy`](boot2deb_core::model::SudoPolicy) drop-in and any
-/// [`authorized_keys`], clears the ssh host keys for first-boot regeneration, drops
-/// the build-time-only local `.deb` repository's apt source (its `file://` temp dir
-/// is gone once the image runs), and re-runs the kernel `postinst.d` hooks so `/boot`
-/// gains the initrd, board dtb,
-/// and `extlinux.conf` — the kernel package configured before the overlay was laid
-/// in, so its own postinst produced none of them. It closes with the localization
-/// asserts and, on a depthcharge board, the signed-kernel finalize.
-fn customize_script(user: &str, build: &ResolvedBuild, boot: Option<BootConfig>) -> String {
-    let mut s = String::from("set -eu\n");
-    // Default account, created locked; the per-image password is spliced in later.
-    let _ = write!(
-        s,
-        "useradd -m -s /bin/bash '{user}'\n\
-         usermod -aG video,render '{user}'\n\
-         mkdir -p /etc/sudoers.d\n\
-         printf '%s ALL=(ALL) {sudoers}\\n' '{user}' > /etc/sudoers.d/{user}\n\
-         chmod 0440 /etc/sudoers.d/{user}\n\
-         rm -f /etc/ssh/ssh_host_*\n\
-         rm -f /etc/apt/sources.list.d/{local_repo}.list\n",
-        sudoers = build.sudo.sudoers_spec(),
-        local_repo = LOCAL_REPO_NAME,
-    );
-    s.push_str(&authorized_keys(user, &build.ssh_authorized_keys));
-    // Boot artifacts: re-run the kernel postinst.d hooks for the installed kernel,
-    // now that the overlay's hooks and the PARTUUID-rooted fstab are in place.
-    // --exit-on-error fails the build rather than shipping a kernel with nothing
-    // to boot it. The kernel version is reused by the depthcharge tail below.
-    s.push_str(
-        "kver=\"$(linux-version list | linux-version sort --reverse | head -n1)\"\n\
-         run-parts --exit-on-error --arg=\"$kver\" /etc/kernel/postinst.d\n",
-    );
-    s.push_str(&l10n_asserts(build));
-    s.push_str(&enable_time_wait_sync());
-    if let Some(BootConfig::Depthcharge { board, .. }) = boot {
-        s.push_str(&depthcharge_finalize(board));
-    }
-    s
-}
-
-/// Enable `systemd-time-wait-sync`, so `time-sync.target` means what Debian's
-/// maintenance jobs already assume it means.
-///
-/// Those jobs — `apt-daily`, `logrotate`, `man-db`, `fstrim`, `e2scrub_all`,
-/// `dpkg-db-backup`, `anacron` — all order themselves `After=time-sync.target`. Nothing
-/// *reaches* that target unless this unit is enabled, so on a stock image the ordering
-/// is inert and they run against whatever the clock says at boot. On a board with no
-/// RTC that is the mtime of `/var/lib/systemd/timesync/clock`: plausible, and as stale
-/// as the last power-off.
-///
-/// Enabled here rather than by a `.wants` symlink in the base overlay because this unit
-/// ships inside the `systemd` package. A symlink laid down before that package installs
-/// is a symlink `deb-systemd-helper` may still have an opinion about when it applies
-/// the unit's preset; one written afterwards is the final word. The link is the exact
-/// one `systemctl enable` would create, written directly because `systemctl` in a cage
-/// with no running manager is a larger dependency than one `ln -s`.
-///
-/// The bound on the wait lives in the base overlay's drop-in, not here — see
-/// `base/overlay/etc/systemd/system/systemd-time-wait-sync.service.d/bounded.conf`,
-/// which explains why an unbounded wait strands an offline board short of
-/// `multi-user.target`. Both asserts guard that drop-in: it is inert if the unit is
-/// missing, and it fails closed — holding the boot for the full 45 seconds on every
-/// offline boot — if `timeout` is.
-fn enable_time_wait_sync() -> String {
-    "[ -f /usr/lib/systemd/system/systemd-time-wait-sync.service ] || \
-     { echo 'systemd ships no systemd-time-wait-sync.service: the bounded-wait drop-in would configure nothing' >&2; exit 1; }\n\
-     [ -x /usr/bin/timeout ] || \
-     { echo 'coreutils ships no /usr/bin/timeout: the bounded-wait drop-in would never release the boot' >&2; exit 1; }\n\
-     mkdir -p /etc/systemd/system/sysinit.target.wants\n\
-     ln -sf /usr/lib/systemd/system/systemd-time-wait-sync.service \
-     /etc/systemd/system/sysinit.target.wants/systemd-time-wait-sync.service\n"
-        .to_string()
-}
-
-/// The `~/.ssh/authorized_keys` block, or the empty string when no config root
-/// authorized anyone.
-///
-/// Written by the customize script rather than staged as an overlay file, for the same
-/// reason the `sudoers` drop-in is: the modes matter and the overlay cannot carry them.
-/// `sshd` under its default `StrictModes` refuses a key whose file or containing
-/// directories are group- or world-writable, and the overlay staging pass normalizes
-/// every mode it copies to `0755`/`0644` — so a staged `.ssh` would arrive at `0755`
-/// and be ignored. Here the script runs as root inside the cage, after `useradd -m` has
-/// made the home directory, and can set `0700`/`0600` and the account's ownership
-/// directly.
-///
-/// The keys go in through a **quoted heredoc**, so nothing in a key line is expanded or
-/// word-split: a comment may contain a quote, a dollar sign, or a backtick with no
-/// escaping question. Resolution has already guaranteed each entry is one line, which
-/// is what keeps the heredoc's own delimiter unreachable.
-fn authorized_keys(user: &str, keys: &[String]) -> String {
-    if keys.is_empty() {
-        return String::new();
-    }
-    let mut s = String::new();
-    let _ = write!(
-        s,
-        "install -d -m 0700 /home/{user}/.ssh\n\
-         cat > /home/{user}/.ssh/authorized_keys <<'BOOT2DEB_AUTHORIZED_KEYS'\n",
-    );
-    for key in keys {
-        s.push_str(key);
-        s.push('\n');
-    }
-    // `chown user:` — a trailing colon with no group names the account's *login* group,
-    // whatever it is called. `useradd` derives that name from the target's
-    // `login.defs`, which is the target's policy and not something to restate here: a
-    // guessed group name would either fail the build or, worse, be a group that happens
-    // to exist and is not the account's.
-    let _ = write!(
-        s,
-        "BOOT2DEB_AUTHORIZED_KEYS\n\
-         chmod 0600 /home/{user}/.ssh/authorized_keys\n\
-         chown -R '{user}:' /home/{user}/.ssh\n",
-    );
-    s
-}
-
-/// The localization tail: prove the two things resolution could not. A timezone
-/// missing from the target's `tzdata` leaves `/etc/localtime` dangling and the
-/// clock silently wrong; a `locales` package that generated nothing leaves `LANG`
-/// naming an ungenerated locale. Cage-native (paths are `/…`, not `$rootfs/…`).
-fn l10n_asserts(build: &ResolvedBuild) -> String {
-    let mut s = format!(
-        "[ -e /usr/share/zoneinfo/{tz} ] || \
-         {{ echo \"timezone '{tz}' is not in this suite's tzdata\" >&2; exit 1; }}\n",
-        tz = build.timezone,
-    );
-    // The locale-archive is absent on an image that generates nothing (also what a
-    // base system looks like), so the check only means something when locales were
-    // asked for.
-    if !build.locales_generate.is_empty() {
-        s.push_str(
-            "[ -s /usr/lib/locale/locale-archive ] || \
-             { echo 'locale-gen produced no locale-archive: LANG would name an ungenerated locale' >&2; exit 1; }\n",
-        );
-    }
-    s
-}
-
-/// The depthcharge tail: build the signed kernel partition, prove it is bootable,
-/// and arm the on-device kernel hooks — every check guarding a failure that is
-/// silent on the serial-console-less hardware. Cage-native: the rootfs is `/`.
-fn depthcharge_finalize(board: &str) -> String {
-    let mut s = String::new();
-    // Assert every module the initramfs lists actually exists for this kernel:
-    // MODULES=list silently drops an unresolvable name, so a typo would ship an
-    // initramfs missing (say) the PMIC driver and the board would hang at a white
-    // screen. `</dev/null` so the inner command cannot consume the list.
-    s.push_str(
-        "for list in /usr/share/initramfs-tools/modules.d/*; do\n\
-         \x20 [ -f \"$list\" ] || continue\n\
-         \x20 while read -r mod; do\n\
-         \x20   case \"$mod\" in ''|\\#*) continue ;; esac\n\
-         \x20   modprobe --set-version \"$kver\" --show-depends \"$mod\" </dev/null >/dev/null 2>&1 || {\n\
-         \x20     echo \"initramfs module '$mod' does not exist in kernel $kver (from $(basename \"$list\"))\" >&2\n\
-         \x20     exit 1\n\
-         \x20   }\n\
-         \x20 done < \"$list\"\n\
-         done\n",
-    );
-    // Build the signed payload; board profile and cmdline come from the pre-install
-    // overlay's config, root= from /etc/fstab.
-    s.push_str(
-        "depthchargectl build --verbose\n\
-         kpart=\"$(ls /boot/depthcharge/*.img 2>/dev/null | head -n1)\"\n\
-         [ -n \"$kpart\" ] || { echo 'depthchargectl build produced no image' >&2; exit 1; }\n\
-         futility vbutil_kernel --verify \"/boot/depthcharge/$(basename \"$kpart\")\"\n",
-    );
-    // The initramfs is inside the signature now — last chance to confirm the
-    // modules that must be in it actually are.
-    let _ = write!(
-        s,
-        "initrd_list=\"$(lsinitramfs \"/boot/initrd.img-$kver\")\"\n\
-         for need in {modules}; do\n\
-         \x20 case \"$initrd_list\" in *\"$need\"*) ;; *)\n\
-         \x20   echo \"the built initramfs is missing $need — MODULES=list did not take\" >&2\n\
-         \x20   exit 1 ;;\n\
-         \x20 esac\n\
-         done\n",
-        modules = REQUIRED_INITRD_MODULES.join(" "),
-    );
-    // Arm the package's kernel hooks for the shipped system: an on-device apt
-    // kernel upgrade re-signs and writes the other slot itself. They were off
-    // during the build so they could not hunt the build host's disks.
-    let _ = write!(
-        s,
-        "cat > /etc/depthcharge-tools/config <<'B2D_EOF'\n{enabled}B2D_EOF\n\
-         grep -q '^enable-system-hooks = True$' /etc/depthcharge-tools/config\n",
-        enabled = config::depthcharge_config(board, true),
-    );
-    // And assert the other half of the upgrade protocol is armed: the
-    // depthcharge-tools .service blesses a freshly-written slot once it boots.
-    // Without it, a successful kernel upgrade is rolled back one reboot later.
-    s.push_str(
-        "systemctl is-enabled depthcharge-tools.service >/dev/null || {\n\
-         \x20 echo 'depthcharge-tools.service is not enabled: a kernel upgrade would be' >&2\n\
-         \x20 echo 'rolled back one reboot after it succeeded (nothing would bless it)' >&2\n\
-         \x20 exit 1\n\
-         }\n",
-    );
-    s
 }
 
 /// Export the provisioned tree to the ownership-preserving `tar` the image node
@@ -1103,6 +981,19 @@ fn export_rootfs_tar(
 
 #[cfg(test)]
 mod tests {
+    use boot2deb_core::model::ResolvedBuild;
+
+    /// The image half of a fixture build. Every fixture here resolves a shipped image
+    /// recipe, so the axis is there; the unwrap states that rather than threading an
+    /// `Option` through every assertion.
+    fn image_of(build: &boot2deb_core::ResolvedBuild) -> &boot2deb_core::ResolvedImage {
+        pair_of(build).image
+    }
+
+    /// The same fixture build as an [`ImageBuild`] pair, for the stages that take one.
+    fn pair_of(build: &boot2deb_core::ResolvedBuild) -> boot2deb_core::ImageBuild<'_> {
+        build.as_image().expect("the fixture recipes build images")
+    }
     use super::*;
     use boot2deb_core::model::{AptSource, InitramfsCompress, SudoPolicy};
     use boot2deb_core::{resolve_recipe, ConfigRoot, Overrides};
@@ -1219,6 +1110,7 @@ mod tests {
                 commit: None,
                 patch_series: Vec::new(),
             },
+            pressed: None,
         }
     }
 
@@ -1248,11 +1140,11 @@ mod tests {
         // selector the pinned mode must drop — without that this test would pass
         // vacuously.
         assert!(
-            !build.rootfs_exclude.is_empty(),
+            !image_of(&build).rootfs_exclude.is_empty(),
             "the fixture must exercise the selectors the pinned mode omits"
         );
         build_debian(
-            &build,
+            pair_of(&build),
             &opts,
             local_url,
             Vec::new(),
@@ -1262,9 +1154,9 @@ mod tests {
         )
         .expect("the resolving provisioner carries the selectors");
 
-        let plan = sample_plan(build.image_suite(), build.arch.debian_arch());
+        let plan = sample_plan(&image_of(&build).suite, build.arch.debian_arch());
         build_debian(
-            &build,
+            pair_of(&build),
             &opts,
             local_url,
             Vec::new(),
@@ -1475,8 +1367,21 @@ mod tests {
 
     /// The customize script is built by string formatting and handed to `sh` ~10
     /// minutes into a build, so parse it here with `sh -n` — a syntax error caught
-    /// at the worst possible moment otherwise.
-    fn assert_valid_shell(name: &str, script: &str) {
+    /// A value the customize environment carries, by name.
+    fn env_of(pairs: &[(String, String)], key: &str) -> String {
+        pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("{key} is not in the customize environment"))
+    }
+
+    /// The shipped bytes must parse as POSIX `sh`, because the only thing between them
+    /// and a rootfs is the target's `/bin/sh` — and a syntax error there fails a
+    /// multi-hour build at the last step. `sh -n` on the *committed file* rather than on
+    /// one build's rendering, which is the whole of what the constant now buys.
+    #[test]
+    fn the_customize_program_is_valid_posix_shell() {
         let mut child = Command::new("sh")
             .arg("-n")
             .stdin(std::process::Stdio::piped())
@@ -1484,96 +1389,139 @@ mod tests {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("sh is available on any unix test host");
-        std::io::Write::write_all(child.stdin.as_mut().unwrap(), script.as_bytes()).unwrap();
+        std::io::Write::write_all(child.stdin.as_mut().unwrap(), CUSTOMIZE.as_bytes()).unwrap();
         drop(child.stdin.take());
         let out = child.wait_with_output().unwrap();
         assert!(
             out.status.success(),
-            "the {name} customize script is not valid shell:\n{}\n--- script ---\n{script}",
+            "the customize program is not valid shell:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
 
+    /// **No build value is ever syntax.** Every variable the program reads is a `B2D_*`
+    /// one the environment supplies, and the environment supplies exactly those — so a
+    /// hostname carrying a newline, or a board profile spelling a heredoc delimiter,
+    /// cannot change what runs.
+    ///
+    /// Both directions matter: a `B2D_*` the program reads and the environment does not
+    /// set is an unbound variable under `set -u`, and one the environment sets and the
+    /// program does not read is a value that silently reaches nothing.
     #[test]
-    fn every_image_enables_the_bounded_clock_wait() {
-        let script = customize_script(DEFAULT_USER, &rk1(), None);
+    fn every_value_the_program_reads_comes_from_the_environment() {
+        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None);
+        let supplied: std::collections::BTreeSet<&str> =
+            env.iter().map(|(k, _)| k.as_str()).collect();
 
-        // The link `systemctl enable` would create. Without it nothing reaches
-        // time-sync.target, and Debian's After=time-sync.target ordering on apt-daily,
-        // logrotate, anacron and e2scrub is inert — they run against whatever the clock
-        // says at boot, which on an RTC-less board is the last power-off.
+        let mut read = std::collections::BTreeSet::new();
+        for (idx, _) in CUSTOMIZE.match_indices("$B2D_") {
+            let tail = &CUSTOMIZE[idx + 1..];
+            let end = tail
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(tail.len());
+            read.insert(&tail[..end]);
+        }
         assert!(
-            script.contains(
-                "ln -sf /usr/lib/systemd/system/systemd-time-wait-sync.service \
-                 /etc/systemd/system/sysinit.target.wants/systemd-time-wait-sync.service"
-            ),
-            "the wait-sync unit must be enabled: {script}"
+            !read.is_empty(),
+            "the program reads no B2D_ variable at all"
         );
-
-        // Enabled from the customize script, which runs *after* the systemd package is
-        // installed. A .wants symlink staged in the base overlay would land before
-        // that package, where deb-systemd-helper may still apply the unit's preset.
-        assert!(
-            script.contains("[ -f /usr/lib/systemd/system/systemd-time-wait-sync.service ]"),
-            "assert the unit exists rather than enabling a name that does not: {script}"
-        );
-
-        // The drop-in that bounds the wait shells out to timeout(1). Missing, the wait
-        // fails closed — 45 seconds of held boot on every offline start — so the build
-        // is the right place to notice.
-        assert!(
-            script.contains("[ -x /usr/bin/timeout ]"),
-            "the bounded-wait drop-in depends on timeout(1): {script}"
+        assert_eq!(
+            read, supplied,
+            "the program's variables and the environment's must be the same set"
         );
     }
 
+    /// Cage-native, and the account is created *locked*: the per-image password is
+    /// spliced into `/etc/shadow` at image assembly, which is what keeps the provisioned
+    /// tree cacheable across images built from one build point.
     #[test]
-    fn customize_script_is_valid_cage_native_shell() {
-        // Cage-native: no chroot, no `$rootfs/` prefix — the rootfs is `/`.
-        let rkbin = customize_script(DEFAULT_USER, &rk1(), None);
-        assert_valid_shell("rkbin", &rkbin);
-        assert!(!rkbin.contains("chroot"), "cage-native: the rootfs is /");
+    fn the_customize_program_is_cage_native_and_leaves_the_account_locked() {
         assert!(
-            !rkbin.contains("$rootfs"),
+            !CUSTOMIZE.contains("chroot"),
+            "cage-native: the rootfs is /"
+        );
+        assert!(
+            !CUSTOMIZE.contains("$rootfs"),
             "cage-native: no host-side rootfs prefix"
         );
-        // The account is created locked; the per-image password is spliced later.
-        assert!(rkbin.contains("useradd -m -s /bin/bash 'debian'"));
-        assert!(!rkbin.contains("chpasswd"));
-        assert!(!rkbin.contains("passwd -e"));
-        assert!(rkbin.contains("usermod -aG video,render 'debian'"));
-        // The shipped default: root with no prompt, and nobody authorized by key.
-        assert!(rkbin.contains("printf '%s ALL=(ALL) NOPASSWD: ALL\\n' 'debian'"));
-        assert!(
-            !rkbin.contains("authorized_keys"),
-            "a config root that authorizes nobody must write no authorized_keys file"
+        assert!(!CUSTOMIZE.contains("chpasswd"));
+        assert!(!CUSTOMIZE.contains("passwd -e"));
+        assert!(CUSTOMIZE.contains(r#"useradd -m -s /bin/bash "$B2D_USER""#));
+        assert!(CUSTOMIZE.contains(r#"usermod -aG video,render "$B2D_USER""#));
+        // The build-time-only local `.deb` repository's apt source is dropped: its
+        // `file://` temp dir is gone by the time the image runs, so leaving it would
+        // fail every on-device `apt-get update`.
+        assert!(CUSTOMIZE.contains(r#"rm -f "/etc/apt/sources.list.d/$B2D_LOCAL_REPO.list""#));
+        assert_eq!(
+            env_of(
+                &customize_env(DEFAULT_USER, image_of(&rk1()), None),
+                "B2D_LOCAL_REPO"
+            ),
+            "boot2deb-local"
         );
-        // The build-time-only local .deb repo's apt source is dropped: its `file://`
-        // temp dir is gone by the time the image runs, so leaving it would fail every
-        // on-device `apt-get update`.
-        assert!(rkbin.contains("rm -f /etc/apt/sources.list.d/boot2deb-local.list"));
-        assert!(rkbin.contains("run-parts --exit-on-error --arg=\"$kver\" /etc/kernel/postinst.d"));
-        // A raw-gap board gets no depthcharge tail.
-        assert!(!rkbin.contains("depthchargectl"));
-
-        let depth = customize_script(
-            DEFAULT_USER,
-            &c201(),
-            Some(BootConfig::Depthcharge {
-                board: "speedy",
-                cmdline: "console=tty1 ro",
-                initramfs_compress: InitramfsCompress::Xz,
-            }),
-        );
-        assert_valid_shell("depthcharge", &depth);
     }
 
-    /// The account block: the `sudoers` drop-in the resolved policy asks for, and an
-    /// `authorized_keys` file `sshd` will actually read.
+    /// The update-initramfs placeholder is removed *before* the hooks run, so the one
+    /// initrd the image ships is the one built here — after the overlay and after the
+    /// depmod hook, which is the first point it can be built right.
     #[test]
-    fn the_customize_script_writes_the_resolved_account_policy() {
+    fn the_placeholder_is_dropped_before_the_kernel_hooks_run() {
+        let removed = CUSTOMIZE
+            .find(r#"rm -f "$B2D_INITRAMFS_STUB""#)
+            .expect("the placeholder is removed");
+        let hooks = CUSTOMIZE
+            .find(r#"run-parts --exit-on-error --arg="$kver" /etc/kernel/postinst.d"#)
+            .expect("the hooks run");
+        assert!(removed < hooks, "removal precedes the hooks");
+        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None);
+        assert_eq!(
+            env_of(&env, "B2D_INITRAMFS_STUB"),
+            crate::rootfs::INITRAMFS_STUB
+        );
+        assert_eq!(
+            env_of(&env, "B2D_INITRAMFS_STUB_LOG"),
+            crate::rootfs::INITRAMFS_STUB_LOG
+        );
+    }
+
+    /// Every image enables `systemd-time-wait-sync`, so `time-sync.target` means what
+    /// Debian's maintenance jobs already assume it means. Without it nothing reaches
+    /// that target, and the `After=time-sync.target` ordering on apt-daily, logrotate,
+    /// anacron and e2scrub is inert — they run against whatever the clock says at boot,
+    /// which on an RTC-less board is the last power-off.
+    #[test]
+    fn every_image_enables_the_bounded_clock_wait() {
+        assert!(
+            CUSTOMIZE.contains(
+                "ln -sf /usr/lib/systemd/system/systemd-time-wait-sync.service \\\n    \
+                 /etc/systemd/system/sysinit.target.wants/systemd-time-wait-sync.service"
+            ),
+            "the wait-sync unit must be enabled"
+        );
+        // Enabled from the customize program, which runs *after* the systemd package is
+        // installed. A `.wants` symlink staged in the base overlay would land before
+        // that package, where `deb-systemd-helper` may still apply the unit's preset.
+        assert!(
+            CUSTOMIZE.contains("[ -f /usr/lib/systemd/system/systemd-time-wait-sync.service ]"),
+            "assert the unit exists rather than enabling a name that does not"
+        );
+        // Both halves of the base overlay's bounded-wait drop-in: it is inert if the
+        // unit is missing, and it fails closed — holding the boot for the full 45
+        // seconds on every offline boot — if `timeout` is.
+        assert!(CUSTOMIZE.contains("[ -x /usr/bin/timeout ]"));
+    }
+
+    /// The account policy reaches the image as resolved: the sudoers spec the build
+    /// chose, and the keys the config authorized, in order.
+    #[test]
+    fn the_customize_env_carries_the_resolved_account_policy() {
         const ED25519: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe operator@workstation";
         const RSA: &str = "ssh-rsa AAAAB3NzaC1yc2EA laptop";
+
+        // The shipped default: root with no prompt, and nobody authorized by key.
+        let plain = customize_env(DEFAULT_USER, image_of(&rk1()), None);
+        assert_eq!(env_of(&plain, "B2D_SUDOERS"), "NOPASSWD: ALL");
+        assert_eq!(env_of(&plain, "B2D_AUTHORIZED_KEYS"), "");
 
         let build = resolve_recipe(
             &repo_root(),
@@ -1585,168 +1533,149 @@ mod tests {
             },
         )
         .unwrap();
-        let script = customize_script(DEFAULT_USER, &build, None);
-        assert_valid_shell("account", &script);
-
-        // `password` writes the prompting spec, and must not leave NOPASSWD anywhere in
-        // the file: sudo takes the *last* matching rule, so a stale one is not inert.
-        assert!(script.contains("printf '%s ALL=(ALL) ALL\\n' 'debian'"));
-        assert!(!script.contains("NOPASSWD"));
-
-        // sshd's StrictModes refuses a key it can reach through a group-writable path,
-        // so the directory mode, the file mode, and the ownership are all load-bearing.
-        assert!(script.contains("install -d -m 0700 /home/debian/.ssh"));
-        assert!(script.contains("chmod 0600 /home/debian/.ssh/authorized_keys"));
-        // Trailing colon: the account's login group, whose name is the target's to decide.
-        assert!(script.contains("chown -R 'debian:' /home/debian/.ssh"));
-        assert!(
-            !script.contains("debian:debian"),
-            "the group name must not be guessed"
+        let env = customize_env(DEFAULT_USER, image_of(&build), None);
+        // `password` writes the prompting spec. sudo takes the *last* matching rule, so
+        // a stale NOPASSWD would not be inert — and there is now nowhere for one to be,
+        // since the program writes exactly this value once.
+        assert_eq!(env_of(&env, "B2D_SUDOERS"), "ALL");
+        // Both keys, one per line, in the order the config named them.
+        assert_eq!(
+            env_of(&env, "B2D_AUTHORIZED_KEYS"),
+            format!("{ED25519}\n{RSA}")
         );
 
-        // Both keys land, one per line, in the order the config named them.
-        let body = script
-            .split_once("<<'BOOT2DEB_AUTHORIZED_KEYS'\n")
-            .expect("a quoted heredoc delimits the keys")
-            .1
-            .split_once("\nBOOT2DEB_AUTHORIZED_KEYS")
-            .expect("the heredoc is terminated")
-            .0;
-        assert_eq!(body, format!("{ED25519}\n{RSA}"));
-
-        // The `.ssh` directory is made after `useradd -m` has created the home it sits
-        // in — reversed, `install -d` would create a root-owned /home/debian and
+        // sshd's StrictModes refuses a key it can reach through a group-writable path,
+        // so the directory mode, the file mode, and the ownership are all load-bearing —
+        // and the `.ssh` directory is made after `useradd -m` has created the home it
+        // sits in. Reversed, `install -d` would create a root-owned /home/<user> and
         // `useradd -m` would then decline to populate or chown it.
-        let useradd = script.find("useradd -m").expect("the account is created");
-        let ssh_dir = script.find("install -d").expect("the .ssh dir is made");
+        assert!(CUSTOMIZE.contains(r#"install -d -m 0700 "/home/$B2D_USER/.ssh""#));
+        assert!(CUSTOMIZE.contains(r#"chmod 0600 "/home/$B2D_USER/.ssh/authorized_keys""#));
+        // Trailing colon: the account's login group, whose name is the target's to
+        // decide.
+        assert!(CUSTOMIZE.contains(r#"chown -R "$B2D_USER": "/home/$B2D_USER/.ssh""#));
+        assert!(
+            !CUSTOMIZE.contains("$B2D_USER:$B2D_USER"),
+            "the group name must not be guessed"
+        );
+        let useradd = CUSTOMIZE
+            .find("useradd -m")
+            .expect("the account is created");
+        let ssh_dir = CUSTOMIZE.find("install -d").expect("the .ssh dir is made");
         assert!(
             useradd < ssh_dir,
             "the home must exist before .ssh goes in it"
         );
     }
 
-    /// The block, executed. Two things are only true if the emitted commands actually
-    /// run: the file `sshd` reads carries the authored bytes *verbatim* — no expansion,
-    /// no word-splitting, no early end to the heredoc, whatever a key's comment holds —
-    /// and the modes it lands at are the ones `StrictModes` requires.
+    /// The keys, written by the program's own line. What has to hold is that the file
+    /// `sshd` reads carries the authored bytes **verbatim** — no expansion, no
+    /// word-splitting, nothing executed — whatever a key's comment holds.
     ///
-    /// Asserting on the script text cannot establish either: the failure mode is not a
-    /// broken build but a silently *different* file, and the only thing standing between
-    /// an authored comment and `sh` is the quoting.
-    ///
-    /// Run against the current account rather than `debian`, in a temp dir standing in
-    /// for the cage's `/`, so the real `install`/`chown`/`chmod` invocations are
-    /// exercised unprivileged — `chown "$me:"` to oneself needs no root, and it is the
-    /// same command string the cage runs as root over the rootfs.
+    /// The line is lifted out of the committed program rather than restated here, so
+    /// this exercises the bytes that ship. It is the one place the old generated form
+    /// could go wrong and this one structurally cannot: the keys arrive in the
+    /// environment, and `printf '%s\n' "$X"` has no quoting left to get wrong.
     #[test]
-    fn the_emitted_block_writes_the_keys_verbatim_at_the_modes_sshd_demands() {
-        use std::os::unix::fs::PermissionsExt;
-
-        // Every metacharacter that would matter in an unquoted context, plus the heredoc
-        // delimiter itself as a comment word.
+    fn a_hostile_authorized_key_is_written_verbatim_and_never_run() {
+        // Every metacharacter that would matter in an unquoted context, plus the
+        // delimiter the old generated heredoc used, as a comment word.
         let hostile = "ssh-ed25519 AAAAB3NzaC1yc2EA $(touch /pwned) `id` 'x' \"y\" \
                        $HOME ${PATH} \\ BOOT2DEB_AUTHORIZED_KEYS";
         let plain = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe second@key";
 
-        // The account this test can chown to. `id -un` rather than $USER, which a test
-        // runner need not set.
-        let me = Command::new("id").arg("-un").output().expect("id runs");
-        let me = String::from_utf8(me.stdout).unwrap().trim().to_string();
+        let write_line = CUSTOMIZE
+            .lines()
+            .find(|l| l.contains("printf '%s\\n' \"$B2D_AUTHORIZED_KEYS\""))
+            .expect("the program writes the keys with printf");
 
-        let script = authorized_keys(&me, &[hostile.to_string(), plain.to_string()]);
-        assert_valid_shell("authorized-keys", &script);
-
-        // Re-root the absolute paths at a temp dir; `useradd -m` makes the home in the
-        // real build, so create it here.
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join(format!("home/{me}"));
-        std::fs::create_dir_all(&home).unwrap();
-        let rooted = script.replace(
-            &format!("/home/{me}"),
-            &format!("{}/home/{me}", tmp.path().display()),
+        let home = tmp.path().join("home/tester");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        // The same line, with the program's own path expression pointed at the fixture.
+        let rooted = write_line.replace(
+            r#""/home/$B2D_USER/.ssh/authorized_keys""#,
+            &format!(r#""{}/.ssh/authorized_keys""#, home.display()),
         );
         let status = Command::new("sh")
             .arg("-eu")
             .arg("-c")
             .arg(&rooted)
+            .env("B2D_AUTHORIZED_KEYS", format!("{hostile}\n{plain}"))
             .env("HOME", "/should-not-appear")
             .status()
             .expect("sh runs");
-        assert!(status.success(), "the block runs:\n{rooted}");
+        assert!(status.success(), "the line runs:\n{rooted}");
 
-        // Verbatim, in order, one key per line — nothing expanded and nothing executed.
-        let keyfile = home.join(".ssh/authorized_keys");
-        let written = std::fs::read_to_string(&keyfile).unwrap();
+        let written = std::fs::read_to_string(home.join(".ssh/authorized_keys")).unwrap();
         assert_eq!(written, format!("{hostile}\n{plain}\n"));
         assert!(
             !tmp.path().join("pwned").exists() && !std::path::Path::new("/pwned").exists(),
             "a command substitution in a comment must not have run"
         );
-
-        // The modes sshd's StrictModes checks before it will read a key at all: nothing
-        // group- or world-accessible on the directory, and no group/other write on the
-        // file.
-        let dir_mode = std::fs::metadata(home.join(".ssh"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        let file_mode = std::fs::metadata(&keyfile).unwrap().permissions().mode() & 0o777;
-        assert_eq!(dir_mode, 0o700, "~/.ssh must be 0700, got {dir_mode:o}");
-        assert_eq!(
-            file_mode, 0o600,
-            "authorized_keys must be 0600, got {file_mode:o}"
-        );
     }
 
+    /// The depthcharge tail: build the signed kernel partition, prove it is bootable,
+    /// and arm the on-device kernel hooks. Every check guards a failure that is silent
+    /// on the serial-console-less hardware.
     #[test]
-    fn the_depthcharge_customize_tail_verifies_before_it_ships() {
-        let script = customize_script(
+    fn the_depthcharge_tail_verifies_before_it_ships() {
+        for expected in [
+            "depthchargectl build",
+            "vbutil_kernel --verify",
+            "lsinitramfs",
+            "--show-depends",
+            "systemctl is-enabled depthcharge-tools.service",
+        ] {
+            assert!(CUSTOMIZE.contains(expected), "the tail runs {expected}");
+        }
+
+        let env = customize_env(
             DEFAULT_USER,
-            &c201(),
+            image_of(&c201()),
             Some(BootConfig::Depthcharge {
                 board: "speedy",
                 cmdline: "console=tty1 ro",
                 initramfs_compress: InitramfsCompress::Xz,
             }),
         );
-        assert!(
-            script.contains("depthchargectl build"),
-            "builds the signed payload"
-        );
-        assert!(
-            script.contains("vbutil_kernel --verify"),
-            "proves the firmware will take it"
-        );
-        assert!(
-            script.contains("lsinitramfs"),
-            "proves the initramfs has what it needs"
-        );
+        assert_eq!(env_of(&env, "B2D_DEPTHCHARGE_BOARD"), "speedy");
+        // Armed — unlike the build-time config in the pre-install overlay, which must
+        // not let the hooks hunt the build host's disks.
+        assert!(env_of(&env, "B2D_DEPTHCHARGE_CONFIG").contains("enable-system-hooks = True"));
+        let modules = env_of(&env, "B2D_REQUIRED_INITRD_MODULES");
         for module in REQUIRED_INITRD_MODULES {
             assert!(
-                script.contains(module),
+                modules.split(' ').any(|m| m == *module),
                 "asserts {module} into the initramfs"
             );
         }
+
+        // A raw-gap board takes the early exit instead: no board, so no tail.
+        let raw = customize_env(DEFAULT_USER, image_of(&rk1()), None);
+        assert_eq!(env_of(&raw, "B2D_DEPTHCHARGE_BOARD"), "");
+        assert_eq!(env_of(&raw, "B2D_DEPTHCHARGE_CONFIG"), "");
         assert!(
-            script.contains("--show-depends"),
-            "asserts the module list resolves"
-        );
-        assert!(
-            script.contains("enable-system-hooks = True"),
-            "arms on-device kernel upgrades before shipping"
-        );
-        assert!(
-            script.contains("systemctl is-enabled depthcharge-tools.service"),
-            "asserts the unit that blesses a booted kernel slot is enabled"
+            CUSTOMIZE.contains(r#"[ -n "$B2D_DEPTHCHARGE_BOARD" ] || exit 0"#),
+            "an empty board ends the program before the tail"
         );
     }
 
+    /// The localization tail proves the two things resolution could not: a timezone
+    /// missing from the target's `tzdata` leaves `/etc/localtime` dangling and the clock
+    /// silently wrong, and a `locales` package that generated nothing leaves `LANG`
+    /// naming an ungenerated locale.
     #[test]
-    fn the_customize_script_asserts_the_l10n_config_took() {
-        let script = customize_script(DEFAULT_USER, &rk1(), None);
-        assert!(script.contains("/usr/share/zoneinfo/"));
-        assert!(script.contains("is not in this suite's tzdata"));
-        assert!(script.contains("/usr/lib/locale/locale-archive"));
+    fn the_customize_program_asserts_the_l10n_config_took() {
+        assert!(CUSTOMIZE.contains(r#"[ -e "/usr/share/zoneinfo/$B2D_TIMEZONE" ]"#));
+        assert!(CUSTOMIZE.contains("is not in this suite's tzdata"));
+        assert!(CUSTOMIZE.contains("[ -s /usr/lib/locale/locale-archive ]"));
+
+        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None);
+        assert_eq!(env_of(&env, "B2D_TIMEZONE"), "UTC");
+        // The flag is set because the RK1 image generates locales; the check is
+        // meaningless on an image that generates none, where the archive is absent by
+        // design.
+        assert_eq!(env_of(&env, "B2D_LOCALES_GENERATED"), "1");
     }
 }

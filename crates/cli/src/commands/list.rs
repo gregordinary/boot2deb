@@ -178,7 +178,12 @@ fn kernel_fields(k: &boot2deb_core::model::KernelDef) -> (String, Option<String>
 
 /// `list-features`: the `--feature` override's valid values with their selection
 /// gates. An empty `requires_soc`/`requires_arch` imposes no constraint and renders
-/// as `any`; conflicts are the other selection-time gate.
+/// as `any`; conflicts and capabilities are the other selection-time gates.
+///
+/// The relations cell folds `conflicts=`, `provides=` and `needs=` into one column so
+/// the table keeps its shape. `provides` is the discovery path a rejected composition
+/// sends a user down — the error names the providers, and this is where they see what
+/// else each one carries.
 pub(crate) fn features(root: &ConfigRoot, json: bool) -> Result {
     let mut broken = Vec::new();
     let mut rows = Vec::new();
@@ -193,22 +198,29 @@ pub(crate) fn features(root: &ConfigRoot, json: bool) -> Result {
                     "requires_soc": socs,
                     "requires_arch": arches,
                     "conflicts": f.conflicts,
+                    "provides": f.provides,
+                    "requires_capability": f.requires_capability,
                     "description": f.description,
                 }));
             }
             Ok(f) => {
-                // The conflicts cell is empty rather than absent for a feature with
-                // none, so every row's description still lands in one column.
-                let conflicts = if f.conflicts.is_empty() {
-                    String::new()
-                } else {
-                    format!("conflicts={}", f.conflicts.join(","))
-                };
+                // The cell is empty rather than absent for a feature with no relations,
+                // so every row's description still lands in one column.
+                let relations = [
+                    ("conflicts", &f.conflicts),
+                    ("provides", &f.provides),
+                    ("needs", &f.requires_capability),
+                ]
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(label, v)| format!("{label}={}", v.join(",")))
+                .collect::<Vec<_>>()
+                .join(" ");
                 table.push(vec![
                     name,
                     format!("soc={}", constraint(&f.requires_soc)),
                     format!("arch={}", constraint(&f.requires_arch)),
-                    conflicts,
+                    relations,
                     f.description.clone(),
                 ]);
             }
@@ -337,6 +349,34 @@ mod tests {
                     "feature '{name}' requires_arch = {arch}, but there is no arches/{arch}.toml"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_feature_that_installs_nothing_states_what_it_configures() {
+        // A feature contributing no packages, no repository, no vendored `.deb`, no
+        // kconfig and no patch series installs nothing: everything it carries is
+        // configuration for software some *other* feature brings. Selected alone it
+        // seeds config files into an image with nothing to read them, which is the
+        // composition error `requires_capability` exists to reject — so a glue feature
+        // has to name what it configures rather than rely on nobody selecting it alone.
+        let root = repo_root();
+        for name in root.list("features").unwrap() {
+            let f = root.feature(&name).unwrap();
+            let installs = !f.packages.is_empty()
+                || !f.apt_sources.is_empty()
+                || !f.extra_debs.is_empty()
+                || !f.config_fragments.is_empty()
+                || !f.patch_series.is_empty()
+                || f.requires_media_accel;
+            if installs {
+                continue;
+            }
+            assert!(
+                !f.requires_capability.is_empty(),
+                "feature '{name}' installs nothing, so it only configures what another \
+                 feature brings — it must name that with requires_capability"
+            );
         }
     }
 }

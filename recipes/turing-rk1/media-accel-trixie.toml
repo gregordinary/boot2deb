@@ -5,15 +5,19 @@
 # suite-independent), over a trixie userland.
 # Constraints only; the exact resolution is written to the sibling .lock.
 device     = "turing-rk1"
-kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
+kernel     = "rk3588-mainline-7.2"       # omit -> device default_kernel
 suite      = "trixie"
-features   = ["media-accel-rockchip"]    # HW transcode userspace (MPP + RGA + ffmpeg-rk)
+# The same pair as the forky sibling: the HW transcode userspace (MPP + RGA +
+# ffmpeg-rk) and the GPU driver the Vulkan filter path needs. See that file for why
+# `vulkan` is a default on the bare-ffmpeg recipes.
+features   = ["media-accel-rockchip", "vulkan"]
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
 # The suite sibling of turing-rk1/media-accel-forky, re-assessed with it over the
-# v7.1.6 kernel; the media userspace is built from source and so suite-independent.
+# v7.2 kernel and over the added `vulkan` feature; the media userspace is built from
+# source and so suite-independent, and Mesa's Vulkan drivers come from each suite.
 [support]
 status = "expected"
-date   = "2026-08-04"
+date   = "2026-08-21"
 

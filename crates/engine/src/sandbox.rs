@@ -100,15 +100,13 @@ use boot2deb_core::provenance::{
     SandboxLandlockFs, SandboxLandlockNet, SandboxMount, SandboxPosture, SandboxProvenance,
     SandboxRlimit, SandboxStreams,
 };
-use ferroday_cage::provision::debian::BuildLayer;
-use ferroday_cage::provision::debian::{
-    Debian, DebianBuilder, DebianEvent, Plan, Repository, Stream as DebianStream,
-};
-use ferroday_cage::provision::{self, Provisioned};
+use ferroday_cage::provision::debian::{Debian, DebianBuilder, DebianEvent, Plan, Repository};
+use ferroday_cage::provision::{self, BuildLayer, Provisioned, Stream as DebianStream};
 use ferroday_cage::{
     Cage, IdentityMap, Network, Observer, ResolvedHardening, ResolvedIdentity, ResolvedMount,
     ResolvedRoot, ResolvedStdio, ResolvedStreams, Stdio,
 };
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
@@ -298,6 +296,16 @@ pub struct SandboxRun<'a> {
     pub argv: &'a [String],
     /// Human-readable description of the invocation, for errors.
     pub context: &'a str,
+    /// Where the lookup probe writes its verdict, or `None` to run the command
+    /// unwatched.
+    ///
+    /// A **host** path under one of `binds`, since the cage exposes binds at their own
+    /// absolute path and nothing else survives it. Set here rather than by rewriting
+    /// `argv` at the call site so that `argv` stays the command the build asked for:
+    /// the probe launches through `/bin/sh -c`, and an error naming its `argv[0]` would
+    /// report `/bin/sh` for every failed compile on an instrumented stage. What it
+    /// watches for, and why, is in the `build::probe` module.
+    pub probe: Option<&'a Path>,
 }
 
 /// A build root and the host paths a command in it must see — the pair every compile
@@ -376,8 +384,19 @@ impl BuildRoot {
     /// with writes landing in the increment. `spec`'s binds still expose host paths at
     /// their host path, so artifacts land back on the host rather than in the upper.
     pub fn run(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
-        let cage = build_cage(baseline_overlay(&self.base, self.layer.path()), spec)?;
+        let cage = build_cage(self.profile(), spec)?;
         run_cage(cage, spec, step)
+    }
+
+    /// The rooted profile a command in this build root launches under: the shared
+    /// [`baseline_overlay`] over this root's base and increment.
+    ///
+    /// Exposed so [`crate::shell`] composes the profile a compile ran under rather
+    /// than restating it — the overlay's two halves are this type's private fields,
+    /// and a second site naming them would be a second definition of what a build root
+    /// *is*.
+    pub(crate) fn profile(&self) -> ferroday_cage::CageBuilder {
+        baseline_overlay(&self.base, self.layer.path())
     }
 
     /// The increment's resolved plan: what this root holds over the base, sha256-pinned
@@ -476,6 +495,40 @@ struct SandboxBase {
     cache_dir: Option<PathBuf>,
 }
 
+/// What a sandbox is provisioned from: where its tree lives, which suite and
+/// architecture it is, which mirrors and keyring it resolves against, and where its
+/// downloads are cached.
+///
+/// A struct rather than six positional arguments because four of them are
+/// `String`/`Option<PathBuf>`-shaped: a transposed `suite`/`arch` pair would bootstrap a
+/// tree for a suite named `arm64`, and would compile. One value also states that the
+/// three sandbox kinds are provisioned from *the same* set of answers — only their role
+/// and their package set differ.
+pub struct SandboxSpec {
+    /// The tree's own directory, keyed by everything below it — the caller derives it
+    /// with [`build_sandbox_dir`] or [`packaging_root_dir`], which is what makes two
+    /// differently-configured sandboxes different directories.
+    pub rootfs: PathBuf,
+    /// Debian suite to bootstrap (e.g. `forky`).
+    pub suite: String,
+    /// Debian architecture to bootstrap: the *target's* for a build sandbox, the
+    /// *host's* for a cross or packaging root.
+    pub arch: String,
+    /// The build's own resolved mirror list, in order. Under `--snapshot pin` the
+    /// compiler and archiver have to come from the same point-in-time archive the
+    /// packages they produce do, so this is the build's list and not a fixed default.
+    /// Empty falls back to [`crate::DEFAULT_MIRROR`]: a caller that resolved no mirror
+    /// expressed no preference.
+    pub mirrors: Vec<String>,
+    /// Debian archive keyring verifying the suite's `Release` signature; `None` falls
+    /// back to the host apt trust store. A vendored keyring makes the bootstrap portable
+    /// to a non-Debian host.
+    pub keyring: Option<PathBuf>,
+    /// Content-addressed directory downloaded `.deb`s are cached in; `None` discards
+    /// them with the bootstrap.
+    pub cache_dir: Option<PathBuf>,
+}
+
 impl SandboxBase {
     /// A base rooted at `rootfs` for `suite`/`arch`, resolved from `mirrors` in order
     /// and verified with `keyring`.
@@ -483,25 +536,18 @@ impl SandboxBase {
     /// An empty `mirrors` falls back to [`crate::DEFAULT_MIRROR`] rather than failing:
     /// a caller that resolved no mirror expressed no preference. Every other argument
     /// is taken as given.
-    fn new(
-        rootfs: PathBuf,
-        suite: String,
-        arch: String,
-        mirrors: Vec<String>,
-        keyring: Option<PathBuf>,
-        cache_dir: Option<PathBuf>,
-    ) -> Self {
+    fn new(spec: SandboxSpec) -> Self {
         SandboxBase {
-            rootfs,
-            suite,
-            arch,
-            mirrors: if mirrors.is_empty() {
+            rootfs: spec.rootfs,
+            suite: spec.suite,
+            arch: spec.arch,
+            mirrors: if spec.mirrors.is_empty() {
                 vec![DEFAULT_MIRROR.to_string()]
             } else {
-                mirrors
+                spec.mirrors
             },
-            keyring,
-            cache_dir,
+            keyring: spec.keyring,
+            cache_dir: spec.cache_dir,
         }
     }
 
@@ -557,10 +603,10 @@ impl SandboxBase {
         for fallback in fallbacks {
             builder = builder.mirror_fallback(fallback);
         }
-        // A snapshot backstop's release is expired by design; accepting a
+        // A point-in-time archive's release is expired by design; accepting a
         // signed-but-stale release is a repository-wide posture, taken only when one
         // is in the list (as the rootfs node does).
-        if !fallbacks.is_empty() {
+        if crate::snapshot::has_snapshot(&self.mirrors) {
             builder = builder.allow_stale_release(true);
         }
         // A vendored keyring makes the bootstrap portable to a non-Debian host;
@@ -624,6 +670,7 @@ impl SandboxBase {
                 context: format!("configure the {} {} bootstrap", self.arch, self.suite),
                 message: source.to_string(),
             })?;
+        self.discard_if_the_archive_moved(&manifest, &mut debian, step)?;
         // The sink is bound for this one run rather than for the provisioner's life,
         // so its borrow of `step` and of `installed` ends when `ensure` returns.
         //
@@ -667,6 +714,76 @@ impl SandboxBase {
                 self.rootfs.display()
             ));
         }
+        Ok(())
+    }
+
+    /// Discard a published base the archive has moved past, so the bootstrap that
+    /// follows re-provisions it. A no-op when no base stands, and when the one that
+    /// stands is still what the archive would give.
+    ///
+    /// **Why the tree's name cannot answer this.** A base is keyed by
+    /// [`build_sandbox_dir`] on the inputs that *request* it — mirrors, package set,
+    /// recipe version — and those are the same before and after an archive moves. Two
+    /// bootstraps months apart therefore land on one directory carrying different
+    /// libraries, and a reuse cannot tell them apart by inspection. Keying on what the
+    /// bootstrap resolved is not available at the point the path is chosen: the
+    /// resolution is the bootstrap's own output. So the check is made where the answer
+    /// exists — against a resolve, on reuse.
+    ///
+    /// The predicate is the *solved set*, not the archive's `Release` date. A suite's
+    /// `Release` is republished several times a day and almost never touches the
+    /// handful of packages a base holds, so expiring on it would re-bootstrap for
+    /// nothing; the manifest states exactly which packages the tree holds, and
+    /// [`diverged`](crate::manifest::diverged) asks about exactly those. Under
+    /// `--snapshot pin` the archive does not move at all, so this never fires.
+    ///
+    /// The cost is one resolve — indices, no downloads — on the reuse path, and it is
+    /// paid only where a base already stands. A build that bootstraps fresh, or that
+    /// discarded an unrecordable base just above, resolves once as it always has. This
+    /// is the same trade [`rootcache`](crate::rootcache) takes for the image rootfs,
+    /// where a solve is seconds against a bootstrap's minutes.
+    ///
+    /// Divergence is not an error. The base's manifest is a record, not a contract —
+    /// only the *image* rootfs manifest is pinned in a lock and verified
+    /// ([`verify_reproduced`](crate::manifest::verify_reproduced)) — so the right
+    /// answer to a moved archive is to re-provision and say what moved, not to stop.
+    fn discard_if_the_archive_moved(
+        &self,
+        manifest: &Path,
+        debian: &mut Debian<'_>,
+        step: &Step,
+    ) -> Result<(), EngineError> {
+        if !self.rootfs.is_dir() || !manifest.is_file() {
+            return Ok(());
+        }
+        let plan = debian.resolve().map_err(|source| EngineError::Bootstrap {
+            context: format!(
+                "resolve the {} {} base to check it against the archive",
+                self.arch, self.suite
+            ),
+            message: source.to_string(),
+        })?;
+        let moved = crate::manifest::diverged(manifest, &crate::manifest::packages(&plan))?;
+        if moved.is_empty() {
+            return Ok(());
+        }
+        // Every package that moved, not the first: an archive step usually moves a
+        // library and everything built against it at once, and the shape of the whole
+        // list is what identifies it as an archive step rather than one odd package.
+        step.log(format!(
+            "the archive has moved past the {} rootfs at {}: {} package(s) resolve differently now, so it is being re-provisioned:",
+            self.arch,
+            self.rootfs.display(),
+            moved.len()
+        ));
+        for m in &moved {
+            step.log(format!("  {}", m.describe()));
+        }
+        reclaim_tree(&self.rootfs)?;
+        // The manifest goes with the tree it describes, for the reason
+        // `discard_unrecordable_base` refuses a tree without one: a record standing
+        // beside no rootfs would be adopted by the fresh bootstrap's own reuse check.
+        std::fs::remove_file(manifest).map_err(|s| EngineError::io(manifest, s))?;
         Ok(())
     }
 }
@@ -730,27 +847,10 @@ impl RootlessSandbox {
     /// the bootstrap. `uppers_dir` is where each stage's overlay upper is created, and
     /// must be [`build_root_uppers`] of the build's work dir — the directory
     /// [`overlay_check`](crate::checks::overlay_check) probes.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        role: SandboxRole,
-        rootfs: PathBuf,
-        uppers_dir: PathBuf,
-        suite: impl Into<String>,
-        arch: impl Into<String>,
-        mirrors: Vec<String>,
-        keyring: Option<PathBuf>,
-        cache_dir: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(role: SandboxRole, spec: SandboxSpec, uppers_dir: PathBuf) -> Self {
         RootlessSandbox {
             role,
-            base: SandboxBase::new(
-                rootfs,
-                suite.into(),
-                arch.into(),
-                mirrors,
-                keyring,
-                cache_dir,
-            ),
+            base: SandboxBase::new(spec),
             uppers_dir,
         }
     }
@@ -849,6 +949,12 @@ impl BuildSandbox for RootlessSandbox {
                 context: format!("stage the {} build root at {}", spec.stage, upper.display()),
                 message: source.to_string(),
             })?;
+        // The staged tree is checked against its own declared dependencies before any
+        // compile runs in it. `stage_layer` installs what the resolver chose, and the
+        // resolver reads the base's already-installed set — so a base older than the
+        // archive the layer resolved from can leave a dependency unmet with nothing
+        // said. See [`check_layer_coherent`].
+        check_layer_coherent(spec.stage, &upper)?;
         // Every path into `stage_layer` resolves before it stages, so a staged layer
         // always reported its plan — including the empty-delta case, whose plan is
         // legitimately empty because the base already carried everything asked for.
@@ -918,23 +1024,9 @@ impl PackagingSandbox {
     /// the `.deb`s has to come from the same point-in-time archive their contents do.
     /// `cache_dir` is where downloaded `.deb`s are cached; `None` discards them with the
     /// bootstrap.
-    pub fn new(
-        rootfs: PathBuf,
-        suite: impl Into<String>,
-        arch: impl Into<String>,
-        mirrors: Vec<String>,
-        keyring: Option<PathBuf>,
-        cache_dir: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(spec: SandboxSpec) -> Self {
         PackagingSandbox {
-            base: SandboxBase::new(
-                rootfs,
-                suite.into(),
-                arch.into(),
-                mirrors,
-                keyring,
-                cache_dir,
-            ),
+            base: SandboxBase::new(spec),
         }
     }
 
@@ -975,8 +1067,16 @@ impl PackagingSandbox {
     ///
     /// Requires [`ensure_ready`](Self::ensure_ready) to have published the root.
     pub fn run(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
-        let cage = build_cage(baseline(&self.base.rootfs), spec)?;
+        let cage = build_cage(self.profile(), spec)?;
         run_cage(cage, spec, step)
+    }
+
+    /// The rooted profile a packaging command launches under: the shared [`baseline`]
+    /// over this root, with no overlay because this root is never layered.
+    ///
+    /// Exposed for the same reason [`BuildRoot::profile`] is — see there.
+    pub(crate) fn profile(&self) -> ferroday_cage::CageBuilder {
+        baseline(&self.base.rootfs)
     }
 }
 
@@ -996,16 +1096,28 @@ impl PackagingSandbox {
 /// land back on the host.
 ///
 /// Takes the rooted profile rather than a root path, leaving "which root is this" with
-/// the caller that knows the answer.
-fn build_cage(profile: ferroday_cage::CageBuilder, spec: &SandboxRun) -> Result<Cage, EngineError> {
+/// the caller that knows the answer — and letting [`crate::shell`] hand in the same
+/// profile with its standard input reset, which is the one thing an interactive session
+/// changes.
+pub(crate) fn build_cage(
+    profile: ferroday_cage::CageBuilder,
+    spec: &SandboxRun,
+) -> Result<Cage, EngineError> {
     if spec.argv.is_empty() {
         return Err(EngineError::EmptyArgv {
             context: spec.context.to_string(),
         });
     }
+    // The instrumented form, if this run asked for one. It is applied here and not at
+    // the call site so `spec.argv` — what the failure message and the event stream name
+    // — stays the command the build asked for rather than the wrapper carrying it.
+    let launched = match spec.probe {
+        Some(report) => Cow::Owned(crate::build::probe::wrap(spec.argv, report)),
+        None => Cow::Borrowed(spec.argv),
+    };
     let mut builder = profile
-        .command(&spec.argv[0])
-        .args(&spec.argv[1..])
+        .command(&launched[0])
+        .args(&launched[1..])
         .current_dir(spec.work);
     for (key, value) in spec.env {
         builder = builder.env(key, value);
@@ -1042,6 +1154,27 @@ fn run_cage(cage: Cage, spec: &SandboxRun, step: &Step) -> Result<(), EngineErro
     }
 }
 
+/// Remove a tree the sandbox wrote, whatever it holds — the single route by which a
+/// build's scratch is always removable.
+///
+/// A plain `remove_dir_all` runs as the caller and fails on two things the sandbox
+/// routinely leaves behind: an unprivileged overlay's work area, which the kernel
+/// leaves as a mode-`0` directory nothing can descend into, and any subtree a
+/// subordinate id-map owns, whose files belong to subuids outside the caller's own.
+/// [`provision::remove`] re-enters the map and handles both, and is idempotent on a
+/// missing path and correct on a non-directory — so callers need not distinguish the
+/// cases.
+///
+/// A caller that must not fail on a stale tree — discarding a build root's previous
+/// increment before staging a fresh one — drops the result; `clean`, whose whole
+/// purpose is the removal, reports it.
+pub fn reclaim_tree(path: &Path) -> Result<(), EngineError> {
+    provision::remove(path).map_err(|source| EngineError::Bootstrap {
+        context: format!("remove {}", path.display()),
+        message: source.to_string(),
+    })
+}
+
 /// Reclaim a stage's build-root directory — its overlay upper and the work area beside
 /// it — before a fresh layer is staged into it.
 ///
@@ -1049,14 +1182,9 @@ fn run_cage(cage: Cage, spec: &SandboxRun, step: &Step) -> Result<(), EngineErro
 /// disposable by construction, so the only thing a failure costs is the disk the stale
 /// increment occupies, and the fresh `stage_layer` that follows reports any real problem
 /// with the directory.
-///
-/// Through [`provision::remove`] rather than a plain recursive delete, because an
-/// overlay leaves a mode-`0` directory in its work area that a plain delete cannot
-/// descend into. This is the same public route [`BuildLayer`]'s own drop documents for a
-/// caller that wants the removal to happen at a point it chooses.
 fn discard_upper(stage_dir: &Path) {
     if stage_dir.exists() {
-        let _ = provision::remove(stage_dir);
+        let _ = reclaim_tree(stage_dir);
     }
 }
 
@@ -1082,6 +1210,51 @@ fn discard_unrecordable_base(rootfs: &Path, manifest: &Path) -> Result<bool, Eng
     }
     std::fs::remove_dir_all(rootfs).map_err(|source| EngineError::io(rootfs, source))?;
     Ok(true)
+}
+
+/// Fail if the staged root does not satisfy its own declared dependencies.
+///
+/// `dpkg` rewrites the whole status database when it installs into the overlay, so the
+/// upper carries the *merged* view — the base's packages and the layer's together —
+/// and one read of it describes the tree a compile will actually see.
+///
+/// The unmet set is reported in full rather than truncated to the first: a skew
+/// between archive states usually breaks several packages at once, and the shape of
+/// the whole list is what identifies it as a skew rather than one bad package.
+///
+/// A missing status file is not an error. A layer that installed nothing never
+/// triggers a copy-up of the database, and a tree that never staged has nothing to be
+/// incoherent about; both are the empty-delta case the caller already allows.
+///
+/// Split out of [`BuildSandbox::stage_layer`] so the condition is exercised against a
+/// hand-written status database, with no bootstrap and no archive to skew.
+fn check_layer_coherent(stage: &str, upper: &Path) -> Result<(), EngineError> {
+    let status = upper.join("var/lib/dpkg/status");
+    let Ok(text) = std::fs::read_to_string(&status) else {
+        return Ok(());
+    };
+    let packages = boot2deb_core::debdep::parse_status(&text);
+    let unmet = boot2deb_core::debdep::unsatisfied(&packages);
+    if unmet.is_empty() {
+        return Ok(());
+    }
+    let unmet = unmet
+        .iter()
+        .map(|u| {
+            let have = match &u.installed {
+                Some(v) => format!("installed {v}"),
+                None => "not installed".to_string(),
+            };
+            format!(
+                "  {} {} requires `{}` — {have}",
+                u.package, u.package_version, u.required
+            )
+        })
+        .collect();
+    Err(EngineError::LayerIncoherent {
+        stage: stage.to_string(),
+        unmet,
+    })
 }
 
 /// The sandbox profile **every** boot2deb cage runs under, over `rootfs`: the package
@@ -1296,6 +1469,66 @@ fn base_tree_name<S: AsRef<str>>(
 /// `/tmp` for exactly that reason.
 pub fn build_root_uppers(work_dir: &Path) -> PathBuf {
     work_dir.join("sandbox").join("layers")
+}
+
+/// Does `name` belong to the packaging root — its tree, or one of the files beside it?
+///
+/// The grammar is [`base_tree_name`]'s, where the role token is followed by `-`.
+/// Requiring the separator is what keeps a name that merely starts with the same
+/// letters from being read as the packaging root and silently spared by
+/// [`build_root_trees`].
+fn is_packaging_root(name: &str) -> bool {
+    name.strip_prefix(PACKAGING_ROLE)
+        .is_some_and(|rest| rest.starts_with('-'))
+}
+
+/// Everything under `work_dir`'s sandbox directory **except the packaging root**: the
+/// provisioned build roots, the files that record what each was bootstrapped with, and
+/// the overlay uppers staged over them.
+///
+/// This is the set that has to go for the build roots to be provisioned again against
+/// the archive as it stands now. A base's cache key covers the mirrors, the package set
+/// and the recipe version — not the versions those resolved to — so nothing invalidates
+/// a tree when the archive moves underneath it, and an aged base is indistinguishable
+/// from a current one by inspection.
+///
+/// The cut follows the split the types already make. A build root is layered
+/// ([`RootlessSandbox`]), and the layer resolves against the archive as it stands when
+/// the build runs, so a base older than that leaves a declared dependency unmet, which
+/// is raised as [`crate::EngineError::LayerIncoherent`] the moment the layer is staged.
+/// The packaging root is [never layered](PackagingSandbox) and installs nothing after
+/// its bootstrap, so it has no skew to hit and dropping it would cost a bootstrap that
+/// nothing asked for.
+///
+/// Selected by leaf name rather than by resolving a recipe, because the trees that have
+/// to go include the ones whose digest no longer matches any base this config would
+/// provision — an aged tree is exactly the one a resolve would not name. The `.lock`
+/// and `.pkgs` siblings carry the tree's own leaf name and so come along with it.
+///
+/// A name this cannot read as text is left out. Every tree here is named
+/// `<role>-<arch>-<suite>-<digest>` and so is ASCII, which makes an unreadable name
+/// something else entirely — and the caller deletes what this returns, so the safe
+/// answer to "what is that" is to leave it standing.
+///
+/// Every path returned exists. They are sorted, since `read_dir` yields whatever order
+/// the filesystem holds and a preview should list the same paths the same way twice. A
+/// work dir with no sandbox directory yields none.
+pub fn build_root_trees(work_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(work_dir.join("sandbox")) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| !is_packaging_root(name))
+        })
+        .map(|entry| entry.path())
+        .collect();
+    found.sort();
+    found
 }
 
 /// The sandbox profile as provenance data: the posture it launches under, the declared
@@ -1612,6 +1845,18 @@ pub(crate) fn forward_bootstrap_event(step: &Step, event: DebianEvent<'_>) {
             ..
         } => step.log(format!("downloading {package} ({index}/{total})")),
         DebianEvent::Extracting { package, .. } => step.log(format!("extracting {package}")),
+        // One line per dependency the resolution could not satisfy. A resolve reports
+        // every refusal before it fails, so the log carries the whole list a user has to
+        // correct rather than the first item of it — and it carries it on the way past,
+        // where a reader is already looking, instead of only inside the error.
+        DebianEvent::Unsatisfiable {
+            requirement,
+            required_by,
+            reason,
+            ..
+        } => step.log(format!(
+            "unsatisfiable: {required_by} requires {requirement}, and {reason}"
+        )),
         DebianEvent::CommandOutput { stream, bytes, .. } => {
             let text = String::from_utf8_lossy(bytes);
             let text = text.trim_end_matches(['\n', '\r']);
@@ -1768,16 +2013,16 @@ pub(crate) fn packaging_root_for_tests(step: &Step) -> Option<PackagingSandbox> 
     // configuration rather than a stand-in.
     let (suite, mirrors) = ("forky", vec![DEFAULT_MIRROR.to_string()]);
     let arch = boot2deb_core::HostInfo::detect().debian_arch()?;
-    let root = PackagingSandbox::new(
-        packaging_root_dir(&work, arch, suite, &mirrors),
-        suite,
-        arch,
+    let root = PackagingSandbox::new(SandboxSpec {
+        rootfs: packaging_root_dir(&work, arch, suite, &mirrors),
+        suite: suite.to_string(),
+        arch: arch.to_string(),
         mirrors,
         // No keyring: the provisioner falls back to its own embedded Debian archive
         // keyring, so the tests need no vendored blob resolved from the config root.
-        None,
-        Some(work.join("cache")),
-    );
+        keyring: None,
+        cache_dir: Some(work.join("cache")),
+    });
     // A poisoned lock means another test panicked mid-bootstrap; the tree it left is
     // still either published or absent, and `ensure_ready` handles both.
     let _guard = PROVISIONING.lock().unwrap_or_else(|e| e.into_inner());
@@ -1788,6 +2033,137 @@ pub(crate) fn packaging_root_for_tests(step: &Step) -> Option<PackagingSandbox> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The live proof that a base the archive moved past is not reused.**
+    ///
+    /// Everything the gate does happens for real here: a real bootstrap publishes a
+    /// real base, a real resolve runs against the real archive, and the comparison,
+    /// the reclaim and the re-provision are the production code path
+    /// ([`SandboxBase::discard_if_the_archive_moved`]) with nothing stubbed.
+    ///
+    /// What is simulated is only the *cause*. Waiting for Debian to move a package
+    /// would make the test unrunnable on demand, so the divergence is created by
+    /// rewriting the manifest the published tree carries. That substitution is exact:
+    /// the manifest is the **only** record of what a tree holds, so a tree whose
+    /// manifest disagrees with the archive is indistinguishable — to this code and to
+    /// an operator — from one the archive genuinely moved past. That indistinguishability
+    /// is the defect being fixed.
+    ///
+    /// Both directions are asserted, and the second is the one that decides the design.
+    /// A gate that fired whenever anything about the archive changed — expiring on the
+    /// suite's `Release` date, say — would pass the first assertion and fail this one,
+    /// re-bootstrapping on every run for nothing.
+    ///
+    /// The packaging root is the vehicle because it is the cheapest real base: host-arch
+    /// (no `qemu-user`) and two packages. It runs the identical [`SandboxBase::ensure`]
+    /// as the multi-hundred-package compile roots.
+    #[test]
+    #[ignore = "bootstraps a real Debian root: needs network and a few minutes"]
+    fn a_base_the_archive_moved_past_is_re_provisioned_and_a_current_one_is_not() {
+        use std::cell::RefCell;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let arch = boot2deb_core::host::HostInfo::detect()
+            .debian_arch()
+            .expect("a host this test can provision a native root for");
+        let (suite, mirrors) = ("forky", vec![DEFAULT_MIRROR.to_string()]);
+        let rootfs = packaging_root_dir(tmp.path(), arch, suite, &mirrors);
+
+        let logs = RefCell::new(Vec::new());
+        let sink = |e: crate::event::Event| {
+            if let crate::event::Event::Log { line, .. } = e {
+                logs.borrow_mut().push(line);
+            }
+        };
+        let sandbox = || {
+            PackagingSandbox::new(SandboxSpec {
+                rootfs: rootfs.clone(),
+                suite: suite.to_string(),
+                arch: arch.to_string(),
+                mirrors: mirrors.clone(),
+                keyring: None,
+                cache_dir: Some(tmp.path().join("debs")),
+            })
+        };
+
+        // 1. Publish a base, and keep what the bootstrap actually resolved.
+        let step = Step::start(&sink, "publish");
+        sandbox()
+            .ensure_ready(&step)
+            .expect("bootstrap a packaging root");
+        let manifest = sandbox()
+            .base_manifest()
+            .expect("a published base records itself");
+        let truth = std::fs::read_to_string(&manifest).unwrap();
+        assert!(
+            truth.contains("dpkg "),
+            "the base carries dpkg:
+{truth}"
+        );
+
+        // 2. Reuse it untouched. The archive has not moved, so nothing may be discarded —
+        //    the tree must survive, and no divergence may be reported.
+        logs.borrow_mut().clear();
+        let marker = rootfs.join("var/lib/dpkg/status");
+        let before = std::fs::metadata(&marker).unwrap().modified().unwrap();
+        sandbox().ensure_ready(&step).expect("reuse a current base");
+        assert_eq!(
+            std::fs::metadata(&marker).unwrap().modified().unwrap(),
+            before,
+            "a base the archive still agrees with was re-provisioned; the gate is              firing on something other than the solved set"
+        );
+        assert!(
+            !logs
+                .borrow()
+                .iter()
+                .any(|l| l.contains("the archive has moved past")),
+            "a current base reported divergence: {:?}",
+            logs.borrow()
+        );
+
+        // 3. Make the published tree claim a package set the archive would not give —
+        //    the 2026-08-07-vs-2026-08-22 case, where one directory name carried two
+        //    different libc6 and nothing could tell them apart.
+        let staled = truth
+            .lines()
+            .map(|l| match l.split_once(' ') {
+                Some(("dpkg", rest)) => {
+                    let mut f = rest.splitn(3, ' ');
+                    format!(
+                        "dpkg 0.0.0-stale {} {}",
+                        f.nth(1).unwrap(),
+                        f.next().unwrap()
+                    )
+                }
+                _ => l.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&manifest, format!("{staled}\n")).unwrap();
+
+        // 4. Reuse it again. The gate must discard the tree, say which package moved,
+        //    and re-provision — leaving the manifest back at what the archive resolves.
+        logs.borrow_mut().clear();
+        sandbox()
+            .ensure_ready(&step)
+            .expect("re-provision a stale base");
+        step.finish();
+
+        let said = logs.borrow().join("\n");
+        assert!(
+            said.contains("the archive has moved past"),
+            "the stale base was reused without a word:\n{said}"
+        );
+        assert!(
+            said.contains("dpkg:") && said.contains("0.0.0-stale"),
+            "the report did not name the package that moved:\n{said}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            truth,
+            "the re-provisioned base did not come back at what the archive resolves"
+        );
+    }
 
     /// A layered build root's environment, managed mounts and launch posture are a plain
     /// rootfs's, exactly — the two rooting modes differ in the root and in nothing else.
@@ -2009,6 +2385,7 @@ mod tests {
             env: &[],
             argv: &[],
             context: "a spec with no program",
+            probe: None,
         };
         // Fails on the empty argv, not on the bogus root — the check runs first.
         match build_cage(baseline(Path::new("/nonexistent")), &spec).unwrap_err() {
@@ -2059,13 +2436,15 @@ mod tests {
         let sandbox = |role, arch: &str| {
             RootlessSandbox::new(
                 role,
-                PathBuf::from("/w/rootfs"),
+                SandboxSpec {
+                    rootfs: PathBuf::from("/w/rootfs"),
+                    suite: "forky".into(),
+                    arch: arch.into(),
+                    mirrors: vec![DEFAULT_MIRROR.to_string()],
+                    keyring: None,
+                    cache_dir: None,
+                },
                 PathBuf::from("/w/sandbox/layers"),
-                "forky",
-                arch,
-                vec![DEFAULT_MIRROR.to_string()],
-                None,
-                None,
             )
         };
         assert_eq!(
@@ -2089,19 +2468,21 @@ mod tests {
         let sb = |arch: &str, suite: &str| {
             RootlessSandbox::new(
                 SandboxRole::Target,
-                build_sandbox_dir(
-                    work,
-                    SandboxRole::Target,
-                    arch,
-                    suite,
-                    &[DEFAULT_MIRROR.to_string()],
-                ),
+                SandboxSpec {
+                    rootfs: build_sandbox_dir(
+                        work,
+                        SandboxRole::Target,
+                        arch,
+                        suite,
+                        &[DEFAULT_MIRROR.to_string()],
+                    ),
+                    suite: suite.into(),
+                    arch: arch.into(),
+                    mirrors: vec![DEFAULT_MIRROR.to_string()],
+                    keyring: None,
+                    cache_dir: None,
+                },
                 PathBuf::from("/w/sandbox/layers"),
-                suite,
-                arch,
-                vec![DEFAULT_MIRROR.to_string()],
-                None,
-                None,
             )
         };
         let arm64 = sb("arm64", "forky");
@@ -2132,13 +2513,15 @@ mod tests {
         std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
         let sb = RootlessSandbox::new(
             SandboxRole::Target,
-            rootfs.clone(),
+            SandboxSpec {
+                rootfs: rootfs.clone(),
+                suite: "forky".into(),
+                arch: "arm64".into(),
+                mirrors: vec![DEFAULT_MIRROR.to_string()],
+                keyring: None,
+                cache_dir: None,
+            },
             PathBuf::from("/w/sandbox/layers"),
-            "forky",
-            "arm64",
-            vec![DEFAULT_MIRROR.to_string()],
-            None,
-            None,
         );
         let manifest = sb.base.manifest_path();
         assert_eq!(sb.base_manifest(), None);
@@ -2165,6 +2548,133 @@ mod tests {
         assert!(!discard_unrecordable_base(&rootfs, &manifest).unwrap());
     }
 
+    /// Writes a dpkg status database into a throwaway upper and returns its root.
+    fn upper_with_status(body: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("var/lib/dpkg");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("status"), body).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn a_layer_that_staged_nothing_is_not_incoherent() {
+        // The empty-delta case: no install, so no copy-up of the database.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(check_layer_coherent("ffmpeg", tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn a_build_root_sweep_takes_every_root_but_the_packaging_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path();
+        let sandbox = work.join("sandbox");
+        // Both build roles, with the `.lock` and `.pkgs` siblings a bootstrap leaves
+        // beside each; the packaging root with its own; and the uppers directory.
+        for role in [SandboxRole::Target, SandboxRole::Cross { target: "arm64" }] {
+            let leaf = format!("{}-arm64-forky-0123456789ab", role.token());
+            std::fs::create_dir_all(sandbox.join(&leaf)).unwrap();
+            std::fs::write(sandbox.join(format!("{leaf}.lock")), "").unwrap();
+            std::fs::write(sandbox.join(format!("{leaf}.pkgs")), "").unwrap();
+        }
+        let packaging = format!("{PACKAGING_ROLE}-amd64-forky-ba9876543210");
+        std::fs::create_dir_all(sandbox.join(&packaging)).unwrap();
+        std::fs::write(sandbox.join(format!("{packaging}.lock")), "").unwrap();
+        std::fs::create_dir_all(build_root_uppers(work)).unwrap();
+
+        let swept: Vec<String> = build_root_trees(work)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            swept,
+            [
+                "build-arm64-forky-0123456789ab",
+                "build-arm64-forky-0123456789ab.lock",
+                "build-arm64-forky-0123456789ab.pkgs",
+                "cross-arm64-forky-0123456789ab",
+                "cross-arm64-forky-0123456789ab.lock",
+                "cross-arm64-forky-0123456789ab.pkgs",
+                "layers",
+            ],
+            "the packaging root and its siblings are the only trees spared"
+        );
+    }
+
+    #[test]
+    fn a_build_root_sweep_of_a_work_dir_with_no_sandbox_is_empty() {
+        // `clean` reports each absent target rather than failing, so an unbuilt recipe
+        // has to yield no targets rather than an error.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(build_root_trees(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn only_the_packaging_token_with_its_separator_is_read_as_the_packaging_root() {
+        assert!(is_packaging_root("package-amd64-forky-ba9876543210"));
+        assert!(is_packaging_root("package-amd64-forky-ba9876543210.pkgs"));
+        // Neither build role's token is the packaging one, so neither is ever spared.
+        for role in [SandboxRole::Target, SandboxRole::Cross { target: "arm64" }] {
+            assert!(!is_packaging_root(&format!(
+                "{}-arm64-forky-0",
+                role.token()
+            )));
+        }
+        // The separator is load-bearing: without it a longer name sharing the token's
+        // letters would be spared, and a build root would survive the sweep.
+        assert!(!is_packaging_root("packages"));
+        assert!(!is_packaging_root("package"));
+    }
+
+    #[test]
+    fn a_coherent_staged_tree_passes() {
+        let body = [
+            "Package: thing",
+            "Status: install ok installed",
+            "Version: 1",
+            "Depends: libc6 (>= 2.0)",
+            "",
+            "Package: libc6",
+            "Status: install ok installed",
+            "Version: 2.43-1",
+            "",
+        ]
+        .join("\n");
+        let tmp = upper_with_status(&body);
+        assert!(check_layer_coherent("ffmpeg", tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn an_archive_skew_is_named_with_both_versions() {
+        // The real failure this exists for: the layer's glib wants a libc the cached
+        // base does not carry, and the compile that follows blames something else.
+        let body = [
+            "Package: libglib2.0-0t64",
+            "Status: install ok installed",
+            "Version: 2.88.3-3",
+            "Depends: libc6 (>= 2.43)",
+            "",
+            "Package: libc6",
+            "Status: install ok installed",
+            "Version: 2.42-17",
+            "",
+        ]
+        .join("\n");
+        let tmp = upper_with_status(&body);
+        let err = check_layer_coherent("ffmpeg", tmp.path()).unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("libglib2.0-0t64"), "{rendered}");
+        assert!(rendered.contains("libc6 (>= 2.43)"), "{rendered}");
+        assert!(rendered.contains("2.42-17"), "{rendered}");
+        assert!(rendered.contains("ffmpeg"), "names the stage: {rendered}");
+        // The remedy is a command, and naming it is the whole difference between an
+        // error a reader can act on and one that sends them looking for the directory.
+        assert!(
+            rendered.contains("clean RECIPE --build-roots"),
+            "names the command that clears it: {rendered}"
+        );
+    }
+
     /// The sandbox bootstraps from the build's mirror list, not a fixed default.
     ///
     /// Under `--snapshot pin` the rootfs node fetches the image's userland from a
@@ -2178,13 +2688,15 @@ mod tests {
         let sb = |mirrors: Vec<String>| {
             RootlessSandbox::new(
                 SandboxRole::Target,
-                PathBuf::from("/w/rootfs"),
+                SandboxSpec {
+                    rootfs: PathBuf::from("/w/rootfs"),
+                    suite: "forky".into(),
+                    arch: "arm64".into(),
+                    mirrors,
+                    keyring: None,
+                    cache_dir: None,
+                },
                 PathBuf::from("/w/sandbox/layers"),
-                "forky",
-                "arm64",
-                mirrors,
-                None,
-                None,
             )
         };
         assert_eq!(sb(vec![snapshot.to_string()]).base.mirrors, vec![snapshot]);

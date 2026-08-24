@@ -64,6 +64,19 @@ pub struct ConfigInputs<'a> {
     pub cr: &'a CompileRoot<'a>,
 }
 
+impl<'a> ConfigInputs<'a> {
+    /// The [`Kbuild`] context these inputs describe — the four values every `make` in
+    /// this module runs under, as one value.
+    pub fn kbuild(&self) -> Kbuild<'a> {
+        Kbuild {
+            tree: self.tree,
+            arch: self.arch,
+            cross_compile: self.cross_compile,
+            cr: self.cr,
+        }
+    }
+}
+
 /// The result of merging fragments onto a base defconfig.
 pub struct Generated {
     /// The dependency-resolved `.config`.
@@ -104,27 +117,10 @@ pub fn generate(
 ) -> Result<Generated, EngineError> {
     let out = prepare_out(out_dir)?;
     // Base: `make <base_defconfig>` writes out/.config.
-    make_target(
-        inputs.tree,
-        &out,
-        inputs.arch,
-        inputs.cross_compile,
-        inputs.base_defconfig,
-        inputs.cr,
-        step,
-    )?;
+    make_target(inputs.kbuild(), &out, inputs.base_defconfig, step)?;
     let dot_config = out.join(".config");
     // Layer fragments with the tree's merge_config.sh (runs alldefconfig).
-    run_merge_config(
-        inputs.tree,
-        &out,
-        inputs.arch,
-        inputs.cross_compile,
-        &dot_config,
-        inputs.fragments,
-        inputs.cr,
-        step,
-    )?;
+    run_merge_config(inputs.kbuild(), &out, &dot_config, inputs.fragments, step)?;
     let config = KernelConfig::parse(&read_config(&dot_config)?);
     // Clean-merge check computed against our fragments directly (not scraped from
     // merge_config, whose own check also flags base-defconfig toolchain symbols).
@@ -138,12 +134,9 @@ pub fn generate(
 /// the reference build compiles. Run on the same tree + toolchain as [`generate`]
 /// so toolchain-probed symbols match.
 pub fn effective_reference(
-    tree: &Path,
-    arch: &str,
-    cross_compile: Option<&str>,
+    kb: Kbuild,
     reference_config: &Path,
     out_dir: &Path,
-    cr: &CompileRoot,
     step: &Step,
 ) -> Result<KernelConfig, EngineError> {
     let out = prepare_out(out_dir)?;
@@ -152,7 +145,7 @@ pub fn effective_reference(
         path: format!("{} -> {}", reference_config.display(), dot_config.display()),
         source,
     })?;
-    make_target(tree, &out, arch, cross_compile, "olddefconfig", cr, step)?;
+    make_target(kb, &out, "olddefconfig", step)?;
     let text = read_config(&dot_config)?;
     Ok(KernelConfig::parse(&text))
 }
@@ -169,12 +162,9 @@ pub fn check_parity(
 ) -> Result<ParityReport, EngineError> {
     let generated = generate(inputs, &work_dir.join("gen"), step)?;
     let reference = effective_reference(
-        inputs.tree,
-        inputs.arch,
-        inputs.cross_compile,
+        inputs.kbuild(),
         reference_config,
         &work_dir.join("reference"),
-        inputs.cr,
         step,
     )?;
     Ok(ParityReport {
@@ -192,21 +182,41 @@ fn prepare_out(dir: &Path) -> Result<PathBuf, EngineError> {
     std::fs::canonicalize(dir).map_err(|source| EngineError::io(dir, source))
 }
 
+/// The kbuild invocation context every `make` in this module runs under: which tree,
+/// for which architecture, with which toolchain prefix, in which build root.
+///
+/// A struct rather than four positional arguments because three of them are
+/// `&str`/`Option<&str>`-shaped and one is a path: a swapped pair would configure a
+/// kernel for the wrong architecture, or probe `cc-option` against the wrong compiler,
+/// and would compile. It also states the contract the module's doc explains — that
+/// generating a `.config` and building the kernel must happen in *one* context, or the
+/// toolchain-probed symbols come out different.
+#[derive(Clone, Copy)]
+pub struct Kbuild<'a> {
+    /// A checkout of the pinned kernel at the locked ref, patches applied. Out-of-tree
+    /// (`O=`) builds leave it untouched.
+    pub tree: &'a Path,
+    /// `ARCH=` for kbuild (e.g. `arm64`).
+    pub arch: &'a str,
+    /// `CROSS_COMPILE=` prefix, or `None` on a native build.
+    pub cross_compile: Option<&'a str>,
+    /// The build root the `make` runs in.
+    pub cr: &'a CompileRoot<'a>,
+}
+
 /// Run `make -C <tree> O=<out> ARCH=<arch> [CROSS_COMPILE=<prefix>] -- <target>` for
 /// a config target, streaming its output to `step` like every other subprocess stage.
 /// `CROSS_COMPILE` is passed as a `make` variable (matching the compile
 /// stage), so the config's `cc-option` probes see the target toolchain. The target
 /// is validated and passed after `--` so a config-derived defconfig cannot be read
 /// as an option or a variable assignment.
-fn make_target(
-    tree: &Path,
-    out: &Path,
-    arch: &str,
-    cross_compile: Option<&str>,
-    target: &str,
-    cr: &CompileRoot,
-    step: &Step,
-) -> Result<(), EngineError> {
+fn make_target(kb: Kbuild, out: &Path, target: &str, step: &Step) -> Result<(), EngineError> {
+    let Kbuild {
+        tree,
+        arch,
+        cross_compile,
+        cr,
+    } = kb;
     crate::build::reject_unsafe_make_target("make target", target)?;
     let context = format!("make {target} for {}", tree.display());
     let mut argv = vec![
@@ -228,17 +238,19 @@ fn make_target(
 /// layer the fragments onto the base and dependency-resolve (via
 /// `make KCONFIG_ALLCONFIG=<merged> alldefconfig`, which the script invokes),
 /// streaming its output to `step`.
-#[allow(clippy::too_many_arguments)]
 fn run_merge_config(
-    tree: &Path,
+    kb: Kbuild,
     out: &Path,
-    arch: &str,
-    cross_compile: Option<&str>,
     base_config: &Path,
     fragments: &[PathBuf],
-    cr: &CompileRoot,
     step: &Step,
 ) -> Result<(), EngineError> {
+    let Kbuild {
+        tree,
+        arch,
+        cross_compile,
+        cr,
+    } = kb;
     let script = tree.join("scripts/kconfig/merge_config.sh");
     // `sh` opens the script argument only after `current_dir(tree)` takes effect, so
     // a tree-derived script path must be absolute or it re-resolves *inside* the

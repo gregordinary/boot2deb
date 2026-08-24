@@ -21,9 +21,27 @@ use boot2deb_core::size::parse_size;
 use boot2deb_core::ResolvedBuild;
 use std::path::{Path, PathBuf};
 
+/// The artifact-store node this stage keys its outputs under, and the label
+/// [`why-rebuild`](crate::plan) predicts against.
+///
+/// A constant because the two have to be the *same string*: the store is keyed by
+/// `(node, signature)`, so a prediction computed under a different node name would
+/// answer a question about an entry no build ever wrote. It is the counterpart of the
+/// path helper above — one names where the tree is, this names where the artifacts are.
+pub const NODE: &str = "uboot";
+
 /// Stage-recipe version for the u-boot tree signature: bump when the
 /// clone/patch logic that shapes the reused tree changes.
 const CLONE_STAGE_VERSION: u32 = 1;
+
+/// The u-boot source tree the [`build_uboot`] stage clones and reuses under `work_dir`
+/// (`<work_dir>/u-boot`). Exposed for the same reason
+/// [`kernel::tree_dir`](crate::build::kernel::tree_dir) is: a reader of the tree —
+/// [`crate::shell`], which starts an interactive session in it — should not restate the
+/// layout literal.
+pub fn tree_dir(work_dir: &Path) -> PathBuf {
+    work_dir.join("u-boot")
+}
 
 /// Build-dependencies this stage layers over the cross root's base — what a u-boot
 /// build wants that the toolchain, `make`, `bc`, `bison`, `flex` and `libssl-dev`
@@ -41,7 +59,10 @@ const CLONE_STAGE_VERSION: u32 = 1;
 /// `CONFIG_TOOLS_MKEFICAPSULE`, which every EFI-loader configuration does. It is a host
 /// tool rather than something the payloads link, but `make tools` is on the path to
 /// them, so its absence stops the build outright.
-const UBOOT_BUILD_DEPS: &[&str] = &[
+///
+/// Read by the [`BuildRootSpec`] that stages the layer, and by [`crate::shell`], which
+/// stages the same layer for an interactive session in this stage's root.
+pub const UBOOT_BUILD_DEPS: &[&str] = &[
     "swig",
     "python3-dev",
     "python3-setuptools",
@@ -187,7 +208,7 @@ pub fn build_uboot(
     let uboot = build::uboot_pin(lock)?;
     let blob_pins = build::blob_pins(lock)?;
     let step = Step::start(sink, "uboot");
-    let tree = opts.work_dir.join("u-boot");
+    let tree = tree_dir(opts.work_dir);
 
     // The applied patch series' identity for the Tier-1/Tier-2 signatures:
     // pinned by `patches.commit`, or the live-series fingerprint in co-dev mode so an
@@ -211,7 +232,7 @@ pub fn build_uboot(
     let _ = std::fs::remove_dir_all(&restored.0);
     if let Some([idbloader, uboot_itb, deb]) = build::restore_stage_outputs(
         opts.store,
-        "uboot",
+        NODE,
         &out_man.signature(),
         &restored.0,
         &["idbloader", "uboot_itb", "deb"],
@@ -310,8 +331,10 @@ pub fn build_uboot(
         &uboot.reference,
         opts,
         epoch,
-        &idbloader,
-        &uboot_itb,
+        Payloads {
+            idbloader: &idbloader,
+            uboot_itb: &uboot_itb,
+        },
         &step,
     )?;
 
@@ -332,7 +355,7 @@ pub fn build_uboot(
         outputs.push(("maskrom_loader", tree.join(MASKROM_LOADER)));
     }
     let outputs: Vec<(&str, &Path)> = outputs.iter().map(|(r, p)| (*r, p.as_path())).collect();
-    build::store_stage_outputs(opts.store, "uboot", &out_man.signature(), &outputs, &step)?;
+    build::store_stage_outputs(opts.store, NODE, &out_man.signature(), &outputs, &step)?;
     step.progress(100);
     step.finish();
     Ok(UbootArtifacts {
@@ -741,17 +764,41 @@ fn package_name(device: &str) -> String {
 ///
 /// The tree is staged on the host — a data-only archive resolves no dependencies, so
 /// nothing here needs a target-arch root — and archived by
+/// The two blobs a u-boot build produces, as one value.
+///
+/// They travel together everywhere: both are written into the deb's payload directory,
+/// both are named by `install.conf`, and both are placed at their own raw-gap offset.
+/// A struct because they are two `&Path`s of the same shape — a swapped pair would
+/// write each blob at the other's offset and produce an image that does not boot.
+struct Payloads<'a> {
+    /// The SPL + TPL loader image, written at the boot method's `idbloader` offset.
+    idbloader: &'a Path,
+    /// The u-boot FIT, written at the `uboot_itb` offset.
+    uboot_itb: &'a Path,
+}
+
+/// What names the produced `.deb`: its package name, its version, its architecture.
+///
+/// A struct for the same reason [`Payloads`] is one: three `&str`s in a row that a
+/// swap would silently reorder into a package nobody can install.
+struct DebIdentity<'a> {
+    /// `u-boot-<device>`.
+    pkg: &'a str,
+    /// The Debian version derived from the pinned u-boot ref.
+    version: &'a str,
+    /// The Debian architecture the payloads are for.
+    arch: &'a str,
+}
+
 /// [`build::archive_deb`] in the build's host-arch packaging root, which is what
 /// makes the `.deb` a function of the lock rather than of the build host's `dpkg`.
-#[allow(clippy::too_many_arguments)]
 fn package_deb(
     build: &ResolvedBuild,
     boot: &ResolvedRkbinBoot,
     uboot_ref: &str,
     opts: &UbootOptions,
     source_date_epoch: Option<u64>,
-    idbloader: &Path,
-    uboot_itb: &Path,
+    payloads: Payloads,
     step: &Step,
 ) -> Result<PathBuf, EngineError> {
     let pkg = package_name(&build.device);
@@ -762,7 +809,15 @@ fn package_deb(
     let pkg_stage = opts.work_dir.join("uboot-deb");
     let _ = std::fs::remove_dir_all(&pkg_stage);
     stage_tree(
-        &pkg_stage, build, boot, &pkg, &version, arch, idbloader, uboot_itb,
+        &pkg_stage,
+        build,
+        boot,
+        &DebIdentity {
+            pkg: &pkg,
+            version: &version,
+            arch,
+        },
+        payloads,
     )?;
     // Force uniform data modes (dirs 0755, files 0644) so the host umask does not leak
     // into the packaged tree — the u-boot deb is data-only, so this is byte-safe and
@@ -795,17 +850,18 @@ fn package_deb(
 /// [`package_deb`] so the layout is testable without `dpkg-deb`. The offsets are
 /// parsed from the build's authored strings, so a malformed offset is a
 /// typed [`ConfigError`](boot2deb_core::ConfigError) here rather than a bad deb.
-#[allow(clippy::too_many_arguments)]
 fn stage_tree(
     pkg_stage: &Path,
     build: &ResolvedBuild,
     boot: &ResolvedRkbinBoot,
-    pkg: &str,
-    version: &str,
-    arch: &str,
-    idbloader: &Path,
-    uboot_itb: &Path,
+    id: &DebIdentity,
+    payloads: Payloads,
 ) -> Result<(), EngineError> {
+    let &DebIdentity { pkg, version, arch } = id;
+    let Payloads {
+        idbloader,
+        uboot_itb,
+    } = payloads;
     let idb_off = parse_size(&boot.offsets.idbloader)?;
     let itb_off = parse_size(&boot.offsets.uboot_itb)?;
 
@@ -939,11 +995,21 @@ fn dd_command(payload: &str, offset: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A [`UserspacePin`] from a name and a [`GitPin`]-shaped fixture.
+    fn named_pin(name: &str, p: GitPin) -> boot2deb_core::lock::UserspacePin {
+        boot2deb_core::lock::UserspacePin {
+            name: name.into(),
+            source: p.source,
+            reference: p.reference,
+            commit: p.commit,
+        }
+    }
     use super::*;
-    use crate::sandbox::SandboxRun;
+    use crate::sandbox::{SandboxRun, SandboxSpec};
     use crate::test_support::{rk1_build, UnusedSandbox};
     use boot2deb_core::lock::{
-        BlobsPin, FfmpegPins, GitPin, KernelPin, PatchesPin, RootfsPin, UbootPin, UserspacePins,
+        BlobsPin, FfmpegPins, GitPin, KernelPin, PatchesPin, RootfsPin, UbootPin,
     };
     use std::cell::RefCell;
 
@@ -975,14 +1041,14 @@ mod tests {
     /// Pointed at a path that does not exist, deliberately: a test that reached
     /// `ensure_ready` through this would fail rather than quietly bootstrap a tree.
     fn unused_packaging() -> PackagingSandbox {
-        PackagingSandbox::new(
-            PathBuf::from("/nonexistent/packaging-root"),
-            "forky",
-            "amd64",
-            Vec::new(),
-            None,
-            None,
-        )
+        PackagingSandbox::new(SandboxSpec {
+            rootfs: PathBuf::from("/nonexistent/packaging-root"),
+            suite: "forky".into(),
+            arch: "amd64".into(),
+            mirrors: Vec::new(),
+            keyring: None,
+            cache_dir: None,
+        })
     }
 
     // The `patches_commit` names the *u-boot* patch pin, since that is what the u-boot
@@ -1018,11 +1084,11 @@ mod tests {
                 reference: "main".into(),
                 commit: patches_commit.into(),
             }),
-            userspace: Some(UserspacePins {
-                mpp: Some(git("m")),
-                librga: Some(git("r")),
-                libmali: Some(git("l")),
-            }),
+            userspace: vec![
+                named_pin("mpp", git("m")),
+                named_pin("librga", git("r")),
+                named_pin("libmali", git("l")),
+            ],
             ffmpeg: Some(FfmpegPins {
                 base: git("b"),
                 rockchip: Some(git("rk")),
@@ -1268,11 +1334,15 @@ mod tests {
             &pkg_stage,
             &build,
             boot,
-            "u-boot-turing-rk1",
-            "2026.04",
-            "arm64",
-            &idb,
-            &itb,
+            &DebIdentity {
+                pkg: "u-boot-turing-rk1",
+                version: "2026.04",
+                arch: "arm64",
+            },
+            Payloads {
+                idbloader: &idb,
+                uboot_itb: &itb,
+            },
         )
         .unwrap();
 
@@ -1345,8 +1415,10 @@ mod tests {
                 "2026.04",
                 &opts,
                 Some(1_600_000_000),
-                &idb,
-                &itb,
+                Payloads {
+                    idbloader: &idb,
+                    uboot_itb: &itb,
+                },
                 &step,
             )
             .unwrap()
@@ -1380,6 +1452,7 @@ mod tests {
                         env: &[],
                         argv: &argv,
                         context: "inspect the packaged deb",
+                        probe: None,
                     },
                     &step,
                 )

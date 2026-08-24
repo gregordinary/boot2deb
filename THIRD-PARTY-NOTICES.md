@@ -55,3 +55,18 @@ module, which is the same one on every Broadcom board in the family, and in an
 `overlay-nonfree/` tree rather than `overlay/` so that a `libre` build lays neither of
 them into the image. Provenance, hashes, and why the superficially similar ChromiumOS
 copies are the *wrong module* are recorded in `socs/rk3288/README.md`.
+
+## The FFmpeg a build produces
+
+Not a vendored component, but the question this file is usually opened for. The
+`ffmpeg-rk` package every recipe here builds is configured `--enable-gpl
+--enable-version3` and links only libraries whose terms combine with those, so the
+package and any image holding it may be redistributed under the GNU General Public
+License, version 3.
+
+One optional feature changes that. Selecting `ffmpeg-nonfree` adds FFmpeg's
+`--enable-nonfree`, which admits encoders — today FDK-AAC — whose licence terms cannot
+be combined with the GPL, and the resulting binary may be built and used but **not
+distributed**. No recipe selects it; it is reached as a variant reference
+(`<recipe>+ffmpeg-nonfree`), which carries no support claim and appears in no support
+matrix. See `docs/src/reference/config-model.md`.

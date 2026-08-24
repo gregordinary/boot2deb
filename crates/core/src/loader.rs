@@ -324,13 +324,9 @@ impl ConfigRoot {
             }
         }
 
-        // `caveats` accumulates down the chain instead of being replaced by it — the
-        // one list in the device layer that does. A caveat states a limitation of the
-        // hardware, and a variant shares its parent's hardware, so last-wins would let
-        // a variant that adds one of its own silently drop every limitation it
-        // inherits and publish a support claim that is wrong. Collected here, before
-        // the merge overwrites the key.
-        let caveats = merged_caveats(&chain);
+        // The additive keys accumulate down the chain instead of being replaced by it
+        // — see [`ACCUMULATED`]. Collected here, before the merge overwrites them.
+        let accumulated = accumulated_arrays(&chain)?;
         // Merge base-most -> child, so a variant wins over what it extends. Errors are
         // attributed to the named device's file: it is the one the operator authored,
         // and after the merge a bad value cannot be traced to an ancestor anyway.
@@ -339,8 +335,10 @@ impl ConfigRoot {
             merge_toml(&mut merged, value);
             top_path = path;
         }
-        if let (Some(caveats), toml::Value::Table(table)) = (caveats, &mut merged) {
-            table.insert("caveats".to_string(), toml::Value::Array(caveats));
+        if let toml::Value::Table(table) = &mut merged {
+            for (key, entries) in accumulated {
+                table.insert(key.to_string(), toml::Value::Array(entries));
+            }
         }
         lineage.reverse();
         Ok((deserialize_at(merged, &top_path)?, lineage))
@@ -627,33 +625,81 @@ fn deserialize_at<T: DeserializeOwned>(value: toml::Value, path: &Path) -> Resul
 /// array, or a type mismatch between the two sides — replaces `base` wholesale.
 /// This is the simplest predictable last-wins: a table grows/overrides field by
 /// field, while an array or scalar key is set, not concatenated.
-/// Every `caveats` entry in an `extends` chain, base-most first and de-duplicated —
-/// the accumulated list [`ConfigRoot::device_with_lineage`] writes back over the
-/// merged one.
+/// The device-layer arrays that **accumulate** base-most → child across
+/// [`extends`](crate::model::DeviceLayer::extends), rather than being replaced
+/// wholesale like every other array.
 ///
-/// `chain` is in child-to-base-most order, as the walk built it. `None` when any
-/// level's `caveats` is present but is not an array: the accumulation must not
-/// swallow a malformed value, so the key is left as authored and the type error
-/// surfaces from deserialization, attributed to a file.
+/// The line is between *describing or supplying the running system* and *selecting a
+/// build input*.
+///
+/// These describe or supply it. A variant is the same hardware with a delta, so it is
+/// bound by everything its parent said about that hardware: a caveat cannot be un-said,
+/// a runtime check that held on the parent holds here, a radio that needed firmware
+/// still needs it, and a board package the parent installs is one this board wants too.
+/// Last-wins on any of them would let a variant that adds one entry silently drop every
+/// entry it inherits — publishing a support claim that is wrong, or a
+/// `boot2deb-selftest` that passes while testing less than the parent's.
+///
+/// Everything else selects. `device_kmods` and `device_patch_series` choose which
+/// drivers and series a kernel is built with, `extra_debs` pins exact bytes (two pins of
+/// one package would be a conflict, not a sum), and every `supported_*`/`default_*` list
+/// names the alternatives a build may pick from. A variant makes its own selection, so
+/// those replace.
+const ACCUMULATED: [&str; 5] = [
+    "caveats",
+    "expect",
+    "nonfree_firmware_packages",
+    "packages",
+    "exclude",
+];
+
+/// Every [`ACCUMULATED`] key's entries across an `extends` chain, base-most first and
+/// de-duplicated — the lists [`ConfigRoot::device_with_lineage`] writes back over the
+/// merged table. A key absent from every level is absent from the result, so it is
+/// never inserted as an empty array over a value the merge produced.
+///
+/// `chain` is in child-to-base-most order, as the walk built it.
+///
+/// A level whose value for one of these keys is not an array is
+/// [`ConfigError::InvalidDeviceField`], naming that level's own file. Attributing it
+/// here is the point: the merge is last-wins, so a malformed value in an *ancestor* that
+/// the child overrides would otherwise vanish into a table that deserializes cleanly,
+/// and the error would never be reported at all.
 ///
 /// Entries are compared as authored values rather than as strings, so a non-string
-/// element reaches the deserializer too.
-fn merged_caveats(chain: &[(toml::Value, PathBuf)]) -> Option<Vec<toml::Value>> {
-    let mut out: Vec<toml::Value> = Vec::new();
-    for (value, _) in chain.iter().rev() {
-        match value.get("caveats") {
-            None => {}
-            Some(toml::Value::Array(entries)) => {
-                for e in entries {
-                    if !out.contains(e) {
-                        out.push(e.clone());
+/// element reaches the deserializer and is rejected there against its own type.
+fn accumulated_arrays(
+    chain: &[(toml::Value, PathBuf)],
+) -> Result<Vec<(&'static str, Vec<toml::Value>)>, ConfigError> {
+    let mut out = Vec::new();
+    for key in ACCUMULATED {
+        let mut entries: Vec<toml::Value> = Vec::new();
+        let mut seen = false;
+        for (value, path) in chain.iter().rev() {
+            match value.get(key) {
+                None => {}
+                Some(toml::Value::Array(level)) => {
+                    seen = true;
+                    for e in level {
+                        if !entries.contains(e) {
+                            entries.push(e.clone());
+                        }
                     }
                 }
+                Some(other) => {
+                    return Err(ConfigError::InvalidDeviceField {
+                        path: path.display().to_string(),
+                        field: key,
+                        found: other.type_str(),
+                    })
+                }
             }
-            Some(_) => return None,
+        }
+        if seen {
+            out.push((key, entries));
         }
     }
-    Some(out)
+    Ok(out)
 }
 
 fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
@@ -798,6 +844,53 @@ fn recipe_half(name: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    /// A misspelt suite is the one failure enumerating suites can hide: the entry never
+    /// applies, so the package goes missing from every image with nothing said. The
+    /// report is what pays that price back.
+    #[test]
+    fn a_suite_no_recipe_builds_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("recipes")).unwrap();
+        std::fs::write(
+            p.join("base.toml"),
+            r#"
+packages = [
+    "bash",
+    { name = "nmtui", suites = ["forkey"] },
+    { name = "future-pkg", suites = ["sid"] },
+    { name = "real-pkg", suites = ["forky"] },
+]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("recipes/r.toml"),
+            "device = \"dev\"\nsuite = \"forky\"\n",
+        )
+        .unwrap();
+
+        let found = ConfigRoot::new(p)
+            .unreachable_suites()
+            .expect("the walk reads the tree");
+        let reported: Vec<(&str, &str)> = found
+            .iter()
+            .map(|u| (u.package.as_str(), u.suite.as_str()))
+            .collect();
+        assert_eq!(
+            reported,
+            vec![("nmtui", "forkey")],
+            "only the misspelling: 'forky' is built here, and 'sid' is a permanent \
+             archive name that no tree has to have a recipe for",
+        );
+    }
+
+    /// The names of a package list, for an assertion that is about which packages a
+    /// layer contributes rather than about how each entry was spelled.
+    fn names(entries: &[crate::model::PackageEntry]) -> Vec<&str> {
+        entries.iter().map(|e| e.name()).collect()
+    }
+
     use super::*;
 
     #[test]
@@ -985,7 +1078,7 @@ mod tests {
             Some("packages = [\"c\"]\n"),
         );
         let base = root.base().unwrap();
-        assert_eq!(base.packages, vec!["c"]); // overlay array replaced wholesale
+        assert_eq!(names(&base.packages), ["c"]); // overlay array replaced wholesale
         assert_eq!(base.exclude, vec!["x"]); // untouched key survives the merge
     }
 
@@ -1113,13 +1206,17 @@ mod tests {
         let (_tmp, root) = device_root(&[
             (
                 "base",
-                device_toml("base", "packages = [\"a\", \"b\"]\nimage_size = \"2G\"\n"),
+                device_toml(
+                    "base",
+                    "device_kmods = [\"a\", \"b\"]\nimage_size = \"2G\"\n",
+                ),
             ),
             (
                 "variant",
-                // No image_size: it is inherited. An explicit hostname and packages: one
-                // scalar and one array the variant does state, to watch both merge rules.
-                device_toml("variant", "extends = \"base\"\npackages = [\"c\"]\n"),
+                // No image_size: it is inherited. An explicit hostname and
+                // device_kmods: one scalar and one *replacing* array the variant does
+                // state, to watch both merge rules.
+                device_toml("variant", "extends = \"base\"\ndevice_kmods = [\"c\"]\n"),
             ),
         ]);
 
@@ -1130,31 +1227,35 @@ mod tests {
         assert_eq!(d.image_size, "2G");
         // ...a key it does state wins...
         assert_eq!(d.hostname, "variant");
-        // ...and an array is replaced wholesale, not concatenated, matching how the
-        // overlay search path merges. A variant restates what it wants to keep.
-        assert_eq!(d.packages, ["c"]);
+        // ...and a *selecting* array is replaced wholesale, not concatenated, matching
+        // how the overlay search path merges. A variant restates what it wants to keep.
+        assert_eq!(d.device_kmods, ["c"]);
         assert_eq!(d.extends.as_deref(), Some("base"));
 
         // The parent still resolves on its own, unaffected by having a variant.
         let (base, base_lineage) = root.device_with_lineage("base").unwrap();
         assert_eq!(base_lineage, ["base"]);
-        assert_eq!(base.packages, ["a", "b"]);
+        assert_eq!(base.device_kmods, ["a", "b"]);
         assert!(base.extends.is_none());
     }
 
-    /// `caveats` is the one device list that accumulates down an `extends` chain
-    /// instead of being replaced by it. A variant shares its parent's hardware, so
-    /// last-wins would let a variant that adds one of its own silently drop every
-    /// limitation it inherits — publishing a support claim that is wrong.
+    /// The five device lists that accumulate down an `extends` chain instead of being
+    /// replaced by it. Each describes or supplies the running system, and a variant is
+    /// the same hardware — so last-wins would let a variant that adds one entry silently
+    /// drop every entry it inherits: a support claim that is wrong, a selftest that
+    /// tests less than the parent's, a radio with no firmware.
     #[test]
-    fn caveats_accumulate_down_an_extends_chain_where_every_other_list_is_replaced() {
+    fn the_additive_lists_accumulate_where_a_selecting_list_is_replaced() {
         let (_tmp, root) = device_root(&[
             (
                 "base",
                 device_toml(
                     "base",
-                    "packages = [\"a\"]\nimage_size = \"2G\"\n\
-                     caveats = [\"no SuperSpeed on any port\"]\n",
+                    "image_size = \"2G\"\ndevice_kmods = [\"a\"]\n\
+                     packages = [\"p-base\"]\nexclude = [\"x-base\"]\n\
+                     nonfree_firmware_packages = [\"firmware-radio\"]\n\
+                     caveats = [\"no SuperSpeed on any port\"]\n\
+                     [[expect]]\ncheck = \"file\"\npath = \"/sys/class/net/eth0\"\n",
                 ),
             ),
             (
@@ -1168,9 +1269,12 @@ mod tests {
                 "leaf",
                 device_toml(
                     "leaf",
-                    // Restates one it inherits, to check the de-duplication.
-                    "extends = \"mid\"\npackages = [\"z\"]\n\
-                     caveats = [\"no SuperSpeed on any port\", \"the jack is unrouted\"]\n",
+                    // Restates one caveat it inherits, to check the de-duplication.
+                    "extends = \"mid\"\ndevice_kmods = [\"z\"]\n\
+                     packages = [\"p-leaf\"]\nexclude = [\"x-leaf\"]\n\
+                     nonfree_firmware_packages = [\"firmware-wifi\"]\n\
+                     caveats = [\"no SuperSpeed on any port\", \"the jack is unrouted\"]\n\
+                     [[expect]]\ncheck = \"devnode\"\npath = \"/dev/mmcblk0\"\n",
                 ),
             ),
         ]);
@@ -1185,23 +1289,63 @@ mod tests {
                 "the jack is unrouted",
             ]
         );
-        // The accumulation is specific to `caveats`: every other array still follows
-        // the replace rule, so this is a documented exception and not a change of rule.
-        assert_eq!(d.packages, ["z"]);
+        assert_eq!(names(&d.packages), ["p-base", "p-leaf"]);
+        assert_eq!(d.exclude, ["x-base", "x-leaf"]);
+        assert_eq!(
+            names(&d.nonfree_firmware_packages),
+            ["firmware-radio", "firmware-wifi"]
+        );
+        // The parent's check survives the variant adding its own, which is the whole
+        // point: a selftest that silently tests less than its parent's passes.
+        assert_eq!(d.expect.len(), 2);
+        // A *selecting* array still replaces, so the two rules are both live and the
+        // difference is which question the key answers.
+        assert_eq!(d.device_kmods, ["z"]);
 
         // A parent with none of its own still contributes nothing and breaks nothing.
         let (base, _) = root.device_with_lineage("base").unwrap();
         assert_eq!(base.caveats, ["no SuperSpeed on any port"]);
+        assert_eq!(base.expect.len(), 1);
     }
 
-    /// The accumulation must not swallow a malformed value: a `caveats` that is not
-    /// an array is left as authored so deserialization names the file it is in.
+    /// A malformed accumulating key is named against the file that holds it — including
+    /// when an *ancestor* holds it and the child overrides the key. The merge is
+    /// last-wins, so that case deserializes cleanly: reporting it requires reading each
+    /// level before the merge, which is what `accumulated_arrays` does.
     #[test]
-    fn a_caveats_key_that_is_not_an_array_is_a_named_parse_error() {
+    fn a_malformed_accumulating_key_names_its_own_file_even_in_an_ancestor() {
+        // Directly on the device.
         let (_tmp, root) =
             device_root(&[("bad", device_toml("bad", "caveats = \"not a list\"\n"))]);
         let err = root.device_with_lineage("bad").unwrap_err().to_string();
         assert!(err.contains("bad.toml"), "{err}");
+        assert!(err.contains("caveats must be an array"), "{err}");
+
+        // In an ancestor the child overrides. Before the key was read per level this
+        // resolved clean and the parent's type error was never reported at all.
+        let (_tmp, root) = device_root(&[
+            (
+                "badparent",
+                device_toml(
+                    "badparent",
+                    "caveats = \"not a list\"\nimage_size = \"2G\"\n",
+                ),
+            ),
+            (
+                "child",
+                device_toml(
+                    "child",
+                    "extends = \"badparent\"\ncaveats = [\"a real one\"]\n",
+                ),
+            ),
+        ]);
+        let err = root.device_with_lineage("child").unwrap_err().to_string();
+        assert!(err.contains("badparent.toml"), "{err}");
+
+        // Every accumulating key is checked, not just `caveats`.
+        let (_tmp, root) = device_root(&[("badpkgs", device_toml("badpkgs", "packages = 7\n"))]);
+        let err = root.device_with_lineage("badpkgs").unwrap_err().to_string();
+        assert!(err.contains("packages must be an array"), "{err}");
     }
 
     #[test]
@@ -1503,5 +1647,110 @@ mod tests {
             shipped.kmod("../devices/h96-max-m9"),
             Err(ConfigError::InvalidName { kind: "kmod", .. })
         ));
+    }
+}
+
+/// One conditional package entry whose `suites` name nothing this config tree builds.
+///
+/// Almost always a typo. Enumerating suites is what makes a conditional entry checkable
+/// against the archive (see [`crate::model::PackageEntry`]), and the price
+/// of enumerating is that a misspelt suite name is silent: the entry simply never
+/// applies, so the package goes missing from every image with nothing said. This is the
+/// check that pays that price back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreachableSuite {
+    /// The layer or feature the entry was read from.
+    pub layer: String,
+    /// The package the entry names.
+    pub package: String,
+    /// The suite the entry names that no recipe in this tree builds.
+    pub suite: String,
+}
+
+impl ConfigRoot {
+    /// Conditional package entries naming a suite no recipe in this tree builds.
+    ///
+    /// Walks the layers every recipe reaches — base, its SoC, its boot method, its
+    /// device, and its features — and reports each `suites` name that appears in none of
+    /// the tree's recipes. A layer no recipe reaches is not walked: it contributes to no
+    /// image, so a suite name in it is a different kind of dead config.
+    ///
+    /// A report is advice, not a verdict. A tree that legitimately carries a layer ahead
+    /// of the recipe that will use it — a suite being prepared for — produces one, and
+    /// that is a thing a caller should say rather than refuse.
+    pub fn unreachable_suites(&self) -> Result<Vec<UnreachableSuite>, ConfigError> {
+        let recipes = self.list_recipes()?;
+        let mut built: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for name in &recipes {
+            let recipe = self.recipe(name)?;
+            if let Some(suite) = &recipe.suite {
+                built.insert(suite.clone());
+            } else if let Ok(device) = self.device(&recipe.device) {
+                // A recipe that names no suite takes the device's default, which is the
+                // suite that recipe builds just as much as an explicit one is.
+                built.insert(device.default_suite.clone());
+            }
+        }
+
+        let mut found = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        // Debian's symbolic suite names are permanent fixtures of the archive, so naming
+        // one is never a typo however the tree's recipes are written. `sid` in
+        // particular is the codename of unstable and, alone among codenames, never
+        // becomes a release — a layer that names it is stating what a future unstable
+        // build should get, which is a correct thing to say before such a recipe exists.
+        const ALWAYS: [&str; 5] = ["sid", "unstable", "testing", "stable", "oldstable"];
+        let mut check = |layer: &str,
+                         entries: &[crate::model::PackageEntry],
+                         out: &mut Vec<UnreachableSuite>| {
+            for entry in entries {
+                for suite in entry.suites().unwrap_or_default() {
+                    if built.contains(suite) || ALWAYS.contains(&suite.as_str()) {
+                        continue;
+                    }
+                    let key = (layer.to_string(), entry.name().to_string(), suite.clone());
+                    if seen.insert(key) {
+                        out.push(UnreachableSuite {
+                            layer: layer.to_string(),
+                            package: entry.name().to_string(),
+                            suite: suite.clone(),
+                        });
+                    }
+                }
+            }
+        };
+
+        if let Ok(base) = self.base() {
+            check("the base layer", &base.packages, &mut found);
+        }
+        for name in &recipes {
+            let Ok(recipe) = self.recipe(name) else {
+                continue;
+            };
+            let Ok(device) = self.device(&recipe.device) else {
+                continue;
+            };
+            let device_layer = format!("device '{}'", recipe.device);
+            check(&device_layer, &device.packages, &mut found);
+            check(&device_layer, &device.nonfree_firmware_packages, &mut found);
+            if let Ok(soc) = self.soc(device.soc) {
+                let soc_layer = format!("soc '{}'", device.soc);
+                check(&soc_layer, &soc.packages, &mut found);
+                check(&soc_layer, &soc.nonfree_firmware_packages, &mut found);
+            }
+            if let Ok(bm) = self.boot_method(device.boot_method) {
+                let bm_layer = format!("boot method '{}'", device.boot_method);
+                check(&bm_layer, bm.packages(), &mut found);
+            }
+            for feature in &recipe.features {
+                if let Ok(f) = self.feature(feature) {
+                    check(&format!("feature '{feature}'"), &f.packages, &mut found);
+                }
+            }
+        }
+        found.sort_by(|a, b| {
+            (&a.layer, &a.package, &a.suite).cmp(&(&b.layer, &b.package, &b.suite))
+        });
+        Ok(found)
     }
 }

@@ -1,6 +1,6 @@
 # recipes/turing-rk1/forky.toml — the Turing RK1 base image on Debian forky.
 # The board's supported suite. A base image: a full Debian userland plus the
-# accel-capable kernel. The rk3588-mainline-7.1 kernel bakes in the rk3588-accel
+# accel-capable kernel. The rk3588-mainline-7.2 kernel bakes in the rk3588-accel
 # patch series and the accel/full kconfig, so the VEPU/VDPU/RGA and NPU drivers
 # are present in the kernel — the hardware blocks are there, just dark. What a base
 # image omits is the Rockchip media *userspace* (MPP + RGA + ffmpeg-rk); add it
@@ -13,36 +13,41 @@
 # without it an NVMe u-boot enumerates perfectly well has no path to a host.
 # Constraints only; the exact resolution is written to the sibling .lock.
 device     = "turing-rk1"
-kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
+kernel     = "rk3588-mainline-7.2"       # omit -> device default_kernel
 suite      = "forky"                     # omit -> device default_suite
 features   = []                          # base: accel kernel, no media userspace
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
-# The last pin that booted was v7.1.1, so this one has not been on the board. What
-# the five point releases to v7.1.6 move, on the paths this image runs: nothing in
-# `rkvdec`, the rocket NPU driver, `rockchip-iommu` or panfrost, which are byte-
-# identical. `rk3588-base.dtsi` changes in one place — `vdec0` and `vdec1` list
-# `reg`/`reg-names` in the order their binding declares, where earlier 7.1.x
-# transposed "link" and "function". Each name keeps the same address and `rkvdec`
-# maps both banks by name, so no consumer sees it; it is a source-context change,
-# and refreshing `rk3588-accel`'s 060 for it is the only edit the bump cost. The eMMC
-# controller (`sdhci-of-dwcmshc`) gains a bus-clock release on its probe *failure*
-# paths, which the board does not take. `rockchip_drm_gem` swaps `obj->import_attach`
-# for `drm_gem_is_imported()`, the same predicate behind an accessor; the remaining
-# rockchip DRM changes are to eDP and DisplayPort attachments, and the RK1's in-tree
-# DT brings up no display at all. So nothing on this board's boot path moved — but
-# nothing has booted this pin, which is what `expected` says.
+# This pin has not been on the board -- the last one that booted was v7.1.1 -- and
+# v7.2 is a .0 release, so it carries no stable point release yet. What the move from
+# v7.1.7 changes, on the paths this image runs:
 #
-# u-boot moves with it, and that release is worth more to this board than the
-# kernel point releases are. Three RK3588 fixes land: the memory map gains the DRAM
-# above the first addressable 4 GiB, a fallback fixes up the two known gaps on
-# 16+ GiB parts, and LMB now keeps DMA allocations below 4 G on all of
-# ARCH_ROCKCHIP — which upstream reports as the cause of grub finding no partitions
-# and of eMMC vanishing mid-boot on boards with 4 GiB or more. The NVMe driver also
-# picks up a fix for PRP-list arithmetic on transfers above 2 MiB and one for
-# command-ID wraparound, both of which a whole-image write to an M.2 disk would
-# otherwise reach. Built and command-verified on the bench, not booted.
+# The patch series changes shape under it. 050 retires: the Verisilicon IOMMU that
+# fronts the AV1 decoder is in the tree from 7.2, in a copy two cleanups newer than
+# ours, so the series drops the patch and `CONFIG_VSI_IOMMU=m` moves to the
+# `accel/full` fragment, which is now its only owner. 072 is the 7.2 variant, because
+# the dtsi now describes all three RGA cores for the in-tree V4L2 RGA3 driver rather
+# than only the RGA2 one; the image keeps the multicore vendor driver and its
+# `/dev/rga`, so the patch retargets those nodes instead of creating them, and
+# `VIDEO_ROCKCHIP_RGA` stays unset. 071 gains one line, because 7.2 removes
+# `strncpy()` from the kernel outright and the vendor RGA driver had a call site.
+#
+# `rockchip-iommu` clears the AUTO_GATING fetch-DTE time limit, which upstream
+# reports as the cause of RGA3 hangs and of the vendor kernel's VOP black screens.
+# Every accelerator on this board maps through that IOMMU, so it reaches decode, RGA
+# and the NPU alike -- the one change here that could move behaviour on hardware.
+#
+# `rkvdec` moves its H.264 and HEVC backends off local bitfield structs onto a shared
+# bitwriter. It is a codegen fix aimed at clang on armhf and hexagon, and it writes
+# the same register payloads. `rk3588-base.dtsi` also gains a `vicap` node and the
+# MIPI CSI-2 receivers, both `status = "disabled"` in the dtsi and neither enabled by
+# this board -- the camera path is new hardware description, not a new driver running
+# here. The rocket NPU driver is a net zero across the release: one commit and its
+# revert. panthor takes a long run of fixes, none of which this image can reach, since
+# the RK1 recipes install no Mesa.
+#
+# u-boot does not move with this bump: it stays at v2026.07.
 [support]
 status = "expected"
-date   = "2026-08-05"
+date   = "2026-08-21"

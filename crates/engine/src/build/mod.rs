@@ -22,7 +22,7 @@ mod elf;
 pub mod ffmpeg;
 pub mod kernel;
 pub mod kmod;
-mod probe;
+pub(crate) mod probe;
 pub mod rkboot;
 pub mod uboot;
 pub mod userspace;
@@ -305,6 +305,7 @@ pub(crate) fn run_in_root(
             env,
             argv,
             context,
+            probe: None,
         },
         step,
     )
@@ -1185,8 +1186,9 @@ pub(crate) fn restore_stage_outputs(
             None => return Ok(None),
         }
     }
-    // Every role restored, so the step compiled nothing: recorded here rather than at
-    // each caller, which is what keeps the claim identical across the stages.
+    // This node came back whole, so the step did not compile it: recorded here rather
+    // than at each caller, which is what keeps the claim identical across the stages.
+    // Its counterpart in [`store_stage_outputs`] records the other half.
     step.restored();
     step.log(format!(
         "restored {node} outputs from the artifact cache (signature {})",
@@ -1198,6 +1200,17 @@ pub(crate) fn restore_stage_outputs(
 /// Tier-2 store side of [`restore_stage_outputs`]: put `node`'s built outputs
 /// under signature `sig` so a later build restores instead of recompiling. A
 /// disabled store (`None`) is a no-op.
+///
+/// Reaching here means this run produced `files`, so this is also where the step
+/// records [`Step::compiled`] — the symmetric half of the [`Step::restored`] that
+/// [`restore_stage_outputs`] records on a hit. A multi-node stage that restores one
+/// node and builds another therefore reports [`StepOutcome::Mixed`](crate::event::StepOutcome::Mixed)
+/// on its own, without each stage having to remember to say so.
+///
+/// A disabled store returns before that call, which cannot understate the outcome:
+/// [`Step::restored`] is reachable only through the store, so with no store nothing
+/// is ever restored and the step reports
+/// [`Built`](crate::event::StepOutcome::Built) either way.
 pub(crate) fn store_stage_outputs(
     store_root: Option<&Path>,
     node: &str,
@@ -1210,6 +1223,7 @@ pub(crate) fn store_stage_outputs(
     };
     let store = crate::artstore::ArtifactStore::open(root)?;
     store.put(node, sig.as_str(), files)?;
+    step.compiled();
     step.log(format!("stored {node} outputs to the artifact cache"));
     Ok(())
 }
@@ -1543,6 +1557,7 @@ pub(crate) fn archive_deb(
             env: &env,
             argv: &argv,
             context,
+            probe: None,
         },
         step,
     )
@@ -1602,21 +1617,32 @@ pub(crate) fn normalize_data_tree(root: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Pick the highest-versioned entry among `names` whose file name starts with
-/// `prefix` and ends with `.deb`, by dpkg-style version ordering. Pure, so the
-/// artifact selection is testable without a build.
+/// Pick the last entry among `names` whose file name starts with `prefix` and ends with
+/// `.deb`, in [`natural_version_cmp`] order. Pure, so the artifact selection is testable
+/// without a build.
+///
+/// The stage directory it scans holds **one** version per prefix — [`purge_stage_debs`]
+/// clears the prefix before the compile writes into it — so the ordering breaks a tie
+/// that should not arise rather than choosing between real candidates. That matters
+/// because the comparison is `sort -V`, not dpkg's: see [`natural_version_cmp`].
 fn pick_deb(names: &[String], prefix: &str) -> Option<String> {
     names
         .iter()
         .filter(|n| n.starts_with(prefix) && n.ends_with(".deb"))
-        .max_by(|a, b| deb_version_cmp(a, b))
+        .max_by(|a, b| natural_version_cmp(a, b))
         .cloned()
 }
 
-/// Compare two `.deb` file names the way `sort -V` would for our purposes: split
-/// into runs of digits and non-digits and compare digit runs numerically. Enough
-/// to order `linux-image-…-9_…` after `…-10_…` correctly.
-fn deb_version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+/// Compare two `.deb` file names the way `sort -V` does: split into runs of digits and
+/// non-digits and compare digit runs numerically. Enough to order
+/// `linux-image-…-9_…` after `…-10_…` correctly.
+///
+/// **Not dpkg ordering.** It has no `~` rule, so `1.0~rc1` sorts *above* `1.0` where
+/// dpkg puts it below. Nothing here needs the difference — [`pick_deb`] scans a
+/// directory holding one version per prefix — and reaching for dpkg semantics would mean
+/// implementing the epoch/upstream/revision split too. If a caller ever has to choose
+/// between two real versions, this is the wrong function.
+fn natural_version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let (mut ai, mut bi) = (a.chars().peekable(), b.chars().peekable());
     loop {
@@ -1705,7 +1731,7 @@ pub(crate) fn purge_stage_debs(dir: &Path, prefixes: &[&str]) -> Result<(), Engi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::Event;
+    use crate::event::{Event, StepOutcome};
     use std::cell::RefCell;
 
     fn clone_failure(stderr: &str) -> EngineError {
@@ -2066,6 +2092,98 @@ mod tests {
         .is_none());
     }
 
+    /// A multi-node stage (kmod: a module node and a firmware node) must report what it
+    /// actually did per node. Restoring one and building the other is `Mixed`, not
+    /// `Restored` — the latter reads as "nothing was compiled", which would make a
+    /// genuinely stale output indistinguishable from a freshly built one in the log.
+    #[test]
+    fn a_stage_that_restores_one_node_and_builds_another_reports_mixed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_root = tmp.path().join("store");
+        let out = tmp.path().join("out");
+        let sig_a = crate::signature::SignatureBuilder::new("node-a", 1).finish();
+        let sig_b = crate::signature::SignatureBuilder::new("node-b", 1).finish();
+        let deb = tmp.path().join("x.deb");
+        std::fs::write(&deb, b"x").unwrap();
+
+        // Seed only node-a, so a later run hits on it and misses on node-b.
+        {
+            let sink = |_e: Event| {};
+            let seed = Step::start(&sink, "seed");
+            store_stage_outputs(Some(&store_root), "a", &sig_a, &[("deb", &deb)], &seed).unwrap();
+        }
+
+        let outcome = |f: &dyn Fn(&Step)| {
+            let seen = RefCell::new(None);
+            let sink = |e: Event| {
+                if let Event::StepFinished { outcome, .. } = e {
+                    *seen.borrow_mut() = Some(outcome);
+                }
+            };
+            let step = Step::start(&sink, "kmod");
+            f(&step);
+            step.finish();
+            seen.into_inner().expect("the step reports an outcome")
+        };
+
+        // node-a restores, node-b misses and is built+stored.
+        assert_eq!(
+            outcome(&|step| {
+                assert!(restore_stage_outputs(
+                    Some(&store_root),
+                    "a",
+                    &sig_a,
+                    &out,
+                    &["deb"],
+                    step
+                )
+                .unwrap()
+                .is_some());
+                assert!(restore_stage_outputs(
+                    Some(&store_root),
+                    "b",
+                    &sig_b,
+                    &out,
+                    &["deb"],
+                    step
+                )
+                .unwrap()
+                .is_none());
+                store_stage_outputs(Some(&store_root), "b", &sig_b, &[("deb", &deb)], step)
+                    .unwrap();
+            }),
+            StepOutcome::Mixed
+        );
+
+        // Both nodes now hit: nothing is compiled, so the claim is a plain restore.
+        assert_eq!(
+            outcome(&|step| {
+                for (node, sig) in [("a", &sig_a), ("b", &sig_b)] {
+                    assert!(restore_stage_outputs(
+                        Some(&store_root),
+                        node,
+                        sig,
+                        &out,
+                        &["deb"],
+                        step
+                    )
+                    .unwrap()
+                    .is_some());
+                }
+            }),
+            StepOutcome::Restored
+        );
+
+        // A store the stage never restored from is a plain build, not a mixed one.
+        assert_eq!(
+            outcome(&|step| {
+                let fresh = tmp.path().join("store2");
+                store_stage_outputs(Some(&fresh), "b", &sig_b, &[("deb", &deb)], step).unwrap();
+            }),
+            StepOutcome::Built
+        );
+    }
+
     #[test]
     fn shallow_clone_accepts_an_uppercase_hex_pin() {
         // Both clone arms must accept the same pin spellings: the Fetch arm
@@ -2298,10 +2416,10 @@ mod tests {
 
     #[test]
     fn the_uboot_scope_gates_its_envelope_against_the_uboot_ref() {
-        // The u-boot node used to pass `gate_reference: None`, which made this whole
-        // arm — and `applies_to_uboot` with it — unreachable. The gate must fire
-        // against the *u-boot* ref: the kernel envelope below excludes v2026.04, and
-        // reading it here would refuse a u-boot the series does claim.
+        // The gate must fire against the *u-boot* ref, and a node that handed over no
+        // reference at all would leave this arm — and `applies_to_uboot` with it —
+        // unreachable. The kernel envelope below excludes v2026.04, so reading that one
+        // here would refuse a u-boot the series does claim.
         let (patches, head) = patches_checkout(
             "rk3576-loader",
             "applies_to_kernel = \">=7.0, <7.2\"\n\
@@ -2421,11 +2539,17 @@ mod tests {
     }
 
     #[test]
-    fn deb_version_cmp_orders_numeric_runs() {
+    fn natural_version_cmp_orders_numeric_runs_and_is_not_dpkg() {
         use std::cmp::Ordering;
-        assert_eq!(deb_version_cmp("a-9-b", "a-10-b"), Ordering::Less);
-        assert_eq!(deb_version_cmp("a-2-b", "a-2-b"), Ordering::Equal);
-        assert_eq!(deb_version_cmp("b", "a"), Ordering::Greater);
+        assert_eq!(natural_version_cmp("a-9-b", "a-10-b"), Ordering::Less);
+        assert_eq!(natural_version_cmp("a-2-b", "a-2-b"), Ordering::Equal);
+        assert_eq!(natural_version_cmp("b", "a"), Ordering::Greater);
+        // Stated so the name is not read as a promise it does not make: dpkg sorts a
+        // `~` suffix *below* the release it precedes, and this sorts it above.
+        assert_eq!(
+            natural_version_cmp("p_1.0~rc1_a.deb", "p_1.0_a.deb"),
+            Ordering::Greater
+        );
     }
 
     /// The sandbox identity separates what must not share an artifact-cache entry.

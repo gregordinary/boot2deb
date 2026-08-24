@@ -1,0 +1,22 @@
+[Unit]
+Description=boot2deb on-image self-test
+# After the boot has settled: the checks describe what multi-user is supposed
+# to have brought up, so running earlier would fail things that are merely late.
+After=multi-user.target
+# first-boot generates host keys and grows the rootfs; let it finish so a
+# first boot is checked in its final state.
+After=boot2deb-firstboot.service
+# The hardware checks are about this board; under emulation (`boot2deb try`)
+# the harness runs the selftest itself in userland mode instead.
+ConditionVirtualization=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/boot2deb/selftest
+StandardOutput=journal
+StandardError=journal
+
+# No [Install] section and no shipped enable symlink here: every image carries
+# this unit, and the rootfs stage lays the multi-user.target.wants/ symlink in
+# only when the recipe sets `selftest_on_boot = true`.

@@ -31,6 +31,15 @@ use std::path::{Path, PathBuf};
 /// series of packagings.
 const BUILD_VERSION: u32 = 1;
 
+/// The artifact-store node this stage keys its outputs under, and the label
+/// [`why-rebuild`](crate::plan) predicts against.
+///
+/// A constant because the two have to be the *same string*: the store is keyed by
+/// `(node, signature)`, so a prediction computed under a different node name would
+/// answer a question about an entry no build ever wrote. It is the counterpart of the
+/// path helper above — one names where the tree is, this names where the artifacts are.
+pub const NODE: &str = "kernel";
+
 /// Stage-recipe version for the kernel tree signature: bump when the
 /// clone/patch logic that shapes the reused tree changes, so an old stamp is
 /// treated as stale and the tree is rebuilt.
@@ -53,6 +62,10 @@ const KERNEL_DEB_PREFIXES: &[&str] = &["linux-image-", "linux-headers-", "linux-
 /// this stage needs them: a u-boot-only build has no reason to carry `libdw-dev`, and a
 /// declaration is what makes an undeclared dependency fail loudly instead of compiling
 /// against a leftover.
+///
+/// Three readers: the [`BuildRootSpec`] that stages the layer, the kmod stage — an
+/// out-of-tree module build *is* a kbuild invocation, so it declares this same set — and
+/// [`crate::shell`], which stages it for an interactive session in either root.
 pub const BUILD_DEPS: &[&str] = &[
     "debhelper",
     "libelf-dev",
@@ -159,13 +172,15 @@ pub fn build_kernel(
 ) -> Result<KernelArtifacts, EngineError> {
     // Narrow the build once: everything below reads the compile inputs — the source,
     // the defconfig, the fragments — which only a compiled kernel has.
-    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(
-        EngineError::StageNotApplicable {
+    let kernel = build
+        .image
+        .as_ref()
+        .and_then(|i| i.kernel.compiled())
+        .ok_or(EngineError::StageNotApplicable {
             stage: "kernel",
             why: "the resolved kernel is a distro package installed from the Debian mirror, \
               so there is no source tree to compile",
-        },
-    )?;
+        })?;
     let step = Step::start(sink, "kernel");
     let tree = tree_dir(opts.work_dir);
 
@@ -187,7 +202,7 @@ pub fn build_kernel(
     let out_man = output_manifest(build, kernel, lock, opts.fragments, env, patches, &dts_fp)?;
     if let Some([image_deb, headers_deb]) = build::restore_stage_outputs(
         opts.store,
-        "kernel",
+        NODE,
         &out_man.signature(),
         opts.out_dir,
         &["image_deb", "headers_deb"],
@@ -239,7 +254,7 @@ pub fn build_kernel(
     // rebuild after `clean`) restores instead of recompiling.
     build::store_stage_outputs(
         opts.store,
-        "kernel",
+        NODE,
         &out_man.signature(),
         &[
             ("image_deb", artifacts.image_deb.as_path()),
@@ -274,13 +289,15 @@ pub fn ensure_module_tree(
     env: &BuildEnv,
     step: &Step,
 ) -> Result<PathBuf, EngineError> {
-    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(
-        EngineError::StageNotApplicable {
+    let kernel = build
+        .image
+        .as_ref()
+        .and_then(|i| i.kernel.compiled())
+        .ok_or(EngineError::StageNotApplicable {
             stage: "kmod",
             why: "the resolved kernel is a distro package installed from the Debian mirror, \
               so there is no kernel tree to build an external module against",
-        },
-    )?;
+        })?;
     let tree = tree_dir(opts.work_dir);
     let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Kernel);
     let patches = build::series_identity(opts.patches, &series_fp);
@@ -336,13 +353,15 @@ pub fn build_dtb(
     env: &BuildEnv,
     sink: &dyn EventSink,
 ) -> Result<PathBuf, EngineError> {
-    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(
-        EngineError::StageNotApplicable {
+    let kernel = build
+        .image
+        .as_ref()
+        .and_then(|i| i.kernel.compiled())
+        .ok_or(EngineError::StageNotApplicable {
             stage: "dtb",
             why: "the resolved kernel is a distro package installed from the Debian mirror, \
               so there is no kernel tree to compile a device tree in",
-        },
-    )?;
+        })?;
     let step = Step::start(sink, "dtb");
     let tree = tree_dir(opts.work_dir);
 
@@ -863,11 +882,20 @@ pub fn kbuild_env(build: &ResolvedBuild, source_date_epoch: Option<u64>) -> Vec<
 
 #[cfg(test)]
 mod tests {
+
+    /// A [`UserspacePin`] from a name and a [`GitPin`]-shaped fixture.
+    fn named_pin(name: &str, p: GitPin) -> boot2deb_core::lock::UserspacePin {
+        boot2deb_core::lock::UserspacePin {
+            name: name.into(),
+            source: p.source,
+            reference: p.reference,
+            commit: p.commit,
+        }
+    }
     use super::*;
     use crate::test_support::{rk1_build, UnusedSandbox};
     use boot2deb_core::lock::{
         BlobsPin, FfmpegPins, GitPin, KernelPin, Lock, PatchesPin, RootfsPin, UbootPin,
-        UserspacePins,
     };
 
     fn lock_with(kernel_commit: &str, patches_commit: &str) -> Lock {
@@ -895,11 +923,11 @@ mod tests {
                 commit: "u".into(),
             }),
             uboot_patches: None,
-            userspace: Some(UserspacePins {
-                mpp: Some(git("m")),
-                librga: Some(git("r")),
-                libmali: Some(git("l")),
-            }),
+            userspace: vec![
+                named_pin("mpp", git("m")),
+                named_pin("librga", git("r")),
+                named_pin("libmali", git("l")),
+            ],
             ffmpeg: Some(FfmpegPins {
                 base: git("b"),
                 rockchip: Some(git("rk")),
@@ -1230,7 +1258,7 @@ mod tests {
         let sig = |lock: &Lock, env: &BuildEnv| {
             output_manifest(
                 &build,
-                build.kernel.as_ref().unwrap().compiled().unwrap(),
+                build.image.as_ref().unwrap().kernel.compiled().unwrap(),
                 lock,
                 opts.fragments,
                 env,

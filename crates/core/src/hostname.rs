@@ -23,12 +23,12 @@ pub const MAX_LABEL_LEN: usize = 63;
 ///
 /// A shape that fails returns *why* — a terse clause naming the offending property,
 /// for the caller to wrap in the typed error that suits where the value was authored:
-/// [`ConfigError::InvalidHostname`] for a device's `hostname`,
+/// [`ConfigError::InvalidField`] with `what = "hostname"` for a device's `hostname`,
 /// [`ConfigError::InvalidDeviceName`] for the slug. The clause says what is wrong, not
 /// what goes wrong if it is ignored; that is this documentation's job, and repeating it
 /// in every message would bury the part the author has to act on.
 ///
-/// [`ConfigError::InvalidHostname`]: crate::ConfigError::InvalidHostname
+/// [`ConfigError::InvalidField`]: crate::ConfigError::InvalidField
 /// [`ConfigError::InvalidDeviceName`]: crate::ConfigError::InvalidDeviceName
 ///
 /// **Rejected, not repaired.** Debian's `hostname(5)` says systemd *filters* invalid

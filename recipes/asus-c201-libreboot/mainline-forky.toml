@@ -4,7 +4,7 @@
 # The two C201 opt-ins at once. From asus-c201-libreboot: the `speedy-libreboot` board
 # profile and the 32 MiB kernel slot its firmware buffer needs, which puts the rootfs at
 # 76 MiB rather than 44. From asus-c201/mainline-forky: a kernel compiled from mainline
-# 7.1.y with the `rk3288-fixes` series, instead of Debian's own armhf kernel.
+# 7.2.y with the `rk3288-fixes` series, instead of Debian's own armhf kernel.
 #
 # The two opt-ins reinforce each other, which is why this pairing is worth its own
 # recipe: the wider slot is headroom a *signed* payload can use, and a compiled kernel is
@@ -14,7 +14,7 @@
 # The image boots only on a unit running libreboot. Reach for `asus-c201/mainline-forky`
 # on stock firmware; its stock profile boots on either.
 device     = "asus-c201-libreboot"
-kernel     = "rk3288-mainline-7.1"
+kernel     = "rk3288-mainline-7.2"
 suite      = "forky"
 features   = []                # a base image, same surface as the other C201 recipes
 layout     = "combined"
@@ -23,8 +23,8 @@ layout     = "combined"
 # first boot grows the partition to fill the card regardless.
 image_size = "2G"
 
-# Re-assessed over the v7.1.6 kernel; see asus-c201/mainline-forky for the delta.
+# Re-assessed over the v7.2 kernel; see asus-c201/mainline-forky for the delta.
 # Nothing it moves is firmware-coupled, so the libreboot opt-in does not change it.
 [support]
 status = "expected"
-date   = "2026-08-04"
+date   = "2026-08-21"

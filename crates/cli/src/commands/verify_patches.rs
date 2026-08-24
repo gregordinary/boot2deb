@@ -251,7 +251,7 @@ fn kernel_axis(
     };
     // A patch series implies a tree to apply it to, so the lock pins both or neither.
     let (Some(kernel), Some(kernel_pin)) = (
-        build.kernel.as_ref().and_then(|k| k.compiled()),
+        build.image.as_ref().and_then(|i| i.kernel.compiled()),
         lock.kernel.as_ref(),
     ) else {
         return Err(
@@ -336,14 +336,19 @@ fn kernel_axis(
     // The ffmpeg/userspace series verify only for a media-accel build, which is the
     // only one carrying those source trees; without them there is nothing to fetch or
     // apply against (the series' ffmpeg/userspace scopes, if any, are moot here).
-    if let (Some(ff), Some(ff_pins)) = (&build.ffmpeg, &lock.ffmpeg) {
+    if let (Some(ff), Some(ff_pins)) = (
+        build.image.as_ref().and_then(|i| i.ffmpeg.as_ref()),
+        &lock.ffmpeg,
+    ) {
         if let Some(checkout) = tree_for_scope(
             args.ffmpeg_path.clone(),
             &ffmpeg_series,
-            args.ffmpeg_base_src.as_deref().unwrap_or(&ff.base.git),
-            &ff_pins.base.reference,
-            &ff_pins.base.commit,
-            "ffmpeg base",
+            &VerifySource {
+                source: args.ffmpeg_base_src.as_deref().unwrap_or(&ff.base.git),
+                reference: &ff_pins.base.reference,
+                commit: &ff_pins.base.commit,
+                what: "ffmpeg base",
+            },
             cache_root,
             sink,
         )? {
@@ -355,20 +360,27 @@ fn kernel_axis(
             });
         }
     }
-    // The `userspace` scope's patches apply to the MPP tree, so verification needs
-    // that tree specifically — a SoC that declares no MPP has no tree to verify
-    // against, and (having no MPP) carries no userspace patches either.
-    if let (Some(mpp), Some(mpp_pin)) = (
-        build.userspace.as_ref().and_then(|us| us.mpp.as_ref()),
-        lock.userspace.as_ref().and_then(|p| p.mpp.as_ref()),
+    // The `userspace` scope's patches apply to whichever tree declares `patched`, so
+    // verification needs that tree specifically — a SoC with no patched tree has none to
+    // verify against, and carries no userspace patches either.
+    let patched = build
+        .image
+        .iter()
+        .flat_map(|i| &i.userspace)
+        .find(|t| t.patched);
+    if let (Some(tree), Some(pin)) = (
+        patched,
+        patched.and_then(|t| lock.userspace.iter().find(|p| p.name == t.name)),
     ) {
         if let Some(checkout) = tree_for_scope(
             args.userspace_path.clone(),
             &userspace_series,
-            args.mpp_src.as_deref().unwrap_or(&mpp.git),
-            &mpp_pin.reference,
-            &mpp_pin.commit,
-            "mpp",
+            &VerifySource {
+                source: args.userspace_src.as_deref().unwrap_or(&tree.git),
+                reference: &pin.reference,
+                commit: &pin.commit,
+                what: &tree.name,
+            },
             cache_root,
             sink,
         )? {
@@ -480,18 +492,29 @@ fn report_unreachable(name: &str, series: &PatchSeries) -> Result<()> {
     Ok(())
 }
 
+/// The upstream a verify tree is fetched from: where, at what, and what to call it.
+///
+/// A struct because all four are `&str`: a swapped pair would fetch the right repo at
+/// the wrong commit, or cache one tree under another's name, and would compile.
+struct VerifySource<'a> {
+    /// The configured upstream, or a `--<tree>-src` override the caller applied.
+    source: &'a str,
+    /// The lock's human-readable ref, for the progress line.
+    reference: &'a str,
+    /// The exact commit to check out — what the verify actually holds the patches to.
+    commit: &'a str,
+    /// What this tree is, for the cache path and the step's log ("kernel", "ffmpeg", …).
+    what: &'a str,
+}
+
 /// Resolve one optional verify tree: an explicit `--<tree>-path` wins; otherwise
 /// `source` (the configured upstream, or a `--<tree>-src` override the caller already
 /// applied) is auto-fetched at the pin, but only when its `series` is non-empty (an
 /// empty scope contributes no tree, so `None`).
-#[allow(clippy::too_many_arguments)]
 fn tree_for_scope(
     explicit: Option<PathBuf>,
     series: &[String],
-    source: &str,
-    reference: &str,
-    commit: &str,
-    what: &str,
+    src: &VerifySource,
     cache_root: &Path,
     sink: &dyn EventSink,
 ) -> Result<Option<PathBuf>> {
@@ -499,7 +522,12 @@ fn tree_for_scope(
         Some(p) => Ok(Some(p)),
         None if series.is_empty() => Ok(None),
         None => Ok(Some(fetch_verify_tree(
-            source, reference, commit, what, cache_root, sink,
+            src.source,
+            src.reference,
+            src.commit,
+            src.what,
+            cache_root,
+            sink,
         )?)),
     }
 }
@@ -532,7 +560,7 @@ enum Envelope {
 /// ([`ensure_applies_uboot`](boot2deb_core::PatchSeries::ensure_applies_uboot))
 /// always refuses.
 ///
-/// Pure, so the branch that used to be wrong is unit-testable.
+/// Pure, so which envelope verdict a given axis reaches is unit-testable.
 fn outside_envelope(candidate: bool, reference: &str, series: &str, declared: &str) -> Envelope {
     if candidate {
         Envelope::Measure(format!(
@@ -576,7 +604,7 @@ mod tests {
             uboot_path: None,
             uboot_src: None,
             userspace_path: None,
-            mpp_src: None,
+            userspace_src: None,
             patches_path: None,
             patches_url: None,
             kernel: None,

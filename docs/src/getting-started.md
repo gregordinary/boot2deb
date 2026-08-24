@@ -91,6 +91,7 @@ carry:
 | Build roots | an unprivileged overlay whose upper layer sits on the work dir's filesystem, which is how each compile root layers a stage's build dependencies | only if the recipe compiles something |
 | Image assembly | `tar` and `cp`. No filesystem tooling — the rootfs ext4 is formatted and then scanned back in pure Rust; `e2fsck` is an optional independent cross-check when present, and the image's provenance records whether it ran | only if the recipe assembles an image |
 | Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | only if the recipe assembles an image *and* this host cannot execute target binaries |
+| Trying the image | `qemu-system-aarch64` / `qemu-system-arm`, which [`boot2deb try`](reference/try.md) boots the finished image under. Optional — no build stage invokes it, and `doctor` reports it as `absent` rather than missing | only if you run `try` |
 
 **`doctor` asks only for what *your recipe* will actually invoke**, so the table above
 is a superset. `doctor turing-rk1/media-accel-forky` on an x86_64 host wants every row;

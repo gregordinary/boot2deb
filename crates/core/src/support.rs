@@ -142,8 +142,8 @@ fn row(
     MatrixRow {
         recipe,
         device: build.device.clone(),
-        suite: build.suite.clone(),
-        kernel: build.kernel.as_ref().map(|k| k.id().to_string()),
+        suite: build.image.as_ref().map(|i| i.suite.clone()),
+        kernel: build.image.as_ref().map(|i| i.kernel.id().to_string()),
         kernel_ref: lock.kernel.as_ref().map(|k| k.reference.clone()),
         patches: patches_cell(lock.patches.as_ref()),
         uboot: patches_cell(lock.uboot_patches.as_ref()),
@@ -295,14 +295,11 @@ fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
     ];
     // A tree the SoC does not declare has no row at all, rather than a row reading
     // "none": these axes exist only for a build whose SoC has that hardware.
-    if let Some(us) = &lock.userspace {
-        for (axis, pin) in [
-            ("mpp", &us.mpp),
-            ("librga", &us.librga),
-            ("libmali", &us.libmali),
-        ] {
-            if let Some(p) = pin {
-                v.push((axis.into(), Some(git(&p.reference, &p.commit))));
+    {
+        for pin in &lock.userspace {
+            {
+                let p = pin;
+                v.push((pin.name.clone(), Some(git(&p.reference, &p.commit))));
             }
         }
     }

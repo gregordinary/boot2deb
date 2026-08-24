@@ -11,7 +11,7 @@ use crate::error::EngineError;
 use crate::git;
 use boot2deb_core::lock::{
     BlobsPin, FfmpegPins, GitPin, KernelPin, KmodPin, Lock, PatchesPin, RootfsPin, UbootPin,
-    UserspacePins,
+    UserspacePin,
 };
 use boot2deb_core::model::KernelSource;
 use boot2deb_core::ResolvedBuild;
@@ -27,12 +27,11 @@ pub struct UpdateOptions<'a> {
     pub kernel_ref: &'a str,
     /// u-boot ref to pin (defaults to the boot-method's `uboot_ref`).
     pub uboot_ref: &'a str,
-    /// MPP source ref to pin (defaults to the SoC layer's `userspace.mpp` ref).
-    pub mpp_ref: &'a str,
-    /// librga source ref to pin (defaults to the SoC layer's `userspace.librga`).
-    pub librga_ref: &'a str,
-    /// libmali source ref to pin (defaults to the SoC layer's `userspace.libmali`).
-    pub libmali_ref: &'a str,
+    /// Per-tree refs to pin the media-accel userspace sources at (`(name, ref)`), in
+    /// any order. A tree absent here falls back to its own `[[userspace]]` declared
+    /// `ref`; the caller seeds it from the previous lock (inheritance) or a
+    /// `--userspace-ref` flag — the same rule the out-of-tree modules follow.
+    pub userspace_refs: &'a [(String, String)],
     /// ffmpeg base (V4L2) ref to pin (defaults to the SoC layer's `ffmpeg.base`).
     pub ffmpeg_base_ref: &'a str,
     /// ffmpeg Rockchip provenance-tree ref to pin (defaults to the SoC layer's
@@ -75,11 +74,8 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     // missing checkout gets the tailored setup error, not a raw git failure: this is
     // the one command that *requires* a local clone, where `build` would auto-fetch),
     // then pin each axis against it. A build with neither series never reads it.
-    let kernel_series = build
-        .kernel
-        .as_ref()
-        .map(|k| k.patch_series())
-        .unwrap_or(&[]);
+    let image = build.image.as_ref();
+    let kernel_series = image.map(|i| i.kernel.patch_series()).unwrap_or(&[]);
     let uboot_series = build.rkbin_boot().and_then(|b| b.uboot_series.as_deref());
     let patches_commit = if !kernel_series.is_empty() || uboot_series.is_some() {
         if !opts.patches_path.join(".git").exists() {
@@ -99,10 +95,8 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     // Resolution guarantees named series carry their source + ref, so a series is
     // never pinned without naming the repo and ref it came from.
     let patches = (!kernel_series.is_empty()).then(|| {
-        let compiled = build
-            .kernel
-            .as_ref()
-            .and_then(|k| k.compiled())
+        let compiled = image
+            .and_then(|i| i.kernel.compiled())
             .expect("kernel patch series imply a compiled kernel");
         PatchesPin {
             series: kernel_series.to_vec(),
@@ -142,10 +136,8 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     // installed from the mirror, so its version and hash are pinned in the solved
     // package manifest like any other package's — there is no ref to peel and no
     // commit to record, and the lock omits `[kernel]` entirely.
-    let kernel = build
-        .kernel
-        .as_ref()
-        .and_then(|k| k.compiled())
+    let kernel = image
+        .and_then(|i| i.kernel.compiled())
         .map(|k| -> Result<KernelPin, EngineError> {
             let source = kernel_source_url(&k.source)?;
             let commit = git::resolve_ref(&source, opts.kernel_ref)?;
@@ -183,34 +175,32 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     // Pin the media-accel sources only when the build carries them (a
     // `requires_media_accel` feature is selected); a base build peels no such refs
     // and its lock omits both tables entirely.
-    let userspace = build
-        .userspace
-        .as_ref()
-        .map(|u| -> Result<UserspacePins, EngineError> {
-            // Each tree is pinned only if the SoC declares it, so the lock's tables
-            // mirror the SoC's own statement about what hardware it has.
-            Ok(UserspacePins {
-                mpp: u
-                    .mpp
-                    .as_ref()
-                    .map(|s| git_pin(&s.git, opts.mpp_ref))
-                    .transpose()?,
-                librga: u
-                    .librga
-                    .as_ref()
-                    .map(|s| git_pin(&s.git, opts.librga_ref))
-                    .transpose()?,
-                libmali: u
-                    .libmali
-                    .as_ref()
-                    .map(|s| git_pin(&s.git, opts.libmali_ref))
-                    .transpose()?,
+    // One pin per tree the build compiles, in the SoC's declared order — so the lock's
+    // `[[userspace]]` array mirrors that SoC's own statement about what hardware it has.
+    // The ref to pin comes from `opts.userspace_refs` (previous-lock inheritance or a
+    // `--userspace-ref <name>=<ref>` flag) and falls back to the tree's declared `ref`.
+    let userspace = image
+        .map(|i| i.userspace.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .map(|t| -> Result<UserspacePin, EngineError> {
+            let reference = opts
+                .userspace_refs
+                .iter()
+                .find(|(name, _)| name == &t.name)
+                .map(|(_, r)| r.as_str())
+                .unwrap_or(&t.git_ref);
+            let pin = git_pin(&t.git, reference)?;
+            Ok(UserspacePin {
+                name: t.name.clone(),
+                source: pin.source,
+                reference: pin.reference,
+                commit: pin.commit,
             })
         })
-        .transpose()?;
-    let ffmpeg = build
-        .ffmpeg
-        .as_ref()
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    let ffmpeg = image
+        .and_then(|i| i.ffmpeg.as_ref())
         .map(|f| -> Result<FfmpegPins, EngineError> {
             Ok(FfmpegPins {
                 base: git_pin(&f.base.git, opts.ffmpeg_base_ref)?,
@@ -225,8 +215,9 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     // Pin each out-of-tree module the board declares, in declared order. The ref to
     // pin comes from `opts.kmod_refs` (previous-lock inheritance / flag) and falls back
     // to the device's own declared ref; the commit is peeled like any other git source.
-    let kmods = build
-        .device_kmods
+    let kmods = image
+        .map(|i| i.device_kmods.as_slice())
+        .unwrap_or(&[])
         .iter()
         .map(|k| -> Result<KmodPin, EngineError> {
             let reference = opts
@@ -301,6 +292,9 @@ pub fn write_lock(path: &Path, lock: &Lock) -> Result<(), EngineError> {
 /// on a u-boot commit and rkbin blobs only if it builds a bootloader, on a patch
 /// commit only if it applies a series. What a build does not have, its lock does not
 /// claim.
+// Each pin is its own type, so a transposed pair does not compile — the argument a
+// parameter object would win here has already been won by the types. What the list is
+// long *for* is that a lock has this many tables.
 #[allow(clippy::too_many_arguments)]
 fn assemble_lock(
     build: &ResolvedBuild,
@@ -309,7 +303,7 @@ fn assemble_lock(
     uboot: Option<UbootPin>,
     patches: Option<PatchesPin>,
     uboot_patches: Option<PatchesPin>,
-    userspace: Option<UserspacePins>,
+    userspace: Vec<UserspacePin>,
     ffmpeg: Option<FfmpegPins>,
     blobs: Option<BlobsPin>,
     kmods: Vec<KmodPin>,
@@ -326,8 +320,8 @@ fn assemble_lock(
         kmods,
         // The rootfs pin exists only for an image build; a u-boot-only build resolves
         // no suite, so the lock omits `[rootfs]`.
-        rootfs: build.suite.as_ref().map(|suite| RootfsPin {
-            suite: suite.clone(),
+        rootfs: build.image.as_ref().map(|image| RootfsPin {
+            suite: image.suite.clone(),
             manifest: opts.rootfs_manifest.to_string(),
             // Set once the solved manifest is committed beside the lock; a bare
             // `update` names the manifest but has not produced it yet.
@@ -338,7 +332,11 @@ fn assemble_lock(
         // exact content pin, so there is nothing to resolve. `update`
         // fetches/verifies/stores them; `build` materializes from the store. Empty
         // when no layer or feature adds one.
-        extra_debs: build.extra_debs.clone(),
+        extra_debs: build
+            .image
+            .as_ref()
+            .map(|i| i.extra_debs.clone())
+            .unwrap_or_default(),
         // Captured opt-in on a successful build (`--save-snapshot`), not here.
         snapshot: None,
     }
@@ -369,6 +367,10 @@ fn assemble_lock(
 /// Kept beside `assemble_lock` so the two stay in lockstep — every resolved-derived
 /// field written there is checked here.
 pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), EngineError> {
+    // Every image-axis check reads through this: a u-boot deliverable has none of them,
+    // and the pins that describe them must then be absent rather than merely unequal —
+    // which is what the `presence` checks below assert.
+    let image = build.image.as_ref();
     /// Record one drifted axis as `axis: lock '<locked>' vs resolved '<resolved>'`.
     fn diff(axes: &mut Vec<String>, axis: &str, locked: &str, resolved: &str) {
         if locked != resolved {
@@ -398,7 +400,7 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
     );
     if let (Some(pin), Some(kernel)) = (
         &lock.kernel,
-        build.kernel.as_ref().and_then(|k| k.compiled()),
+        build.image.as_ref().and_then(|i| i.kernel.compiled()),
     ) {
         diff(&mut axes, "kernel id", &pin.id, &kernel.id);
         // The kernel URL is derived from the definition's source; an unknown named
@@ -420,19 +422,23 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
     if let (Some(pin), Some(boot)) = (&lock.uboot, build.rkbin_boot()) {
         diff(&mut axes, "u-boot source", &pin.source, &boot.uboot_source);
     }
-    if let (Some(lock_us), Some(us)) = (&lock.userspace, &build.userspace) {
-        // A tree appearing or disappearing is drift in its own right — the SoC's
-        // statement about its hardware changed — so presence is checked before the
-        // source URL, and only compared when both sides have the tree.
-        for (axis, lock_pin, src) in [
-            ("mpp", &lock_us.mpp, &us.mpp),
-            ("librga", &lock_us.librga, &us.librga),
-            ("libmali", &lock_us.libmali, &us.libmali),
-        ] {
-            presence(&mut axes, axis, lock_pin.is_some(), src.is_some());
-            if let (Some(p), Some(s)) = (lock_pin, src) {
-                diff(&mut axes, &format!("{axis} source"), &p.source, &s.git);
-            }
+    // A tree appearing or disappearing is drift in its own right — the SoC's statement
+    // about its hardware changed, or this build stopped asking for an optional tree — so
+    // presence is checked per name before the source URL, and the URL only where both
+    // sides have the tree.
+    let resolved_us = image.map(|i| i.userspace.as_slice()).unwrap_or(&[]);
+    for name in lock
+        .userspace
+        .iter()
+        .map(|p| p.name.as_str())
+        .chain(resolved_us.iter().map(|t| t.name.as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let lock_pin = lock.userspace.iter().find(|p| p.name == name);
+        let tree = resolved_us.iter().find(|t| t.name == name);
+        presence(&mut axes, name, lock_pin.is_some(), tree.is_some());
+        if let (Some(p), Some(t)) = (lock_pin, tree) {
+            diff(&mut axes, &format!("{name} source"), &p.source, &t.git);
         }
     }
     // Presence before sources, as the userspace trees get: the ffmpeg pin exists iff the
@@ -444,9 +450,9 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         &mut axes,
         "ffmpeg",
         lock.ffmpeg.is_some(),
-        build.ffmpeg.is_some(),
+        image.is_some_and(|i| i.ffmpeg.is_some()),
     );
-    if let (Some(lock_ff), Some(ff)) = (&lock.ffmpeg, &build.ffmpeg) {
+    if let (Some(lock_ff), Some(ff)) = (&lock.ffmpeg, image.and_then(|i| i.ffmpeg.as_ref())) {
         diff(
             &mut axes,
             "ffmpeg base source",
@@ -508,11 +514,7 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         .as_ref()
         .map(|p| p.series.as_slice())
         .unwrap_or(&[]);
-    let resolved_series = build
-        .kernel
-        .as_ref()
-        .map(|k| k.patch_series())
-        .unwrap_or(&[]);
+    let resolved_series = image.map(|i| i.kernel.patch_series()).unwrap_or(&[]);
     if lock_series != resolved_series {
         axes.push(format!(
             "patch series: lock '{}' vs resolved '{}'",
@@ -545,14 +547,15 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         lock.rootfs.is_some(),
         build.produces_image(),
     );
-    if let (Some(pin), Some(suite)) = (&lock.rootfs, &build.suite) {
-        diff(&mut axes, "suite", &pin.suite, suite);
+    if let (Some(pin), Some(image)) = (&lock.rootfs, image) {
+        diff(&mut axes, "suite", &pin.suite, &image.suite);
     }
-    if lock.extra_debs != build.extra_debs {
+    let resolved_debs = image.map(|i| i.extra_debs.as_slice()).unwrap_or(&[]);
+    if lock.extra_debs != resolved_debs {
         axes.push(format!(
             "extra_debs: lock records {} vs resolved {}",
             lock.extra_debs.len(),
-            build.extra_debs.len()
+            resolved_debs.len()
         ));
     }
     // Media-accel presence: the lock pins userspace/ffmpeg iff the resolved build
@@ -562,14 +565,15 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
     presence(
         &mut axes,
         "media-accel sources",
-        lock.userspace.is_some(),
-        build.userspace.is_some(),
+        !lock.userspace.is_empty(),
+        image.is_some_and(|i| !i.userspace.is_empty()),
     );
     // Out-of-tree modules: the lock pins one per `device_kmods` entry. A board that
     // added, removed, or renamed a kmod — or repointed one at a different repo — must
     // re-pin, since building the old commit from a URL that need not contain it is the
     // very source-drift class the git pins guard against. Keyed by name, order-free.
-    for res in &build.device_kmods {
+    let resolved_kmods = image.map(|i| i.device_kmods.as_slice()).unwrap_or(&[]);
+    for res in resolved_kmods {
         match lock.kmods.iter().find(|p| p.name == res.name) {
             Some(pin) => diff(
                 &mut axes,
@@ -581,7 +585,7 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         }
     }
     for pin in &lock.kmods {
-        if !build.device_kmods.iter().any(|k| k.name == pin.name) {
+        if !resolved_kmods.iter().any(|k| k.name == pin.name) {
             axes.push(format!(
                 "kmod '{}': in lock but no longer resolved",
                 pin.name
@@ -691,6 +695,28 @@ fn blob_pin(dir: &Path, filename: &str) -> Result<String, EngineError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A [`UserspacePin`] from a name and a [`GitPin`]-shaped fixture.
+    fn named_pin(name: &str, p: GitPin) -> boot2deb_core::lock::UserspacePin {
+        boot2deb_core::lock::UserspacePin {
+            name: name.into(),
+            source: p.source,
+            reference: p.reference,
+            commit: p.commit,
+        }
+    }
+
+    /// The image half of a fixture build. Every fixture here resolves a shipped image
+    /// recipe, so the axis is there; the unwrap states that rather than threading an
+    /// `Option` through every assertion.
+    fn image_of(build: &boot2deb_core::ResolvedBuild) -> &boot2deb_core::ResolvedImage {
+        pair_of(build).image
+    }
+
+    /// The same fixture build as an [`ImageBuild`] pair, for the stages that take one.
+    fn pair_of(build: &boot2deb_core::ResolvedBuild) -> boot2deb_core::ImageBuild<'_> {
+        build.as_image().expect("the fixture recipes build images")
+    }
     use super::*;
     use crate::test_support::rk1_build;
 
@@ -839,9 +865,7 @@ mod tests {
         let opts = UpdateOptions {
             kernel_ref: "v7.1.1",
             uboot_ref: "unused",
-            mpp_ref: "unused",
-            librga_ref: "unused",
-            libmali_ref: "unused",
+            userspace_refs: &[],
             ffmpeg_base_ref: "unused",
             ffmpeg_rockchip_ref: "unused",
             kmod_refs: &[],
@@ -870,20 +894,22 @@ mod tests {
         // A fully-upstream board: no patch series on either axis, and no media-accel
         // sources either (the transcode stack is what a patch series exists for).
         let mut build = rk1_build();
-        if let Some(boot2deb_core::model::ResolvedKernel::Compiled(k)) = &mut build.kernel {
+        let image = build
+            .image
+            .as_mut()
+            .expect("the fixture recipe builds an image");
+        if let boot2deb_core::model::ResolvedKernel::Compiled(k) = &mut image.kernel {
             k.patch_series = Vec::new();
         }
+        image.userspace = Vec::new();
+        image.ffmpeg = None;
         if let boot2deb_core::model::ResolvedBoot::RockchipRkbin(b) = &mut build.boot {
             b.uboot_series = None;
         }
-        build.userspace = None;
-        build.ffmpeg = None;
         let opts = UpdateOptions {
             kernel_ref: "v7.1.1",
             uboot_ref: "unused",
-            mpp_ref: "unused",
-            librga_ref: "unused",
-            libmali_ref: "unused",
+            userspace_refs: &[],
             ffmpeg_base_ref: "unused",
             ffmpeg_rockchip_ref: "unused",
             kmod_refs: &[],
@@ -901,7 +927,7 @@ mod tests {
         // Sources and blob files mirror the resolved build so the drift gate below
         // sees a lock that genuinely describes it.
         let boot = build.rkbin_boot().unwrap();
-        let kernel = build.kernel.as_ref().unwrap().compiled().unwrap();
+        let kernel = image_of(&build).kernel.compiled().unwrap();
         let lock = assemble_lock(
             &build,
             &opts,
@@ -916,10 +942,10 @@ mod tests {
                 reference: "v2026.04".into(),
                 commit: "b".repeat(40),
             }),
-            None, // patches
-            None, // uboot_patches
-            None, // userspace
-            None, // ffmpeg
+            None,       // patches
+            None,       // uboot_patches
+            Vec::new(), // userspace
+            None,       // ffmpeg
             Some(BlobsPin {
                 atf: format!("{}@sha256:{}", boot.rkbin.atf, "0".repeat(64)),
                 tpl: format!("{}@sha256:{}", boot.rkbin.tpl, "1".repeat(64)),
@@ -964,11 +990,11 @@ mod tests {
                 commit: "c".repeat(40),
             }),
             uboot_patches: None,
-            userspace: Some(UserspacePins {
-                mpp: Some(git('1')),
-                librga: Some(git('2')),
-                libmali: Some(git('3')),
-            }),
+            userspace: vec![
+                named_pin("mpp", git('1')),
+                named_pin("librga", git('2')),
+                named_pin("libmali", git('3')),
+            ],
             ffmpeg: Some(FfmpegPins {
                 base: git('4'),
                 rockchip: Some(git('5')),
@@ -1012,9 +1038,7 @@ mod tests {
         let opts = UpdateOptions {
             kernel_ref: "v7.1.1",
             uboot_ref: "v2026.04",
-            mpp_ref: "mainline-cma-fix",
-            librga_ref: "master",
-            libmali_ref: "master",
+            userspace_refs: &[],
             ffmpeg_base_ref: "v4l2-request-n8.1",
             ffmpeg_rockchip_ref: "8.1",
             kmod_refs: &[],
@@ -1048,11 +1072,11 @@ mod tests {
                 commit: "67750099d1f73e36ca3551de380744a72e4d5ef7".into(),
             }),
             None, // uboot_patches
-            Some(UserspacePins {
-                mpp: Some(git_pin("mainline-cma-fix", "95a6c48816d39b190be4b7333ad6fc249c08590c")),
-                librga: Some(git_pin("master", "2cffdf6f332c3ddb93eb087841d78e8b487db2a3")),
-                libmali: Some(git_pin("master", "bd33ee262f47fd936b831afccaa0759b3ecc2482")),
-            }),
+            vec![
+                    named_pin("mpp", git_pin("mainline-cma-fix", "95a6c48816d39b190be4b7333ad6fc249c08590c")),
+                    named_pin("librga", git_pin("master", "2cffdf6f332c3ddb93eb087841d78e8b487db2a3")),
+                    named_pin("libmali", git_pin("master", "bd33ee262f47fd936b831afccaa0759b3ecc2482")),
+                ],
             Some(FfmpegPins {
                 base: git_pin("v4l2-request-n8.1", "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935"),
                 rockchip: Some(git_pin("8.1", "f66f2f804627e4464c2d1b10181772b5437bb991")),
@@ -1079,10 +1103,13 @@ mod tests {
         let uboot_pin = lock.uboot.as_ref().unwrap();
         assert_eq!(uboot_pin.source, build.rkbin_boot().unwrap().uboot_source);
         assert_eq!(uboot_pin.reference, "v2026.04");
-        let us = lock.userspace.as_ref().unwrap();
         let ff = lock.ffmpeg.as_ref().unwrap();
         assert_eq!(
-            us.mpp.as_ref().unwrap().commit,
+            lock.userspace
+                .iter()
+                .find(|p| p.name == "mpp")
+                .expect("the RK1 pins mpp")
+                .commit,
             "95a6c48816d39b190be4b7333ad6fc249c08590c"
         );
         assert_eq!(ff.base.commit, "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935");
@@ -1142,7 +1169,7 @@ mod tests {
         for drop_axis in ["userspace", "ffmpeg"] {
             let mut lock = matching_lock(&build);
             match drop_axis {
-                "userspace" => lock.userspace = None,
+                "userspace" => lock.userspace = Vec::new(),
                 _ => lock.ffmpeg = None,
             }
             match check_lock_consistency(&lock, &build).unwrap_err() {
@@ -1164,9 +1191,7 @@ mod tests {
         let opts = UpdateOptions {
             kernel_ref: "v7.1.1",
             uboot_ref: "unused",
-            mpp_ref: "unused",
-            librga_ref: "unused",
-            libmali_ref: "unused",
+            userspace_refs: &[],
             ffmpeg_base_ref: "unused",
             ffmpeg_rockchip_ref: "unused",
             kmod_refs: &[],
@@ -1209,8 +1234,11 @@ mod tests {
             (
                 "mpp source",
                 base_lock(&|l| {
-                    l.userspace.as_mut().unwrap().mpp.as_mut().unwrap().source =
-                        "https://other.example/mpp.git".into()
+                    l.userspace
+                        .iter_mut()
+                        .find(|p| p.name == "mpp")
+                        .expect("the fixture pins mpp")
+                        .source = "https://other.example/mpp.git".into()
                 }),
             ),
             (
@@ -1244,14 +1272,13 @@ mod tests {
     /// A lock whose resolve-derived axes all match `build` — the drift-test
     /// baseline (commits/hashes are placeholders; the gate never reads them).
     fn matching_lock(build: &ResolvedBuild) -> Lock {
-        let us = build.userspace.as_ref().unwrap();
-        let ff = build.ffmpeg.as_ref().unwrap();
+        let ff = image_of(build).ffmpeg.as_ref().unwrap();
         let git = |source: &str, c: &str| GitPin {
             source: source.into(),
             reference: "r".into(),
             commit: c.into(),
         };
-        let kernel = build.kernel.as_ref().unwrap().compiled().unwrap();
+        let kernel = image_of(build).kernel.compiled().unwrap();
         let boot = build.rkbin_boot().unwrap();
         Lock {
             kernel: Some(KernelPin {
@@ -1261,11 +1288,7 @@ mod tests {
                 commit: "kc".into(),
             }),
             patches: {
-                let series = build
-                    .kernel
-                    .as_ref()
-                    .map(|k| k.patch_series())
-                    .unwrap_or(&[]);
+                let series = image_of(build).kernel.patch_series();
                 (!series.is_empty()).then(|| PatchesPin {
                     series: series.to_vec(),
                     source: "https://example.invalid/patches.git".into(),
@@ -1286,17 +1309,17 @@ mod tests {
             }),
             // Mirror whichever trees the fixture's SoC declares, so the lock built
             // here matches the config it is later drift-checked against.
-            userspace: Some(UserspacePins {
-                mpp: us.mpp.as_ref().map(|s| git(&s.git, "m")),
-                librga: us.librga.as_ref().map(|s| git(&s.git, "r")),
-                libmali: us.libmali.as_ref().map(|s| git(&s.git, "l")),
-            }),
+            userspace: image_of(build)
+                .userspace
+                .iter()
+                .map(|t| named_pin(&t.name, git(&t.git, "c")))
+                .collect(),
             ffmpeg: Some(FfmpegPins {
                 base: git(&ff.base.git, "b"),
                 rockchip: ff.rockchip.as_ref().map(|s| git(&s.git, "rk")),
             }),
             rootfs: Some(RootfsPin {
-                suite: build.image_suite().to_string(),
+                suite: image_of(build).suite.clone(),
                 manifest: "m".into(),
                 manifest_sha256: None,
             }),
@@ -1306,7 +1329,7 @@ mod tests {
                 bl32: boot.rkbin.bl32.as_ref().map(|f| format!("{f}@sha256:cc")),
             }),
             kmods: vec![],
-            extra_debs: build.extra_debs.clone(),
+            extra_debs: image_of(build).extra_debs.clone(),
             snapshot: None,
         }
     }

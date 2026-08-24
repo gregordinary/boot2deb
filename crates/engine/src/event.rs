@@ -192,18 +192,20 @@ impl<'a> Step<'a> {
     /// Record that one of this step's outputs came back from the artifact cache
     /// instead of being produced by this run.
     ///
-    /// A step that restores everything it produces needs only this call: with nothing
-    /// restored the outcome is [`StepOutcome::Built`], which is the honest default
-    /// because it claims the work was done. A step that restores *some* of its outputs
-    /// must also call [`compiled`](Step::compiled) for the rest, or it will claim to
-    /// have restored a set it partly compiled.
+    /// A step that restores *some* of its outputs must also call
+    /// [`compiled`](Step::compiled) for the rest, or it will claim to have restored a
+    /// set it partly compiled. Stages that cache through the shared
+    /// `restore_stage_outputs`/`store_stage_outputs` pair have both halves recorded for
+    /// them, so only a stage driving the artifact store itself calls these.
     pub fn restored(&self) {
         self.restored.set(true);
     }
 
-    /// Record that one of this step's outputs was produced by this run. Only a step
-    /// that can also restore some of them needs to say so — see
-    /// [`restored`](Step::restored).
+    /// Record that one of this step's outputs was produced by this run — the other
+    /// half of the pair described on [`restored`](Step::restored).
+    ///
+    /// A step that restores nothing may skip this: with `restored` unset the outcome
+    /// is [`StepOutcome::Built`] regardless, which already claims the work was done.
     pub fn compiled(&self) {
         self.compiled.set(true);
     }

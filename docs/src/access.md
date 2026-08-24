@@ -97,6 +97,11 @@ Three places to put them, depending on scope:
   shipped tree. See [Overlays](reference/overlays.md).
 - **The shipped `base.toml`** — only if the config root is your own fork.
 
+A fourth, per *unit* rather than per image: `boot2deb press --ssh-key` writes the
+key into the pressed file's seed partition, and the device appends it to
+`authorized_keys` at first boot — how six boards from one image get six different
+keys (or the same key without rebuilding). See [Producing images](press.md).
+
 A recipe's list **replaces** the base list rather than adding to it, so a recipe for an
 image you intend to hand to someone else can authorize nobody with
 `ssh_authorized_keys = []`.

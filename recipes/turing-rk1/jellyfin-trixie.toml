@@ -5,7 +5,7 @@
 # forky pocket either way, so both variants install Jellyfin's trixie build.
 # Constraints only; the exact resolution is written to the sibling .lock.
 device     = "turing-rk1"
-kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
+kernel     = "rk3588-mainline-7.2"       # omit -> device default_kernel
 suite      = "trixie"
 features   = ["jellyfin", "media-accel-rockchip", "jellyfin-rockchip"]
 layout     = "combined"                  # omit -> device default_layout
@@ -15,14 +15,14 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 
 # The suite sibling of turing-rk1/jellyfin-forky and under the same bring-up gate:
 # the transcode path this recipe exists to serve has not been exercised through
-# Jellyfin on either suite.
+# Jellyfin on either suite. Re-assessed over the v7.2 kernel with its forky sibling.
 [support]
 status = "experimental"
-date   = "2026-08-05"
+date   = "2026-08-21"
 
 # The same two, for the same reasons: the acceleration shape is a property of the
 # ffmpeg-rk build and the seeded configuration, neither of which is suite-dependent.
 caveats = [
   "Transcoding is hardware-*encode* only. The seeded /etc/jellyfin/encoding.xml selects the `rkmpp` acceleration type with an empty hardware-decoding codec list, so video is decoded and scaled on the CPU and encoded on the VEPU580. Re-enabling any codec under Playback > Transcoding > \"Enable hardware decoding for\" makes Jellyfin emit `-hwaccel rkmpp`, whose decoder cannot open on a mainline kernel, and those streams fail outright rather than falling back to software.",
-  "Jellyfin's bundled FFmpeg is not installed — the recipe supplies /opt/ffmpeg-rk/bin/ffmpeg instead, which is the only build here that can reach the VEPU580. There is therefore no second encoder to fall back to if that path is changed to something invalid.",
+  "Jellyfin's bundled FFmpeg is not installed — the recipe supplies /opt/ffmpeg-rk/bin/ffmpeg instead, which is the only build here that can reach the VEPU580. There is therefore no second encoder to fall back to: Jellyfin validates the path during startup and exits if the binary does not run, so pointing Dashboard > Playback > Transcoding > \"FFmpeg path\" at something invalid leaves the server failing to start rather than transcoding in software.",
 ]

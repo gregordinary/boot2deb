@@ -14,7 +14,30 @@
 //! ([`diff`](crate::diff)).
 
 use crate::error::ConfigError;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+
+/// The filename suffix every solved manifest carries: `<stem>.pkgs.lock`, written
+/// beside the `<recipe>.lock` that names it.
+///
+/// Part of the format this module defines, so a writer and a reader cannot disagree
+/// about which files are manifests. That distinction is load-bearing beyond parsing:
+/// a manifest shares the `.lock` extension with a recipe lock but is not TOML, so a
+/// consumer that walks `recipes/` by extension alone reads one as the other.
+pub const MANIFEST_SUFFIX: &str = ".pkgs.lock";
+
+/// The manifest filename for a recipe `stem` — the name `update` and `build` write,
+/// and the value a lock's [`RootfsPin::manifest`](crate::lock::RootfsPin::manifest)
+/// holds.
+pub fn manifest_name(stem: &str) -> String {
+    format!("{stem}{MANIFEST_SUFFIX}")
+}
+
+/// True when `name` is a solved manifest rather than a recipe lock — for a consumer
+/// enumerating `recipes/`, where the two share the `.lock` extension.
+pub fn is_manifest_name(name: &str) -> bool {
+    name.ends_with(MANIFEST_SUFFIX)
+}
 
 /// One package in a solved manifest.
 ///
@@ -97,6 +120,82 @@ pub fn parse(text: &str, path: &str) -> Result<Vec<Package>, ConfigError> {
     Ok(packages)
 }
 
+/// One package's difference between two solved sets — the unit
+/// [`moved`] reports.
+///
+/// A side is `None` when that set does not hold the package at all, so an addition and
+/// a removal are the same shape as a version change and need no separate variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moved {
+    /// Binary package name, the identity the two sides are matched on.
+    pub name: String,
+    /// Debian architecture, matched on alongside the name: `libc6:arm64` and
+    /// `libc6:armhf` are different packages that a multi-arch set can hold at once.
+    pub architecture: String,
+    /// What the first set holds, or `None` if it does not hold this package.
+    pub before: Option<Package>,
+    /// What the second set holds, or `None` if it does not hold this package.
+    pub after: Option<Package>,
+}
+
+impl Moved {
+    /// A one-line summary for a report: `libc6:arm64 2.42-17 -> 2.43-3`, with `(absent)`
+    /// standing in for a side that does not hold the package.
+    ///
+    /// The version is what a reader acts on, so it leads. Two sides at the same version
+    /// render the sha256s instead — that pair differs in the `.deb`'s *bytes*, and
+    /// printing one version twice would read as no difference at all.
+    pub fn describe(&self) -> String {
+        let same_version = matches!(
+            (&self.before, &self.after),
+            (Some(b), Some(a)) if b.version == a.version
+        );
+        let side = |p: &Option<Package>| match p {
+            None => "(absent)".to_string(),
+            Some(p) if same_version => format!("{} sha256:{}", p.version, p.sha256),
+            Some(p) => p.version.clone(),
+        };
+        format!(
+            "{}:{} {} -> {}",
+            self.name,
+            self.architecture,
+            side(&self.before),
+            side(&self.after)
+        )
+    }
+}
+
+/// What differs between two solved package sets, sorted by name then architecture.
+///
+/// Packages are matched on `name` + `architecture` and compared on the *whole* row, so
+/// a set that agrees on every version but records one different sha256 still reports —
+/// that pair names different bytes, which is the case a name-and-version comparison
+/// would call equal.
+///
+/// An empty result is the decisive answer that the two sets are the same set. That is
+/// what lets a caller treat a recorded manifest as still describing what an archive
+/// would give now, rather than merely as having been true once.
+pub fn moved(before: &[Package], after: &[Package]) -> Vec<Moved> {
+    let key = |p: &Package| (p.name.clone(), p.architecture.clone());
+    let index = |set: &[Package]| -> BTreeMap<(String, String), Package> {
+        set.iter().map(|p| (key(p), p.clone())).collect()
+    };
+    let (before, after) = (index(before), index(after));
+    before
+        .keys()
+        .chain(after.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|k| before.get(*k) != after.get(*k))
+        .map(|k| Moved {
+            name: k.0.clone(),
+            architecture: k.1.clone(),
+            before: before.get(k).cloned(),
+            after: after.get(k).cloned(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +273,74 @@ mod tests {
         // A fifth field is malformed for the same reason a third is: the format is
         // exactly four, and anything else means the file is not what it claims.
         assert!(parse("a 1 all aa extra\n", "m").is_err());
+    }
+
+    #[test]
+    fn an_unchanged_set_moved_nothing_in_any_order() {
+        let a = [
+            pkg("libc6", "2.41-1", "arm64", "aaaa"),
+            pkg("bash", "5.2", "arm64", "bbbb"),
+        ];
+        let b = [
+            pkg("bash", "5.2", "arm64", "bbbb"),
+            pkg("libc6", "2.41-1", "arm64", "aaaa"),
+        ];
+        // Empty is the decisive answer, and resolution order must not disturb it —
+        // the whole point is to treat a recorded manifest as still current.
+        assert!(moved(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn a_version_change_names_both_sides() {
+        // The §5 case: one base carries libc6 2.42-17, a later archive resolves 2.43-3,
+        // and nothing but the version distinguishes the two trees.
+        let before = [pkg("libc6", "2.42-17", "arm64", "aaaa")];
+        let after = [pkg("libc6", "2.43-3", "arm64", "cccc")];
+        let m = moved(&before, &after);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].describe(), "libc6:arm64 2.42-17 -> 2.43-3");
+    }
+
+    #[test]
+    fn an_added_and_a_removed_package_each_report_one_absent_side() {
+        let before = [pkg("gone", "1", "all", "aaaa")];
+        let after = [pkg("new", "2", "all", "bbbb")];
+        let m = moved(&before, &after);
+        // Sorted by name, so `gone` precedes `new` regardless of which side held it.
+        assert_eq!(
+            m.iter().map(|x| x.describe()).collect::<Vec<_>>(),
+            ["gone:all 1 -> (absent)", "new:all (absent) -> 2"]
+        );
+    }
+
+    #[test]
+    fn one_version_at_two_digests_reports_the_bytes_rather_than_one_version_twice() {
+        // A name-and-version comparison calls this pair equal; they are not the same
+        // `.deb`, and a report printing "1.0 -> 1.0" would read as no difference.
+        let before = [pkg("libc6", "1.0", "arm64", "aaaa")];
+        let after = [pkg("libc6", "1.0", "arm64", "bbbb")];
+        let m = moved(&before, &after);
+        assert_eq!(
+            m[0].describe(),
+            "libc6:arm64 1.0 sha256:aaaa -> 1.0 sha256:bbbb"
+        );
+    }
+
+    #[test]
+    fn the_same_name_at_two_architectures_is_two_packages() {
+        // A multi-arch set holds both at once, so matching on the name alone would
+        // report a spurious move between them.
+        let before = [
+            pkg("libc6", "1.0", "arm64", "aaaa"),
+            pkg("libc6", "1.0", "armhf", "bbbb"),
+        ];
+        assert!(moved(&before, &before).is_empty());
+        let after = [
+            pkg("libc6", "1.0", "arm64", "aaaa"),
+            pkg("libc6", "2.0", "armhf", "cccc"),
+        ];
+        let m = moved(&before, &after);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].architecture, "armhf");
     }
 }

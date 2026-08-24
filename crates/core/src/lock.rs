@@ -148,12 +148,13 @@ pub struct Lock {
     /// verbatim. Omitted from the committed lock when u-boot ships pristine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot_patches: Option<PatchesPin>,
-    /// Exact media-accel userspace source pins (MPP/RGA/Mali). Present iff the
-    /// recipe builds the HW transcode stack (a `requires_media_accel` feature is
-    /// selected); omitted from the committed lock for a base build, which resolves
-    /// and builds no userspace/ffmpeg nodes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub userspace: Option<UserspacePins>,
+    /// Exact media-accel userspace source pins, one `[[userspace]]` entry per tree the
+    /// build compiles, in the SoC's declared order. Non-empty iff the recipe builds the
+    /// HW transcode stack (a `requires_media_accel` feature is selected); the committed
+    /// lock omits the array entirely for a base build, which resolves and builds no
+    /// userspace or ffmpeg node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub userspace: Vec<UserspacePin>,
     /// Exact ffmpeg source pins (V4L2 base + Rockchip rkmpp/rkrga). Present in
     /// lockstep with [`userspace`](Self::userspace) — the media-accel stack pins
     /// as a unit.
@@ -220,6 +221,30 @@ impl Lock {
             path: path.to_string(),
             source,
         })
+    }
+
+    /// Every upstream commit this lock pins, across all source axes — the kernel and
+    /// u-boot trees, both patch-series checkouts, each userspace and ffmpeg tree, and
+    /// each out-of-tree kmod. Blob, extra-deb, and rootfs pins are content hashes, not
+    /// commits, so they are not here.
+    ///
+    /// This is the *liveness* set a commit-addressed cache is swept against: a checkout
+    /// keyed on a commit no lock names can be re-fetched, so it is dead. Deliberately
+    /// the union of every axis rather than only the two a verify gate fetches today —
+    /// over-reporting keeps a live tree; under-reporting deletes one.
+    pub fn pinned_commits(&self) -> std::collections::BTreeSet<&str> {
+        let mut out = std::collections::BTreeSet::new();
+        out.extend(self.kernel.iter().map(|p| p.commit.as_str()));
+        out.extend(self.patches.iter().map(|p| p.commit.as_str()));
+        out.extend(self.uboot.iter().map(|p| p.commit.as_str()));
+        out.extend(self.uboot_patches.iter().map(|p| p.commit.as_str()));
+        out.extend(self.userspace.iter().map(|p| p.commit.as_str()));
+        out.extend(self.kmods.iter().map(|p| p.commit.as_str()));
+        if let Some(ffmpeg) = &self.ffmpeg {
+            out.insert(ffmpeg.base.commit.as_str());
+            out.extend(ffmpeg.rockchip.iter().map(|p| p.commit.as_str()));
+        }
+        out
     }
 }
 
@@ -312,26 +337,28 @@ pub struct GitPin {
     pub commit: String,
 }
 
-/// Pinned media-accel userspace sources — the MPP/RGA/Mali forks the userspace
-/// build node compiles into `.deb`s.
+/// One pinned media-accel userspace source — the exact commit the userspace build node
+/// compiles into `.deb`s.
+///
+/// One `[[userspace]]` entry per tree the SoC declares *and* this build enables, keyed
+/// by [`name`](Self::name). A list rather than three named tables, mirroring
+/// [`UserspaceTree`](crate::model::UserspaceTree): the set is the SoC's to state, so a
+/// part with a different stack pins a different set without a schema change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Each tree is pinned only when the SoC declares it — the pins mirror
-/// [`UserspaceSources`](crate::model::UserspaceSources) one-for-one, so an absent
-/// entry here means the SoC has no such tree and the userspace node builds no
-/// `.deb` for it.
-pub struct UserspacePins {
-    /// Rockchip MPP pin (`librockchip-mpp1`). Absent on a part with no vendor
-    /// `mpp_service` in its kernel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mpp: Option<GitPin>,
-    /// librga pin (`librga2`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub librga: Option<GitPin>,
-    /// libmali pin. Absent where the GPU is driven by mainline panfrost and its
-    /// userspace is Mesa from the mirror.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub libmali: Option<GitPin>,
+pub struct UserspacePin {
+    /// Matches the SoC's `[[userspace]]` entry name; the drift gate compares the two.
+    pub name: String,
+    /// Clone URL the commit was pinned from. Compared against a fresh resolve by the
+    /// drift gate, so a re-pointed fork re-pins rather than fetching an old commit from
+    /// a repository that need not contain it.
+    pub source: String,
+    /// The human-readable ref this pin came from (TOML key `ref`).
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The exact commit the ref pointed at.
+    #[serde(deserialize_with = "de_commit")]
+    pub commit: String,
 }
 
 /// Pinned out-of-tree kernel-module source — one per device `device_kmods` entry. A
@@ -482,23 +509,26 @@ mod tests {
                 reference: "main".into(),
                 commit: "e86ef2a0000000000000000000000000000000ab".into(),
             }),
-            userspace: Some(UserspacePins {
-                mpp: Some(GitPin {
+            userspace: vec![
+                    UserspacePin {
+                        name: "mpp".into(),
                     source: "https://github.com/example/mpp.git".into(),
                     reference: "mainline-cma-fix".into(),
                     commit: "750e76ec2d9287babfaf08c8bf395ebc5e8778ea".into(),
-                }),
-                librga: Some(GitPin {
+                    },
+                    UserspacePin {
+                        name: "librga".into(),
                     source: "https://github.com/example/librga.git".into(),
                     reference: "master".into(),
                     commit: "2cffdf6f332c3ddb93eb087841d78e8b487db2a3".into(),
-                }),
-                libmali: Some(GitPin {
+                    },
+                    UserspacePin {
+                        name: "libmali".into(),
                     source: "https://github.com/example/libmali.git".into(),
                     reference: "master".into(),
                     commit: "bd33ee262f47fd936b831afccaa0759b3ecc2482".into(),
-                }),
-            }),
+                    },
+                ],
             ffmpeg: Some(FfmpegPins {
                 base: GitPin {
                     source: "https://github.com/example/ffmpeg.git".into(),
@@ -569,23 +599,26 @@ mod tests {
                 commit: "c".repeat(40),
             }),
             uboot_patches: None,
-            userspace: Some(UserspacePins {
-                mpp: Some(GitPin {
+            userspace: vec![
+                UserspacePin {
+                    name: "mpp".into(),
                     source: "m://s".into(),
                     reference: "m".into(),
                     commit: "1".repeat(40),
-                }),
-                librga: Some(GitPin {
+                },
+                UserspacePin {
+                    name: "librga".into(),
                     source: "r://s".into(),
                     reference: "r".into(),
                     commit: "2".repeat(40),
-                }),
-                libmali: Some(GitPin {
+                },
+                UserspacePin {
+                    name: "libmali".into(),
                     source: "l://s".into(),
                     reference: "l".into(),
                     commit: "3".repeat(40),
-                }),
-            }),
+                },
+            ],
             ffmpeg: Some(FfmpegPins {
                 base: GitPin {
                     source: "b://s".into(),
@@ -617,6 +650,73 @@ mod tests {
     }
 
     #[test]
+    fn pinned_commits_covers_every_source_axis() {
+        // The liveness set a commit-addressed cache is swept against, so an axis
+        // missing here is a live checkout deleted. Asserted against the full fixture
+        // rather than a hand-listed subset: every axis that carries a commit must
+        // appear, whichever gate happens to fetch it today.
+        let mut lock = base_lock();
+        lock.uboot_patches = Some(PatchesPin {
+            series: vec!["rk3576-display".into()],
+            source: "https://example.invalid/patches.git".into(),
+            reference: "main".into(),
+            commit: "6".repeat(40),
+        });
+        lock.kmods = vec![KmodPin {
+            name: "aic8800".into(),
+            source: "https://example.invalid/aic8800.git".into(),
+            reference: "main".into(),
+            commit: "7".repeat(40),
+        }];
+        let pinned = lock.pinned_commits();
+        let expected: std::collections::BTreeSet<String> = [
+            "a", // kernel
+            "b", // patches
+            "c", // u-boot
+            "6", // u-boot patches
+            "1", "2", "3", // userspace
+            "4", // ffmpeg base
+            "5", // ffmpeg rockchip provenance
+            "7", // kmod
+        ]
+        .iter()
+        .map(|c| c.repeat(40))
+        .collect();
+        let got: std::collections::BTreeSet<String> =
+            pinned.iter().map(|c| (*c).to_string()).collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn a_lock_that_fetches_nothing_pins_no_commits() {
+        // The C201 shape (distro kernel, depthcharge, no blobs): the blob and rootfs
+        // pins are content hashes, not commits, so the sweep must not read them as
+        // liveness for a checkout directory that happens to share their hex shape.
+        let lock = Lock {
+            kernel: None,
+            patches: None,
+            uboot: None,
+            uboot_patches: None,
+            userspace: Vec::new(),
+            ffmpeg: None,
+            rootfs: Some(RootfsPin {
+                suite: "forky".into(),
+                manifest: "asus-c201-forky.pkgs.lock".into(),
+                manifest_sha256: None,
+            }),
+            blobs: Some(BlobsPin {
+                atf: format!("atf@sha256:{}", "0".repeat(64)),
+                tpl: format!("tpl@sha256:{}", "1".repeat(64)),
+                bl32: None,
+            }),
+            kmods: vec![],
+            extra_debs: vec![],
+            snapshot: None,
+        };
+        assert!(lock.pinned_commits().is_empty());
+    }
+
+    #[test]
     fn a_distro_kernel_depthcharge_lock_pins_only_the_rootfs() {
         // The C201 shape: Debian's own kernel package, a boot method that compiles no
         // u-boot, and no rkbin blobs. Nothing is fetched from git and nothing is
@@ -628,7 +728,7 @@ mod tests {
             patches: None,
             uboot: None,
             uboot_patches: None,
-            userspace: None,
+            userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(RootfsPin {
                 suite: "forky".into(),
@@ -838,7 +938,7 @@ mod tests {
         // nodes, so `update` writes no pins for them. The committed lock must omit
         // both tables entirely (not empty tables) and round-trip back to `None`.
         let mut lock = base_lock();
-        lock.userspace = None;
+        lock.userspace = Vec::new();
         lock.ffmpeg = None;
         let text = lock.to_toml_string().unwrap();
         assert!(
@@ -846,7 +946,7 @@ mod tests {
             "base-build lock must not emit media-accel tables:\n{text}"
         );
         let back: Lock = toml::from_str(&text).unwrap();
-        assert_eq!(back.userspace, None);
+        assert!(back.userspace.is_empty());
         assert_eq!(back.ffmpeg, None);
         assert_eq!(lock, back);
     }

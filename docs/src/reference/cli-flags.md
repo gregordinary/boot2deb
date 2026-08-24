@@ -100,7 +100,7 @@ Scaffold a new `devices/<name>.toml` (and, by default, a matching recipe) from t
 | `--description` | `<DESCRIPTION>` | Board description. Prompted if omitted on a terminal |
 | `--soc` | `<SOC>` | SoC (e.g. rk3588). Must already have a `socs/<soc>.toml`. Prompted if omitted on a terminal; required otherwise |
 | `--boot-method` | `<BOOT_METHOD>` | Boot method (e.g. rockchip-rkbin). Prompted/defaulted if omitted |
-| `--kernel` | `<KERNEL>` | Kernel definition id (e.g. rk3588-mainline-7.1). Must support the chosen SoC. Prompted/defaulted if omitted |
+| `--kernel` | `<KERNEL>` | Kernel definition id (e.g. rk3588-mainline-7.2). Must support the chosen SoC. Prompted/defaulted if omitted |
 | `--suite` | `<SUITE>` | Default Debian suite. Prompted/defaulted (forky) if omitted |
 | `--layout` | `<LAYOUT>` | Default image layout (combined \| split). Prompted/defaulted if omitted |
 | `--hostname` | `<HOSTNAME>` | Default image hostname. Defaults to the device name |
@@ -177,11 +177,9 @@ Resolve upstream refs + hash blobs and write the recipe's `.lock`. The sole path
 | flag | value | what it does |
 | --- | --- | --- |
 | `--feature` | `<FEATURES>`, repeatable | Rootfs feature to select, repeatable (`--feature jellyfin --feature media-accel-rockchip`). Replaces the recipe's own feature list and pins the result as a *variant* of the recipe: the lock, its solved package manifest, and the build directory are all named `<recipe>+<feature>...`, so the recipe's own lock is left alone and two selections never collide. Order is significant — kernel fragments and patch series compose in selection order. A variant carries no `[support]` claim; the claim belongs to the recipe |
-| `--kernel-ref` | `<KERNEL_REF>` | Kernel ref to pin, resolved to a commit (e.g. v7.1.1). Optional once a lock exists: omitting it re-pins the *previous lock's* kernel ref, so a routine re-pin (e.g. after importing a patch) needs no kernel tag the user did not touch. Required only for the first update, which has no prior ref to inherit. Auto-resolving a kernel `track` to its latest tag is a later refinement |
+| `--kernel-ref` | `<KERNEL_REF>` | Kernel ref to pin, resolved to a commit (e.g. v7.2). Optional once a lock exists: omitting it re-pins the *previous lock's* kernel ref, so a routine re-pin (e.g. after importing a patch) needs no kernel tag the user did not touch. Required only for the first update, which has no prior ref to inherit. Auto-resolving a kernel `track` to its latest tag is a later refinement |
 | `--uboot-ref` | `<UBOOT_REF>` | u-boot ref to pin. Defaults to the boot-method's `uboot_ref`, re-read on every update, so bumping that one constraint moves every board on the method — except a lock already pinned to a bare commit sha, which is kept as the deliberate hand-pin only this flag can have created |
-| `--mpp-ref` | `<MPP_REF>` | MPP source ref to pin. Defaults to the SoC layer's `userspace.mpp` ref, re-read on every update; a lock pinned to a bare commit sha is kept instead |
-| `--librga-ref` | `<LIBRGA_REF>` | librga source ref to pin. Defaults to the SoC layer's `userspace.librga`, re-read on every update; a lock pinned to a bare commit sha is kept instead |
-| `--libmali-ref` | `<LIBMALI_REF>` | libmali source ref to pin. Defaults to the SoC layer's `userspace.libmali`, re-read on every update; a lock pinned to a bare commit sha is kept instead |
+| `--userspace-ref` | `<NAME=REF>`, repeatable | Media-accel userspace ref to pin, as `NAME=REF`, repeatable. Defaults to that tree's own `[[userspace]]` ref, re-read on every update; a lock pinned to a bare commit sha is kept instead. The SoC declares which trees it has, so each override names one (`--userspace-ref mpp=v1.5.0`) |
 | `--ffmpeg-base-ref` | `<FFMPEG_BASE_REF>` | ffmpeg base (V4L2) ref to pin. Defaults to the SoC layer's `ffmpeg.base`, re-read on every update; a lock pinned to a bare commit sha is kept instead |
 | `--ffmpeg-rockchip-ref` | `<FFMPEG_ROCKCHIP_REF>` | ffmpeg Rockchip provenance-tree ref to pin. Defaults to the SoC layer's `ffmpeg.rockchip`, re-read on every update; a lock pinned to a bare commit sha is kept instead. Recorded as the graft's provenance; not fetched |
 | `--patches-path` | `<PATCHES_PATH>` | `patches` repo checkout whose HEAD pins the series (default: the config root's sibling `../patches`). `update` requires this local clone when the kernel names a patch series — the pin *is* its HEAD — unlike `build`, which auto-fetches the already-pinned commit and needs no checkout |
@@ -206,7 +204,7 @@ Dry-run the locked patch series against source checkouts with `git am --3way`, h
 | `--uboot-path` | `<UBOOT_PATH>` | u-boot checkout to verify the u-boot series against. Optional: omit it and, when the recipe pins a u-boot series, the locked u-boot is auto-fetched at its pin |
 | `--uboot-src` | `<UBOOT_SRC>` | u-boot clone source (git URL or local path) for the auto-fetch, in place of the boot method's `uboot_source`. Ignored with `--uboot-path` |
 | `--userspace-path` | `<USERSPACE_PATH>` | Userspace (MPP/RGA) checkout to verify the userspace series against. Optional: omit it and, when the series carries userspace patches, the locked MPP tree is auto-fetched at its pin |
-| `--mpp-src` | `<MPP_SRC>` | MPP clone source (git URL or local path) for the auto-fetch, in place of the SoC layer's `userspace.mpp` URL. A local checkout (e.g. ../mpp-rockchip) makes the fetch near-instant. Ignored with `--userspace-path` |
+| `--userspace-src` | `<USERSPACE_SRC>` | Clone source (git URL or local path) for the auto-fetch of the *patched* userspace tree, in place of that tree's own `[[userspace]]` URL. A local checkout makes the fetch near-instant. Ignored with `--userspace-path` |
 | `--patches-path` | `<PATCHES_PATH>` | `patches` repo checkout the series + patches are read from. Omit to use the config root's sibling `../patches` if present, else auto-fetch the series at the lock's `patches.commit` |
 | `--patches-url` | `<PATCHES_URL>` | Clone URL for auto-fetching the `patches` series when no local checkout is present; default: the repo the lock's patch pin names |
 | `--kernel` | `<VERSION>` | Verify against this kernel version instead of the one the lock pins, leaving the lock untouched — "would this series survive 7.2?" answered before adopting 7.2. Takes a kernel tag (`v7.2`, `v7.2-rc3`); pair it with `--kernel-path` or `--kernel-src` pointing at a tree that holds it. — A version outside the series' declared `applies_to_kernel` is measured, not refused: that is the case worth asking about, and gating on the envelope would answer the question by assuming it. The run says so and reports what `git am` actually does, so a clean result is the evidence for widening the envelope. — A release candidate is matched against its base release here, so an `-rc` tree is answerable; the build path stays release-strict. — Kernel axis only: a recipe that pins no kernel (a `deliverable = "uboot"` one) rejects it rather than quietly verifying its u-boot series and reporting a green that answers nothing. |
@@ -240,6 +238,19 @@ Ask the archives a build would resolve against whether they carry every package 
 | `recipe` | yes | Recipe whose resolved package set to check (e.g. turing-rk1/forky) |
 
 This command takes no flags of its own.
+
+## verify-image
+
+Hold a finished image artifact to the invariants that are checkable without a board: the artifact set is present, the plan document parses and its digest matches what the provenance records, `[[archives]]` is well formed, the ext4 filesystem is exactly its GPT partition, and a fitted `--image-size` left the slack it asked for. Read-only, no root: only the head of the artifact is decompressed. The off-board half of the hardware gate
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `recipe` | yes | Recipe whose built image to verify (e.g. turing-rk1/forky) |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--out-dir` | `<OUT_DIR>` | Directory holding the built artifacts (default: the recipe's own `<work>/artifacts`) |
+
 
 ## verify-sources
 
@@ -293,12 +304,10 @@ Drive the build stages (kernel, u-boot, userspace, ffmpeg, and the disk image) f
 | `--stage` | `all` \| `kernel` \| `dtb` \| `kmod` \| `uboot` \| `userspace` \| `ffmpeg` \| `rootfs` \| `image` (default `all`) | Which stage(s) to run |
 | `--kernel-src` | `<KERNEL_SRC>` | Kernel clone source (git URL or local path); default: the kernel definition's source URL. A local clone (e.g. ../linux) is far faster |
 | `--uboot-src` | `<UBOOT_SRC>` | u-boot clone source (git URL or local path); default: the boot method's `uboot_source` |
-| `--mpp-src` | `<MPP_SRC>` | MPP clone source (git URL or local path); default: the SoC layer's `userspace.mpp` URL. A local checkout (e.g. ../mpp-rockchip) is far faster |
-| `--librga-src` | `<LIBRGA_SRC>` | librga clone source; default: the SoC layer's `userspace.librga` URL |
-| `--libmali-src` | `<LIBMALI_SRC>` | libmali clone source; default: the SoC layer's `userspace.libmali` URL |
+| `--userspace-src` | `<NAME=SRC>`, repeatable | Media-accel userspace clone source, as `NAME=SRC`, repeatable; default: that tree's own `[[userspace]]` URL. The SoC declares which trees it has, so each override names one (`--userspace-src mpp=../mpp-rockchip`). A local checkout is far faster than a fresh clone. The clone is still made at the locked commit, so the named tree must contain it |
 | `--ffmpeg-base-src` | `<FFMPEG_BASE_SRC>` | ffmpeg base (Kwiboo) clone source; default: the SoC layer's `ffmpeg.base` URL. A local checkout makes the fetch near-instant |
 | `--kmod-src` | `<NAME=SRC>`, repeatable | Out-of-tree module clone source, as `NAME=SRC`, repeatable; default: that kmod's locked `source`. Unlike the single-tree axes there are several modules, so each override names the `device_kmods` entry it applies to (`--kmod-src aic8800=../aic8800`). The clone is still made at the locked commit, so the named tree must contain it |
-| `--build-libmali` |  | Also build the Mali userspace (off by default — unused on a headless box) |
+| `--userspace` | `<NAME>`, repeatable | Also build an *optional* media-accel userspace tree, by name, repeatable. — A tree the SoC marks `optional` is skipped unless named here: libmali is the live case — the transcode pipeline rides the VPU and the RGA, not the GPU, so a headless box never needs the blob and compiling its variant matrix is minutes for nothing. Naming an optional tree also changes what the *whole* userspace stage layers, so every tree's cache key moves with it. |
 | `--patches-path` | `<PATCHES_PATH>` | `patches` repo checkout the series is read from. Omit to use the config root's sibling `../patches` (if present, with the lock's `patches.commit` enforced), else auto-fetch the series at the pinned commit from `--patches-url`/the repo the pin names. Pass an explicit path to co-develop the series from a working checkout, which downgrades a pin mismatch to a loud warning |
 | `--patches-url` | `<PATCHES_URL>` | Clone URL for auto-fetching the `patches` series when no local checkout is present; default: the repo the lock's patch pin names. The series is fetched at the lock's `patches.commit` into a durable cache and its pin enforced. Ignored when `--patches-path` or the sibling `../patches` supplies a checkout |
 | `--blobs-dir` | `<BLOBS_DIR>` | Vendored rkbin blob directory (default: blobs/SOC under the config root) |
@@ -338,12 +347,10 @@ Rebuild an image from the plan document a previous build published, instead of r
 | `--stage` | `all` \| `kernel` \| `dtb` \| `kmod` \| `uboot` \| `userspace` \| `ffmpeg` \| `rootfs` \| `image` (default `all`) | Which stage(s) to run |
 | `--kernel-src` | `<KERNEL_SRC>` | Kernel clone source (git URL or local path); default: the kernel definition's source URL. A local clone (e.g. ../linux) is far faster |
 | `--uboot-src` | `<UBOOT_SRC>` | u-boot clone source (git URL or local path); default: the boot method's `uboot_source` |
-| `--mpp-src` | `<MPP_SRC>` | MPP clone source (git URL or local path); default: the SoC layer's `userspace.mpp` URL. A local checkout (e.g. ../mpp-rockchip) is far faster |
-| `--librga-src` | `<LIBRGA_SRC>` | librga clone source; default: the SoC layer's `userspace.librga` URL |
-| `--libmali-src` | `<LIBMALI_SRC>` | libmali clone source; default: the SoC layer's `userspace.libmali` URL |
+| `--userspace-src` | `<NAME=SRC>`, repeatable | Media-accel userspace clone source, as `NAME=SRC`, repeatable; default: that tree's own `[[userspace]]` URL. The SoC declares which trees it has, so each override names one (`--userspace-src mpp=../mpp-rockchip`). A local checkout is far faster than a fresh clone. The clone is still made at the locked commit, so the named tree must contain it |
 | `--ffmpeg-base-src` | `<FFMPEG_BASE_SRC>` | ffmpeg base (Kwiboo) clone source; default: the SoC layer's `ffmpeg.base` URL. A local checkout makes the fetch near-instant |
 | `--kmod-src` | `<NAME=SRC>`, repeatable | Out-of-tree module clone source, as `NAME=SRC`, repeatable; default: that kmod's locked `source`. Unlike the single-tree axes there are several modules, so each override names the `device_kmods` entry it applies to (`--kmod-src aic8800=../aic8800`). The clone is still made at the locked commit, so the named tree must contain it |
-| `--build-libmali` |  | Also build the Mali userspace (off by default — unused on a headless box) |
+| `--userspace` | `<NAME>`, repeatable | Also build an *optional* media-accel userspace tree, by name, repeatable. — A tree the SoC marks `optional` is skipped unless named here: libmali is the live case — the transcode pipeline rides the VPU and the RGA, not the GPU, so a headless box never needs the blob and compiling its variant matrix is minutes for nothing. Naming an optional tree also changes what the *whole* userspace stage layers, so every tree's cache key moves with it. |
 | `--patches-path` | `<PATCHES_PATH>` | `patches` repo checkout the series is read from. Omit to use the config root's sibling `../patches` (if present, with the lock's `patches.commit` enforced), else auto-fetch the series at the pinned commit from `--patches-url`/the repo the pin names. Pass an explicit path to co-develop the series from a working checkout, which downgrades a pin mismatch to a loud warning |
 | `--patches-url` | `<PATCHES_URL>` | Clone URL for auto-fetching the `patches` series when no local checkout is present; default: the repo the lock's patch pin names. The series is fetched at the lock's `patches.commit` into a durable cache and its pin enforced. Ignored when `--patches-path` or the sibling `../patches` supplies a checkout |
 | `--blobs-dir` | `<BLOBS_DIR>` | Vendored rkbin blob directory (default: blobs/SOC under the config root) |
@@ -435,24 +442,114 @@ Explain, per compile node, what the next `build` will actually redo: whether it 
 | --- | --- | --- |
 | `--work-dir` | `<WORK_DIR>` | Build scratch dir to inspect (default: `<root>/build/RECIPE`) — must match the dir the build used, since the stamps live there |
 | `--patches-path` | `<PATCHES_PATH>` | The build being reasoned about used an explicit `--patches-path` co-dev checkout (folded into the kernel/u-boot/ffmpeg signatures). Pass the same value so the prediction matches what that build would reuse |
-| `--build-libmali` |  | Include the optional libmali userspace node (built only with `--build-libmali`) |
+| `--userspace` | `<NAME>`, repeatable | The build being reasoned about names these optional userspace trees (`--userspace <name>`). Pass the same set: an optional tree changes what the whole userspace stage layers, so it moves every userspace node's key |
 | `--no-artifact-cache` |  | The build being reasoned about passes `--no-artifact-cache`. The Tier-2 artifact cache is then off, so no node restores a stored `.deb` and every one recompiles — pass it here to see that prediction rather than the cached one |
+
+
+## shell
+
+Open an interactive shell in the root a build stage compiles in — the same base tree, the same layered build-dependencies, the same mounts and the same environment the compile has. The way to diagnose a failed compile by looking at it rather than by reading what it printed. Provisions the root if this work dir has none; needs a terminal
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `recipe` | yes | Recipe whose root to enter (e.g. turing-rk1/forky); its `.lock` must exist |
+| `command` | no | The command to run in the root, and its arguments. Default: an interactive `bash`. Everything after `--` is taken verbatim, so a command's own flags reach it rather than boot2deb |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--stage` | `kernel` \| `uboot` \| `kmod` \| `userspace` \| `ffmpeg` \| `packaging` | Which root to enter. Required: the whole point is entering a *particular* stage's root, and no default is more likely right than another |
+| `--feature` | `<FEATURES>`, repeatable | Rootfs feature to select, repeatable — the same selection `build --feature` used, since a variant builds in a work dir of its own. Passing the reference directly (`shell turing-rk1/forky+jellyfin`) is equivalent |
+| `--work-dir` | `<WORK_DIR>` | Build scratch dir whose roots to enter (default: `<root>/build/RECIPE`) — the same default `build` uses, so a session lands in the tree a build made |
+| `--out-dir` | `<OUT_DIR>` | Directory holding the `.deb`s the compile stages staged (default: `WORK_DIR/artifacts`). Read only by `--stage ffmpeg`, whose root layers this build's own userspace packages out of it |
+| `--userspace` | `<NAME>`, repeatable | Enter the userspace root as a build naming these optional trees would see it, carrying the development packages their own probes need — the same set the userspace stage ran under |
+| `--snapshot` | `<SNAPSHOT>` | Snapshot activation, as `build` takes it. Default: the lock's captured mode. It is in every provisioned root's cache key, so a session opened under a different mode than the build ran under would enter a different tree |
+| `--keyring` | `<KEYRING>` | Debian archive keyring for the bootstrap, if the root has to be provisioned. Default: the vendored `blobs/keyrings/debian-archive-keyring.gpg` |
 
 
 ## clean
 
-Remove a recipe's build scratch (clones, sandbox, rootfs cache, artifacts) under its work dir, to reclaim disk or force a clean rebuild
+Remove a recipe's build scratch (clones, sandbox, rootfs cache) under its work dir, or sweep the durable caches every recipe shares, to reclaim disk or force a clean rebuild
 
 | argument | required | what it is |
 | --- | --- | --- |
-| `recipe` | yes | Recipe whose build scratch to remove (e.g. turing-rk1/forky) |
+| `recipe` | no | Recipe whose build scratch to remove (e.g. turing-rk1/forky). Optional when every selector given is root-scoped (`--artifacts`, `--verify-trees`, `--kconfig`, `--all-caches`), since those name a shared store rather than one recipe's work dir |
 
 | flag | value | what it does |
 | --- | --- | --- |
 | `--work-dir` | `<WORK_DIR>` | Build scratch dir to clean (default: `<root>/build/RECIPE`) |
 | `--cache` |  | Remove only the rootfs early-cutoff cache (WORK_DIR/cache), keeping the compiled source trees and artifacts |
 | `--sandbox` |  | Remove only the provisioned roots (WORK_DIR/sandbox: the target-arch build sandbox and the host-arch packaging root) — the largest reclaimable tree |
-| `--artifacts` |  | Remove the durable Tier-2 artifact store (`<root>/cache/artifacts`). Unlike the other selectors this store is shared across recipes, so this clears cached outputs for *every* recipe, not just this one |
+| `--build-roots` |  | Remove the provisioned *build* roots and the layers staged over them, sparing the packaging root, so the next build provisions them against the archive as it stands now — the answer to `the <stage> build root does not satisfy its own dependencies`, where a cached base has aged past the archive its layer resolved from. `--sandbox` clears the same skew but takes the packaging root with it, which is a second bootstrap for a root that is never layered and cannot skew |
+| `--artifacts` |  | Remove the durable Tier-2 artifact store (`<root>/cache/artifacts`). Root-scoped: this store is shared across recipes, so it clears cached outputs for *every* recipe, not just one |
+| `--verify-trees` |  | Prune the auto-fetched source checkouts (`<root>/cache/verify-trees`, and the `patches` checkouts beside them) down to what is still pinned: a checkout is commit-addressed, so one whose commit no `recipes/*/*.lock` names can only be re-fetched, never reconstructed from, and is dead. Root-scoped. Pinned checkouts stay — `--all-caches` is what takes those too |
+| `--kconfig` |  | Remove `verify-config`'s scratch tree (`<root>/cache/kconfig`), one work dir per recipe holding a provisioned cross root and a kbuild output dir. Pure scratch: the next `verify-config` re-provisions. Root-scoped |
+| `--all-caches` |  | Remove the whole durable cache tree (`<root>/cache`) — artifacts, every auto-fetched checkout *including the pinned ones*, the kconfig scratch, and the pre-built extra-deb store. Root-scoped, and the nuclear option: everything here is reclaimable by construction, but re-earning it costs a full re-fetch and a cache-cold rebuild |
 | `--dry-run` |  | Show what would be removed (with sizes) without removing anything |
 | `--force` |  | Remove the work dir even when it is not stamped as boot2deb-created (no `.boot2deb-work` marker). Without this, `clean` refuses such a target, so a mistyped `--work-dir` cannot recursively delete an arbitrary tree |
+
+
+## press
+
+Produce a ready-to-flash image file from a build's artifacts, verified and optionally personalized per unit (`--hostname`/`--ssh-key`/`--wifi-ssid` seed keys) or extended with per-site files (`--copy`/`--deb`/`--embed-image`, which re-assemble the image from the kept rootfs tar). boot2deb does not write devices — hand the pressed file to any flasher, `dd` included
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `recipe` | yes | Recipe whose artifacts to press (e.g. turing-rk1/forky) |
+| `output` | no | The image file to write, for a build with one artifact (a combined image or a u-boot deliverable). A split build is two files for two media and takes `--boot-out` + `--rootfs-out` instead |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--boot-out` | `<BOOT_OUT>` | The boot image's output file, for a `split` build — what goes onto the eMMC/SPI medium the board boots from |
+| `--rootfs-out` | `<ROOTFS_OUT>` | The rootfs image's output file, for a `split` build — what goes onto the disk the OS lives on |
+| `--hostname` | `<HOSTNAME>` | Per-unit hostname, written into the image's seed partition and applied by the device at first boot |
+| `--ssh-key` | `<SSH_KEYS>`, repeatable | SSH public key (the full `ssh-ed25519 AAAA... comment` line), repeatable — appended to the default account's `authorized_keys` at first boot |
+| `--wifi-ssid` | `<WIFI_SSID>` | Wi-Fi network the device joins at first boot (images with NetworkManager only — every Wi-Fi-capable board's has it). The per-site value that never belongs in a committed recipe |
+| `--wifi-psk` | `<WIFI_PSK>` | WPA passphrase for `--wifi-ssid` (8-63 characters, or 64 hex digits). Omit for an open network. Stored as plain text in the seed partition, like every seed key |
+| `--static-ip` | `<ADDR/PREFIX[,GW[,DNS...]]>` | Static IPv4 (`ADDRESS/PREFIX[,GATEWAY[,DNS...]]`) for the connection the seed sets up: the Wi-Fi profile when `--wifi-ssid` is present, the wired interface otherwise — NetworkManager or dhcpcd, whichever the image carries. Omit for DHCP |
+| `--copy` | `<SRC:DEST>`, repeatable | Copy a host file into the image at an absolute path (`SRC:DEST`), repeatable — a site config, a one-off script. Mode 0644 (0755 when the source is executable), owner root. Re-assembles the image from the kept rootfs tar, so the build must have run. A source named `*.tmpl` is a template: its `{{image.<name>}}` references (hostname, PARTUUIDs, suite, …) are expanded at press time and it lands at DEST |
+| `--copy-tree` | `<DIR>`, repeatable | Copy a whole directory that mirrors the target rootfs, repeatable — `DIR/etc/site.conf` lands at `/etc/site.conf`. Every regular file and symlink under it is placed; directories are not, since the parents each file needs are created root-owned 0755. Same modes as `--copy`, and a `*.tmpl` file is expanded and lands without the suffix |
+| `--deb` | `<PATH>`, repeatable | Stage a local .deb (repeatable) for installation at first boot via `dpkg -i`. Dependencies already in the image resolve immediately; missing ones are fetched only if the board has network by then |
+| `--embed-image` |  | Carry the recipe's own compressed image artifact inside the pressed image (at /var/lib/boot2deb/install/), so the booted board can install itself to internal storage with `boot2deb-install-to` — the boot-from-card, install-to-eMMC workflow |
+| `--no-verify` |  | Skip the post-write verification of the pressed file. The press is not faster; only the re-read is saved |
+| `--dry-run` |  | Print what would be pressed — artifacts, outputs, additions, seed keys — without writing anything |
+| `--layout` | `<LAYOUT>` | Image layout override (`combined` \| `split`), matching the `build` that produced the artifacts |
+| `--rootfs-label` | `<ROOTFS_LABEL>` (default `rootfs`) | ext4 volume label / GPT partition name for a re-assembled rootfs — match the `build --rootfs-label` the artifacts were made with |
+| `--work-dir` | `<WORK_DIR>` | Build scratch dir holding the artifacts (default: `<root>/build/RECIPE`) |
+| `--out-dir` | `<OUT_DIR>` | Directory the build wrote its artifacts to (default: `WORK_DIR/artifacts`) |
+
+
+## seed
+
+Rewrite the per-unit seed partition of an already-pressed image file — the same personalization `press` applies, without re-pressing. With no keys the seed resets to the empty template. Takes a file: to re-personalize a card that is already written, edit `seed.txt` on its `B2D-SEED` volume directly
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `image` | yes | The pressed image file whose seed partition to rewrite |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--hostname` | `<HOSTNAME>` | Per-unit hostname, written into the image's seed partition and applied by the device at first boot |
+| `--ssh-key` | `<SSH_KEYS>`, repeatable | SSH public key (the full `ssh-ed25519 AAAA... comment` line), repeatable — appended to the default account's `authorized_keys` at first boot |
+| `--wifi-ssid` | `<WIFI_SSID>` | Wi-Fi network the device joins at first boot (images with NetworkManager only — every Wi-Fi-capable board's has it). The per-site value that never belongs in a committed recipe |
+| `--wifi-psk` | `<WIFI_PSK>` | WPA passphrase for `--wifi-ssid` (8-63 characters, or 64 hex digits). Omit for an open network. Stored as plain text in the seed partition, like every seed key |
+| `--static-ip` | `<ADDR/PREFIX[,GW[,DNS...]]>` | Static IPv4 (`ADDRESS/PREFIX[,GATEWAY[,DNS...]]`) for the connection the seed sets up: the Wi-Fi profile when `--wifi-ssid` is present, the wired interface otherwise — NetworkManager or dhcpcd, whichever the image carries. Omit for DHCP |
+| `--dry-run` |  | Print what the seed would say without writing anything |
+
+
+## try
+
+Boot the built image under QEMU before it is flashed, and assert the userland works: systemd reaches multi-user with no failed unit, the generated password logs in, first-boot completes, the on-image selftest passes in userland mode — and a second boot of the same disk still does, the check no single-boot smoke test covers. Boots the suite's generic kernel as a fixture; the shipped kernel and the board are not under test
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `recipe` | yes | Recipe whose built image to boot (e.g. turing-rk1/forky); run `boot2deb build` first |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--timeout` | `<TIMEOUT>` (default `900`) | Seconds one boot may take to reach a login prompt (and to settle after it). The default is sized for TCG emulation on a loaded host; with KVM a boot takes a fraction of it, and the timeout is a ceiling, not a wait |
+| `--keep-disk` |  | Keep the booted disk copy under the work dir after the run, for a post-mortem or to boot it by hand. Its account password was changed at first login; the run's report prints the one now set |
+| `--refresh-fixture` |  | Discard the cached fixture kernel and harvest the suite's current one — how a new point release of the generic kernel is picked up |
+| `--work-dir` | `<WORK_DIR>` | Build scratch directory (default `build/<recipe>` under the config root) — where the disk copy and the fixture kernel live |
+| `--out-dir` | `<OUT_DIR>` | Where the build's artifacts were written, when not the default `<work-dir>/artifacts` |
+| `--keyring` | `<KEYRING>` | Debian archive keyring for the fixture-kernel root's bootstrap (default: the vendored `debian-archive-keyring.gpg`) |
 

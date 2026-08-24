@@ -85,6 +85,24 @@ pub enum ConfigError {
         found: &'static str,
     },
 
+    /// A device layer's value for one of the accumulating array keys — `caveats`,
+    /// `expect`, `nonfree_firmware_packages`, `packages`, `exclude` — is present but is
+    /// not an array.
+    ///
+    /// Caught while walking the `extends` chain rather than at deserialization, so the
+    /// message names the file that holds it. That attribution is the whole point: the
+    /// merge is last-wins, so a malformed value in an ancestor that the child overrides
+    /// would deserialize cleanly and never be reported.
+    #[error("{path}: {field} must be an array, found {found}")]
+    InvalidDeviceField {
+        /// The device file that holds the bad value.
+        path: String,
+        /// The key whose value is not an array.
+        field: &'static str,
+        /// The TOML type that was found instead.
+        found: &'static str,
+    },
+
     /// A recipe reference (a CLI argument or config cross-reference) is not a valid
     /// `<device>/<leaf>` — or bare `<leaf>` — path. Recipes are the one layer that
     /// nests one level under a device folder, so a reference may carry a *single*
@@ -327,20 +345,6 @@ pub enum ConfigError {
         slots: u8,
     },
 
-    /// The depthcharge board profile name is not a bare identifier. Separate from
-    /// [`UnknownBoardProfile`](Self::UnknownBoardProfile): that one asks whether the
-    /// device offers the profile, this one whether the string is safe to carry. The
-    /// value is written into `/etc/depthcharge-tools/config` through a quoted heredoc,
-    /// so a line reading `B2D_EOF` in it would end the heredoc early.
-    #[error(
-        "board profile '{board}' is not a bare identifier ([A-Za-z0-9_.-]) — the name is \
-         written into /etc/depthcharge-tools/config and read back by depthchargectl"
-    )]
-    InvalidBoardProfile {
-        /// The offending profile name.
-        board: String,
-    },
-
     /// The requested image layout has no meaning under the resolved boot method.
     #[error("boot method '{boot_method}' does not support the '{layout}' layout: {why}")]
     UnsupportedLayout {
@@ -375,16 +379,6 @@ pub enum ConfigError {
         value: u8,
         /// The cap ([`MAX_KPART_SLOTS`](crate::chromeos::MAX_KPART_SLOTS)).
         max: u8,
-    },
-
-    /// A boot method's kernel command line carries something the signing tool cannot
-    /// or will not honour, so the value would not survive into the booted kernel.
-    #[error("invalid kernel cmdline {value:?}: {why}")]
-    InvalidCmdline {
-        /// The offending cmdline.
-        value: String,
-        /// Why it cannot be used.
-        why: &'static str,
     },
 
     /// The device declares an input that only a *compiled* kernel consumes — a board
@@ -668,6 +662,28 @@ pub enum ConfigError {
         problem: String,
     },
 
+    /// A recipe declares a `[support]` claim while selecting a feature that builds
+    /// FFmpeg `--enable-nonfree`. A claim is a statement that a configuration is fit
+    /// to publish, and this one may not be published at all, so the two cannot both
+    /// stand.
+    ///
+    /// It is a gate on *authored* recipes only. The nonfree flavour is reached as a
+    /// feature-variant reference (`<recipe>+<feature>`), which carries no claim of its
+    /// own and appears in no support matrix — that path is unaffected.
+    #[error(
+        "recipe '{recipe}' declares a [support] claim but selects '{feature}', which \
+         builds FFmpeg with --enable-nonfree — the result may be built and used but \
+         not redistributed, so it cannot carry a claim that it is fit to publish. \
+         Reach the nonfree flavour as '{recipe}+{feature}' instead of authoring a \
+         recipe for it, or drop the [support] block"
+    )]
+    NonfreeSupportClaim {
+        /// The recipe carrying the claim.
+        recipe: String,
+        /// The selected feature that makes the build undistributable.
+        feature: String,
+    },
+
     /// A selected feature declares `requires_media_accel` but the resolved SoC
     /// provides no `[userspace]`/`[ffmpeg]` source stanzas to build the stack
     /// from. The remedy is to add those stanzas at the SoC layer (as RK3588 does)
@@ -762,21 +778,58 @@ pub enum ConfigError {
         conflicts_with: String,
     },
 
-    /// The resolved suite (device `default_suite` or a `--suite` override) is not a
-    /// well-formed Debian codename: it must be a bare token starting with an
-    /// alphanumeric and drawn from `[A-Za-z0-9._-]`. Rejected at resolve so an
-    /// invalid suite fails immediately instead of deep in the bootstrap, where it
-    /// would surface as an opaque archive fetch failure.
-    #[error("invalid suite '{value}': must be a Debian codename (a bare token in [A-Za-z0-9._-] starting with an alphanumeric)")]
-    InvalidSuite {
-        /// The offending suite string.
+    /// A selected feature requires a capability no other selected feature provides —
+    /// an incomplete composition, caught at resolve because the image it would build
+    /// is bootable but broken (`jellyfin` with no FFmpeg provider installs a server
+    /// that exits at startup).
+    ///
+    /// The message names the providers the config tree carries, because the fix is
+    /// always to add one and the user cannot be expected to know which features
+    /// declare the capability.
+    #[error("feature '{feature}' requires capability '{capability}', which no selected feature provides{}", providers_hint(.providers))]
+    MissingCapability {
+        /// The feature whose requirement is unmet.
+        feature: String,
+        /// The capability name it asked for.
+        capability: String,
+        /// Every feature in the config tree providing that capability, sorted. Empty
+        /// if the tree has none, which means the requirement is misspelled or the
+        /// provider was never authored.
+        providers: Vec<String>,
+    },
+
+    /// A configured value cannot be carried to the file, line, or command line it has
+    /// to reach, so resolution refuses it rather than emitting an image built around it.
+    ///
+    /// **One variant for eight axes** — locale, timezone, NTP server, keymap field,
+    /// hostname, suite, kernel cmdline, depthcharge board profile — because they are one
+    /// failure: a value the config authored is not a value its destination can hold. The
+    /// message says which axis and why, and its `what` field carries the axis as
+    /// data, so a test asserting `what == "hostname"` pins more than a variant name did.
+    ///
+    /// The value is rendered with `{:?}`, not quoted by hand: several of these are
+    /// rejected *for* carrying a newline or a quote, and printing one raw would put the
+    /// thing being rejected into the operator's terminal unescaped.
+    ///
+    /// Axes with more to say keep their own variant — [`InvalidKmod`](Self::InvalidKmod)
+    /// names the file, [`InvalidDeviceDts`](Self::InvalidDeviceDts) the device,
+    /// [`AptSourceBadField`](Self::AptSourceBadField) the feature and the source. What
+    /// is collapsed here is what carried nothing the message did not already say.
+    #[error("invalid {what} {value:?}: {why}")]
+    InvalidField {
+        /// The axis, as the message names it: `locale`, `timezone`, `NTP server`,
+        /// `hostname`, `suite`, `kernel cmdline`, `board profile`, or `keymap <field>`.
+        what: &'static str,
+        /// The offending value.
         value: String,
+        /// Why its destination cannot hold it.
+        why: &'static str,
     },
 
     /// The resolved suite is well-formed but not in the device's `supported_suites`.
-    /// Separate from [`InvalidSuite`](Self::InvalidSuite): that one asks whether the
-    /// string could name a suite at all, this one whether *this board* is built for
-    /// it. Catches both a typo and a suite whose kernel predates the SoC — either of
+    /// Separate from [`InvalidField`](Self::InvalidField) with `what = "suite"`: that
+    /// one asks whether the string could name a suite at all, this one whether *this
+    /// board* is built for it. Catches both a typo and a suite whose kernel predates the SoC — either of
     /// which would otherwise fail minutes into a bootstrap.
     #[error("device '{device}' does not support suite '{suite}' (supported: {supported})")]
     UnsupportedSuite {
@@ -813,6 +866,21 @@ pub enum ConfigError {
     NoSupportedSuites {
         /// The device with the empty list.
         device: String,
+    },
+
+    /// A conditional package entry names an empty `suites` list, so it applies to no
+    /// build at all. Config that can never take effect is a mistake rather than a
+    /// no-op — most likely a list someone emptied instead of deleting the entry.
+    #[error(
+        "package '{package}' in {layer} names an empty `suites` list, so it is installed \
+         on no suite; delete the entry, or list the suites that carry the package"
+    )]
+    PackageSuitesEmpty {
+        /// The package the entry names.
+        package: String,
+        /// The layer or feature the entry was read from, for a message that points at
+        /// the file to edit.
+        layer: String,
     },
 
     /// An `extra_debs` entry does not set exactly one locator: it must carry either
@@ -870,66 +938,6 @@ pub enum ConfigError {
         /// The prefix of the first entry, which the new patch would precede (`0`,
         /// since a higher first entry leaves integer room and does not reach here).
         after: u32,
-    },
-
-    /// A locale name is not one `locale-gen` could act on. The name reaches
-    /// `/etc/locale.gen` as a `<name> <charset>` line and `/etc/locale.conf` as a
-    /// shell-sourced `LANG=` value, so it must both carry a codeset and contain
-    /// nothing a shell would interpret.
-    #[error("invalid locale '{value}': {why}")]
-    InvalidLocale {
-        /// The offending locale.
-        value: String,
-        /// Why it cannot be used.
-        why: &'static str,
-    },
-
-    /// A timezone is not a name `tzdata` could resolve. It becomes the target of the
-    /// `/etc/localtime` symlink under `/usr/share/zoneinfo/`, so a name that escaped
-    /// that directory would point the system clock at an arbitrary file.
-    #[error("invalid timezone '{value}': {why}")]
-    InvalidTimezone {
-        /// The offending timezone.
-        value: String,
-        /// Why it cannot be used.
-        why: &'static str,
-    },
-
-    /// An NTP server is not a bare host `systemd-timesyncd` could reach. The value
-    /// becomes part of a space-separated `NTP=` line, so anything carrying whitespace
-    /// would silently split into two servers — and a scheme or port would produce one
-    /// the resolver can never answer.
-    #[error("invalid NTP server '{value}': {why}")]
-    InvalidNtpServer {
-        /// The offending server.
-        value: String,
-        /// Why it cannot be used.
-        why: &'static str,
-    },
-
-    /// A keymap field carries something `/etc/default/keyboard` cannot hold. That
-    /// file is *sourced by shell* (`console-setup`, `keyboard-setup`), so a value with
-    /// a quote or a substitution in it would execute rather than configure.
-    #[error("invalid keymap {field} '{value}': {why}")]
-    InvalidKeymap {
-        /// Which XKB field (`layout`, `model`, `variant`, `options`).
-        field: &'static str,
-        /// The offending value.
-        value: String,
-        /// Why it cannot be used.
-        why: &'static str,
-    },
-
-    /// A device's `hostname` is not an RFC 1123 host name. It is written verbatim
-    /// into `/etc/hostname` and into a `127.0.1.1` line of `/etc/hosts`, and that
-    /// second file is line- and token-oriented — so a value carrying a newline would
-    /// add host entries rather than name one host.
-    #[error("invalid hostname '{value}': {why}")]
-    InvalidHostname {
-        /// The offending hostname.
-        value: String,
-        /// Why it cannot be used.
-        why: &'static str,
     },
 
     /// An `ssh_authorized_keys` entry is not a usable `authorized_keys` line. Rejected
@@ -1015,6 +1023,22 @@ fn not_found_hint(kind: &str, similar: &[String]) -> String {
         "kmod" => " — `boot2deb list-kmods` shows what is available".into(),
         _ => String::new(),
     }
+}
+
+/// The trailing hint on [`ConfigError::MissingCapability`], naming the features that
+/// would satisfy the requirement.
+///
+/// An empty `providers` is a different failure from a forgotten one — the capability
+/// is misspelled, or no provider has been authored — so it points at the listing
+/// rather than suggesting an addition that does not exist.
+fn providers_hint(providers: &[String]) -> String {
+    if providers.is_empty() {
+        return " — no feature in this config tree provides it; \
+                `boot2deb list-features` shows what is available"
+            .into();
+    }
+    let names: Vec<String> = providers.iter().map(|n| format!("'{n}'")).collect();
+    format!(" — add one of {}", names.join(", "))
 }
 
 /// Names from `candidates` close enough to `name` to be worth suggesting, best first.

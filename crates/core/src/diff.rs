@@ -164,20 +164,12 @@ impl Side {
                 commit: Some(u.commit.clone()),
             });
         }
-        if let Some(us) = &lock.userspace {
-            for (axis, pin) in [
-                ("mpp", &us.mpp),
-                ("librga", &us.librga),
-                ("libmali", &us.libmali),
-            ] {
-                if let Some(p) = pin {
-                    sources.push(SourcePin {
-                        axis: axis.into(),
-                        reference: Some(p.reference.clone()),
-                        commit: Some(p.commit.clone()),
-                    });
-                }
-            }
+        for pin in &lock.userspace {
+            sources.push(SourcePin {
+                axis: pin.name.clone(),
+                reference: Some(pin.reference.clone()),
+                commit: Some(pin.commit.clone()),
+            });
         }
         if let Some(ff) = &lock.ffmpeg {
             sources.push(SourcePin {
@@ -252,17 +244,19 @@ impl Side {
                 commit: s.uboot_commit.clone(),
             });
         }
+        for u in &prov.userspace {
+            sources.push(SourcePin {
+                axis: u.name.clone(),
+                reference: Some(u.reference.clone()),
+                commit: Some(u.commit.clone()),
+            });
+        }
         if let Some(ma) = &s.media_accel {
-            for (axis, reference, commit) in [
-                ("mpp", &ma.mpp_ref, &ma.mpp_commit),
-                ("librga", &ma.librga_ref, &ma.librga_commit),
-                ("libmali", &ma.libmali_ref, &ma.libmali_commit),
-                (
-                    "ffmpeg-rockchip",
-                    &ma.ffmpeg_rockchip_ref,
-                    &ma.ffmpeg_rockchip_commit,
-                ),
-            ] {
+            for (axis, reference, commit) in [(
+                "ffmpeg-rockchip",
+                &ma.ffmpeg_rockchip_ref,
+                &ma.ffmpeg_rockchip_commit,
+            )] {
                 if reference.is_some() || commit.is_some() {
                     sources.push(SourcePin {
                         axis: axis.into(),
@@ -346,10 +340,10 @@ impl Side {
     pub fn from_resolved(label: impl Into<String>, build: &crate::ResolvedBuild) -> Self {
         Side {
             label: label.into(),
-            kernel: build.kernel.as_ref().map(|k| KernelFacts {
-                id: k.id().to_string(),
-                flavor: Some(k.flavor().to_string()),
-                package: match k {
+            kernel: build.image.as_ref().map(|i| KernelFacts {
+                id: i.kernel.id().to_string(),
+                flavor: Some(i.kernel.flavor().to_string()),
+                package: match &i.kernel {
                     crate::ResolvedKernel::Distro(d) => Some(d.package.clone()),
                     crate::ResolvedKernel::Compiled(_) => None,
                 },
@@ -982,6 +976,17 @@ fn bool_str(b: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// A [`UserspacePin`] from a name and a [`GitPin`]-shaped fixture — the two now
+    /// travel as one value.
+    fn named_pin(name: &str, p: crate::lock::GitPin) -> crate::lock::UserspacePin {
+        crate::lock::UserspacePin {
+            name: name.into(),
+            source: p.source,
+            reference: p.reference,
+            commit: p.commit,
+        }
+    }
     use super::*;
     use crate::lock::*;
 
@@ -1013,11 +1018,10 @@ mod tests {
                 commit: "c".repeat(40),
             }),
             uboot_patches: None,
-            userspace: Some(UserspacePins {
-                mpp: Some(git("mainline-cma-fix", "d")),
-                librga: Some(git("master", "e")),
-                libmali: None,
-            }),
+            userspace: vec![
+                named_pin("mpp", git("mainline-cma-fix", "d")),
+                named_pin("librga", git("master", "e")),
+            ],
             ffmpeg: Some(FfmpegPins {
                 base: git("v4l2-request-n8.1", "f"),
                 rockchip: None,
@@ -1257,7 +1261,13 @@ mod tests {
     fn only_the_source_axes_that_moved_are_reported() {
         let left = Side::from_lock("old", &base_lock());
         let mut newer = base_lock();
-        newer.userspace.as_mut().unwrap().librga = Some(git("multicore", "5"));
+        let librga = newer
+            .userspace
+            .iter_mut()
+            .find(|p| p.name == "librga")
+            .expect("the fixture pins librga");
+        librga.reference = "multicore".into();
+        librga.commit = "5".repeat(40);
         let right = Side::from_lock("new", &newer);
 
         let Section::Compared { changes } = compare(&left, &right).sources else {

@@ -4,10 +4,10 @@
 //!
 //! The formatter reads the rootfs `tar` in-process through [`ArchiveSource`], taking
 //! each entry's ownership, mode, times, extended attributes, and POSIX ACLs straight
-//! from the (PAX) headers, and writes those owner ids directly into the inodes. That
-//! removes the reason the old path needed a user namespace: nothing is extracted to a
-//! staging tree whose multi-uid ownership an unprivileged process cannot set, so the
-//! whole step runs as the plain build user. Only the headers are read up front: each
+//! from the (PAX) headers, and writes those owner ids directly into the inodes. That is
+//! what makes the user namespace unnecessary: nothing is extracted to a staging tree
+//! whose multi-uid ownership an unprivileged process cannot set, so the whole step runs
+//! as the plain build user. Only the headers are read up front: each
 //! file's bytes stay in the archive until that file is placed, so a multi-gigabyte
 //! rootfs costs the largest single file in it rather than the sum.
 //!
@@ -60,12 +60,12 @@ use crate::event::Step;
 use crate::hosttool;
 use crate::image::geometry::EXT4_BLOCK;
 use boot2deb_core::provenance::{FilesystemGeometry, FilesystemProvenance};
-use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
-    ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions, FormatPlan,
-    GrowReservation, InodeCount, Layout, Location, Reader, ReservedRatio, ScanReport, Slack,
-    Source, SourceEntry, TreeBuilder,
+    EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions, FormatPlan, GrowReservation,
+    InodeCount, Layout, Location, Reader, ReservedRatio, ScanReport, Source, SourceEntry,
+    TreeBuilder,
 };
+use ferrosys::{ArchiveSource, Slack, Timestamp};
 use sha2::{Digest, Sha256};
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -118,14 +118,19 @@ pub const ROOTFS_FS_KIND: &str = "ext4";
 /// `/etc/fstab` mounts by. `uuid` is the deterministic superblock UUID the caller derived
 /// from the lock, so a rebuild reproduces it. `first_boot` is the per-image credential
 /// spliced into the rootfs's `/etc/shadow` before the filesystem is written.
+/// `additions` is a press re-assembly's tree additions, merged into the parsed
+/// entry list before the credential splice (so the per-image password wins over
+/// anything a press could copy); `None` for a build, whose image carries exactly
+/// the tar.
 ///
-/// Unlike the old `mke2fs` path, the superblock's format times are deterministic too:
-/// they take the newest source mtime, which the rootfs export has already clamped to the
-/// lock's `SOURCE_DATE_EPOCH`. The per-image first-boot password is still unique per
-/// build, so the image as a whole is not byte-for-byte reproducible.
+/// The superblock's format times are deterministic: they take the newest source mtime,
+/// which the rootfs export has already clamped to the lock's `SOURCE_DATE_EPOCH`. The
+/// per-image first-boot password is still unique per build, so the image as a whole is
+/// not byte-for-byte reproducible.
 ///
 /// Returns what the format realized and what it was checked with — see
 /// [`RootfsFilesystem`].
+#[allow(clippy::too_many_arguments)] // two call sites; the args are the format itself
 pub(crate) fn build_rootfs_ext4(
     dest: &Path,
     size: RootfsSize,
@@ -133,6 +138,7 @@ pub(crate) fn build_rootfs_ext4(
     label: &str,
     uuid: Uuid,
     first_boot: FirstBoot,
+    additions: Option<&crate::press::additions::TreeAdditions>,
     step: &Step,
 ) -> Result<RootfsFilesystem, EngineError> {
     if let RootfsSize::Exact(bytes) = size {
@@ -173,12 +179,22 @@ pub(crate) fn build_rootfs_ext4(
     //    directory itself — matching what the build has always materialized.
     entries.retain(|e| !e.path.starts_with(DEV_PREFIX));
 
-    // 3. Splice the unique per-image first-boot password into /etc/shadow: the one
+    // 3. A press re-assembly's tree additions, merged before the password splice
+    //    below so the per-image credential always wins over anything copied in.
+    if let Some(additions) = additions {
+        additions.apply(&mut entries)?;
+        step.log(format!(
+            "merged {} tree addition(s) and stamped the pressed marker",
+            additions.file_count()
+        ));
+    }
+
+    // 4. Splice the unique per-image first-boot password into /etc/shadow: the one
     //    per-build-unique step, done on the parsed entry rather than a staged file.
     splice_first_boot_password(&mut entries, first_boot)?;
     step.log("spliced the unique per-image first-boot password into /etc/shadow");
 
-    // 4. Format straight into `dest`. `format_to` streams only the blocks it uses into
+    // 5. Format straight into `dest`. `format_to` streams only the blocks it uses into
     //    the (sparse) file and extends it to the full size, so the whole image never
     //    lives in memory; a freshly truncated file gives it the zeroed holes it needs.
     //    It returns the geometry it realized, which is the writer's own account of what
@@ -228,6 +244,7 @@ pub(crate) fn build_rootfs_ext4(
 
     Ok(RootfsFilesystem {
         size_bytes,
+        time_secs: options.time.secs,
         provenance: filesystem_provenance(&options, &layout)?,
         verified_with: verify_clean(dest, step)?,
     })
@@ -274,6 +291,11 @@ pub(crate) struct RootfsFilesystem {
     /// [`RootfsSize::Fit`] the caller did not state it: the search decided it, and the
     /// rootfs partition is then laid out around this number.
     pub size_bytes: u64,
+    /// The deterministic creation time the format stamped (the newest source
+    /// mtime, already clamped to the lock's `SOURCE_DATE_EPOCH`). The seed
+    /// partition's FAT reuses it, so every timestamp on the image answers to the
+    /// same clock.
+    pub time_secs: i64,
     /// The on-disk contract, for the provenance manifest's `[filesystem]`.
     pub provenance: FilesystemProvenance,
     /// The checks the filesystem passed, in the order they ran, for the provenance
@@ -317,7 +339,7 @@ fn format_options(uuid: Uuid, label: &str, entries: &[SourceEntry]) -> FormatOpt
     options.reserved =
         ReservedRatio::from_hundredths_of_percent(RESERVED_HUNDREDTHS).expect("1% is in range");
     // Remount read-only on a detected error, so an inconsistency cannot spread through
-    // further writes (the safety policy the old `mke2fs -e remount-ro` set).
+    // further writes.
     options.errors = ErrorBehavior::RemountReadOnly;
     options.volume_name = volume_name(label);
     options
@@ -751,7 +773,7 @@ mod tests {
             user: "debian",
             password_hash: "$6$saltsalt$0123456789abcdef",
         };
-        let fs = build_rootfs_ext4(&img, size, &tar, "rootfs", uuid, first_boot, &step)?;
+        let fs = build_rootfs_ext4(&img, size, &tar, "rootfs", uuid, first_boot, None, &step)?;
         Ok((img, fs))
     }
 

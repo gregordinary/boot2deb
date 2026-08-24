@@ -8,8 +8,12 @@
 //! lays into the rootfs, in the same manifest-plus-ordered-files spirit as a
 //! patch series.
 //!
-//! Pure: parsing plus compatibility checks (the SoC/arch gates and pairwise
-//! conflicts).
+//! Pure: parsing plus compatibility checks — the SoC/arch gates, pairwise
+//! conflicts, and capability requirements. The last two are the *composition*
+//! gates, and they are opposites: `conflicts` rejects a selection holding two
+//! features that cannot coexist, while
+//! [`requires_capability`](Feature::requires_capability) rejects one missing a
+//! feature it needs. Both validate what the recipe named; neither adds to it.
 //!
 //! A feature reaches the kernel as well as the rootfs. Alongside its packages,
 //! overlay, and third-party apt sources, it may contribute
@@ -55,7 +59,7 @@ pub struct Feature {
     /// [`apt_sources`](Feature::apt_sources) this feature adds — apt resolves
     /// their dependencies; order is not significant — apt solves the set.
     #[serde(default)]
-    pub packages: Vec<String>,
+    pub packages: Vec<crate::model::PackageEntry>,
     /// Packages this feature drops from the merged rootfs set — e.g. a
     /// feature that replaces a base package with its own variant. Unioned with
     /// every layer's `exclude`; any name in that union is removed from the include
@@ -96,6 +100,30 @@ pub struct Feature {
     /// enough.
     #[serde(default)]
     pub conflicts: Vec<String>,
+    /// Capabilities this feature supplies to the rest of the selection — free-form
+    /// names such as `ffmpeg`, matched literally against other features'
+    /// [`requires_capability`](Feature::requires_capability).
+    ///
+    /// Set on a *provider*: both `media-accel-rockchip` and `media-accel-v4l2`
+    /// build an `ffmpeg-rk` `.deb`, so both declare `provides = ["ffmpeg"]`. The
+    /// point of naming a capability rather than the providers is that a consumer
+    /// does not enumerate them — a new provider for another platform declares the
+    /// same capability and every consumer accepts it unchanged.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Capabilities another selected feature must [`provides`](Feature::provides),
+    /// or resolution fails with [`ConfigError::MissingCapability`].
+    ///
+    /// Set on a *consumer* whose packages are useless without a sibling's: `jellyfin`
+    /// installs no FFmpeg and Jellyfin exits at startup rather than running with
+    /// transcoding disabled, so `jellyfin` alone is a bootable image with a dead
+    /// service. The gate turns that into a resolve-time error.
+    ///
+    /// This validates a composition; it does not complete one. Nothing is added to
+    /// the selection to satisfy a requirement — the recipe still names every
+    /// feature explicitly (non-goal: no provider auto-resolution).
+    #[serde(default)]
+    pub requires_capability: Vec<String>,
     /// This feature's packages are produced by building the SoC's media-accel
     /// source trees — the `[userspace]` (MPP/RGA/Mali) and `[ffmpeg]` stanzas at
     /// the SoC layer. Set on a provider feature like `media-accel-rockchip`, whose
@@ -110,6 +138,27 @@ pub struct Feature {
     /// mirror-only add-in) need no source build.
     #[serde(default)]
     pub requires_media_accel: bool,
+    /// Build the FFmpeg provider under `--enable-nonfree`, admitting the encoders
+    /// whose licences FFmpeg cannot combine with the GPL — a class, of which FDK-AAC
+    /// is the member this tree has a use for.
+    ///
+    /// It is a *licence* gate rather than a library switch, and the distinction is
+    /// FFmpeg's own: `./configure` refuses a GPL build linking such an encoder unless
+    /// the flag is present, so the flag and the encoders it admits move together in
+    /// both directions. Setting it makes the resulting binary undistributable — the
+    /// combination may be built and used, not passed on — which is why it is opt-in
+    /// per build rather than a property of the provider.
+    ///
+    /// Default `false`: every build produces a redistributable FFmpeg. The feature
+    /// that sets it installs no packages of its own and declares
+    /// `requires_capability = ["ffmpeg"]`, so selecting it without a provider to
+    /// re-flavour is a resolution error rather than a silent no-op.
+    ///
+    /// Reaches the build as [`ResolvedImage::ffmpeg_nonfree`](crate::model::ResolvedImage::ffmpeg_nonfree),
+    /// which decides both the `./configure` flags and the build root's package set —
+    /// so the free build does not carry the nonfree encoder's headers either.
+    #[serde(default)]
+    pub ffmpeg_nonfree: bool,
     /// Kconfig fragments this feature merges into the kernel build, by fragment
     /// path (`accel/rk3576-rga`), appended after the kernel's own and the device's
     /// — so a feature's value wins a conflict, matching the way its packages stack
@@ -153,6 +202,14 @@ pub struct Feature {
     /// keeps the SoC's wider tag.
     #[serde(default)]
     pub caveats: Vec<String>,
+    /// Runtime checks images selecting this feature must pass (`[[expect]]`),
+    /// compiled into `/etc/boot2deb/selftest.d/` for `boot2deb-selftest`. A
+    /// capability's proof belongs to the capability — the render node its stack
+    /// opens, the misc device its out-of-tree driver presents — so every recipe
+    /// composing the feature inherits the check without restating it. The
+    /// mechanically checkable counterpart of [`caveats`](Self::caveats).
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
 }
 
 impl Feature {
@@ -223,6 +280,20 @@ pub fn first_requiring_media_accel(selected: &[(String, Feature)]) -> Option<&st
         .map(|(name, _)| name.as_str())
 }
 
+/// The first selected feature (in recipe order) that declares
+/// [`ffmpeg_nonfree`](Feature::ffmpeg_nonfree), or `None` when none do.
+///
+/// `Some` means the build's FFmpeg is configured `--enable-nonfree` and is therefore
+/// undistributable. The *name* is returned rather than a bare bool so a caller
+/// rejecting the combination — a recipe claiming support for a build it may not ship
+/// — can point at the feature that made it so.
+pub fn first_enabling_ffmpeg_nonfree(selected: &[(String, Feature)]) -> Option<&str> {
+    selected
+        .iter()
+        .find(|(_, f)| f.ffmpeg_nonfree)
+        .map(|(name, _)| name.as_str())
+}
+
 /// The kconfig fragments and kernel patch series a selected feature set
 /// contributes, as `(config_fragments, patch_series)`.
 ///
@@ -284,8 +355,53 @@ pub fn ensure_no_conflicts(selected: &[(String, Feature)]) -> Result<(), ConfigE
     Ok(())
 }
 
+/// Validate that every capability a selected feature requires is provided by one.
+///
+/// `selected` pairs each chosen feature's name with its loaded manifest. Returns
+/// [`ConfigError::MissingCapability`] for the first requirement no selected feature
+/// [`provides`](Feature::provides), naming the providers the shipped tree does carry
+/// so the message says what to add rather than only what is missing.
+///
+/// A feature may satisfy its own requirement; that is a provider that also consumes
+/// what it supplies, and it needs no special case.
+pub fn ensure_capabilities_satisfied(
+    selected: &[(String, Feature)],
+    known_providers: &[(String, Vec<String>)],
+) -> Result<(), ConfigError> {
+    for (name, f) in selected {
+        for capability in &f.requires_capability {
+            if selected
+                .iter()
+                .any(|(_, o)| o.provides.contains(capability))
+            {
+                continue;
+            }
+            // Every feature in the tree that would satisfy this, so the error can
+            // name the fix. Sorted for a stable message.
+            let mut providers: Vec<String> = known_providers
+                .iter()
+                .filter(|(_, provides)| provides.contains(capability))
+                .map(|(n, _)| n.clone())
+                .collect();
+            providers.sort();
+            return Err(ConfigError::MissingCapability {
+                feature: name.clone(),
+                capability: capability.clone(),
+                providers,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    /// The names of a package list, for an assertion that is about which packages a
+    /// layer contributes rather than about how each entry was spelled.
+    fn names(entries: &[crate::model::PackageEntry]) -> Vec<&str> {
+        entries.iter().map(|e| e.name()).collect()
+    }
+
     use super::*;
 
     fn feat(requires_soc: Vec<Soc>, conflicts: Vec<&str>) -> Feature {
@@ -298,10 +414,14 @@ mod tests {
             apt_sources: vec![],
             extra_debs: vec![],
             conflicts: conflicts.into_iter().map(String::from).collect(),
+            provides: vec![],
+            requires_capability: vec![],
             caveats: vec![],
             requires_media_accel: false,
+            ffmpeg_nonfree: false,
             config_fragments: vec![],
             patch_series: vec![],
+            expect: vec![],
         }
     }
 
@@ -313,7 +433,10 @@ mod tests {
             requires_soc = ["rk3588", "rk3576", "rk3566"]
         "#;
         let f: Feature = toml::from_str(text).unwrap();
-        assert_eq!(f.packages, vec!["ffmpeg-rk", "librockchip-mpp1", "librga2"]);
+        assert_eq!(
+            names(&f.packages),
+            ["ffmpeg-rk", "librockchip-mpp1", "librga2"]
+        );
         assert_eq!(f.requires_soc, vec![Soc::Rk3588, Soc::Rk3576, Soc::Rk3566]);
         assert!(f.requires_arch.is_empty());
         assert!(f.apt_sources.is_empty());
@@ -364,6 +487,93 @@ mod tests {
             .ensure_supports_arch("some-x86-feature", Arch::Riscv64)
             .unwrap_err();
         assert!(matches!(err, ConfigError::IncompatibleFeatureArch { .. }));
+    }
+
+    /// A `(name, feature)` pair declaring capabilities, for the gate tests below.
+    fn cap(name: &str, provides: &[&str], requires: &[&str]) -> (String, Feature) {
+        let mut f = feat(vec![], vec![]);
+        f.provides = provides.iter().map(|s| s.to_string()).collect();
+        f.requires_capability = requires.iter().map(|s| s.to_string()).collect();
+        (name.to_string(), f)
+    }
+
+    #[test]
+    fn a_required_capability_is_satisfied_by_any_provider() {
+        // The point of naming a capability rather than a provider: the consumer is
+        // unchanged across providers, so both of these compositions pass with the
+        // same `requires_capability = ["ffmpeg"]`.
+        let rockchip = cap("media-accel-rockchip", &["ffmpeg"], &[]);
+        let v4l2 = cap("media-accel-v4l2", &["ffmpeg"], &[]);
+        let jellyfin = cap("jellyfin", &[], &["ffmpeg"]);
+        let known = vec![
+            (
+                "media-accel-rockchip".to_string(),
+                vec!["ffmpeg".to_string()],
+            ),
+            ("media-accel-v4l2".to_string(), vec!["ffmpeg".to_string()]),
+        ];
+
+        assert!(
+            ensure_capabilities_satisfied(&[jellyfin.clone(), rockchip], &known).is_ok(),
+            "the RK3588 provider satisfies it"
+        );
+        assert!(
+            ensure_capabilities_satisfied(&[jellyfin.clone(), v4l2], &known).is_ok(),
+            "so does the RK3576 one, with no change to the consumer"
+        );
+
+        // Alone it fails, and the message has to name the fix — a user who has not
+        // read the feature tree cannot know which features carry the capability.
+        let err = ensure_capabilities_satisfied(&[jellyfin], &known).unwrap_err();
+        let ConfigError::MissingCapability {
+            ref feature,
+            ref capability,
+            ref providers,
+        } = err
+        else {
+            panic!("expected MissingCapability, got {err:?}");
+        };
+        assert_eq!(feature, "jellyfin");
+        assert_eq!(capability, "ffmpeg");
+        assert_eq!(providers, &["media-accel-rockchip", "media-accel-v4l2"]);
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("add one of 'media-accel-rockchip', 'media-accel-v4l2'"),
+            "unhelpful message: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_capability_no_feature_provides_points_at_the_listing() {
+        // Distinct from a forgotten provider: this is a misspelled requirement or one
+        // whose provider was never authored, so there is nothing to suggest adding.
+        let consumer = cap("consumer", &[], &["ffmpgе"]);
+        let err = ensure_capabilities_satisfied(&[consumer], &[]).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("no feature in this config tree provides it"),
+            "should not invite adding a provider that does not exist: {rendered}"
+        );
+        assert!(rendered.contains("list-features"));
+    }
+
+    #[test]
+    fn a_feature_may_satisfy_its_own_requirement() {
+        // A provider that also consumes what it supplies needs no special case, and
+        // an implementation scanning "the others" rather than the whole selection
+        // would reject this.
+        let both = cap("self-sufficient", &["ffmpeg"], &["ffmpeg"]);
+        assert!(ensure_capabilities_satisfied(&[both], &[]).is_ok());
+    }
+
+    #[test]
+    fn capability_fields_default_to_empty() {
+        // Every existing feature manifest omits both, so the gate has to be inert
+        // unless something opts in.
+        let f: Feature = toml::from_str("description = \"x\"\n").unwrap();
+        assert!(f.provides.is_empty());
+        assert!(f.requires_capability.is_empty());
+        assert!(ensure_capabilities_satisfied(&[("x".into(), f)], &[]).is_ok());
     }
 
     #[test]
@@ -421,6 +631,24 @@ mod tests {
         let provider: Feature =
             toml::from_str("description = \"x\"\nrequires_media_accel = true\n").unwrap();
         assert!(provider.requires_media_accel);
+    }
+
+    #[test]
+    fn ffmpeg_nonfree_defaults_false_and_names_the_feature_that_sets_it() {
+        // Absent key → free. Every feature manifest but one omits it, and the default
+        // decides what every image ships, so it is the half worth pinning in a test.
+        let plain: Feature = toml::from_str("description = \"x\"\n").unwrap();
+        assert!(!plain.ffmpeg_nonfree);
+        let none = [("media-accel-rockchip".to_string(), feat(vec![], vec![]))];
+        assert_eq!(first_enabling_ffmpeg_nonfree(&none), None);
+
+        let mut nonfree = feat(vec![], vec![]);
+        nonfree.ffmpeg_nonfree = true;
+        let set = [
+            ("media-accel-rockchip".to_string(), feat(vec![], vec![])),
+            ("ffmpeg-nonfree".to_string(), nonfree),
+        ];
+        assert_eq!(first_enabling_ffmpeg_nonfree(&set), Some("ffmpeg-nonfree"));
     }
 
     #[test]

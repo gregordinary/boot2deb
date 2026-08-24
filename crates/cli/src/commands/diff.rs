@@ -191,7 +191,12 @@ fn read_fragments(
     root: &ConfigRoot,
     build: &boot2deb_core::model::ResolvedBuild,
 ) -> Result<Option<FragmentSet>> {
-    if build.kernel.as_ref().and_then(|k| k.compiled()).is_none() {
+    if build
+        .image
+        .as_ref()
+        .and_then(|i| i.kernel.compiled())
+        .is_none()
+    {
         return Ok(None);
     }
     let paths = fragment_paths(root, build)?;

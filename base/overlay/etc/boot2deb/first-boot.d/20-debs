@@ -1,0 +1,36 @@
+#!/bin/sh
+# Install any .deb staged at press time (/var/lib/boot2deb/firstboot-debs,
+# written by `boot2deb press --deb`): dpkg -i over the whole set, alphabetical.
+#
+# Tolerant like the seed hook: every failure logs and exits 0, because a board
+# that does not come up is worse than a board missing a package. The honest
+# caveat: dpkg -i resolves nothing — a dependency not already in the image
+# leaves the package unconfigured until `apt-get -f install` can run, which
+# needs network the board may not have yet on its first boot. The staged files
+# are kept either way, so `dpkg -i /var/lib/boot2deb/firstboot-debs/*.deb` by
+# hand is always a valid retry.
+
+dir=/var/lib/boot2deb/firstboot-debs
+[ -d "$dir" ] || exit 0
+set -- "$dir"/*.deb
+[ -e "$1" ] || exit 0
+
+export DEBIAN_FRONTEND=noninteractive
+if dpkg -i -- "$@"; then
+    echo "boot2deb debs: installed $# staged package(s)"
+    exit 0
+fi
+
+# dpkg left something unconfigured — almost always missing dependencies. Fetch
+# them only if the network is already reachable (the seed hook has run, but a
+# Wi-Fi association may still be seconds away); otherwise say what to run.
+if timeout 10 getent hosts deb.debian.org >/dev/null 2>&1; then
+    if apt-get -f install -y; then
+        echo "boot2deb debs: dependencies fetched; staged package(s) configured"
+        exit 0
+    fi
+    echo "boot2deb debs: apt-get -f install failed; run it by hand once the network is up" >&2
+else
+    echo "boot2deb debs: dependencies missing and no network yet; run 'apt-get -f install' once online" >&2
+fi
+exit 0

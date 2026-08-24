@@ -67,7 +67,7 @@ use std::path::{Path, PathBuf};
 /// bootstrapped tree's dpkg state, apt configuration, and configure ordering, so a
 /// dependency bump that changes the emitted tree for unchanged inputs is a bump here
 /// too.
-const ROOTFS_STAGE_VERSION: u32 = 10;
+const ROOTFS_STAGE_VERSION: u32 = 11;
 
 /// Everything that determines the produced rootfs tree *except* the per-image
 /// password (applied on restore) — the inputs [`cache_key`] hashes.
@@ -628,7 +628,7 @@ mod tests {
         let debs = vec!["def".to_string()];
         assert_eq!(
             cache_key(&inputs(&solved, &overlay, &debs)).as_str(),
-            "0c08a2881f12a8218334ec473fd411f0ddedf27dd52fb2e034e2e10da72467a7"
+            "4dcd87874a57cc52f4283a672e8e29b9c4d7ed4b1ab229e0cc301ea5f29ce91d"
         );
     }
 

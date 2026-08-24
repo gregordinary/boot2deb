@@ -94,7 +94,7 @@ kernel that compiles nothing would read as configured and boot as broken.
 A compiled kernel may declare `libre = true`, which says its source is
 [GNU Linux-libre](https://www.fsfla.org/ikiwiki/selibre/linux-libre/): every
 nonfree-firmware loader has been removed from the tree, so no driver it builds can read
-a blob. `kernels/rk3288-libre-7.1.toml` is the shipped one.
+a blob. `kernels/rk3288-libre-7.2.toml` is the shipped one.
 
 That is a property of the *source*, but it decides things well outside the kernel, so
 resolution propagates it to the whole build rather than leaving each layer to restate
@@ -409,29 +409,59 @@ exact pins in `recipes/<device>/<leaf>.lock`.
 
 ### Media-accel sources ride the feature, not the SoC
 
-The `[userspace]` (MPP/RGA/Mali) and `[ffmpeg]` source stanzas at the soc layer are
+The `[[userspace]]` entries and the `[ffmpeg]` source stanza at the soc layer are
 **optional**. They provide the trees a `requires_media_accel` feature compiles, and they
 are copied into a build only when a selected feature declares it. A recipe that builds no
 transcode stack carries no such sources and skips the userspace/ffmpeg compile nodes
-entirely; a SoC that never transcodes omits the stanzas. Selecting a
+entirely; a SoC that never transcodes declares neither. Selecting a
 `requires_media_accel` feature on a SoC that lacks them is a resolve-time error, so the
 coupling is checked, not assumed.
 
-Each individual tree is optional too, and an absent one is a statement about the
-hardware rather than an omission. A SoC declares what it has:
+**A tree is a value, not a field.** `[[userspace]]` is an array, one entry per tree the
+part has, because *which* trees exist is the SoC's statement about its own hardware — so
+a fourth tree, or a different family's stack entirely, is a file edit rather than a
+schema change. The build stage, the lock, the plan nodes and the CLI all loop over
+whatever is declared. This is the shape `kmods/<name>.toml` already has for out-of-tree
+drivers, and it is there for the same reason.
+
+An absent tree is a statement about the hardware rather than an omission:
 
 | | RK3588 | RK3576 |
 |---|---|---|
-| `[userspace.mpp]` | yes | no — no vendor `mpp_service` in a mainline kernel |
-| `[userspace.librga]` | yes | yes |
-| `[userspace.libmali]` | yes — CSF GPU, no mainline driver | no — panfrost, so Mesa from the mirror |
+| `mpp` | yes | no — no vendor `mpp_service` in a mainline kernel |
+| `librga` | yes | yes |
+| `libmali` | yes — CSF GPU, no mainline driver | no — panfrost, so Mesa from the mirror |
 | `[ffmpeg.rockchip]` | yes — the rkmpp/rkrga graft | no — the base tree builds unmodified |
+
+Each entry says what the tree *is* and how the rest of the build relates to it, rather
+than leaving those as rules in code:
+
+```toml
+[[userspace]]
+name            = "librga"
+git             = "https://github.com/tsukumijima/librga-rockchip.git"
+ref             = "master"
+debs            = ["librga2", "librga-dev"]   # what its packaging produces
+links           = ["librga2", "librga-dev"]   # what a consumer links against
+ffmpeg_flag     = "--enable-rkrga"            # the ./configure flag it earns
+ffmpeg_requires = ["mpp"]                     # and what that flag needs alongside it
+```
+
+Three more keys shape a tree that needs them: `patched = true` marks the one tree that
+takes the series' `userspace` scope (the MPP CMA fix), `optional = true` means it is
+skipped unless a build names it with `--userspace <name>`, and `build_deps` /
+`targets_filter` carry the extra development packages a tree's probes need and a filter
+over a vendor variant matrix.
 
 That set is the capability statement the build reads, not just provenance: ffmpeg's
 `./configure` surface is **derived** from it, so a SoC declaring no MPP is never asked
 for `--enable-rkmpp` (and never build-depends on a `librockchip-mpp-dev` nothing
-produces). The lock mirrors it one-for-one, omitting the table for any tree the SoC
-does not declare.
+produces). `ffmpeg_requires` is what makes the rkrga rule data rather than a special
+case — its filters allocate RKMPP frames and ffmpeg's own `./configure` rejects
+`--enable-rkrga` without `--enable-rkmpp`, so on the RK3576 `librga2` still ships for
+programs that speak the API directly and the produced ffmpeg carries no librga `NEEDED`
+entry at all. The lock mirrors the declared set one-for-one, as `[[userspace]]` entries
+keyed by `name`.
 
 ### A feature can reach the kernel
 
@@ -458,6 +488,94 @@ Both fields require a **compiled** kernel. A distro-package kernel merges no kco
 applies no series, so selecting such a feature against one is a resolve-time error naming
 the feature — otherwise the capability would install its userspace against hardware
 support that was never built.
+
+### A feature can require another, by capability
+
+Two features can be individually valid and useless together, or useless apart. The
+model has both gates, and they are opposites:
+
+```toml
+# features/media-accel-rockchip.toml — a provider
+conflicts = ["media-accel-v4l2"]     # these two cannot coexist
+provides  = ["ffmpeg"]               # what this supplies to the selection
+
+# features/jellyfin.toml — a consumer
+requires_capability = ["ffmpeg"]     # something in the selection must supply it
+```
+
+`conflicts` is symmetric — declaring it on either side is enough — and rejects a
+selection holding both. `requires_capability` rejects a selection holding a consumer
+and no provider:
+
+```console
+$ boot2deb resolve turing-rk1/forky+jellyfin
+error: feature 'jellyfin' requires capability 'ffmpeg', which no selected feature
+       provides — add one of 'media-accel-rockchip', 'media-accel-v4l2'
+```
+
+That composition would otherwise build a perfectly good image whose Jellyfin exits at
+startup, because the feature installs no FFmpeg and the application treats a missing
+encoder as fatal. It is the cheapest class of error to catch at resolve: nothing about
+the failure is visible until the board boots.
+
+**A capability is a free-form name, not a feature name**, and that is the whole point.
+Both `media-accel-rockchip` (RK3588) and `media-accel-v4l2` (RK3576) declare
+`provides = ["ffmpeg"]`, so `jellyfin` composes with whichever matches the SoC while
+naming neither — and a provider for a future platform satisfies it with no edit to the
+consumer. Names are matched literally; a misspelling on either side surfaces as this
+same error, which reports when no feature in the tree provides the capability at all.
+
+`list-features` shows both sides, which is where a rejected composition sends you:
+
+```console
+$ boot2deb list-features
+ffmpeg-nonfree        soc=any     arch=any    needs=ffmpeg
+jellyfin              soc=any     arch=arm64  needs=ffmpeg
+media-accel-rockchip  soc=rk3588  arch=any    conflicts=media-accel-v4l2 provides=ffmpeg
+media-accel-v4l2      soc=rk3576  arch=any    conflicts=media-accel-rockchip provides=ffmpeg
+```
+
+This **validates** a composition; it does not complete one. Nothing is added to the
+selection to satisfy a requirement — the recipe still names every feature explicitly.
+Provider auto-resolution stays a non-goal: the builder tells you the composition is
+incomplete and which features would complete it, and you choose.
+
+### The FFmpeg a build ships is redistributable
+
+Every recipe here builds FFmpeg with `--enable-gpl --enable-version3` and nothing that
+forfeits redistribution, so the `ffmpeg-rk` `.deb` and any image holding it may be
+passed on.
+
+The other flavour is available and is a feature, not a flag:
+
+```console
+$ boot2deb build turing-rk1/media-accel-forky                            # free
+$ boot2deb build turing-rk1/forky+media-accel-rockchip+ffmpeg-nonfree    # nonfree
+```
+
+`ffmpeg-nonfree` installs no packages. It sets one axis on the build — FFmpeg's
+`--enable-nonfree`, which admits encoders whose licence terms cannot be combined with
+the GPL, of which FDK-AAC is the one this tree has a use for — and `requires_capability
+= ["ffmpeg"]` makes selecting it without a provider the resolve-time error above rather
+than a flag nobody reads. Note the second form names the *whole* selection: a `+`
+suffix replaces a recipe's feature list, it does not add to it, so the nonfree variant
+of a recipe with features of its own is spelled against a base recipe that has none.
+
+The two are separate builds all the way down. The flavour moves the `./configure` flags
+and the ffmpeg stage's build root together, both of which the artifact cache keys on, so
+neither flavour can ever be served from the other's cache; and each variant reference
+gets its own lock, work directory and artifact path. What a finished image was built
+with is recorded in its provenance manifest, under `[image] features`, alongside every
+other axis of the build point.
+
+Because a `[support]` claim says a configuration is fit to publish, a recipe that both
+declares one and selects `ffmpeg-nonfree` is rejected at resolution. Reach the flavour
+as a variant reference; a variant carries no claim and appears in no support matrix.
+
+Nothing on the hardware path depends on the choice. Audio is CPU work on these boards
+either way, and FDK-AAC's advantages — bitrates below about 96 kbps, and the HE-AAC
+profiles — sit outside the 128-384 kbps range a media server transcodes to, which
+FFmpeg's own native `aac` encoder covers.
 
 ### A board device tree that is not yet upstream
 
@@ -550,6 +668,80 @@ concatenated**. So a variant that wants to add one entry to an inherited list re
 the list — which is why the example above restates the parent's `device_dts` source
 alongside its own wrapper. Chains are walked to the base-most device, and a cycle is a
 named error rather than a hang.
+
+### A package that only exists in some suites
+
+Most packages are the same in every suite and are written as a bare name. A few are not:
+Debian splits, renames and drops binary packages between releases, so a layer that names
+one unconditionally is right on the suites it was written against and wrong on the rest.
+An entry in any `packages` or `nonfree_firmware_packages` list may therefore name the
+suites it applies to:
+
+```toml
+packages = [
+    "network-manager",
+    # nmtui left `network-manager` for a package of its own at 1.56.0-4, so forky and
+    # sid need it named and trixie (1.52.1-1) must not — that archive has no such
+    # package, and its `network-manager` already ships the binary.
+    { name = "network-manager-tui", suites = ["forky", "sid"] },
+    "wpasupplicant",
+]
+```
+
+An entry that does not apply contributes nothing and does not reserve its name, which is
+what lets a **rename** be written as two entries over disjoint suites — on any one build
+exactly one of them applies:
+
+```toml
+{ name = "libv4l-0",    suites = ["bookworm"] },
+{ name = "libv4l-0t64", suites = ["trixie", "forky"] },
+```
+
+The suites are **enumerated, not bounded**. A range (`since = "forky"`) would read closer
+to the intent and would need no edit when a suite is added — and that is the hazard
+rather than the convenience, because it silently extends the claim to every future suite,
+and whether a package still exists in one is a fact only that archive can answer.
+Enumerating forces the claim to be restated when a suite is added, and
+[`verify-packages`](cli.md) then checks each claim against the archive it is about. It
+also means boot2deb owns no release sequence: there is no ordering to maintain and no
+special case for `sid`.
+
+The price of enumerating is that a misspelt suite is silent — the entry never applies, so
+the package goes missing with nothing said. `verify-packages` pays it back by reporting a
+`suites` name that no recipe in the tree builds:
+
+```text
+note : network-manager-tui in soc 'rk3288' names suite 'forkey', which no recipe in
+       this tree builds — check the spelling
+```
+
+Debian's symbolic names (`sid`, `unstable`, `testing`, `stable`, `oldstable`) are exempt:
+they are permanent fixtures of the archive, so naming one is never a typo even where no
+recipe builds it yet. An entry naming an **empty** `suites` list is refused outright at
+resolution — config that can never take effect is a mistake, not a no-op.
+
+`exclude` takes plain names only. An include has to name a package the archive carries,
+so which suite is being built decides whether the name is right; an exclude names
+something that must not be installed and is satisfied just as well by a suite that never
+had it, so excluding a name a suite does not carry is already a no-op.
+
+**Five arrays are the exception and accumulate**: `caveats`, `expect`,
+`nonfree_firmware_packages`, `packages` and `exclude`. Each level's entries are
+concatenated base-most first and de-duplicated, so a variant inherits its parent's and
+adds its own. The line is between *describing or supplying the running system* and
+*selecting a build input*. A variant is the same hardware, so it is bound by everything
+its parent said about that hardware: a caveat cannot be un-said, a runtime check that
+held on the parent holds here, a radio that needed firmware still needs it, and a board
+package the parent installs is one this board wants too. Replacing any of them would let
+a variant that adds one entry silently drop every entry it inherits — a support claim
+that is wrong, or a self-test that passes while testing less than the parent's.
+
+Everything else **selects**, and a variant makes its own selection: `device_kmods` and
+`device_patch_series` choose which drivers and series the kernel is built with,
+`extra_debs` pins exact bytes (two pins of one package would be a conflict, not a sum),
+and every `supported_*` list names the alternatives a build may pick from. A value that
+is not an array at any level of the chain is an error naming the file that holds it —
+including an ancestor's, which last-wins alone would have swallowed.
 
 Reach for this only when the difference genuinely needs a device tree or another
 device-layer field. A capability whose whole expression is packages, kernel config, and
@@ -700,7 +892,7 @@ carries.
 **A lock records what the build depends on, and nothing else.** Each table is present
 only when the build actually has that dependency: `[kernel]` when a kernel is compiled,
 `[uboot]` and `[blobs]` when a bootloader is, `[patches]` when a series is applied,
-`[userspace]`/`[ffmpeg]` when the media-accel stack is. Pinning a commit nothing
+`[[userspace]]`/`[ffmpeg]` when the media-accel stack is. Pinning a commit nothing
 consumes would record provenance for a dependency that does not exist — and would make
 `update` demand a checkout the build never reads. Taken to its limit, a board that
 installs Debian's kernel and boots its own firmware has a lock with exactly one table:
@@ -730,7 +922,7 @@ See the [CLI reference](cli.md) for the commands that operate on these.
 ### Re-pinning: constraints move, hand-pins stay
 
 The config layers declare a **constraint** — `uboot_ref = "v2026.07"` on the boot method,
-`[userspace.mpp] ref = "…"` on the SoC — and the lock records the **exact pin** resolved
+a `[[userspace]]` entry's `ref` on the SoC — and the lock records the **exact pin** resolved
 from it. An `update` given no per-tree ref flag re-reads the constraint, so editing one
 and re-pinning carries every recipe that resolves through that layer with it:
 
@@ -824,18 +1016,20 @@ They are printed by `resolve`, at the end of a `build`, and in the
 board — they hold for every recipe on it — and the feature and recipe ones under each
 recipe, since those depend on what that recipe selected.
 
-`caveats` is the one device list that **accumulates** down an `extends` chain rather
-than being replaced by it. Every other array follows the ordinary last-wins rule, and a
-variant restates what it wants to keep — but a variant shares its parent's hardware, so
-last-wins there would let a variant that adds one caveat silently drop every limitation
-it inherits. A variant cannot un-say one of its parent's; a board that genuinely lacks
-the limitation is its own device rather than a variant.
+`caveats` **accumulates** down an `extends` chain rather than being replaced by it —
+one of [the five arrays that do](#a-variant-board-extends-another). A variant
+shares its parent's hardware, so last-wins there would let a variant that adds one
+caveat silently drop every limitation it inherits. A variant cannot un-say one of its
+parent's; a board that genuinely lacks the limitation is its own device rather than a
+variant.
 
 A caveat is a sentence, not a code, so the only rule at load is that it is non-empty
 and carries no ragged whitespace. **Where a limitation is mechanically checkable it
 belongs in the board's selftest expectations instead**, where it fails rather than
 merely informs; a caveat that could have been an `[[expect]]` entry is a check nobody
-runs. Caveats are for what cannot be asked of the running system.
+runs. Caveats are for what cannot be asked of the running system. The `[[expect]]`
+array itself — which layers take one, the check kinds, and how the checks reach the
+image — is [the on-image self-test](self-test.md).
 
 ### A feature selection is a build point, not a new recipe
 

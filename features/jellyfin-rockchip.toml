@@ -10,12 +10,17 @@
 # application's config file. A recipe that wants accelerated Jellyfin names all
 # three — there is no provider auto-resolution (non-goal).
 #
-# Composing this without `media-accel-rockchip` produces an image whose Jellyfin
-# points at an `/opt/ffmpeg-rk` that no package installed, and Jellyfin will have
-# no encoder at all. `requires_soc` catches the hardware mismatch; it cannot catch
-# a recipe that names the wrong sibling feature, so name both.
+# Both halves of the composition are required rather than assumed. `requires_capability
+# = ["jellyfin"]` names the application this configures, so selecting the glue alone —
+# which would seed `/etc/jellyfin/encoding.xml` into an image with no server to read it
+# — is rejected at resolve. That requirement also carries the FFmpeg one transitively:
+# `jellyfin` itself declares `requires_capability = ["ffmpeg"]`, so a selection holding
+# this file has been shown to carry a provider. `requires_soc` below covers the other
+# half — that the provider is the *Rockchip* one — since only an RK3588 build resolves
+# it.
 description  = "Configure Jellyfin to transcode on the Rockchip stack (ffmpeg-rk + VEPU580)"
 requires_soc = ["rk3588"]
+requires_capability = ["jellyfin"]
 
 # No packages: `jellyfin` brings the server, `media-accel-rockchip` brings
 # ffmpeg-rk. This feature is the seeded `/etc/jellyfin/encoding.xml` under

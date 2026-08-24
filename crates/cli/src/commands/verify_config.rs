@@ -37,14 +37,18 @@ pub(crate) fn run(
     // kernel arrives pre-built from the mirror: Debian owns its `.config`, so there
     // are no fragments to merge and nothing this gate could compare.
     let kernel = build
-        .kernel
+        .image
         .as_ref()
-        .and_then(|k| k.compiled())
+        .and_then(|i| i.kernel.compiled())
         .ok_or_else(|| {
             format!(
                 "recipe '{recipe}' uses kernel '{}', a distro package built by Debian — its \
              kernel config is not ours to generate, so there is nothing to verify",
-                build.kernel.as_ref().map(|k| k.id()).unwrap_or("(none)")
+                build
+                    .image
+                    .as_ref()
+                    .map(|i| i.kernel.id())
+                    .unwrap_or("(none)")
             )
         })?;
     // Fragment names resolve to fragments/<name>.config along the config search
@@ -189,7 +193,7 @@ pub(crate) fn run(
         // slash-free recipe identity (device included) keeps two boards' verifies from
         // colliding on one dir.
         let slug = recipe.replace('/', "-");
-        root.path().join("cache").join("kconfig").join(slug)
+        crate::config::kconfig_cache(root).join(slug)
     }));
     std::fs::create_dir_all(&work_dir)
         .map_err(|e| format!("failed to create {}: {e}", work_dir.display()))?;
@@ -203,19 +207,21 @@ pub(crate) fn run(
     };
     let cross_sandbox = RootlessSandbox::new(
         cross_role,
-        boot2deb_engine::sandbox::build_sandbox_dir(
-            &work_dir,
-            cross_role,
-            host_deb_arch,
-            &build.packaging_suite,
-            &mirrors,
-        ),
+        boot2deb_engine::sandbox::SandboxSpec {
+            rootfs: boot2deb_engine::sandbox::build_sandbox_dir(
+                &work_dir,
+                cross_role,
+                host_deb_arch,
+                &build.packaging_suite,
+                &mirrors,
+            ),
+            suite: build.packaging_suite.clone(),
+            arch: host_deb_arch.to_string(),
+            mirrors,
+            keyring,
+            cache_dir: Some(work_dir.join("cache").join("provisioner-debs")),
+        },
         boot2deb_engine::sandbox::build_root_uppers(&work_dir),
-        build.packaging_suite.clone(),
-        host_deb_arch,
-        mirrors,
-        keyring,
-        Some(work_dir.join("cache").join("provisioner-debs")),
     );
     let gate_step = Step::start(&sink, "config-root");
     cross_sandbox.ensure_ready(&gate_step)?;

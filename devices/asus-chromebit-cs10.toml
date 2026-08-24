@@ -46,6 +46,12 @@ image_size              = "2G"
 # Ctrl+U with its own USB HID driver and its own fixed layout, before Linux exists.
 keymap                  = "us"
 
+# The board's one sound card: no analog codec (the DT skips the chromebook
+# include), so the card is the HDMI one and carries mickey's own DT name.
+[[expect]]
+check = "sound-card"
+name  = "VEYRON-HDMI"
+
 # --- The board profile ---------------------------------------------------------
 # One profile: depthcharge-tools carries `mickey` as a first-class board, and there is
 # no libreboot port for the Chromebit — the family's only libreboot profile is the

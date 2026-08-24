@@ -5,6 +5,7 @@
 # User guide
 
 - [Getting started](getting-started.md)
+- [Producing images](press.md)
 - [Upgrading the kernel](kernel-upgrades.md)
 - [Locale, timezone, and keyboard](localization.md)
 - [The clock and time sync](clock.md)
@@ -34,6 +35,8 @@
 - [CLI](reference/cli.md)
 - [Every flag](reference/cli-flags.md)
 - [Support matrix](reference/support-matrix.md)
+- [The on-image self-test](reference/self-test.md)
+- [Trying an image before flashing](reference/try.md)
 - [RK3576 u-boot images](reference/rk3576-uboot-images.md)
 - [Overlays](reference/overlays.md)
 - [Image identity](reference/image-identity.md)

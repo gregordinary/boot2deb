@@ -20,13 +20,22 @@ use crate::sandbox::{BuildRoot, BuildRootSpec, CompileRoot, PackagingSandbox};
 use crate::signature::{Signature, SignatureBuilder, SignatureManifest};
 use boot2deb_core::lock::{KmodPin, Lock};
 use boot2deb_core::model::{KmodFirmware, ResolvedKmod};
-use boot2deb_core::ResolvedBuild;
+use boot2deb_core::{ImageBuild, ResolvedBuild};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Stage-recipe version for a kmod **tree** signature (Tier-1 fetched+patched tree):
 /// bump when the fetch/patch logic that shapes a reused driver tree changes.
 const TREE_STAGE_VERSION: u32 = 1;
+
+/// Where this stage's driver trees and packaging scratch live under `work_dir`
+/// (`<work_dir>/kmod`) — one directory per declared module inside it. Exposed for the
+/// same reason [`kernel::tree_dir`](crate::build::kernel::tree_dir) is: a reader of the
+/// tree — [`crate::shell`], which starts an interactive session in it — should not
+/// restate the layout literal.
+pub fn stage_dir(work_dir: &Path) -> PathBuf {
+    work_dir.join("kmod")
+}
 
 /// Stage-recipe version for a kmod **output** signature (Tier-2 `.deb`): this stage's
 /// own logic, folded in as an input. An entry stored under a different version is
@@ -85,19 +94,19 @@ pub struct KmodArtifacts {
 
 /// Run the kmod stage, emitting its [`Event`](crate::event::Event)s to `sink`.
 ///
-/// Reads the [`Lock`] for the `[[kmods]]` pins and the [`ResolvedBuild`] for the module
+/// Reads the [`Lock`] for the `[[kmods]]` pins and the build's image half for the module
 /// descriptors. Each kmod is Tier-2-cached on `(kernel tree, driver tree, kver, arch,
 /// toolchain, module list, make args)`, so a no-change rebuild restores the `.deb`
 /// without rebuilding either tree.
 pub fn build_kmods(
-    build: &ResolvedBuild,
+    ib: ImageBuild,
     lock: &Lock,
     opts: &KmodOptions,
     env: &BuildEnv,
     sink: &dyn EventSink,
 ) -> Result<KmodArtifacts, EngineError> {
+    let ImageBuild { build, image } = ib;
     let step = Step::start(sink, "kmod");
-    let stage_root = opts.work_dir.join("kmod");
 
     // The kernel tree signature is folded into every kmod's output key: a kernel commit
     // or patch bump changes module vermagic, so a cached modules `.deb` must not survive
@@ -105,7 +114,7 @@ pub fn build_kmods(
     let kernel_sig = kernel_tree_signature(lock, opts)?;
 
     let mut debs = Vec::new();
-    for (idx, k) in build.device_kmods.iter().enumerate() {
+    for (idx, k) in image.device_kmods.iter().enumerate() {
         let pin = lock
             .kmods
             .iter()
@@ -122,36 +131,76 @@ pub fn build_kmods(
             lock,
             opts,
             env,
-            &stage_root,
-            k,
-            pin,
-            locals,
+            KmodTarget {
+                k,
+                pin,
+                local_patches: locals,
+            },
             &kernel_sig,
             &step,
         )?;
         debs.extend(produced);
-        step.progress((100 * (idx + 1) / build.device_kmods.len().max(1)) as u8);
+        step.progress((100 * (idx + 1) / image.device_kmods.len().max(1)) as u8);
     }
     step.finish();
     Ok(KmodArtifacts { debs })
 }
 
+/// One out-of-tree module as this build resolves it: its declaration, the commit the
+/// lock pins it at, and the boot2deb-side compat patches applied on top.
+///
+/// A struct because the three are one thing — "the driver this iteration builds" — and
+/// every signature in the stage folds all three. Splitting them across positional
+/// arguments would let a call site pass one kmod's patches with another's pin, which is
+/// a cache key that names a tree nobody built.
+#[derive(Clone, Copy)]
+struct KmodTarget<'a> {
+    /// The resolved `kmods/<name>.toml`: repo, subdir, modules, make args, firmware.
+    k: &'a ResolvedKmod,
+    /// The lock's `[[kmods]]` entry for it — the exact commit to fetch.
+    pin: &'a KmodPin,
+    /// The device's own compat patches for this driver, in apply order. Their *content*
+    /// folds into every signature, so an edited shim restamps rather than restores.
+    local_patches: &'a [PathBuf],
+}
+
+/// Where a produced `.deb` is archived and what stamps it: the packaging root, the
+/// stage's scratch, and the `SOURCE_DATE_EPOCH` the archive records.
+///
+/// A struct because all three describe the *archiving*, not the driver — the same three
+/// values serve the modules deb and the firmware deb, and neither of those cares which
+/// is which beyond handing them straight to `dpkg-deb`.
+#[derive(Clone, Copy)]
+struct DebArchive<'a> {
+    /// The stage's scratch root; the pkg-stage and the produced `.deb` live under it.
+    stage_root: &'a Path,
+    /// The host-arch root `dpkg-deb` runs in, so the archive is a function of the lock
+    /// rather than of the build host's `dpkg`.
+    packaging: &'a PackagingSandbox,
+    /// The deterministic timestamp every archived member takes.
+    epoch: Option<u64>,
+}
+
 /// Build and package one device kmod, restoring from the Tier-2 cache on a hit. Returns
 /// the per-kernel modules `.deb` and, when the kmod ships firmware, the companion
 /// `<name>-firmware` `.deb` after it (declared install order).
-#[allow(clippy::too_many_arguments)]
 fn build_one(
     build: &ResolvedBuild,
     lock: &Lock,
     opts: &KmodOptions,
     env: &BuildEnv,
-    stage_root: &Path,
-    k: &ResolvedKmod,
-    pin: &KmodPin,
-    local_patches: &[PathBuf],
+    target: KmodTarget,
     kernel_sig: &Signature,
     step: &Step,
 ) -> Result<Vec<PathBuf>, EngineError> {
+    let KmodTarget {
+        k,
+        pin,
+        local_patches,
+    } = target;
+    // Derived rather than taken: it is a function of `opts.work_dir`, and a second
+    // parameter for it would let a caller hand over a root the stage does not own.
+    let stage_root = &stage_dir(opts.work_dir);
     // A local patch's *content* shapes both the module and the firmware bytes copied
     // from the patched tree, so fold each file's fingerprint into every signature — an
     // edited shim must restamp rather than reuse a stale build.
@@ -259,10 +308,12 @@ fn build_one(
             pin,
             &kver,
             build.arch.debian_arch(),
-            stage_root,
             &pkg_stage,
-            opts.packaging,
-            epoch,
+            DebArchive {
+                stage_root,
+                packaging: opts.packaging,
+                epoch,
+            },
             step,
         )?;
         let staged = build::stage_artifact(opts.out_dir, &deb)?;
@@ -293,9 +344,11 @@ fn build_one(
                 fw,
                 pin,
                 &driver_tree,
-                stage_root,
-                opts.packaging,
-                epoch,
+                DebArchive {
+                    stage_root,
+                    packaging: opts.packaging,
+                    epoch,
+                },
                 step,
             )?;
             let staged = build::stage_artifact(opts.out_dir, &deb)?;
@@ -600,18 +653,20 @@ fn prune_empty_dirs(root: &Path) -> Result<(), EngineError> {
 /// the `updates/` module. Archived by [`build::archive_deb`] in the build's packaging
 /// root, which clamps member mtimes to the driver commit's date and states the
 /// compressor.
-#[allow(clippy::too_many_arguments)]
 fn package_deb(
     k: &ResolvedKmod,
     pin: &KmodPin,
     kver: &str,
     arch: &str,
-    stage_root: &Path,
     pkg_stage: &Path,
-    packaging: &PackagingSandbox,
-    epoch: Option<u64>,
+    archive: DebArchive,
     step: &Step,
 ) -> Result<PathBuf, EngineError> {
+    let DebArchive {
+        stage_root,
+        packaging,
+        epoch,
+    } = archive;
     let pkg = package_name(&k.name, kver);
     let version = deb_version(pin);
 
@@ -658,17 +713,19 @@ fn package_deb(
 /// firmware path (the reason firmware is its own deb, not folded into the per-kver one).
 /// All regular files directly under `<driver_tree>/<subdir>` are staged at the declared
 /// `install` path; subdirectories are not descended.
-#[allow(clippy::too_many_arguments)]
 fn package_firmware_deb(
     k: &ResolvedKmod,
     fw: &KmodFirmware,
     pin: &KmodPin,
     driver_tree: &Path,
-    stage_root: &Path,
-    packaging: &PackagingSandbox,
-    epoch: Option<u64>,
+    archive: DebArchive,
     step: &Step,
 ) -> Result<PathBuf, EngineError> {
+    let DebArchive {
+        stage_root,
+        packaging,
+        epoch,
+    } = archive;
     let src = driver_tree.join(&fw.subdir);
     if !src.is_dir() {
         return Err(EngineError::ArtifactMissing {

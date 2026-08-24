@@ -400,18 +400,10 @@ fn source_pins(manifest: &ProvenanceManifest) -> Vec<SourcePin> {
             url: None,
         });
     }
+    for u in &manifest.userspace {
+        pins.extend(pin(&u.name, Some(&u.reference), Some(&u.commit)));
+    }
     if let Some(ma) = &sources.media_accel {
-        pins.extend(pin("mpp", ma.mpp_ref.as_ref(), ma.mpp_commit.as_ref()));
-        pins.extend(pin(
-            "librga",
-            ma.librga_ref.as_ref(),
-            ma.librga_commit.as_ref(),
-        ));
-        pins.extend(pin(
-            "libmali",
-            ma.libmali_ref.as_ref(),
-            ma.libmali_commit.as_ref(),
-        ));
         pins.extend(pin(
             "ffmpeg",
             Some(&ma.ffmpeg_base_ref),

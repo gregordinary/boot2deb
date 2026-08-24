@@ -2,17 +2,15 @@
 # EVB whose DTB is in mainline, so a full build exercises the kernel DTB + u-boot
 # (DDR loader + BL31 + BL32) chain without needing the device_dts mechanism.
 device     = "rk3576-evb1-v10"
-kernel     = "rk3576-mainline-7.1"
+kernel     = "rk3576-mainline-7.2"
 suite      = "forky"
 features   = []
 layout     = "combined"
 image_size = "2G"
 
 # The SoC-path validator: it builds end-to-end, but there is no EVB hardware to
-# boot it on, so the claim is "expected". Re-assessed over the v7.1.6 kernel, which
-# changes `rk3576.dtsi` in one place: `vdec` lists `reg`/`reg-names` in the order its
-# binding declares, where earlier 7.1.x transposed "link" and "function". Each name
-# keeps the same address, and nothing else on the SoC path moves.
+# boot it on, so the claim is "expected". Re-assessed over the v7.2 kernel; see
+# h96-max-m9/forky for what the bump moves on this SoC, none of which is board-coupled.
 [support]
 status = "expected"
-date   = "2026-08-04"
+date   = "2026-08-21"

@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// A `git` command with the build host's git configuration neutralized: no
-/// `/etc/gitconfig`, no `~/.gitconfig`, no `$XDG_CONFIG_HOME/git/config`, and no
-/// `/etc/gitattributes`.
+/// `/etc/gitconfig`, no `~/.gitconfig`, no `$XDG_CONFIG_HOME/git/config`, no
+/// `/etc/gitattributes`, and no config injected through the environment.
 ///
 /// **Every** `git` the engine runs comes from here, because host config is build
 /// input. The one that decides it is `url.<base>.insteadOf`: it silently rewrites a
@@ -28,6 +28,18 @@ use std::process::{Command, Output};
 /// environment a build runs in is declared here, not inherited — and the pure-Rust
 /// clone in [`crate::patchfetch`] isolates `gix` for the same reason.
 ///
+/// **The files are not the whole of it.** `GIT_CONFIG_COUNT` with its
+/// `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` pairs, and `GIT_CONFIG_PARAMETERS`, are
+/// honored regardless of `GIT_CONFIG_NOSYSTEM` and `GIT_CONFIG_GLOBAL` — so a host or a
+/// CI wrapper carrying either can inject the very `insteadOf` the paragraph above says
+/// cannot reach a fetch. Both are removed. Dropping the count is sufficient for the
+/// numbered form: git reads the pairs only up to it.
+///
+/// `LC_ALL=C` because the engine reads git's output. The clone retry in
+/// [`crate::build`] classifies a failure as transient by matching English markers in
+/// stderr, and on a localized host every transient network failure would otherwise
+/// become a hard one. Nothing that parses git output wants a translated string.
+///
 /// Transport settings are the deliberate cost. A host whose `~/.gitconfig` carries
 /// `http.proxy` must express it as `http_proxy`/`https_proxy` in the environment,
 /// which git still reads; credentials for a private source likewise. Config that
@@ -38,7 +50,10 @@ pub(crate) fn command(repo: Option<&Path>) -> Command {
     let mut cmd = Command::new("git");
     cmd.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_ATTR_NOSYSTEM", "1");
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("LC_ALL", "C")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS");
     if let Some(r) = repo {
         cmd.arg("-C").arg(r);
     }
@@ -528,6 +543,43 @@ c9acdc466e9aa96352f658b9276aa8a45b8e817d\trefs/tags/v7.1.1^{}\n";
         assert!(is_clean(&main).unwrap());
         std::fs::create_dir_all(main.join(".git/rebase-merge")).unwrap();
         assert!(!is_clean(&main).unwrap());
+    }
+
+    #[test]
+    fn the_host_environment_cannot_configure_or_translate_a_command() {
+        // The posture is the whole of `command`'s guarantee, so it is asserted as the
+        // child's environment rather than inferred from a run: a host that sets
+        // `GIT_CONFIG_COUNT` (honored regardless of `GIT_CONFIG_NOSYSTEM` and
+        // `GIT_CONFIG_GLOBAL`) or `GIT_CONFIG_PARAMETERS` can otherwise inject the very
+        // `url.<base>.insteadOf` that redirects a pinned fetch away from the remote the
+        // lock names — and a localized host turns every transient clone failure into a
+        // hard one, since the retry classifier matches English stderr.
+        let cmd = command(None);
+        let env: Vec<_> = cmd.get_envs().collect();
+        let value = |k: &str| {
+            env.iter()
+                .find(|(key, _)| *key == std::ffi::OsStr::new(k))
+                .map(|(_, v)| *v)
+        };
+        for removed in ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"] {
+            assert_eq!(
+                value(removed),
+                Some(None),
+                "{removed} must be removed from the child environment"
+            );
+        }
+        for (key, want) in [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_ATTR_NOSYSTEM", "1"),
+            ("LC_ALL", "C"),
+        ] {
+            assert_eq!(
+                value(key),
+                Some(Some(std::ffi::OsStr::new(want))),
+                "{key} must be declared as {want}"
+            );
+        }
     }
 
     #[test]

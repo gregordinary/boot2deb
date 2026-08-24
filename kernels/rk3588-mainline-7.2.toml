@@ -1,0 +1,33 @@
+# kernels/rk3588-mainline-7.2.toml — a kernel is its own versioned entity that
+# owns everything version-coupled: source ref, config fragments, patch series.
+flavor           = "mainline"
+source           = "linux-stable"        # 7.2.x releases live in linux-stable
+track            = "7.2.y"               # resolved to an exact tag/SHA in the lock
+base_defconfig   = "defconfig"           # in-tree arm64 base; fragments merge onto it
+# Merge order (base first, device appended by the device layer): the generated
+# Debian-generic baseline, then the curated rockchip SoC + accel slices.
+config_fragments = ["base/debian-arm64", "soc/rk3588", "accel/full"]
+patch_series   = ["rk3588-accel"]      # -> patches repo, kernel-version-scoped
+# Clone URL of the patches repo, so a build with no local checkout auto-fetches
+# the series at the lock-pinned commit. Override with --patches-url, or point
+# --patches-path at a local checkout to co-develop the series.
+patches_url      = "https://github.com/gregordinary/patches.git"
+supported_socs   = ["rk3588"]
+
+# What this kernel's patch series add at runtime, checked by boot2deb-selftest.
+# These are the kernel's expectations rather than the SoC's because the devices
+# exist only on this patched tree — mainline alone presents none of them.
+#   /dev/rga          multicore RGA 2D engine (rga3.ko, out-of-tree)
+#   /dev/mpp_service  vendor MPP service port driving the VEPU580 encoder
+#   /dev/accel/accel0 rocket NPU (DRM accel node)
+[[expect]]
+check = "devnode"
+path  = "/dev/rga"
+
+[[expect]]
+check = "devnode"
+path  = "/dev/mpp_service"
+
+[[expect]]
+check = "devnode"
+path  = "/dev/accel/accel0"

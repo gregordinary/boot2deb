@@ -1,0 +1,9 @@
+# RK3576 hardware acceleration device permissions.
+#
+# The V4L2 decoder and media-controller nodes already land in the `video` group
+# by default, so they need no rule here. The DMA-BUF heaps do not: they come up
+# root-only, and every accelerated pipeline on this SoC allocates from them —
+# a decoder handing out frames, or an RGA client importing them. Without this a
+# non-root consumer (a service user, or the desktop user) cannot allocate a
+# single buffer.
+SUBSYSTEM=="dma_heap", GROUP="video", MODE="0660"

@@ -1,4 +1,4 @@
-# kernels/rk3576-mainline-7.1.toml — mainline 7.1.x for RK3576 boards.
+# kernels/rk3576-mainline-7.2.toml — mainline 7.2.x for RK3576 boards.
 # The SoC is fully upstream, so the kernel tree is nearly pristine: HW decode
 # (VDPU383) is native mainline, and encode is absent from mainline (a
 # vendor-kernel dependency, out of scope). The SoC-wide series it carries is
@@ -8,8 +8,8 @@
 # The u-boot variant is a separate axis (the device's `supported_uboot_series`,
 # resolved over the `rockchip-rkbin` boot method).
 flavor           = "mainline"
-source           = "linux-stable"        # 7.1.x stable releases live in linux-stable
-track            = "7.1.y"               # the lock pins the exact tag (update --kernel-ref)
+source           = "linux-stable"        # 7.2.x releases live in linux-stable
+track            = "7.2.y"               # the lock pins the exact tag (update --kernel-ref)
 base_defconfig   = "defconfig"           # in-tree arm64 base; fragments merge onto it
 config_fragments = ["base/debian-arm64", "soc/rk3576"]
 patch_series   = ["rk3576-fixes"]      # SoC-wide GPU power-domain fix; a board adds its own via device_patch_series

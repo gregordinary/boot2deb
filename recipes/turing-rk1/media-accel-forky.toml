@@ -8,18 +8,33 @@
 # recipe of its own that composes this feature plus the app.
 # Constraints only; the exact resolution is written to the sibling .lock.
 device     = "turing-rk1"
-kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
+kernel     = "rk3588-mainline-7.2"       # omit -> device default_kernel
 suite      = "forky"                     # omit -> device default_suite
-features   = ["media-accel-rockchip"]    # HW transcode userspace (MPP + RGA + ffmpeg-rk)
+# HW transcode userspace (MPP + RGA + ffmpeg-rk), and the GPU driver its filter
+# path needs. `vulkan` is here rather than left a la carte because this recipe's
+# consumer is the FFmpeg command line, and on the command line the Vulkan filters
+# are the fastest scale/tone-map/composite route these boards have — `scale_vulkan`
+# measures 53.8 dB against swscale at 18x the efficiency. Without a driver installed
+# they are compiled in and cannot open, which is a working image that quietly does
+# the slow thing.
+features   = ["media-accel-rockchip", "vulkan"]
 layout     = "combined"                  # omit -> device default_layout
+# Unchanged at 2G: the whole package set weighs 1003 MiB installed, Vulkan
+# included, so half the volume is still free before the first-boot grow.
 image_size = "2G"
 
-# Derived from turing-rk1/forky along the userspace axis. Re-assessed over the v7.1.6
-# kernel: the decode and encode drivers this feature builds against are unchanged from
-# v7.1.1 — `rkvdec` byte-identical, and 060's VEPU580 refresh is trailing context in
-# `rk3588-base.dtsi`, no driver line. The `vdec` `reg` reorder that forced the refresh
-# reaches only a consumer that indexes the banks instead of naming them, which `rkvdec`
-# does not.
+# Derived from turing-rk1/forky along the userspace axis, and re-assessed over the v7.2
+# kernel: see that recipe for what the bump moves. Two of its items land on this
+# recipe's own path rather than the base's. The RGA the `/dev/rga` consumers here talk
+# to is still the multicore vendor driver — 7.2's in-tree V4L2 RGA3 driver is left
+# unbuilt, because it exposes one core per video node, does scale and colour conversion
+# only, and has no 10-bit YUV, so NV15 out of a 10-bit HEVC decode has no path through
+# it and `librga`, `scale_rkrga` and `vpp_rkrga` cannot speak to it at all. And the
+# IOMMU fetch-DTE change upstream ties to RGA3 hangs is on exactly this image's filter
+# path. `rkvdec`'s move to a shared bitwriter writes the same register payloads. The
+# `vulkan` feature is unaffected: it is a userspace package set over panthor, which
+# takes fixes this recipe cannot distinguish. This configuration was built and measured
+# on the previous kernel; not booted from this recipe on this one.
 [support]
 status = "expected"
-date   = "2026-08-04"
+date   = "2026-08-21"

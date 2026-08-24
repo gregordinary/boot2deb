@@ -17,8 +17,18 @@
 //!   store outside any work dir ([`crate::artstore`]). A *hit here skips the compile
 //!   entirely*, so it dominates: a node can rebuild its tree and still not compile.
 //!
-//! Each verdict is computed by calling the very function the stage keys its store
-//! lookup on, so the prediction cannot drift from the build's own decision.
+//! **Nothing here is a second copy of the build's own answer.** Each verdict is computed
+//! by calling the very function the stage keys its store lookup on; each node's tree
+//! comes from the stage's own path helper
+//! ([`kernel::tree_dir`](crate::build::kernel::tree_dir) and its siblings); and each
+//! node's *name* comes from the stage's own [`NODE`](crate::build::kernel::NODE)
+//! constant, because the artifact store is keyed by `(node, signature)` and a prediction
+//! under a different name would answer a question about an entry no build ever wrote.
+//!
+//! What this module still decides for itself is the *set* of nodes and their order. That
+//! is deliberate and not drift: `build` runs the rootfs and image nodes too, and `shell`
+//! offers the packaging root, but neither is a node this predicts — the rootfs keys on a
+//! live package solve (below), and the image node caches nothing.
 //!
 //! Out of scope, because it is not a static prediction: the rootfs node's cache keys
 //! on the live package solve, which needs the mirror.
@@ -136,9 +146,13 @@ pub struct PlanInputs<'a> {
     /// prediction folds the same live-series fingerprint the build stamps;
     /// `None` (or pinned mode) folds the series by commit only.
     pub patches_root: Option<&'a Path>,
-    /// Include the optional `libmali` userspace node (built only with
-    /// `--build-libmali`).
-    pub include_libmali: bool,
+    /// The userspace trees this build compiles, as the SoC declares them and resolution
+    /// narrowed them: an optional tree is here only when the build asked for it.
+    ///
+    /// The prediction needs the declarations and not only the lock's pins, because the
+    /// output key folds the whole set — one tree's `build_deps` are layered for the
+    /// whole stage, so enabling an optional tree moves every tree's key.
+    pub userspace: &'a [boot2deb_core::model::UserspaceTree],
     /// The build's resolved `device_dts` sources. Their content is folded into the
     /// kernel tree signature (the stage copies them into the tree), so the prediction
     /// must fold it too or an edited board `.dts` would be reported as "reuse". Empty
@@ -231,9 +245,9 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
         kernel_tree_sig = Some(man.signature());
         let kernel_out = inputs
             .build
-            .kernel
+            .image
             .as_ref()
-            .and_then(|k| k.compiled())
+            .and_then(|i| i.kernel.compiled())
             .and_then(|k| {
                 crate::build::kernel::output_manifest(
                     inputs.build,
@@ -247,8 +261,8 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
                 .ok()
             });
         nodes.push(NodePlan::evaluate(
-            "kernel",
-            w.join("linux"),
+            crate::build::kernel::NODE,
+            crate::build::kernel::tree_dir(w),
             &man,
             kernel_out.as_ref(),
             store,
@@ -266,8 +280,8 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
             .ok()
         });
         nodes.push(NodePlan::evaluate(
-            "uboot",
-            w.join("u-boot"),
+            crate::build::uboot::NODE,
+            crate::build::uboot::tree_dir(w),
             &man,
             out.as_ref(),
             store,
@@ -276,62 +290,47 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
     // The media-accel compile nodes (userspace packages + ffmpeg) exist only when
     // the recipe builds the transcode stack — i.e. the lock pins those sources. A
     // base build stops at kernel + u-boot.
-    if let Some(us_pins) = &lock.userspace {
-        let us = w.join("userspace");
-        // The userspace `git am` scope (the MPP CMA fix) folds into the patched
-        // package's tree signature, so recompute it the same way the stage stamps it —
-        // `receives_userspace_patches` is the shared source of truth for which package.
+    if !lock.userspace.is_empty() {
+        let us = crate::build::userspace::stage_dir(w);
+        // The userspace `git am` scope (the MPP CMA fix) folds into the patched tree's
+        // signature, so recompute it the same way the stage stamps it —
+        // `receives_userspace_patches` is the shared source of truth for which tree.
         let patch_inputs = crate::build::userspace::PatchInputs {
             pin: lock.patches.as_ref(),
             patches: patch_series(dev, &userspace_fp),
-        };
-        let us_patches = |name: &str| {
-            crate::build::userspace::receives_userspace_patches(name).then_some(&patch_inputs)
         };
         // The sandbox-built packages key their output on the suite they are built for,
         // which a media-accel build always has; a lock without one contributes no
         // output manifest rather than a wrong key.
         let suite = lock.rootfs.as_ref().map(|r| r.suite.as_str());
         let deb_arch = inputs.build.arch.debian_arch();
-        let us_out = |name: &str, commit: &str| {
-            suite.map(|suite| {
+        // One node per tree the lock pins — the same set the userspace stage builds, so
+        // the plan and the build agree on what exists for this SoC and this build.
+        for pin in &lock.userspace {
+            let Some(tree) = inputs.userspace.iter().find(|t| t.name == pin.name) else {
+                // The lock pins a tree this resolution does not carry. The drift gate
+                // reports that as drift; a prediction here would name a node no build
+                // will run.
+                continue;
+            };
+            let patches =
+                crate::build::userspace::receives_userspace_patches(tree).then_some(&patch_inputs);
+            let out = suite.map(|suite| {
                 crate::build::userspace::output_manifest_for(
-                    name,
-                    commit,
+                    &pin.name,
+                    &pin.commit,
                     suite,
                     deb_arch,
                     &inputs.env.sandbox_id,
-                    inputs.include_libmali,
-                    us_patches(name),
+                    inputs.userspace,
+                    patches,
                 )
-            })
-        };
-        // One node per tree the lock pins — the same set the userspace stage builds,
-        // so the plan and the build agree on what exists for this SoC.
-        for (node, name, pin) in [
-            ("userspace:mpp", "mpp", &us_pins.mpp),
-            ("userspace:librga", "librga", &us_pins.librga),
-        ] {
-            if let Some(p) = pin {
-                nodes.push(NodePlan::evaluate(
-                    node,
-                    us.join(name),
-                    &crate::build::userspace::signature_manifest(name, &p.commit, us_patches(name)),
-                    us_out(name, &p.commit).as_ref(),
-                    store,
-                ));
-            }
-        }
-        if let (true, Some(p)) = (inputs.include_libmali, &us_pins.libmali) {
+            });
             nodes.push(NodePlan::evaluate(
-                "userspace:libmali",
-                us.join("libmali"),
-                &crate::build::userspace::signature_manifest(
-                    "libmali",
-                    &p.commit,
-                    us_patches("libmali"),
-                ),
-                us_out("libmali", &p.commit).as_ref(),
+                &crate::build::userspace::node_name_for(&pin.name),
+                us.join(&pin.name),
+                &crate::build::userspace::signature_manifest(&pin.name, &pin.commit, patches),
+                out.as_ref(),
                 store,
             ));
         }
@@ -340,21 +339,28 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
         // ffmpeg links against the userspace `.deb`s, so its output key folds their
         // pins too — a media-accel lock always has both, and a lock with only one
         // yields no key rather than one that ignores the missing half.
-        let out = lock.userspace.as_ref().map(|us_pins| {
+        let out = (!lock.userspace.is_empty()).then(|| {
             crate::build::ffmpeg::output_manifest(
                 lock,
                 ff_pins,
-                us_pins,
-                inputs.build.arch.debian_arch(),
-                &inputs.env.sandbox_id,
-                inputs.include_libmali,
-                patch_series(dev, &ffmpeg_fp),
-                patch_series(dev, &userspace_fp),
+                &lock.userspace,
+                &crate::build::ffmpeg::OutputKeyInputs {
+                    arch: inputs.build.arch.debian_arch(),
+                    sandbox_id: &inputs.env.sandbox_id,
+                    trees: inputs.userspace,
+                    nonfree: inputs
+                        .build
+                        .image
+                        .as_ref()
+                        .is_some_and(|i| i.ffmpeg_nonfree),
+                    patches: patch_series(dev, &ffmpeg_fp),
+                    us_patches: patch_series(dev, &userspace_fp),
+                },
             )
         });
         nodes.push(NodePlan::evaluate(
-            "ffmpeg",
-            w.join("ffmpeg").join("build"),
+            crate::build::ffmpeg::NODE,
+            crate::build::ffmpeg::tree_dir(w),
             &crate::build::ffmpeg::clone_manifest(
                 ff_pins,
                 lock.patches.as_ref(),
@@ -415,7 +421,7 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
         let node = crate::build::kmod::node_name(&k.name);
         let mut plan = NodePlan::evaluate(
             &node,
-            w.join("kmod").join(&k.name),
+            crate::build::kmod::stage_dir(w).join(&k.name),
             &man,
             mod_man.as_ref(),
             store,
@@ -454,11 +460,42 @@ fn patch_series(dev: bool, fp: &[String]) -> crate::build::SeriesIdentity<'_> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The trees the RK1 fixture's SoC declares, less the optional ones — the set a
+    /// plain `build` compiles, and what the prediction has to be given to match it.
+    fn rk1_trees(build: &ResolvedBuild) -> Vec<boot2deb_core::model::UserspaceTree> {
+        build
+            .image
+            .iter()
+            .flat_map(|i| &i.userspace)
+            .filter(|t| !t.optional)
+            .cloned()
+            .collect()
+    }
+
+    /// Every tree, including the optional ones — what `--userspace libmali` asks for.
+    fn all_rk1_trees(build: &ResolvedBuild) -> Vec<boot2deb_core::model::UserspaceTree> {
+        build
+            .image
+            .iter()
+            .flat_map(|i| &i.userspace)
+            .cloned()
+            .collect()
+    }
+
+    /// A [`UserspacePin`] from a name and a [`GitPin`]-shaped fixture.
+    fn named_pin(name: &str, p: GitPin) -> boot2deb_core::lock::UserspacePin {
+        boot2deb_core::lock::UserspacePin {
+            name: name.into(),
+            source: p.source,
+            reference: p.reference,
+            commit: p.commit,
+        }
+    }
     use super::*;
     use crate::signature::write_manifest;
     use boot2deb_core::lock::{
         BlobsPin, FfmpegPins, GitPin, KernelPin, Lock, PatchesPin, RootfsPin, UbootPin,
-        UserspacePins,
     };
 
     /// A `BuildEnv` with fixed host identities. The Tier-1 assertions below are
@@ -499,11 +536,11 @@ mod tests {
                 commit: "u1".into(),
             }),
             uboot_patches: None,
-            userspace: Some(UserspacePins {
-                mpp: Some(git(mpp_commit)),
-                librga: Some(git("rga1")),
-                libmali: Some(git("mali1")),
-            }),
+            userspace: vec![
+                named_pin("mpp", git(mpp_commit)),
+                named_pin("librga", git("rga1")),
+                named_pin("libmali", git("mali1")),
+            ],
             ffmpeg: Some(FfmpegPins {
                 base: git("b1"),
                 rockchip: Some(git("rk1")),
@@ -537,13 +574,14 @@ mod tests {
         let lock = lock_fixture("kc1", "mc1");
         let tmp = tempfile::tempdir().unwrap();
         let build = crate::test_support::rk1_build();
+        let trees = rk1_trees(&build);
         let env = env_fixture();
         let plan = plan_nodes(&PlanInputs {
             lock: &lock,
             work_dir: tmp.path(),
             patches_dev: false,
             patches_root: None,
-            include_libmali: false,
+            userspace: &trees,
             device_dts: &[],
             device_kmods: &[],
             kmod_local_patches: &[],
@@ -568,18 +606,23 @@ mod tests {
         );
     }
 
+    /// An optional tree gets a node exactly when the build named it. The prediction is
+    /// given the same narrowed set the build compiles, so a `--userspace libmali` run
+    /// and a plain one predict different node sets — which is the truth, since only one
+    /// of them builds that tree.
     #[test]
-    fn libmali_node_is_gated_on_the_flag() {
+    fn an_optional_trees_node_appears_only_when_the_build_asks_for_it() {
         let lock = lock_fixture("kc1", "mc1");
         let build = crate::test_support::rk1_build();
         let env = env_fixture();
         let tmp = tempfile::tempdir().unwrap();
+        let all = all_rk1_trees(&build);
         let with = plan_nodes(&PlanInputs {
             lock: &lock,
             work_dir: tmp.path(),
             patches_dev: false,
             patches_root: None,
-            include_libmali: true,
+            userspace: &all,
             device_dts: &[],
             device_kmods: &[],
             kmod_local_patches: &[],
@@ -589,6 +632,24 @@ mod tests {
             artifact_store: None,
         });
         assert!(with.iter().any(|n| n.node == "userspace:libmali"));
+
+        // And not when it does not: the same lock, the narrowed set.
+        let narrow = rk1_trees(&build);
+        let without = plan_nodes(&PlanInputs {
+            lock: &lock,
+            work_dir: tmp.path(),
+            patches_dev: false,
+            patches_root: None,
+            userspace: &narrow,
+            device_dts: &[],
+            device_kmods: &[],
+            kmod_local_patches: &[],
+            build: &build,
+            env: &env,
+            fragments: &[],
+            artifact_store: None,
+        });
+        assert!(!without.iter().any(|n| n.node == "userspace:libmali"));
     }
 
     #[test]
@@ -596,7 +657,7 @@ mod tests {
         // A lock with no media-accel pins (a base build) schedules neither the
         // userspace packages nor ffmpeg — only kernel + u-boot.
         let mut lock = lock_fixture("kc1", "mc1");
-        lock.userspace = None;
+        lock.userspace = Vec::new();
         lock.ffmpeg = None;
         let tmp = tempfile::tempdir().unwrap();
         let build = crate::test_support::rk1_build();
@@ -606,7 +667,7 @@ mod tests {
             work_dir: tmp.path(),
             patches_dev: false,
             patches_root: None,
-            include_libmali: true,
+            userspace: &[],
             device_dts: &[],
             device_kmods: &[],
             kmod_local_patches: &[],
@@ -624,7 +685,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let work = tmp.path();
 
-        // Stamp the kernel + mpp trees as if a build at ("kc1","mc1") had run.
+        // Stamp the kernel + mpp trees as if a build at ("kc1","mc1") had run. The
+        // paths are literals here on purpose: `plan_nodes` asks each stage where its
+        // tree is, so a fixture that asked the same way would agree with a moved layout
+        // instead of catching it.
         let old = lock_fixture("kc1", "mc1");
         let linux = work.join("linux");
         std::fs::create_dir_all(&linux).unwrap();
@@ -646,7 +710,11 @@ mod tests {
             &mpp,
             &crate::build::userspace::signature_manifest(
                 "mpp",
-                &old.userspace.as_ref().unwrap().mpp.as_ref().unwrap().commit,
+                &old.userspace
+                    .iter()
+                    .find(|p| p.name == "mpp")
+                    .expect("the fixture pins mpp")
+                    .commit,
                 Some(&old_patches),
             ),
         )
@@ -655,13 +723,14 @@ mod tests {
         // Re-plan against a lock whose kernel commit moved but whose mpp commit did not.
         let new = lock_fixture("kc2", "mc1");
         let build = crate::test_support::rk1_build();
+        let trees = rk1_trees(&build);
         let env = env_fixture();
         let plan = plan_nodes(&PlanInputs {
             lock: &new,
             work_dir: work,
             patches_dev: false,
             patches_root: None,
-            include_libmali: false,
+            userspace: &trees,
             device_dts: &[],
             device_kmods: &[],
             kmod_local_patches: &[],
@@ -699,7 +768,7 @@ mod tests {
             work_dir: work,
             patches_dev: false,
             patches_root: None,
-            include_libmali: false,
+            userspace: &[],
             device_dts: &[],
             device_kmods: &[],
             kmod_local_patches: &[],
@@ -733,7 +802,7 @@ mod tests {
                 work_dir: work,
                 patches_dev: false,
                 patches_root: None,
-                include_libmali: false,
+                userspace: &[],
                 device_dts: &[],
                 device_kmods: &[],
                 kmod_local_patches: &[],
@@ -764,7 +833,7 @@ mod tests {
         let store = ArtifactStore::open(&store_root).unwrap();
         let sig = crate::build::kernel::output_manifest(
             &build,
-            build.kernel.as_ref().unwrap().compiled().unwrap(),
+            build.image.as_ref().unwrap().kernel.compiled().unwrap(),
             &lock,
             &[],
             &env,

@@ -6,14 +6,14 @@
 # build it in with turing-rk1/media-accel-trixie.
 # Constraints only; the exact resolution is written to the sibling .lock.
 device     = "turing-rk1"
-kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
+kernel     = "rk3588-mainline-7.2"       # omit -> device default_kernel
 suite      = "trixie"
 features   = []                          # base: accel kernel, no media userspace
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
-# Derived from turing-rk1/forky along the suite axis, and re-assessed over the v7.1.6
+# Derived from turing-rk1/forky along the suite axis, and re-assessed over the v7.2
 # kernel: see that recipe for what the bump moves. Nothing it touches is suite-coupled.
 [support]
 status = "expected"
-date   = "2026-08-04"
+date   = "2026-08-21"

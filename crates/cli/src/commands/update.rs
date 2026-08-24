@@ -97,7 +97,7 @@ pub(crate) fn run(
             .ok_or_else(|| {
                 format!(
                     "no --kernel-ref given and no existing lock for '{recipe}' to inherit it \
-                     from — pass --kernel-ref <tag> (e.g. v7.1.1) for the first update"
+                     from — pass --kernel-ref <tag> (e.g. v7.2) for the first update"
                 )
             })?,
     };
@@ -117,39 +117,32 @@ pub(crate) fn run(
     // stack (its resolved build carries the sources). A base build leaves them empty —
     // `resolve_lock` never reads a ref without a matching source, and the lock omits
     // both pin tables.
-    let prev_us = prev.as_ref().and_then(|l| l.userspace.as_ref());
+    let prev_us = prev.as_ref().map(|l| l.userspace.as_slice()).unwrap_or(&[]);
     let prev_ff = prev.as_ref().and_then(|l| l.ffmpeg.as_ref());
-    let us = build.userspace.as_ref();
-    let mpp_ref = take(
-        &mut bumps,
-        "mpp",
-        args.mpp_ref,
-        prev_us
-            .and_then(|u| u.mpp.as_ref())
-            .map(|p| p.reference.as_str()),
-        us.and_then(|u| u.mpp.as_ref()).map(|s| s.git_ref.as_str()),
-    );
-    let librga_ref = take(
-        &mut bumps,
-        "librga",
-        args.librga_ref,
-        prev_us
-            .and_then(|u| u.librga.as_ref())
-            .map(|p| p.reference.as_str()),
-        us.and_then(|u| u.librga.as_ref())
-            .map(|s| s.git_ref.as_str()),
-    );
-    let libmali_ref = take(
-        &mut bumps,
-        "libmali",
-        args.libmali_ref,
-        prev_us
-            .and_then(|u| u.libmali.as_ref())
-            .map(|p| p.reference.as_str()),
-        us.and_then(|u| u.libmali.as_ref())
-            .map(|s| s.git_ref.as_str()),
-    );
-    let ff = build.ffmpeg.as_ref();
+    // One ref per tree the resolved build carries, keyed by name — the same rule the
+    // out-of-tree modules follow, and for the same reason: which trees exist is the
+    // SoC's statement, so there is no fixed set of flags to write.
+    let userspace_refs: Vec<(String, String)> = build
+        .image
+        .iter()
+        .flat_map(|i| &i.userspace)
+        .map(|t| {
+            let flag = args
+                .userspace_refs
+                .iter()
+                .find(|(name, _)| name == &t.name)
+                .map(|(_, r)| r.clone());
+            let locked = prev_us
+                .iter()
+                .find(|p| p.name == t.name)
+                .map(|p| p.reference.as_str());
+            (
+                t.name.clone(),
+                take(&mut bumps, &t.name, flag, locked, Some(&t.git_ref)),
+            )
+        })
+        .collect();
+    let ff = build.image.as_ref().and_then(|i| i.ffmpeg.as_ref());
     let ffmpeg_base_ref = take(
         &mut bumps,
         "ffmpeg",
@@ -172,8 +165,9 @@ pub(crate) fn run(
     // kmod layer's `ref` is the only constraint there is to follow.
     let prev_kmods = prev.as_ref().map(|l| l.kmods.as_slice()).unwrap_or(&[]);
     let kmod_refs: Vec<(String, String)> = build
-        .device_kmods
+        .image
         .iter()
+        .flat_map(|i| &i.device_kmods)
         .map(|k| {
             let locked = prev_kmods
                 .iter()
@@ -204,14 +198,12 @@ pub(crate) fn run(
         // directory, and inside `recipes/turing-rk1/` the device is the folder name
         // already. `build` publishes its own copy under the stem.
         let leaf = recipe.rsplit('/').next().unwrap_or(recipe);
-        format!("{leaf}.pkgs.lock")
+        boot2deb_core::manifest::manifest_name(leaf)
     });
     let opts = pins::UpdateOptions {
         kernel_ref: &kernel_ref,
         uboot_ref: &uboot_ref,
-        mpp_ref: &mpp_ref,
-        librga_ref: &librga_ref,
-        libmali_ref: &libmali_ref,
+        userspace_refs: &userspace_refs,
         ffmpeg_base_ref: &ffmpeg_base_ref,
         ffmpeg_rockchip_ref: &ffmpeg_rockchip_ref,
         kmod_refs: &kmod_refs,
@@ -243,7 +235,7 @@ pub(crate) fn run(
     }
     // Only the pins this build actually has are printed. A row for an absent one
     // would claim a dependency the lock deliberately does not record.
-    match (&lock.kernel, build.kernel.as_ref()) {
+    match (&lock.kernel, build.image.as_ref().map(|i| &i.kernel)) {
         (Some(k), _) => println!("  kernel   {} {} {}", k.id, k.reference, short(&k.commit)),
         (None, Some(k)) => println!(
             "  kernel   {} (distro package — version pinned in the package manifest)",
@@ -270,16 +262,8 @@ pub(crate) fn run(
     }
     // Only the trees this SoC has. A line reading "none" would suggest something
     // failed to pin; the absence is the SoC not having that hardware.
-    if let Some(us) = &lock.userspace {
-        for (label, pin) in [
-            ("mpp     ", &us.mpp),
-            ("librga  ", &us.librga),
-            ("libmali ", &us.libmali),
-        ] {
-            if let Some(p) = pin {
-                println!("  {label} {} {}", p.reference, short(&p.commit));
-            }
-        }
+    for pin in &lock.userspace {
+        println!("  {:<8} {} {}", pin.name, pin.reference, short(&pin.commit));
     }
     if let Some(ff) = &lock.ffmpeg {
         println!(

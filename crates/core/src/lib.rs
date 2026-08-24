@@ -6,7 +6,8 @@
 //! [`resolve_recipe`] entry points, the [`feature`], [`series`], [`lock`],
 //! [`manifest`], and [`kconfig`] formats, comparison of two build points
 //! ([`diff`]), patch normalization for `patch import` ([`mbox`]), device/recipe
-//! generation for `new-device` ([`scaffold`]), [`size`] parsing, source-pin
+//! generation for `new-device` ([`scaffold`]), selftest expectations
+//! ([`expect`]), [`size`] parsing, source-pin
 //! durability form ([`sources`]), re-pin ref selection ([`repin`]), and the upgrade
 //! survey's comparison
 //! ([`outdated`]) over the tag spellings [`version`] parses, Debian suite facts
@@ -23,8 +24,10 @@ pub mod buildpoint;
 pub mod chromeos;
 pub mod datavolume;
 pub mod datetime;
+pub mod debdep;
 pub mod diff;
 pub mod error;
+pub mod expect;
 pub mod feature;
 pub mod host;
 pub mod hostname;
@@ -35,6 +38,7 @@ pub mod manifest;
 pub mod mbox;
 pub mod model;
 pub mod outdated;
+pub mod press;
 pub mod provenance;
 pub mod repin;
 pub mod resolve;
@@ -43,10 +47,12 @@ pub mod scaffold;
 pub mod series;
 pub mod size;
 pub mod sources;
+pub mod staticip;
 pub mod suite;
 pub mod support;
 pub mod version;
 pub mod weight;
+pub mod wifi;
 
 pub use buildpoint::BuildPoint;
 pub use error::ConfigError;

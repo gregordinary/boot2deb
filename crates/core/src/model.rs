@@ -284,35 +284,95 @@ pub struct GitSource {
     pub git_ref: String,
 }
 
-/// The media-accel userspace source trees — the MPP/RGA/Mali forks whose
-/// `.deb`s the userspace build node produces. They live at the SoC layer because
-/// which of them exist is a property of the SoC.
+/// One media-accel userspace source tree, as the SoC layer authors it: a pinned fork,
+/// the `.deb`s its packaging produces, and how the ffmpeg build relates to it.
 ///
-/// Every tree is optional, and an absent one is a statement about the hardware, not
-/// an omission: the SoC declares what it has, and the userspace node builds exactly
-/// that. A part whose codec block has no mainline `mpp_service` declares no
-/// [`mpp`](Self::mpp) and gets no `librockchip-mpp1`; a part whose GPU is driven by
-/// mainline panfrost declares no [`libmali`](Self::libmali), because Mesa is its
-/// userspace and comes from the Debian mirror. The set also decides ffmpeg's
-/// `./configure` surface — see [`SocLayer::ffmpeg`].
+/// **A tree is a value, not a field.** The set lives at the SoC layer because *which*
+/// trees exist is a property of the part: an RK3588 has a vendor `mpp_service` for
+/// `librockchip-mpp` to bind and a CSF GPU with no mainline driver, an RK3576 has
+/// neither and pins `librga` alone. Declaring them as a list rather than as three named
+/// fields is what makes a fourth tree — or a different family's stack entirely — a file
+/// edit rather than a schema change: the stage, the lock, the plan nodes and the CLI all
+/// loop over whatever is here. This is the shape `kmods/<name>.toml` already has for
+/// out-of-tree drivers, for the same reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UserspaceSources {
-    /// Rockchip Media Process Platform (`librockchip-mpp1`). Present only where the
-    /// kernel offers the vendor `mpp_service` the library talks to; on a
-    /// mainline-only part there is nothing for it to bind, so it is `None` and
-    /// ffmpeg builds without `--enable-rkmpp`.
+pub struct UserspaceTree {
+    /// The tree's name: its directory under `<work>/userspace/`, its `userspace:<name>`
+    /// artifact-cache node, its label in logs, and the key `--userspace-ref` and the
+    /// lock address it by. Resolution holds it to a bare identifier, since it becomes a
+    /// path component and a cache key.
+    pub name: String,
+    /// Clone URL of the fork.
+    pub git: String,
+    /// Default branch/tag/commit constraint; the exact commit is pinned in the lock
+    /// (`ref` in TOML).
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// Every `.deb` this tree's `dpkg-buildpackage` produces, in install order.
+    ///
+    /// The stage collects by these names and its **resume check requires every one**: a
+    /// crash between a multi-binary package's outputs must not look finished. Naming
+    /// them here rather than deriving them from the tree keeps the check possible
+    /// without a checkout.
+    pub debs: Vec<String>,
+    /// The runtime library and its `-dev`, in that order — what a *consumer* of this
+    /// tree links against, and a subset of [`debs`](Self::debs).
+    ///
+    /// Named separately because the vendor packaging does not relate the two:
+    /// `librockchip-mpp-dev` declares `Depends: librockchip-mpp1`, but `librga-dev`
+    /// declares nothing at all — so a build root given only the `-dev` packages has
+    /// librga's headers and its `.pc` file but no `librga.so`, and ffmpeg's link probe
+    /// fails. The runtime library is also what carries the `shlibs` `dpkg-shlibdeps`
+    /// reads, which is what makes the produced deb's `Depends` resolvable.
+    ///
+    /// Empty for a tree nothing links against — libmali, which ships a GPU blob no
+    /// other package in this build build-depends on.
     #[serde(default)]
-    pub mpp: Option<GitSource>,
-    /// Rockchip 2D raster graphics accelerator library (`librga2`), speaking the
-    /// vendor `/dev/rga` ABI.
+    pub links: Vec<String>,
+    /// The `./configure` flag ffmpeg passes when it is built against this tree, e.g.
+    /// `--enable-rkmpp`. Absent for a tree ffmpeg does not know about.
     #[serde(default)]
-    pub librga: Option<GitSource>,
-    /// Mali GPU userspace blob. Present only for a GPU with no mainline driver — a
-    /// CSF part such as the RK3588's G610. A Bifrost part driven by panfrost takes
-    /// Mesa from the mirror instead and leaves this `None`.
+    pub ffmpeg_flag: Option<String>,
+    /// Other trees this one's *ffmpeg support* needs, by name. When any is absent from
+    /// the SoC's set, this tree is still built and shipped — it is simply not one
+    /// ffmpeg is configured against.
+    ///
+    /// The live case is rkrga: its filters allocate `AVRKMPPFramesContext` frames and
+    /// ffmpeg's own `./configure` rejects `--enable-rkrga` without `--enable-rkmpp`, so
+    /// on a SoC that pins `librga` and no `mpp` the produced ffmpeg carries no librga
+    /// `NEEDED` entry at all. `librga2` still ships, for programs that speak the API
+    /// directly.
     #[serde(default)]
-    pub libmali: Option<GitSource>,
+    pub ffmpeg_requires: Vec<String>,
+    /// This tree takes the patch series' `userspace` scope. Exactly one tree per SoC
+    /// does — the MPP CMA fix — and the flag is here rather than a name comparison in
+    /// the stage so a second family's patched tree needs no code.
+    #[serde(default)]
+    pub patched: bool,
+    /// Built only when a build asks for it by name (`--userspace <name>`). `false` — the
+    /// default — is built whenever the SoC declares it.
+    ///
+    /// The live case is libmali: the transcode pipeline rides the VPU and the RGA, not
+    /// the GPU, so a headless box never needs the blob and compiling its variant matrix
+    /// is minutes for nothing.
+    #[serde(default)]
+    pub optional: bool,
+    /// Extra Debian build-dependencies this tree's own `./configure` or `meson` probes
+    /// need, over the stage's shared set.
+    ///
+    /// Layered for the **whole stage**, not per package: one build root serves every
+    /// tree, so these `.pc` files are present in the root the other trees' probes run in
+    /// too. That is why enabling an optional tree moves every tree's cache key.
+    #[serde(default)]
+    pub build_deps: Vec<String>,
+    /// Restrict this tree's `debian/targets` to one variant, skipping the rest of a
+    /// vendor variant matrix.
+    ///
+    /// libmali's is ~140 GPU variants, of which one board needs one. Absent leaves the
+    /// packaging's own target list alone.
+    #[serde(default)]
+    pub targets_filter: Option<String>,
 }
 
 /// Default in-repo directory a [`KmodLayer`]'s quilt patches live in.
@@ -385,6 +445,12 @@ pub struct KmodLayer {
     /// (see [`KmodFirmware`]), never vendored into the config tree.
     #[serde(default)]
     pub firmware: Option<KmodFirmware>,
+    /// Runtime checks this driver must pass on the booted image (`[[expect]]`) —
+    /// its firmware present where the compiled-in path looks, its device node up.
+    /// Declared with the driver rather than per board so every board naming this
+    /// kmod inherits its contract.
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
 }
 
 /// A [`KmodLayer`] with the name resolution took it from — the `kmods/<name>.toml` stem,
@@ -488,7 +554,7 @@ pub struct SocLayer {
     /// SoC-specific rootfs packages added to the base set; empty for the
     /// RK1, whose accel userspace ships via features, not the SoC layer.
     #[serde(default)]
-    pub packages: Vec<String>,
+    pub packages: Vec<PackageEntry>,
     /// Packages carrying **nonfree firmware** this SoC's hardware loads at runtime,
     /// separated from [`packages`](Self::packages) so a
     /// [`libre`](CompiledKernelDef::libre) build can drop exactly them and nothing
@@ -501,11 +567,18 @@ pub struct SocLayer {
     /// a part every board on that SoC carries, and moves down to a device when boards
     /// differ.
     #[serde(default)]
-    pub nonfree_firmware_packages: Vec<String>,
+    pub nonfree_firmware_packages: Vec<PackageEntry>,
     /// Packages this SoC layer drops from the merged rootfs set — the
     /// scoped subtraction a pure package union cannot express. Unioned with every
     /// other layer's `exclude`; any name in that union is removed from the include
     /// set (exclude wins). Empty for the RK1.
+    ///
+    /// Plain names, where every *include* list is a [`PackageEntry`] that may name the
+    /// suites it applies to. The difference is not an oversight: an include has to name
+    /// a package the archive carries, so which suite is being built decides whether the
+    /// name is right, while an exclude names something that must not be installed and is
+    /// satisfied just as well by a suite that never had it. Excluding a name a suite does
+    /// not carry is already a no-op, so there is nothing for a condition to express.
     #[serde(default)]
     pub exclude: Vec<String>,
     /// Limitations of this **silicon** that no build lifts, in sentences an operator
@@ -521,17 +594,28 @@ pub struct SocLayer {
     /// empty for the RK1, whose accel userspace builds from source.
     #[serde(default)]
     pub extra_debs: Vec<ExtraDeb>,
-    /// Media-accel userspace source trees (MPP/RGA/Mali), common to the RK35xx
-    /// family. Optional: a SoC that never builds the HW transcode stack omits
-    /// them, and resolution rejects a build that selects a `requires_media_accel`
-    /// feature (e.g. `media-accel-rockchip`) on a SoC that does. Present alongside
+    /// Media-accel userspace source trees, one `[[userspace]]` entry per tree this
+    /// part has. Empty on a SoC that never builds the HW transcode stack, and
+    /// resolution then rejects a build selecting a `requires_media_accel` feature
+    /// (e.g. `media-accel-rockchip`) on it. Non-empty exactly alongside
     /// [`ffmpeg`](Self::ffmpeg) — the media-accel stack is built as a unit.
+    ///
+    /// A list rather than named fields: see [`UserspaceTree`].
     #[serde(default)]
-    pub userspace: Option<UserspaceSources>,
+    pub userspace: Vec<UserspaceTree>,
     /// ffmpeg source pair (V4L2 base + Rockchip rkmpp/rkrga), common to RK35xx.
     /// Optional under the same contract as [`userspace`](Self::userspace).
     #[serde(default)]
     pub ffmpeg: Option<FfmpegSources>,
+    /// Runtime checks every board on this SoC must pass on the booted image
+    /// (`[[expect]]`), compiled into `/etc/boot2deb/selftest.d/` for
+    /// `boot2deb-selftest`. Here when the expectation is a property of the part —
+    /// the GPU firmware the SoC's driver requests, the codec nodes its VPUs
+    /// present — and at the device layer when boards differ. The mechanically
+    /// checkable counterpart of [`caveats`](Self::caveats): a caveat informs, an
+    /// expectation fails.
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
 }
 
 /// Bootloader-method invariants (`boot-methods/<method>.toml`), tagged per method.
@@ -577,7 +661,7 @@ impl BootMethodLayer {
     /// Rootfs packages this boot method's wiring needs (`depthcharge-tools` for
     /// the ChromeOS method; none for `rockchip-rkbin`, whose boot wiring is
     /// overlay files rather than packages).
-    pub fn packages(&self) -> &[String] {
+    pub fn packages(&self) -> &[PackageEntry] {
         match self {
             BootMethodLayer::RockchipRkbin(l) => &l.packages,
             BootMethodLayer::Depthcharge(l) => &l.packages,
@@ -598,6 +682,17 @@ impl BootMethodLayer {
         match self {
             BootMethodLayer::RockchipRkbin(l) => &l.extra_debs,
             BootMethodLayer::Depthcharge(l) => &l.extra_debs,
+        }
+    }
+
+    /// Runtime checks this boot method's install must pass on the booted image
+    /// (`[[expect]]`). The boot artifacts live here because their layout is the
+    /// method's: extlinux + an on-`/boot` kernel for `rockchip-rkbin`, a signed
+    /// kernel partition (and so no such files) for `depthcharge`.
+    pub fn expect(&self) -> &[crate::expect::Expectation] {
+        match self {
+            BootMethodLayer::RockchipRkbin(l) => &l.expect,
+            BootMethodLayer::Depthcharge(l) => &l.expect,
         }
     }
 }
@@ -640,13 +735,17 @@ pub struct RockchipRkbinLayer {
     /// Boot-method-specific rootfs packages added to the base set; empty here,
     /// since the boot wiring is overlay files, not packages.
     #[serde(default)]
-    pub packages: Vec<String>,
+    pub packages: Vec<PackageEntry>,
     /// Packages this boot method drops from the merged rootfs set.
     #[serde(default)]
     pub exclude: Vec<String>,
     /// Pre-built `.deb`s this boot method pulls from outside the Debian mirror.
     #[serde(default)]
     pub extra_debs: Vec<ExtraDeb>,
+    /// Runtime checks this method's boot install must pass (`[[expect]]`) — the
+    /// extlinux config, the on-`/boot` kernel/initrd this method's hooks write.
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
 }
 
 /// The `depthcharge` boot method: a vboot-signed FIT written into a **ChromeOS
@@ -713,13 +812,18 @@ pub struct DepthchargeLayer {
     /// builds the signed payload at image time and re-signs it on the running board
     /// through its `/etc/kernel/postinst.d` hook.
     #[serde(default)]
-    pub packages: Vec<String>,
+    pub packages: Vec<PackageEntry>,
     /// Packages this boot method drops from the merged rootfs set.
     #[serde(default)]
     pub exclude: Vec<String>,
     /// Pre-built `.deb`s this boot method pulls from outside the Debian mirror.
     #[serde(default)]
     pub extra_debs: Vec<ExtraDeb>,
+    /// Runtime checks this method's boot install must pass (`[[expect]]`) — the
+    /// signed kernel partition's on-image half (the `depthchargectl` hook state),
+    /// not `/boot` files this method never writes.
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
 }
 
 /// A third-party (non-Debian-mirror) apt repository a feature adds to the rootfs
@@ -761,6 +865,111 @@ pub struct AptSource {
     pub signed_by: String,
 }
 
+/// One entry of a layer's or feature's `packages` list: a name, and optionally the
+/// suites it applies to.
+///
+/// Most packages are the same in every suite and are written as a bare string. A few
+/// are not — Debian splits, renames and drops binary packages between releases, and a
+/// layer that names one unconditionally is wrong on every suite but the ones it was
+/// written against. `nmtui` is the worked example: it left `network-manager` for a
+/// `network-manager-tui` of its own at 1.56.0-4, so the name a layer must ask for
+/// depends on which suite the recipe picked.
+///
+/// The suites are **enumerated rather than bounded**. A range (`since = "forky"`)
+/// would read closer to the intent and would need no edit when a suite is added, but
+/// that is the hazard rather than the convenience: it silently extends the claim to
+/// every future suite, and whether a package still exists in one is a fact only that
+/// archive can answer. Enumerating forces the claim to be restated when a suite is
+/// added, and `boot2deb verify-packages` then checks each claim against the archive it
+/// is about. It also means this type needs no ordering over suite names — there is no
+/// release sequence to maintain here, and no special case for `sid`.
+///
+/// A conditional entry that matches no suite in the config tree is almost certainly a
+/// typo; `boot2deb verify-config` reports one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PackageEntry {
+    /// Installed on every suite. The common case, and the only one most layers use.
+    Plain(String),
+    /// Installed only on the suites it names.
+    Conditional {
+        /// The package name, as the archive spells it.
+        name: String,
+        /// The suites that carry this package. Never empty — an entry applying to no
+        /// suite is refused at resolution as [`ConfigError::PackageSuitesEmpty`],
+        /// since config that can never take effect is a mistake and not a no-op.
+        suites: Vec<String>,
+    },
+}
+
+impl PackageEntry {
+    /// The package name, whichever form the entry takes.
+    pub fn name(&self) -> &str {
+        match self {
+            PackageEntry::Plain(name) => name,
+            PackageEntry::Conditional { name, .. } => name,
+        }
+    }
+
+    /// The suites this entry is restricted to, or `None` where it applies to all of
+    /// them.
+    pub fn suites(&self) -> Option<&[String]> {
+        match self {
+            PackageEntry::Plain(_) => None,
+            PackageEntry::Conditional { suites, .. } => Some(suites),
+        }
+    }
+
+    /// Whether this entry contributes its package to a build of `suite`.
+    ///
+    /// An unconditional entry applies everywhere. A conditional one applies where it
+    /// says so, compared verbatim: a suite is an archive's own name for itself, and
+    /// two spellings are two suites.
+    pub fn applies_to(&self, suite: &str) -> bool {
+        match self {
+            PackageEntry::Plain(_) => true,
+            PackageEntry::Conditional { suites, .. } => suites.iter().any(|s| s == suite),
+        }
+    }
+
+    /// Refuses an entry that names no suite. `layer` names the file the entry came
+    /// from, so the failure points at what to edit.
+    pub fn validate(&self, layer: &str) -> Result<(), ConfigError> {
+        match self {
+            PackageEntry::Conditional { name, suites } if suites.is_empty() => {
+                Err(ConfigError::PackageSuitesEmpty {
+                    package: name.clone(),
+                    layer: layer.to_string(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl From<&str> for PackageEntry {
+    /// A bare name is an unconditional entry — the form most of the config uses, and
+    /// the one a caller building a list from names wants.
+    fn from(name: &str) -> PackageEntry {
+        PackageEntry::Plain(name.to_string())
+    }
+}
+
+impl From<String> for PackageEntry {
+    /// As for `&str`: a name alone carries no condition.
+    fn from(name: String) -> PackageEntry {
+        PackageEntry::Plain(name)
+    }
+}
+
+impl std::fmt::Display for PackageEntry {
+    /// The name alone. What a reader wants from a package entry in a message is which
+    /// package it is; the condition is context that the message around it carries.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// A pre-built `.deb` a layer or feature pulls in from outside the Debian mirror
 /// — a vendor download or a file on disk — content-pinned by its
 /// mandatory sha256.
@@ -775,7 +984,7 @@ pub struct AptSource {
 /// its trust boundary, never a `dpkg -i`.
 ///
 /// Declared on any hardware layer or feature; the union across all of them is
-/// de-duplicated by sha256 at resolution ([`ResolvedBuild::extra_debs`]). The lock
+/// de-duplicated by sha256 at resolution ([`ResolvedImage::extra_debs`]). The lock
 /// records the same shape verbatim (the sha256 is already exact, so there is
 /// nothing to resolve): `update` fetches every entry, verifies its bytes hash to
 /// `sha256`, and copies them into the content store; `build` materializes from that
@@ -975,6 +1184,23 @@ pub struct DeviceLayer {
     /// Chains are walked to the base-most device, and a cycle is
     /// [`crate::error::ConfigError::DeviceExtendsCycle`].
     ///
+    /// **Five arrays accumulate instead of replacing**: [`caveats`](Self::caveats),
+    /// [`expect`](Self::expect),
+    /// [`nonfree_firmware_packages`](Self::nonfree_firmware_packages),
+    /// [`packages`](Self::packages) and [`exclude`](Self::exclude). Each level's entries
+    /// are concatenated base-most first and de-duplicated. The line is between
+    /// *describing or supplying the running system* and *selecting a build input*: a
+    /// variant is the same hardware, so it is bound by everything its parent said about
+    /// that hardware — a caveat cannot be un-said, a runtime check that held on the
+    /// parent holds here, a radio that needed firmware still needs it — while
+    /// [`device_kmods`](Self::device_kmods),
+    /// [`device_patch_series`](Self::device_patch_series),
+    /// [`extra_debs`](Self::extra_debs) and every `supported_*` list *choose* among
+    /// alternatives, and a variant makes its own choice. A value that is not an array at
+    /// any level of the chain is
+    /// [`InvalidDeviceField`](crate::error::ConfigError::InvalidDeviceField), named
+    /// against the file that holds it.
+    ///
     /// The parent's *assets* come too: its `overlay/` tree is laid in before this
     /// device's, so a variant inherits the parent's runtime config and can override
     /// any file of it. This is the half a hand-copied variant cannot express, and the
@@ -1044,8 +1270,9 @@ pub struct DeviceLayer {
     /// distro-package kernel compiles nothing, so naming any here is a typed error.
     /// Empty/absent for a board that carries no out-of-tree module.
     ///
-    /// Arrays replace wholesale across [`extends`](Self::extends), so a variant that
-    /// wants its parent's drivers plus one more restates the whole list.
+    /// This array replaces wholesale across [`extends`](Self::extends) — it *selects*
+    /// which drivers a kernel is built with rather than describing the board — so a
+    /// variant that wants its parent's drivers plus one more restates the whole list.
     #[serde(default)]
     pub device_kmods: Vec<String>,
     /// Kernel definitions valid for this board; an override must be one of these.
@@ -1108,19 +1335,21 @@ pub struct DeviceLayer {
     #[serde(default)]
     pub rkbin: RkbinLayer,
     /// Board-specific rootfs packages added to the base set; empty for the
-    /// RK1.
+    /// RK1. Accumulates across [`extends`](Self::extends).
     #[serde(default)]
-    pub packages: Vec<String>,
+    pub packages: Vec<PackageEntry>,
     /// Packages carrying **nonfree firmware** this board's hardware loads at runtime,
     /// under the same contract as [`SocLayer::nonfree_firmware_packages`]: dropped
     /// on a [`libre`](CompiledKernelDef::libre) build, merged in place on any other.
     /// This is where a blob belongs when boards on one SoC carry different parts —
     /// two radios in the same family, say — and the SoC layer is where it belongs
-    /// when they do not.
+    /// when they do not. Accumulates across [`extends`](Self::extends): the part a
+    /// parent needed firmware for is on the variant's board too.
     #[serde(default)]
-    pub nonfree_firmware_packages: Vec<String>,
+    pub nonfree_firmware_packages: Vec<PackageEntry>,
     /// Packages this board drops from the merged rootfs set, unioned with
     /// every other layer's `exclude` (exclude wins). Empty for the RK1.
+    /// Accumulates across [`extends`](Self::extends).
     #[serde(default)]
     pub exclude: Vec<String>,
     /// Limitations of **this board** that no build lifts, in sentences an operator
@@ -1129,15 +1358,31 @@ pub struct DeviceLayer {
     /// Here when the limitation is a property of the board — a port wired without a
     /// SuperSpeed pair, a codec whose output is not routed — and at the SoC layer
     /// ([`SocLayer::caveats`]) when it belongs to the silicon and so to every board
-    /// on it. A device that `extends` another inherits its caveats and adds its own;
-    /// a variant that lifts one of its parent's has to be its own device rather than
-    /// a variant, since a caveat cannot be un-said.
+    /// on it. Accumulates across [`extends`](Self::extends): a device that extends
+    /// another inherits its caveats and adds its own, and a variant that lifts one of
+    /// its parent's has to be its own device rather than a variant, since a caveat
+    /// cannot be un-said.
     #[serde(default)]
     pub caveats: Vec<String>,
     /// Pre-built `.deb`s this board pulls from outside the Debian mirror;
-    /// empty for the RK1.
+    /// empty for the RK1. Replaces wholesale across [`extends`](Self::extends) — an
+    /// entry pins exact bytes, and two pins of one package would be a conflict rather
+    /// than a sum.
     #[serde(default)]
     pub extra_debs: Vec<ExtraDeb>,
+    /// Runtime checks **this board** must pass on the booted image (`[[expect]]`),
+    /// compiled into `/etc/boot2deb/selftest.d/` for `boot2deb-selftest`. Here
+    /// when the expectation is the board's — a sound card its DT names, a node
+    /// its radio presents — and at the SoC layer ([`SocLayer::expect`]) when it
+    /// holds for every board on the part. The mechanically checkable counterpart
+    /// of [`caveats`](Self::caveats).
+    ///
+    /// Accumulates across [`extends`](Self::extends): a variant inherits its parent's
+    /// checks and adds its own. The hardware a check describes is the hardware the
+    /// variant has, so a replaced list would leave a `boot2deb-selftest` that passes
+    /// while testing less than the parent's.
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
 }
 
 /// The distro-generic rootfs substrate (`base.toml`): the base Debian
@@ -1157,7 +1402,7 @@ pub struct BaseLayer {
     pub locale: String,
     /// Locales generated into the image *in addition to* [`locale`](Self::locale),
     /// which resolution always generates — so this lists only the extras (see
-    /// [`ResolvedBuild::locales_generate`]).
+    /// [`ResolvedImage::locales_generate`]).
     ///
     /// Each becomes a line in `/etc/locale.gen`, and `locale-gen` compiles it into the
     /// image at build time. That is what lets a *pre-built* image switch to one of them
@@ -1181,14 +1426,14 @@ pub struct BaseLayer {
     /// currently on must still be able to find the time.
     ///
     /// Worth setting for a board that boots on an isolated network, which cannot reach
-    /// the public pool at all — see [`ResolvedBuild::ntp_servers`] for what a board
+    /// the public pool at all — see [`ResolvedImage::ntp_servers`] for what a board
     /// with no reachable time source does instead.
     #[serde(default)]
     pub ntp_servers: Vec<String>,
     /// Base Debian packages installed into every rootfs (the bootstrap
     /// `--include` set) — device- and feature-independent distro policy.
     #[serde(default)]
-    pub packages: Vec<String>,
+    pub packages: Vec<PackageEntry>,
     /// Packages excluded from the base system, e.g. `isc-dhcp-client` where a
     /// lighter DHCP client is used instead. Unioned at resolution with the
     /// soc/boot-method/device/feature `exclude` sets into the bootstrap
@@ -1479,6 +1724,16 @@ impl KernelDef {
             KernelDef::Distro(k) => &k.supported_socs,
         }
     }
+
+    /// Runtime checks images built on this kernel must pass (`[[expect]]`) —
+    /// what the *kernel choice* guarantees, e.g. a driver this definition's
+    /// fragments compile that the distro package does not.
+    pub fn expect(&self) -> &[crate::expect::Expectation] {
+        match self {
+            KernelDef::Compiled(k) => &k.expect,
+            KernelDef::Distro(k) => &k.expect,
+        }
+    }
 }
 
 /// The distribution's own kernel package — no source, no defconfig, no fragments,
@@ -1498,6 +1753,10 @@ pub struct DistroKernelDef {
     pub package: String,
     /// SoCs this kernel supports; resolution rejects a mismatched device.
     pub supported_socs: Vec<Soc>,
+    /// Runtime checks images on this kernel must pass (`[[expect]]`); see
+    /// [`KernelDef::expect`].
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
 }
 
 /// A kernel compiled from source: it owns its source ref, base defconfig, config
@@ -1551,7 +1810,7 @@ pub struct CompiledKernelDef {
     /// removed, so no driver it builds can load a blob.
     ///
     /// A property of the *source*, with a consequence for the whole image — which is
-    /// why it is declared here and reaches [`ResolvedBuild::libre`] rather than being
+    /// why it is declared here and reaches [`ResolvedImage::libre`] rather than being
     /// restated per device. Resolution drops the hardware layers'
     /// [`nonfree_firmware_packages`](SocLayer::nonfree_firmware_packages) and their
     /// `overlay-nonfree/` trees, and narrows the image's apt components to `main`:
@@ -1560,6 +1819,12 @@ pub struct CompiledKernelDef {
     /// whatever the hardware asks for.
     #[serde(default)]
     pub libre: bool,
+    /// Runtime checks images on this kernel must pass (`[[expect]]`); see
+    /// [`KernelDef::expect`]. What the definition's own fragments and series
+    /// guarantee belongs here — a driver a device gains only on this kernel is
+    /// this layer's expectation, not the board's.
+    #[serde(default)]
+    pub expect: Vec<crate::expect::Expectation>,
 }
 
 /// The `patches` ref recorded when a kernel definition names none.
@@ -1632,8 +1897,9 @@ pub struct Support {
     ///
     /// Scoped to this build point. The board-wide and silicon-wide halves live at the
     /// layers that own them ([`DeviceLayer::caveats`], [`SocLayer::caveats`]), so a
-    /// board with three recipes states its own limitations once;
-    /// [`ResolvedBuild::caveats`] is the three concatenated, which is what a reader
+    /// board with three recipes states its own limitations once, and a capability's
+    /// live on the feature ([`crate::feature::Feature::caveats`]);
+    /// [`ResolvedBuild::caveats`] is all of them concatenated, which is what a reader
     /// is shown. Here belongs only what this *point* does not do — a feature whose
     /// userspace has a broken filter, a suite whose package is too old.
     ///
@@ -1835,6 +2101,19 @@ pub struct Recipe {
     /// — see [`crate::datavolume`].
     #[serde(default)]
     pub data_volumes: Vec<crate::datavolume::DataVolume>,
+    /// Run `boot2deb-selftest` automatically once per boot, after
+    /// `multi-user.target`, logging to the journal (the shipped
+    /// `boot2deb-selftest.service`, which every image carries disabled; this flag
+    /// enables it). For a board validated over a serial console, where nobody is
+    /// logged in to run the selftest by hand — the failed unit in
+    /// `systemctl --failed` and the journal entry are the announcement.
+    ///
+    /// A recipe field rather than a device one because it is a deployment choice:
+    /// the same board can have a bring-up recipe that wants the check every boot
+    /// and a production recipe that does not want a red unit on a box whose
+    /// operator cannot act on it. Default off.
+    #[serde(default)]
+    pub selftest_on_boot: bool,
     /// The maintainer's support claim for this build point.
     ///
     /// Optional because a claim is only meaningful from someone in a position to
@@ -1992,7 +2271,7 @@ pub struct ResolvedCompiledKernel {
     /// Kernel-owned fragments followed by device fragments, in apply order.
     pub config_fragments: Vec<String>,
     /// This tree is GNU Linux-libre — see [`CompiledKernelDef::libre`] for what it
-    /// costs the build, and [`ResolvedBuild::libre`] for the image-wide form the rest
+    /// costs the build, and [`ResolvedImage::libre`] for the image-wide form the rest
     /// of the pipeline reads.
     pub libre: bool,
 }
@@ -2004,7 +2283,7 @@ pub struct ResolvedDistroKernel {
     /// Kernel definition id (e.g. `debian-armmp`).
     pub id: String,
     /// The kernel package, which resolution has already added to
-    /// [`ResolvedBuild::rootfs_packages`].
+    /// [`ResolvedImage::rootfs_packages`].
     pub package: String,
 }
 
@@ -2195,6 +2474,12 @@ pub struct ResolvedDepthchargeBoot {
 /// every referenced layer merged, so the engine never re-reads config. Fields
 /// with no default (e.g. blobs) are guaranteed present because resolution
 /// validated them.
+///
+/// **What is here holds for every deliverable.** The hardware — device, SoC, arch,
+/// boot method — the packaging root's suite, and the limitations the silicon and the
+/// board impose are true of a bootloader as much as of an image. Everything an image
+/// alone has is in [`image`](Self::image), so a [`Deliverable::Uboot`] build carries no
+/// neutral placeholder for an axis it does not have and nothing can read one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedBuild {
     /// Device name that was resolved.
@@ -2217,21 +2502,12 @@ pub struct ResolvedBuild {
     pub soc: Soc,
     /// Selected boot method.
     pub boot_method: BootMethod,
-    /// Resolved kernel axis, or `None` for a [`Deliverable::Uboot`] build, which
-    /// resolves and builds no kernel. `Some` for every image build (a compiled or
-    /// distro kernel).
-    pub kernel: Option<ResolvedKernel>,
-    /// Debian suite, or `None` for a [`Deliverable::Uboot`] build, which resolves no
-    /// rootfs. `Some` for every image build. Present exactly when
-    /// [`kernel`](Self::kernel) is — the two absences travel together, and
-    /// [`produces_image`](Self::produces_image) reads this.
-    pub suite: Option<String>,
     /// The suite whose `dpkg` archives this build's `.deb`s — the suite the packaging
     /// root is provisioned for.
     ///
-    /// Present unconditionally, unlike [`suite`](Self::suite): every deliverable
+    /// Present unconditionally, unlike [`ResolvedImage::suite`]: every deliverable
     /// packages something, including a [`Deliverable::Uboot`] build that resolves no
-    /// image axis at all. It is the resolved [`suite`](Self::suite) where there is one,
+    /// image axis at all. It is the resolved [`ResolvedImage::suite`] where there is one,
     /// so an image and the `.deb`s inside it are archived by the same `dpkg`, and the
     /// device's `default_suite` otherwise — the board's own declared suite, which is
     /// also the one its image builds resolve, so a bootloader-only build reuses their
@@ -2241,10 +2517,110 @@ pub struct ResolvedBuild {
     /// bytes, so this names an input to them and is folded into the u-boot and kmod
     /// output signatures.
     pub packaging_suite: String,
+    /// Image layout.
+    pub layout: Layout,
+    /// The boot-method-specific configuration, tagged by method: what the
+    /// bootloader/boot payload is, where it goes, and what it needs. Every field is
+    /// guaranteed present for the method it belongs to.
+    pub boot: ResolvedBoot,
+    /// Board DTB path, relative to the DT output dir.
+    pub kernel_dtb: String,
+    /// Config-root-relative device-tree sources the kernel stage copies into the
+    /// in-tree DT dir before `make` (from the device). Empty when the board's DTB is
+    /// already upstream. Resolution guarantees each path is contained (relative, no
+    /// `..`), names a `.dts`/`.dtsi`, and that [`kernel_dtb`](Self::kernel_dtb) is
+    /// compiled from one of them.
+    pub device_dts: Vec<String>,
+    /// Extra kernel command-line arguments (from the device), space-separated and
+    /// trimmed; empty when the board declares none. Resolution guarantees the value
+    /// is a single line of plain arguments, safe to embed in the sourced
+    /// `/etc/boot2deb/board.conf` (no quote/escape/expansion characters), and free
+    /// of `root=`. The extlinux path emits it as `EXTL_CMD_LINE`; the depthcharge
+    /// path has already folded it into [`ResolvedDepthchargeBoot::cmdline`].
+    pub kernel_cmdline: String,
+    /// Device-tree subdirectory (from the SoC).
+    pub dt_dir: String,
+    /// Force-loaded accel modules (from the SoC).
+    pub modules: Vec<String>,
+    /// `ARCH=` for kbuild (from the arch).
+    pub kernel_arch: String,
+    /// `CROSS_COMPILE` prefix (from the arch; used only when cross-building).
+    pub cross_compile: String,
+    /// `KBUILD_IMAGE` path (from the arch).
+    pub kbuild_image: String,
+    /// What this build point does **not** do, in sentences: the SoC's, the device
+    /// lineage's, each selected feature's, and the recipe's [`Support::caveats`]
+    /// concatenated in that order and de-duplicated by text, first-appearance order.
+    /// Each entry carries the [`CaveatScope`] of the layer that stated it, which is
+    /// what the `(soc)`/`(board)`/`(feature)`/`(recipe)` prefix renders from.
+    ///
+    /// Silicon, then board, then capability, then build point, because that is the
+    /// order of increasing specificity — a reader meets the limitation that constrains
+    /// the most before the one that constrains the least, and a feature's limits sit
+    /// between the two: narrower than the silicon (they hold only where it is selected)
+    /// and wider than a recipe's (they hold in every recipe that selects it).
+    /// De-duplicated so a device restating a caveat it inherits does not print it twice,
+    /// keeping the *first* — and so the widest — scope; the concatenation is the whole
+    /// rule, since a caveat states a limitation and no layer can lift one another layer
+    /// declared.
+    ///
+    /// Empty for a build point whose layers declare none. That is not a claim of no
+    /// limitations — nothing mechanical establishes that — only that none is stated.
+    pub caveats: Vec<Caveat>,
+    /// Everything a build that produces an **image** resolves, or `None` for a
+    /// [`Deliverable::Uboot`] build, whose sole deliverable is the bootloader.
+    ///
+    /// The deliverable axis lives in the type rather than in a dozen optional-or-neutral
+    /// fields, so "this build has no rootfs" is a shape the compiler enforces instead of
+    /// an invariant restated at each reader. A caller on the image path takes the
+    /// [`ResolvedImage`] by pattern and reads its fields directly; one that may see
+    /// either kind asks [`produces_image`](Self::produces_image).
+    pub image: Option<ResolvedImage>,
+}
+
+/// Everything a build that produces an image resolves: the kernel, the suite and its
+/// rootfs, the localization and account policy, the out-of-tree modules, the media-accel
+/// sources, and the checks the finished image must pass.
+///
+/// The half of a build point that a [`Deliverable::Uboot`] build does not have. Split
+/// out of [`ResolvedBuild`] because the absence is total — a bootloader has no rootfs to
+/// hold an account, no `/etc/shadow` to splice a password into, no kernel to build a
+/// module against, and no image for a check to run on — and a struct of neutral
+/// placeholders states that absence in comments where a type states it outright.
+/// Everything here is unconditionally present: resolution produces this value only for a
+/// build that has all of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedImage {
+    /// The resolved kernel axis: a kernel compiled from a pinned source tree, or a
+    /// distro-package one installed from the mirror. Unconditional, because a build
+    /// that resolves no kernel resolves no image either.
+    pub kernel: ResolvedKernel,
+    /// The Debian suite this image is built from: the mirror its rootfs is
+    /// bootstrapped against and the archive its packages are solved in.
+    ///
+    /// Distinct from [`ResolvedBuild::packaging_suite`], which every deliverable has —
+    /// this one is the suite the *image* is, and on an image build the two are equal by
+    /// construction, so an image and the `.deb`s inside it are archived by the same
+    /// `dpkg`.
+    pub suite: String,
     /// Composable rootfs features, in recipe order; empty means a plain
     /// base image. Validated at resolution: each is known, compatible with the
     /// resolved SoC, and non-conflicting.
     pub features: Vec<String>,
+    /// This build ships no nonfree firmware, because its kernel is GNU Linux-libre
+    /// and could not load any — the resolved form of
+    /// [`CompiledKernelDef::libre`], `false` for every distro-package kernel.
+    ///
+    /// Three things read it, and each is a subtraction rather than an addition, so a
+    /// non-libre build resolves exactly as it did before this axis existed: the
+    /// hardware layers' `nonfree_firmware_packages` are left out of
+    /// [`rootfs_packages`](Self::rootfs_packages), their `overlay-nonfree/` trees are
+    /// not laid into the rootfs, and the image's apt components narrow to `main`.
+    pub libre: bool,
+    /// Image size.
+    pub image_size: String,
+    /// Image hostname.
+    pub hostname: String,
     /// Second disks this image mounts for data, in recipe order; empty on a build
     /// that stores everything on the boot medium. Validated at resolution
     /// ([`crate::datavolume::validate_all`]) and paired with the `data-volume`
@@ -2265,22 +2641,6 @@ pub struct ResolvedBuild {
     /// include set: no name appears in both [`rootfs_packages`](Self::rootfs_packages)
     /// and here.
     pub rootfs_exclude: Vec<String>,
-    /// This build ships no nonfree firmware, because its kernel is GNU Linux-libre
-    /// and could not load any — the resolved form of
-    /// [`CompiledKernelDef::libre`], `false` for every distro-package kernel.
-    ///
-    /// Three things read it, and each is a subtraction rather than an addition, so a
-    /// non-libre build resolves exactly as it did before this axis existed: the
-    /// hardware layers' `nonfree_firmware_packages` are left out of
-    /// [`rootfs_packages`](Self::rootfs_packages), their `overlay-nonfree/` trees are
-    /// not laid into the rootfs, and the image's apt components narrow to `main`.
-    pub libre: bool,
-    /// Image layout.
-    pub layout: Layout,
-    /// Image size.
-    pub image_size: String,
-    /// Image hostname.
-    pub hostname: String,
     /// System locale — the image's `LANG`, written to `/etc/locale.conf`. Resolution
     /// guarantees it also appears in [`locales_generate`](Self::locales_generate), so
     /// the `LANG` an image boots with can never name a locale that image does not have.
@@ -2324,18 +2684,6 @@ pub struct ResolvedBuild {
     /// Resolution guarantees each entry is a single well-formed `authorized_keys` line
     /// carrying a public key ([`crate::authkeys::check_authorized_key`]).
     pub ssh_authorized_keys: Vec<String>,
-    /// The boot-method-specific configuration, tagged by method: what the
-    /// bootloader/boot payload is, where it goes, and what it needs. Every field is
-    /// guaranteed present for the method it belongs to.
-    pub boot: ResolvedBoot,
-    /// Board DTB path, relative to the DT output dir.
-    pub kernel_dtb: String,
-    /// Config-root-relative device-tree sources the kernel stage copies into the
-    /// in-tree DT dir before `make` (from the device). Empty when the board's DTB is
-    /// already upstream. Resolution guarantees each path is contained (relative, no
-    /// `..`), names a `.dts`/`.dtsi`, and that [`kernel_dtb`](Self::kernel_dtb) is
-    /// compiled from one of them.
-    pub device_dts: Vec<String>,
     /// Out-of-tree kernel-module sets, in the order the device named them: each
     /// `kmods/<name>.toml` loaded and validated, built against this build's kernel tree
     /// and staged into `/lib/modules/<kver>/updates/`. Empty for a board that carries
@@ -2344,32 +2692,37 @@ pub struct ResolvedBuild {
     /// since the modules need a tree to build against — that the kernel is compiled, not
     /// a distro package.
     pub device_kmods: Vec<ResolvedKmod>,
-    /// Extra kernel command-line arguments (from the device), space-separated and
-    /// trimmed; empty when the board declares none. Resolution guarantees the value
-    /// is a single line of plain arguments, safe to embed in the sourced
-    /// `/etc/boot2deb/board.conf` (no quote/escape/expansion characters), and free
-    /// of `root=`. The extlinux path emits it as `EXTL_CMD_LINE`; the depthcharge
-    /// path has already folded it into [`ResolvedDepthchargeBoot::cmdline`].
-    pub kernel_cmdline: String,
-    /// Device-tree subdirectory (from the SoC).
-    pub dt_dir: String,
-    /// Force-loaded accel modules (from the SoC).
-    pub modules: Vec<String>,
-    /// `ARCH=` for kbuild (from the arch).
-    pub kernel_arch: String,
-    /// `CROSS_COMPILE` prefix (from the arch; used only when cross-building).
-    pub cross_compile: String,
-    /// `KBUILD_IMAGE` path (from the arch).
-    pub kbuild_image: String,
-    /// Media-accel userspace source trees (from the SoC layer). `Some` iff this
-    /// build compiles the HW transcode stack — i.e. a selected feature declares
+    /// Media-accel userspace source trees (from the SoC layer), in the order that layer
+    /// declares them. Non-empty iff this build compiles the HW transcode stack — i.e. a
+    /// selected feature declares
     /// [`requires_media_accel`](crate::feature::Feature::requires_media_accel);
-    /// resolution guarantees the SoC provides the sources in that case. `None` for
-    /// a base build, and the userspace/ffmpeg compile + plan nodes are then skipped.
-    pub userspace: Option<UserspaceSources>,
+    /// resolution guarantees the SoC provides the trees in that case. Empty for a base
+    /// build, and the userspace/ffmpeg compile + plan nodes are then skipped.
+    ///
+    /// This is the SoC's whole set, including the trees marked
+    /// [`optional`](UserspaceTree::optional): which of those a *build* compiles is a
+    /// build-time choice (`--userspace <name>`), not a resolution one, so the lock pins
+    /// every tree the part has and a build narrows the set as it runs. The narrowing
+    /// lives with the command that has the flag.
+    pub userspace: Vec<UserspaceTree>,
     /// ffmpeg source pair (from the SoC layer). `Some`/`None` in lockstep with
     /// [`userspace`](Self::userspace) — the media-accel stack is built as a unit.
     pub ffmpeg: Option<FfmpegSources>,
+    /// This build's FFmpeg is configured `--enable-nonfree`, admitting the encoders
+    /// whose licences cannot be combined with the GPL for redistribution — the
+    /// resolved form of [`Feature::ffmpeg_nonfree`](crate::feature::Feature::ffmpeg_nonfree),
+    /// `false` unless a selected feature asks for it.
+    ///
+    /// It is the licence *flavour* of the FFmpeg this build produces, and it decides
+    /// two things together: the `./configure` flags, and the build root's package set
+    /// — so a free build carries neither the nonfree encoder nor its headers. `false`
+    /// means the produced `ffmpeg-rk` `.deb`, and any image holding it, may be
+    /// redistributed; `true` means it may not.
+    ///
+    /// Meaningful only where the build has an FFmpeg to flavour. The feature that
+    /// sets it requires the `ffmpeg` capability, so a selection carrying it without a
+    /// provider fails at resolution rather than resolving to a flag nothing reads.
+    pub ffmpeg_nonfree: bool,
     /// Third-party apt repositories the selected features contribute,
     /// unioned across features and de-duplicated by `name`. The rootfs bootstrap
     /// activates these before the package solve so an out-of-mirror app (e.g.
@@ -2381,20 +2734,41 @@ pub struct ResolvedBuild {
     /// the lock; `build` materializes them into the local apt repo before the
     /// solve. Empty when no layer or feature adds one.
     pub extra_debs: Vec<ExtraDeb>,
-    /// What this build point does **not** do, in sentences: the SoC's, the device
-    /// lineage's, and the recipe's [`Support::caveats`] concatenated in that order and
-    /// de-duplicated by text, first-appearance order.
-    ///
-    /// Silicon first, then board, then build point, because that is the order of
-    /// increasing specificity — a reader meets the limitation that constrains the most
-    /// before the one that constrains the least. De-duplicated so a device restating a
-    /// caveat it inherits does not print it twice; the concatenation is the whole rule,
-    /// since a caveat states a limitation and no layer can lift one another layer
-    /// declared.
-    ///
-    /// Empty for a build point whose layers declare none. That is not a claim of no
-    /// limitations — nothing mechanical establishes that — only that none is stated.
-    pub caveats: Vec<Caveat>,
+    /// The layers' selftest expectations, one group per declaring layer in merge
+    /// order — SoC, boot method, device, kernel, features (selection order), then
+    /// each kmod. The rootfs stage writes each group as its own
+    /// `/etc/boot2deb/selftest.d/<scope>-<name>.checks` file, so a failing check
+    /// on the device names the layer whose contract it is. Groups whose layer
+    /// declares nothing are omitted; empty means no layer expects anything —
+    /// which, like an empty [`caveats`](ResolvedBuild::caveats), is a statement about the
+    /// config, not the hardware.
+    pub expectations: Vec<crate::expect::ExpectationGroup>,
+    /// Enable the shipped `boot2deb-selftest.service` so the selftest runs once
+    /// per boot ([`Recipe::selftest_on_boot`]; false for a direct device build,
+    /// which names no recipe). The unit ships either way — this decides only the
+    /// enable symlink the rootfs stage lays in.
+    pub selftest_on_boot: bool,
+}
+
+/// A build point and its image half, borrowed together — the argument every stage on
+/// the image path takes.
+///
+/// The two are separate types because a [`Deliverable::Uboot`] build has only one of
+/// them ([`ResolvedBuild::image`]), and separate *values* because splitting them is what
+/// removes the neutral placeholders. But every image stage reads both — the boot method
+/// and the hardware from one, the suite and the rootfs from the other — so passing them
+/// as a pair keeps that from becoming two positional parameters at ten call sites, and
+/// makes "this function runs only on the image path" a thing the signature says.
+///
+/// Constructed by [`ResolvedBuild::as_image`], which is the single place the deliverable
+/// is narrowed.
+#[derive(Debug, Clone, Copy)]
+pub struct ImageBuild<'a> {
+    /// The half every deliverable has: hardware, boot method, packaging suite, caveats.
+    pub build: &'a ResolvedBuild,
+    /// The half only an image has: kernel, suite, rootfs, localization, account,
+    /// out-of-tree modules, media-accel sources, expectations.
+    pub image: &'a ResolvedImage,
 }
 
 /// One stated limitation, and how widely it holds.
@@ -2480,7 +2854,10 @@ impl ResolvedBuild {
     /// all — so the kernel compile node, its patch series, and its config fragments
     /// are all skipped, and the lock pins no kernel commit.
     pub fn compiles_kernel(&self) -> bool {
-        matches!(self.kernel, Some(ResolvedKernel::Compiled(_)))
+        matches!(
+            self.image.as_ref().map(|i| &i.kernel),
+            Some(ResolvedKernel::Compiled(_))
+        )
     }
 
     /// Whether this build compiles **anything** from source: a kernel, a bootloader, or
@@ -2495,26 +2872,27 @@ impl ResolvedBuild {
     /// firmware, no accel stack — needs neither, and installs every byte it ships from
     /// the mirror. The engine's host preflight is driven by exactly this predicate.
     pub fn compiles_from_source(&self) -> bool {
-        self.compiles_kernel() || self.rkbin_boot().is_some() || self.userspace.is_some()
+        self.compiles_kernel()
+            || self.rkbin_boot().is_some()
+            || self.image.as_ref().is_some_and(|i| !i.userspace.is_empty())
     }
 
     /// Whether this build produces a full image (kernel + rootfs + `.img`), as
     /// opposed to a [`Deliverable::Uboot`] build that emits only the bootloader.
-    /// `true` is exactly when [`suite`](Self::suite) is present, which resolution
-    /// keeps in lockstep with [`kernel`](Self::kernel): the rootfs, image, and
+    /// `true` is exactly when [`image`](Self::image) is present: the rootfs, image, and
     /// sandbox nodes all key on it.
     pub fn produces_image(&self) -> bool {
-        self.suite.is_some()
+        self.image.is_some()
     }
 
-    /// The Debian suite, for a caller that only runs on the image path (the rootfs
-    /// and image nodes). Panics on a u-boot-only build, which resolves no suite —
-    /// [`produces_image`](Self::produces_image) is the check for a caller that might
-    /// see either kind.
-    pub fn image_suite(&self) -> &str {
-        self.suite
-            .as_deref()
-            .expect("image_suite is read only on the image path, which resolves a suite")
+    /// This build as an [`ImageBuild`], or `None` for a [`Deliverable::Uboot`] one.
+    ///
+    /// The single narrowing point: a caller that has one of these has been shown to hold
+    /// both halves, so nothing downstream re-asks the question.
+    pub fn as_image(&self) -> Option<ImageBuild<'_>> {
+        self.image
+            .as_ref()
+            .map(|image| ImageBuild { build: self, image })
     }
 }
 
@@ -2768,5 +3146,92 @@ mod tests {
         );
         assert_eq!(InitramfsCompress::Xz.as_str(), "xz");
         assert_eq!(InitramfsCompress::Zstd.as_str(), "zstd");
+    }
+
+    /// A bare string and a table are both entries; TOML tells them apart by shape and
+    /// the untagged enum follows, so a layer can mix the two in one list.
+    #[test]
+    fn a_package_list_mixes_bare_names_and_conditional_entries() {
+        #[derive(serde::Deserialize)]
+        struct Layer {
+            packages: Vec<PackageEntry>,
+        }
+        let layer: Layer = toml::from_str(
+            r#"
+            packages = [
+                "network-manager",
+                { name = "network-manager-tui", suites = ["forky", "sid"] },
+            ]
+            "#,
+        )
+        .expect("both forms parse");
+        assert_eq!(
+            layer.packages,
+            vec![
+                PackageEntry::Plain("network-manager".into()),
+                PackageEntry::Conditional {
+                    name: "network-manager-tui".into(),
+                    suites: vec!["forky".into(), "sid".into()],
+                },
+            ]
+        );
+    }
+
+    /// The condition decides membership per build, which is the whole point: one layer
+    /// file serves every suite.
+    #[test]
+    fn a_conditional_entry_applies_only_to_the_suites_it_names() {
+        let entry = PackageEntry::Conditional {
+            name: "network-manager-tui".into(),
+            suites: vec!["forky".into(), "sid".into()],
+        };
+        assert!(entry.applies_to("forky"));
+        assert!(entry.applies_to("sid"));
+        assert!(!entry.applies_to("trixie"));
+        // Verbatim: a suite is an archive's own name for itself, so a near-miss is a
+        // different suite and not a match.
+        assert!(!entry.applies_to("Forky"));
+        assert!(!entry.applies_to("forky-backports"));
+    }
+
+    /// An unconditional entry is the common case and is never filtered out.
+    #[test]
+    fn a_bare_name_applies_to_every_suite() {
+        let entry = PackageEntry::from("network-manager");
+        assert!(entry.applies_to("trixie"));
+        assert!(entry.applies_to("forky"));
+        assert_eq!(entry.suites(), None);
+    }
+
+    /// Config that can never take effect is a mistake, not a no-op — most likely a list
+    /// someone emptied instead of deleting the entry.
+    #[test]
+    fn an_entry_naming_no_suite_is_refused() {
+        let entry = PackageEntry::Conditional {
+            name: "nmtui".into(),
+            suites: vec![],
+        };
+        let err = entry
+            .validate("soc 'rk3288'")
+            .expect_err("an entry applying to nothing is refused");
+        assert!(matches!(err, ConfigError::PackageSuitesEmpty { .. }));
+        // The failure names both the package and where to edit it.
+        let message = err.to_string();
+        assert!(message.contains("nmtui"), "{message}");
+        assert!(message.contains("rk3288"), "{message}");
+    }
+
+    /// A well-formed entry passes validation whichever form it takes.
+    #[test]
+    fn a_well_formed_entry_validates() {
+        assert!(PackageEntry::from("bash")
+            .validate("the base layer")
+            .is_ok());
+        assert!(PackageEntry::Conditional {
+            name: "nmtui".into(),
+            suites: vec!["forky".into()],
+        }
+        .validate("the base layer")
+        .is_ok());
     }
 }

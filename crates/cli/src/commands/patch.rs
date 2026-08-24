@@ -243,9 +243,9 @@ fn recipes_using_series(root: &ConfigRoot, series: &str) -> Vec<String> {
         .filter(|name| {
             resolve_recipe(root, name, &Overrides::default()).is_ok_and(|build| {
                 let kernel = build
-                    .kernel
+                    .image
                     .as_ref()
-                    .is_some_and(|k| k.patch_series().iter().any(|p| p == series));
+                    .is_some_and(|i| i.kernel.patch_series().iter().any(|p| p == series));
                 let uboot = build
                     .rkbin_boot()
                     .and_then(|b| b.uboot_series.as_deref())

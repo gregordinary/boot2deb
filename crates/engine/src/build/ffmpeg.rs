@@ -24,7 +24,7 @@
 
 use crate::build::elf;
 use crate::build::{
-    self, deb_names, pick_deb, probe, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope,
+    self, deb_names, pick_deb, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope,
     PatchSource, SeriesIdentity,
 };
 use crate::error::EngineError;
@@ -32,7 +32,8 @@ use crate::event::{EventSink, Step};
 use crate::git;
 use crate::repo::LocalDistsRepo;
 use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, SandboxRun};
-use boot2deb_core::lock::{FfmpegPins, Lock, UserspacePins};
+use boot2deb_core::lock::{FfmpegPins, Lock, UserspacePin};
+use boot2deb_core::model::UserspaceTree;
 use std::path::{Path, PathBuf};
 
 /// Install prefix baked into the build; keeps `ffmpeg-rk` out of the system FFmpeg's
@@ -45,9 +46,33 @@ use std::path::{Path, PathBuf};
 /// the `-rk`-suffixed links [`stage_path_symlinks`] puts in `/usr/bin`.
 const INSTALL_PREFIX: &str = "/opt/ffmpeg-rk";
 
+/// The artifact-store node this stage keys its outputs under, and the label
+/// [`why-rebuild`](crate::plan) predicts against.
+///
+/// A constant because the two have to be the *same string*: the store is keyed by
+/// `(node, signature)`, so a prediction computed under a different node name would
+/// answer a question about an entry no build ever wrote. It is the counterpart of the
+/// path helper above — one names where the tree is, this names where the artifacts are.
+pub const NODE: &str = "ffmpeg";
+
 /// Stage-recipe version for the ffmpeg tree signature: bump when the
 /// fetch/patch logic that shapes the reused tree changes.
 const CLONE_STAGE_VERSION: u32 = 1;
+
+/// Where this stage's scratch lives under `work_dir` (`<work_dir>/ffmpeg`): the source
+/// tree at [`tree_dir`], the install staging beside it, and the pool the layer resolves
+/// this build's own `.deb`s from. Exposed for the same reason
+/// [`kernel::tree_dir`](crate::build::kernel::tree_dir) is: a reader of the tree —
+/// [`crate::shell`], which starts an interactive session in it — should not restate the
+/// layout literal.
+pub fn stage_dir(work_dir: &Path) -> PathBuf {
+    work_dir.join("ffmpeg")
+}
+
+/// The ffmpeg source tree this stage clones and reuses (`<work_dir>/ffmpeg/build`).
+pub fn tree_dir(work_dir: &Path) -> PathBuf {
+    stage_dir(work_dir).join("build")
+}
 
 /// Stage-recipe version for the ffmpeg **output** signature (Tier-2 artifact cache):
 /// bump when the configure/compile/package logic changes the produced `.deb`
@@ -67,6 +92,9 @@ const LOOKUP_PROBE_REPORT: &str = "lookup-probe.log";
 /// the codec/format libraries `./configure` probes, and they come from the suite.
 /// `librockchip-mpp-dev` / `librga-dev` are *not* here — they are this build's own
 /// output, added per SoC by [`userspace_dev_packages`] and resolved from the pool.
+///
+/// The nonfree flavour's own dep is not here either, for the same reason it is not in
+/// [`BASE_CONFIGURE_FLAGS`]: see [`NONFREE_DEPS`].
 const FFMPEG_DEPS: &[&str] = &[
     "nasm",
     "yasm",
@@ -75,7 +103,6 @@ const FFMPEG_DEPS: &[&str] = &[
     "libass-dev",
     "libx264-dev",
     "libx265-dev",
-    "libfdk-aac-dev",
     "libssl-dev",
     "libfreetype-dev",
     // Build-root only: headers and loader stub for the three Vulkan flags in
@@ -92,23 +119,56 @@ const FFMPEG_DEPS: &[&str] = &[
     "glslc",
 ];
 
-/// The userspace `.deb` name prefixes ffmpeg build-depends on for this build, in
-/// install order — each tree's runtime lib first, then its `-dev`.
+/// The build-deps the nonfree flavour adds, layered only when this build is one
+/// ([`ResolvedImage::ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree)).
 ///
-/// Derived from the pins, not fixed: ffmpeg build-depends on a userspace package
-/// exactly when it is configured against that library, so the list must track the
-/// same SoC-declared trees [`configure_flags`] reads. Demanding
-/// `librockchip-mpp-dev` on a SoC that builds no MPP would fail the stage looking
-/// for a `.deb` nothing produces.
-fn userspace_dep_prefixes(userspace: &UserspacePins) -> Vec<&'static str> {
-    let mut prefixes = Vec::new();
-    if userspace.mpp.is_some() {
-        prefixes.extend(["librockchip-mpp1_", "librockchip-mpp-dev_"]);
-    }
-    if userspace.librga.is_some() {
-        prefixes.extend(["librga2_", "librga-dev_"]);
-    }
-    prefixes
+/// `./configure` is a probe suite, so a `-dev` package left in the root of a free
+/// build would be an input with no matching output: the flag that would compile
+/// against it is absent, and the produced deb would be described by a dependency set
+/// it does not reflect. It is dropped rather than left harmlessly present so the free
+/// build's inputs state the same thing its binary does.
+const NONFREE_DEPS: &[&str] = &["libfdk-aac-dev"];
+
+/// The userspace libraries this build's ffmpeg is **configured against**, which is not
+/// the same as the trees the SoC pins.
+///
+/// MPP is linked whenever the SoC declares it. RGA is linked only alongside MPP: the
+/// rkrga filters allocate `AVRKMPPFramesContext` frames and ffmpeg's `./configure`
+/// rejects `--enable-rkrga` without `--enable-rkmpp`, so a SoC that pins librga and no
+/// MPP produces an ffmpeg with no librga `NEEDED` entry at all. That SoC still builds
+/// and ships `librga2` for programs that speak the API directly — it is simply not
+/// ffmpeg's library there.
+///
+/// One predicate, read by [`configure_flags`], the build root's package list and the
+/// produced deb's runtime `Depends`, so those three cannot disagree about what was
+/// linked — a disagreement fails the stage on a correct build, since the deb declares a
+/// dependency the binary does not carry.
+fn linked_userspace(trees: &[UserspaceTree]) -> Vec<&UserspaceTree> {
+    let have = |name: &str| trees.iter().any(|t| t.name == name);
+    trees
+        .iter()
+        .filter(|t| {
+            // A tree ffmpeg has no flag for is not something it links.
+            t.ffmpeg_flag.is_some()
+                // And one whose ffmpeg support needs another tree is linked only
+                // alongside it — the rkrga case above.
+                && t.ffmpeg_requires.iter().all(|need| have(need))
+        })
+        .collect()
+}
+
+/// The userspace `.deb` name prefixes ffmpeg build-depends on for this build, in
+/// install order — each linked tree's runtime lib first, then its `-dev`.
+///
+/// Derived from [`linked_userspace`], not from the declared set: ffmpeg build-depends on
+/// a userspace package exactly when it is configured against that library. Demanding
+/// `librockchip-mpp-dev` on a SoC that builds no MPP would fail the stage looking for a
+/// `.deb` nothing produces.
+fn userspace_dep_prefixes(trees: &[UserspaceTree]) -> Vec<String> {
+    linked_userspace(trees)
+        .into_iter()
+        .flat_map(|t| t.links.iter().map(|l| format!("{l}_")))
+        .collect()
 }
 
 /// The userspace packages ffmpeg's build root layers in — **each tree's runtime library
@@ -127,18 +187,15 @@ fn userspace_dep_prefixes(userspace: &UserspacePins) -> Vec<&'static str> {
 /// runtime library is also what carries the `shlibs` `dpkg-shlibdeps` reads, so naming
 /// it is what makes the produced deb's `Depends` resolvable at all.
 ///
-/// Derived from the pins for the same reason the prefixes are: asking for
+/// Derived from [`linked_userspace`] for the same reason the prefixes are: asking for
 /// `librockchip-mpp-dev` on a SoC that builds no MPP would fail the resolution on a
-/// package the pool cannot hold.
-fn userspace_layer_packages(userspace: &UserspacePins) -> Vec<&'static str> {
-    let mut packages = Vec::new();
-    if userspace.mpp.is_some() {
-        packages.extend(["librockchip-mpp1", "librockchip-mpp-dev"]);
-    }
-    if userspace.librga.is_some() {
-        packages.extend(["librga2", "librga-dev"]);
-    }
-    packages
+/// package the pool cannot hold, and layering a library this build does not configure
+/// against puts headers in the root that no probe reads.
+fn userspace_layer_packages(trees: &[UserspaceTree]) -> Vec<String> {
+    linked_userspace(trees)
+        .into_iter()
+        .flat_map(|t| t.links.iter().cloned())
+        .collect()
 }
 
 /// The whole build-dependency set this stage layers over the sandbox base: the suite's
@@ -147,24 +204,35 @@ fn userspace_layer_packages(userspace: &UserspacePins) -> Vec<&'static str> {
 /// One function, read by the [`BuildRootSpec`] that stages the layer *and* by the output
 /// signature that keys on it, so a package cannot reach `./configure` without reaching
 /// the key. Which matters here more than anywhere: ffmpeg's `./configure` is a probe
-/// suite, and every entry decides whether a codec is compiled in.
-fn layer_packages(userspace: &UserspacePins) -> Vec<&'static str> {
-    let mut packages: Vec<&'static str> = FFMPEG_DEPS.to_vec();
-    packages.extend(userspace_layer_packages(userspace));
+/// suite, and every entry decides whether a codec is compiled in. [`crate::shell`] reads
+/// it too, so an interactive session lands in the root this stage compiles in rather
+/// than one that resembles it.
+///
+/// `nonfree` is the build's licence flavour, and it moves this set in step with the
+/// configure flags: the two flavours differ in what they ask `./configure` for *and* in
+/// what is present for it to find, which is what makes them different builds rather
+/// than the same build described differently.
+pub fn layer_packages(trees: &[UserspaceTree], nonfree: bool) -> Vec<String> {
+    let mut packages: Vec<String> = FFMPEG_DEPS.iter().map(|p| (*p).to_string()).collect();
+    if nonfree {
+        packages.extend(NONFREE_DEPS.iter().map(|p| (*p).to_string()));
+    }
+    packages.extend(userspace_layer_packages(trees));
     packages
 }
 
-/// The runtime packages the produced `.deb` must depend on — one per userspace tree the
-/// SoC declares, the libraries ffmpeg links against from this build's own output.
-fn required_runtime_depends(userspace: &UserspacePins) -> Vec<&'static str> {
-    let mut packages = Vec::new();
-    if userspace.mpp.is_some() {
-        packages.push("librockchip-mpp1");
-    }
-    if userspace.librga.is_some() {
-        packages.push("librga2");
-    }
-    packages
+/// The runtime packages the produced `.deb` must depend on — the runtime library of
+/// each tree this build links from its own output, per [`linked_userspace`].
+///
+/// The *first* entry of each linked tree's `links`, which is that tree's runtime library
+/// (the `-dev` follows it). It is what was linked, not what was pinned: on a SoC with
+/// librga and no MPP the binary carries no librga soname, so requiring `librga2` here
+/// would reject an ffmpeg that is correct for that SoC.
+fn required_runtime_depends(trees: &[UserspaceTree]) -> Vec<&str> {
+    linked_userspace(trees)
+        .into_iter()
+        .filter_map(|t| t.links.first().map(String::as_str))
+        .collect()
 }
 
 /// Refuse a `depends` that omits a userspace library this build linked against.
@@ -179,7 +247,7 @@ fn required_runtime_depends(userspace: &UserspacePins) -> Vec<&'static str> {
 /// So the resolved text is checked rather than the run's status. This is the exact string
 /// [`control_text`] writes as `Depends:`, checked before the `.deb` is built, so a
 /// dropped dependency stops the stage instead of shipping.
-fn assert_userspace_depends(depends: &str, userspace: &UserspacePins) -> Result<(), EngineError> {
+fn assert_userspace_depends(depends: &str, trees: &[UserspaceTree]) -> Result<(), EngineError> {
     // Field-split rather than substring-match: `librga2` must not be satisfied by
     // `librga2-dev`, and a version relation (`librga2 (>= 1.2)`) is the package plus a
     // constraint, so the name is the first token of a comma-separated field.
@@ -187,7 +255,7 @@ fn assert_userspace_depends(depends: &str, userspace: &UserspacePins) -> Result<
         .split(',')
         .filter_map(|d| d.split_whitespace().next())
         .collect();
-    let missing: Vec<&str> = required_runtime_depends(userspace)
+    let missing: Vec<&str> = required_runtime_depends(trees)
         .into_iter()
         .filter(|want| !named.contains(want))
         .collect();
@@ -225,10 +293,14 @@ fn assert_userspace_depends(depends: &str, userspace: &UserspacePins) -> Result<
 /// `Depends`, and nothing else: the GPU driver that actually executes the work is an
 /// ICD loaded at runtime, is not a dependency of anything here, and is opted into per
 /// image by the `vulkan` rootfs feature.
+///
+/// This set is redistributable: `--enable-gpl` and `--enable-version3` admit only
+/// libraries whose licences combine with the GPL, so the binary it produces may be
+/// passed on. The flags that forfeit that are [`NONFREE_CONFIGURE_FLAGS`], and they
+/// are added per build rather than kept here.
 const BASE_CONFIGURE_FLAGS: &[&str] = &[
     "--enable-gpl",
     "--enable-version3",
-    "--enable-nonfree",
     "--enable-shared",
     "--disable-static",
     "--enable-libdrm",
@@ -236,7 +308,6 @@ const BASE_CONFIGURE_FLAGS: &[&str] = &[
     "--enable-v4l2-request",
     "--enable-libx264",
     "--enable-libx265",
-    "--enable-libfdk-aac",
     "--enable-libass",
     "--enable-libfreetype",
     "--enable-openssl",
@@ -244,6 +315,21 @@ const BASE_CONFIGURE_FLAGS: &[&str] = &[
     "--enable-libplacebo",
     "--enable-libshaderc",
 ];
+
+/// The `./configure` flags that make the produced binary undistributable, added only
+/// for a build whose selection asked for them
+/// ([`ResolvedImage::ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree)).
+///
+/// The two are one flag, not two: `--enable-nonfree` is the licence gate that admits
+/// encoders whose terms cannot be combined with the GPL, and FFmpeg's own
+/// `./configure` *rejects* `--enable-libfdk-aac` against `--enable-gpl` without it. So
+/// they are added together and removed together, and a build carrying one and not the
+/// other does not configure.
+///
+/// FDK-AAC is today's only member of that class here. The set is named for the gate
+/// rather than for the library so adding a second one is an entry in this list, not a
+/// second axis.
+const NONFREE_CONFIGURE_FLAGS: &[&str] = &["--enable-nonfree", "--enable-libfdk-aac"];
 
 /// The linker flag that bakes the install `libdir` into every object this stage
 /// builds, so each finds its siblings without help from the environment.
@@ -276,18 +362,25 @@ fn rpath_ldflag() -> String {
 /// rejects the pair — so librga alone yields no rkrga. On such a SoC librga is still
 /// built and shipped for programs that speak its API directly; it just is not an
 /// ffmpeg filter.
-fn configure_flags(userspace: &UserspacePins) -> Vec<String> {
+///
+/// `nonfree` is the build's licence flavour
+/// ([`ResolvedImage::ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree)):
+/// it appends [`NONFREE_CONFIGURE_FLAGS`] and is the one input here that is a choice
+/// rather than a consequence of the hardware.
+fn configure_flags(trees: &[UserspaceTree], nonfree: bool) -> Vec<String> {
     let mut flags: Vec<String> = BASE_CONFIGURE_FLAGS
         .iter()
         .map(|s| (*s).to_string())
         .collect();
-    flags.push(rpath_ldflag());
-    if userspace.mpp.is_some() {
-        flags.push("--enable-rkmpp".to_string());
-        if userspace.librga.is_some() {
-            flags.push("--enable-rkrga".to_string());
-        }
+    if nonfree {
+        flags.extend(NONFREE_CONFIGURE_FLAGS.iter().map(|s| (*s).to_string()));
     }
+    flags.push(rpath_ldflag());
+    flags.extend(
+        linked_userspace(trees)
+            .into_iter()
+            .filter_map(|t| t.ffmpeg_flag.clone()),
+    );
     flags
 }
 
@@ -302,14 +395,24 @@ pub struct FfmpegOptions<'a> {
     /// Directory holding the userspace `.deb`s ffmpeg build-depends on — the output
     /// dir of a prior [`userspace`](crate::build::userspace) run.
     pub userspace_debs: &'a Path,
-    /// Whether the userspace stage of this build also built Mali.
+    /// Build FFmpeg under `--enable-nonfree` — the resolution's
+    /// [`ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree), passed through
+    /// rather than re-derived so the stage cannot disagree with what was resolved.
     ///
-    /// Nothing here compiles Mali, and ffmpeg does not link it. It is carried because
-    /// the flag decides what the *userspace* stage layered over the shared sandbox base
+    /// It is not in the lock because it is not a source pin: it is an axis of the
+    /// build point, resolved from the selected features exactly like the feature list
+    /// itself, and the provenance manifest records it there. `true` produces a `.deb`
+    /// that may not be redistributed.
+    pub nonfree: bool,
+    /// The userspace trees this build compiles, as the SoC declares them and resolution
+    /// narrowed them.
+    ///
+    /// The whole set, not only the ones ffmpeg links: a tree ffmpeg ignores still
+    /// decides what the *userspace* stage layered over the shared sandbox base
     /// ([`layer_packages`](crate::build::userspace::layer_packages)), and this stage's
-    /// key folds the userspace packages' output signatures — so recomputing them here
-    /// with a different answer would name `.deb`s that were never built.
-    pub build_libmali: bool,
+    /// key folds those packages' output signatures — so recomputing them here from a
+    /// smaller set would name `.deb`s that were never built.
+    pub trees: &'a [UserspaceTree],
     /// Scratch directory; the ffmpeg tree, `pkg-stage`, and the built `.deb` live
     /// under `<work>/ffmpeg/`.
     pub work_dir: &'a Path,
@@ -344,8 +447,8 @@ pub fn build_ffmpeg(
     sink: &dyn EventSink,
 ) -> Result<FfmpegArtifacts, EngineError> {
     let step = Step::start(sink, "ffmpeg");
-    let stage_root = opts.work_dir.join("ffmpeg");
-    let tree = stage_root.join("build");
+    let stage_root = stage_dir(opts.work_dir);
+    let tree = tree_dir(opts.work_dir);
 
     // ffmpeg build-depends on the userspace debs, so a media-accel build always
     // carries both pin sets; the CLI schedules this stage only then. Reaching it
@@ -354,10 +457,10 @@ pub fn build_ffmpeg(
         .ffmpeg
         .as_ref()
         .ok_or(EngineError::MissingMediaAccelPins { stage: "ffmpeg" })?;
-    let userspace = lock
-        .userspace
-        .as_ref()
-        .ok_or(EngineError::MissingMediaAccelPins { stage: "ffmpeg" })?;
+    if lock.userspace.is_empty() {
+        return Err(EngineError::MissingMediaAccelPins { stage: "ffmpeg" });
+    }
+    let userspace = &lock.userspace;
 
     // The applied patch series identities for the signatures: ffmpeg's own tree
     // series, plus — for the userspace-dependency fold — the `userspace` scope
@@ -380,15 +483,18 @@ pub fn build_ffmpeg(
         lock,
         ffmpeg,
         userspace,
-        arch,
-        &env.sandbox_id,
-        opts.build_libmali,
-        ffmpeg_patches,
-        us_patches,
+        &OutputKeyInputs {
+            arch,
+            sandbox_id: &env.sandbox_id,
+            trees: opts.trees,
+            nonfree: opts.nonfree,
+            patches: ffmpeg_patches,
+            us_patches,
+        },
     );
     if let Some([deb]) = build::restore_stage_outputs(
         opts.store,
-        "ffmpeg",
+        NODE,
         &out_man.signature(),
         opts.out_dir,
         &["deb"],
@@ -403,7 +509,7 @@ pub fn build_ffmpeg(
 
     // Fail fast on the build-time dependency (the userspace `.deb`s) before the
     // expensive source fetch, so a forgotten userspace stage errors immediately.
-    let debs = required_userspace_debs(opts.userspace_debs, userspace)?;
+    let debs = required_userspace_debs(opts.userspace_debs, opts.trees)?;
     // The ffmpeg node runs only for a media-accel image build, which resolves a suite;
     // the pool and the layer are both stamped with it.
     let suite = lock
@@ -436,7 +542,8 @@ pub fn build_ffmpeg(
     let source_date_epoch = git::commit_epoch(&tree, &ffmpeg.base.commit).ok();
     let pool_dir = stage_root.join("build-pool");
     let pool = LocalDistsRepo::assemble(&pool_dir, &debs, suite, arch, source_date_epoch, &step)?;
-    let packages = layer_packages(userspace);
+    let packages = layer_packages(opts.trees, opts.nonfree);
+    let packages: Vec<&str> = packages.iter().map(String::as_str).collect();
     let root = sandbox.build_root(
         &BuildRootSpec {
             packages: &packages,
@@ -463,7 +570,7 @@ pub fn build_ffmpeg(
         &tree,
         &binds,
         &build_env,
-        &configure_flags(userspace),
+        &configure_flags(opts.trees, opts.nonfree),
         &step,
     )?;
     step.progress(55);
@@ -492,7 +599,7 @@ pub fn build_ffmpeg(
     // A missing `shlibs` entry does not fail `dpkg-shlibdeps`; it silently drops the
     // dependency. So the run's exit status proves nothing about the one thing the pool
     // exists to deliver, and the resolved text is checked instead.
-    assert_userspace_depends(&depends, userspace)?;
+    assert_userspace_depends(&depends, opts.trees)?;
     step.progress(90);
 
     let version = deb_version(&ffmpeg.base.reference, &ffmpeg.base.commit);
@@ -508,7 +615,7 @@ pub fn build_ffmpeg(
     // Store the deb under the output signature.
     build::store_stage_outputs(
         opts.store,
-        "ffmpeg",
+        NODE,
         &out_man.signature(),
         &[("deb", deb.as_path())],
         &step,
@@ -539,17 +646,55 @@ pub fn build_ffmpeg(
 /// deb bytes) keeps the key computable without the userspace `.deb`s present.
 /// Public so `why-rebuild` ([`crate::plan`]) asks the artifact store the same
 /// question this stage does, rather than reimplementing the key it is asking under.
-#[allow(clippy::too_many_arguments)]
+///
+/// The build-shaped half of the ffmpeg output key: everything that decides the produced
+/// `.deb` and is not already in the lock.
+///
+/// A struct rather than six positional arguments, for the reason
+/// [`rootcache::CacheKeyInputs`](crate::rootcache::CacheKeyInputs) gives: most of these
+/// are `&str`- or `bool`-shaped, so a swapped pair would silently change every key
+/// rather than fail to compile — and a wrong key here restores a deb built from
+/// something else.
+#[derive(Clone, Copy)]
+pub struct OutputKeyInputs<'a> {
+    /// The Debian architecture the deb is built for.
+    pub arch: &'a str,
+    /// The sandbox instance that compiles it: which mirror its userland came from, and
+    /// which `qemu-user` runs its compiler.
+    pub sandbox_id: &'a str,
+    /// The userspace trees this build compiles, as the SoC declares them and resolution
+    /// narrowed them. They decide the configure flags, the layered build-deps and the
+    /// folded dependency signatures at once, so the key carries the set rather than a
+    /// flag per tree.
+    pub trees: &'a [UserspaceTree],
+    /// The licence flavour — `--enable-nonfree`. It moves both folded inputs at once
+    /// (the ordered `configure_flags` and the `build_deps` set), so the key separates
+    /// the two flavours without a term of its own.
+    pub nonfree: bool,
+    /// The ffmpeg patch series' identity.
+    pub patches: SeriesIdentity<'a>,
+    /// The userspace patch series' identity, folded through MPP's dep signature.
+    pub us_patches: SeriesIdentity<'a>,
+}
+
+/// `nonfree` is the build's licence flavour, and it is why the two flavours of one
+/// recipe never share a cached deb: it moves both folded inputs at once — the ordered
+/// `configure_flags` and the `build_deps` set — so the key separates them without a
+/// term of its own.
 pub fn output_manifest(
     lock: &Lock,
     ffmpeg: &FfmpegPins,
-    userspace: &UserspacePins,
-    arch: &str,
-    sandbox_id: &str,
-    build_libmali: bool,
-    patches: SeriesIdentity,
-    us_patches: SeriesIdentity,
+    userspace: &[UserspacePin],
+    key: &OutputKeyInputs,
 ) -> crate::signature::SignatureManifest {
+    let &OutputKeyInputs {
+        arch,
+        sandbox_id,
+        trees,
+        nonfree,
+        patches,
+        us_patches,
+    } = key;
     // The ffmpeg node runs only for a media-accel image build, which resolves a suite.
     let suite = lock
         .rootfs
@@ -558,11 +703,11 @@ pub fn output_manifest(
         .suite
         .as_str();
     let tree_sig = clone_manifest(ffmpeg, lock.patches.as_ref(), patches).signature();
-    let mpp_inputs = crate::build::userspace::PatchInputs {
+    let us_inputs = crate::build::userspace::PatchInputs {
         pin: lock.patches.as_ref(),
         patches: us_patches,
     };
-    let flags = configure_flags(userspace);
+    let flags = configure_flags(trees, nonfree);
     let mut b = crate::signature::SignatureBuilder::new("ffmpeg:out", OUTPUT_STAGE_VERSION);
     b.fold_dep(&tree_sig)
         .fold_ordered("configure_flags", &flags)
@@ -575,35 +720,25 @@ pub fn output_manifest(
         // What was layered over that sandbox, from the same function that stages it.
         // `./configure` is a probe suite, so every entry decides whether a codec is
         // compiled in.
-        .fold_set("build_deps", &layer_packages(userspace))
+        .fold_set("build_deps", &layer_packages(trees, nonfree))
         .fold_scalar("base.reference", &ffmpeg.base.reference)
         .fold_scalar("pkg_name", PKG_NAME);
     // Fold a dependency only for a tree this build has. Folding the absent ones as
     // empty would make two SoCs with different hardware hash alike; omitting them
     // keeps the signature a statement about what was actually linked. `flags` already
     // records *which* trees those were, so the two cannot disagree.
-    if let Some(mpp) = &userspace.mpp {
+    for tree in linked_userspace(trees) {
+        let Some(pin) = userspace.iter().find(|p| p.name == tree.name) else {
+            continue;
+        };
         let dep = crate::build::userspace::output_manifest_for(
-            "mpp",
-            &mpp.commit,
+            &tree.name,
+            &pin.commit,
             suite,
             arch,
             sandbox_id,
-            build_libmali,
-            Some(&mpp_inputs),
-        )
-        .signature();
-        b.fold_dep(&dep);
-    }
-    if let Some(rga) = &userspace.librga {
-        let dep = crate::build::userspace::output_manifest_for(
-            "librga",
-            &rga.commit,
-            suite,
-            arch,
-            sandbox_id,
-            build_libmali,
-            None,
+            trees,
+            crate::build::userspace::receives_userspace_patches(tree).then_some(&us_inputs),
         )
         .signature();
         b.fold_dep(&dep);
@@ -695,6 +830,7 @@ fn configure(
         env,
         argv: &argv,
         context: "ffmpeg ./configure",
+        probe: None,
     };
     root.run(&spec, step)
 }
@@ -706,7 +842,7 @@ fn configure(
 ///
 /// This is the build's one parallel command in a freshly mounted overlay, and the only
 /// place a header has ever gone missing that was not, so it runs under
-/// [`probe::wrap`](crate::build::probe::wrap) — free on success, and the difference
+/// [`the lookup probe`](crate::build::probe) — free on success, and the difference
 /// between a transient and a durably wrong mount when it is not.
 fn compile(
     root: &BuildRoot,
@@ -718,13 +854,13 @@ fn compile(
     step: &Step,
 ) -> Result<(), EngineError> {
     let make = vec!["make".to_string(), format!("-j{}", env.jobs())];
-    let argv = probe::wrap(&make, report);
     let spec = SandboxRun {
         work: tree,
         binds,
         env: run_env,
-        argv: &argv,
+        argv: &make,
         context: "ffmpeg make",
+        probe: Some(report),
     };
     root.run(&spec, step)
 }
@@ -749,6 +885,7 @@ fn install_to_stage(
         env: &[],
         argv: &argv,
         context: "ffmpeg make install",
+        probe: None,
     };
     root.run(&spec, step)
 }
@@ -785,6 +922,7 @@ fn package_deb(
         env: build_env,
         argv: &argv,
         context: "dpkg-deb --build ffmpeg-rk",
+        probe: None,
     };
     root.run(&spec, step)
 }
@@ -792,11 +930,11 @@ fn package_deb(
 /// Select the userspace `.deb`s ffmpeg build-depends on (highest version each)
 /// from `dir`, in install order, erroring if the dir or any package is absent —
 /// which means the userspace stage was not run first.
-fn required_userspace_debs(
+pub(crate) fn required_userspace_debs(
     dir: &Path,
-    userspace: &UserspacePins,
+    trees: &[UserspaceTree],
 ) -> Result<Vec<PathBuf>, EngineError> {
-    let prefixes = userspace_dep_prefixes(userspace);
+    let prefixes = userspace_dep_prefixes(trees);
     // No vendor userspace at all (a decode-only stack): nothing to install, and the
     // userspace stage may legitimately have produced no output dir.
     if prefixes.is_empty() {
@@ -811,7 +949,7 @@ fn required_userspace_debs(
     let names = deb_names(dir)?;
     let mut debs = Vec::new();
     for prefix in prefixes {
-        match pick_deb(&names, prefix) {
+        match pick_deb(&names, &prefix) {
             Some(name) => debs.push(dir.join(name)),
             None => {
                 return Err(EngineError::ArtifactMissing {
@@ -887,6 +1025,7 @@ fn resolve_depends(
         env: &[],
         argv: &argv,
         context: "dpkg-shlibdeps ffmpeg-rk",
+        probe: None,
     };
     root.run(&spec, step)?;
 
@@ -1145,69 +1284,212 @@ fn deb_version(reference: &str, commit: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A [`UserspacePin`] from a name and a [`GitPin`]-shaped fixture.
+    fn named_pin(name: &str, p: GitPin) -> UserspacePin {
+        UserspacePin {
+            name: name.into(),
+            source: p.source,
+            reference: p.reference,
+            commit: p.commit,
+        }
+    }
     use super::*;
     use boot2deb_core::lock::{
-        BlobsPin, FfmpegPins, GitPin, KernelPin, PatchesPin, RootfsPin, UbootPin, UserspacePins,
+        BlobsPin, FfmpegPins, GitPin, KernelPin, PatchesPin, RootfsPin, UbootPin,
     };
+    use boot2deb_core::model::UserspaceTree;
 
-    /// A pin set declaring every userspace tree — the RK3588-shaped stack.
-    fn all_trees() -> UserspacePins {
-        let git = |c: &str| {
-            Some(GitPin {
-                source: "s".into(),
-                reference: "r".into(),
-                commit: c.into(),
-            })
-        };
-        UserspacePins {
-            mpp: git("m"),
-            librga: git("r"),
-            libmali: git("l"),
+    /// A tree that ffmpeg links, with its runtime library and its `-dev`. The package
+    /// names are the shipped ones: several assertions below are about the *exact* names
+    /// the build root layers and the deb depends on.
+    fn tree(name: &str, lib: &str, dev: &str, flag: &str, requires: &[&str]) -> UserspaceTree {
+        UserspaceTree {
+            name: name.into(),
+            git: "s".into(),
+            git_ref: "r".into(),
+            debs: vec![lib.to_string(), dev.to_string()],
+            links: vec![lib.to_string(), dev.to_string()],
+            ffmpeg_flag: Some(flag.into()),
+            ffmpeg_requires: requires.iter().map(|r| (*r).to_string()).collect(),
+            patched: false,
+            optional: false,
+            build_deps: Vec::new(),
+            targets_filter: None,
         }
     }
 
-    /// A pin set with librga but no MPP and no libmali — the RK3576-shaped stack,
-    /// where decode is the kernel's own V4L2 path and the GPU runs on Mesa.
-    fn rga_only() -> UserspacePins {
-        UserspacePins {
-            mpp: None,
-            librga: Some(GitPin {
-                source: "s".into(),
-                reference: "r".into(),
-                commit: "r".into(),
-            }),
-            libmali: None,
-        }
+    /// Every userspace tree ffmpeg links — the RK3588-shaped stack.
+    fn all_trees() -> Vec<UserspaceTree> {
+        vec![
+            tree(
+                "mpp",
+                "librockchip-mpp1",
+                "librockchip-mpp-dev",
+                "--enable-rkmpp",
+                &[],
+            ),
+            tree(
+                "librga",
+                "librga2",
+                "librga-dev",
+                "--enable-rkrga",
+                &["mpp"],
+            ),
+        ]
     }
 
-    /// The base flags plus nothing: a SoC declaring no vendor userspace at all.
-    fn no_trees() -> UserspacePins {
-        UserspacePins {
-            mpp: None,
-            librga: None,
-            libmali: None,
-        }
+    /// librga but no MPP — the RK3576-shaped stack, where decode is the kernel's own
+    /// V4L2 path and the GPU runs on Mesa. Its `ffmpeg_requires` is unsatisfied, so
+    /// ffmpeg links neither.
+    fn rga_only() -> Vec<UserspaceTree> {
+        vec![tree(
+            "librga",
+            "librga2",
+            "librga-dev",
+            "--enable-rkrga",
+            &["mpp"],
+        )]
+    }
+
+    /// A SoC declaring no vendor userspace at all.
+    fn no_trees() -> Vec<UserspaceTree> {
+        Vec::new()
     }
 
     #[test]
     fn configure_flags_follow_the_socs_declared_trees() {
         // Everything declared: the full vendor pipeline.
-        let full = configure_flags(&all_trees());
+        let full = configure_flags(&all_trees(), false);
         assert!(full.contains(&"--enable-rkmpp".to_string()));
         assert!(full.contains(&"--enable-rkrga".to_string()));
 
         // librga without MPP yields *neither* rkmpp nor rkrga: ffmpeg's own configure
         // rejects rkrga without rkmpp, so asking for it would fail the build. librga is
         // still built and shipped — it just is not an ffmpeg filter.
-        let rga = configure_flags(&rga_only());
+        let rga = configure_flags(&rga_only(), false);
         assert!(!rga.contains(&"--enable-rkmpp".to_string()));
         assert!(!rga.contains(&"--enable-rkrga".to_string()));
 
         // v4l2-request is unconditional: it needs no vendor userspace, only the
         // kernel's stateless decoder, which is the whole point on a mainline SoC.
-        for flags in [&full, &rga, &configure_flags(&no_trees())] {
+        for flags in [&full, &rga, &configure_flags(&no_trees(), false)] {
             assert!(flags.contains(&"--enable-v4l2-request".to_string()));
         }
+    }
+
+    /// The default build is redistributable, and it takes an explicit ask to make one
+    /// that is not.
+    ///
+    /// This is the assertion the whole licence axis rests on: `--enable-nonfree`
+    /// forfeits the right to pass the binary on, so its absence from the default is
+    /// what every image boot2deb ships depends on. A regression here is silent — the
+    /// build succeeds and the binary works — which is why it is pinned rather than
+    /// left to the flag list being read correctly.
+    #[test]
+    fn the_default_flavour_is_free_and_the_nonfree_flags_move_together() {
+        let free = configure_flags(&all_trees(), false);
+        for flag in NONFREE_CONFIGURE_FLAGS {
+            assert!(
+                !free.contains(&(*flag).to_string()),
+                "the default build must not carry {flag}"
+            );
+        }
+        // What the free build *is*: GPL + version3, which admit only licences that
+        // combine for redistribution.
+        assert!(free.contains(&"--enable-gpl".to_string()));
+        assert!(free.contains(&"--enable-version3".to_string()));
+
+        // The opt-in adds the whole set and nothing else. Both halves matter:
+        // ffmpeg's configure rejects `--enable-libfdk-aac` against `--enable-gpl`
+        // without `--enable-nonfree`, so a flavour carrying one and not the other
+        // does not configure at all.
+        let nonfree = configure_flags(&all_trees(), true);
+        for flag in NONFREE_CONFIGURE_FLAGS {
+            assert!(nonfree.contains(&(*flag).to_string()));
+        }
+        assert_eq!(nonfree.len(), free.len() + NONFREE_CONFIGURE_FLAGS.len());
+
+        // The licence axis is orthogonal to the hardware one: flavouring a build must
+        // not disturb what the SoC's declared trees derive.
+        for trees in [all_trees(), rga_only(), no_trees()] {
+            let (free, nonfree) = (
+                configure_flags(&trees, false),
+                configure_flags(&trees, true),
+            );
+            for flag in ["--enable-rkmpp", "--enable-rkrga", "--enable-v4l2-request"] {
+                assert_eq!(
+                    free.contains(&flag.to_string()),
+                    nonfree.contains(&flag.to_string()),
+                    "{flag} must not depend on the licence flavour"
+                );
+            }
+        }
+    }
+
+    /// The flavour moves the configure flags and the build root's packages together.
+    ///
+    /// `./configure` is a probe suite, so these two are one decision: leaving the
+    /// nonfree encoder's headers in a free build's root would make its inputs describe
+    /// a binary it did not produce, and asking for the flag without them would fail the
+    /// probe. Asserted from the same constants both sides read.
+    #[test]
+    fn the_licence_flavour_moves_the_build_deps_with_the_flags() {
+        let free = layer_packages(&all_trees(), false);
+        let nonfree = layer_packages(&all_trees(), true);
+        for pkg in NONFREE_DEPS {
+            assert!(
+                !free.contains(&(*pkg).to_string()),
+                "the free build must not layer {pkg}"
+            );
+            assert!(nonfree.contains(&(*pkg).to_string()));
+        }
+        assert_eq!(nonfree.len(), free.len() + NONFREE_DEPS.len());
+        // The userspace half is untouched by the licence axis, as in the flags.
+        assert_eq!(
+            userspace_layer_packages(&all_trees()).len(),
+            free.len() - FFMPEG_DEPS.len()
+        );
+    }
+
+    #[test]
+    fn a_soc_with_rga_and_no_mpp_neither_layers_nor_requires_librga() {
+        // The three consumers of LinkedUserspace must agree with configure_flags: an
+        // ffmpeg built without --enable-rkrga carries no librga soname, so demanding
+        // `librga2` in its Depends rejects a correct build, and layering librga-dev
+        // puts headers in the root that no `./configure` probe reads.
+        let rga = rga_only();
+        assert!(!configure_flags(&rga, false).contains(&"--enable-rkrga".to_string()));
+        assert!(userspace_dep_prefixes(&rga).is_empty());
+        assert!(userspace_layer_packages(&rga).is_empty());
+        assert!(required_runtime_depends(&rga).is_empty());
+
+        // So shlibs resolving no userspace library at all is a pass, not the failure it
+        // is on a SoC that does link one.
+        let suite_only = "libc6 (>= 2.38), libdrm2 (>= 2.4.101)";
+        assert!(assert_userspace_depends(suite_only, &rga).is_ok());
+        assert!(assert_userspace_depends(suite_only, &all_trees()).is_err());
+    }
+
+    #[test]
+    fn a_soc_with_both_trees_links_layers_and_requires_both() {
+        let full = all_trees();
+        assert_eq!(
+            userspace_layer_packages(&full),
+            [
+                "librockchip-mpp1",
+                "librockchip-mpp-dev",
+                "librga2",
+                "librga-dev"
+            ]
+        );
+        assert_eq!(
+            required_runtime_depends(&full),
+            ["librockchip-mpp1", "librga2"]
+        );
+        assert!(
+            assert_userspace_depends("librockchip-mpp1 (>= 1.0), librga2 (>= 1.2)", &full).is_ok()
+        );
     }
 
     #[test]
@@ -1256,7 +1538,7 @@ mod tests {
         // suite's own FFmpeg, so a global search path would shadow it system-wide.
         let want = "--extra-ldflags=-Wl,-rpath,/opt/ffmpeg-rk/lib".to_string();
         for trees in [all_trees(), rga_only(), no_trees()] {
-            assert!(configure_flags(&trees).contains(&want));
+            assert!(configure_flags(&trees, false).contains(&want));
         }
         // The flag must name the same prefix the tree installs to, or the objects
         // would resolve against a directory the deb never ships.
@@ -1276,10 +1558,10 @@ mod tests {
                 "librga-dev_"
             ]
         );
-        assert_eq!(
-            userspace_dep_prefixes(&rga_only()),
-            vec!["librga2_", "librga-dev_"]
-        );
+        // librga without MPP is configured against nothing, so it build-depends on
+        // nothing: ffmpeg's configure rejects rkrga without rkmpp. See
+        // `a_soc_with_rga_and_no_mpp_neither_layers_nor_requires_librga`.
+        assert!(userspace_dep_prefixes(&rga_only()).is_empty());
         assert!(userspace_dep_prefixes(&no_trees()).is_empty());
     }
 
@@ -1301,12 +1583,9 @@ mod tests {
                 "librga-dev"
             ]
         );
-        assert_eq!(
-            userspace_layer_packages(&rga_only()),
-            vec!["librga2", "librga-dev"]
-        );
+        assert!(userspace_layer_packages(&rga_only()).is_empty());
         assert!(userspace_layer_packages(&no_trees()).is_empty());
-        // The set the layer installs is the set the old path installed by path, so the
+        // The build-root layer and the runtime `Depends` name the same trees, so the
         // two cannot disagree about what a build root holds.
         assert_eq!(
             userspace_layer_packages(&all_trees()).len(),
@@ -1317,7 +1596,7 @@ mod tests {
             required_runtime_depends(&all_trees()),
             vec!["librockchip-mpp1", "librga2"]
         );
-        assert_eq!(required_runtime_depends(&rga_only()), vec!["librga2"]);
+        assert!(required_runtime_depends(&rga_only()).is_empty());
         assert!(required_runtime_depends(&no_trees()).is_empty());
     }
 
@@ -1364,9 +1643,9 @@ mod tests {
         // A SoC that builds no vendor userspace requires none of it, so any Depends
         // satisfies the check — including one naming no userspace package at all.
         assert!(assert_userspace_depends("libc6 (>= 2.38)", &no_trees()).is_ok());
-        // And an RGA-only stack demands only librga2.
-        assert!(assert_userspace_depends("libc6, librga2", &rga_only()).is_ok());
-        assert!(assert_userspace_depends("libc6, librockchip-mpp1", &rga_only()).is_err());
+        // An RGA-only stack links neither, because rkrga needs rkmpp — so a Depends
+        // naming no userspace package is the correct outcome there, not a dropped one.
+        assert!(assert_userspace_depends("libc6", &rga_only()).is_ok());
     }
 
     #[test]
@@ -1405,11 +1684,11 @@ mod tests {
                 commit: "uc".into(),
             }),
             uboot_patches: None,
-            userspace: Some(UserspacePins {
-                mpp: Some(git("m")),
-                librga: Some(git("r")),
-                libmali: Some(git("l")),
-            }),
+            userspace: vec![
+                named_pin("mpp", git("m")),
+                named_pin("librga", git("r")),
+                named_pin("libmali", git("l")),
+            ],
             ffmpeg: Some(FfmpegPins {
                 base: git(base_commit),
                 rockchip: Some(git("rk")),
@@ -1486,16 +1765,19 @@ mod tests {
     fn output_manifest_covers_tree_arch_and_suite() {
         let sig = |lock: &Lock, arch: &str| {
             let ff = lock.ffmpeg.as_ref().unwrap();
-            let us = lock.userspace.as_ref().unwrap();
+            let us = &lock.userspace;
             output_manifest(
                 lock,
                 ff,
                 us,
-                arch,
-                SANDBOX,
-                false,
-                SeriesIdentity::Pinned,
-                SeriesIdentity::Pinned,
+                &OutputKeyInputs {
+                    arch,
+                    sandbox_id: SANDBOX,
+                    trees: &all_trees(),
+                    nonfree: false,
+                    patches: SeriesIdentity::Pinned,
+                    us_patches: SeriesIdentity::Pinned,
+                },
             )
             .signature
             .clone()
@@ -1520,12 +1802,15 @@ mod tests {
             output_manifest(
                 &lock,
                 lock.ffmpeg.as_ref().unwrap(),
-                lock.userspace.as_ref().unwrap(),
-                "arm64",
-                "https://snapshot.debian.org/archive/debian/20260628T083000Z/",
-                false,
-                SeriesIdentity::Pinned,
-                SeriesIdentity::Pinned,
+                &lock.userspace,
+                &OutputKeyInputs {
+                    arch: "arm64",
+                    sandbox_id: "https://snapshot.debian.org/archive/debian/20260628T083000Z/",
+                    trees: &all_trees(),
+                    nonfree: false,
+                    patches: SeriesIdentity::Pinned,
+                    us_patches: SeriesIdentity::Pinned,
+                },
             )
             .signature
         );
@@ -1536,15 +1821,51 @@ mod tests {
             output_manifest(
                 &dev_lock,
                 dev_lock.ffmpeg.as_ref().unwrap(),
-                dev_lock.userspace.as_ref().unwrap(),
-                "arm64",
-                SANDBOX,
-                false,
-                SeriesIdentity::Dev(&[]),
-                SeriesIdentity::Dev(&[]),
+                &dev_lock.userspace,
+                &OutputKeyInputs {
+                    arch: "arm64",
+                    sandbox_id: SANDBOX,
+                    trees: &all_trees(),
+                    nonfree: false,
+                    patches: SeriesIdentity::Dev(&[]),
+                    us_patches: SeriesIdentity::Dev(&[]),
+                },
             )
             .signature
         );
+    }
+
+    /// The two licence flavours of one recipe never share a cached `.deb`.
+    ///
+    /// They are the same source tree at the same pins built two ways, so nothing about
+    /// the *sources* separates them — only the configure surface and the build root do,
+    /// and both are folded. Without this a `+ffmpeg-nonfree` build would restore the
+    /// free deb from the artifact store (or the reverse, which is the dangerous
+    /// direction: an image that must not be redistributed shipped as one that may).
+    #[test]
+    fn the_two_licence_flavours_never_share_an_output_entry() {
+        let lock = lock_with("bc1", "pc1");
+        let sig = |nonfree| {
+            output_manifest(
+                &lock,
+                lock.ffmpeg.as_ref().unwrap(),
+                &lock.userspace,
+                &OutputKeyInputs {
+                    arch: "arm64",
+                    sandbox_id: SANDBOX,
+                    trees: &all_trees(),
+                    nonfree,
+                    patches: SeriesIdentity::Pinned,
+                    us_patches: SeriesIdentity::Pinned,
+                },
+            )
+            .signature
+            .clone()
+        };
+        assert_ne!(sig(false), sig(true));
+        // And each is stable, so the separation is the flavour and not noise.
+        assert_eq!(sig(false), sig(false));
+        assert_eq!(sig(true), sig(true));
     }
 
     #[test]
@@ -1553,16 +1874,19 @@ mod tests {
         // either userspace pin must invalidate the cached ffmpeg deb.
         let sig = |lock: &Lock| {
             let ff = lock.ffmpeg.as_ref().unwrap();
-            let us = lock.userspace.as_ref().unwrap();
+            let us = &lock.userspace;
             output_manifest(
                 lock,
                 ff,
                 us,
-                "arm64",
-                SANDBOX,
-                false,
-                SeriesIdentity::Pinned,
-                SeriesIdentity::Pinned,
+                &OutputKeyInputs {
+                    arch: "arm64",
+                    sandbox_id: SANDBOX,
+                    trees: &all_trees(),
+                    nonfree: false,
+                    patches: SeriesIdentity::Pinned,
+                    us_patches: SeriesIdentity::Pinned,
+                },
             )
             .signature
             .clone()
@@ -1572,22 +1896,18 @@ mod tests {
         let mut mpp_bump = lock_with("bc1", "pc1");
         mpp_bump
             .userspace
-            .as_mut()
-            .unwrap()
-            .mpp
-            .as_mut()
-            .unwrap()
+            .iter_mut()
+            .find(|p| p.name == "mpp")
+            .expect("the fixture pins mpp")
             .commit = "m2".into();
         assert_ne!(base, sig(&mpp_bump));
         // An RGA pin bump likewise splits it.
         let mut rga_bump = lock_with("bc1", "pc1");
         rga_bump
             .userspace
-            .as_mut()
-            .unwrap()
-            .librga
-            .as_mut()
-            .unwrap()
+            .iter_mut()
+            .find(|p| p.name == "librga")
+            .expect("the fixture pins librga")
             .commit = "r2".into();
         assert_ne!(base, sig(&rga_bump));
     }

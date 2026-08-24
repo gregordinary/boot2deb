@@ -19,6 +19,13 @@ between them is its own feature.
 
 `/opt/ffmpeg-rk/bin/ffmpeg`, never `/usr/bin/ffmpeg-rk`.
 
+For this field to be consulted at all, the `jellyfin` feature has to have cleared
+the `--ffmpeg=` argument Debian puts on the service's command line — Jellyfin
+takes the command-line path first and only falls back to `EncoderAppPath` when it
+is empty. That is `features/jellyfin`'s overlay, not this feature's, because the
+stock argument points at the bundled FFmpeg *that* feature declines to install.
+See its README.
+
 Jellyfin is never told where `ffprobe` is. It derives the path by replacing the
 last component of the ffmpeg path with `ffprobe`. From the prefix path that gives
 `/opt/ffmpeg-rk/bin/ffprobe`, which the `ffmpeg-rk` package ships. From the

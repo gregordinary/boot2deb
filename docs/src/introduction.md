@@ -6,7 +6,7 @@ Rust-native, typed, testable builder that resolves a build from layered TOML con
 axis — and drives the whole pipeline: kernel, u-boot, media-accel userspace, ffmpeg,
 the Debian rootfs, and a bootable disk image, all from a single committed lockfile.
 
-The image assembly is pure Rust: GPT partitioning, ext4 formatting, and `.xz`
+The image assembly is pure Rust: GPT partitioning, ext4 formatting, and `.xz` or `.gz`
 compression with no C dependencies and no `sudo`. The Debian bootstrap, every compile,
 and every `.deb` archiving run in rootless, in-process user-namespace roots, so an
 x86_64 host builds an arm64 image without root and without `fakeroot` at all.

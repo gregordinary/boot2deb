@@ -141,7 +141,14 @@ pub(crate) fn run(
         assembles_image: build.produces_image(),
     };
     let checks = boot2deb_engine::checks::tool_checks(&needs);
-    let anchors = trust_anchors(root, &build.apt_sources)?;
+    let anchors = trust_anchors(
+        root,
+        build
+            .image
+            .as_ref()
+            .map(|i| i.apt_sources.as_slice())
+            .unwrap_or(&[]),
+    )?;
     let blocking = report(&checks, &anchors, json, &mut doc)?;
 
     // Every check above is a probe of the host, and that is the whole list: a build

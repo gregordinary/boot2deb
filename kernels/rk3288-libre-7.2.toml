@@ -1,6 +1,6 @@
-# kernels/rk3288-libre-7.1.toml — GNU Linux-libre 7.1.y for RK3288 boards.
+# kernels/rk3288-libre-7.2.toml — GNU Linux-libre 7.2.y for RK3288 boards.
 #
-# The same kernel as rk3288-mainline-7.1 — same release, same defconfig, same
+# The same kernel as rk3288-mainline-7.2 — same release, same defconfig, same
 # fragments, same `rk3288-fixes` series — built from the deblobbed tree instead of
 # `linux-stable`. Everything that differs between the two is a property of the
 # source, which is what makes them comparable: if a board behaves differently on
@@ -36,8 +36,8 @@ flavor           = "mainline"
 # rides on the pin, not the transport. `update` resolves the tag once and writes
 # the commit into the lock, and every build after that fetches *that commit* by
 # sha and would fail if the server answered with anything else.
-source           = { git = "git://linux-libre.fsfla.org/releases.git", ref = "sources/v7.1.6-gnu" }
-track            = "7.1.y"                 # the lock pins the exact tag (update --kernel-ref)
+source           = { git = "git://linux-libre.fsfla.org/releases.git", ref = "sources/v7.2-gnu" }
+track            = "7.2.y"                 # the lock pins the exact tag (update --kernel-ref)
 
 base_defconfig   = "multi_v7_defconfig"    # in-tree 32-bit multiplatform base; fragments merge onto it
 config_fragments = ["base/debian-armhf", "soc/rk3288"]

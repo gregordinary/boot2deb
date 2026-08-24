@@ -1,0 +1,43 @@
+# features/ffmpeg-nonfree.toml — build this image's FFmpeg under
+# `--enable-nonfree`, admitting the encoders whose licences cannot be combined
+# with the GPL for redistribution.
+#
+# It is a *licence flavour*, not a package set: it installs nothing, replaces
+# nothing, and changes no dependency of the image. What it changes is how the
+# FFmpeg provider already in the selection is configured — so it is composed
+# alongside a provider rather than instead of one, which is what
+# `requires_capability` below enforces. Selecting it on an image with no FFmpeg is
+# a resolution error, not a flag nobody reads.
+#
+# Both flavours are buildable and only one is shippable, which is why there is no
+# recipe that names this feature. Reach it as a variant of any recipe:
+#
+#     boot2deb build turing-rk1/media-accel-forky                 # free
+#     boot2deb build turing-rk1/media-accel-forky+ffmpeg-nonfree  # nonfree
+#
+# The two are separate builds all the way down — separate configure surfaces,
+# separate build roots, separate artifact-cache entries and separate locks — so
+# neither can be served from the other's cache. A recipe that both names this
+# feature and declares a `[support]` claim is rejected at resolution: a claim says
+# a configuration is fit to publish, and this one may not be published at all.
+description = "Build FFmpeg with --enable-nonfree (FDK-AAC); the result is not redistributable"
+
+# No packages, no overlay, no apt source. The whole of this feature is the flag it
+# sets on the build, declared in the `ffmpeg_nonfree` line at the foot of the file.
+
+# There has to be an FFmpeg to re-flavour. Named as a capability rather than as
+# `media-accel-rockchip` so this works unchanged against any provider — the V4L2
+# one, or a future VAAPI/NVENC sibling on another platform.
+requires_capability = ["ffmpeg"]
+
+caveats = [
+  "The resulting binary must not be distributed. `--enable-nonfree` admits encoders whose licence terms cannot be combined with the GPL for redistribution, so an image built with this feature may be built and used but not passed on — not published, not shipped on a device, not handed to someone else. The default build of every recipe here omits the flag and is redistributable.",
+  "Nothing on the hardware path depends on it. Audio is CPU work on these boards whichever encoder runs it: the RK35xx accelerators are video-only, so this changes no hardware behaviour and costs no VPU or GPU time either way.",
+  "FDK-AAC's advantages sit outside the range a media server transcodes in. It wins below roughly 96 kbps and in the HE-AAC profiles; FFmpeg's own native `aac` encoder covers the 128-384 kbps stereo range Jellyfin actually targets, and is what the default build uses.",
+]
+
+# The flag itself. It reaches `./configure` as `--enable-nonfree --enable-libfdk-aac`
+# — one decision, because FFmpeg's configure rejects the second without the first —
+# and it also adds `libfdk-aac-dev` to the ffmpeg stage's build root, since a probe
+# suite that cannot find the library compiles nothing against it.
+ffmpeg_nonfree = true

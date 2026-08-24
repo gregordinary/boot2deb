@@ -29,7 +29,9 @@
 //! from the mirror list [`snapshot`] resolves (the live mirror, plus a
 //! `snapshot.debian.org` mirror when a captured snapshot is activated), and its
 //! solved package manifest is verified against the committed reproducibility pin by
-//! [`manifest`]. Host preflight
+//! [`manifest`]. When reading a failed stage's captured output is not enough, [`shell`]
+//! stands that stage's root up again and hands the operator an interactive session in
+//! it. Host preflight
 //! for `doctor` — identity/cross status ([`preflight`]) plus tool-presence checks
 //! with remediation ([`checks`]) — is also here, over the one probe contract in
 //! [`hosttool`].
@@ -60,16 +62,20 @@ pub mod patchfetch;
 pub mod patchimport;
 pub mod pins;
 pub mod plan;
+pub mod press;
 pub mod repo;
 pub mod rootcache;
 pub mod rootfs;
 pub mod sandbox;
 pub mod secret;
+pub mod selftest;
+pub mod shell;
 pub mod signature;
 pub mod snapshot;
 pub mod sources;
 pub mod srcfetch;
 pub mod toolchain;
+pub mod tryboot;
 
 pub use bootstrap::DEFAULT_MIRROR;
 pub use error::EngineError;
@@ -129,15 +135,26 @@ pub(crate) mod test_support {
         )
     }
 
+    /// The recipe both fixtures below are the two halves of: the resolved build and
+    /// its committed pins have to describe one build point, or a test pairing them
+    /// asserts against a combination no build has.
+    const RK1_MEDIA_ACCEL: &str = "turing-rk1/media-accel-forky";
+
     /// The resolved `turing-rk1/media-accel-forky` build, for stage tests that need
     /// real device / offset / soc values *and* the media userspace + ffmpeg pins.
     pub(crate) fn rk1_build() -> ResolvedBuild {
-        resolve_recipe(
-            &repo_root(),
-            "turing-rk1/media-accel-forky",
-            &Overrides::default(),
-        )
-        .unwrap()
+        resolve_recipe(&repo_root(), RK1_MEDIA_ACCEL, &Overrides::default()).unwrap()
+    }
+
+    /// That recipe's **committed** lock, for tests that need a lock carrying every pin
+    /// table a media-accel build has — the kernel and patches pins, the userspace
+    /// sources, ffmpeg's base, and the rootfs suite.
+    ///
+    /// The shipped file rather than a fixture assembled here: a synthetic lock is a
+    /// second statement of what a lock looks like, and it drifts by staying valid while
+    /// the real ones change.
+    pub(crate) fn rk1_lock() -> boot2deb_core::lock::Lock {
+        repo_root().lock(RK1_MEDIA_ACCEL).unwrap()
     }
 }
 

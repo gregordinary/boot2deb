@@ -75,7 +75,7 @@ move it up instead.
    — the SoC's shared properties: device-tree directory, force-loaded modules, arch, and
    any SoC-wide firmware packages.
    - **Media-accel sources are optional and ride the feature.** Supply the
-     `[userspace.mpp]`, `[userspace.librga]`, `[userspace.libmali]`, `[ffmpeg.base]`, and
+     one `[[userspace]]` entry per vendor tree the part has, `[ffmpeg.base]`, and
      `[ffmpeg.rockchip]` stanzas here **only if** a board of this SoC will enable a
      `media-accel-*` feature (the feature compiles them into `.deb`s); copy the block from
      `socs/rk3588.toml`. A headless SoC that never transcodes omits them entirely. Selecting
@@ -123,8 +123,10 @@ move it up instead.
      — write `extends = "<other-device>"` and state only the deltas. It inherits that
      device's keys *and* its `overlay/` tree, so the parent board's driver tuning, units,
      and keymaps reach your image and any file of them can be overridden by shipping your
-     own copy at the same path. Do not hand-copy the other device's file: arrays replace
-     rather than append across the merge, so restate any list you extend, and see
+     own copy at the same path. Do not hand-copy the other device's file: most arrays
+     replace rather than append across the merge, so restate any list you extend — the
+     five that describe the board (`caveats`, `expect`, `nonfree_firmware_packages`,
+     `packages`, `exclude`) accumulate instead. See
      [A variant board extends another](../reference/config-model.md#a-variant-board-extends-another).
 5. **kmod** (`kmods/<name>.toml`) — only if the board carries hardware whose driver is in
    nobody's kernel tree. Run `boot2deb list-kmods` first: if a kmod for the chip already
@@ -276,8 +278,8 @@ supported_boot_methods  = ["rockchip-rkbin"]
 uboot_defconfig         = "my-board-rk3588_defconfig"    # research: must exist in u-boot
 kernel_dtb              = "rockchip/rk3588-my-board.dtb" # research: must exist in the kernel
 device_config_fragments = []                             # no board-specific kconfig deltas
-supported_kernels       = ["rk3588-mainline-7.1"]
-default_kernel          = "rk3588-mainline-7.1"
+supported_kernels       = ["rk3588-mainline-7.2"]
+default_kernel          = "rk3588-mainline-7.2"
 default_suite           = "forky"
 default_layout          = "combined"
 hostname                = "my-board"                     # defaults to the slug, which is already one
@@ -292,7 +294,7 @@ tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
 
 ```toml
 device   = "my-board"
-kernel   = "rk3588-mainline-7.1"
+kernel   = "rk3588-mainline-7.2"
 suite    = "forky"
 features = ["media-accel-rockchip"]   # or [] for a plain image
 layout   = "combined"

@@ -1,8 +1,8 @@
 # recipes/h96-max-m9/forky.toml — the buildable point for the H96 MAX M9 on
-# mainline 7.1 / Debian forky. Constraints only; the exact resolution is written
+# mainline 7.2 / Debian forky. Constraints only; the exact resolution is written
 # to the sibling .lock by `boot2deb update h96-max-m9/forky`.
 device     = "h96-max-m9"
-kernel     = "rk3576-mainline-7.1"
+kernel     = "rk3576-mainline-7.2"
 uboot_series = "rk3576-display"
 suite      = "forky"
 features   = []                # base image; add media-accel-v4l2 for the decode/RGA stack
@@ -10,23 +10,40 @@ layout     = "combined"
 image_size = "2G"
 
 # The device's NPU series and DT enable are in the base board, so this image is the
-# configuration the NPU results are taken on. The last pin that booted to a login was
-# v7.1.3 with the rk3576-npu series through 0011; three classes of delta separate this
-# one from it. The board description: `rknn_core_1` and `rknn_mmu_1` left at the dtsi's
-# `disabled` default (concurrent rocket jobs corrupt each other's output, so core 0
-# alone runs) — one fewer node to probe than the baseline, which enabled a core that
-# never bound — the removal of an i2c2 RTC that is not fitted, the removal of a serdes
-# PHY enable with no consumer, CPU cache nodes, and quieter Wi-Fi logging.
-# The rocket driver: 0012 and 0021-0022 choosing which block's completion retires a
-# job and when the wait for it starts, 0015-0017's submit uAPI, 0023's ranged cache
-# maintenance, and 0013-0014 plus 0018-0020 and 0024 hardening /dev/accel — all of it
-# reached only through the module's ioctls and completion poll, so none of it is on a
-# path boot depends on. The third is the kernel itself, v7.1.3 to v7.1.6. That spans
-# three stable point releases, but only the first two carry anything this board runs:
-# from v7.1.5 the rk3576 device trees, the rocket and rkvdec drivers, rockchip's
-# pmdomain, clk, SAI, iommu, mmc and PHY drivers are all unchanged, and the only
-# rockchip DRM changes are to DisplayPort bridges the board has no path to. Hence
+# configuration the NPU results are taken on. An image from this recipe at the v7.1.6
+# pin boots to a login, joins Wi-Fi and runs a desktop on the board; two deltas
+# separate this pin from that one, and both are in the board description rather than
+# on the boot path.
+#
+# `rknn_core_1` and `rknn_mmu_1` are left at the dtsi's `disabled` default, because
+# concurrent rocket jobs corrupt each other's output and core 0 alone runs — one
+# fewer node to probe than the image that booted, which enabled a core that never
+# bound.
+#
+# usb_drd0 runs at SuperSpeed on the usbdp PHY, carrying nothing beyond the SoC dtsi
+# to do it. That is measured, on the sibling media-accel recipe, which shares this
+# board description: 5 Gbps, ~154 MB/s over 92 GB of continuous reads, no link error.
+# A device that lands at 480 Mb/s there is a seating problem — see the `.dts`.
+#
+# What the move from v7.1.7 to v7.2 changes on this SoC's paths. v7.2 is a .0
+# release, so it carries no stable point release yet.
+#
+# The `rk3576-fixes` series crosses unchanged -- all six patches read the same on both
+# generations, so nothing in it was rebased. `rockchip-iommu` clears the AUTO_GATING
+# fetch-DTE time limit, which upstream reports as the cause of RGA3 hangs and of the
+# vendor kernel's VOP black screens; every accelerator here maps through that IOMMU.
+# `rkvdec` moves its H.264 and HEVC backends off local bitfield structs onto a shared
+# bitwriter -- a codegen fix aimed at clang on armhf and hexagon, writing the same
+# register payloads -- and this board's own read-cache patch (rk3576/104) sits beside
+# it unchanged, since it maps the "cache" bank by name. `rockchip_sai` takes a
+# `guard()` conversion for its spin locks, partly reverted in the same release; the
+# board's SAI routing patch (rk3576/103) applies over the result untouched. The
+# `rk3576.dtsi` changes are additions for other boards -- Khadas Edge 2L peripherals,
+# `pinctrl-names`, HDMI FRL enable GPIOs -- and none of them names this one.
+#
+# Mainline still has no Rockchip video *encoder*, so nothing changes there.
+#
 # `expected` until an image from this pin boots.
 [support]
 status = "expected"
-date   = "2026-08-06"
+date   = "2026-08-21"
