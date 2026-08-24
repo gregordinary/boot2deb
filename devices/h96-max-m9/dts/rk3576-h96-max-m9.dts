@@ -278,10 +278,14 @@
 	cpu-supply = <&vdd_cpu_big_s0>;
 };
 
-&combphy0_ps {
-	status = "okay";
-};
-
+/*
+ * Only combphy1_psu runs. The two naneng serdes PHYs each back a PCIe controller,
+ * a SATA port, and (for combphy1_psu alone) usb_drd1's SuperSpeed lane. This board
+ * brings up no PCIe and no SATA, so combphy0_ps has no consumer at all and stays
+ * disabled; combphy1_psu is enabled because usb_drd1_dwc3 names it as its
+ * "usb3-phy". That PHY logs `wait phy status ready timeout` on every boot and no
+ * device has ever trained at SuperSpeed on this board -- see the usb_drd1 note.
+ */
 &combphy1_psu {
 	status = "okay";
 };
@@ -429,7 +433,12 @@
 				};
 			};
 
+			/*
+			 * always-on because rocket cannot claim it: see the
+			 * &rknn_core_0 note below.
+			 */
 			vdd_npu_s0: dcdc-reg2 {
+				regulator-always-on;
 				regulator-boot-on;
 				regulator-min-microvolt = <550000>;
 				regulator-max-microvolt = <950000>;
@@ -676,21 +685,20 @@
 	};
 };
 
-&i2c2 {
-	status = "okay";
-
-	hym8563: rtc@51 {
-		compatible = "haoyu,hym8563";
-		reg = <0x51>;
-		clock-output-names = "hym8563";
-		interrupt-parent = <&gpio0>;
-		interrupts = <RK_PA0 IRQ_TYPE_LEVEL_LOW>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&rtc_int>;
-		wakeup-source;
-		#clock-cells = <0>;
-	};
-};
+/*
+ * i2c2 stays disabled: this board populates nothing on it. The EVB design puts a
+ * Haoyu HYM8563 RTC at 0x51 there, and the factory device tree carries the node,
+ * but the chip is absent -- an i2cdetect sweep of the bus NAKs every address in
+ * about 60 ms, which is a healthy bus reporting nothing home rather than a bus
+ * fault. Declaring it anyway costs a guaranteed `rtc-hym8563 2-0051: could not
+ * init device, -6` on every boot for a device that cannot answer.
+ *
+ * There is no RTC to substitute. The RK3576 has no on-chip RTC block (the TRM
+ * describes none), and mainline exposes no RTC on the RK806 PMIC -- `rtc-rk808`
+ * covers RK805/808/809/817/818 only, and the RK806 mfd cell list has no RTC cell.
+ * So the board keeps no wall-clock time across power cycles and depends on NTP;
+ * `/dev/rtc` does not exist. That is the hardware, not a gap in the config.
+ */
 
 &mdio0 {
 	rgmii_phy0: ethernet-phy@1 {
@@ -711,12 +719,6 @@
 	hdmi {
 		hdmi_frl_en: hdmi-frl-en {
 			rockchip,pins = <2 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>;
-		};
-	};
-
-	hym8563 {
-		rtc_int: rtc-int {
-			rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
 
@@ -778,6 +780,39 @@
 		mode-fastboot = <0x5242c309>;
 		mode-ums = <0x5242c30c>;
 	};
+};
+
+/*
+ * The RKNN NPU, driven by the mainline `rocket` DRM-accel driver. Both compute
+ * cores run. The SoC nodes come in disabled from the rk3576-npu patch series;
+ * a board enables them and wires the rail.
+ *
+ * The rail needs regulator-always-on, *in addition to* npu-supply. Mainline
+ * rocket references no regulator API, so npu-supply is inert and nothing claims
+ * vdd_npu_s0; the regulator core then disables it as unused at t~33 s, long
+ * after a clean probe at t~8 s. It presents as a runtime failure, not a boot
+ * failure.
+ *
+ * The power domains are not a board's business: both core nodes carry both
+ * RK3576_PD_NPU0 and RK3576_PD_NPU1 in the SoC dtsi, because rocket attaches
+ * them explicitly on every RK3576. See rk3576/npu/README.md in the patches repo.
+ */
+&rknn_core_0 {
+	npu-supply = <&vdd_npu_s0>;
+	status = "okay";
+};
+
+&rknn_mmu_0 {
+	status = "okay";
+};
+
+&rknn_core_1 {
+	npu-supply = <&vdd_npu_s0>;
+	status = "okay";
+};
+
+&rknn_mmu_1 {
+	status = "okay";
 };
 
 /*
@@ -951,6 +986,16 @@
 	status = "okay";
 };
 
+/*
+ * The USB 2.0 Type-A port. It keeps the SoC dtsi's SuperSpeed wiring -- the
+ * combphy1_psu "usb3-phy" -- so the controller registers a SuperSpeed root hub,
+ * but that PHY never comes ready (`2b060000.phy: wait phy status ready timeout`
+ * on every boot) and nothing has enumerated above high speed here. Whether the
+ * SS lane reaches a connector at all is unconfirmed; settle it by plugging a
+ * SuperSpeed device into each port and reading which bus it lands on. If this
+ * port is high-speed-only, drop the SS phy the way usb_drd0_dwc3 does above and
+ * disable combphy1_psu with it.
+ */
 &usb_drd1_dwc3 {
 	dr_mode = "host";
 	snps,dis_u2_susphy_quirk;

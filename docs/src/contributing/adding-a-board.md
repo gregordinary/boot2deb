@@ -103,7 +103,7 @@ move it up instead.
      the soc layer** and merged per field, so a board on the SoC's usual memory omits the
      block entirely; a board with different DRAM overrides just `tpl`.
    - under `depthcharge`: a `[depthcharge]` block naming the board profile and the
-     profiles the unit supports. No `uboot_defconfig`, no blobs — this board compiles no
+     series the unit supports. No `uboot_defconfig`, no blobs — this board compiles no
      bootloader, and resolution does not ask it to.
    - **`device_config_fragments` gotcha:** naming a fragment here makes its file
      *mandatory*. `device_config_fragments = ["device/my-board"]` requires
@@ -136,12 +136,12 @@ move it up instead.
      the *better* answer where it applies: `apt` keeps the board's kernel patched, which
      a kernel you compiled does not.
    - Otherwise write a `mainline` or `vendor` definition with its source refs, `.config`
-     fragments, and patch profile. Version-coupled, so a new kernel version is a new
-     file. A compiled kernel that applies no series writes `patch_profile = "none"` and
+     fragments, and patch series. Version-coupled, so a new kernel version is a new
+     file. A compiled kernel that applies no series writes `patch_series = "none"` and
      then never reads the `patches` repo.
 
    Note that a distro kernel and the compile-only device fields (`device_dts`,
-   `device_config_fragments`, `device_patch_profiles`, `device_kmods`) are mutually
+   `device_config_fragments`, `device_patch_series`, `device_kmods`) are mutually
    exclusive, and resolution says so: nothing would ever build the DTB, merge the
    fragments, apply the series, or give the modules a tree to build against.
 
@@ -170,8 +170,8 @@ Supporting assets:
   references.
 - **fragments** (`fragments/<name>.config`) — kernel `.config` fragments merged onto the
   base defconfig, referenced by name from a kernel or device.
-- **patch profile** — lives in the separate `patches` repo, referenced by the kernel; see
-  [Adding a patch](adding-a-patch.md). Omitted entirely by a `patch_profile = "none"`
+- **patch series** — lives in the separate `patches` repo, referenced by the kernel; see
+  [Adding a patch](adding-a-patch.md). Omitted entirely by a `patch_series = "none"`
   kernel.
 - **board device tree** — only when the board's `.dts` is not yet upstream; see
   [`device_dts`](#when-the-boards-device-tree-is-not-upstream).
@@ -211,7 +211,7 @@ resolve — it must be the DTB one of those sources builds — so the table abov
 applies to it. Iterate with `build <recipe> --stage dtb`, which rebuilds only the DTB.
 
 Keep `device_dts` for the *new* board file. An edit to an *existing* upstream `.dts` is a
-patch in the kernel's patch profile; a source that would overwrite an in-tree file is
+patch in the kernel's patch series; a source that would overwrite an in-tree file is
 refused rather than silently shadowing it.
 
 ## Bring it up

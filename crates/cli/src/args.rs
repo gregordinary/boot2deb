@@ -4,7 +4,7 @@
 
 use boot2deb_core::lock::SnapshotMode;
 use boot2deb_core::model::{BootMethod, Keymap, Layout, Overrides};
-use boot2deb_core::profile::Scope;
+use boot2deb_core::series::Scope;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -100,7 +100,7 @@ pub(crate) enum Command {
     /// Dry-run the locked patch series against source checkouts with
     /// `git am --3way`, hard-erroring on the first patch that does not apply.
     VerifyPatches {
-        /// Recipe whose lock names the kernel ref + patch profile.
+        /// Recipe whose lock names the kernel ref + patch series.
         recipe: String,
         #[command(flatten)]
         args: VerifyArgs,
@@ -192,6 +192,13 @@ pub(crate) enum StageArg {
 /// scratch/output locations, and the lock-independent image + cache knobs.
 #[derive(Args)]
 pub(crate) struct BuildArgs {
+    /// Rootfs feature to select, repeatable — the same selection `update --feature`
+    /// pinned. It names which lock to build from (`<recipe>+<feature>...`), it does
+    /// not re-resolve one: `update` must have written that variant's lock first, and
+    /// a selection with no lock is an error naming the `update` line to run. Passing
+    /// the reference directly (`build turing-rk1/forky+jellyfin`) is equivalent.
+    #[arg(long = "feature")]
+    pub(crate) features: Vec<String>,
     /// Which stage(s) to run.
     #[arg(long, value_enum, default_value_t = StageArg::All)]
     pub(crate) stage: StageArg,
@@ -419,6 +426,15 @@ pub(crate) struct NewDeviceArgs {
 /// pin when omitted) plus the blob/patches/manifest inputs.
 #[derive(Args)]
 pub(crate) struct UpdateArgs {
+    /// Rootfs feature to select, repeatable (`--feature jellyfin --feature
+    /// media-accel-rockchip`). Replaces the recipe's own feature list and pins the
+    /// result as a *variant* of the recipe: the lock, its solved package manifest,
+    /// and the build directory are all named `<recipe>+<feature>...`, so the recipe's
+    /// own lock is left alone and two selections never collide. Order is significant
+    /// — kernel fragments and patch series compose in selection order. A variant
+    /// carries no `[support]` claim; the claim belongs to the recipe.
+    #[arg(long = "feature")]
+    pub(crate) features: Vec<String>,
     /// Kernel ref to pin, resolved to a commit (e.g. v7.1.1). Optional once a lock
     /// exists: omitting it re-pins the *previous lock's* kernel ref, so a routine
     /// re-pin (e.g. after importing a patch) needs no kernel tag the user did not
@@ -447,7 +463,7 @@ pub(crate) struct UpdateArgs {
     pub(crate) ffmpeg_rockchip_ref: Option<String>,
     /// `patches` repo checkout whose HEAD pins the series (default: the config
     /// root's sibling `../patches`). `update` requires this local clone when the
-    /// kernel names a patch profile — the pin *is* its HEAD — unlike `build`, which
+    /// kernel names a patch series — the pin *is* its HEAD — unlike `build`, which
     /// auto-fetches the already-pinned commit and needs no checkout.
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
@@ -477,7 +493,7 @@ pub(crate) struct VerifyArgs {
     #[arg(long)]
     pub(crate) kernel_src: Option<String>,
     /// ffmpeg checkout to verify the ffmpeg series against. Optional: omit it and,
-    /// when the profile carries ffmpeg patches, the locked ffmpeg base is
+    /// when the series carries ffmpeg patches, the locked ffmpeg base is
     /// auto-fetched at its pin.
     #[arg(long)]
     pub(crate) ffmpeg_path: Option<PathBuf>,
@@ -487,7 +503,7 @@ pub(crate) struct VerifyArgs {
     #[arg(long)]
     pub(crate) ffmpeg_base_src: Option<String>,
     /// Userspace (MPP/RGA) checkout to verify the userspace series against. Optional:
-    /// omit it and, when the profile carries userspace patches, the locked MPP tree
+    /// omit it and, when the series carries userspace patches, the locked MPP tree
     /// is auto-fetched at its pin.
     #[arg(long)]
     pub(crate) userspace_path: Option<PathBuf>,
@@ -496,7 +512,7 @@ pub(crate) struct VerifyArgs {
     /// the fetch near-instant. Ignored with `--userspace-path`.
     #[arg(long)]
     pub(crate) mpp_src: Option<String>,
-    /// `patches` repo checkout the profile + patches are read from. Omit to use the
+    /// `patches` repo checkout the series + patches are read from. Omit to use the
     /// config root's sibling `../patches` if present, else auto-fetch the series at
     /// the lock's `patches.commit`.
     #[arg(long)]
@@ -509,6 +525,11 @@ pub(crate) struct VerifyArgs {
     /// the lock untouched — "would this series survive 7.2?" answered before
     /// adopting 7.2. Takes a kernel tag (`v7.2`, `v7.2-rc3`); pair it with
     /// `--kernel-path` or `--kernel-src` pointing at a tree that holds it.
+    ///
+    /// A version outside the series' declared `applies_to_kernel` is measured, not
+    /// refused: that is the case worth asking about, and gating on the envelope would
+    /// answer the question by assuming it. The run says so and reports what `git am`
+    /// actually does, so a clean result is the evidence for widening the envelope.
     ///
     /// A release candidate is matched against its base release here, so an `-rc`
     /// tree is answerable; the build path stays release-strict.
@@ -561,7 +582,7 @@ pub(crate) struct ConfigArgs {
 #[derive(Subcommand)]
 pub(crate) enum PatchAction {
     /// Fetch a patch (patchwork/mbox URL, a file, or `-` for stdin), normalize it to
-    /// canonical `git am`-ready mbox, slot it into a profile's scope at a position,
+    /// canonical `git am`-ready mbox, slot it into a series' scope at a position,
     /// and — with `--verify-tree` — dry-run `git am`-verify the resulting series.
     Import {
         /// Patch source: an `http(s)://` URL (a patchwork mbox), a local file path,
@@ -572,14 +593,14 @@ pub(crate) enum PatchAction {
     },
 }
 
-/// `patch import`'s flags: where the patch lands (profile, scope, position, name)
-/// and how it is verified before the profile edit is kept.
+/// `patch import`'s flags: where the patch lands (series, scope, position, name)
+/// and how it is verified before the series edit is kept.
 #[derive(Args)]
 pub(crate) struct PatchImportArgs {
-    /// Profile to slot the patch into (e.g. rk3588-accel) — names
-    /// `profiles/<name>/profile.toml` in the patches repo.
+    /// Series to slot the patch into (e.g. rk3588-accel) — names
+    /// `series/<name>/series.toml` in the patches repo.
     #[arg(long)]
-    pub(crate) profile: String,
+    pub(crate) series: String,
     /// Which source tree's ordered list to insert into.
     #[arg(long, value_parser = parse_scope)]
     pub(crate) scope: Scope,
@@ -611,7 +632,7 @@ pub(crate) struct PatchImportArgs {
     pub(crate) origin: Option<String>,
     /// `patches` repo checkout to write into (default: the config root's sibling
     /// `../patches`). `patch import` requires this local clone — it writes the patch
-    /// file and edits the profile there — unlike `build`, which auto-fetches pinned
+    /// file and edits the series there — unlike `build`, which auto-fetches pinned
     /// commits.
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
@@ -632,10 +653,10 @@ pub(crate) struct OverrideArgs {
     /// `supported_kernels`.
     #[arg(long)]
     pub(crate) kernel: Option<String>,
-    /// u-boot patch profile (e.g. `rk3576-display`); default: the recipe/device
-    /// `default_uboot_profile`. Must be one of the device's `supported_uboot_profiles`.
-    #[arg(long = "uboot-profile")]
-    pub(crate) uboot_profile: Option<String>,
+    /// u-boot patch series (e.g. `rk3576-display`); default: the recipe/device
+    /// `default_uboot_series`. Must be one of the device's `supported_uboot_series`.
+    #[arg(long = "uboot-series")]
+    pub(crate) uboot_series: Option<String>,
     /// Debian suite the image is built for (e.g. `forky`, `trixie`); default: the
     /// recipe/device `default_suite`. Re-pinning it for a build is `update`'s job —
     /// here it resolves a different build point.
@@ -693,7 +714,7 @@ impl From<OverrideArgs> for Overrides {
             // build is always an image.
             deliverable: Default::default(),
             kernel: a.kernel,
-            uboot_profile: a.uboot_profile,
+            uboot_series: a.uboot_series,
             suite: a.suite,
             layout: a.layout,
             boot_method: a.boot_method,

@@ -7,7 +7,7 @@ ref = "v2026.04"
 commit = "88dc2788777babfd6322fa655df549a019aa1e69"
 
 [uboot_patches]
-profiles = ["rk3576-util"]
+series = ["rk3576-util"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
 commit = "a86051e87f5c9bb0c065dd2a01200c8ce676ea82"

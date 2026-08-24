@@ -3,7 +3,7 @@
 # `distro-package` is the flavor for a board that needs no kernel of ours. Nothing is
 # compiled, patched, or configured: Debian builds `linux-image-armmp` and this
 # definition just names it. So there is no source ref, no defconfig, no fragment list,
-# and no patch profile — and the lock records no kernel commit, because the exact
+# and no patch series — and the lock records no kernel commit, because the exact
 # version and hash are pinned in the solved package manifest like every other package
 # in the image.
 #

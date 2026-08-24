@@ -12,7 +12,7 @@ use crate::config::{
 };
 use crate::render::print_event;
 use boot2deb_core::model::Overrides;
-use boot2deb_core::{load_profile, resolve_recipe, ConfigRoot};
+use boot2deb_core::{load_series, resolve_recipe, ConfigRoot};
 use boot2deb_engine::event::{Event, Step};
 use boot2deb_engine::{kconfig, pins, EventSink};
 use std::path::{Path, PathBuf};
@@ -60,7 +60,7 @@ pub(crate) fn run(
             let kernel_pin = lock.kernel.as_ref().ok_or_else(|| {
                 format!("the lock for '{recipe}' pins no kernel — re-run `boot2deb update`")
             })?;
-            // A kernel with no patch profile reads no `patches` checkout: the config
+            // A kernel with no patch series reads no `patches` checkout: the config
             // gate then runs against the pristine locked tree.
             let series = match lock.patches.as_ref() {
                 Some(pin) => {
@@ -72,16 +72,16 @@ pub(crate) fn run(
                         root,
                         &sink,
                     )?;
-                    // Load and envelope-gate every composed profile before fetching, so
-                    // a profile that does not cover the locked kernel fails fast; the
+                    // Load and envelope-gate every composed series before fetching, so
+                    // a series that does not cover the locked kernel fails fast; the
                     // config gate then compiles against the full composed series.
-                    let mut profiles = Vec::with_capacity(pin.profiles.len());
-                    for name in &pin.profiles {
-                        let profile = load_profile(&patches_root, name)?;
-                        profile.ensure_applies(name, &kernel_pin.reference)?;
-                        profiles.push((name.clone(), profile));
+                    let mut loaded = Vec::with_capacity(pin.series.len());
+                    for name in &pin.series {
+                        let series = load_series(&patches_root, name)?;
+                        series.ensure_applies(name, &kernel_pin.reference)?;
+                        loaded.push((name.clone(), series));
                     }
-                    Some((patches_root, profiles))
+                    Some((patches_root, loaded))
                 }
                 None => None,
             };
@@ -99,17 +99,17 @@ pub(crate) fn run(
                 &verify_trees_cache(root),
                 &sink,
             )?;
-            if let Some((patches_root, profiles)) = series {
+            if let Some((patches_root, series)) = series {
                 let target = format!("{} @ {}", kernel_pin.id, kernel_pin.reference);
                 let step = Step::start(&sink, "apply-patches");
                 // The config gate compiles against what this kernel actually gets, so
-                // every profile's kernel series is concatenated in order and narrowed
+                // every series' kernel series is concatenated in order and narrowed
                 // by the locked kernel exactly as a build narrows it — release-strict,
                 // since the lock pins a released tag.
                 let mut kernel_series: Vec<&str> = Vec::new();
-                for (name, profile) in &profiles {
-                    kernel_series.extend(profile.series_for(
-                        boot2deb_core::profile::Scope::Kernel,
+                for (name, series) in &series {
+                    kernel_series.extend(series.series_for(
+                        boot2deb_core::series::Scope::Kernel,
                         name,
                         &kernel_pin.reference,
                         boot2deb_core::RangeMatch::Release,

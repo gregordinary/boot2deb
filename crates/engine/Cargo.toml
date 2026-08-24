@@ -13,7 +13,7 @@ serde.workspace = true
 # diffs. Pure Rust, already in the tree via core.
 toml.workspace = true
 # Format-preserving TOML editing for `patch import`: slot a patch into a
-# profile's scope list without disturbing the file's comments/layout. Already in
+# series' scope list without disturbing the file's comments/layout. Already in
 # the tree as toml's own parser backend.
 toml_edit = "0.22"
 thiserror.workspace = true

@@ -128,7 +128,7 @@ pub enum Layout {
 #[serde(rename_all = "kebab-case")]
 pub enum KernelFlavor {
     /// Upstream/mainline (or `linux-stable`); compiled from source, patched by a
-    /// profile.
+    /// series.
     Mainline,
     /// Vendor / out-of-tree BSP tree; compiled from source, typically shipped
     /// pre-patched.
@@ -381,7 +381,7 @@ pub struct KmodFirmware {
 /// The graft is intentional: decode stays on the mainline V4L2 path from `base`,
 /// while only the encode + scale commits are taken from `rockchip` — `rockchip`'s
 /// own (vendor-MPP) decode path is *not* wanted, as mainline lacks its HAL. The
-/// graft is materialized as an ordered `git am` series in the profile's `ffmpeg`
+/// graft is materialized as an ordered `git am` series in the series' `ffmpeg`
 /// scope: one graft commit (the RKMPP hwcontext) needs a 3-way conflict
 /// resolution that a plain cherry-pick cannot reproduce, so the resolved commits
 /// are shipped as patches. `rockchip` records the provenance tree those patches
@@ -530,15 +530,15 @@ pub struct RockchipRkbinLayer {
     /// Default u-boot ref (a constraint; the exact commit is pinned in the lock).
     pub uboot_ref: String,
     /// Clone URL of the `patches` repo the u-boot series is fetched from and pinned
-    /// against, for a device that selects a real u-boot profile. The boot method owns
+    /// against, for a device that selects a real u-boot series. The boot method owns
     /// u-boot, so it owns u-boot's patch source — the counterpart of a kernel
     /// definition's [`patches_url`](CompiledKernelDef::patches_url). Required at
-    /// resolution only when a device on this method selects a profile other than
-    /// [`NO_PATCH_PROFILE`](crate::profile::NO_PATCH_PROFILE).
+    /// resolution only when a device on this method selects a series other than
+    /// [`NO_PATCH_SERIES`](crate::series::NO_PATCH_SERIES).
     #[serde(default)]
     pub patches_url: Option<String>,
     /// The `patches` ref the u-boot series is pinned at, defaulting to
-    /// [`DEFAULT_PATCHES_REF`] when a profile is
+    /// [`DEFAULT_PATCHES_REF`] when a series is
     /// selected and this is omitted.
     #[serde(default)]
     pub patches_ref: Option<String>,
@@ -910,20 +910,20 @@ pub struct DeviceLayer {
     /// Board-specific kconfig fragments (board deltas only; SoC/accel fragments
     /// belong to the kernel definition).
     pub device_config_fragments: Vec<String>,
-    /// Board-specific kernel patch profiles, applied *after* the kernel definition's
-    /// own [`patch_profiles`](CompiledKernelDef::patch_profiles) — the patch-series
+    /// Board-specific kernel patch series, applied *after* the kernel definition's
+    /// own [`patch_series`](CompiledKernelDef::patch_series) — the patch-series
     /// analogue of [`device_config_fragments`](Self::device_config_fragments). A driver
     /// only one board carries (an out-of-tree wireless part, say) lives here rather than
     /// on the SoC-wide kernel, so sibling boards on the same kernel never patch it in.
-    /// The profiles come from the kernel's `patches_url` checkout like the kernel's own;
+    /// The series come from the kernel's `patches_url` checkout like the kernel's own;
     /// a distro-package kernel compiles nothing, so naming any here is a typed error.
     /// Empty/absent for a board that adds no series of its own.
     #[serde(default)]
-    pub device_patch_profiles: Vec<String>,
+    pub device_patch_series: Vec<String>,
     /// Names of the out-of-tree kernel-module sets this board builds against its own
     /// kernel and stages into `/lib/modules/<kver>/updates/`, each resolved from
     /// `kmods/<name>.toml` ([`KmodLayer`]). Board opt-in like
-    /// [`device_patch_profiles`](Self::device_patch_profiles) — a driver only one board
+    /// [`device_patch_series`](Self::device_patch_series) — a driver only one board
     /// carries never rides its siblings — while the driver's own declaration is shared,
     /// so a second board with the same chip names it rather than copying it. A
     /// distro-package kernel compiles nothing, so naming any here is a typed error.
@@ -937,20 +937,20 @@ pub struct DeviceLayer {
     pub supported_kernels: Vec<String>,
     /// Kernel used when none is specified.
     pub default_kernel: String,
-    /// u-boot patch profiles valid for this board (e.g. `rk3576-display`,
+    /// u-boot patch series valid for this board (e.g. `rk3576-display`,
     /// `rk3576-util`, `rk3576-loader`) — the u-boot analogue of
     /// [`supported_kernels`](Self::supported_kernels). Selecting one applies its
     /// `uboot`-scope series over the compiled u-boot; the kernel tree is untouched, so
-    /// a u-boot variant costs a profile here, not a whole kernel definition. Empty on a
+    /// a u-boot variant costs a series here, not a whole kernel definition. Empty on a
     /// board whose u-boot ships pristine (the RK1) or whose firmware is not ours to
     /// build (a depthcharge Chromebook). Only meaningful under `rockchip-rkbin`.
     #[serde(default)]
-    pub supported_uboot_profiles: Vec<String>,
-    /// u-boot profile used when none is specified. Required when
-    /// [`supported_uboot_profiles`](Self::supported_uboot_profiles) is non-empty, and
+    pub supported_uboot_series: Vec<String>,
+    /// u-boot series used when none is specified. Required when
+    /// [`supported_uboot_series`](Self::supported_uboot_series) is non-empty, and
     /// must name one of them.
     #[serde(default)]
-    pub default_uboot_profile: Option<String>,
+    pub default_uboot_series: Option<String>,
     /// Debian suite used when none is specified (RK1: `forky`).
     pub default_suite: String,
     /// Image layout used when none is specified.
@@ -1252,7 +1252,7 @@ impl<'de> Deserialize<'de> for KernelSource {
 /// A kernel is a versioned entity that owns everything version-coupled, so bumping
 /// one means authoring a *new* definition rather than editing a device. What it
 /// owns depends on where it comes from: a compiled kernel owns a source ref, a base
-/// defconfig, config fragments, and a patch profile; a distribution kernel owns
+/// defconfig, config fragments, and a patch series; a distribution kernel owns
 /// only its package name, because Debian owns everything else.
 ///
 /// The variant is chosen by the file's `flavor` key: [`ConfigRoot::kernel`] reads it
@@ -1299,7 +1299,7 @@ pub struct DistroKernelDef {
 }
 
 /// A kernel compiled from source: it owns its source ref, base defconfig, config
-/// fragments, and patch profile.
+/// fragments, and patch series.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledKernelDef {
@@ -1316,22 +1316,22 @@ pub struct CompiledKernelDef {
     /// Version-coupled kconfig fragments (SoC drivers + accel enables), in merge
     /// order.
     pub config_fragments: Vec<String>,
-    /// Patch profiles in the `patches` repo, applied to the kernel tree in listed
+    /// Patch series in the `patches` repo, applied to the kernel tree in listed
     /// order; an empty list for a kernel that applies no series — a fully-upstream
-    /// SoC or a pre-patched vendor tree. Every profile a kernel names comes from the
+    /// SoC or a pre-patched vendor tree. Every series a kernel names comes from the
     /// one [`patches_url`](Self::patches_url) checkout at one pinned commit, so
-    /// composing them (e.g. a SoC-fix profile plus an out-of-tree driver profile) adds
-    /// profile *names*, not sources. A kernel with an empty list never reads the
-    /// `patches` repo; each named profile's declared kernel range is gated at build
-    /// time. Authored explicitly (`patch_profiles = []` states "no series" on purpose,
+    /// composing them (e.g. a SoC-fix series plus an out-of-tree driver series) adds
+    /// series *names*, not sources. A kernel with an empty list never reads the
+    /// `patches` repo; each named series' declared kernel range is gated at build
+    /// time. Authored explicitly (`patch_series = []` states "no series" on purpose,
     /// so it cannot be forgotten).
-    pub patch_profiles: Vec<String>,
-    /// Clone URL of the `patches` repo the profiles live in. Used to auto-fetch the
+    pub patch_series: Vec<String>,
+    /// Clone URL of the `patches` repo the series live in. Used to auto-fetch the
     /// series at the lock-pinned commit when no local checkout is present, and
     /// recorded in the lock so the pin names the repo its commit is meaningful in.
     ///
-    /// Required whenever [`patch_profiles`](Self::patch_profiles) is non-empty —
-    /// resolution rejects named profiles without one — and omitted only by a kernel
+    /// Required whenever [`patch_series`](Self::patch_series) is non-empty —
+    /// resolution rejects named series without one — and omitted only by a kernel
     /// that applies no series. An explicit `--patches-path`/`--patches-url` overrides
     /// it for a given run without changing what the lock records.
     #[serde(default)]
@@ -1501,10 +1501,10 @@ pub struct Recipe {
     /// [`Deliverable::Uboot`] recipe, which resolves no kernel.
     #[serde(default)]
     pub kernel: Option<String>,
-    /// u-boot patch profile override; `None` → device `default_uboot_profile`. Must
-    /// name one of the device's [`supported_uboot_profiles`](DeviceLayer::supported_uboot_profiles).
+    /// u-boot patch series override; `None` → device `default_uboot_series`. Must
+    /// name one of the device's [`supported_uboot_series`](DeviceLayer::supported_uboot_series).
     #[serde(default)]
-    pub uboot_profile: Option<String>,
+    pub uboot_series: Option<String>,
     /// Suite override; `None` → device `default_suite`. Ignored for a
     /// [`Deliverable::Uboot`] recipe, which resolves no suite.
     #[serde(default)]
@@ -1559,9 +1559,9 @@ pub struct Overrides {
     pub deliverable: Deliverable,
     /// Override the kernel definition id.
     pub kernel: Option<String>,
-    /// Override the u-boot patch profile (must be in the device's
-    /// `supported_uboot_profiles`).
-    pub uboot_profile: Option<String>,
+    /// Override the u-boot patch series (must be in the device's
+    /// `supported_uboot_series`).
+    pub uboot_series: Option<String>,
     /// Override the Debian suite.
     pub suite: Option<String>,
     /// Override the image layout.
@@ -1631,12 +1631,12 @@ impl ResolvedKernel {
         }
     }
 
-    /// The patch profiles this kernel applies, in order; empty when it applies no
+    /// The patch series this kernel applies, in order; empty when it applies no
     /// series — either an empty authored list, or a distro-package kernel, which never
     /// reads the `patches` repo at all.
-    pub fn patch_profiles(&self) -> &[String] {
+    pub fn patch_series(&self) -> &[String] {
         self.compiled()
-            .map(|k| k.patch_profiles.as_slice())
+            .map(|k| k.patch_series.as_slice())
             .unwrap_or(&[])
     }
 }
@@ -1655,16 +1655,16 @@ pub struct ResolvedCompiledKernel {
     pub track: Option<String>,
     /// In-tree base defconfig.
     pub base_defconfig: String,
-    /// Patch profile names, applied to the kernel tree in listed order; empty when
+    /// Patch series names, applied to the kernel tree in listed order; empty when
     /// this kernel applies no series. An empty list means the build never reads the
     /// `patches` repo: no checkout is resolved, no series is applied, and the lock
-    /// records no `[patches]` table. All profiles share the one `patches` checkout
+    /// records no `[patches]` table. All series share the one `patches` checkout
     /// ([`patches_url`](Self::patches_url)) at one pinned commit.
-    pub patch_profiles: Vec<String>,
+    pub patch_series: Vec<String>,
     /// Clone URL of the `patches` repo, for auto-fetching the series at the
     /// lock-pinned commit when no local checkout is present, and for the lock's
     /// `[patches] source`. Resolution guarantees this is `Some` exactly when
-    /// [`patch_profiles`](Self::patch_profiles) is non-empty: a series always names
+    /// [`patch_series`](Self::patch_series) is non-empty: a series always names
     /// the repo it comes from, and a kernel with no series has nothing to fetch.
     pub patches_url: Option<String>,
     /// The `patches` ref the lock pins the series at — the definition's
@@ -1767,14 +1767,14 @@ pub struct ResolvedRkbinBoot {
     pub uboot_source: String,
     /// u-boot ref constraint (from the boot method); pinned exactly in the lock.
     pub uboot_ref: String,
-    /// The selected u-boot patch profile, or `None` when u-boot ships pristine (the
-    /// authored [`NO_PATCH_PROFILE`](crate::profile::NO_PATCH_PROFILE) sentinel, or a
-    /// board that declares no profiles). `Some` is exactly when the u-boot node
+    /// The selected u-boot patch series, or `None` when u-boot ships pristine (the
+    /// authored [`NO_PATCH_SERIES`](crate::series::NO_PATCH_SERIES) sentinel, or a
+    /// board that declares no series). `Some` is exactly when the u-boot node
     /// applies a `uboot`-scope series and the lock records a `[uboot_patches]` table.
-    pub uboot_profile: Option<String>,
+    pub uboot_series: Option<String>,
     /// Clone URL of the `patches` repo the u-boot series comes from (from the boot
     /// method). Resolution guarantees this is `Some` exactly when
-    /// [`uboot_profile`](Self::uboot_profile) is `Some`.
+    /// [`uboot_series`](Self::uboot_series) is `Some`.
     pub uboot_patches_url: Option<String>,
     /// The `patches` ref the u-boot series is pinned at — the boot method's
     /// `patches_ref`, or [`DEFAULT_PATCHES_REF`].

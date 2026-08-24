@@ -1,9 +1,9 @@
-//! `patch import`: fetch a patch, normalize it, and slot it into a profile.
+//! `patch import`: fetch a patch, normalize it, and slot it into a series.
 //!
 //! Fetches from a URL/file/stdin, normalizes to canonical `git am`-ready mbox, writes
-//! it into the patches repo, inserts its label into the profile's scope at the
+//! it into the patches repo, inserts its label into the series' scope at the
 //! requested position, and — with `--verify-tree` — dry-run `git am`-verifies the
-//! resulting series. The file write and the profile edit are rolled back if the
+//! resulting series. The file write and the series edit are rolled back if the
 //! verify fails, so a rejected patch leaves the repo untouched.
 //!
 //! A successful import is deliberately inert: builds read the series at the lock's
@@ -16,8 +16,8 @@ use crate::args::PatchImportArgs;
 use crate::config::default_patches_checkout;
 use boot2deb_core::mbox::{self, ImportMeta};
 use boot2deb_core::model::Overrides;
-use boot2deb_core::profile::derive_prefix;
-use boot2deb_core::{load_profile, resolve_recipe, ConfigRoot};
+use boot2deb_core::series::derive_prefix;
+use boot2deb_core::{load_series, resolve_recipe, ConfigRoot};
 use boot2deb_engine::{patches, patchimport, EngineError};
 
 /// Run `patch import <source>`.
@@ -30,7 +30,7 @@ pub(crate) fn import(
         .patches_path
         .clone()
         .unwrap_or_else(|| default_patches_checkout(root));
-    // `patch import` writes into a local clone (the patch file + the profile
+    // `patch import` writes into a local clone (the patch file + the series
     // edit), so a missing checkout is a setup error with a remedy — unlike
     // `build`, which auto-fetches pinned commits and needs no checkout.
     if !patches_path.join(".git").exists() {
@@ -60,11 +60,11 @@ pub(crate) fn import(
     let normalized = mbox::normalize(&text, &meta)?;
 
     // The current scope list fixes the insertion index and the derived prefix.
-    let profile = load_profile(&patches_path, &args.profile)?;
+    let series = load_series(&patches_path, &args.series)?;
     // `patch import` reasons about the list as paths: it derives a filename prefix
     // that reads near its neighbours, and verifies the spliced series. A range on a
     // neighbour changes neither, and the imported entry is written bare (= always).
-    let scope_list: Vec<&str> = profile.scope(args.scope).iter().map(|e| e.path()).collect();
+    let scope_list: Vec<&str> = series.scope(args.scope).iter().map(|e| e.path()).collect();
     let index = insert_index(args.position, scope_list.len())
         .map_err(|e| format!("--position {e} (the {} scope)", args.scope.as_str()))?;
 
@@ -111,9 +111,9 @@ pub(crate) fn import(
         normalized.mbox.len()
     );
 
-    // Recipes whose kernel uses this profile — named in both the "verify it now" hint
+    // Recipes whose kernel uses this series — named in both the "verify it now" hint
     // (when the import is unverified) and the re-pin follow-up. Computed once.
-    let recipes = recipes_using_profile(root, &args.profile);
+    let recipes = recipes_using_series(root, &args.series);
 
     // Verify the resulting series (with the new patch spliced in at `index`) against
     // a source checkout, if one was supplied. A failure rolls back the written file.
@@ -121,7 +121,7 @@ pub(crate) fn import(
         Some(tree) => {
             let mut spliced = scope_list.clone();
             spliced.insert(index, label.as_str());
-            let target = format!("{} ({})", args.profile, tree.display());
+            let target = format!("{} ({})", args.series, tree.display());
             match patches::verify_tree(
                 &patches_path,
                 &spliced,
@@ -160,19 +160,18 @@ pub(crate) fn import(
         }
     }
 
-    // Slot the label into the profile manifest, preserving its comments/layout. If
+    // Slot the label into the series manifest, preserving its comments/layout. If
     // this fails, roll back the written patch so no partial import survives.
-    let profile_path = patches_path
-        .join("profiles")
-        .join(&args.profile)
-        .join("profile.toml");
-    if let Err(e) = patchimport::insert_into_profile(&profile_path, args.scope, index, &label) {
+    let series_path = patches_path
+        .join("series")
+        .join(format!("{}.toml", args.series));
+    if let Err(e) = patchimport::insert_into_series(&series_path, args.scope, index, &label) {
         let _ = std::fs::remove_file(&dest_path);
         return Err(e.into());
     }
     println!(
         "patch import: {}/{} now lists the patch at position {} of {}",
-        args.profile,
+        args.series,
         args.scope.as_str(),
         index + 1,
         scope_list.len() + 1
@@ -188,8 +187,8 @@ pub(crate) fn import(
     println!("  1. commit it:      git -C {patches} add -A && git -C {patches} commit");
     if recipes.is_empty() {
         println!(
-            "  2. re-pin locks:   boot2deb update <recipe>   (each recipe whose kernel uses profile '{}')",
-            args.profile
+            "  2. re-pin locks:   boot2deb update <recipe>   (each recipe whose kernel uses series '{}')",
+            args.series
         );
     } else {
         for (i, recipe) in recipes.iter().enumerate() {
@@ -223,11 +222,11 @@ fn insert_index(position: Option<usize>, len: usize) -> Result<usize, String> {
     }
 }
 
-/// Recipes whose resolved kernel uses patch profile `profile` — the locks a
+/// Recipes whose resolved kernel uses patch series `series` — the locks a
 /// `patch import` invalidates, named in its follow-up hint. Best-effort: a recipe
 /// that fails to resolve, or a cwd outside any config root, contributes nothing
 /// rather than failing the import (which itself needs only the patches repo).
-fn recipes_using_profile(root: &ConfigRoot, profile: &str) -> Vec<String> {
+fn recipes_using_series(root: &ConfigRoot, series: &str) -> Vec<String> {
     let Ok(names) = root.list_recipes() else {
         return Vec::new();
     };
@@ -238,7 +237,7 @@ fn recipes_using_profile(root: &ConfigRoot, profile: &str) -> Vec<String> {
                 build
                     .kernel
                     .as_ref()
-                    .map(|k| k.patch_profiles().iter().any(|p| p == profile))
+                    .map(|k| k.patch_series().iter().any(|p| p == series))
                     .unwrap_or(false)
             })
         })
@@ -266,13 +265,13 @@ mod tests {
     }
 
     #[test]
-    fn recipes_using_profile_finds_the_locks_an_import_invalidates() {
+    fn recipes_using_series_finds_the_locks_an_import_invalidates() {
         // Every shipped RK1 recipe — base, media-accel, and jellyfin — resolves to the
-        // rk3588-accel profile, because the patch profile lives on the shared kernel
+        // rk3588-accel series, because the patch series lives on the shared kernel
         // axis. A `patch import` into it names each recipe's update command; an unknown
-        // profile (or an unusable root) degrades to the generic hint.
+        // series (or an unusable root) degrades to the generic hint.
         let root = repo_root();
-        let recipes = recipes_using_profile(&root, "rk3588-accel");
+        let recipes = recipes_using_series(&root, "rk3588-accel");
         assert!(
             recipes.contains(&"turing-rk1/forky".to_string()),
             "{recipes:?}"
@@ -285,8 +284,8 @@ mod tests {
             recipes.contains(&"turing-rk1/jellyfin".to_string()),
             "{recipes:?}"
         );
-        assert!(recipes_using_profile(&root, "no-such-profile").is_empty());
+        assert!(recipes_using_series(&root, "no-such-series").is_empty());
         let empty = tempfile::tempdir().unwrap();
-        assert!(recipes_using_profile(&ConfigRoot::new(empty.path()), "rk3588-accel").is_empty());
+        assert!(recipes_using_series(&ConfigRoot::new(empty.path()), "rk3588-accel").is_empty());
     }
 }

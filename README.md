@@ -39,7 +39,7 @@ Two properties it is built around:
 | Board | SoC | Arch | Status |
 | --- | --- | --- | --- |
 | [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html) | RK3588 | arm64 | Boots; hardware video transcode validated |
-| [H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html) | RK3576 | arm64 | Boots to an HDMI login; Wi-Fi, audio, and suspend/resume validated |
+| [H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html) | RK3576 | arm64 | Boots to an HDMI login; Wi-Fi, Bluetooth, GPU, and suspend/resume validated; NPU binds and computes |
 | [ASUS Chromebook C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html) | RK3288 | armhf | Boots to login + Wi-Fi (forky & trixie) |
 | [ASUS Chromebook Flip C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
 | [ASUS Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
@@ -56,6 +56,15 @@ hardware-transcode image that adds the Rockchip MPP/RGA/ffmpeg userspace
 (`turing-rk1/jellyfin`). A recipe need not build an image at all: an RK3576 board also
 ships u-boot-only recipes whose deliverable is a maskrom-streamable bootloader.
 List them with `cargo run -p boot2deb-cli -- list-recipes`.
+
+You are not limited to the combinations someone curated. Features compose a-la-carte —
+name any selection on `update`/`build` and it is pinned and built as its own point, with
+its own lock, beside the recipe it starts from:
+
+```sh
+cargo run -p boot2deb-cli -- update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
+cargo run -p boot2deb-cli -- build  turing-rk1/forky+media-accel-rockchip+jellyfin
+```
 
 ## Quick start
 
@@ -133,7 +142,7 @@ sources live in [`docs/`](docs/); build them locally with `mdbook serve docs`. C
 ## Repository layout
 
 ```
-crates/core     typed model, layer resolution + validation, patch-profile / lock /
+crates/core     typed model, layer resolution + validation, patch-series / lock /
                 kconfig formats (pure, unit-tested)
 crates/engine   Linux side effects: git shell-outs, lock resolver, patch verify gate,
                 kernel-config generation, the compile stages, the rootfs + image nodes,

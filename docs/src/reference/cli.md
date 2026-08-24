@@ -51,7 +51,7 @@ cargo run -p boot2deb-cli -- doctor turing-rk1/forky
   claim or re-pinning a lock, and a test fails if the committed page is stale.
 - **`list-kernels` / `list-features`** enumerate the valid values for the `--kernel`
   and `--feature` overrides — name, version/compatibility, and (for kernels) the patch
-  profile — so the override knobs are discoverable without reading the TOML tree.
+  series — so the override knobs are discoverable without reading the TOML tree.
 - **`list-kmods`** enumerates the out-of-tree kernel-module sets a device's
   `device_kmods` may name, with the driver ref each tracks and the modules it ships.
   Unlike the two above this is not an override: it is what a new board consults to find
@@ -109,6 +109,17 @@ Resolves upstream refs to commits and hashes the vendored blobs, writing
 `recipes/<device>/<leaf>.lock`. This is the **only** command that consults upstream; `build`
 reads only the lock, so a build is reproducible from its committed pins.
 
+- **`--feature <name>`**, repeatable, pins a [feature
+  selection](config-model.md#a-feature-selection-is-a-build-point-not-a-new-recipe)
+  as a *variant* of the recipe — everything but the features comes from the recipe,
+  and the lock lands beside it as `<leaf>+<feature>...lock`. A variant's first
+  `update` inherits the recipe's pins, so it needs no `--kernel-ref`.
+
+```sh
+cargo run -p boot2deb-cli -- update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
+# wrote recipes/turing-rk1/forky+media-accel-rockchip+jellyfin.lock
+```
+
 ## build
 
 ```sh
@@ -117,6 +128,18 @@ cargo run -p boot2deb-cli -- build turing-rk1/forky
 
 Builds the recipe from its lock: compiles the kernel, u-boot, userspace, and ffmpeg,
 bootstraps the rootfs, and writes the bootable disk image. Notable flags:
+
+- **`--feature <name>`**, repeatable, selects which lock to build — the one `update
+  --feature` pinned. It does not re-resolve one, so a selection that was never pinned
+  is an error naming the `update` line to run. Naming the reference directly is
+  equivalent:
+
+  ```sh
+  cargo run -p boot2deb-cli -- build turing-rk1/forky+media-accel-rockchip+jellyfin
+  ```
+
+  A variant builds in its own work directory under its own image identity, so it never
+  lands on the recipe's artifacts.
 
 - **`--stage <node>`** runs a single node — `kernel`, `dtb`, `kmod`, `uboot`,
   `userspace`, `ffmpeg`, `rootfs`, or `image`; the default builds everything. `kmod`
@@ -190,6 +213,31 @@ linux-stable is large. If you already have a local checkout, point `--kernel-src
 `--ffmpeg-base-src` and `--mpp-src` do the same for the other trees. `verify-sources`
 never clones — it only queries the remotes.
 
+#### The free prerequisite: does the series even claim this kernel?
+
+Before any of those, there is a question that needs no source tree at all — whether
+each composed series' declared `applies_to_kernel` admits the kernel being pinned. It
+is pure metadata, so `update` and `build` both ask it for free:
+
+- **`update`** says so at pin time and keeps going, because pinning the new kernel is
+  the first step of adopting it. Bumping onto a kernel the series predates is exactly
+  the routine move that hits this.
+- **`build`** refuses, before cloning anything. The kernel node asks the same question,
+  but only once the tree is on disk — a minute of network for an answer that was
+  already in the manifests.
+
+Both name the `verify-patches --kernel` line to run next. That ordering is the point:
+the cheap check tells you a series makes no claim about your kernel, and the expensive
+one tells you whether it would have worked anyway.
+
+```
+note: kernel v7.2-rc5 is outside series 'rk3588-accel' (declared >=7.0, <7.2) — a build
+      will refuse it. Measure it first, which needs no re-pin:
+  boot2deb verify-patches turing-rk1/forky --kernel v7.2-rc5 --kernel-path <checkout> --keep-going
+then widen applies_to_kernel in the series if it comes back clean, or retire the
+patches it names.
+```
+
 ### verify-patches
 
 ```sh
@@ -215,12 +263,22 @@ new kernel means re-pinning to that kernel first — mutating state before knowi
 the answer is yes, which is backwards for the one command whose job is finding out.
 
 Because the lock pins no commit for a kernel it does not name, a candidate needs
-`--kernel-path` pointing at a checkout already at that version. Two rules shift on this
+`--kernel-path` pointing at a checkout already at that version. Three rules shift on this
 path:
 
+- **The declared envelope does not gate the run.** A series is asked about 7.2 exactly
+  while its `applies_to_kernel` still says `<7.2`, so refusing an out-of-envelope
+  candidate would answer the question by assuming it — the only way past would be to
+  widen the claim first, which is the very thing being tested. So the run reports that
+  the kernel is outside the envelope and measures it anyway, and what `git am` does is
+  the answer. A clean result is the *evidence for* widening the envelope, not a claim
+  that it already covers that kernel. On the locked path an out-of-envelope kernel stays
+  a hard error: there the series really would be applied to a kernel it makes no claim
+  about. Per-entry `kernels` ranges still narrow the series, so a patch already marked
+  obsolete at the candidate drops out rather than counting as a failure.
 - **A release candidate is answerable.** By semver's rule `7.2.0-rc3` satisfies neither
   `<7.2` nor `>=7.2`, so a release-only range rejects every RC. That strictness is right
-  for a build — a profile's envelope is a claim about *released* kernels — but wrong
+  for a build — a series' envelope is a claim about *released* kernels — but wrong
   here, where an RC is exactly the tree you want to measure. On the candidate path an RC
   is matched as its base release; the build path stays release-strict.
 - **`--keep-going` reports every failure in one pass.** A single boundary frequently
@@ -231,7 +289,7 @@ path:
   still change what comes after it.
 
 `--kernel-path` / `--ffmpeg-path` / `--userspace-path` are all **optional**: an omitted
-tree is auto-fetched at its locked commit (ffmpeg and userspace only when the profile
+tree is auto-fetched at its locked commit (ffmpeg and userspace only when the series
 carries patches for that scope). The `--kernel-src` / `--ffmpeg-base-src` / `--mpp-src`
 flags (same names and meaning as `build`'s) override the fetch *source* — a git URL or
 local path used in place of the configured upstream — while the tree still lands at
@@ -275,13 +333,13 @@ make the rootfs solve durable the same way.
 ### patch import
 
 `patch import` fetches a patch, normalizes it to canonical `git am`-ready mbox, and slots
-it into a profile — the first step of the patch-authoring loop. It is documented with its
+it into a series — the first step of the patch-authoring loop. It is documented with its
 full workflow (commit, re-pin, verify) on
 [Adding a patch](../contributing/adding-a-patch.md):
 
 ```sh
 cargo run -p boot2deb-cli -- patch import https://patchwork.kernel.org/project/linux-rockchip/patch/NNNN/mbox/ \
-  --profile rk3588-accel --scope kernel
+  --series rk3588-accel --scope kernel
 ```
 
 ## Rebuild planning and cleanup

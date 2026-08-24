@@ -11,7 +11,7 @@ in how far each goes beyond booting:
 | **display** | The u-boot an image ships with. Boots, and recovers without a serial cable. |
 | **util** | A recovery and bring-up tool: a boot menu, diagnostics, and image verification at the prompt. |
 
-The u-boot variant is its own axis: a recipe selects one with `uboot_profile`,
+The u-boot variant is its own axis: a recipe selects one with `uboot_series`,
 independent of the kernel. A `loader`/`util` tool is a u-boot-only deliverable
 (`deliverable = "uboot"`) that names no suite or kernel; `display` is the u-boot
 a full image recipe ships with.
@@ -23,14 +23,14 @@ Most of the RK3576 u-boot series is SoC-generic — it patches only the
 RK3576 board. Those images are therefore homed on the **`rk3576-generic`** tool
 host (not a board):
 
-| Image | Recipe | u-boot profile | Scope |
+| Image | Recipe | u-boot series | Scope |
 |---|---|---|---|
 | loader | `rk3576-generic/loader` | `rk3576-loader` | SoC-generic |
 | util | `rk3576-generic/util` | `rk3576-util` | SoC-generic |
 
 A board contributes its own recipes where it needs something board-specific:
 
-| Image | Recipe | u-boot profile | Scope |
+| Image | Recipe | u-boot series | Scope |
 |---|---|---|---|
 | display (shipped image) | `h96-max-m9/forky` | `rk3576-display` | board image |
 | util + ethernet | `h96-max-m9/util` | `h96-max-m9-util` | board-specific |
@@ -39,7 +39,7 @@ A board contributes its own recipes where it needs something board-specific:
 so a rescue session can pull an image over the network (`dhcp`/`tftp`) and
 `ping`. The ethernet is board-specific — an RTL8211F at MDIO address 1, PHY
 reset on gpio2 PB3, `tx_delay 0x1b`, `rgmii-rxid` — so it ships in a board
-profile (`h96-max-m9-util`) that layers one board patch on the generic util
+series (`h96-max-m9-util`) that layers one board patch on the generic util
 series, leaving the SoC-generic images ethernet-free. The board patch adds the
 nodes to the shared `rk3576-generic` control DTB; a board wanting its own
 control DTB would carry the ethernet there instead.

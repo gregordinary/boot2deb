@@ -72,7 +72,7 @@ git = "https://github.com/tsukumijima/librga-rockchip.git"
 ref = "master"
 
 # The V4L2-request decode base, unmodified: no `[ffmpeg.rockchip]`, because no
-# graft applies. The rk3576 patch profiles carry an empty `ffmpeg` scope, so the
+# graft applies. The rk3576 patch series carry an empty `ffmpeg` scope, so the
 # tree builds pristine.
 [ffmpeg.base]
 git = "https://code.ffmpeg.org/Kwiboo/FFmpeg.git"

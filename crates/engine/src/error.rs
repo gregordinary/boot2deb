@@ -92,7 +92,7 @@ pub enum EngineError {
         axes: Vec<String>,
     },
 
-    /// A patch file referenced by a profile does not exist on disk.
+    /// A patch file referenced by a series does not exist on disk.
     #[error("patch not found: {path}")]
     PatchNotFound {
         /// Path that was expected to hold the patch.
@@ -380,7 +380,7 @@ pub enum EngineError {
 
     /// A `device_dts` source would overwrite a device-tree file the kernel already
     /// ships. `device_dts` owns the *new* board file; an edit to an *existing*
-    /// upstream `.dts`/`.dtsi` is a patch in the kernel's patch profile, which `git
+    /// upstream `.dts`/`.dtsi` is a patch in the kernel's patch series, which `git
     /// am` applies with conflict detection. Silently clobbering the upstream file
     /// would hide that the fork has drifted, so the copy refuses. §4.
     #[error(
@@ -606,11 +606,11 @@ pub enum EngineError {
         path: String,
     },
 
-    /// Editing the profile manifest during `patch import` failed — the file could
+    /// Editing the series manifest during `patch import` failed — the file could
     /// not be parsed as TOML, or the scope key held a non-array value.
-    #[error("failed to update profile {path}: {detail}")]
-    PatchImportProfile {
-        /// The profile.toml being edited.
+    #[error("failed to update series {path}: {detail}")]
+    PatchImportSeries {
+        /// The series.toml being edited.
         path: String,
         /// What went wrong.
         detail: String,

@@ -39,10 +39,10 @@ pub struct MatrixRow {
     /// kernel — whose version rides the suite's package set rather than a commit,
     /// so the lock has none to state — or a u-boot-only recipe.
     pub kernel_ref: Option<String>,
-    /// The kernel patch series pinned for this build: profile, ref, and short commit.
+    /// The kernel patch series pinned for this build: series, ref, and short commit.
     /// [`None`] where the kernel applies no series.
     pub patches: Option<PatchesCell>,
-    /// The u-boot patch series pinned for this build: profile, ref, and short commit.
+    /// The u-boot patch series pinned for this build: series, ref, and short commit.
     /// [`None`] where the boot method compiles no u-boot, or u-boot ships pristine.
     pub uboot: Option<PatchesCell>,
     /// The maintainer's claim.
@@ -55,8 +55,8 @@ pub struct MatrixRow {
 /// the human-legible release it came from, and the exact commit under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchesCell {
-    /// Profile names selecting the series, in apply order (comma-joined for display).
-    pub profiles: Vec<String>,
+    /// Series names selecting the series, in apply order (comma-joined for display).
+    pub series: Vec<String>,
     /// The release tag or branch the pin was taken at.
     pub reference: String,
     /// The exact commit, truncated for display.
@@ -95,11 +95,11 @@ pub fn matrix(root: &ConfigRoot) -> Result<Matrix, ConfigError> {
     Ok(out)
 }
 
-/// The profile/ref/short-commit cell for a pinned patch series, or [`None`] when
+/// The series/ref/short-commit cell for a pinned patch series, or [`None`] when
 /// the lock records no such pin.
 fn patches_cell(pin: Option<&crate::lock::PatchesPin>) -> Option<PatchesCell> {
     pin.map(|p| PatchesCell {
-        profiles: p.profiles.clone(),
+        series: p.series.clone(),
         reference: p.reference.clone(),
         commit: p.commit.chars().take(SHORT_COMMIT).collect(),
     })
@@ -145,7 +145,7 @@ impl MatrixRow {
         self.suite.as_deref().unwrap_or("—")
     }
 
-    /// The kernel-patches cell: profile, release handle, and short commit, or `none`
+    /// The kernel-patches cell: series, release handle, and short commit, or `none`
     /// where the kernel applies no series. Plain text, like
     /// [`kernel_cell`](Self::kernel_cell).
     pub fn patches_cell(&self) -> String {
@@ -157,11 +157,11 @@ impl MatrixRow {
         Self::pin_cell(self.uboot.as_ref())
     }
 
-    /// Render a patch-pin cell as `profiles ref (commit)` (profiles comma-joined), or
+    /// Render a patch-pin cell as `series ref (commit)` (series comma-joined), or
     /// `none` when absent.
     fn pin_cell(pin: Option<&PatchesCell>) -> String {
         match pin {
-            Some(p) => format!("{} {} ({})", p.profiles.join(", "), p.reference, p.commit),
+            Some(p) => format!("{} {} ({})", p.series.join(", "), p.reference, p.commit),
             None => "none".to_string(),
         }
     }
@@ -321,13 +321,13 @@ pub fn render_markdown(matrix: &Matrix) -> String {
         };
         let pins = |c: &Option<PatchesCell>| match c {
             Some(p) => {
-                let profiles = p
-                    .profiles
+                let series = p
+                    .series
                     .iter()
                     .map(|name| format!("`{name}`"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{profiles} `{}` (`{}`)", p.reference, p.commit)
+                format!("{series} `{}` (`{}`)", p.reference, p.commit)
             }
             None => "none".to_string(),
         };
@@ -360,7 +360,7 @@ mod tests {
             kernel: Some("rk3588-mainline-7.1".into()),
             kernel_ref: Some("v7.1.1".into()),
             patches: Some(PatchesCell {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 reference: "main".into(),
                 commit: "527d03d54ea6".into(),
             }),
@@ -393,7 +393,7 @@ mod tests {
             kernel_ref: None,
             patches: None,
             uboot: Some(PatchesCell {
-                profiles: vec!["rk3576-loader".into()],
+                series: vec!["rk3576-loader".into()],
                 reference: "main".into(),
                 commit: "e86ef2a00000".into(),
             }),
@@ -452,7 +452,7 @@ ref = \"v7.1.1\"
 commit = \"c9acdc466e9aa96352f658b9276aa8a45b8e817d\"
 
 [patches]
-profiles = [\"rk3588-accel\"]
+series = [\"rk3588-accel\"]
 source = \"https://example.invalid/patches.git\"
 ref = \"main\"
 commit = \"527d03d54ea68a375b814ccb3314901530cb8b32\"

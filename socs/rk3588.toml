@@ -31,7 +31,7 @@ tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
 # Media-accel userspace source trees, shared across the RK35xx family.
 # `ref` is the default constraint; the exact commit is pinned in the lock. mpp
 # pins the durable upstream release tag, and the contiguous-CMA allocator fix the
-# VEPU580 encoder needs is applied from the profile's `userspace` scope as a
+# VEPU580 encoder needs is applied from the series' `userspace` scope as a
 # `git am` patch — a durable base plus a versioned patch, not a
 # locally-authored commit.
 [userspace.mpp]
@@ -48,7 +48,7 @@ ref = "master"
 
 # ffmpeg source pair: mainline V4L2-request decode base (Kwiboo) plus the Rockchip
 # rkmpp-encode / rkrga-filter graft (nyanmisaka). The graft is materialized as an
-# ordered `git am` series in the rk3588-accel profile's `ffmpeg` scope — one
+# ordered `git am` series in the rk3588-accel series' `ffmpeg` scope — one
 # graft commit (the RKMPP hwcontext) needs a 3-way conflict resolution a plain
 # cherry-pick cannot reproduce — so `rockchip` here is recorded as provenance and
 # is not fetched at build time. The two refs are a matched FFmpeg-8.1 pair.

@@ -1,0 +1,104 @@
+aic8800: demote the firmware-download and tx-power chatter to pr_debug
+
+The debug-level default from the quiet-log-level patch governs the driver's
+AICWFDBG macros, and misses everything the driver logs with a bare printk().
+A printk() call with no KERN_ prefix takes CONFIG_MESSAGE_LOGLEVEL_DEFAULT,
+which is KERN_WARNING on a Debian kernel -- so these lines survive both that
+patch and a loglevel= boot argument, and they land in `journalctl -p warning`
+beside real faults.
+
+Two groups are worth silencing:
+
+  - The BSP's firmware-download trace: the module entry banner, the release
+    date, the path of each of the five firmware blobs, and an md5 of each.
+    Around a dozen lines every boot, none of which report a fault -- a failed
+    load has its own error paths.
+
+  - get_txpwr_max(), which is reached from rwnx_cfg80211_get_tx_power(). It
+    prints on every tx-power query, so NetworkManager and wpa_supplicant keep
+    it firing every few minutes for the life of the system. This is the one
+    that matters: the rest cost a boot, this one never stops.
+
+pr_debug keeps all of it reachable through dynamic debug when the firmware
+load is what is being debugged. The `\r\n` terminators go with them; nothing
+here is a serial-console banner.
+
+This is not an exhaustive sweep. The SDIO tree has upwards of 700 bare printk()
+calls, and converting every one of them would be a large standing conflict
+against radxa's tree for no gain -- the great majority sit on paths a healthy
+boot never takes. These are the ones a working system actually prints.
+
+diff --git a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_driver.c b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_driver.c
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_driver.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_driver.c
+@@ -484,7 +484,7 @@
+ #endif
+ 
+ #define MD5(x) x[0],x[1],x[2],x[3],x[4],x[5],x[6],x[7],x[8],x[9],x[10],x[11],x[12],x[13],x[14],x[15]
+-#define MD5PINRT "file md5:%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\r\n"
++#define MD5PINRT "file md5:%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n"
+ 
+ int rwnx_load_firmware(u32 **fw_buf, const char *name, struct device *device)
+ {
+@@ -528,7 +528,7 @@
+ 	MD5Init(&md5);
+ 	MD5Update(&md5, (unsigned char *)buffer, size);
+ 	MD5Final(&md5, decrypt);
+-	printk(MD5PINRT, MD5(decrypt));
++	pr_debug(MD5PINRT, MD5(decrypt));
+ 
+ 	release_firmware(fw);
+ 
+@@ -549,7 +549,7 @@
+ 		MD5Init(&md5);
+ 		MD5Update(&md5, (unsigned char *)*fw_buf, size);
+ 		MD5Final(&md5, decrypt);
+-		printk(MD5PINRT, MD5(decrypt));
++		pr_debug(MD5PINRT, MD5(decrypt));
+ 
+ 		return size;
+ 	#endif
+@@ -573,7 +573,7 @@
+ 		return -1;
+ 	}
+ 
+-	printk("%s :firmware path = %s  \n", __func__, path);
++	pr_debug("%s :firmware path = %s\n", __func__, path);
+ 
+ 	/* open the firmware file */
+ 	fp = filp_open(path, O_RDONLY, 0);
+@@ -661,7 +661,7 @@
+ 	MD5Update(&md5, (unsigned char *)buffer, size);
+ 	MD5Final(&md5, decrypt);
+ 
+-	printk(MD5PINRT, MD5(decrypt));
++	pr_debug(MD5PINRT, MD5(decrypt));
+ 
+ 	return size;
+ #endif
+diff --git a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_main.c b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_main.c
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_main.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_main.c
+@@ -412,8 +412,8 @@
+ static int __init aicbsp_init(void)
+ {
+ 	int ret;
+-	printk("%s\n", __func__);
+-	printk("RELEASE_DATE:%s\r\n", RELEASE_DATE);
++	pr_debug("%s\n", __func__);
++	pr_debug("RELEASE_DATE:%s\n", RELEASE_DATE);
+ 
+ 	aicbsp_info.cpmode = testmode;
+ 
+diff --git a/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_platform.c b/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_platform.c
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_platform.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_platform.c
+@@ -1073,7 +1073,7 @@
+ 	    }
+ 	}
+ 
+-	printk("%s:txpwr_max:%d \r\n",__func__,power);
++	pr_debug("%s:txpwr_max:%d\n", __func__, power);
+ 	return power;
+ }
+ 

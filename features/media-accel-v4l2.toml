@@ -8,7 +8,7 @@
 #    (`rockchip_vdec`, enabled on the SoC layer) and an ffmpeg built
 #    `--enable-v4l2-request`. No vendor userspace is involved in the decode path.
 #  - The RGA 2D raster accelerator: the out-of-tree vendor driver and the DT nodes
-#    that bind it (the `rk3576-rga` patch profile + `accel/rk3576-rga` fragment,
+#    that bind it (the `rk3576-rga` patch series + `accel/rk3576-rga` fragment,
 #    both contributed below), and `librga2` for programs that speak its API.
 #
 # What it does not deliver, stated so nobody plans around it:
@@ -34,7 +34,7 @@ requires_media_accel = true
 
 # The RGA driver: the patch series that adds it to the tree, and the kconfig that
 # compiles it. Both are needed — a fragment can only turn on code the tree has.
-patch_profiles   = ["rk3576-rga"]
+patch_series   = ["rk3576-rga"]
 config_fragments = ["accel/rk3576-rga"]
 
 # The two media-accel providers are alternatives, not layers: both build an

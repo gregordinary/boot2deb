@@ -129,7 +129,7 @@ pub struct Lock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel: Option<KernelPin>,
     /// Exact patch-series pin. Present iff the resolved kernel names a patch
-    /// profile. A kernel that applies no series never reads the `patches` repo, so
+    /// series. A kernel that applies no series never reads the `patches` repo, so
     /// pinning a commit would record provenance for a dependency the build does not
     /// have; the committed lock then omits the `[patches]` table entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,7 +141,7 @@ pub struct Lock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot: Option<UbootPin>,
     /// Exact u-boot patch-series pin. Present iff the build's boot method compiles
-    /// u-boot **and** the selected u-boot profile names a real series (not the
+    /// u-boot **and** the selected u-boot series names a real series (not the
     /// pristine sentinel). Symmetric with [`patches`](Self::patches) — the kernel and
     /// u-boot patch axes pin independently, so a u-boot-only build carries this with
     /// no `[patches]`, and an image build can carry both — and reuses [`PatchesPin`]
@@ -225,7 +225,7 @@ pub struct KernelPin {
     pub commit: String,
 }
 
-/// Pinned patch series: the profiles applied, the repo they came from, the ref that
+/// Pinned patch series: the series applied, the repo they came from, the ref that
 /// was resolved, and the exact commit.
 ///
 /// Symmetric with [`KernelPin`] and [`UbootPin`] on purpose. `commit` alone
@@ -238,10 +238,10 @@ pub struct KernelPin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchesPin {
-    /// Patch profile names, applied in listed order. The kernel axis composes several
-    /// (a SoC-fix profile plus an out-of-tree driver profile, say); the u-boot axis
+    /// Patch series names, applied in listed order. The kernel axis composes several
+    /// (a SoC-fix series plus an out-of-tree driver series, say); the u-boot axis
     /// always names exactly one. All come from the one repo, `ref`, and `commit` below.
-    pub profiles: Vec<String>,
+    pub series: Vec<String>,
     /// Clone URL the commit was pinned from (the kernel definition's
     /// `patches_url`). A commit id means nothing outside its repo, so the pin
     /// records where it came from.
@@ -337,7 +337,7 @@ pub struct KmodPin {
 
 /// Pinned ffmpeg sources — the V4L2 base plus the Rockchip provenance tree the
 /// graft patch series was derived from. `build` fetches `base` and applies
-/// the profile's ffmpeg `git am` series; the graft is not re-derived from
+/// the series' ffmpeg `git am` series; the graft is not re-derived from
 /// `rockchip`, which is recorded purely as provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -446,7 +446,7 @@ mod tests {
                 commit: "c9acdc466e9aa96352f658b9276aa8a45b8e817d".into(),
             }),
             patches: Some(PatchesPin {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 source: "https://example.invalid/patches.git".into(),
                 reference: "main".into(),
                 commit: "f78b240894a29a4c3976ad22935b1c2e16b3c6ad".into(),
@@ -457,7 +457,7 @@ mod tests {
                 commit: "88dc2788777babfd6322fa655df549a019aa1e69".into(),
             }),
             uboot_patches: Some(PatchesPin {
-                profiles: vec!["rk3576-display".into()],
+                series: vec!["rk3576-display".into()],
                 source: "https://example.invalid/patches.git".into(),
                 reference: "main".into(),
                 commit: "e86ef2a0000000000000000000000000000000ab".into(),
@@ -538,7 +538,7 @@ mod tests {
                 commit: "a".repeat(40),
             }),
             patches: Some(PatchesPin {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 source: "https://example.invalid/patches.git".into(),
                 reference: "main".into(),
                 commit: "b".repeat(40),
@@ -656,7 +656,7 @@ mod tests {
         // A lock that does pin a series still writes the table.
         let with = base_lock().to_toml_string().unwrap();
         assert!(with.contains("[patches]"));
-        assert!(with.contains("profiles = [\"rk3588-accel\"]"));
+        assert!(with.contains("series = [\"rk3588-accel\"]"));
     }
 
     #[test]

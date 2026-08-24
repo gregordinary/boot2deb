@@ -34,8 +34,9 @@ repo_patches = [
     "fix-build-on-low-memory-devices.patch",
 ]
 
-# Ours, from kmods/aic8800/patches/, applied after radxa's. Both are the SDIO subsets of
-# radxa patches whose full form touches the PCIE/USB trees an SDIO build does not build.
+# Ours, from kmods/aic8800/patches/, applied after radxa's. 0001 and 0002 are the SDIO
+# subsets of radxa patches whose full form touches the PCIE/USB trees an SDIO build does
+# not build; 0003 is ours outright.
 #
 #  - 0001: radxa's 7.1 build fix touches only the USB tree, so the SDIO cfg80211 ops
 #    (add_key/get_key/.../tdls) still carry the pre-7.1 `net_device *` signature and will
@@ -44,9 +45,15 @@ repo_patches = [
 #    merges the equivalent SDIO fix upstream.
 #  - 0002: lowers both modules' compiled-in debug default to errors only, so a quiet
 #    console does not depend on a modprobe.d file reaching the image.
+#  - 0003: reaches what 0002 cannot. The debug default governs the AICWFDBG macros; a
+#    bare `printk()` takes CONFIG_MESSAGE_LOGLEVEL_DEFAULT instead, which is a warning
+#    on a Debian kernel, so the firmware-download trace and get_txpwr_max() survive both
+#    0002 and `loglevel=`. The tx-power one is the reason this exists: it is on
+#    rwnx_cfg80211_get_tx_power(), so it reprints for as long as the system runs.
 local_patches = [
     "0001-sdio-linux-7.1.patch",
     "0002-quiet-log-level.patch",
+    "0003-quiet-bare-printk.patch",
 ]
 
 # `CONFIG_FDRV_NO_REG_SDIO=y` takes the driver's direct-probe SDIO path (the registered-

@@ -33,6 +33,27 @@ Toolchain-probed symbols (MTE / RELR / `CC_*` / `AS_*` / `PAHOLE_*`) are **not**
 checked into any fragment: they vary with the build host's assembler/compiler, so
 each host derives them itself.
 
+## Only prompted symbols belong in a fragment
+
+A kconfig symbol declared without a prompt (`config X` / `tristate` with no quoted
+string, `def_bool`, …) takes its value entirely from `select` and `depends on`.
+`merge_config.sh` feeds fragment values in as answers to prompts, so a fragment
+line for a promptless symbol is a no-op that kconfig discards.
+
+Such a line is worse than useless: it reads as an assertion, and it holds only
+while the drivers that select the symbol happen to agree with the value that was
+recorded. Add a slice for a different SoC that selects it differently and the line
+turns into a gate failure describing nothing — kconfig's answer is the correct one
+and no fragment edit can change it.
+
+So a generated baseline carries prompted symbols only. Finding the promptless ones
+is mechanical: walk the tree's `Kconfig` files, and for each `config X` block up to
+its `help`, look for a quoted string on the type line or a `prompt` directive.
+Two traps: Kconfig quotes prompts with either `"` or `'` (`tristate '"ah" match
+support'` is prompted), and a symbol may be declared in several blocks — one prompt
+anywhere makes it settable. A prompt behind an `if` (`bool "…" if FOO`) also counts
+as prompted; the symbol is settable in some configurations, so it stays.
+
 ## Checking against a reference config
 
 `boot2deb verify-config <recipe> --kernel-path <patched tree> --reference-config
@@ -46,6 +67,7 @@ so probed symbols cancel and only fragment differences surface.
 A new kernel version is a re-validation event. The baseline is mechanical:
 diff the new kernel's `make defconfig` against the target config, subtract the
 curated slices and the toolchain-probed symbols, and take the fixpoint under
-`olddefconfig` (so `default y` children disabled upstream get explicit pins). The
-curated `soc/`, `accel/`, and `device/` slices are then reviewed by hand against
-the kernel's config-drift report — that human curation is the point of the split.
+`olddefconfig` (so `default y` children disabled upstream get explicit pins), and
+drop the promptless symbols. The curated `soc/`, `accel/`, and `device/` slices are
+then reviewed by hand against the kernel's config-drift report — that human
+curation is the point of the split.

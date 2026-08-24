@@ -93,7 +93,7 @@ back.
 ## When the write fails: the payload ceiling
 
 The signed blob must fit its kernel slot — 16 MiB on stock firmware (a board page may
-list roomier firmware profiles). `depthchargectl` builds the new image first and writes
+list roomier firmware series). `depthchargectl` builds the new image first and writes
 second, so when nothing it tries fits under the ceiling, it fails **without touching the
 slot**:
 

@@ -13,7 +13,7 @@
 # for the full capability statement.
 device     = "h96-max-m9"
 kernel     = "rk3576-mainline-7.1"
-uboot_profile = "rk3576-display"
+uboot_series = "rk3576-display"
 suite      = "forky"
 features   = ["media-accel-v4l2"]
 layout     = "combined"

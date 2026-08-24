@@ -1,6 +1,6 @@
 //! The verify-applies gate: dry-run an ordered patch series against a source tree
 //! with `git am --3way`, naming the failing patch and the target when one does not
-//! apply. Patches are never fuzzed in; the profile's ranges are the declared
+//! apply. Patches are never fuzzed in; the series' ranges are the declared
 //! intent, this is the enforcement.
 //!
 //! "Dry-run" means the tree is restored to its starting commit afterwards, so a
@@ -23,7 +23,7 @@ struct ResolvedPatch {
     label: String,
 }
 
-/// Resolve a profile's repo-relative patch labels to absolute paths under
+/// Resolve a series' repo-relative patch labels to absolute paths under
 /// `patches_root`, preserving order.
 fn resolve_paths(patches_root: &Path, labels: &[&str]) -> Vec<ResolvedPatch> {
     labels
@@ -36,7 +36,7 @@ fn resolve_paths(patches_root: &Path, labels: &[&str]) -> Vec<ResolvedPatch> {
 }
 
 /// Verify that `labels` (one tree's ordered series from a
-/// [`PatchProfile`](boot2deb_core::PatchProfile), e.g. its `kernel` list) applies
+/// [`SeriesIdentity`](boot2deb_core::PatchSeries), e.g. its `kernel` list) applies
 /// to the checkout at `repo`.
 ///
 /// - `patches_root` is the patches-repo checkout the labels are relative to.
@@ -211,7 +211,7 @@ fn indent(s: &str) -> String {
 ///
 /// The caller selects which trees to exercise — e.g. only `kernel` before the
 /// ffmpeg/MPP checkouts exist — pairing each
-/// [`PatchProfile`](boot2deb_core::PatchProfile) series (already filtered to the
+/// [`SeriesIdentity`](boot2deb_core::PatchSeries) series (already filtered to the
 /// kernel under test) with the checkout to verify it against. `target` labels what
 /// the trees are checked at.
 ///
@@ -219,7 +219,7 @@ fn indent(s: &str) -> String {
 /// across all trees. Under [`OnFailure::Stop`] it hard-errors on the first tree
 /// that fails; under [`OnFailure::KeepGoing`] it visits every tree and the failure
 /// list is the report.
-pub fn verify_profile(
+pub fn verify_series(
     patches_root: &Path,
     target: &str,
     trees: &[(&str, &[&str], &Path)],

@@ -46,7 +46,7 @@ pub struct UpdateOptions<'a> {
     /// Directory holding the vendored rkbin blobs to hash.
     pub blobs_dir: &'a Path,
     /// Checkout of the `patches` repo whose HEAD pins the series. Consulted only when
-    /// the resolved kernel names a patch profile; a build that applies no patches
+    /// the resolved kernel names a patch series; a build that applies no patches
     /// leaves this unread and locks no `[patches]` table, so it needs no checkout.
     pub patches_path: &'a Path,
     /// Path recorded for the solved package manifest the rootfs stage writes
@@ -65,7 +65,7 @@ pub struct UpdateOptions<'a> {
 /// absent from the lock and resurface at the next build as a pin mismatch.
 /// Failing on the local problem first also keeps the refusal instant.
 ///
-/// A kernel with no patch profile skips that step entirely: there is no series to pin,
+/// A kernel with no patch series skips that step entirely: there is no series to pin,
 /// so the `patches` checkout is never read and the resulting lock omits `[patches]`.
 /// Pinning a commit nothing consumes would both record a phantom dependency and make
 /// `update` fail on a machine with no `patches` clone.
@@ -74,14 +74,14 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     // `patches` checkout's HEAD. Establish it once when either names a series (a
     // missing checkout gets the tailored setup error, not a raw git failure: this is
     // the one command that *requires* a local clone, where `build` would auto-fetch),
-    // then pin each axis against it. A build with neither profile never reads it.
-    let kernel_profiles = build
+    // then pin each axis against it. A build with neither series never reads it.
+    let kernel_series = build
         .kernel
         .as_ref()
-        .map(|k| k.patch_profiles())
+        .map(|k| k.patch_series())
         .unwrap_or(&[]);
-    let uboot_profile = build.rkbin_boot().and_then(|b| b.uboot_profile.as_deref());
-    let patches_commit = if !kernel_profiles.is_empty() || uboot_profile.is_some() {
+    let uboot_series = build.rkbin_boot().and_then(|b| b.uboot_series.as_deref());
+    let patches_commit = if !kernel_series.is_empty() || uboot_series.is_some() {
         if !opts.patches_path.join(".git").exists() {
             return Err(EngineError::PatchesCheckoutMissing {
                 path: opts.patches_path.display().to_string(),
@@ -96,46 +96,46 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     } else {
         None
     };
-    // Resolution guarantees named profiles carry their source + ref, so a series is
+    // Resolution guarantees named series carry their source + ref, so a series is
     // never pinned without naming the repo and ref it came from.
-    let patches = (!kernel_profiles.is_empty()).then(|| {
+    let patches = (!kernel_series.is_empty()).then(|| {
         let compiled = build
             .kernel
             .as_ref()
             .and_then(|k| k.compiled())
-            .expect("kernel patch profiles imply a compiled kernel");
+            .expect("kernel patch series imply a compiled kernel");
         PatchesPin {
-            profiles: kernel_profiles.to_vec(),
+            series: kernel_series.to_vec(),
             source: compiled
                 .patches_url
                 .clone()
-                .expect("resolution rejects profiles without a patches_url"),
+                .expect("resolution rejects series without a patches_url"),
             reference: compiled
                 .patches_ref
                 .clone()
-                .expect("resolution pairs patches_ref with the profiles"),
+                .expect("resolution pairs patches_ref with the series"),
             commit: patches_commit
                 .clone()
-                .expect("kernel profiles mean the checkout was read"),
+                .expect("kernel series mean the checkout was read"),
         }
     });
-    let uboot_patches = uboot_profile.map(|profile| {
+    let uboot_patches = uboot_series.map(|series| {
         let boot = build
             .rkbin_boot()
-            .expect("a u-boot patch profile implies a rockchip-rkbin boot");
+            .expect("a u-boot patch series implies a rockchip-rkbin boot");
         PatchesPin {
-            profiles: vec![profile.to_string()],
+            series: vec![series.to_string()],
             source: boot
                 .uboot_patches_url
                 .clone()
-                .expect("resolution rejects a u-boot profile without a patches_url"),
+                .expect("resolution rejects a u-boot series without a patches_url"),
             reference: boot
                 .uboot_patches_ref
                 .clone()
-                .expect("resolution pairs the u-boot patches_ref with the profile"),
+                .expect("resolution pairs the u-boot patches_ref with the series"),
             commit: patches_commit
                 .clone()
-                .expect("a u-boot profile means the checkout was read"),
+                .expect("a u-boot series means the checkout was read"),
         }
     });
     // Pin the kernel only when it is compiled from source. A distro-package kernel is
@@ -347,7 +347,7 @@ fn assemble_lock(
 /// Assert the committed lock still agrees with a fresh resolution on every axis the
 /// lock records *from the resolved build*: the kernel definition id, every commit
 /// pin's source repo (kernel / u-boot / userspace / ffmpeg / out-of-tree modules), the
-/// rkbin blob file names, the patch profile, the suite, the resolved extra-deb set, the
+/// rkbin blob file names, the patch series, the suite, the resolved extra-deb set, the
 /// out-of-tree module set, and media-accel presence (the exact fields `assemble_lock`
 /// copies out of the [`ResolvedBuild`]).
 ///
@@ -491,39 +491,39 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
             p.join(", ")
         }
     };
-    // The kernel composes an ordered profile list; a changed set or order must re-pin.
-    let lock_profiles: &[String] = lock
+    // The kernel composes an ordered series list; a changed set or order must re-pin.
+    let lock_series: &[String] = lock
         .patches
         .as_ref()
-        .map(|p| p.profiles.as_slice())
+        .map(|p| p.series.as_slice())
         .unwrap_or(&[]);
-    let resolved_profiles = build
+    let resolved_series = build
         .kernel
         .as_ref()
-        .map(|k| k.patch_profiles())
+        .map(|k| k.patch_series())
         .unwrap_or(&[]);
-    if lock_profiles != resolved_profiles {
+    if lock_series != resolved_series {
         axes.push(format!(
-            "patch profiles: lock '{}' vs resolved '{}'",
-            show_list(lock_profiles),
-            show_list(resolved_profiles)
+            "patch series: lock '{}' vs resolved '{}'",
+            show_list(lock_series),
+            show_list(resolved_series)
         ));
     }
     // The u-boot patch axis: the lock pins it iff the resolved boot method selects a
-    // real u-boot profile. A profile change (or a board switching off u-boot) since
-    // `update` must re-pin, not build the old series. u-boot names exactly one profile,
+    // real u-boot series. A series change (or a board switching off u-boot) since
+    // `update` must re-pin, not build the old series. u-boot names exactly one series,
     // so compare the lone name.
-    let lock_uboot_profile = lock
+    let lock_uboot_series = lock
         .uboot_patches
         .as_ref()
-        .and_then(|p| p.profiles.first())
+        .and_then(|p| p.series.first())
         .map(String::as_str);
-    let resolved_uboot_profile = build.rkbin_boot().and_then(|b| b.uboot_profile.as_deref());
-    if lock_uboot_profile != resolved_uboot_profile {
+    let resolved_uboot_series = build.rkbin_boot().and_then(|b| b.uboot_series.as_deref());
+    if lock_uboot_series != resolved_uboot_series {
         axes.push(format!(
-            "u-boot patch profile: lock '{}' vs resolved '{}'",
-            show(lock_uboot_profile),
-            show(resolved_uboot_profile)
+            "u-boot patch series: lock '{}' vs resolved '{}'",
+            show(lock_uboot_series),
+            show(resolved_uboot_series)
         ));
     }
     // The rootfs pin exists iff the build produces an image; a suite drift is only
@@ -738,11 +738,11 @@ mod tests {
         // The dirty-checkout refusal above is the observable proof that `resolve_lock`
         // consults `patches_path`. Point a no-patch build at something that is not a
         // git repo at all: whatever else fails, it must not fail on the patches step.
-        // A fully-upstream board: no patch profile, and no media-accel sources either
-        // (the transcode stack is what a patch profile exists for).
+        // A fully-upstream board: no patch series, and no media-accel sources either
+        // (the transcode stack is what a patch series exists for).
         let mut build = rk1_build();
         if let Some(boot2deb_core::model::ResolvedKernel::Compiled(k)) = &mut build.kernel {
-            k.patch_profiles = Vec::new();
+            k.patch_series = Vec::new();
         }
         build.userspace = None;
         build.ffmpeg = None;
@@ -765,7 +765,7 @@ mod tests {
                 "a no-patch build must not consult the patches checkout, got {e:?}"
             );
         }
-        // The pure assembly carries the real contract: no profile -> no `[patches]`.
+        // The pure assembly carries the real contract: no series -> no `[patches]`.
         // Sources and blob files mirror the resolved build so the drift gate below
         // sees a lock that genuinely describes it.
         let boot = build.rkbin_boot().unwrap();
@@ -821,7 +821,7 @@ mod tests {
                 commit: "a".repeat(40),
             }),
             patches: Some(PatchesPin {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 source: "ps".into(),
                 reference: "main".into(),
                 commit: "b".repeat(40),
@@ -910,7 +910,7 @@ mod tests {
                 commit: "88dc2788777babfd6322fa655df549a019aa1e69".into(),
             }),
             Some(PatchesPin {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 source: "https://example.invalid/patches.git".into(),
                 reference: "main".into(),
                 commit: "67750099d1f73e36ca3551de380744a72e4d5ef7".into(),
@@ -940,7 +940,7 @@ mod tests {
         );
         assert_eq!(kernel_pin.reference, "v7.1.1");
         assert_eq!(
-            lock.patches.as_ref().unwrap().profiles,
+            lock.patches.as_ref().unwrap().series,
             vec!["rk3588-accel".to_string()]
         );
         // The u-boot source is recorded from the resolved boot method.
@@ -993,7 +993,7 @@ mod tests {
         // Multiple drifted axes are all reported.
         let mut drifted = base_lock();
         drifted.kernel.as_mut().unwrap().id = "other-kernel".into();
-        drifted.patches.as_mut().unwrap().profiles = vec!["other-profile".into()];
+        drifted.patches.as_mut().unwrap().series = vec!["other-series".into()];
         match check_lock_consistency(&drifted, &build).unwrap_err() {
             EngineError::LockConfigDrift { axes } => assert_eq!(axes.len(), 2),
             other => panic!("expected LockConfigDrift, got {other:?}"),
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn update_names_a_missing_patches_checkout_with_a_remedy() {
-        // A kernel with a patch profile needs a local checkout (the pin is its
+        // A kernel with a patch series needs a local checkout (the pin is its
         // HEAD); a missing one is the tailored setup error, not a raw git failure
         // — and it fails before any upstream ref is consulted.
         let build = rk1_build();
@@ -1106,13 +1106,13 @@ mod tests {
                 commit: "kc".into(),
             }),
             patches: {
-                let profiles = build
+                let series = build
                     .kernel
                     .as_ref()
-                    .map(|k| k.patch_profiles())
+                    .map(|k| k.patch_series())
                     .unwrap_or(&[]);
-                (!profiles.is_empty()).then(|| PatchesPin {
-                    profiles: profiles.to_vec(),
+                (!series.is_empty()).then(|| PatchesPin {
+                    series: series.to_vec(),
                     source: "https://example.invalid/patches.git".into(),
                     reference: "main".into(),
                     commit: "p".into(),
@@ -1123,8 +1123,8 @@ mod tests {
                 reference: "v".into(),
                 commit: "u".into(),
             }),
-            uboot_patches: boot.uboot_profile.as_ref().map(|profile| PatchesPin {
-                profiles: vec![profile.clone()],
+            uboot_patches: boot.uboot_series.as_ref().map(|series| PatchesPin {
+                series: vec![series.clone()],
                 source: "https://example.invalid/patches.git".into(),
                 reference: "main".into(),
                 commit: "up".into(),

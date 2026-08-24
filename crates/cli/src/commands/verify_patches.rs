@@ -3,7 +3,7 @@
 //! Each tree is either an explicit `--<tree>-path` checkout or, when omitted,
 //! auto-fetched at its locked pin into a durable cache — so a fresh clone can verify
 //! with no hand-cloned trees. The kernel is always verified; ffmpeg/userspace only
-//! when the profile carries patches for them (an empty scope needs no tree). The
+//! when the series carries patches for them (an empty scope needs no tree). The
 //! patches checkout itself is resolved the same way `build` resolves it (explicit,
 //! `../patches`, or auto-fetched at the lock's `patches.commit`).
 
@@ -11,8 +11,8 @@ use crate::args::VerifyArgs;
 use crate::config::{fetch_verify_tree, resolve_patches_source, verify_trees_cache};
 use crate::render::print_event;
 use boot2deb_core::model::Overrides;
-use boot2deb_core::profile::Scope;
-use boot2deb_core::{load_profile, resolve_recipe, ConfigRoot, RangeMatch};
+use boot2deb_core::series::Scope;
+use boot2deb_core::{load_series, resolve_recipe, ConfigRoot, RangeMatch};
 use boot2deb_engine::event::Event;
 use boot2deb_engine::{patches, pins, EventSink};
 use std::path::{Path, PathBuf};
@@ -53,27 +53,27 @@ pub(crate) fn run(
         root,
         &sink,
     )?;
-    // Load every composed profile; the kernel applies them in order, so verify checks
+    // Load every composed series; the kernel applies them in order, so verify checks
     // the concatenated series per scope against one tree.
-    let mut profiles = Vec::with_capacity(pin.profiles.len());
-    for name in &pin.profiles {
-        profiles.push((name.clone(), load_profile(&patches_root, name)?));
+    let mut series = Vec::with_capacity(pin.series.len());
+    for name in &pin.series {
+        series.push((name.clone(), load_series(&patches_root, name)?));
     }
 
     // Unreachable entries: ranges that no longer overlap the envelope, so no kernel
-    // that profile admits can select them. A warning rather than an error, because a
+    // that series admits can select them. A warning rather than an error, because a
     // dead entry breaks nothing — it is only clutter, and a ledger that only grows
     // becomes unreadable. Retiring one is safe: an old lock names an old `patches`
     // commit whose tree still holds the manifest line and the file.
-    for (name, profile) in &profiles {
-        for (scope, entry) in profile.unreachable(name)? {
+    for (name, series) in &series {
+        for (scope, entry) in series.unreachable(name)? {
             println!(
-                "warning: {} entry {} is unreachable — its range {} cannot overlap the profile's \
+                "warning: {} entry {} is unreachable — its range {} cannot overlap the series' \
                  {} envelope, so no kernel '{}' admits can select it; retire the entry and its file",
                 scope.as_str(),
                 entry.path(),
                 entry.kernels().unwrap_or("(none)"),
-                profile.applies_to_kernel.as_deref().unwrap_or("*"),
+                series.applies_to_kernel.as_deref().unwrap_or("*"),
                 name,
             );
         }
@@ -90,20 +90,16 @@ pub(crate) fn run(
         None => RangeMatch::Release,
     };
 
-    // Declared-intent gate: is the kernel under test in every composed profile's
-    // envelope? One profile that does not cover it fails the whole set.
-    for (name, profile) in &profiles {
-        if !profile.applies_to_under(name, reference, mode)? {
-            return Err(format!(
-                "kernel {reference} is outside profile '{}' (declared {}){}",
-                name,
-                profile.applies_to_kernel.as_deref().unwrap_or("*"),
-                match candidate {
-                    Some(_) => " — widen the envelope first if this candidate should be in range",
-                    None => "",
-                }
-            )
-            .into());
+    // Declared-intent gate: is the kernel under test in every composed series'
+    // envelope? On the locked path one series that does not cover it fails the whole
+    // set; a candidate is measured instead — see [`outside_envelope`].
+    for (name, series) in &series {
+        if !series.applies_to_under(name, reference, mode)? {
+            let declared = series.applies_to_kernel.as_deref().unwrap_or("*");
+            match outside_envelope(candidate.is_some(), reference, name, declared) {
+                Envelope::Measure(note) => println!("{note}"),
+                Envelope::Refuse(err) => return Err(err.into()),
+            }
         }
     }
     let target = format!("{} @ {reference}", kernel_pin.id);
@@ -141,21 +137,21 @@ pub(crate) fn run(
         }
     };
     // Narrow every scope to the entries the kernel under test selects, once, composing
-    // each profile's entries in profile order. These are what get verified and what
+    // each series' entries in series order. These are what get verified and what
     // decide whether a scope needs a tree at all: a scope with no entries from any
-    // profile contributes nothing to fetch.
+    // series contributes nothing to fetch.
     let mut kernel_series: Vec<&str> = Vec::new();
     let mut ffmpeg_series: Vec<&str> = Vec::new();
     let mut userspace_series: Vec<&str> = Vec::new();
-    for (name, profile) in &profiles {
-        kernel_series.extend(profile.series_for(Scope::Kernel, name, reference, mode)?);
-        ffmpeg_series.extend(profile.series_for(Scope::Ffmpeg, name, reference, mode)?);
-        userspace_series.extend(profile.series_for(Scope::Userspace, name, reference, mode)?);
+    for (name, series) in &series {
+        kernel_series.extend(series.series_for(Scope::Kernel, name, reference, mode)?);
+        ffmpeg_series.extend(series.series_for(Scope::Ffmpeg, name, reference, mode)?);
+        userspace_series.extend(series.series_for(Scope::Userspace, name, reference, mode)?);
     }
 
     // The ffmpeg/userspace series verify only for a media-accel build, which is the
     // only one carrying those source trees; without them there is nothing to fetch or
-    // apply against (the profile's ffmpeg/userspace scopes, if any, are moot here).
+    // apply against (the series' ffmpeg/userspace scopes, if any, are moot here).
     let ffmpeg_tree = match (&build.ffmpeg, &lock.ffmpeg) {
         (Some(ff), Some(ff_pins)) => tree_for_scope(
             args.ffmpeg_path,
@@ -205,7 +201,7 @@ pub(crate) fn run(
     } else {
         patches::OnFailure::Stop
     };
-    let (report, failures) = patches::verify_profile(&patches_root, &target, &trees, on_failure)?;
+    let (report, failures) = patches::verify_series(&patches_root, &target, &trees, on_failure)?;
     for (tree, n) in &report {
         let failed = failures.iter().filter(|f| &f.tree == tree).count();
         if failed == 0 {
@@ -260,5 +256,76 @@ fn tree_for_scope(
         None => Ok(Some(fetch_verify_tree(
             source, reference, commit, what, cache_root, sink,
         )?)),
+    }
+}
+
+/// What a kernel falling outside a series' declared `applies_to_kernel` means for
+/// this run.
+enum Envelope {
+    /// Say so and measure it anyway, carrying the note to print.
+    Measure(String),
+    /// Refuse, carrying the error.
+    Refuse(String),
+}
+
+/// Decide how to treat a kernel the series does not claim.
+///
+/// On the **locked** path this is a real defect: the build would apply a series to a
+/// kernel it makes no claim about, so it refuses.
+///
+/// On the **candidate** path it is the interesting case rather than a refusal.
+/// "Would this series survive 7.2?" is asked precisely while the envelope still says
+/// `<7.2`, so gating on the envelope would answer the question by assuming it — the
+/// only way past would be to widen the claim first, which is the very thing the run
+/// exists to test. So the run says the kernel is out of envelope and then measures
+/// it, and what `git am` does is the answer. Per-entry ranges still narrow the series
+/// ([`series_for`](boot2deb_core::PatchSeries::series_for) does not re-check the
+/// envelope), so a patch already marked obsolete at this kernel drops out rather than
+/// counting as a failure.
+///
+/// Pure, so the branch that used to be wrong is unit-testable.
+fn outside_envelope(candidate: bool, reference: &str, series: &str, declared: &str) -> Envelope {
+    if candidate {
+        Envelope::Measure(format!(
+            "note: {reference} is outside series '{series}' (declared {declared}) — measuring \
+             it anyway; a clean result is the evidence for widening the envelope, not a claim \
+             that it already covers this kernel"
+        ))
+    } else {
+        Envelope::Refuse(format!(
+            "kernel {reference} is outside series '{series}' (declared {declared})"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_candidate_outside_the_envelope_is_measured_not_refused() {
+        // The regression this guards: refusing here made `--kernel` unable to answer
+        // the only question it exists for, since a series is asked about 7.2 exactly
+        // while its envelope still excludes 7.2.
+        let Envelope::Measure(note) =
+            outside_envelope(true, "v7.2-rc5", "rk3588-accel", ">=7.0, <7.2")
+        else {
+            panic!("a candidate outside the envelope must be measured, not refused");
+        };
+        assert!(note.contains("v7.2-rc5"), "{note}");
+        assert!(note.contains("rk3588-accel"), "{note}");
+        assert!(note.contains(">=7.0, <7.2"), "{note}");
+    }
+
+    #[test]
+    fn the_locked_kernel_outside_the_envelope_still_refuses() {
+        // The build path keeps its gate: applying a series to a kernel it makes no
+        // claim about is a defect, not a question.
+        let Envelope::Refuse(err) = outside_envelope(false, "v7.2", "rk3588-accel", ">=7.0, <7.2")
+        else {
+            panic!("the locked path must refuse a kernel outside the envelope");
+        };
+        assert!(err.contains("v7.2"), "{err}");
+        assert!(err.contains("rk3588-accel"), "{err}");
     }
 }

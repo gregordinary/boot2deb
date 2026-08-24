@@ -41,7 +41,7 @@ as `durable | ephemeral | ORPHANED | skipped` and exits non-zero on any orphan, 
 gate on it. It touches only the git remotes.
 
 **Custom kernels.** A custom kernel is pinned the same way — a source commit plus a patch
-profile commit. Its one failure mode is rebasing or force-pushing the patch repo, which
+series commit. Its one failure mode is rebasing or force-pushing the patch repo, which
 orphans the pinned commit. Keep it in the durable class by **tagging the patch repo at
 each release**; the pinned commit then lives under an immutable ref and stays fetchable
 across future rebases.
@@ -92,7 +92,7 @@ command's complete environment, and `[[sandbox_mounts]]` is every mount the sand
 establishes, in order, down to the `/dev` device nodes and symlinks. Two images built from
 one lock that differ can be compared on the inputs that could explain it.
 
-That record is the profile every command *starts from*. A run's own working and artifact
+That record is the series every command *starts from*. A run's own working and artifact
 binds are per-build paths, and the `/etc/resolv.conf` an `apt` run binds comes from the
 build host, so neither is recorded — the section describes the builder, not the machine.
 
@@ -165,7 +165,7 @@ What is recorded, because it genuinely does reach the image:
   `.deb`s and therefore stands up no sandbox. It is a record, not a contract: nothing pins
   it in the lock and no later build is verified against it.
 - **`[sandbox_env]` and `[[sandbox_mounts]]`** — the environment and the complete mount
-  profile every sandboxed build command runs under, as the sandbox library resolves them.
+  series every sandboxed build command runs under, as the sandbox library resolves them.
   Both sit outside that library's compatibility promise, so they are recorded rather than
   inferred from its version, and the mounts have no other accessor at all — down to the
   `/dev` device nodes and symlinks.

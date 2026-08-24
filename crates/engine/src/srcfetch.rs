@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// Materialize `source` at the locked `commit` into a commit-addressed directory
 /// under `cache_root`, returning that clean, detached checkout's path.
 ///
-/// Durable and content-addressed like [`crate::patchfetch::fetch_profile`]: a present
+/// Durable and content-addressed like [`crate::patchfetch::fetch_series`]: a present
 /// `cache_root/<commit>` is always a complete checkout at that commit — the fetch
 /// stages into a temp sibling and atomically renames on success, so an interrupted
 /// clone never leaves a half-materialized tree a later run trusts. A hit returns
@@ -64,7 +64,7 @@ pub fn ensure_tree(
 
 /// Prepare a cached kernel tree for the config gate: reset it to the locked
 /// `base_commit` (clearing patches a prior run left, and aborting any interrupted
-/// `git am`), then apply the profile's kernel `series` in place — leaving it patched
+/// `git am`), then apply the series' kernel `series` in place — leaving it patched
 /// for `verify-config`'s out-of-tree kconfig run. Returns the number of patches
 /// applied.
 ///

@@ -7,7 +7,7 @@
 
 use crate::fsutil::{absolutize, normalize};
 use boot2deb_core::model::{Overrides, ResolvedBuild};
-use boot2deb_core::{resolve_device, resolve_recipe, ConfigRoot};
+use boot2deb_core::{resolve_device, resolve_recipe, BuildPoint, ConfigRoot};
 use boot2deb_engine::event::Step;
 use boot2deb_engine::rootfs;
 use boot2deb_engine::{image, patchfetch, pins, EngineError, EventSink};
@@ -39,6 +39,32 @@ pub(crate) fn ensure_config_root(root: &ConfigRoot) -> Result<()> {
     .into())
 }
 
+/// Fold a positional recipe argument and any `--feature` flags into one
+/// [`BuildPoint`], whose [reference](BuildPoint::reference) names every path the
+/// build derives.
+///
+/// The two spellings are equivalent — `build turing-rk1/forky --feature jellyfin` and
+/// `build turing-rk1/forky+jellyfin` are the same point — so the flag form is sugar
+/// over the reference, not a second mechanism. Giving *both* is rejected rather than
+/// merged: the two lists would have to be concatenated in some order, and feature
+/// order changes the build, so there is no answer that is obviously what was meant.
+pub(crate) fn build_point(reference: &str, features: Vec<String>) -> Result<BuildPoint> {
+    if features.is_empty() {
+        return Ok(BuildPoint::parse(reference)?);
+    }
+    let point = BuildPoint::parse(reference)?;
+    if point.is_variant() {
+        return Err(format!(
+            "'{reference}' already selects features ({}), so --feature has nothing \
+             unambiguous to add — put the whole selection in one place, either in the \
+             reference or in --feature flags",
+            point.features().join(", ")
+        )
+        .into());
+    }
+    Ok(BuildPoint::new(point.recipe(), features)?)
+}
+
 /// Resolve `target` as a recipe if one exists or it is a nested `<device>/<leaf>`
 /// reference, else as a device.
 pub(crate) fn resolve(
@@ -63,11 +89,46 @@ pub(crate) fn resolve(
     }
 }
 
+/// The composed series whose declared `applies_to_kernel` does not admit
+/// `kernel_version`, as `(series name, declared range)` in compose order. Empty when
+/// every series claims the kernel — the ordinary case.
+///
+/// This is the **cheap half** of the patch question, and the half that can be asked
+/// before committing to anything: it reads the series manifests and compares version
+/// ranges, needing no source tree and running no `git am`. Whether the patches
+/// actually apply is `verify-patches`, which needs a kernel checkout and is therefore
+/// the expensive half.
+///
+/// Release-strict, matching the build gate rather than the candidate path: a series'
+/// envelope is a claim about released kernels, so a pinned prerelease is reported here
+/// exactly as the build would refuse it.
+pub(crate) fn series_outside_envelope(
+    patches_root: &Path,
+    series: &[String],
+    kernel_version: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut outside = Vec::new();
+    for name in series {
+        let loaded = boot2deb_core::load_series(patches_root, name)?;
+        if !loaded.applies_to(name, kernel_version)? {
+            outside.push((
+                name.clone(),
+                loaded
+                    .applies_to_kernel
+                    .clone()
+                    .unwrap_or_else(|| "*".to_string()),
+            ));
+        }
+    }
+    Ok(outside)
+}
+
 /// Validate the resolved build's cheap, local config invariants: the whole
 /// image geometry (offset ordering, alignment, GPT/rootfs fit — via the engine),
 /// that every referenced kernel `config_fragments` file and `device_dts` source
 /// exists under the config path, and that every declared apt source's signing
 /// keyring is vendored.
+///
 /// Run by `resolve` (the documented first coherence gate), `update` (so a malformed
 /// axis fails before the lock is committed), and `build` (so it fails before any
 /// stage compiles) — a bad `rootfs_offset`, a typo'd fragment name, or a missing
@@ -351,7 +412,7 @@ pub(crate) fn resolve_patches_source(
         })?;
     let cache_root = root.path().join("cache").join("patches");
     let step = Step::start(sink, "patches");
-    let dir = patchfetch::fetch_profile(&url, &pin.commit, &cache_root, &step)?;
+    let dir = patchfetch::fetch_series(&url, &pin.commit, &cache_root, &step)?;
     step.finish();
     Ok((dir, false))
 }
@@ -471,7 +532,7 @@ pub(crate) fn source_axes<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testsupport::repo_root;
+    use crate::testsupport::{repo_root, repo_root_path};
 
     #[test]
     fn preflight_accepts_shipped_config_and_rejects_bad_geometry_or_fragment() {
@@ -614,17 +675,37 @@ mod tests {
         assert_eq!(patches.reference, "main");
     }
 
+    /// A config root whose overlay adds `h96-max-m9-variant`, a device that extends
+    /// the shipped H96 and states nothing but its identity.
+    ///
+    /// The variant is synthetic rather than shipped because the thing under test is
+    /// the `extends` merge itself, which must hold whether or not the tree happens to
+    /// ship a variant board at the time. The `TempDir` is returned so the caller keeps
+    /// the overlay alive for the length of the test.
+    fn root_with_variant() -> (tempfile::TempDir, ConfigRoot) {
+        let overlay = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(overlay.path().join("devices")).unwrap();
+        std::fs::write(
+            overlay.path().join("devices/h96-max-m9-variant.toml"),
+            "extends     = \"h96-max-m9\"\n\
+             description = \"H96 MAX M9 variant, for the extends contract\"\n\
+             hostname    = \"h96-max-m9-variant\"\n",
+        )
+        .unwrap();
+        let root =
+            ConfigRoot::with_overlays(repo_root_path(), [overlay.path().to_path_buf()]).unwrap();
+        (overlay, root)
+    }
+
     #[test]
     fn a_variant_board_lays_in_the_overlay_of_what_it_extends() {
         // The failure this guards is silent and total: a device's overlay tree is found
         // by its *name*, so a variant that ships no tree of its own would get none at
         // all -- no driver tuning, no services, no keymaps -- and still build a
-        // plausible image. The H96 NPU variant is exactly that shape: it owns a `.dts`
-        // and nothing else, and every runtime file it needs belongs to the board it
-        // extends.
-        let root = repo_root();
-        let variant = resolve_device(&root, "h96-max-m9-npu", &Overrides::default()).unwrap();
-        assert_eq!(variant.device_lineage, ["h96-max-m9", "h96-max-m9-npu"]);
+        // plausible image.
+        let (_overlay, root) = root_with_variant();
+        let variant = resolve_device(&root, "h96-max-m9-variant", &Overrides::default()).unwrap();
+        assert_eq!(variant.device_lineage, ["h96-max-m9", "h96-max-m9-variant"]);
 
         let dirs = overlay_dirs(&root, &variant, OverlayStage::Customize);
         let base_tree = root
@@ -636,7 +717,7 @@ mod tests {
         );
 
         // The tree carries the files whose absence produced a verbose console and a
-        // dead 5 GHz band on this variant; name one so the assertion is about reaching
+        // dead 5 GHz band on this board; name one so the assertion is about reaching
         // real config, not about a directory existing.
         assert!(base_tree.join("etc/modprobe.d/aic8800.conf").is_file());
 
@@ -647,7 +728,7 @@ mod tests {
         assert!(
             dirs[..parent_at]
                 .iter()
-                .all(|d| !d.ends_with("devices/h96-max-m9-npu/overlay")),
+                .all(|d| !d.ends_with("devices/h96-max-m9-variant/overlay")),
             "the variant's own tree must not precede what it extends"
         );
 
@@ -660,23 +741,23 @@ mod tests {
         assert!(
             !base_dirs
                 .iter()
-                .any(|d| d.ends_with("devices/h96-max-m9-npu/overlay")),
+                .any(|d| d.ends_with("devices/h96-max-m9-variant/overlay")),
             "a board must not pick up its variant's tree"
         );
     }
 
     #[test]
     fn a_variant_board_inherits_the_kmods_of_what_it_extends() {
-        // The same failure shape as the overlay tree, one layer over: the NPU variant
-        // states only its `.dts`, its fragment, and its patch profile, so its Wi-Fi has
-        // to arrive through `extends`. If it did not, the variant would build a
-        // plausible image with no wlan0 at all and nothing would say so.
-        let root = repo_root();
+        // The same failure shape as the overlay tree, one layer over: a variant that
+        // states only its identity has to get its Wi-Fi through `extends`. If it did
+        // not, the variant would build a plausible image with no wlan0 at all and
+        // nothing would say so.
+        let (_overlay, root) = root_with_variant();
         let base = resolve_device(&root, "h96-max-m9", &Overrides::default()).unwrap();
-        let variant = resolve_device(&root, "h96-max-m9-npu", &Overrides::default()).unwrap();
+        let variant = resolve_device(&root, "h96-max-m9-variant", &Overrides::default()).unwrap();
         assert_eq!(
             base.device_kmods, variant.device_kmods,
-            "the NPU variant's kmods must be exactly what it extends"
+            "the variant's kmods must be exactly what it extends"
         );
         assert_eq!(
             base.device_kmods
@@ -684,6 +765,28 @@ mod tests {
                 .map(|k| k.name.as_str())
                 .collect::<Vec<_>>(),
             ["aic8800"]
+        );
+    }
+
+    #[test]
+    fn a_variant_board_inherits_the_patch_series_of_what_it_extends() {
+        // `device_patch_series` is the field that carries the H96's NPU series, and a
+        // variant silently losing it would build a kernel whose `rocket` driver has no
+        // RK3576 support compiled in -- an image that boots fine and has no /dev/accel.
+        let (_overlay, root) = root_with_variant();
+        let series = |name: &str| {
+            resolve_device(&root, name, &Overrides::default())
+                .unwrap()
+                .kernel
+                .expect("the H96 resolves a compiled kernel")
+                .patch_series()
+                .to_vec()
+        };
+        let base = series("h96-max-m9");
+        assert_eq!(base, series("h96-max-m9-variant"));
+        assert!(
+            base.iter().any(|p| p == "rk3576-npu"),
+            "the H96 carries its NPU series on the device layer: {base:?}"
         );
     }
 
@@ -704,11 +807,161 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["0001-sdio-linux-7.1.patch", "0002-quiet-log-level.patch"]
+            [
+                "0001-sdio-linux-7.1.patch",
+                "0002-quiet-log-level.patch",
+                "0003-quiet-bare-printk.patch"
+            ]
         );
         assert!(paths.iter().all(|p| p.is_absolute() && p.is_file()));
         assert!(paths
             .iter()
             .all(|p| p.parent().unwrap().ends_with("kmods/aic8800/patches")));
+    }
+
+    #[test]
+    fn a_feature_flag_and_a_reference_suffix_are_the_same_point() {
+        // The two spellings must agree exactly, because they name the same lock: if
+        // they diverged, `update --feature X` would pin one file and
+        // `build <recipe>+X` would look for another, and the second would report a
+        // missing lock the first had just written.
+        let flags = build_point("turing-rk1/forky", vec!["jellyfin".into()]).unwrap();
+        let suffix = build_point("turing-rk1/forky+jellyfin", vec![]).unwrap();
+        assert_eq!(flags, suffix);
+        assert_eq!(flags.reference(), "turing-rk1/forky+jellyfin");
+    }
+
+    #[test]
+    fn no_features_leaves_the_recipe_name_untouched() {
+        // Every existing lock, manifest, and build directory is named for the recipe.
+        // A plain build must keep resolving to exactly that name.
+        let point = build_point("turing-rk1/forky", vec![]).unwrap();
+        assert_eq!(point.reference(), "turing-rk1/forky");
+        assert!(!point.is_variant());
+    }
+
+    #[test]
+    fn giving_both_spellings_at_once_is_refused() {
+        // Merging them would mean concatenating two lists in some order, and feature
+        // order decides which fragment wins a kconfig conflict — so there is no
+        // reading that is obviously what was meant. Refuse and say where to put it.
+        let err = build_point(
+            "turing-rk1/forky+jellyfin",
+            vec!["media-accel-rockchip".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("already selects features"), "{err}");
+        assert!(
+            err.contains("jellyfin"),
+            "the error names what is there: {err}"
+        );
+    }
+
+    #[test]
+    fn a_variant_reference_names_a_lock_beside_the_recipes_own() {
+        // The variant's lock must land in the recipe's directory (so it is versioned
+        // and found by every lock-reading command) without colliding with the
+        // recipe's, and its work dir must be distinct or two selections would compile
+        // over each other.
+        let root = repo_root();
+        let point = build_point("h96-max-m9/forky", vec!["media-accel-v4l2".into()]).unwrap();
+        let variant = root.lock_path(&point.reference()).unwrap();
+        let recipe = root.lock_path(point.recipe()).unwrap();
+        assert_ne!(variant, recipe);
+        assert_eq!(variant.parent(), recipe.parent());
+        assert_eq!(variant.file_name().unwrap(), "forky+media-accel-v4l2.lock");
+        assert_ne!(
+            crate::workdir::work_dir_for(&root, &point.reference(), None),
+            crate::workdir::work_dir_for(&root, point.recipe(), None)
+        );
+    }
+
+    #[test]
+    fn a_variant_reference_resolves_the_recipes_axes_with_its_own_features() {
+        // The point of the whole mechanism: everything but the feature list comes from
+        // the recipe, so a variant cannot drift from the board it names.
+        let root = repo_root();
+        let recipe = resolve_recipe(&root, "h96-max-m9/forky", &Overrides::default()).unwrap();
+        let variant = resolve_recipe(
+            &root,
+            "h96-max-m9/forky+media-accel-v4l2",
+            &Overrides::default(),
+        )
+        .unwrap();
+        assert_eq!(recipe.device, variant.device);
+        assert_eq!(recipe.suite, variant.suite);
+        assert!(recipe.features.is_empty());
+        assert_eq!(
+            variant
+                .features
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["media-accel-v4l2"]
+        );
+        // And the feature reaches the kernel, which is what makes a variant more than
+        // a package list — the RGA series is on the variant and not on the recipe.
+        fn series(b: &ResolvedBuild) -> Vec<&str> {
+            b.kernel
+                .as_ref()
+                .unwrap()
+                .patch_series()
+                .iter()
+                .map(String::as_str)
+                .collect()
+        }
+        assert!(!series(&recipe).contains(&"rk3576-rga"));
+        assert!(series(&variant).contains(&"rk3576-rga"));
+    }
+
+    #[test]
+    fn series_outside_envelope_names_only_the_series_that_do_not_claim_the_kernel() {
+        // The prerequisite `update` and `build` both run before committing to a clone.
+        // It has to be exact in both directions: a false positive nags on every routine
+        // re-pin, and a false negative is the case this exists to stop -- a lock that
+        // pins a kernel no series claims, discovered only after the tree is on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("series");
+        std::fs::create_dir_all(&series).unwrap();
+        std::fs::write(
+            series.join("narrow.toml"),
+            "applies_to_kernel = \">=7.0, <7.2\"\nkernel = []\nffmpeg = []\nuserspace = []\nuboot = []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            series.join("wide.toml"),
+            "applies_to_kernel = \">=7.0, <8.0\"\nkernel = []\nffmpeg = []\nuserspace = []\nuboot = []\n",
+        )
+        .unwrap();
+        // No envelope at all: claims every kernel, so it is never reported.
+        std::fs::write(
+            series.join("unbounded.toml"),
+            "kernel = []\nffmpeg = []\nuserspace = []\nuboot = []\n",
+        )
+        .unwrap();
+        let names = [
+            "narrow".to_string(),
+            "wide".to_string(),
+            "unbounded".to_string(),
+        ];
+
+        // In range for every series: nothing to say.
+        assert!(series_outside_envelope(dir.path(), &names, "v7.1.5")
+            .unwrap()
+            .is_empty());
+
+        // Past `narrow`'s cap: it alone is reported, carrying its declared range.
+        let out = series_outside_envelope(dir.path(), &names, "v7.2").unwrap();
+        assert_eq!(out, vec![("narrow".to_string(), ">=7.0, <7.2".to_string())]);
+
+        // Release-strict, matching the build gate rather than the candidate path: an RC
+        // satisfies neither bound, so every bounded series is reported and the
+        // unbounded one still is not.
+        let rc = series_outside_envelope(dir.path(), &names, "v7.2-rc5").unwrap();
+        assert_eq!(
+            rc.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["narrow", "wide"]
+        );
     }
 }

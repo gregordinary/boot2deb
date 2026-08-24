@@ -21,6 +21,12 @@ pub(crate) fn run(
     recipe: &str,
     args: UpdateArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // A `--feature` selection makes this a *variant* of the recipe. Every path below
+    // is derived from the reference rather than the recipe name, so the variant's
+    // lock and solved manifest land beside — never on top of — the recipe's own.
+    let point = crate::config::build_point(recipe, args.features)?;
+    let reference = point.reference();
+    let recipe = reference.as_str();
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
     // Validate the local config invariants (image geometry, kernel-fragment and
     // apt-keyring existence) before resolving/committing the lock, so a bad
@@ -32,7 +38,16 @@ pub(crate) fn run(
     // the kernel would silently re-pin every other tree from its committed exact
     // commit back to the current branch head. Flags still override; a first update
     // (no prior lock) falls back to the config default.
-    let prev = root.lock(recipe).ok();
+    //
+    // A variant's *first* update inherits the recipe's lock instead of starting bare.
+    // A feature selection is the only thing that differs from the recipe, so every
+    // source axis should start where the recipe already pinned it — otherwise the
+    // variant would demand a `--kernel-ref` the operator never chose and could easily
+    // answer differently, silently building the "same" image against another kernel.
+    let prev = root
+        .lock(recipe)
+        .ok()
+        .or_else(|| point.is_variant().then(|| root.lock(point.recipe()).ok())?);
     let ref_for = |flag: Option<String>,
                    from_lock: fn(&boot2deb_core::lock::Lock) -> String,
                    default: &str| {
@@ -211,14 +226,14 @@ pub(crate) fn run(
     if let Some(p) = &lock.uboot_patches {
         println!(
             "  u-boot patches {} {}",
-            p.profiles.join(", "),
+            p.series.join(", "),
             short(&p.commit)
         );
     }
     // A no-patch kernel has no series to report; printing an empty row would imply
     // one exists.
     match &lock.patches {
-        Some(p) => println!("  patches  {} {}", p.profiles.join(", "), short(&p.commit)),
+        Some(p) => println!("  patches  {} {}", p.series.join(", "), short(&p.commit)),
         None => println!("  patches  (none — this kernel applies no series)"),
     }
     // Only the trees this SoC has. A line reading "none" would suggest something
@@ -309,11 +324,45 @@ pub(crate) fn run(
         );
     }
 
+    // Prerequisite check: does every composed series even *claim* the kernel just
+    // pinned? Pure metadata — the manifests are already on disk — so it costs nothing
+    // and answers at pin time what would otherwise surface only after the build had
+    // cloned the kernel. Bumping onto a kernel the series predates is exactly the
+    // routine move that hits this, and finding out then is late.
+    //
+    // Advisory, like the durability checks above. The lock is not wrong: pinning the
+    // new kernel is the first step of adopting it, and the envelope is widened once
+    // the evidence says it can be. Blocking here would force the claim to be widened
+    // before anything had measured it, which is backwards.
+    if let (Some(pin), Some(kernel)) = (&lock.patches, &lock.kernel) {
+        let outside =
+            crate::config::series_outside_envelope(&patches_path, &pin.series, &kernel.reference)?;
+        for (name, declared) in &outside {
+            eprintln!(
+                "  note: kernel {} is outside series '{name}' (declared {declared}) — a build \
+                 will refuse it. Measure it first, which needs no re-pin:\n    \
+                 boot2deb verify-patches {recipe} --kernel {} --kernel-path <checkout> \
+                 --keep-going\n  then widen applies_to_kernel in the series if it comes back \
+                 clean, or retire the patches it names.",
+                kernel.reference, kernel.reference
+            );
+        }
+    }
+
     // A `validated` claim asserts that an image from *these* pins booted. Moving any
     // of them retires that evidence, and this is the only moment both locks exist to
     // compare — after the write the previous pins are gone. Advisory like the
     // durability checks above: re-validating is the caller's call, not the tool's,
     // and a lock write that already succeeded is not undone by a stale claim.
+    //
+    // A variant is skipped: the claim belongs to the recipe, and a different feature
+    // selection is a different build, so a variant neither inherits the claim nor can
+    // retire it. Comparing here would be actively wrong on a variant's *first* update,
+    // whose `prev` is the recipe's own lock — every pin would read as unmoved while
+    // the build is not the one the claim describes at all.
+    if point.is_variant() {
+        return Ok(());
+    }
     if let (Some(prev), Some(claim)) = (&prev, root.recipe(recipe)?.support) {
         let moved = boot2deb_core::support::pin_changes(prev, &lock);
         if claim.status == boot2deb_core::model::SupportStatus::Validated && !moved.is_empty() {

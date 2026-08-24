@@ -358,12 +358,12 @@ pub struct IdentityKernel {
     /// The exact kernel commit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// The patch profiles applied to that kernel, in order. They are the difference
+    /// The patch series applied to that kernel, in order. They are the difference
     /// between two boards running the same kernel version and having different hardware
     /// working, so they belong on the device rather than only in the build's records.
     /// Empty when the kernel applied no series.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub patch_profiles: Vec<String>,
+    pub patch_series: Vec<String>,
 }
 
 /// The resolved build point (from [`ResolvedBuild`]).
@@ -429,12 +429,12 @@ pub struct SourcesProvenance {
     /// Absent for a compiled kernel.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kernel_package: Option<String>,
-    /// Patch profile names, in order. Empty — along with
+    /// Patch series names, in order. Empty — along with
     /// [`patches_commit`](Self::patches_commit) being absent — when the kernel applied
     /// no series, so the record never implies a `patches` dependency the build did not
     /// have.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub patch_profiles: Vec<String>,
+    pub patch_series: Vec<String>,
     /// `patches` repo commit the series is pinned at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patches_commit: Option<String>,
@@ -678,10 +678,10 @@ pub fn system_identity(build: &ResolvedBuild, lock: &Lock) -> SystemIdentity {
             },
             reference: lock.kernel.as_ref().map(|k| k.reference.clone()),
             commit: lock.kernel.as_ref().map(|k| k.commit.clone()),
-            patch_profiles: lock
+            patch_series: lock
                 .patches
                 .as_ref()
-                .map(|p| p.profiles.clone())
+                .map(|p| p.series.clone())
                 .unwrap_or_default(),
         },
     }
@@ -739,10 +739,10 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
                 crate::model::ResolvedKernel::Distro(k) => Some(k.package.clone()),
                 crate::model::ResolvedKernel::Compiled(_) => None,
             },
-            patch_profiles: lock
+            patch_series: lock
                 .patches
                 .as_ref()
-                .map(|p| p.profiles.clone())
+                .map(|p| p.series.clone())
                 .unwrap_or_default(),
             patches_commit: lock.patches.as_ref().map(|p| p.commit.clone()),
             uboot_ref: lock.uboot.as_ref().map(|u| u.reference.clone()),
@@ -919,7 +919,7 @@ mod tests {
                 commit: "kc".into(),
             }),
             patches: Some(PatchesPin {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 source: "https://example.invalid/patches.git".into(),
                 reference: "main".into(),
                 commit: "pc".into(),
@@ -1290,7 +1290,7 @@ mod tests {
     fn both_patch_axes_get_a_durability_row() {
         let mut lock = sample_lock();
         lock.uboot_patches = Some(PatchesPin {
-            profiles: vec!["rk3576-display".into()],
+            series: vec!["rk3576-display".into()],
             source: "https://example.invalid/patches.git".into(),
             // A bare commit as its own reference is the unfetchable form, and this is
             // the axis it happens to: it is graded, not silently dropped.

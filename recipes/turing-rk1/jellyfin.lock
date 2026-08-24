@@ -8,10 +8,10 @@ ref = "v7.1.1"
 commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
 
 [patches]
-profiles = ["rk3588-accel"]
+series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "e56368aa9a73f74fe682f88590797f4013a5ef45"
+commit = "47686cce6f6aaeeb9f7c85699b8a7fda6e67c48a"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"

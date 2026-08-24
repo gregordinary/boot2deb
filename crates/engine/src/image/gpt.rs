@@ -191,7 +191,7 @@ mod tests {
             uboot_defconfig: "d".into(),
             uboot_source: "s".into(),
             uboot_ref: "v1".into(),
-            uboot_profile: None,
+            uboot_series: None,
             uboot_patches_url: None,
             uboot_patches_ref: None,
             rkbin: Rkbin {

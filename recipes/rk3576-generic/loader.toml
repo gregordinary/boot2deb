@@ -8,10 +8,10 @@
 # It builds from the rk3576-generic control DTB, so the payload is identical on
 # any RK3576 board — hence it is homed on the rk3576-generic tool host, not a
 # specific board. Being a pure bootloader unrelated to any Debian release, it
-# names no suite, kernel, or image — only the u-boot profile.
+# names no suite, kernel, or image — only the u-boot series.
 device        = "rk3576-generic"
 deliverable   = "uboot"
-uboot_profile = "rk3576-loader"
+uboot_series = "rk3576-loader"
 
 # A blank-board bring-up loader; the deliverable is the u-boot USB boot images, not
 # a flashed rootfs. Not built or exercised on hardware yet, so "expected".

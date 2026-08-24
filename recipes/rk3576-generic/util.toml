@@ -11,10 +11,10 @@
 # that needs board-specific u-boot support (e.g. ethernet) gets its own util
 # recipe with a board profile; see recipes/h96-max-m9/util.toml. Being a pure
 # bootloader tool unrelated to any Debian release, it names no suite, kernel, or
-# image — only the u-boot profile.
+# image — only the u-boot series.
 device        = "rk3576-generic"
 deliverable   = "uboot"
-uboot_profile = "rk3576-util"
+uboot_series = "rk3576-util"
 
 # A maskrom bring-up and recovery tool: the deliverable is the u-boot USB boot
 # images, not a flashed rootfs. Built clean from mainline u-boot; not yet

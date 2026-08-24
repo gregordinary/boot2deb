@@ -14,7 +14,7 @@
 //! full variant matrix.
 
 use crate::build::{
-    self, deb_names, stage_artifact, BuildEnv, PatchScope, PatchSeries, PatchSource,
+    self, deb_names, stage_artifact, BuildEnv, PatchScope, PatchSource, SeriesIdentity,
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
@@ -89,7 +89,7 @@ pub struct UserspaceOptions<'a> {
     pub build_libmali: bool,
     /// The `userspace` patch scope's checkout + pin — the MPP CMA fix. The MPP tree
     /// receives it; librga/libmali build unpatched. `None` when the resolved kernel
-    /// names no patch profile.
+    /// names no patch series.
     pub patches: Option<PatchSource<'a>>,
     /// Scratch dir; sources are cloned under `<work>/userspace/<name>` and the
     /// `.deb`s `dpkg-buildpackage` drops land in `<work>/userspace/`.
@@ -169,13 +169,13 @@ pub fn build_userspace(
         });
     }
 
-    // Patch context: the profile's `userspace` scope — the MPP CMA fix — is
-    // applied to the MPP tree; librga/libmali build unpatched upstream. The profile +
+    // Patch context: the series' `userspace` scope — the MPP CMA fix — is
+    // applied to the MPP tree; librga/libmali build unpatched upstream. The series +
     // its pin are the same for the whole build; [`receives_userspace_patches`] decides
     // which package's tree gets the series (and folds it into that tree's signature).
     // In co-dev mode the userspace series fingerprint is folded into the MPP tree
     // signature so an edited userspace patch restamps it; `series_fp` lives
-    // in the ctx so the borrowed [`PatchSeries::Dev`] outlives the package loop.
+    // in the ctx so the borrowed [`SeriesIdentity::Dev`] outlives the package loop.
     let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Userspace);
     let patch_ctx = UserspacePatchCtx {
         patches: opts.patches,
@@ -319,7 +319,7 @@ fn build_one(
             &tree,
             step,
         )?;
-        // Apply the profile's `userspace` scope onto the fetched base — the MPP CMA
+        // Apply the series' `userspace` scope onto the fetched base — the MPP CMA
         // fix, mirroring the kernel/ffmpeg stages' clone→apply flow. Only
         // MPP is patched; librga/libmali are unpatched upstream. The series is
         // materialized in the patches repo (durable base + patch), so the pin
@@ -398,7 +398,7 @@ fn collect(
     Ok(UserspaceArtifacts { debs })
 }
 
-/// Whether a userspace package receives the profile's `userspace` patch scope.
+/// Whether a userspace package receives the series' `userspace` patch scope.
 /// Only MPP carries a local patch — the CMA fix (`allocator_dma_heap`);
 /// librga/libmali build unpatched upstream. The single source of truth so the stage
 /// and `why-rebuild` ([`crate::plan`]) agree on which package's tree gets the series
@@ -408,22 +408,22 @@ pub fn receives_userspace_patches(name: &str) -> bool {
 }
 
 /// The patch inputs folded into a userspace package's tree signature when it
-/// receives the `userspace` scope — the profile name, its pinned commit, and
+/// receives the `userspace` scope — the series name, its pinned commit, and
 /// the applied-series identity, mirroring how the kernel/ffmpeg tree signatures fold
 /// their series (`build::fold_patch_series`). A package that carries no patch folds
 /// none of this.
 pub struct PatchInputs<'a> {
-    /// The lock's patch pin (profile + `patches` repo commit), or `None` when the
-    /// build's kernel names no patch profile and nothing is applied.
+    /// The lock's patch pin (series + `patches` repo commit), or `None` when the
+    /// build's kernel names no patch series and nothing is applied.
     pub pin: Option<&'a boot2deb_core::lock::PatchesPin>,
     /// The applied series' identity: pinned by commit, or (co-dev) the live-series
     /// fingerprint so an edited userspace patch restamps the MPP tree.
-    pub patches: PatchSeries<'a>,
+    pub patches: SeriesIdentity<'a>,
 }
 
 /// The userspace stage's patch context: the checkout + pin to apply from — shared
 /// across the packages, applied only to the ones [`receives_userspace_patches`]
-/// selects. `None` when the build's kernel names no patch profile.
+/// selects. `None` when the build's kernel names no patch series.
 struct UserspacePatchCtx<'a> {
     /// The checkout and pin the `userspace` scope is read from, or `None` when the
     /// build applies no patches.
@@ -445,10 +445,10 @@ impl UserspacePatchCtx<'_> {
     }
 }
 
-/// Apply the profile's `userspace` scope onto `pkg`'s fetched tree in place,
-/// via the shared [`apply_profile_scope`](crate::build::apply_profile_scope) — the
+/// Apply the series' `userspace` scope onto `pkg`'s fetched tree in place,
+/// via the shared [`apply_series_scope`](crate::build::apply_series_scope) — the
 /// same pin-enforcement + verify-applies gate the kernel/ffmpeg stages use. No
-/// kernel-range gate here (that guards the kernel node; the profile is validated
+/// kernel-range gate here (that guards the kernel node; the series is validated
 /// there). Logs the applied count.
 fn apply_patches(
     pkg: &Package,
@@ -457,7 +457,7 @@ fn apply_patches(
     step: &Step,
 ) -> Result<(), EngineError> {
     let target = format!("{} @ {}", pkg.name, pkg.pin.reference);
-    let n = build::apply_profile_scope(
+    let n = build::apply_series_scope(
         &build::ApplyScope {
             tree,
             patches: ctx.patches,
@@ -471,7 +471,7 @@ fn apply_patches(
         step.log(format!(
             "{}: applied {n} userspace patch(es) ({})",
             pkg.name,
-            p.pin.profiles.join(", ")
+            p.pin.series.join(", ")
         ));
     }
     Ok(())
@@ -479,7 +479,7 @@ fn apply_patches(
 
 /// Tier-1 signature manifest of a fetched userspace source tree, keyed by
 /// package `name`, its locked `commit` (which content-addresses the fetched tree),
-/// and — when the package receives the `userspace` scope — the patch profile
+/// and — when the package receives the `userspace` scope — the patch series
 /// with its pinned commit, so a patch change restamps the tree just as a pin bump
 /// does. Public and parameterized so `why-rebuild` ([`crate::plan`]) recomputes the
 /// same per-package signature this stage stamps — the node is `userspace:<name>`.
@@ -792,7 +792,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
             deb_prefixes: &[],
         };
         let pin_at = |commit: &str| boot2deb_core::lock::PatchesPin {
-            profiles: vec!["rk3588-accel".into()],
+            series: vec!["rk3588-accel".into()],
             source: "https://example.invalid/patches.git".into(),
             reference: "main".into(),
             commit: commit.into(),
@@ -800,16 +800,16 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         let (pin1, pin2) = (pin_at("p1"), pin_at("p2"));
         let p1 = PatchInputs {
             pin: Some(&pin1),
-            patches: PatchSeries::Pinned,
+            patches: SeriesIdentity::Pinned,
         };
         let p2 = PatchInputs {
             pin: Some(&pin2),
-            patches: PatchSeries::Pinned,
+            patches: SeriesIdentity::Pinned,
         };
         let empty: Vec<String> = vec![];
         let p1_dev = PatchInputs {
             pin: Some(&pin1),
-            patches: PatchSeries::Dev(&empty),
+            patches: SeriesIdentity::Dev(&empty),
         };
         // Folding a patch series changes the tree signature vs an unpatched fetch...
         assert_ne!(
@@ -831,22 +831,22 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         let fp2 = vec!["media-accel/userspace/001.patch=bbb".to_string()];
         let dev1 = PatchInputs {
             pin: Some(&pin1),
-            patches: PatchSeries::Dev(&fp1),
+            patches: SeriesIdentity::Dev(&fp1),
         };
         let dev2 = PatchInputs {
             pin: Some(&pin1),
-            patches: PatchSeries::Dev(&fp2),
+            patches: SeriesIdentity::Dev(&fp2),
         };
         assert_ne!(
             package_signature(&mpp, Some(&dev1)),
             package_signature(&mpp, Some(&dev2))
         );
-        // A build with no patch profile signs distinctly from every patched variant and
+        // A build with no patch series signs distinctly from every patched variant and
         // from an unpatched fetch — its MPP tree really is unpatched, but the node still
         // records that the scope was considered.
         let none = PatchInputs {
             pin: None,
-            patches: PatchSeries::Pinned,
+            patches: SeriesIdentity::Pinned,
         };
         assert_ne!(
             package_signature(&mpp, Some(&none)),
@@ -1005,14 +1005,14 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         assert_ne!(base, sig(&mpp(&p1), "forky", "armhf"));
         // A patch series reaches the output signature through the tree dependency.
         let pc1 = boot2deb_core::lock::PatchesPin {
-            profiles: vec!["rk3588-accel".into()],
+            series: vec!["rk3588-accel".into()],
             source: "https://example.invalid/patches.git".into(),
             reference: "main".into(),
             commit: "pc1".into(),
         };
         let patches = PatchInputs {
             pin: Some(&pc1),
-            patches: PatchSeries::Pinned,
+            patches: SeriesIdentity::Pinned,
         };
         assert_ne!(
             base,

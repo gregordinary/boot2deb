@@ -8,9 +8,9 @@ description = "Rockchip idbloader + u-boot.itb in the raw gap (rkbin ATF/TPL)"
 uboot_source = "https://git.u-boot-project.org/u-boot/u-boot.git"
 uboot_ref    = "v2026.04"                # default constraint; pinned exactly in the lock
 
-# The `patches` repo the selected u-boot profile's series is fetched from and pinned
+# The `patches` repo the selected u-boot series' series is fetched from and pinned
 # against (the u-boot analogue of a kernel definition's `patches_url`). Read only when
-# a device on this method selects a real u-boot profile; a board whose u-boot ships
+# a device on this method selects a real u-boot series; a board whose u-boot ships
 # pristine never touches it.
 patches_url  = "https://github.com/gregordinary/patches.git"
 patches_ref  = "main"                    # default constraint; the exact commit is pinned in the lock

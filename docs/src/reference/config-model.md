@@ -7,7 +7,7 @@ A build is a single point across the axes a user selects:
 - **device** — the target hardware. It resolves through a layered hardware stack (see
   below).
 - **kernel** — an orthogonal axis that owns everything version-coupled: its source
-  refs, `.config` fragments, and [patch profile](#patch-profiles-belong-to-the-kernel).
+  refs, `.config` fragments, and [patch series](#patch-series-belong-to-the-kernel).
   A device declares which kernels it supports and a default; override with `--kernel`
   (values from `list-kernels`). Some kernels are [not built at
   all](#kernels-are-compiled-or-installed).
@@ -42,7 +42,7 @@ A kernel definition's `flavor` decides what shape it has, because the two kinds 
 kernel have almost nothing in common:
 
 - **`mainline` / `vendor`** — compiled from source. The definition owns a source ref, a
-  base defconfig, a fragment list, and a patch profile, and the build clones the tree,
+  base defconfig, a fragment list, and a patch series, and the build clones the tree,
   applies the series, merges the config, and runs `make bindeb-pkg`. The lock pins the
   exact commit.
 
@@ -111,24 +111,24 @@ libreboot installed. So the device declares a default and the profiles it suppor
 The default is deliberately the *stock* profile: a stock-profile image boots on stock
 firmware **and** on a unit running libreboot, while the reverse is not true.
 
-## Patch profiles belong to the kernel
+## Patch series belong to the kernel
 
-A **patch profile** (e.g. `rk3588-accel`) is the ordered patch series applied to the
+A **patch series** (e.g. `rk3588-accel`) is the ordered patch series applied to the
 source trees before they compile. It is **a property of the kernel definition, not a
-user-selected axis**: a kernel names its profile via `patch_profile` in
-`kernels/<id>.toml`, and there is deliberately no `--profile` flag, because a series
-that applies to one kernel version does not apply to another — so the profile is
-version-coupled to the kernel that owns it. Profiles live in a separate `patches` repo,
+user-selected axis**: a kernel names its series via `patch_series` in
+`kernels/<id>.toml`, and there is deliberately no `--series` flag, because a series
+that applies to one kernel version does not apply to another — so the series is
+version-coupled to the kernel that owns it. Series live in a separate `patches` repo,
 not in this one. Authoring workflow:
 [Adding a patch](../contributing/adding-a-patch.md).
 
-The lock's `[patches]` block records the profile plus the same three fields every other
+The lock's `[patches]` block records the series plus the same three fields every other
 pinned source carries — where it came from, the ref that was resolved, and the exact
 commit:
 
 ```toml
 [patches]
-profile = "rk3588-accel"
+series = "rk3588-accel"
 source  = "https://github.com/gregordinary/patches.git"
 ref     = "main"
 commit  = "527d03d54ea68a375b814ccb3314901530cb8b32"
@@ -143,12 +143,12 @@ than implying a release nobody cut.
 durability, and this axis needs it most: `update` takes the patches commit from a local
 checkout's `HEAD` rather than resolving a remote ref, so it is the pin likeliest to name
 something that exists nowhere else — a series committed locally and not yet pushed pins
-fine and then fails for everyone. A kernel definition that names a `patch_profile` must
+fine and then fails for everyone. A kernel definition that names a `patch_series` must
 therefore also name a `patches_url`; resolution rejects one without the other.
 
 ### Two ranges, not one
 
-A profile declares an overall `applies_to_kernel` envelope, and each entry in a scope
+A series declares an overall `applies_to_kernel` envelope, and each entry in a scope
 list may narrow itself further inside it:
 
 ```toml
@@ -167,7 +167,7 @@ actually applies. Both are *declared intent* — the `git am` pass is the enforc
 
 This shape exists because the patch series changes discontinuously while kernels move
 continuously. A kernel bump where everything still applies changes nothing here except
-the envelope: no copied lists, no forked profile. When one patch does break, the
+the envelope: no copied lists, no forked series. When one patch does break, the
 boundary is expressed on that patch alone, and the version-insensitive majority stay
 bare strings. Upstreaming gets a first-class encoding too — an upper bound reading
 "needed until mainline absorbed it."
@@ -175,19 +175,19 @@ bare strings. Upstreaming gets a first-class encoding too — an upper bound rea
 Because both alternatives live in one list, a single repo checkout still builds 7.1 and
 7.2 correctly; a flat list mutated in place would lose that.
 
-Fork a **new profile name** only when the series *shape* diverges enough that one list
-is confusing. Profile names stay semantic, never version-suffixed, so the kernel
+Fork a **new series name** only when the series *shape* diverges enough that one list
+is confusing. Series names stay semantic, never version-suffixed, so the kernel
 definitions referencing them stay stable.
 
 An entry whose range no longer overlaps the envelope is unreachable by construction —
-no kernel the profile admits can select it. That is mechanically decidable rather than a
+no kernel the series admits can select it. That is mechanically decidable rather than a
 judgement call, so it is reported as a lint rather than left to a cleanup someone has to
 remember. Retiring such an entry, file included, is safe: an old lock names an old
 `patches` commit whose tree still contains both.
 
 A kernel may apply **no series at all** — a stock mainline kernel whose SoC is fully
 upstream, or a vendor tree that already ships its patches. It writes
-`patch_profile = "none"`, and then the build never reads the `patches` repo: nothing is
+`patch_series = "none"`, and then the build never reads the `patches` repo: nothing is
 fetched, nothing is applied, `verify-patches` reports there is nothing to verify, and
 the lock **omits its `[patches]` block entirely** rather than pinning a commit the build
 never consumes. Such a board builds on a machine with no `patches` checkout.
@@ -202,22 +202,22 @@ beside the kernel rather than under it:
 
 ```toml
 # devices/<board>.toml
-supported_uboot_profiles = ["rk3576-display", "h96-max-m9-util"]
-default_uboot_profile    = "rk3576-display"
+supported_uboot_series = ["rk3576-display", "h96-max-m9-util"]
+default_uboot_series    = "rk3576-display"
 ```
 
-A profile is a patch profile in the same `patches` repo the kernel series lives in,
-selected per recipe (`uboot_profile = "..."`) or per invocation (`--uboot-profile`),
+A series is a patch series in the same `patches` repo the kernel series lives in,
+selected per recipe (`uboot_series = "..."`) or per invocation (`--uboot-series`),
 and validated against the device's supported set exactly as the kernel axis is. The
 repo it is fetched from is the boot method's `patches_url`/`patches_ref`, and the
 resolved commit lands in the lock's `[uboot_patches]` block — a full pin like every
 other fetched source, graded by `verify-sources` and recorded in each image's
 provenance manifest.
 
-A board whose u-boot ships pristine simply declares no profiles — the RK1 does — or,
+A board whose u-boot ships pristine simply declares no series — the RK1 does — or,
 if it lists some and wants none for this build, selects `"none"`, the same sentinel
-the kernel axis spells as `patch_profile = "none"`. Either way the build fetches
-nothing and the lock omits `[uboot_patches]` entirely. Declaring profiles but no
+the kernel axis spells as `patch_series = "none"`. Either way the build fetches
+nothing and the lock omits `[uboot_patches]` entirely. Declaring series but no
 default, with none selected, is a config error rather than a silent fallback to
 pristine.
 
@@ -229,7 +229,7 @@ Because the axis is independent, a recipe can name a bootloader and *nothing els
 # recipes/rk3576-generic/util.toml
 device        = "rk3576-generic"
 deliverable   = "uboot"
-uboot_profile = "rk3576-util"
+uboot_series = "rk3576-util"
 ```
 
 `deliverable = "uboot"` means the artifact is the bootloader alone. Such a build
@@ -354,13 +354,13 @@ out-of-tree has to patch and configure the kernel for the hardware to exist at a
 alongside its packages and overlay a feature may declare:
 
 ```toml
-patch_profiles   = ["rk3576-rga"]      # series that add the driver to the tree
+patch_series   = ["rk3576-rga"]      # series that add the driver to the tree
 config_fragments = ["accel/rk3576-rga"]  # kconfig that compiles it
 ```
 
 Both are needed together — a fragment can only turn on code the tree contains. They
-compose **after** the kernel's own `patch_profiles`/`config_fragments` and the device's
-`device_patch_profiles`/`device_config_fragments`, so a feature gets the last word on a
+compose **after** the kernel's own `patch_series`/`config_fragments` and the device's
+`device_patch_series`/`device_config_fragments`, so a feature gets the last word on a
 symbol the layers below it also set, matching the way its packages stack last in the
 rootfs merge.
 
@@ -449,17 +449,27 @@ deltas:
 ```toml
 extends = "h96-max-m9"
 
-description = "H96 MAX M9 (RK3576) TV box -- NPU experimental"
-hostname    = "h96-max-m9-npu"
-kernel_dtb  = "rockchip/rk3576-h96-max-m9-npu.dtb"
+description = "H96 MAX M9 (RK3576) TV box -- 16 GB fitting"
+hostname    = "h96-max-m9-16g"
+kernel_dtb  = "rockchip/rk3576-h96-max-m9-16g.dtb"
+device_dts  = [
+    "devices/h96-max-m9/dts/rk3576-h96-max-m9.dts",
+    "devices/h96-max-m9-16g/dts/rk3576-h96-max-m9-16g.dts",
+]
 ```
 
 The parent is merged under the child by the same rules the overlay search path uses:
 tables merge key-by-key, and **a scalar or array is replaced wholesale, not
 concatenated**. So a variant that wants to add one entry to an inherited list restates
-the list — which is why the example above also restates the parent's `device_dts` and
-`device_config_fragments` alongside its own. Chains are walked to the base-most device,
-and a cycle is a named error rather than a hang.
+the list — which is why the example above restates the parent's `device_dts` source
+alongside its own wrapper. Chains are walked to the base-most device, and a cycle is a
+named error rather than a hang.
+
+Reach for this only when the difference genuinely needs a device tree or another
+device-layer field. A capability whose whole expression is packages, kernel config, and
+a patch series is a [feature](#a-feature-can-reach-the-kernel) instead — features
+[compose a-la-carte](#a-feature-selection-is-a-build-point-not-a-new-recipe), where a
+variant device does not.
 
 The parent's **assets come too**: its `overlay/` tree is laid into the rootfs before the
 variant's, so the variant inherits the parent board's runtime config — driver tuning in
@@ -523,7 +533,7 @@ The split between the two is what makes a build reproducible:
 - **`build`** reads only the lock. It touches no network for its pins, so the same lock
   always produces the same inputs. Before building it checks the lock against a fresh
   resolution on every axis the lock records from config — the source repos, blob file
-  names, kernel id, suite, patch profile, extra debs — and refuses on drift, so a
+  names, kernel id, suite, patch series, extra debs — and refuses on drift, so a
   config edit after `update` (say a boot-method flip to a different u-boot repo) is a
   named error rather than a build against stale pins.
 
@@ -553,12 +563,61 @@ build would not produce. The two are kept honest at the one moment they can be d
 apart — `update` warns when it moves the pins out from under a `validated` claim, since
 moving them retires the evidence the claim rested on.
 
+### A feature selection is a build point, not a new recipe
+
+The feature axis is a list, so the number of *legal* selections grows exponentially in
+the number of features — and most of them are nobody's curated point. "The shipped H96
+image, plus hardware decode" is a perfectly reasonable thing to want and a poor reason
+to author a file.
+
+So a build point is a recipe **plus** a feature selection, written as a **reference**:
+
+```text
+h96-max-m9/forky                        the recipe as authored
+h96-max-m9/forky+media-accel-v4l2       that recipe, with this feature selected
+turing-rk1/forky+media-accel-rockchip+jellyfin
+```
+
+Everything but the features comes from the recipe, so a selection cannot drift from the
+board it names. The selection *replaces* the recipe's own `features` list rather than
+adding to it, which is the same thing `--feature` has always meant for `resolve`. Both
+spellings work everywhere, and mean the same point:
+
+```sh
+boot2deb update h96-max-m9/forky --feature media-accel-v4l2
+boot2deb build  h96-max-m9/forky+media-accel-v4l2
+```
+
+**A variant is locked like anything else.** `update` writes
+`recipes/h96-max-m9/forky+media-accel-v4l2.lock` beside the recipe's own, with its own
+solved package manifest, and `build` compiles it in its own work directory under a
+distinct image identity — so two selections can coexist without one landing on the
+other's artifacts. Every lock-reading command takes the reference, so `why-rebuild`,
+`verify-patches`, `verify-sources`, and `clean` all work on a variant unchanged. A
+variant's first `update` inherits the recipe's pins, so it starts from the same kernel,
+u-boot, and blob commits the recipe was pinned at.
+
+Three things follow from a variant being a build point rather than a recipe:
+
+- **It carries no support claim.** The claim belongs to the recipe, and a different
+  feature set is a different build. `list-recipes` and the support matrix show only
+  authored recipes; a variant appears in neither.
+- **Feature order is significant, so it is preserved.** `config_fragments` and
+  `patch_series` compose in selection order, so a later feature wins a kconfig
+  conflict. Two orderings of one set are two references — sorting them into one name
+  would give two materially different builds a single identity.
+- **A selection with no lock is an error, not an implicit `update`.** `build` reads
+  locks; it never resolves one. The error names the `update` line to run.
+
+Curate a recipe when a point is worth *claiming* — something you have booted, or intend
+to support. Use a variant for everything else.
+
 ## Crates
 
 The builder is a Rust workspace of three crates:
 
 ```
-crates/core     typed model, layer resolution + validation, patch-profile / lock /
+crates/core     typed model, layer resolution + validation, patch-series / lock /
                 kconfig formats (pure, deterministic, unit-tested — no Linux host)
 crates/engine   Linux side effects: git shell-outs, the lock resolver, the patch
                 verify gate, kernel-config generation, the compile stages (kernel /

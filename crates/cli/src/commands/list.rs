@@ -138,7 +138,7 @@ pub(crate) fn kernels(root: &ConfigRoot, json: bool) -> Result {
 /// its version knob, and its patch series.
 ///
 /// The knobs differ because the kernels do. A compiled kernel tracks an upstream
-/// version and applies a patch profile; a distro kernel has neither — its version
+/// version and applies a patch series; a distro kernel has neither — its version
 /// comes from the suite and it is patched by Debian — so what a reader wants to see
 /// there is the package that installs it.
 fn kernel_fields(k: &boot2deb_core::model::KernelDef) -> (String, Option<String>, String) {
@@ -147,10 +147,10 @@ fn kernel_fields(k: &boot2deb_core::model::KernelDef) -> (String, Option<String>
         KernelDef::Compiled(k) => (
             k.flavor.as_str().to_string(),
             k.track.clone(),
-            if k.patch_profiles.is_empty() {
+            if k.patch_series.is_empty() {
                 "none".to_string()
             } else {
-                k.patch_profiles.join(", ")
+                k.patch_series.join(", ")
             },
         ),
         KernelDef::Distro(k) => (

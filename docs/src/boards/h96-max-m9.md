@@ -16,14 +16,10 @@ is having a bootloader that can recover the board without a cable. That is what 
 | Recipe | Deliverable | Status |
 | --- | --- | --- |
 | `h96-max-m9/forky` | Whole-disk Debian image (forky) | validated on hardware |
-| `h96-max-m9/media-accel` | The same image plus the RGA 2D accelerator | experimental |
+| `h96-max-m9/media-accel` | The same image plus HW video decode and the RGA 2D accelerator | experimental |
 | `h96-max-m9/util` | u-boot only — the recovery tool, with this board's ethernet | builds; ethernet validated |
-| `h96-max-m9-npu/forky` | Image variant binding the NPU via the `rocket` driver | experimental |
 
-`h96-max-m9-npu` is a separate *device* that `extends` this one: it adds a device tree
-with the NPU node and the `rk3576-npu` patch profile, and inherits everything else —
-overlay tree, Wi-Fi module, packages. The driver binds `/dev/accel`; inference is not
-working yet.
+The base image carries the NPU — see [The NPU](#the-npu) below.
 
 Build the shipped image as in [Getting started](../getting-started.md):
 
@@ -110,17 +106,18 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | Boot to HDMI login, eMMC | works |
 | Ethernet (GMAC0) | works |
 | eMMC (HS400-ES) | works |
-| HDMI video | works (1080p60 first-party; 4K reported) |
+| HDMI video | works — 1080p60 and 4K30 |
 | GPU (Mali-G52 / panfrost) + Mesa GL | works — GL 3.1 / GLES 3.1 |
 | Wi-Fi, 2.4 + 5 GHz | works (AIC8800D80) |
 | Bluetooth | works — `hci0` up, LE + classic scan |
 | Suspend / resume (s2idle) | works |
 | USB 2.0 host | works |
 | Bundled remote | works, zero-config |
-| HDMI-CEC | adapter comes up (`/dev/cec0`) |
+| HDMI-CEC | drove a TV on and off; needs re-validation on a current image |
+| NPU (`rocket`) | device works — jobs compute bit-exact; no userspace for this SoC yet |
 | Analog audio / S/PDIF | card registers; output not yet exercised |
 | HW video decode | driver binds (`/dev/video0`); decode not yet run |
-| HW video encode, NPU | no mainline driver |
+| HW video encode | no mainline driver |
 | SD card | absent — the slot is depopulated |
 | USB 3.0 SuperSpeed | unstable on this unit |
 
@@ -134,6 +131,36 @@ Two things the board needs that are worth knowing about:
 - **`cpuidle.off=1` is in the kernel command line.** A core suspended into the DT
   `CPU_SLEEP` state can miss its wakeup on this platform's BL31. It is a board-level
   workaround, stated in `devices/h96-max-m9.toml` with the condition to drop it.
+
+## The NPU
+
+The RK3576 carries an RKNN neural accelerator, and mainline drives it — through the
+in-tree `rocket` DRM-accel driver, no vendor RKNPU2 stack. **Every image for this board
+has it**: the shipped `h96-max-m9/forky` binds `rocket` on `27700000.npu` and presents
+**`/dev/accel/accel0`**.
+
+Jobs submitted to it compute correctly: an int8 convolution is bit-exact against a CPU
+model on this silicon, and multi-task row-windowed programs stay bit-exact submitted
+back to back with no gap.
+
+The image supplies the *device*, not a runtime, and **there is no released userspace for
+this SoC yet**. Nothing in Debian opens an accel node at all, and the NPU's register
+program is SoC-specific — the RK3576 map is shifted and re-packed relative to the RK3588,
+so a userspace written for the RK3588 does not run here.
+[rocket-userspace](https://github.com/gregordinary/rocket-userspace) is the library to
+watch: it is bit-exact on the RK3588 today and names the RK3576 as its next target, but
+its machine parameters (CBUF size, core count, datatype set) have to be confirmed on this
+part before it drives this board. Until then, driving the NPU here means writing your own
+regcmd encoder against `/dev/accel`.
+
+Two properties of the board's DTS are load-bearing and fail in ways that do not point
+at themselves — both power domains (`NPU0` *and* `NPU1`) on the one core node, or the
+driver's own domain attach loses to the device core's and there is no `/dev/accel`; and
+`regulator-always-on` on `vdd_npu_s0`, or the rail is torn down as unused ~33 s into
+boot, long after a successful probe. The board `.dts` states both with the reasoning.
+
+That always-on rail is the standing cost of carrying the NPU in the base image: it holds
+a supply up on a board that may never open the accel node.
 
 ## Related pages
 

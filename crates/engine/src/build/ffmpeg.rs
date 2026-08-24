@@ -3,7 +3,7 @@
 //! and rkrga *scale* grafted on from nyanmisaka — and package it as the
 //! `ffmpeg-rk` `.deb`.
 //!
-//! The graft is the profile's ffmpeg `git am` series: the nyanmisaka
+//! The graft is the series' ffmpeg `git am` series: the nyanmisaka
 //! encode/scale commits, resolved and materialized as patches (one — the RKMPP
 //! hwcontext — needs a 3-way conflict resolution a plain cherry-pick cannot
 //! reproduce), followed by the NV15 scale_rkrga fix. A patch that will not apply
@@ -24,7 +24,7 @@
 
 use crate::build::{
     self, deb_names, pick_deb, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope,
-    PatchSeries, PatchSource,
+    PatchSource, SeriesIdentity,
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
@@ -224,7 +224,7 @@ pub struct FfmpegOptions<'a> {
     /// FFmpeg tree makes the fetch near-instant.
     pub base_src: &'a str,
     /// The `ffmpeg` patch scope's checkout + pin — the materialized graft series plus
-    /// the NV15 fix. `None` when the resolved kernel names no patch profile.
+    /// the NV15 fix. `None` when the resolved kernel names no patch series.
     pub patches: Option<PatchSource<'a>>,
     /// Directory holding the userspace `.deb`s ffmpeg build-depends on — the output
     /// dir of a prior [`userspace`](crate::build::userspace) run.
@@ -249,7 +249,7 @@ pub struct FfmpegArtifacts {
 
 /// Run the ffmpeg stage, emitting its [`Event`](crate::event::Event)s to `sink`.
 ///
-/// Reads only the [`Lock`] for pins: the base commit and the patch profile.
+/// Reads only the [`Lock`] for pins: the base commit and the patch series.
 /// `arch` is the Debian architecture for the control file and deb name (e.g.
 /// `arm64`). The `sandbox` supplies the target-arch build environment. A tree
 /// already present at `<work>/ffmpeg/build` is reused (already patched) and only
@@ -282,7 +282,7 @@ pub fn build_ffmpeg(
     // series, plus — for the userspace-dependency fold — the `userspace` scope
     // (the MPP CMA fix). Pinned by commit, or fingerprinted from the live checkout in
     // co-dev mode so an edited patch restamps the tree/deb. The `*_fp` locals
-    // outlive the borrowed `PatchSeries`.
+    // outlive the borrowed `SeriesIdentity`.
     let ffmpeg_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Ffmpeg);
     let us_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Userspace);
     let (ffmpeg_patches, us_patches) = (
@@ -447,8 +447,8 @@ fn output_manifest(
     userspace: &UserspacePins,
     arch: &str,
     sandbox_id: &str,
-    patches: PatchSeries,
-    us_patches: PatchSeries,
+    patches: SeriesIdentity,
+    us_patches: SeriesIdentity,
 ) -> crate::signature::SignatureManifest {
     // The ffmpeg node runs only for a media-accel image build, which resolves a suite.
     let suite = lock
@@ -508,17 +508,17 @@ fn output_manifest(
 /// The Tier-1 signature manifest of the fetched+patched ffmpeg tree: the
 /// base commit and the patch series (`build::fold_patch_series`) that together
 /// determine the tree. The source URL is excluded (the commit content-addresses the
-/// base). The [`PatchSeries`] fold covers the pinned patch commit and — in co-dev
+/// base). The [`SeriesIdentity`] fold covers the pinned patch commit and — in co-dev
 /// mode — the live-series fingerprint, so a co-dev build never shares a
 /// stamp with a pinned one and an edited patch restamps. Public so `why-rebuild`
 /// ([`crate::plan`]) recomputes the same signature it stamps here. Takes the
-/// [`FfmpegPins`] and the patch profile/commit directly rather than the whole
+/// [`FfmpegPins`] and the patch series/commit directly rather than the whole
 /// [`Lock`], since it is only meaningful for a media-accel build (one that has
 /// ffmpeg pins).
 pub fn clone_manifest(
     ffmpeg: &FfmpegPins,
     pin: Option<&boot2deb_core::lock::PatchesPin>,
-    patches: PatchSeries,
+    patches: SeriesIdentity,
 ) -> crate::signature::SignatureManifest {
     let mut b = crate::signature::SignatureBuilder::new("ffmpeg", CLONE_STAGE_VERSION);
     b.fold_scalar("ffmpeg.base.commit", &ffmpeg.base.commit);
@@ -526,15 +526,15 @@ pub fn clone_manifest(
     b.manifest()
 }
 
-/// Fetch the base at its locked commit and `git am` the profile's ffmpeg series —
+/// Fetch the base at its locked commit and `git am` the series' ffmpeg series —
 /// the materialized nyanmisaka graft plus the NV15 fix — leaving the tree at
 /// the fully-assembled source the build compiles.
 ///
 /// On any failure the partial tree is removed, so a re-run after a failed `git am`
 /// starts clean rather than silently reusing a half-applied series (the reuse
 /// check in [`build_ffmpeg`] only ever sees a completed tree). The graft rides in
-/// the profile's ffmpeg scope; no kernel-range gate here — that guards the kernel
-/// node, and the profile is already validated there.
+/// the series' ffmpeg scope; no kernel-range gate here — that guards the kernel
+/// node, and the series is already validated there.
 fn fetch_and_patch(
     ffmpeg: &FfmpegPins,
     opts: &FfmpegOptions,
@@ -558,7 +558,7 @@ fn fetch_and_patch(
     if let Some(p) = opts.patches {
         step.log(format!(
             "applied {n} ffmpeg patch(es) ({})",
-            p.pin.profiles.join(", ")
+            p.pin.series.join(", ")
         ));
     }
     Ok(())
@@ -1114,7 +1114,7 @@ mod tests {
                 commit: "kc".into(),
             }),
             patches: Some(PatchesPin {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 source: "ps".into(),
                 reference: "main".into(),
                 commit: patches_commit.into(),
@@ -1182,19 +1182,19 @@ mod tests {
             let ff = lock.ffmpeg.as_ref().unwrap();
             clone_manifest(ff, lock.patches.as_ref(), patches).signature
         };
-        let base = sig("bc1", "pc1", PatchSeries::Pinned);
-        assert_eq!(base, sig("bc1", "pc1", PatchSeries::Pinned));
+        let base = sig("bc1", "pc1", SeriesIdentity::Pinned);
+        assert_eq!(base, sig("bc1", "pc1", SeriesIdentity::Pinned));
         // A base-tree bump or a patch-pin bump each invalidate the reused tree.
-        assert_ne!(base, sig("bc2", "pc1", PatchSeries::Pinned));
-        assert_ne!(base, sig("bc1", "pc2", PatchSeries::Pinned));
+        assert_ne!(base, sig("bc2", "pc1", SeriesIdentity::Pinned));
+        assert_ne!(base, sig("bc1", "pc2", SeriesIdentity::Pinned));
         // Co-dev mode splits the key; a co-dev content change restamps.
         let empty: Vec<String> = vec![];
-        assert_ne!(base, sig("bc1", "pc1", PatchSeries::Dev(&empty)));
+        assert_ne!(base, sig("bc1", "pc1", SeriesIdentity::Dev(&empty)));
         let fp1 = vec!["media-accel/ffmpeg/0001.patch=aaa".to_string()];
         let fp2 = vec!["media-accel/ffmpeg/0001.patch=bbb".to_string()];
         assert_ne!(
-            sig("bc1", "pc1", PatchSeries::Dev(&fp1)),
-            sig("bc1", "pc1", PatchSeries::Dev(&fp2))
+            sig("bc1", "pc1", SeriesIdentity::Dev(&fp1)),
+            sig("bc1", "pc1", SeriesIdentity::Dev(&fp2))
         );
     }
 
@@ -1213,8 +1213,8 @@ mod tests {
                 us,
                 arch,
                 SANDBOX,
-                PatchSeries::Pinned,
-                PatchSeries::Pinned,
+                SeriesIdentity::Pinned,
+                SeriesIdentity::Pinned,
             )
             .signature
             .clone()
@@ -1242,8 +1242,8 @@ mod tests {
                 lock.userspace.as_ref().unwrap(),
                 "arm64",
                 "https://snapshot.debian.org/archive/debian/20260628T083000Z/",
-                PatchSeries::Pinned,
-                PatchSeries::Pinned,
+                SeriesIdentity::Pinned,
+                SeriesIdentity::Pinned,
             )
             .signature
         );
@@ -1257,8 +1257,8 @@ mod tests {
                 dev_lock.userspace.as_ref().unwrap(),
                 "arm64",
                 SANDBOX,
-                PatchSeries::Dev(&[]),
-                PatchSeries::Dev(&[]),
+                SeriesIdentity::Dev(&[]),
+                SeriesIdentity::Dev(&[]),
             )
             .signature
         );
@@ -1277,8 +1277,8 @@ mod tests {
                 us,
                 "arm64",
                 SANDBOX,
-                PatchSeries::Pinned,
-                PatchSeries::Pinned,
+                SeriesIdentity::Pinned,
+                SeriesIdentity::Pinned,
             )
             .signature
             .clone()

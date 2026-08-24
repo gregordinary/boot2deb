@@ -6,7 +6,7 @@
 //! `new-device` (scaffold a new device + recipe from the typed model); `update`
 //! (resolve upstream refs into the lock); `verify-patches`, `verify-config`, and
 //! `verify-sources` (the patch, kernel-config, and source-durability gates); `patch
-//! import` (fetch + normalize + slot a patch into a profile); `build` (drive the
+//! import` (fetch + normalize + slot a patch into a series); `build` (drive the
 //! compile / rootfs / image pipeline from the lock); `why-rebuild` (explain, offline,
 //! which compile nodes the next build reuses vs. rebuilds); and `clean` (remove a
 //! recipe's build scratch).

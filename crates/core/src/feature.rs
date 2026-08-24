@@ -6,7 +6,7 @@
 //! substrate — `base ⊕ soc ⊕ boot-method ⊕ device ⊕ Σ features`. A feature
 //! declares the Debian packages it adds; its overlay tree carries the config it
 //! lays into the rootfs, in the same manifest-plus-ordered-files spirit as a
-//! patch profile.
+//! patch series.
 //!
 //! Pure: parsing plus compatibility checks (the SoC/arch gates and pairwise
 //! conflicts).
@@ -14,7 +14,7 @@
 //! A feature reaches the kernel as well as the rootfs. Alongside its packages,
 //! overlay, and third-party apt sources, it may contribute
 //! [`config_fragments`](Feature::config_fragments) and
-//! [`patch_profiles`](Feature::patch_profiles) — because a capability is often not
+//! [`patch_series`](Feature::patch_series) — because a capability is often not
 //! purely userspace. A hardware-accel provider whose driver is out-of-tree has to
 //! patch and configure the kernel to exist at all, and pinning that on the kernel
 //! or device layer would force it on every build of that SoC or board, including
@@ -125,8 +125,8 @@ pub struct Feature {
     /// ignored.
     #[serde(default)]
     pub config_fragments: Vec<String>,
-    /// Kernel patch profiles this feature adds, by name (`rk3576-rga`), appended
-    /// after the kernel's `patch_profiles` and the device's `device_patch_profiles`
+    /// Kernel patch series this feature adds, by name (`rk3576-rga`), appended
+    /// after the kernel's `patch_series` and the device's `device_patch_series`
     /// and resolved from the same `patches` checkout at the same pin.
     ///
     /// The patch-series half of [`config_fragments`](Feature::config_fragments): a
@@ -137,7 +137,7 @@ pub struct Feature {
     /// Same compiled-kernel requirement, and the same error, as
     /// [`config_fragments`](Feature::config_fragments).
     #[serde(default)]
-    pub patch_profiles: Vec<String>,
+    pub patch_series: Vec<String>,
 }
 
 impl Feature {
@@ -208,11 +208,11 @@ pub fn first_requiring_media_accel(selected: &[(String, Feature)]) -> Option<&st
         .map(|(name, _)| name.as_str())
 }
 
-/// The kconfig fragments and kernel patch profiles a selected feature set
-/// contributes, as `(config_fragments, patch_profiles)`.
+/// The kconfig fragments and kernel patch series a selected feature set
+/// contributes, as `(config_fragments, patch_series)`.
 ///
 /// Both lists follow recipe selection order, and each is de-duplicated keeping the
-/// first occurrence: two features naming the same profile express one requirement,
+/// first occurrence: two features naming the same series express one requirement,
 /// and applying a series twice would fail the second time. The caller appends these
 /// after the kernel's and the device's, so a feature is the last word.
 pub fn kernel_contributions(selected: &[(String, Feature)]) -> (Vec<String>, Vec<String>) {
@@ -225,7 +225,7 @@ pub fn kernel_contributions(selected: &[(String, Feature)]) -> (Vec<String>, Vec
     }
     (
         dedup(selected.iter().flat_map(|(_, f)| &f.config_fragments)),
-        dedup(selected.iter().flat_map(|(_, f)| &f.patch_profiles)),
+        dedup(selected.iter().flat_map(|(_, f)| &f.patch_series)),
     )
 }
 
@@ -241,8 +241,8 @@ pub fn first_contributing_kernel_input(
     selected.iter().find_map(|(name, f)| {
         if !f.config_fragments.is_empty() {
             Some((name.as_str(), "config_fragments"))
-        } else if !f.patch_profiles.is_empty() {
-            Some((name.as_str(), "patch_profiles"))
+        } else if !f.patch_series.is_empty() {
+            Some((name.as_str(), "patch_series"))
         } else {
             None
         }
@@ -285,7 +285,7 @@ mod tests {
             conflicts: conflicts.into_iter().map(String::from).collect(),
             requires_media_accel: false,
             config_fragments: vec![],
-            patch_profiles: vec![],
+            patch_series: vec![],
         }
     }
 

@@ -28,7 +28,17 @@ device_dts              = ["devices/h96-max-m9/dts/rk3576-h96-max-m9.dts"]
 # the display entirely -- see the display reference, section 5.
 kernel_cmdline          = "cpuidle.off=1"
 
-device_config_fragments = ["device/h96-max-m9"]    # board IR + regdb kconfig deltas
+# Board IR + regdb kconfig deltas, plus the NPU enable (DRM_ACCEL + ROCKCHIP_IOMMU
+# + the rocket driver). The NPU is board opt-in rather than SoC-wide because the
+# enable rides this board's `.dts` and its rail.
+device_config_fragments = ["device/h96-max-m9", "accel/rk3576-npu"]
+
+# The RK3576 NPU (rocket) kernel series, composed after the kernel's SoC-wide
+# rk3576-fixes series. On the device rather than the kernel so an RK3576 board
+# without an NPU enable in its device tree carries neither the series nor the driver.
+# It delivers a device (/dev/accel) that computes bit-exact; no released userspace
+# encodes for this SoC yet, so nothing in the image opens it.
+device_patch_series   = ["rk3576-npu"]
 
 # The board's AIC8800D80 SDIO Wi-Fi driver, built out-of-tree from kmods/aic8800.toml
 # rather than carried as an in-tree patch series. Board opt-in, so the shared RK3576
@@ -69,8 +79,8 @@ default_kernel          = "rk3576-mainline-7.1"
 # u-boot for its shipped image (rk3576-display), and a board-specific util tool
 # that adds this board's ethernet (h96-max-m9-util, a u-boot-only recipe). The
 # board-neutral loader and util tools are homed on the rk3576-generic device.
-supported_uboot_profiles = ["rk3576-display", "h96-max-m9-util"]
-default_uboot_profile    = "rk3576-display"
+supported_uboot_series = ["rk3576-display", "h96-max-m9-util"]
+default_uboot_series    = "rk3576-display"
 default_suite           = "forky"
 default_layout          = "combined"               # combined | split
 hostname                = "h96-max-m9"

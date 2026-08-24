@@ -143,15 +143,15 @@ pub enum ConfigError {
         supported: String,
     },
 
-    /// The chosen u-boot profile is not in the device's `supported_uboot_profiles`.
+    /// The chosen u-boot series is not in the device's `supported_uboot_series`.
     #[error(
-        "device '{device}' does not support u-boot profile '{profile}' (supported: {supported})"
+        "device '{device}' does not support u-boot series '{series}' (supported: {supported})"
     )]
-    UnknownUbootProfileForDevice {
+    UnknownUbootSeriesForDevice {
         /// The device being resolved.
         device: String,
-        /// The requested u-boot profile.
-        profile: String,
+        /// The requested u-boot series.
+        series: String,
         /// Comma-separated list of what the device does support.
         supported: String,
     },
@@ -191,13 +191,13 @@ pub enum ConfigError {
         flag: &'static str,
     },
 
-    /// The device declares `supported_uboot_profiles` but no `default_uboot_profile`,
-    /// and none was selected — so a build has no u-boot profile to resolve.
+    /// The device declares `supported_uboot_series` but no `default_uboot_series`,
+    /// and none was selected — so a build has no u-boot series to resolve.
     #[error(
-        "device '{device}' lists supported_uboot_profiles but no default_uboot_profile — \
-         set one (or select a profile per recipe / with --uboot-profile)"
+        "device '{device}' lists supported_uboot_series but no default_uboot_series — \
+         set one (or select a series per recipe / with --uboot-series)"
     )]
-    MissingDefaultUbootProfile {
+    MissingDefaultUbootSeries {
         /// The device being resolved.
         device: String,
     },
@@ -342,7 +342,7 @@ pub enum ConfigError {
     },
 
     /// A selected feature contributes a kernel input — kconfig fragments or a patch
-    /// profile — while the resolved kernel is a distro package that compiles
+    /// series — while the resolved kernel is a distro package that compiles
     /// nothing. The capability's driver would never be patched in or configured on,
     /// so the feature would install its userspace against hardware support that is
     /// not there.
@@ -357,7 +357,7 @@ pub enum ConfigError {
         /// The distro-package kernel it was paired with.
         kernel: String,
         /// The feature field that would be ignored (`config_fragments` or
-        /// `patch_profiles`).
+        /// `patch_series`).
         what: &'static str,
     },
 
@@ -432,11 +432,11 @@ pub enum ConfigError {
         kmod: String,
     },
 
-    /// A patch profile's `applies_to_kernel` is not a valid semver requirement.
-    #[error("profile '{profile}' has invalid applies_to_kernel '{value}': {source}")]
+    /// A patch series' `applies_to_kernel` is not a valid semver requirement.
+    #[error("series '{series}' has invalid applies_to_kernel '{value}': {source}")]
     InvalidVersionReq {
-        /// The profile whose range failed to parse.
-        profile: String,
+        /// The series whose range failed to parse.
+        series: String,
         /// The offending `applies_to_kernel` string.
         value: String,
         /// Underlying semver parse error.
@@ -462,67 +462,67 @@ pub enum ConfigError {
         source: semver::Error,
     },
 
-    /// A kernel definition names one or more patch profiles but no `patches_url`. The
+    /// A kernel definition names one or more patch series but no `patches_url`. The
     /// lock records the source beside the commit, and a commit id is meaningless
     /// outside the repo it came from, so a series without a source cannot be pinned
     /// honestly.
     #[error(
-        "kernel '{kernel}' names patch profiles [{profiles}] but no patches_url — \
+        "kernel '{kernel}' names patch series [{series}] but no patches_url — \
          add `patches_url` to kernels/{kernel}.toml (the lock records it beside the \
          pinned commit, which means nothing without the repo it is in)"
     )]
     MissingPatchesUrl {
         /// Kernel definition id.
         kernel: String,
-        /// The profiles it names, comma-joined.
-        profiles: String,
+        /// The series it names, comma-joined.
+        series: String,
     },
 
-    /// A device selects a u-boot patch profile but its `rockchip-rkbin` boot method
+    /// A device selects a u-boot patch series but its `rockchip-rkbin` boot method
     /// declares no `patches_url`. The u-boot series has nowhere to be fetched from and
     /// no source to pin beside its commit, mirroring [`MissingPatchesUrl`].
     ///
     /// [`MissingPatchesUrl`]: ConfigError::MissingPatchesUrl
     #[error(
-        "device '{device}' selects u-boot profile '{profile}' but boot method \
+        "device '{device}' selects u-boot series '{series}' but boot method \
          'rockchip-rkbin' declares no patches_url — add `patches_url` to \
          boot-methods/rockchip-rkbin.toml"
     )]
     MissingUbootPatchesUrl {
         /// The device being resolved.
         device: String,
-        /// The u-boot profile it selects.
-        profile: String,
+        /// The u-boot series it selects.
+        series: String,
     },
 
-    /// The resolved kernel version falls outside the profile's declared range —
+    /// The resolved kernel version falls outside the series' declared range —
     /// the "declared intent" mismatch caught before the verify gate runs.
     #[error(
-        "profile '{profile}' does not target kernel {kernel_version} \
+        "series '{series}' does not target kernel {kernel_version} \
          (applies_to_kernel = '{applies_to}')"
     )]
-    KernelOutsideProfileRange {
-        /// The patch profile.
-        profile: String,
+    KernelOutsideSeriesRange {
+        /// The patch series.
+        series: String,
         /// The resolved kernel version that is out of range.
         kernel_version: String,
-        /// The profile's declared range.
+        /// The series' declared range.
         applies_to: String,
     },
 
-    /// The resolved u-boot version falls outside the profile's declared
+    /// The resolved u-boot version falls outside the series' declared
     /// `applies_to_uboot` range — the u-boot counterpart of
-    /// [`KernelOutsideProfileRange`](ConfigError::KernelOutsideProfileRange).
+    /// [`KernelOutsideSeriesRange`](ConfigError::KernelOutsideSeriesRange).
     #[error(
-        "profile '{profile}' does not target u-boot {uboot_version} \
+        "series '{series}' does not target u-boot {uboot_version} \
          (applies_to_uboot = '{applies_to}')"
     )]
-    UbootOutsideProfileRange {
-        /// The patch profile.
-        profile: String,
+    UbootOutsideSeriesRange {
+        /// The patch series.
+        series: String,
         /// The resolved u-boot version that is out of range.
         uboot_version: String,
-        /// The profile's declared range.
+        /// The series' declared range.
         applies_to: String,
     },
 
@@ -602,6 +602,11 @@ pub enum ConfigError {
     /// The same feature was selected more than once. Features apply their overlay
     /// and packages, so a duplicate would apply an overlay twice — rejected rather
     /// than silently deduplicated.
+    ///
+    /// Also raised when building a [`BuildPoint`](crate::buildpoint::BuildPoint),
+    /// which rejects it earlier still: folding a repeat there would make the
+    /// reference disagree with what was asked for, and the reference is what names
+    /// the lock, the solved manifest, and the build directory.
     #[error("feature '{feature}' selected more than once")]
     DuplicateFeature {
         /// The repeated feature name.
@@ -673,7 +678,7 @@ pub enum ConfigError {
 
     /// `patch import` could not choose a filename prefix for the requested position.
     /// Consecutive integer neighbors auto-degrade to a lettered sub-prefix
-    /// ([`derive_prefix`](crate::profile::derive_prefix)), so this remains only for
+    /// ([`derive_prefix`](crate::series::derive_prefix)), so this remains only for
     /// the one case with no room below it: prepending before a `000`-prefixed first
     /// entry. Pass an explicit destination label with `--as`.
     #[error(

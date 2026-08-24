@@ -2,13 +2,13 @@
 
 boot2deb applies an ordered **patch series** to each source tree (kernel, ffmpeg,
 userspace, u-boot) before it compiles. The series is declared by a
-[patch profile](../reference/config-model.md#patch-profiles-belong-to-the-kernel) that
+[patch series](../reference/config-model.md#patch-series-belong-to-the-kernel) that
 lives in the separate `patches` repo. Adding a patch means getting it into that series
 and then into a build. This page walks the loop end to end.
 
-It applies to a kernel that names a profile. A kernel with `patch_profile = "none"`
+It applies to a kernel that names a series. A kernel with `patch_series = "none"`
 applies no series and never reads the `patches` repo; giving such a board a patch means
-first authoring a profile for its kernel.
+first authoring a series for its kernel.
 
 ## The loop
 
@@ -23,19 +23,19 @@ patch sitting on disk does nothing until it is *committed* in the patches repo a
 lock is *re-pinned* to include that commit. `patch import` prints these follow-ups for
 you; the rest of this page is the same steps, with their failure modes.
 
-The running example imports a kernel patch into the `rk3588-accel` profile and builds the
+The running example imports a kernel patch into the `rk3588-accel` series and builds the
 `turing-rk1/forky` recipe.
 
 ## 1. Import the patch
 
 `patch import` fetches a patch (a patchwork/mbox URL, a local file, or `-` for stdin),
-normalizes it to canonical `git am`-ready mbox, writes it into the profile's tree, and
-slots it into the profile manifest at the right position:
+normalizes it to canonical `git am`-ready mbox, writes it into the series' tree, and
+slots it into the series manifest at the right position:
 
 ```sh
 cargo run -p boot2deb-cli -- patch import \
   https://patchwork.kernel.org/project/linux-rockchip/patch/NNNN/mbox/ \
-  --profile rk3588-accel --scope kernel
+  --series rk3588-accel --scope kernel
 ```
 
 - `--scope` selects which tree's series to insert into: `kernel`, `ffmpeg`, `userspace`,
@@ -64,14 +64,14 @@ next steps — no build reads the patch until the series is committed and re-pin
   2. re-pin locks:   boot2deb update turing-rk1/forky
 ```
 
-The re-pin line names each recipe whose kernel uses the profile you imported into. The
+The re-pin line names each recipe whose kernel uses the series you imported into. The
 checkout path it prints is the one it wrote to: `--patches-path` when you passed one,
 else the config root's sibling `../patches` — anchored to `--root`, not to the
 directory you ran from.
 
 ## 2. Commit in the patches repo
 
-The new patch file and the profile edit both live in the `patches` repo. Commit them
+The new patch file and the series edit both live in the `patches` repo. Commit them
 there:
 
 ```sh
@@ -136,7 +136,7 @@ if the checkout is *behind* the pin (stale), `git checkout` the pinned commit. R
 after a commit is the usual fix.
 
 **Auto-fetch can't find the commit.** A zero-clone build (no local `../patches`) fetches
-the series at the pinned commit from the profile's `patches_url`. That only works if the
+the series at the pinned commit from the series' `patches_url`. That only works if the
 commit has been **pushed** — an unpushed local commit resolves fine against a local
 checkout but not on another machine. Push the patches repo before relying on the
 auto-fetch.

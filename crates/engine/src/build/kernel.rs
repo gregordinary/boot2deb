@@ -15,7 +15,7 @@
 
 use crate::build::{
     self, deb_names, pick_deb, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope,
-    PatchSeries, PatchSource,
+    PatchSource, SeriesIdentity,
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
@@ -59,7 +59,7 @@ pub struct KernelOptions<'a> {
     /// clone (e.g. `../linux`) makes the shallow clone near-instant.
     pub source: &'a str,
     /// The patch series to apply, or `None` when the resolved kernel names no patch
-    /// profile — the tree is then compiled exactly as cloned and the `patches` repo is
+    /// series — the tree is then compiled exactly as cloned and the `patches` repo is
     /// never read.
     pub patches: Option<PatchSource<'a>>,
     /// Resolved kconfig fragment files in merge order (base → soc → accel →
@@ -119,7 +119,7 @@ pub fn source_date_epoch(work_dir: &Path, lock: &Lock) -> Option<u64> {
 /// Run the kernel stage, emitting its [`Event`](crate::event::Event)s to `sink`.
 ///
 /// Reads only the [`Lock`] for pins: the kernel ref/commit, the patch
-/// profile + its commit. A freshly-cloned tree is verified to sit at the locked
+/// series + its commit. A freshly-cloned tree is verified to sit at the locked
 /// commit before patches are applied; a reused `<work>/linux` is left as-is
 /// (already patched) and only reconfigured + rebuilt.
 pub fn build_kernel(
@@ -371,7 +371,7 @@ fn output_manifest(
     lock: &Lock,
     opts: &KernelOptions,
     env: &BuildEnv,
-    patches: PatchSeries,
+    patches: SeriesIdentity,
     device_dts: &[String],
 ) -> Result<crate::signature::SignatureManifest, EngineError> {
     let tree_sig = clone_manifest(lock, patches, device_dts)?.signature();
@@ -399,7 +399,7 @@ fn output_manifest(
 /// excluded (a commit content-addresses the tree, so the same commit from any mirror
 /// is the same tree). The reference is folded because the patch-applicability gate
 /// keys on it, so a reference change without a commit change must restamp the tree to
-/// force the gate to re-evaluate. The [`PatchSeries`] fold covers the
+/// force the gate to re-evaluate. The [`SeriesIdentity`] fold covers the
 /// pinned commit and — in co-dev mode — the live-series fingerprint, so a
 /// co-dev build never shares a stamp with a pinned one and an edited patch restamps.
 /// `device_dts` is the ordered content fingerprint from
@@ -410,7 +410,7 @@ fn output_manifest(
 /// here.
 pub fn clone_manifest(
     lock: &Lock,
-    patches: PatchSeries,
+    patches: SeriesIdentity,
     device_dts: &[String],
 ) -> Result<crate::signature::SignatureManifest, EngineError> {
     let pin = build::kernel_pin(lock)?;
@@ -458,9 +458,9 @@ fn clone_and_patch(
     match opts.patches {
         Some(p) => step.log(format!(
             "applied {n} kernel patches ({})",
-            p.pin.profiles.join(", ")
+            p.pin.series.join(", ")
         )),
-        None => step.log("no patch profile: compiling the kernel tree as cloned"),
+        None => step.log("no patch series: compiling the kernel tree as cloned"),
     }
     install_device_dts(build, opts.device_dts, tree, step)?;
     Ok(())
@@ -772,7 +772,7 @@ mod tests {
                 commit: kernel_commit.into(),
             }),
             patches: Some(PatchesPin {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 source: "ps".into(),
                 reference: "main".into(),
                 commit: patches_commit.into(),
@@ -815,24 +815,24 @@ mod tests {
                 .unwrap()
                 .signature
         };
-        let base = sig("kc1", "pc1", PatchSeries::Pinned);
+        let base = sig("kc1", "pc1", SeriesIdentity::Pinned);
         // Same pins → same signature (a plain rebuild reuses the tree).
-        assert_eq!(base, sig("kc1", "pc1", PatchSeries::Pinned));
+        assert_eq!(base, sig("kc1", "pc1", SeriesIdentity::Pinned));
         // A kernel bump changes it (stale tree rebuilds, not silently reused).
-        assert_ne!(base, sig("kc2", "pc1", PatchSeries::Pinned));
+        assert_ne!(base, sig("kc2", "pc1", SeriesIdentity::Pinned));
         // A patches-pin bump changes it.
-        assert_ne!(base, sig("kc1", "pc2", PatchSeries::Pinned));
+        assert_ne!(base, sig("kc1", "pc2", SeriesIdentity::Pinned));
         // Co-dev mode never shares a stamp with a pinned build, even with an empty
         // fingerprint (the `patches_dev` marker alone differs).
         let empty: Vec<String> = vec![];
-        assert_ne!(base, sig("kc1", "pc1", PatchSeries::Dev(&empty)));
+        assert_ne!(base, sig("kc1", "pc1", SeriesIdentity::Dev(&empty)));
         // A co-dev series *content* change restamps the tree: editing a
         // patch file (its digest) changes the fingerprint, hence the signature.
         let fp1 = vec!["media-accel/kernel/040.patch=aaa".to_string()];
         let fp2 = vec!["media-accel/kernel/040.patch=bbb".to_string()];
         assert_ne!(
-            sig("kc1", "pc1", PatchSeries::Dev(&fp1)),
-            sig("kc1", "pc1", PatchSeries::Dev(&fp2))
+            sig("kc1", "pc1", SeriesIdentity::Dev(&fp1)),
+            sig("kc1", "pc1", SeriesIdentity::Dev(&fp2))
         );
     }
 
@@ -845,10 +845,10 @@ mod tests {
         a.kernel.as_mut().unwrap().reference = "v7.1.1".into();
         b.kernel.as_mut().unwrap().reference = "v7.1.2".into();
         assert_ne!(
-            clone_manifest(&a, PatchSeries::Pinned, &[])
+            clone_manifest(&a, SeriesIdentity::Pinned, &[])
                 .unwrap()
                 .signature,
-            clone_manifest(&b, PatchSeries::Pinned, &[])
+            clone_manifest(&b, SeriesIdentity::Pinned, &[])
                 .unwrap()
                 .signature
         );
@@ -858,7 +858,7 @@ mod tests {
     fn device_dts_content_folds_into_the_clone_signature() {
         let lock = lock_with("kc1", "pc1");
         let sig = |dts: &[String]| {
-            clone_manifest(&lock, PatchSeries::Pinned, dts)
+            clone_manifest(&lock, SeriesIdentity::Pinned, dts)
                 .unwrap()
                 .signature
         };
@@ -868,7 +868,7 @@ mod tests {
         let upstream = sig(&[]);
         assert_eq!(
             upstream,
-            clone_manifest(&lock, PatchSeries::Pinned, &[])
+            clone_manifest(&lock, SeriesIdentity::Pinned, &[])
                 .unwrap()
                 .signature
         );
@@ -1129,7 +1129,7 @@ mod tests {
                 lock,
                 &opts,
                 env,
-                PatchSeries::Pinned,
+                SeriesIdentity::Pinned,
                 &[],
             )
             .unwrap()

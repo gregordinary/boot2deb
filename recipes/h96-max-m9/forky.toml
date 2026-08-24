@@ -3,16 +3,20 @@
 # to the sibling .lock by `boot2deb update h96-max-m9/forky`.
 device     = "h96-max-m9"
 kernel     = "rk3576-mainline-7.1"
-uboot_profile = "rk3576-display"
+uboot_series = "rk3576-display"
 suite      = "forky"
-features   = []                # base image; media-accel is not modeled for RK3576 yet
+features   = []                # base image; add media-accel-v4l2 for the decode/RGA stack
 layout     = "combined"
 image_size = "2G"
 
-# The u-boot chain (rk3576-display) is hardware-validated and the image has
-# booted to a login on this board; the full image path has not been rebuilt
-# since the shared image/first-boot code changed, so the claim is "expected"
-# until a fresh build boots.
+# The device's NPU series and DT enable are in the base board, so this image is the
+# configuration the NPU results are taken on. Five deltas separate this pin from the
+# last one that booted to a login, and none of them touches a path that boot depends
+# on: the CBUF clocks rknn_core_1 needs to probe (a core that never bound), the
+# removal of an i2c2 RTC that is not fitted, the removal of a serdes PHY enable with
+# no consumer, CPU cache nodes plus quieter Wi-Fi logging, and rocket retiring an
+# RK3576 job on the DPU's own completion. Those are axes not expected to change the
+# outcome, so `expected` until an image from this pin boots.
 [support]
-status = "validated"
-date   = "2026-07-24"
+status = "expected"
+date   = "2026-07-28"

@@ -5,7 +5,7 @@
 //! gate ([`patches`]), and kernel-config generation + the parity check
 //! ([`kconfig`]). Curating the series is [`patchimport`] (`patch import`): it fetches
 //! a patch, normalizes it to canonical mbox (via [`boot2deb_core::mbox`]), and slots
-//! it into a profile's ordered scope list. The compile steps run as subprocess stages — the [`build`] graph
+//! it into a series' ordered scope list. The compile steps run as subprocess stages — the [`build`] graph
 //! nodes ([`build::kernel`], [`build::uboot`], [`build::userspace`],
 //! [`build::ffmpeg`]) — reading the resolved lock and emitting the structured
 //! [`event`] stream. Reuse of a cloned+patched kernel/u-boot tree is gated

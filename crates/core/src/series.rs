@@ -1,11 +1,11 @@
-//! Patch-profile model: a kernel-version-scoped manifest —
-//! `profiles/<name>/profile.toml` in the `patches` repo — declaring the kernel
+//! Patch-series model: a kernel-version-scoped manifest —
+//! `series/<name>.toml` in the `patches` repo — declaring the kernel
 //! range a series targets plus ordered per-tree patch lists.
 //!
-//! A profile belongs to a *kernel definition*, not a device: a series that
-//! applies to one kernel version will not apply to another, so the profile lives
+//! A series belongs to a *kernel definition*, not a device: a series that
+//! applies to one kernel version will not apply to another, so the series lives
 //! with the kernel that owns it. Supporting a new kernel version means
-//! authoring a new profile; old profiles stay so old kernels keep building.
+//! authoring a new series; old series stay so old kernels keep building.
 //!
 //! Pure: parsing plus version-range matching only. Fetching the patches repo and
 //! running `git am` are engine side effects. The version match here is the
@@ -18,22 +18,22 @@ use serde::Deserialize;
 use std::path::Path;
 use std::str::FromStr;
 
-/// The `patch_profile` a kernel definition authors when it applies no patch series
+/// The `patch_series` a kernel definition authors when it applies no patch series
 /// at all — a stock mainline kernel whose SoC is fully upstream, or a vendor kernel
 /// that already ships its patches. Such a build never reads the `patches` repo, so
 /// its lock records no `[patches]` table.
 ///
-/// The spelling is config-facing; [`patch_profile`] maps it to the `None` the rest of
+/// The spelling is config-facing; [`patch_series`] maps it to the `None` the rest of
 /// the code reasons about, so no other module compares against this string.
-pub const NO_PATCH_PROFILE: &str = "none";
+pub const NO_PATCH_SERIES: &str = "none";
 
-/// Interpret a kernel definition's authored `patch_profile`: `None` for the
-/// [`NO_PATCH_PROFILE`] sentinel, `Some(name)` for a real profile in the `patches`
-/// repo. Resolution calls this once, so an absent profile flows through
+/// Interpret a kernel definition's authored `patch_series`: `None` for the
+/// [`NO_PATCH_SERIES`] sentinel, `Some(name)` for a real series in the `patches`
+/// repo. Resolution calls this once, so an absent series flows through
 /// [`ResolvedKernel`](crate::model::ResolvedKernel) and the lock as a typed absence
 /// rather than a magic string.
-pub fn patch_profile(authored: &str) -> Option<&str> {
-    (authored != NO_PATCH_PROFILE).then_some(authored)
+pub fn patch_series(authored: &str) -> Option<&str> {
+    (authored != NO_PATCH_SERIES).then_some(authored)
 }
 
 /// How a kernel version is matched against a declared range.
@@ -45,7 +45,7 @@ pub fn patch_profile(authored: &str) -> Option<&str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeMatch {
     /// Release-strict: a prerelease matches only a range that names one. This is
-    /// what a **build** uses — a profile's declared envelope is a claim about
+    /// what a **build** uses — a series' declared envelope is a claim about
     /// released kernels, and quietly building an RC against it would overstate it.
     Release,
     /// Candidate: a prerelease is matched as its base release (`7.2.0-rc3` is read
@@ -54,7 +54,7 @@ pub enum RangeMatch {
     Candidate,
 }
 
-/// One entry in a profile's ordered scope list.
+/// One entry in a series' ordered scope list.
 ///
 /// Bare string or table, so the version-insensitive majority stay one-liners and
 /// only the volatile few carry a range:
@@ -67,7 +67,7 @@ pub enum RangeMatch {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchEntry {
-    /// A bare path: applies to every kernel the profile's envelope admits.
+    /// A bare path: applies to every kernel the series' envelope admits.
     Always(String),
     /// A path narrowed to its own kernel range, intersected with the envelope.
     Ranged(RangedPatch),
@@ -76,7 +76,7 @@ pub enum PatchEntry {
 // Manual `Deserialize` rather than `#[serde(untagged)]`, as for `KernelSource` and
 // `Keymap`: an untagged enum ignores unknown fields regardless of
 // `deny_unknown_fields`, and a table that matches no variant gives an opaque "did not
-// match any variant" rather than naming the offending key. `profile.toml` lives in the
+// match any variant" rather than naming the offending key. `series.toml` lives in the
 // `patches` repo and is hand-authored, so it is exactly the file that earns a precise
 // error. Dispatching on the TOML value kind — string → `Always`, table → the
 // `deny_unknown_fields` `RangedPatch` — makes a typo (`{ path, kernel }`) say so.
@@ -117,7 +117,7 @@ impl<'de> Deserialize<'de> for PatchEntry {
 pub struct RangedPatch {
     /// Patches-repo-relative path, as a bare entry would spell it.
     pub path: String,
-    /// Semver requirement narrowing this patch within the profile's envelope
+    /// Semver requirement narrowing this patch within the series' envelope
     /// (e.g. `"<7.3"` for one upstreamed at 7.3, `">=7.2"` for a successor).
     pub kernels: String,
 }
@@ -142,21 +142,21 @@ impl PatchEntry {
     /// True when this entry is selected for `kernel_version`. A bare entry always
     /// is; a ranged one is when its range matches under `mode`.
     ///
-    /// `profile` names the owner for the error message only.
+    /// `series` names the owner for the error message only.
     pub fn selected(
         &self,
-        profile: &str,
+        series: &str,
         kernel_version: &str,
         mode: RangeMatch,
     ) -> Result<bool, ConfigError> {
         match self.kernels() {
             None => Ok(true),
-            Some(range) => matches_range(profile, range, kernel_version, mode),
+            Some(range) => matches_range(series, range, kernel_version, mode),
         }
     }
 }
 
-/// A patch profile manifest (`profiles/<name>/profile.toml`).
+/// A patch series manifest (`series/<name>.toml`).
 ///
 /// Each scope list is an ordered sequence of [`PatchEntry`], and the list — not the
 /// filename prefixes — is the authoritative apply order. A single tree's list may
@@ -166,22 +166,22 @@ impl PatchEntry {
 /// tree via `git am --3way`.
 ///
 /// Two ranges gate a build: [`applies_to_kernel`](Self::applies_to_kernel) is the
-/// profile's overall envelope, and each entry may narrow itself further within it.
+/// series' overall envelope, and each entry may narrow itself further within it.
 /// Both express *declared intent*; the engine's `git am` pass is the enforcement.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PatchProfile {
+pub struct PatchSeries {
     /// Version range the kernel-family scopes (`kernel`/`ffmpeg`/`userspace`) target,
     /// as a semver requirement (e.g. `">=7.0, <7.2"`), matched against the resolved
     /// kernel's release version. `None` (omitted) means those scopes apply to any
-    /// kernel — the shape a profile that patches only u-boot takes, since it makes no
+    /// kernel — the shape a series that patches only u-boot takes, since it makes no
     /// kernel claim. Gated per build by [`ensure_applies`](Self::ensure_applies).
     #[serde(default)]
     pub applies_to_kernel: Option<String>,
     /// Version range the `uboot` scope targets, matched against the resolved u-boot's
     /// version (the boot method's `uboot_ref`, e.g. `v2026.04`) rather than the
     /// kernel's — u-boot is its own axis. `None` means the u-boot series applies to
-    /// any u-boot this profile is built against. Gated by
+    /// any u-boot this series is built against. Gated by
     /// [`ensure_applies_uboot`](Self::ensure_applies_uboot).
     #[serde(default)]
     pub applies_to_uboot: Option<String>,
@@ -201,8 +201,8 @@ pub struct PatchProfile {
     pub uboot: Vec<PatchEntry>,
 }
 
-impl PatchProfile {
-    /// The version-range envelope gating `scope`, if the profile declares one: the
+impl PatchSeries {
+    /// The version-range envelope gating `scope`, if the series declares one: the
     /// [`applies_to_kernel`](Self::applies_to_kernel) range for the kernel-family
     /// scopes, the [`applies_to_uboot`](Self::applies_to_uboot) range for `uboot`.
     fn envelope(&self, scope: Scope) -> Option<&str> {
@@ -213,18 +213,18 @@ impl PatchProfile {
     }
 
     /// Parse `scope`'s declared envelope into a [`VersionReq`], or `None` when the
-    /// profile declares none for it (that scope then applies to any version).
+    /// series declares none for it (that scope then applies to any version).
     ///
-    /// `profile` names the owner for the error message only.
+    /// `series` names the owner for the error message only.
     pub fn version_req(
         &self,
-        profile: &str,
+        series: &str,
         scope: Scope,
     ) -> Result<Option<VersionReq>, ConfigError> {
         self.envelope(scope)
             .map(|req| {
                 VersionReq::parse(req).map_err(|source| ConfigError::InvalidVersionReq {
-                    profile: profile.to_string(),
+                    series: series.to_string(),
                     value: req.to_string(),
                     source,
                 })
@@ -232,14 +232,14 @@ impl PatchProfile {
             .transpose()
     }
 
-    /// True when `kernel_version` falls in this profile's kernel envelope, matched
-    /// release-strict ([`RangeMatch::Release`]); always true when the profile
+    /// True when `kernel_version` falls in this series' kernel envelope, matched
+    /// release-strict ([`RangeMatch::Release`]); always true when the series
     /// declares no kernel envelope.
     ///
     /// `kernel_version` may be `v`-prefixed (`v7.1.1`) and may omit the patch
     /// component (`7.1` is read as `7.1.0`).
-    pub fn applies_to(&self, profile: &str, kernel_version: &str) -> Result<bool, ConfigError> {
-        self.applies_to_under(profile, kernel_version, RangeMatch::Release)
+    pub fn applies_to(&self, series: &str, kernel_version: &str) -> Result<bool, ConfigError> {
+        self.applies_to_under(series, kernel_version, RangeMatch::Release)
     }
 
     /// [`applies_to`](Self::applies_to) under an explicit [`RangeMatch`], so
@@ -247,13 +247,13 @@ impl PatchProfile {
     /// build path would refuse.
     pub fn applies_to_under(
         &self,
-        profile: &str,
+        series: &str,
         kernel_version: &str,
         mode: RangeMatch,
     ) -> Result<bool, ConfigError> {
         match self.applies_to_kernel.as_deref() {
             None => Ok(true),
-            Some(req) => matches_range(profile, req, kernel_version, mode),
+            Some(req) => matches_range(series, req, kernel_version, mode),
         }
     }
 
@@ -267,13 +267,13 @@ impl PatchProfile {
     pub fn series_for(
         &self,
         scope: Scope,
-        profile: &str,
+        series: &str,
         kernel_version: &str,
         mode: RangeMatch,
     ) -> Result<Vec<&str>, ConfigError> {
         self.scope(scope)
             .iter()
-            .filter_map(|e| match e.selected(profile, kernel_version, mode) {
+            .filter_map(|e| match e.selected(series, kernel_version, mode) {
                 Ok(true) => Some(Ok(e.path())),
                 Ok(false) => None,
                 Err(e) => Some(Err(e)),
@@ -281,10 +281,10 @@ impl PatchProfile {
             .collect()
     }
 
-    /// Entries the profile can never select, as `(scope, entry)` pairs.
+    /// Entries the series can never select, as `(scope, entry)` pairs.
     ///
     /// An entry is unreachable when its own range shares no version with its scope's
-    /// envelope: no version the profile admits for that scope can select it, so it is
+    /// envelope: no version the series admits for that scope can select it, so it is
     /// dead by construction rather than by judgement. Envelope `">=7.8, <8.0"` with an
     /// entry pinned `"<7.2"` is the shape this catches — typically a patch that was
     /// upstreamed long enough ago that the envelope has moved past its cap. A scope
@@ -297,10 +297,10 @@ impl PatchProfile {
     ///
     /// Conservative: an entry whose range or envelope uses an operator this cannot
     /// bound (`^`, `~`, `*`) is never reported, so a finding is always a real one.
-    pub fn unreachable(&self, profile: &str) -> Result<Vec<(Scope, &PatchEntry)>, ConfigError> {
+    pub fn unreachable(&self, series: &str) -> Result<Vec<(Scope, &PatchEntry)>, ConfigError> {
         let mut dead = Vec::new();
         for scope in Scope::ALL {
-            let Some(envelope) = self.version_req(profile, scope)? else {
+            let Some(envelope) = self.version_req(series, scope)? else {
                 continue;
             };
             let Some(env) = Interval::of(&envelope) else {
@@ -310,7 +310,7 @@ impl PatchProfile {
                 let Some(range) = entry.kernels() else {
                     continue;
                 };
-                let req = parse_req(profile, range)?;
+                let req = parse_req(series, range)?;
                 if Interval::of(&req).is_some_and(|i| !env.intersects(&i)) {
                     dead.push((scope, entry));
                 }
@@ -319,15 +319,15 @@ impl PatchProfile {
         Ok(dead)
     }
 
-    /// [`applies_to`](PatchProfile::applies_to) as a hard gate on the kernel-family
-    /// scopes: returns [`ConfigError::KernelOutsideProfileRange`] when the kernel is
-    /// out of range, so a mismatched `(kernel, profile)` fails before any patch is
-    /// fetched. A no-op when the profile declares no kernel envelope.
-    pub fn ensure_applies(&self, profile: &str, kernel_version: &str) -> Result<(), ConfigError> {
+    /// [`applies_to`](PatchSeries::applies_to) as a hard gate on the kernel-family
+    /// scopes: returns [`ConfigError::KernelOutsideSeriesRange`] when the kernel is
+    /// out of range, so a mismatched `(kernel, series)` fails before any patch is
+    /// fetched. A no-op when the series declares no kernel envelope.
+    pub fn ensure_applies(&self, series: &str, kernel_version: &str) -> Result<(), ConfigError> {
         match &self.applies_to_kernel {
-            Some(range) if !self.applies_to(profile, kernel_version)? => {
-                Err(ConfigError::KernelOutsideProfileRange {
-                    profile: profile.to_string(),
+            Some(range) if !self.applies_to(series, kernel_version)? => {
+                Err(ConfigError::KernelOutsideSeriesRange {
+                    series: series.to_string(),
                     kernel_version: kernel_version.to_string(),
                     applies_to: range.clone(),
                 })
@@ -337,19 +337,19 @@ impl PatchProfile {
     }
 
     /// The `uboot` scope's declared-intent gate: returns
-    /// [`ConfigError::UbootOutsideProfileRange`] when `uboot_version` is outside the
-    /// profile's [`applies_to_uboot`](Self::applies_to_uboot) envelope. A no-op when
-    /// the profile declares no u-boot envelope, which is the common case — a u-boot
+    /// [`ConfigError::UbootOutsideSeriesRange`] when `uboot_version` is outside the
+    /// series' [`applies_to_uboot`](Self::applies_to_uboot) envelope. A no-op when
+    /// the series declares no u-boot envelope, which is the common case — a u-boot
     /// series is usually written for the one u-boot generation the board runs.
     pub fn ensure_applies_uboot(
         &self,
-        profile: &str,
+        series: &str,
         uboot_version: &str,
     ) -> Result<(), ConfigError> {
         match &self.applies_to_uboot {
-            Some(range) if !matches_range(profile, range, uboot_version, RangeMatch::Release)? => {
-                Err(ConfigError::UbootOutsideProfileRange {
-                    profile: profile.to_string(),
+            Some(range) if !matches_range(series, range, uboot_version, RangeMatch::Release)? => {
+                Err(ConfigError::UbootOutsideSeriesRange {
+                    series: series.to_string(),
                     uboot_version: uboot_version.to_string(),
                     applies_to: range.clone(),
                 })
@@ -371,8 +371,8 @@ impl PatchProfile {
     }
 }
 
-/// One of the four source trees a profile orders independently. The variant
-/// name matches the profile's TOML array key, so it doubles as the key to edit.
+/// One of the four source trees a series orders independently. The variant
+/// name matches the series' TOML array key, so it doubles as the key to edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     /// The kernel tree (spans the `media-accel` and `rocket` scopes).
@@ -386,11 +386,11 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// Every scope, in profile-declaration order — so a check that must cover the
+    /// Every scope, in series-declaration order — so a check that must cover the
     /// whole manifest cannot silently miss one when a scope is added.
     pub const ALL: [Scope; 4] = [Scope::Kernel, Scope::Ffmpeg, Scope::Userspace, Scope::Uboot];
 
-    /// The profile TOML array key for this scope (`"kernel"`, `"ffmpeg"`, …).
+    /// The series TOML array key for this scope (`"kernel"`, `"ffmpeg"`, …).
     pub fn as_str(self) -> &'static str {
         match self {
             Scope::Kernel => "kernel",
@@ -426,7 +426,7 @@ pub fn patch_prefix(label: &str) -> Option<u32> {
 }
 
 /// Choose a zero-padded filename prefix that sorts a new patch at list index
-/// `index` among the profile scope's ordered entries.
+/// `index` among the series scope's ordered entries.
 ///
 /// The prefix mirrors the list order — a reading aid, not load-bearing (the list
 /// is authoritative). It is the integer midpoint between the numeric prefixes of
@@ -502,20 +502,17 @@ fn next_suffix(list: &[&str], value: u32) -> char {
     ('a'..='z').find(|c| !used.contains(c)).unwrap_or('z')
 }
 
-/// Load `profiles/<name>/profile.toml` from a patches-repo root.
+/// Load `series/<name>.toml` from a patches-repo root.
 ///
 /// `patches_root` is a checkout of the `patches` repo (fetched at the
 /// lock-pinned commit, or a `--patches-path` dev override). A missing file is
-/// [`ConfigError::NotFound`] with `kind = "profile"`.
-pub fn load_profile(patches_root: &Path, name: &str) -> Result<PatchProfile, ConfigError> {
-    let path = patches_root
-        .join("profiles")
-        .join(name)
-        .join("profile.toml");
+/// [`ConfigError::NotFound`] with `kind = "series"`.
+pub fn load_series(patches_root: &Path, name: &str) -> Result<PatchSeries, ConfigError> {
+    let path = patches_root.join("series").join(format!("{name}.toml"));
     let text = std::fs::read_to_string(&path).map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
             ConfigError::NotFound {
-                kind: "profile",
+                kind: "series",
                 name: name.to_string(),
                 path: path.display().to_string(),
             }
@@ -538,12 +535,12 @@ pub fn load_profile(patches_root: &Path, name: &str) -> Result<PatchProfile, Con
 /// matching, which is what makes an `-rc` tree answerable: semver would otherwise
 /// exclude it from every range whose bounds name no prerelease.
 fn matches_range(
-    profile: &str,
+    series: &str,
     range: &str,
     kernel_version: &str,
     mode: RangeMatch,
 ) -> Result<bool, ConfigError> {
-    let req = parse_req(profile, range)?;
+    let req = parse_req(series, range)?;
     let mut ver = parse_kernel_version(kernel_version)?;
     if mode == RangeMatch::Candidate {
         ver.pre = semver::Prerelease::EMPTY;
@@ -551,10 +548,10 @@ fn matches_range(
     Ok(req.matches(&ver))
 }
 
-/// Parse a semver requirement, attributing a failure to `profile`.
-fn parse_req(profile: &str, range: &str) -> Result<VersionReq, ConfigError> {
+/// Parse a semver requirement, attributing a failure to `series`.
+fn parse_req(series: &str, range: &str) -> Result<VersionReq, ConfigError> {
     VersionReq::parse(range).map_err(|source| ConfigError::InvalidVersionReq {
-        profile: profile.to_string(),
+        series: series.to_string(),
         value: range.to_string(),
         source,
     })
@@ -579,7 +576,7 @@ impl Interval {
     /// Derive the interval, or `None` if any comparator uses an unmodelled operator.
     ///
     /// A comparator's missing components read as zero (`<7.2` bounds at `7.2.0`),
-    /// matching how the profiles spell their ranges. `<=`/`=` are widened to the
+    /// matching how the series spell their ranges. `<=`/`=` are widened to the
     /// next patch release so the upper bound stays exclusive throughout.
     fn of(req: &VersionReq) -> Option<Self> {
         use semver::Op;
@@ -664,8 +661,8 @@ mod tests {
         })
     }
 
-    fn profile() -> PatchProfile {
-        PatchProfile {
+    fn series() -> PatchSeries {
+        PatchSeries {
             applies_to_kernel: Some(">=7.0, <7.2".into()),
             applies_to_uboot: None,
             kernel: vec![
@@ -686,7 +683,7 @@ mod tests {
             ffmpeg    = ["media-accel/ffmpeg/0001-z.patch"]
             userspace = ["media-accel/userspace/001-w.patch"]
         "#;
-        let p: PatchProfile = toml::from_str(text).unwrap();
+        let p: PatchSeries = toml::from_str(text).unwrap();
         assert_eq!(p.kernel.len(), 2);
         assert_eq!(p.ffmpeg, vec![always("media-accel/ffmpeg/0001-z.patch")]);
         assert!(p.uboot.is_empty());
@@ -703,7 +700,7 @@ mod tests {
               { path = "media-accel/kernel/050-av1-v15.patch", kernels = ">=7.2" },
             ]
         "#;
-        let p: PatchProfile = toml::from_str(text).unwrap();
+        let p: PatchSeries = toml::from_str(text).unwrap();
         assert_eq!(p.kernel[0], always("media-accel/kernel/040-x.patch"));
         assert_eq!(p.kernel[1].path(), "media-accel/kernel/050-av1-v14.patch");
         assert_eq!(p.kernel[1].kernels(), Some("<7.2"));
@@ -713,16 +710,14 @@ mod tests {
     #[test]
     fn a_ranged_entry_with_an_unknown_key_is_rejected_by_name() {
         // A typo must not silently fall through to another shape — and the message must
-        // name the offending key. `profile.toml` is hand-authored in the `patches` repo,
+        // name the offending key. `series.toml` is hand-authored in the `patches` repo,
         // and an untagged enum's "data did not match any variant" says nothing about
         // which key is wrong or what the right one is.
         let text = r#"
             applies_to_kernel = ">=7.0"
             kernel = [{ path = "k/010-x.patch", kernel = "<7.2" }]
         "#;
-        let err = toml::from_str::<PatchProfile>(text)
-            .unwrap_err()
-            .to_string();
+        let err = toml::from_str::<PatchSeries>(text).unwrap_err().to_string();
         assert!(err.contains("kernel"), "{err}");
         assert!(err.contains("unknown field"), "{err}");
         // A table missing `kernels` entirely is likewise named, not silently read as
@@ -731,7 +726,7 @@ mod tests {
             applies_to_kernel = ">=7.0"
             kernel = [{ path = "k/010-x.patch" }]
         "#;
-        let err = toml::from_str::<PatchProfile>(missing)
+        let err = toml::from_str::<PatchSeries>(missing)
             .unwrap_err()
             .to_string();
         assert!(err.contains("kernels"), "{err}");
@@ -740,7 +735,7 @@ mod tests {
             applies_to_kernel = ">=7.0"
             kernel = [42]
         "#;
-        let err = toml::from_str::<PatchProfile>(wrong_kind)
+        let err = toml::from_str::<PatchSeries>(wrong_kind)
             .unwrap_err()
             .to_string();
         assert!(
@@ -751,7 +746,7 @@ mod tests {
 
     #[test]
     fn series_for_selects_the_entries_the_kernel_admits() {
-        let p = PatchProfile {
+        let p = PatchSeries {
             applies_to_kernel: Some(">=7.0, <7.4".into()),
             applies_to_uboot: None,
             kernel: vec![
@@ -793,7 +788,7 @@ mod tests {
 
     #[test]
     fn a_release_candidate_is_answerable_only_on_the_candidate_path() {
-        let p = profile(); // envelope ">=7.0, <7.2"
+        let p = series(); // envelope ">=7.0, <7.2"
 
         // Release-strict: semver excludes a prerelease from a release-only range,
         // which is correct for a build -- the envelope claims released kernels.
@@ -812,7 +807,7 @@ mod tests {
 
     #[test]
     fn unreachable_reports_only_entries_the_envelope_cannot_select() {
-        let p = PatchProfile {
+        let p = PatchSeries {
             applies_to_kernel: Some(">=7.8, <8.0".into()),
             applies_to_uboot: None,
             kernel: vec![
@@ -838,7 +833,7 @@ mod tests {
     fn unreachable_declines_to_judge_an_unmodelled_operator() {
         // `^` is not bounded by Interval::of, so the lint stays silent rather than
         // report a live entry. One-sided by design.
-        let p = PatchProfile {
+        let p = PatchSeries {
             applies_to_kernel: Some(">=7.8, <8.0".into()),
             applies_to_uboot: None,
             kernel: vec![ranged("k/010-x.patch", "^6.1")],
@@ -853,7 +848,7 @@ mod tests {
     fn unreachable_covers_every_scope() {
         // Scope::ALL is what keeps a newly added scope from escaping the lint. Each
         // scope is judged against its own envelope, so the u-boot scope gets one too.
-        let p = PatchProfile {
+        let p = PatchSeries {
             applies_to_kernel: Some(">=7.8, <8.0".into()),
             applies_to_uboot: Some(">=2026, <2027".into()),
             kernel: vec![],
@@ -867,12 +862,12 @@ mod tests {
     #[test]
     fn unknown_field_is_rejected() {
         let text = "applies_to_kernel = \">=7.0\"\nbogus = []\n";
-        assert!(toml::from_str::<PatchProfile>(text).is_err());
+        assert!(toml::from_str::<PatchSeries>(text).is_err());
     }
 
     #[test]
     fn version_in_range_applies() {
-        let p = profile();
+        let p = series();
         // The RK1's kernel version.
         assert!(p.applies_to("rk3588-accel", "v7.1.1").unwrap());
         assert!(p.applies_to("rk3588-accel", "7.1.1").unwrap());
@@ -882,7 +877,7 @@ mod tests {
 
     #[test]
     fn version_out_of_range_does_not_apply() {
-        let p = profile();
+        let p = series();
         assert!(!p.applies_to("rk3588-accel", "6.12.0").unwrap());
         // Upper bound exclusive.
         assert!(!p.applies_to("rk3588-accel", "7.2.0").unwrap());
@@ -890,14 +885,14 @@ mod tests {
 
     #[test]
     fn ensure_applies_hard_errors_out_of_range() {
-        let p = profile();
+        let p = series();
         let err = p.ensure_applies("rk3588-accel", "6.12.0").unwrap_err();
-        assert!(matches!(err, ConfigError::KernelOutsideProfileRange { .. }));
+        assert!(matches!(err, ConfigError::KernelOutsideSeriesRange { .. }));
     }
 
     #[test]
     fn invalid_range_is_typed_error() {
-        let mut p = profile();
+        let mut p = series();
         p.applies_to_kernel = Some("not a range".into());
         let err = p.applies_to("rk3588-accel", "7.1.1").unwrap_err();
         assert!(matches!(err, ConfigError::InvalidVersionReq { .. }));
@@ -908,7 +903,7 @@ mod tests {
         assert_eq!("kernel".parse::<Scope>().unwrap(), Scope::Kernel);
         assert_eq!("uboot".parse::<Scope>().unwrap(), Scope::Uboot);
         assert!("bogus".parse::<Scope>().is_err());
-        let p = profile();
+        let p = series();
         assert_eq!(p.scope(Scope::Kernel).len(), 2);
         assert!(p.scope(Scope::Ffmpeg).is_empty());
         assert_eq!(Scope::Userspace.as_str(), "userspace");

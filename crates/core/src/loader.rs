@@ -356,7 +356,7 @@ impl ConfigRoot {
 
     /// Load `kernels/<id>.toml`, dispatching on its `flavor` to the variant that
     /// flavor's fields belong to: a compiled kernel carries a source ref, defconfig,
-    /// fragments, and patch profile; a `distro-package` kernel carries only a package
+    /// fragments, and patch series; a `distro-package` kernel carries only a package
     /// name. Each variant is strict, so a fragment list on a distro kernel — which
     /// nothing would ever read — fails at load rather than being ignored.
     pub fn kernel(&self, id: &str) -> Result<KernelDef, ConfigError> {
@@ -425,9 +425,9 @@ impl ConfigRoot {
     /// and its lock as a unit; an overlay retuning a shipped recipe owns both
     /// automatically.
     pub fn lock(&self, name: &str) -> Result<crate::lock::Lock, ConfigError> {
-        validate_recipe_ref(name)?;
+        validate_build_ref(name)?;
         let path = self
-            .owning_root("recipes", name)
+            .owning_root("recipes", recipe_half(name))
             .join("recipes")
             .join(format!("{name}.lock"));
         match Self::read_file(&path)? {
@@ -450,9 +450,9 @@ impl ConfigRoot {
     /// this is a *write* target: an unchecked `../` or absolute name would let
     /// `update` clobber a file outside `recipes/`.
     pub fn lock_path(&self, name: &str) -> Result<PathBuf, ConfigError> {
-        validate_recipe_ref(name)?;
+        validate_build_ref(name)?;
         Ok(self
-            .owning_root("recipes", name)
+            .owning_root("recipes", recipe_half(name))
             .join("recipes")
             .join(format!("{name}.lock")))
     }
@@ -467,11 +467,11 @@ impl ConfigRoot {
     /// separator at all), since this is a *write* target: an unchecked `../` or
     /// absolute component would let `build --save-manifest` write outside `recipes/`.
     pub fn recipe_sibling(&self, recipe: &str, filename: &str) -> Result<PathBuf, ConfigError> {
-        validate_recipe_ref(recipe)?;
+        validate_build_ref(recipe)?;
         validate_name("manifest", filename)?;
         // The recipe's own directory: the parent of `recipes/<device>/<leaf>.toml`,
         // i.e. `recipes/<device>` (or `recipes/` for a bare, un-nested reference).
-        let owning = self.owning_root("recipes", recipe);
+        let owning = self.owning_root("recipes", recipe_half(recipe));
         let recipe_rel = format!("recipes/{recipe}.toml");
         let dir = Path::new(&recipe_rel)
             .parent()
@@ -657,6 +657,50 @@ fn validate_recipe_ref(name: &str) -> Result<(), ConfigError> {
             name: name.to_string(),
         })
     }
+}
+
+/// [`validate_recipe_ref`] as a crate-visible check, for
+/// [`BuildPoint`](crate::buildpoint::BuildPoint) to hold its recipe half to exactly
+/// the rule the loader enforces rather than restating it.
+pub(crate) fn check_recipe_ref(name: &str) -> Result<(), ConfigError> {
+    validate_recipe_ref(name)
+}
+
+/// [`validate_name`] for a feature, for
+/// [`BuildPoint`](crate::buildpoint::BuildPoint) to hold each feature in a reference
+/// to the same bare-identifier rule — which is what keeps a reference's `+` suffix
+/// from opening a path the recipe half could not.
+pub(crate) fn check_feature_name(name: &str) -> Result<(), ConfigError> {
+    validate_name("feature", name)
+}
+
+/// Validate a *build reference* — a recipe reference optionally carrying a
+/// `+`-separated feature suffix, the form
+/// [`BuildPoint::reference`](crate::buildpoint::BuildPoint::reference) produces.
+///
+/// Used by the write targets that a variant build derives ([`ConfigRoot::lock_path`],
+/// [`ConfigRoot::lock`], [`ConfigRoot::recipe_sibling`]), because those name the
+/// build point rather than the authored recipe. [`ConfigRoot::recipe`] keeps the
+/// stricter rule: a `.toml` exists for a recipe, never for a variant.
+fn validate_build_ref(name: &str) -> Result<(), ConfigError> {
+    let mut parts = name.split(crate::buildpoint::FEATURE_SEP);
+    validate_recipe_ref(parts.next().unwrap_or_default())?;
+    for feature in parts {
+        validate_name("feature", feature)?;
+    }
+    Ok(())
+}
+
+/// The recipe half of a build reference — everything before the first
+/// [`FEATURE_SEP`](crate::buildpoint::FEATURE_SEP).
+///
+/// A variant's lock and manifest live beside the recipe they derive from, so the
+/// root that *owns* them is the root owning that recipe, not one owning a `.toml`
+/// that does not exist.
+fn recipe_half(name: &str) -> &str {
+    name.split(crate::buildpoint::FEATURE_SEP)
+        .next()
+        .unwrap_or(name)
 }
 
 #[cfg(test)]

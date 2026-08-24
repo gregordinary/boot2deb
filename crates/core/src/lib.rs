@@ -3,7 +3,7 @@
 //! Pure and deterministic: no build side effects (those live in the engine), so
 //! everything here is unit-testable without a Linux host. The public surface is
 //! the [`model`] types, the [`ConfigRoot`] loader, the [`resolve_device`] /
-//! [`resolve_recipe`] entry points, the [`feature`], [`profile`], [`lock`], and
+//! [`resolve_recipe`] entry points, the [`feature`], [`series`], [`lock`], and
 //! [`kconfig`] formats, patch normalization for `patch import` ([`mbox`]),
 //! device/recipe generation for `new-device` ([`scaffold`]), [`size`] parsing,
 //! source-pin durability form ([`sources`]), and [`host`] detection.
@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
+pub mod buildpoint;
 pub mod chromeos;
 pub mod error;
 pub mod feature;
@@ -22,19 +23,20 @@ pub mod loader;
 pub mod lock;
 pub mod mbox;
 pub mod model;
-pub mod profile;
 pub mod provenance;
 pub mod resolve;
 pub mod scaffold;
+pub mod series;
 pub mod size;
 pub mod sources;
 pub mod support;
 
+pub use buildpoint::BuildPoint;
 pub use error::ConfigError;
 pub use feature::Feature;
 pub use host::HostInfo;
 pub use kconfig::KernelConfig;
 pub use loader::ConfigRoot;
 pub use model::*;
-pub use profile::{load_profile, PatchEntry, PatchProfile, RangeMatch};
 pub use resolve::{resolve_device, resolve_recipe};
+pub use series::{load_series, PatchEntry, PatchSeries, RangeMatch};

@@ -163,11 +163,11 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             );
             println!("  track      : {}", k.track.as_deref().unwrap_or("-"));
             println!(
-                "  profiles   : {}",
-                if k.patch_profiles.is_empty() {
+                "  series     : {}",
+                if k.patch_series.is_empty() {
                     "none".to_string()
                 } else {
-                    k.patch_profiles.join(", ")
+                    k.patch_series.join(", ")
                 }
             );
             println!("  fragments  : {}", k.config_fragments.join(", "));
@@ -259,8 +259,8 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
                 boot.uboot_ref, boot.uboot_defconfig
             );
             println!(
-                "u-boot prof  : {}",
-                boot.uboot_profile.as_deref().unwrap_or("none (pristine)")
+                "u-boot series: {}",
+                boot.uboot_series.as_deref().unwrap_or("none (pristine)")
             );
             println!("rkbin atf    : {}", boot.rkbin.atf);
             println!("rkbin tpl    : {}", boot.rkbin.tpl);

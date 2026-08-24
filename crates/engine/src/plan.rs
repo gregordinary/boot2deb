@@ -109,17 +109,17 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
     // Co-dev tree signatures fold the live-series fingerprint; recompute it
     // per scope exactly as each stage does so a co-dev prediction matches the stamp.
     // Pinned mode (or no patches root) folds by commit only. The `*_fp` Vecs are held
-    // here so the borrowed [`PatchSeries::Dev`] outlives every use below.
-    // A lock with no `[patches]` table (a kernel with no patch profile) has no series
+    // here so the borrowed [`SeriesIdentity::Dev`] outlives every use below.
+    // A lock with no `[patches]` table (a kernel with no patch series) has no series
     // to fingerprint at all, in either mode.
     // Each scope folds the pin of the axis that patches its tree: the u-boot tree is
     // patched by `[uboot_patches]`, every other scope by the kernel-side `[patches]`.
     // Folding the wrong pin for u-boot would predict a shared stamp for distinct u-boot
-    // profiles — exactly the artifact-cache collision `uboot::clone_manifest` guards.
+    // series — exactly the artifact-cache collision `uboot::clone_manifest` guards.
     let fingerprint =
         |pin: Option<&boot2deb_core::lock::PatchesPin>, scope| match (inputs.patches_root, pin) {
             (Some(root), Some(pin)) if inputs.patches_dev => {
-                crate::build::patch_series_fingerprint(root, &pin.profiles, scope)
+                crate::build::patch_series_fingerprint(root, &pin.series, scope)
             }
             _ => Vec::new(),
         };
@@ -232,14 +232,14 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
     nodes
 }
 
-/// The [`PatchSeries`](crate::build::PatchSeries) for a predicted node: co-dev folds
+/// The [`SeriesIdentity`](crate::build::SeriesIdentity) for a predicted node: co-dev folds
 /// the live-series fingerprint `fp`, pinned folds by commit. A free `fn`
 /// (not a closure) so the borrow of `fp` is elided cleanly into the return type.
-fn patch_series(dev: bool, fp: &[String]) -> crate::build::PatchSeries<'_> {
+fn patch_series(dev: bool, fp: &[String]) -> crate::build::SeriesIdentity<'_> {
     if dev {
-        crate::build::PatchSeries::Dev(fp)
+        crate::build::SeriesIdentity::Dev(fp)
     } else {
-        crate::build::PatchSeries::Pinned
+        crate::build::SeriesIdentity::Pinned
     }
 }
 
@@ -266,7 +266,7 @@ mod tests {
                 commit: kernel_commit.into(),
             }),
             patches: Some(PatchesPin {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 source: "ps".into(),
                 reference: "main".into(),
                 commit: "p1".into(),
@@ -390,7 +390,7 @@ mod tests {
         std::fs::create_dir_all(&linux).unwrap();
         write_manifest(
             &linux,
-            &crate::build::kernel::clone_manifest(&old, crate::build::PatchSeries::Pinned, &[])
+            &crate::build::kernel::clone_manifest(&old, crate::build::SeriesIdentity::Pinned, &[])
                 .unwrap(),
         )
         .unwrap();
@@ -400,7 +400,7 @@ mod tests {
         // series, so include the same PatchInputs.
         let old_patches = crate::build::userspace::PatchInputs {
             pin: old.patches.as_ref(),
-            patches: crate::build::PatchSeries::Pinned,
+            patches: crate::build::SeriesIdentity::Pinned,
         };
         write_manifest(
             &mpp,

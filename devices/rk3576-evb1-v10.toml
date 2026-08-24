@@ -19,8 +19,8 @@ supported_kernels       = ["rk3576-mainline-7.1"]
 default_kernel          = "rk3576-mainline-7.1"
 # The EVB defaults to the minimal rockusb loader u-boot — the dev-board bring-up
 # posture (flash over USB); the display/util variants are available too.
-supported_uboot_profiles = ["rk3576-loader", "rk3576-display", "rk3576-util"]
-default_uboot_profile    = "rk3576-loader"
+supported_uboot_series = ["rk3576-loader", "rk3576-display", "rk3576-util"]
+default_uboot_series    = "rk3576-loader"
 default_suite           = "forky"
 default_layout          = "combined"
 hostname                = "rk3576-evb1"

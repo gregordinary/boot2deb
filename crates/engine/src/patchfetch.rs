@@ -39,7 +39,7 @@ const GIX_FETCH_TIMEOUT: Duration = Duration::from_secs(180);
 /// network. A miss performs a full pure-Rust `gix` clone (all history, so an
 /// arbitrary pinned ancestor is reachable), checks out the pinned commit detached,
 /// and renames it into place.
-pub fn fetch_profile(
+pub fn fetch_series(
     url: &str,
     commit: &str,
     cache_root: &Path,
@@ -253,7 +253,7 @@ mod tests {
         let sink = |_e: Event| {};
         let step = Step::start(&sink, "test");
         let checkout =
-            fetch_profile(origin.to_str().unwrap(), &first, &cache, &step).expect("fetch");
+            fetch_series(origin.to_str().unwrap(), &first, &cache, &step).expect("fetch");
 
         // Commit-addressed: the checkout lives under cache/<commit>.
         assert_eq!(checkout, cache.join(&first));
@@ -275,11 +275,11 @@ mod tests {
         let sink = |_e: Event| {};
 
         let step = Step::start(&sink, "test");
-        let a = fetch_profile(origin.to_str().unwrap(), &first, &cache, &step).unwrap();
+        let a = fetch_series(origin.to_str().unwrap(), &first, &cache, &step).unwrap();
         // Remove the origin so a re-fetch would fail: a hit must not touch it.
         std::fs::remove_dir_all(&origin).unwrap();
         let step2 = Step::start(&sink, "test");
-        let b = fetch_profile(origin.to_str().unwrap(), &first, &cache, &step2).unwrap();
+        let b = fetch_series(origin.to_str().unwrap(), &first, &cache, &step2).unwrap();
         assert_eq!(a, b);
     }
 
@@ -288,7 +288,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: Event| {};
         let step = Step::start(&sink, "test");
-        let err = fetch_profile(
+        let err = fetch_series(
             "--upload-pack=touch /tmp/pwn",
             "0000000000000000000000000000000000000000",
             tmp.path(),

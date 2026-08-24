@@ -48,7 +48,7 @@ id = "rk3588-mainline-7.1"
 flavor = "mainline"
 reference = "v7.1.1"
 commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
-patch_profile = "rk3588-accel"
+patch_series = "rk3588-accel"
 ```
 
 ## `board` is the reason the file exists

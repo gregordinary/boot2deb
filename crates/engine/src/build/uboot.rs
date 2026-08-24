@@ -10,7 +10,7 @@
 
 use crate::blobs;
 use crate::build::{
-    self, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope, PatchSeries, PatchSource,
+    self, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope, PatchSource, SeriesIdentity,
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
@@ -43,7 +43,7 @@ pub struct UbootOptions<'a> {
     /// the boot method's `uboot_source`; a local clone speeds the shallow clone.
     pub source: &'a str,
     /// The patch series to apply, or `None` when the resolved kernel names no patch
-    /// profile — u-boot is then compiled exactly as cloned.
+    /// series — u-boot is then compiled exactly as cloned.
     pub patches: Option<PatchSource<'a>>,
     /// Directory holding the vendored rkbin blobs, verified against the lock
     /// before use.
@@ -59,7 +59,7 @@ pub struct UbootOptions<'a> {
 }
 
 /// binman's maskrom USB download payload filenames, emitted only when the u-boot
-/// build enables `CONFIG_ROCKCHIP_MASKROM_IMAGE` (the `rk3576-loader` profile does).
+/// build enables `CONFIG_ROCKCHIP_MASKROM_IMAGE` (the `rk3576-loader` series does).
 const MASKROM_USB471: &str = "u-boot-rockchip-usb471.bin";
 const MASKROM_USB472: &str = "u-boot-rockchip-usb472.bin";
 /// The merged RKBOOT loader packed from the two payloads by [`crate::build::rkboot`]:
@@ -261,7 +261,7 @@ fn output_manifest(
     boot: &ResolvedRkbinBoot,
     lock: &Lock,
     env: &BuildEnv,
-    patches: PatchSeries,
+    patches: SeriesIdentity,
 ) -> Result<crate::signature::SignatureManifest, EngineError> {
     // Fold the Tier-1 tree signature (carrying the co-dev series fingerprint, if any),
     // so a co-dev build never shares an output entry with a pinned one and an edited
@@ -290,7 +290,7 @@ fn output_manifest(
 /// The Tier-1 signature manifest of the cloned+patched u-boot tree: the
 /// pinned inputs that determine its content — the u-boot commit and the patch series
 /// (`build::fold_patch_series`). The source URL is excluded (the commit
-/// content-addresses the tree). The [`PatchSeries`] fold covers the pinned patch
+/// content-addresses the tree). The [`SeriesIdentity`] fold covers the pinned patch
 /// commit and — in co-dev mode — the live-series fingerprint, so a co-dev
 /// build never shares a stamp with a pinned one and an edited patch restamps.
 /// Blobs/defconfig are not folded here — they gate compile, which re-runs on every
@@ -298,14 +298,14 @@ fn output_manifest(
 /// recomputes the same signature it stamps here.
 pub fn clone_manifest(
     lock: &Lock,
-    patches: PatchSeries,
+    patches: SeriesIdentity,
 ) -> Result<crate::signature::SignatureManifest, EngineError> {
     let pin = build::uboot_pin(lock)?;
     let mut b = crate::signature::SignatureBuilder::new("uboot", CLONE_STAGE_VERSION);
     b.fold_scalar("uboot.commit", &pin.commit);
-    // The u-boot tree is patched by the *u-boot* profile (`[uboot_patches]`), an
+    // The u-boot tree is patched by the *u-boot* series (`[uboot_patches]`), an
     // independent axis from the kernel's `[patches]`. Folding the wrong pin here would
-    // make every u-boot profile on one u-boot commit share a signature — the display,
+    // make every u-boot series on one u-boot commit share a signature — the display,
     // util, and loader builds would collide in the artifact cache.
     build::fold_patch_series(&mut b, lock.uboot_patches.as_ref(), patches);
     Ok(b.manifest())
@@ -338,7 +338,7 @@ fn clone_and_patch(
     if let (Some(p), 1..) = (opts.patches, n) {
         step.log(format!(
             "applied {n} u-boot patches ({})",
-            p.pin.profiles.join(", ")
+            p.pin.series.join(", ")
         ));
     }
     Ok(())
@@ -781,7 +781,7 @@ mod tests {
                 commit: "kc".into(),
             }),
             patches: Some(PatchesPin {
-                profiles: vec!["rk3588-accel".into()],
+                series: vec!["rk3588-accel".into()],
                 source: "ps".into(),
                 reference: "main".into(),
                 commit: "kernel-pc".into(),
@@ -792,7 +792,7 @@ mod tests {
                 commit: uboot_commit.into(),
             }),
             uboot_patches: Some(PatchesPin {
-                profiles: vec!["rk3576-util".into()],
+                series: vec!["rk3576-util".into()],
                 source: "ps".into(),
                 reference: "main".into(),
                 commit: patches_commit.into(),
@@ -859,43 +859,43 @@ mod tests {
                 .unwrap()
                 .signature
         };
-        let base = sig("uc1", "pc1", PatchSeries::Pinned);
-        assert_eq!(base, sig("uc1", "pc1", PatchSeries::Pinned));
+        let base = sig("uc1", "pc1", SeriesIdentity::Pinned);
+        assert_eq!(base, sig("uc1", "pc1", SeriesIdentity::Pinned));
         // A u-boot bump or a u-boot-patches-pin bump each invalidate the reused tree.
-        assert_ne!(base, sig("uc2", "pc1", PatchSeries::Pinned));
-        assert_ne!(base, sig("uc1", "pc2", PatchSeries::Pinned));
+        assert_ne!(base, sig("uc2", "pc1", SeriesIdentity::Pinned));
+        assert_ne!(base, sig("uc1", "pc2", SeriesIdentity::Pinned));
         // The u-boot tree signature tracks `[uboot_patches]`, not the kernel `[patches]`
         // pin: bumping the kernel patch commit must NOT move it (regression guard —
-        // folding the wrong pin collided every u-boot profile in the artifact cache).
+        // folding the wrong pin collided every u-boot series in the artifact cache).
         let mut kernel_bumped = lock_with("uc1", "pc1");
         kernel_bumped.patches.as_mut().unwrap().commit = "kernel-pc-2".into();
         assert_eq!(
             base,
-            clone_manifest(&kernel_bumped, PatchSeries::Pinned)
+            clone_manifest(&kernel_bumped, SeriesIdentity::Pinned)
                 .unwrap()
                 .signature
         );
-        // And two different u-boot profiles at the same commit stay distinct.
+        // And two different u-boot series at the same commit stay distinct.
         let mut util = lock_with("uc1", "pc1");
-        util.uboot_patches.as_mut().unwrap().profiles = vec!["rk3576-util".into()];
+        util.uboot_patches.as_mut().unwrap().series = vec!["rk3576-util".into()];
         let mut util_net = lock_with("uc1", "pc1");
-        util_net.uboot_patches.as_mut().unwrap().profiles = vec!["rk3576-util-net".into()];
+        util_net.uboot_patches.as_mut().unwrap().series = vec!["rk3576-util-net".into()];
         assert_ne!(
-            clone_manifest(&util, PatchSeries::Pinned)
+            clone_manifest(&util, SeriesIdentity::Pinned)
                 .unwrap()
                 .signature,
-            clone_manifest(&util_net, PatchSeries::Pinned)
+            clone_manifest(&util_net, SeriesIdentity::Pinned)
                 .unwrap()
                 .signature
         );
         // Co-dev mode splits the key; a co-dev content change restamps.
         let empty: Vec<String> = vec![];
-        assert_ne!(base, sig("uc1", "pc1", PatchSeries::Dev(&empty)));
+        assert_ne!(base, sig("uc1", "pc1", SeriesIdentity::Dev(&empty)));
         let fp1 = vec!["uboot/010.patch=aaa".to_string()];
         let fp2 = vec!["uboot/010.patch=bbb".to_string()];
         assert_ne!(
-            sig("uc1", "pc1", PatchSeries::Dev(&fp1)),
-            sig("uc1", "pc1", PatchSeries::Dev(&fp2))
+            sig("uc1", "pc1", SeriesIdentity::Dev(&fp1)),
+            sig("uc1", "pc1", SeriesIdentity::Dev(&fp2))
         );
     }
 
@@ -914,29 +914,45 @@ mod tests {
                 .unwrap()
                 .signature
         };
-        let base = man(&lock_with("uc1", "pc1"), &env("gcc-1"), PatchSeries::Pinned);
+        let base = man(
+            &lock_with("uc1", "pc1"),
+            &env("gcc-1"),
+            SeriesIdentity::Pinned,
+        );
         // Stable under identical inputs.
         assert_eq!(
             base,
-            man(&lock_with("uc1", "pc1"), &env("gcc-1"), PatchSeries::Pinned)
+            man(
+                &lock_with("uc1", "pc1"),
+                &env("gcc-1"),
+                SeriesIdentity::Pinned
+            )
         );
         // A u-boot pin bump reaches the output signature through the tree dependency.
         assert_ne!(
             base,
-            man(&lock_with("uc2", "pc1"), &env("gcc-1"), PatchSeries::Pinned)
+            man(
+                &lock_with("uc2", "pc1"),
+                &env("gcc-1"),
+                SeriesIdentity::Pinned
+            )
         );
         // A blob change → new signature (a hit must imply the same verified blobs).
         let mut lock_blob = lock_with("uc1", "pc1");
         lock_blob.blobs.as_mut().unwrap().atf = "different-atf-hash".into();
-        assert_ne!(base, man(&lock_blob, &env("gcc-1"), PatchSeries::Pinned));
+        assert_ne!(base, man(&lock_blob, &env("gcc-1"), SeriesIdentity::Pinned));
         // Adding/altering the BL32 blob also restamps (the OP-TEE payload is folded).
         let mut lock_bl32 = lock_with("uc1", "pc1");
         lock_bl32.blobs.as_mut().unwrap().bl32 = Some("rk3576_bl32@sha256:cd".into());
-        assert_ne!(base, man(&lock_bl32, &env("gcc-1"), PatchSeries::Pinned));
+        assert_ne!(base, man(&lock_bl32, &env("gcc-1"), SeriesIdentity::Pinned));
         // Toolchain and co-dev mode each split the key.
         assert_ne!(
             base,
-            man(&lock_with("uc1", "pc1"), &env("gcc-2"), PatchSeries::Pinned)
+            man(
+                &lock_with("uc1", "pc1"),
+                &env("gcc-2"),
+                SeriesIdentity::Pinned
+            )
         );
         let empty: Vec<String> = vec![];
         assert_ne!(
@@ -944,7 +960,7 @@ mod tests {
             man(
                 &lock_with("uc1", "pc1"),
                 &env("gcc-1"),
-                PatchSeries::Dev(&empty)
+                SeriesIdentity::Dev(&empty)
             )
         );
     }

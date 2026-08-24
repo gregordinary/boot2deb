@@ -42,7 +42,36 @@ pub(crate) fn run(
     // overridable here — the lock pins no image geometry. The source-pinning axes
     // (kernel/suite/features/boot-method) would mismatch the lock, so re-pinning
     // those is `update`'s job, not a build-time override.
-    let lock = root.lock(recipe)?;
+    // A `--feature` selection names a *variant* of the recipe, which `update` must
+    // already have pinned: `build` reads a lock, it never resolves one. Every derived
+    // path — lock, work dir, image identity, provenance — keys off the reference, so a
+    // variant build cannot land on the recipe's artifacts.
+    let point = crate::config::build_point(recipe, args.features.clone())?;
+    let reference = point.reference();
+    let recipe = reference.as_str();
+    let lock = root
+        .lock(recipe)
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            // A variant whose lock was never written is the one likely mistake here, and
+            // the generic "lock not found" would leave the operator guessing that `update`
+            // takes the same flags. Name the line to run.
+            if point.is_variant() && root.lock_path(recipe).is_ok_and(|p| !p.exists()) {
+                format!(
+                    "no lock for '{recipe}' — this feature selection has not been pinned yet. \
+                 Run:\n    boot2deb update {} {}",
+                    point.recipe(),
+                    point
+                        .features()
+                        .iter()
+                        .map(|f| format!("--feature {f}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+                .into()
+            } else {
+                err.into()
+            }
+        })?;
     let overrides = Overrides {
         layout: args.layout,
         image_size: args.image_size.clone(),
@@ -50,7 +79,7 @@ pub(crate) fn run(
     };
     let resolved = resolve_recipe(root, recipe, &overrides)?;
     // Fail fast if the config drifted since `update`: the lock's resolved-derived axes
-    // (kernel id, patch profile, suite, extra_debs) must still match a fresh resolve,
+    // (kernel id, patch series, suite, extra_debs) must still match a fresh resolve,
     // or the build would mix new resolved axes with stale pins.
     boot2deb_engine::pins::check_lock_consistency(&lock, &resolved)?;
     // Validate the cheap local config invariants (image geometry, kernel-fragment
@@ -254,7 +283,7 @@ pub(crate) fn run(
     });
 
     // Resolve the patches source only when there is a series to apply: the lock pins
-    // one (its kernel names a patch profile) *and* this run includes a stage that
+    // one (its kernel names a patch series) *and* this run includes a stage that
     // applies it (kernel/u-boot/userspace/ffmpeg — the userspace stage carries the MPP
     // CMA fix). A rootfs/image-only build, or any build of a no-patch kernel, never
     // reads or fetches the `patches` repo.
@@ -289,9 +318,9 @@ pub(crate) fn run(
         )?),
         _ => None,
     };
-    // Only a compiled kernel can name a patch profile, so a lock that pins kernel
+    // Only a compiled kernel can name a patch series, so a lock that pins kernel
     // patches pins a kernel too. Check it rather than assume it: the kernel's version is
-    // what the profile's per-entry ranges are filtered against, and defaulting it would
+    // what the series' per-entry ranges are filtered against, and defaulting it would
     // silently select the wrong series.
     if lock.patches.is_some() && lock.kernel.is_none() {
         return Err(format!(
@@ -300,8 +329,30 @@ pub(crate) fn run(
         )
         .into());
     }
+    // Declared-intent prerequisite, before any stage runs. The kernel node's gate asks
+    // the same question, but only once the tree is cloned — a minute of network for an
+    // answer already sitting on disk in the series manifests. `update` flags this at
+    // pin time; this catches a lock that arrived some other way, or one whose series
+    // envelope moved under it since.
+    if let (Some((patches_root, _)), Some(pin), Some(kernel)) =
+        (&checkout, &lock.patches, &lock.kernel)
+    {
+        let outside =
+            crate::config::series_outside_envelope(patches_root, &pin.series, &kernel.reference)?;
+        if let Some((name, declared)) = outside.first() {
+            return Err(format!(
+                "kernel {} is outside series '{name}' (declared {declared}) — this build would \
+                 apply a series that makes no claim about this kernel. Measure it without \
+                 re-pinning:\n  boot2deb verify-patches {recipe} --kernel {} \
+                 --kernel-path <checkout> --keep-going\nthen widen applies_to_kernel in the \
+                 series if it comes back clean, or retire the patches it names.",
+                kernel.reference, kernel.reference
+            )
+            .into());
+        }
+    }
     // Bind the resolved checkout to each axis's pin, so no stage can be handed a
-    // profile without a checkout to read it from (or vice versa). The kernel-scope
+    // series without a checkout to read it from (or vice versa). The kernel-scope
     // series is narrowed by the kernel version; the u-boot-scope series by the u-boot
     // version (u-boot is its own axis).
     let kernel_patches = checkout
