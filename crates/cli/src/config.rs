@@ -7,7 +7,8 @@
 
 use crate::fsutil::{absolutize, normalize};
 use boot2deb_core::model::{Overrides, ResolvedBuild};
-use boot2deb_core::{resolve_device, resolve_recipe, BuildPoint, ConfigRoot};
+use boot2deb_core::series::Scope;
+use boot2deb_core::{resolve_device, resolve_recipe, BuildPoint, ConfigRoot, RangeMatch};
 use boot2deb_engine::event::Step;
 use boot2deb_engine::rootfs;
 use boot2deb_engine::{image, patchfetch, pins, EngineError, EventSink};
@@ -89,34 +90,36 @@ pub(crate) fn resolve(
     }
 }
 
-/// The composed series whose declared `applies_to_kernel` does not admit
-/// `kernel_version`, as `(series name, declared range)` in compose order. Empty when
-/// every series claims the kernel — the ordinary case.
+/// The composed series whose declared envelope for `scope` does not admit
+/// `version`, as `(series name, declared range)` in compose order. Empty when every
+/// series claims the version — the ordinary case.
 ///
 /// This is the **cheap half** of the patch question, and the half that can be asked
 /// before committing to anything: it reads the series manifests and compares version
 /// ranges, needing no source tree and running no `git am`. Whether the patches
-/// actually apply is `verify-patches`, which needs a kernel checkout and is therefore
+/// actually apply is `verify-patches`, which needs a checkout and is therefore
 /// the expensive half.
 ///
+/// `scope` selects the axis: [`Scope::Kernel`] asks `applies_to_kernel` about a
+/// kernel tag, [`Scope::Uboot`] asks `applies_to_uboot` about a u-boot tag. The two
+/// axes move independently, so each is asked about its own version.
+///
 /// Release-strict, matching the build gate rather than the candidate path: a series'
-/// envelope is a claim about released kernels, so a pinned prerelease is reported here
-/// exactly as the build would refuse it.
+/// envelope is a claim about released versions, so a pinned prerelease is reported
+/// here exactly as the build would refuse it.
 pub(crate) fn series_outside_envelope(
     patches_root: &Path,
     series: &[String],
-    kernel_version: &str,
+    scope: Scope,
+    version: &str,
 ) -> Result<Vec<(String, String)>> {
     let mut outside = Vec::new();
     for name in series {
         let loaded = boot2deb_core::load_series(patches_root, name)?;
-        if !loaded.applies_to(name, kernel_version)? {
+        if !loaded.applies_to_scope(name, scope, version, RangeMatch::Release)? {
             outside.push((
                 name.clone(),
-                loaded
-                    .applies_to_kernel
-                    .clone()
-                    .unwrap_or_else(|| "*".to_string()),
+                loaded.envelope(scope).unwrap_or("*").to_string(),
             ));
         }
     }
@@ -377,16 +380,25 @@ pub(crate) fn default_patches_checkout(root: &ConfigRoot) -> PathBuf {
 /// 1. An explicit `--patches-path <dir>` — co-development from a working checkout.
 /// 2. The [default sibling checkout](default_patches_checkout) if it is a git
 ///    checkout — the pin is enforced.
-/// 3. Auto-fetch the series at the lock's `patches.commit` from `--patches-url` or
-///    the kernel definition's `patches_url`, into a durable commit-addressed cache
+/// 3. Auto-fetch the series at the lock's `patches.commit` from `--patches-url`,
+///    else from the pin's own [`source`], into a durable commit-addressed cache
 ///    (`<root>/cache/patches/<commit>`), so a build with no local checkout resolves
 ///    automatically (the North-Star "selecting a device auto-fetches the right
 ///    patches"). With no URL available this is a hard [`EngineError::PatchesNoSource`]
 ///    naming the pinned commit — patches are never silently skipped.
+///
+/// The URL comes from the *pin*, not from the current config, for two reasons.
+/// The commit is the lock's, so the repo must be too: re-pointing a kernel's
+/// `patches_url` after a lock was written would otherwise fetch the pinned commit
+/// from a different repo. And the pin is the only source both axes carry — a
+/// `deliverable = "uboot"` recipe resolves no kernel at all
+/// ([`resolve_device`]), so a config-derived kernel URL leaves it with nothing to
+/// fetch from.
+///
+/// [`source`]: boot2deb_core::lock::PatchesPin::source
 pub(crate) fn resolve_patches_source(
     patches_path: Option<&Path>,
     patches_url: Option<&str>,
-    resolved: &ResolvedBuild,
     pin: &boot2deb_core::lock::PatchesPin,
     root: &ConfigRoot,
     sink: &dyn EventSink,
@@ -399,20 +411,15 @@ pub(crate) fn resolve_patches_source(
         return Ok((default_local, false));
     }
     let url = patches_url
-        .map(str::to_string)
-        .or_else(|| {
-            resolved
-                .kernel
-                .as_ref()
-                .and_then(|k| k.compiled())
-                .and_then(|k| k.patches_url.clone())
-        })
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .or_else(|| Some(pin.source.trim()).filter(|s| !s.is_empty()))
         .ok_or_else(|| EngineError::PatchesNoSource {
             commit: pin.commit.clone(),
         })?;
     let cache_root = root.path().join("cache").join("patches");
     let step = Step::start(sink, "patches");
-    let dir = patchfetch::fetch_series(&url, &pin.commit, &cache_root, &step)?;
+    let dir = patchfetch::fetch_series(url, &pin.commit, &cache_root, &step)?;
     step.finish();
     Ok((dir, false))
 }
@@ -615,6 +622,92 @@ mod tests {
             .to_string();
         assert!(shown.ends_with("/patches"), "{shown}");
         assert!(!shown.contains("/./") && !shown.contains(".."), "{shown}");
+    }
+
+    /// A pin at `commit` naming `source`, for the auto-fetch precedence tests.
+    fn patches_pin(source: &str) -> boot2deb_core::lock::PatchesPin {
+        boot2deb_core::lock::PatchesPin {
+            series: vec!["rk3576-loader".to_string()],
+            source: source.to_string(),
+            reference: "main".to_string(),
+            commit: "7b3bcb9d59040f0f1a5c1f0b2e3d4c5a69788899".to_string(),
+        }
+    }
+
+    /// A config root with no sibling `../patches`, so auto-fetch is the only path
+    /// left. Returns the `TempDir` so the caller keeps it alive.
+    fn root_without_sibling_patches() -> (tempfile::TempDir, ConfigRoot) {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("isolated/cfg");
+        std::fs::create_dir_all(&nested).unwrap();
+        let root = ConfigRoot::new(&nested);
+        assert!(!default_patches_checkout(&root).join(".git").exists());
+        (tmp, root)
+    }
+
+    #[test]
+    fn the_patch_pin_supplies_the_fetch_url_without_any_kernel() {
+        // A `deliverable = "uboot"` recipe resolves no kernel at all, so a
+        // config-derived kernel URL would leave both shipped u-boot-only recipes
+        // unable to fetch the series they pin. The pin carries the repo itself, and
+        // that is what the fetch takes — no ResolvedBuild is consulted.
+        let (_tmp, root) = root_without_sibling_patches();
+        let pin = patches_pin("https://example.invalid/patches.git");
+        // Pre-seed the commit-addressed cache so the fetch is a hit and the test
+        // stays hermetic; reaching a hit at all is what today's kernel-only fallback
+        // could not do.
+        let cached = root.path().join("cache/patches").join(&pin.commit);
+        std::fs::create_dir_all(&cached).unwrap();
+        let sink = |_: boot2deb_engine::Event| {};
+        let (dir, dev) = resolve_patches_source(None, None, &pin, &root, &sink).unwrap();
+        assert_eq!(dir, cached);
+        assert!(!dev, "an auto-fetched checkout is not a co-dev checkout");
+    }
+
+    #[test]
+    fn the_fetch_url_comes_from_the_pin_and_an_explicit_flag_outranks_it() {
+        // The commit is the lock's, so the repo must be too: re-pointing a kernel's
+        // `patches_url` after a lock was written must not fetch the pinned commit
+        // from somewhere else. `--patches-url` is the one deliberate override.
+        let (tmp, root) = root_without_sibling_patches();
+        let sink = |_: boot2deb_engine::Event| {};
+
+        // Both URLs are local paths that do not exist, so the clone fails without
+        // touching the network — and names the URL it tried.
+        let pinned = tmp.path().join("pinned-repo.git");
+        let pin = patches_pin(&pinned.display().to_string());
+        let err = resolve_patches_source(None, None, &pin, &root, &sink)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&pinned.display().to_string()), "{err}");
+
+        let overridden = tmp.path().join("overridden-repo.git");
+        let err = resolve_patches_source(
+            None,
+            Some(&overridden.display().to_string()),
+            &pin,
+            &root,
+            &sink,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&overridden.display().to_string()), "{err}");
+        assert!(!err.contains(&pinned.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn a_pin_with_no_source_names_both_axes_in_its_remediation() {
+        // The only way to reach this now is a lock whose pin records no repo. A
+        // u-boot-only recipe has no kernel definition to set `patches_url` on, so a
+        // message naming only that one is unactionable for half the recipes.
+        let (_tmp, root) = root_without_sibling_patches();
+        let sink = |_: boot2deb_engine::Event| {};
+        let err = resolve_patches_source(None, None, &patches_pin("  "), &root, &sink)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no patches source"), "{err}");
+        assert!(err.contains("kernel definition"), "{err}");
+        assert!(err.contains("rockchip-rkbin.toml"), "{err}");
     }
 
     #[test]
@@ -947,21 +1040,68 @@ mod tests {
         ];
 
         // In range for every series: nothing to say.
-        assert!(series_outside_envelope(dir.path(), &names, "v7.1.5")
-            .unwrap()
-            .is_empty());
+        assert!(
+            series_outside_envelope(dir.path(), &names, Scope::Kernel, "v7.1.5")
+                .unwrap()
+                .is_empty()
+        );
 
         // Past `narrow`'s cap: it alone is reported, carrying its declared range.
-        let out = series_outside_envelope(dir.path(), &names, "v7.2").unwrap();
+        let out = series_outside_envelope(dir.path(), &names, Scope::Kernel, "v7.2").unwrap();
         assert_eq!(out, vec![("narrow".to_string(), ">=7.0, <7.2".to_string())]);
 
         // Release-strict, matching the build gate rather than the candidate path: an RC
         // satisfies neither bound, so every bounded series is reported and the
         // unbounded one still is not.
-        let rc = series_outside_envelope(dir.path(), &names, "v7.2-rc5").unwrap();
+        let rc = series_outside_envelope(dir.path(), &names, Scope::Kernel, "v7.2-rc5").unwrap();
         assert_eq!(
             rc.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
             ["narrow", "wide"]
+        );
+    }
+
+    #[test]
+    fn series_outside_envelope_asks_the_uboot_axis_about_the_uboot_version() {
+        // The two axes move independently: a series that claims a narrow kernel range
+        // and a wide u-boot one is in envelope for u-boot exactly when its
+        // `applies_to_uboot` says so, and the kernel range must not leak into that
+        // answer. u-boot tags are zero-padded (`v2026.04`), which is the shape the
+        // range match has to accept on both sides.
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("series");
+        std::fs::create_dir_all(&series).unwrap();
+        std::fs::write(
+            series.join("display.toml"),
+            "applies_to_kernel = \">=7.0, <7.2\"\n\
+             applies_to_uboot  = \">=2026.01, <2027.01\"\n\
+             kernel = []\nffmpeg = []\nuserspace = []\nuboot = []\n",
+        )
+        .unwrap();
+        // No u-boot envelope: claims every u-boot, so it is never reported.
+        std::fs::write(
+            series.join("loader.toml"),
+            "kernel = []\nffmpeg = []\nuserspace = []\nuboot = []\n",
+        )
+        .unwrap();
+        let names = ["display".to_string(), "loader".to_string()];
+
+        // Inside the u-boot envelope, and the narrow kernel range does not interfere.
+        assert!(
+            series_outside_envelope(dir.path(), &names, Scope::Uboot, "v2026.04")
+                .unwrap()
+                .is_empty()
+        );
+        // Past its cap: reported, carrying the declared range as authored.
+        let out = series_outside_envelope(dir.path(), &names, Scope::Uboot, "v2027.04").unwrap();
+        assert_eq!(
+            out,
+            vec![("display".to_string(), ">=2026.01, <2027.01".to_string())]
+        );
+        // The same series against a kernel tag answers the kernel question instead.
+        let out = series_outside_envelope(dir.path(), &names, Scope::Kernel, "v7.3").unwrap();
+        assert_eq!(
+            out,
+            vec![("display".to_string(), ">=7.0, <7.2".to_string())]
         );
     }
 }

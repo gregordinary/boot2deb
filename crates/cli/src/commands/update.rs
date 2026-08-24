@@ -10,6 +10,7 @@ use crate::args::UpdateArgs;
 use crate::config::{default_patches_checkout, extra_debs_store, preflight_config, source_axes};
 use crate::render::{print_event, short};
 use boot2deb_core::model::Overrides;
+use boot2deb_core::series::Scope;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
 use boot2deb_engine::debstore::DebStore;
 use boot2deb_engine::event::{Event, Step};
@@ -335,8 +336,12 @@ pub(crate) fn run(
     // the evidence says it can be. Blocking here would force the claim to be widened
     // before anything had measured it, which is backwards.
     if let (Some(pin), Some(kernel)) = (&lock.patches, &lock.kernel) {
-        let outside =
-            crate::config::series_outside_envelope(&patches_path, &pin.series, &kernel.reference)?;
+        let outside = crate::config::series_outside_envelope(
+            &patches_path,
+            &pin.series,
+            Scope::Kernel,
+            &kernel.reference,
+        )?;
         for (name, declared) in &outside {
             eprintln!(
                 "  note: kernel {} is outside series '{name}' (declared {declared}) — a build \
@@ -345,6 +350,29 @@ pub(crate) fn run(
                  --keep-going\n  then widen applies_to_kernel in the series if it comes back \
                  clean, or retire the patches it names.",
                 kernel.reference, kernel.reference
+            );
+        }
+    }
+    // The same advisory on the u-boot axis, against the u-boot tag this update just
+    // pinned. Bumping a board's `uboot_ref` past what its series claims is the u-boot
+    // equivalent of the kernel bump above, and equally worth hearing about at pin
+    // time rather than after the build has cloned u-boot. There is no candidate path
+    // here — u-boot has no `--kernel` equivalent — so the remedy is the claim itself.
+    if let (Some(pin), Some(uboot)) = (&lock.uboot_patches, &lock.uboot) {
+        let outside = crate::config::series_outside_envelope(
+            &patches_path,
+            &pin.series,
+            Scope::Uboot,
+            &uboot.reference,
+        )?;
+        for (name, declared) in &outside {
+            eprintln!(
+                "  note: u-boot {} is outside series '{name}' (declared {declared}) — a build \
+                 will refuse it. Verify it first, which needs no re-pin:\n    \
+                 boot2deb verify-patches {recipe} --keep-going\n  then widen \
+                 applies_to_uboot in the series if it comes back clean, or retire the patches \
+                 it names.",
+                uboot.reference
             );
         }
     }
@@ -377,6 +405,17 @@ pub(crate) fn run(
             eprintln!(
                 "  that claim now describes a combination nothing has booted — re-validate on \
                  hardware and update the date, or set status = \"expected\" until you do"
+            );
+        }
+        // The published support matrix is generated from these pins, so moving one
+        // makes the committed page describe a build that no longer exists. A gate test
+        // catches it, but only after the fact — as a red CI on whoever pushed the
+        // re-pin. The reminder belongs at the moment the pins move, which is here, and
+        // only when they actually did: a no-op re-pin has nothing to regenerate.
+        if !moved.is_empty() {
+            eprintln!(
+                "  note: this re-pin changes the generated support matrix — regenerate it:\n    \
+                 boot2deb support-matrix --markdown > docs/src/reference/support-matrix.md"
             );
         }
     }

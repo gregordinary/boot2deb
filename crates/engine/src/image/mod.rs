@@ -96,6 +96,14 @@ pub struct ImageOptions<'a> {
     /// once compression succeeds to save disk on the largest artifact.
     /// Ignored when `compress` is off.
     pub keep_raw: bool,
+    /// Upper bound on the `.xz` encoder's worker pool — the build's
+    /// [`jobs`](crate::build::BuildEnv::jobs). `None` uses the host's available
+    /// parallelism.
+    ///
+    /// Compression is the one image-node step with real concurrency, so `--jobs N`
+    /// has to reach it: a flag that bounds the compile and then fans the encode
+    /// across every core does not mean what it says on a shared machine.
+    pub jobs: Option<usize>,
 }
 
 /// The image's on-disk identifiers, all derived from one lock-stable seed rather
@@ -345,7 +353,7 @@ pub fn build_image(
     if opts.compress {
         for image in output.images() {
             let dst = append_xz(image);
-            compress_xz(image, &dst, &step)?;
+            compress_xz(image, &dst, opts.jobs, &step)?;
             step.log(format!("compressed {}", dst.display()));
             compressed.push(dst);
         }
@@ -607,13 +615,16 @@ fn read_chunk<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize>
 /// `.xz`-compress `src` to `dst` with the pure-Rust multithreaded encoder.
 ///
 /// Image-sized inputs make single-threaded LZMA impractical, so this fans the
-/// encode across the host's cores ([`XzWriterMt`], one block per worker); a small
-/// input degenerates to a single block. The container is standard `.xz` either
-/// way.
-fn compress_xz(src: &Path, dst: &Path, step: &Step) -> Result<(), EngineError> {
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1) as u32;
+/// encode across `jobs` workers ([`XzWriterMt`], one block per worker), defaulting to
+/// the host's available parallelism when the build set no cap; a small input
+/// degenerates to a single block. The container is standard `.xz` either way.
+fn compress_xz(
+    src: &Path,
+    dst: &Path,
+    jobs: Option<usize>,
+    step: &Step,
+) -> Result<(), EngineError> {
+    let workers = xz_workers(jobs);
     step.log(format!(
         "compressing {} -> {} (xz preset {XZ_PRESET}, {workers} worker(s))",
         src.display(),
@@ -631,6 +642,20 @@ fn compress_xz(src: &Path, dst: &Path, step: &Step) -> Result<(), EngineError> {
         .map_err(|s| EngineError::io(src, s))?;
     writer.finish().map_err(|s| EngineError::io(dst, s))?;
     Ok(())
+}
+
+/// The `.xz` worker count for a build's [`jobs`](crate::build::BuildEnv::jobs) cap:
+/// the cap where one is set, else the host's available parallelism, and never zero
+/// (the encoder needs at least one worker, and `--jobs 0` is not a request for none).
+///
+/// Pure, so the bound is testable without compressing anything.
+fn xz_workers(jobs: Option<usize>) -> u32 {
+    let n = jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
+    n.clamp(1, u32::MAX as usize) as u32
 }
 
 /// The byte length of `path`.
@@ -673,41 +698,11 @@ mod tests {
         b
     }
 
-    /// True when a host tool is runnable — the image path is Linux-only, so tests
-    /// that need a host fixture helper (`tar`) skip cleanly where it is absent.
-    ///
-    /// Presence is detected by whether the probe **spawns** (a missing binary fails to
-    /// exec with `ENOENT`), not by its exit status: a present tool that rejects
-    /// `--version` and exits non-zero must not be reported absent, which would silently
-    /// skip the end-to-end image tests even on a capable host.
-    fn have(tool: &str) -> bool {
-        Command::new(tool).arg("--version").output().is_ok()
-    }
-
     /// Whether the end-to-end image path can run: every tool in `tools` is runnable.
     /// The ext4 format itself is pure Rust and needs no host tool; `tools` covers only
-    /// the fixture helper the test drives (`tar`). When
-    /// something is missing the behavior depends on `BOOT2DEB_REQUIRE_HOST_TOOLS`: a CI
-    /// job that guarantees the tools sets it, and a miss then **panics** so the most
-    /// important image assertions cannot silently drop out of the run; unset (a
-    /// tool-minimal dev host), the caller skips with a printed note.
+    /// the fixture helper the test drives (`tar`).
     fn require_host_tools(tools: &[&str]) -> bool {
-        let missing: Vec<String> = tools
-            .iter()
-            .filter(|t| !have(t))
-            .map(|t| t.to_string())
-            .collect();
-        if missing.is_empty() {
-            return true;
-        }
-        assert!(
-            std::env::var_os("BOOT2DEB_REQUIRE_HOST_TOOLS").is_none(),
-            "BOOT2DEB_REQUIRE_HOST_TOOLS is set but required host tools are missing: \
-             {missing:?} — this CI job must provide them so the end-to-end image tests \
-             do not skip"
-        );
-        eprintln!("skipping: required host tools unavailable: {missing:?}");
-        false
+        crate::hosttool::require(tools)
     }
 
     /// Build a tiny rootfs tarball (a few dirs + files) at `path`.
@@ -790,7 +785,7 @@ mod tests {
         let xz = tmp.path().join("data.bin.xz");
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "image");
-        compress_xz(&src, &xz, &step).unwrap();
+        compress_xz(&src, &xz, None, &step).unwrap();
 
         let out = Command::new("xz").args(["-dc"]).arg(&xz).output().unwrap();
         assert!(
@@ -799,6 +794,24 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(out.stdout, payload);
+    }
+
+    #[test]
+    fn jobs_bounds_the_xz_worker_pool() {
+        // `--jobs N` used to bound `make` and nothing else, so a `build --jobs 4` on a
+        // shared machine still fanned image compression across every core. The flag
+        // means "for this build".
+        assert_eq!(xz_workers(Some(4)), 4);
+        assert_eq!(xz_workers(Some(1)), 1);
+        // `--jobs 0` is not a request for no workers; the encoder needs at least one.
+        assert_eq!(xz_workers(Some(0)), 1);
+        // Unset falls back to the host, which is whatever this machine has — assert the
+        // property, not the number.
+        let host = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1) as u32;
+        assert_eq!(xz_workers(None), host);
+        assert!(xz_workers(None) >= 1);
     }
 
     #[test]
@@ -862,6 +875,7 @@ mod tests {
             identity: ImageIdentity::derive("test-seed", "turing-rk1"),
             compress: false,
             keep_raw: false,
+            jobs: None,
         };
         let sink = |_: crate::event::Event| {};
         let arts = build_image(&build, &opts, &sink).unwrap();
@@ -906,7 +920,7 @@ mod tests {
 
         // If `sfdisk` is around, the GPT must be parseable and name the partition —
         // an sfdisk *failure* means a corrupt table and fails the test.
-        if have("sfdisk") {
+        if crate::hosttool::have("sfdisk") {
             let o = Command::new("sfdisk")
                 .arg("-d")
                 .arg(&image)
@@ -951,6 +965,7 @@ mod tests {
                 identity: ImageIdentity::derive("test-seed", "turing-rk1"),
                 compress: true,
                 keep_raw,
+                jobs: None,
             };
             build_image(&small_rk1_build("192MiB"), &opts, &sink).unwrap()
         };
@@ -1004,6 +1019,7 @@ mod tests {
             identity: ImageIdentity::derive("test-seed", "turing-rk1"),
             compress: false,
             keep_raw: false,
+            jobs: None,
         };
         let sink = |_: crate::event::Event| {};
         let arts = build_image(&build, &opts, &sink).unwrap();

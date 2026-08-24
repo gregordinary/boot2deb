@@ -207,13 +207,29 @@ fn indent(s: &str) -> String {
         .join("\n")
 }
 
-/// Verify a set of trees, each `(label, ordered patch list, checkout)`.
+/// One tree in a [`verify_series`] run: what to apply, where, and at what version.
+///
+/// The target rides with the tree rather than being one label for the whole run
+/// because a verify spans two independent axes. The kernel-family trees are checked
+/// at the kernel tag and the `uboot` tree at the u-boot tag, so a single target
+/// would have to misreport one of them.
+pub struct VerifyTree<'a> {
+    /// Tree label for messages (`"kernel"`, `"ffmpeg"`, `"uboot"`, …).
+    pub label: &'a str,
+    /// The ordered patch labels, already narrowed to the version under test.
+    pub series: &'a [&'a str],
+    /// The checkout to apply them to.
+    pub checkout: &'a Path,
+    /// What that checkout is at (`"rk3588-mainline-7.1 @ v7.1.1"`), for messages.
+    pub target: &'a str,
+}
+
+/// Verify a set of [`VerifyTree`]s.
 ///
 /// The caller selects which trees to exercise — e.g. only `kernel` before the
 /// ffmpeg/MPP checkouts exist — pairing each
 /// [`SeriesIdentity`](boot2deb_core::PatchSeries) series (already filtered to the
-/// kernel under test) with the checkout to verify it against. `target` labels what
-/// the trees are checked at.
+/// version under test) with the checkout to verify it against.
 ///
 /// Returns the per-tree verified counts in order, plus every failure collected
 /// across all trees. Under [`OnFailure::Stop`] it hard-errors on the first tree
@@ -221,15 +237,21 @@ fn indent(s: &str) -> String {
 /// list is the report.
 pub fn verify_series(
     patches_root: &Path,
-    target: &str,
-    trees: &[(&str, &[&str], &Path)],
+    trees: &[VerifyTree<'_>],
     on_failure: OnFailure,
 ) -> Result<ProfileReport, EngineError> {
     let mut report = Vec::new();
     let mut failures = Vec::new();
-    for (tree, labels, repo) in trees {
-        let (n, failed) = verify_tree(patches_root, labels, repo, tree, target, on_failure)?;
-        report.push((tree.to_string(), n));
+    for t in trees {
+        let (n, failed) = verify_tree(
+            patches_root,
+            t.series,
+            t.checkout,
+            t.label,
+            t.target,
+            on_failure,
+        )?;
+        report.push((t.label.to_string(), n));
         failures.extend(failed);
     }
     Ok((report, failures))

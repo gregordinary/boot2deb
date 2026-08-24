@@ -42,16 +42,21 @@ pub struct BuildEnv {
     /// `CROSS_COMPILE` prefix, `Some` when the host arch differs from the target;
     /// `None` for a native build (no prefix passed to `make`).
     pub cross_compile: Option<String>,
-    /// `make -j` parallelism; `None` lets the stage default to the host's
-    /// available parallelism.
+    /// Parallelism cap for the whole build; `None` lets each stage default to the
+    /// host's available parallelism.
     ///
-    /// Deliberately **not** in any signature. It reaches two outputs — `make -j` and
-    /// the `DEB_BUILD_OPTIONS=parallel=` a `dpkg-buildpackage` sees — but a build
-    /// system whose output depends on its job count is a build system with a bug, so
-    /// folding it would fragment the artifact cache by machine size to key something
-    /// that is supposed to be invariant. It is recorded in the provenance manifest
-    /// instead, where a difference between two images from one lock can be seen
-    /// without being paid for on every cache lookup.
+    /// It bounds every concurrent thing the build does — `make -j`, the
+    /// `DEB_BUILD_OPTIONS=parallel=` a `dpkg-buildpackage` sees, and the image's `.xz`
+    /// worker pool — because the flag means "for this build", not "for `make`". On a
+    /// shared or constrained machine an unbounded compression pass is as unwelcome as
+    /// an unbounded compile.
+    ///
+    /// Deliberately **not** in any signature. That is a separate question from
+    /// bounding concurrency: a build system whose *output* depends on its job count is
+    /// a build system with a bug, so folding it would fragment the artifact cache by
+    /// machine size to key something that is supposed to be invariant. It is recorded
+    /// in the provenance manifest instead, where a difference between two images from
+    /// one lock can be seen without being paid for on every cache lookup.
     pub jobs: Option<usize>,
     /// Identity of the host cross toolchain that compiles **on the host**
     /// ([`HostToolchain::compiler_identity`](crate::toolchain::HostToolchain::compiler_identity)),
@@ -71,11 +76,17 @@ pub struct BuildEnv {
     ///    snapshots key differently. Against a *live* mirror the compiler can still
     ///    move under an unchanged key; that residual is what the snapshot exists to
     ///    close, and it cannot be closed from here.
-    ///  - The **`qemu-user` interpreter**, on a cross host, which executes that
-    ///    compiler
-    ///    ([`qemu_identity`](crate::toolchain::HostToolchain::qemu_identity)). A
-    ///    native build folds no interpreter segment at all rather than an empty one,
-    ///    so it can never key alike with a cross build whose qemu is merely missing.
+    ///  - The **`qemu-user` interpreter**, where the host cannot execute the target's
+    ///    binaries, which is what then executes that compiler
+    ///    ([`qemu_identity`](crate::toolchain::HostToolchain::qemu_identity)). A host
+    ///    that runs them directly folds no interpreter segment at all rather than an
+    ///    empty one, so it can never key alike with an emulated build whose qemu is
+    ///    merely missing.
+    ///
+    ///    "Cannot execute" is narrower than "cross": an arm64 host building armhf
+    ///    compiles through a cross toolchain and then runs the result natively, so it
+    ///    folds no interpreter. Keying on the toolchain question instead would name a
+    ///    binary that never ran.
     pub sandbox_id: String,
 }
 
@@ -84,9 +95,9 @@ pub struct BuildEnv {
 ///
 /// Lives here, beside the field it fills, rather than at the one call site: it decides
 /// when two sandbox-built `.deb`s may be restored for each other, and that is a
-/// property of the signature, not of the CLI. A native build contributes no
-/// interpreter segment at all — not an empty one — so it can never key alike with a
-/// cross build whose `qemu-user` is merely missing.
+/// property of the signature, not of the CLI. A build that runs target binaries
+/// directly contributes no interpreter segment at all — not an empty one — so it can
+/// never key alike with an emulated build whose `qemu-user` is merely missing.
 pub fn sandbox_identity(mirrors: &[String], toolchain: &crate::toolchain::HostToolchain) -> String {
     let userland = mirrors.join(" ");
     match toolchain.qemu_identity() {
@@ -735,8 +746,10 @@ pub(crate) struct ClonePinned<'a> {
     pub scope: PatchScope,
     /// Message label for the patched tree (e.g. `"kernel @ v7.1.1"`).
     pub target: &'a str,
-    /// When `Some`, gate the series' declared kernel range against this ref
-    /// before applying — the kernel node's declared-intent gate.
+    /// When `Some`, gate the series' declared envelope against this ref before
+    /// applying — the declared-intent gate. The ref belongs to the *scope's own*
+    /// axis: the kernel tag for the kernel-family scopes, the u-boot tag for
+    /// [`PatchScope::Uboot`], since a u-boot series makes no claim about a kernel.
     pub gate_reference: Option<&'a str>,
 }
 
@@ -838,8 +851,10 @@ pub(crate) struct ApplyScope<'a> {
     pub scope: PatchScope,
     /// Message label for the patched tree (e.g. `"kernel @ v7.1.1"`).
     pub target: &'a str,
-    /// When `Some`, gate the series' declared kernel range against this ref
-    /// before applying — the kernel node's declared-intent gate.
+    /// When `Some`, gate the series' declared envelope against this ref before
+    /// applying — the declared-intent gate. The ref belongs to the *scope's own*
+    /// axis: the kernel tag for the kernel-family scopes, the u-boot tag for
+    /// [`PatchScope::Uboot`], since a u-boot series makes no claim about a kernel.
     pub gate_reference: Option<&'a str>,
 }
 
@@ -880,7 +895,7 @@ pub(crate) fn apply_series_scope(spec: &ApplyScope, step: &Step) -> Result<usize
     if let Some(reference) = spec.gate_reference {
         // Declared-intent gate before touching the tree, against the envelope for this
         // scope: the u-boot scope gates on the u-boot version, the rest on the kernel.
-        // Every composed series is gated; one that does not cover this kernel fails here.
+        // Every composed series is gated; one that does not cover this version fails here.
         for &(name, ref series) in &loaded {
             match spec.scope {
                 PatchScope::Uboot => series.ensure_applies_uboot(name, reference)?,
@@ -921,19 +936,19 @@ fn verify_patches_pin(
         step.emit(
             Stream::Stderr,
             format!(
-                "warning: patches checkout {} is at {}{} but the lock pins {} — \
-                 applying the working tree's series (--patches-path override)",
-                patches_root.display(),
-                head,
-                if clean {
-                    ""
-                } else {
-                    " (with uncommitted changes)"
-                },
-                expected,
+                "warning: {} — applying the working tree's series (--patches-path override)",
+                crate::pins::describe_patches_drift(patches_root, &head, expected, clean),
             ),
         );
         return Ok(());
+    }
+    // A checkout on the pin with uncommitted work is not a drifted pin, and saying
+    // "is at X, but the lock pins X" would read as a contradiction.
+    if head == expected {
+        return Err(EngineError::PatchesWorktreeDirty {
+            root: patches_root.display().to_string(),
+            commit: head,
+        });
     }
     Err(EngineError::PatchesPinMismatch {
         root: patches_root.display().to_string(),
@@ -1995,21 +2010,115 @@ mod tests {
         );
         git(&["checkout", "-q", "-"]);
 
-        // An uncommitted change fails the clean check even at the right commit,
-        // and the remedy leads with committing, whatever HEAD's relation is.
+        // An uncommitted change fails the clean check even at the right commit — but
+        // nothing is *mismatched* there, so it is its own error and must not claim the
+        // checkout is at some commit other than the one it pins.
         std::fs::write(repo.join("f"), "changed").unwrap();
         let err = verify_patches_pin(repo, &newer_head, false, &step).unwrap_err();
         assert!(
-            matches!(err, EngineError::PatchesPinMismatch { dirty: true, .. }),
-            "expected dirty PatchesPinMismatch, got {err:?}"
+            matches!(err, EngineError::PatchesWorktreeDirty { .. }),
+            "expected PatchesWorktreeDirty, got {err:?}"
         );
         let msg = err.to_string();
         assert!(
             msg.contains("commit them"),
             "dirty remedy leads with commit: {msg}"
         );
+        assert!(
+            !msg.contains("but the lock pins"),
+            "an on-pin dirty tree is not a pin mismatch: {msg}"
+        );
+        assert_eq!(
+            msg.matches(newer_head.as_str()).count(),
+            1,
+            "the commit is named once, not as both actual and expected: {msg}"
+        );
         // ...but the override tolerates a dirty co-dev checkout too.
         verify_patches_pin(repo, &newer_head, true, &step).unwrap();
+    }
+
+    /// `git init` + one commit of whatever `dir` already holds, returning its HEAD.
+    fn commit_all(dir: &Path) -> String {
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@boot2deb"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base", "--allow-empty"]);
+        git::rev_parse_head(dir).unwrap()
+    }
+
+    /// A committed `patches` checkout holding one series manifest, returned with its
+    /// HEAD so a [`PatchSource`] can pin it. The `TempDir` is returned so the caller
+    /// keeps the checkout alive.
+    fn patches_checkout(name: &str, manifest: &str) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("series")).unwrap();
+        std::fs::write(
+            tmp.path().join("series").join(format!("{name}.toml")),
+            manifest,
+        )
+        .unwrap();
+        let head = commit_all(tmp.path());
+        (tmp, head)
+    }
+
+    #[test]
+    fn the_uboot_scope_gates_its_envelope_against_the_uboot_ref() {
+        // The u-boot node used to pass `gate_reference: None`, which made this whole
+        // arm — and `applies_to_uboot` with it — unreachable. The gate must fire
+        // against the *u-boot* ref: the kernel envelope below excludes v2026.04, and
+        // reading it here would refuse a u-boot the series does claim.
+        let (patches, head) = patches_checkout(
+            "rk3576-loader",
+            "applies_to_kernel = \">=7.0, <7.2\"\n\
+             applies_to_uboot  = \">=2026.01, <2027.01\"\n\
+             uboot = []\n",
+        );
+        let pin = boot2deb_core::lock::PatchesPin {
+            series: vec!["rk3576-loader".to_string()],
+            source: "https://example.invalid/patches.git".to_string(),
+            reference: "main".to_string(),
+            commit: head,
+        };
+        // A real repo: the apply pass runs `git` against the tree it patches, so an
+        // in-envelope run has to reach a tree it can actually inspect.
+        let tree = tempfile::tempdir().unwrap();
+        commit_all(tree.path());
+        let sink = |_: Event| {};
+        let step = Step::start(&sink, "t");
+        let scope = |version: &'static str| ApplyScope {
+            tree: tree.path(),
+            patches: Some(PatchSource {
+                root: patches.path(),
+                pin: &pin,
+                dev: false,
+                version,
+            }),
+            scope: PatchScope::Uboot,
+            target: "u-boot",
+            gate_reference: Some(version),
+        };
+        // In envelope: the (empty) series applies, so nothing is rejected.
+        assert_eq!(apply_series_scope(&scope("v2026.04"), &step).unwrap(), 0);
+        // Out of envelope: refused before the tree is touched.
+        let err = apply_series_scope(&scope("v2027.04"), &step).unwrap_err();
+        assert!(
+            err.to_string().contains("does not target u-boot v2027.04"),
+            "{err}"
+        );
     }
 
     #[test]

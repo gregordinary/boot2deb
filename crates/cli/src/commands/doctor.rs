@@ -30,17 +30,32 @@ pub(crate) fn run(
     let build = resolve(root, &target, overrides)?;
     let pf = boot2deb_engine::preflight(build.arch);
     println!("target    : {target} (arch {})", build.arch);
-    if pf.cross {
-        println!(
-            "cross     : yes — needs qemu-user binfmt for {} maintainer scripts/compiles",
-            build.arch
-        );
-    } else {
-        println!(
-            "cross     : no — native {} build, no qemu-user needed",
-            build.arch
-        );
-    }
+    // Two lines, not one, because the two answers come apart: an arm64 host building
+    // armhf needs the cross toolchain and needs no qemu at all (CONFIG_COMPAT=y runs
+    // those binaries natively). Reporting them as one "cross: yes" told that host to
+    // install an interpreter its build never invokes.
+    println!(
+        "toolchain : {}",
+        if pf.cross_toolchain {
+            format!(
+                "cross — {} cannot be emitted by this host's native cc",
+                build.arch
+            )
+        } else {
+            format!("native — this host's cc emits {}", build.arch)
+        }
+    );
+    println!(
+        "execution : {}",
+        if pf.interpreter {
+            format!(
+                "emulated — needs qemu-user binfmt for {} maintainer scripts/compiles",
+                build.arch
+            )
+        } else {
+            format!("native — this host runs {} binaries directly", build.arch)
+        }
+    );
 
     // Tool-presence preflight: report each requirement with its path or a
     // host-specific install hint, then fail if any required tool is missing.
@@ -82,6 +97,28 @@ pub(crate) fn run(
             }
         }
     }
+    // A native kernel build carries one prerequisite these checks cannot see. `make
+    // bindeb-pkg` runs `dpkg-checkbuilddeps` against the kernel's generated
+    // debian/control, and that consults the *dpkg database* — while everything above
+    // is a PATH scan and `pkg-config`. Those are different oracles: a host where
+    // `libelf-dev` or `debhelper` is present but not dpkg-registered passes every
+    // check here and then fails the build minutes in. Cross builds pass `DPKG_FLAGS=-d`
+    // and skip the gate entirely, so this is the native path's alone.
+    //
+    // Stated rather than probed: reproducing dpkg's own dependency solve would be a
+    // second implementation of it, and the answer only matters on a host that installed
+    // its build deps outside dpkg.
+    if build.compiles_kernel() && !pf.cross_toolchain {
+        println!();
+        println!("note      : native kernel build — `make bindeb-pkg` runs");
+        println!("            dpkg-checkbuilddeps against the dpkg database, which the");
+        println!("            PATH and pkg-config probes above cannot speak for. On a");
+        println!("            Debian/Ubuntu host that installed its build deps with apt");
+        println!("            this is already satisfied; on one that installed them from");
+        println!("            source, install the matching -dev packages so dpkg knows");
+        println!("            about them too. Cross builds skip this check entirely.");
+    }
+
     // Trust anchors: every keyring this build bootstraps against, and the vetted keys
     // each one carries. Printed in full rather than summarized — the point of the
     // fingerprint manifests is that whose keys you trust is something you can *see*,

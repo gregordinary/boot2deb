@@ -4,7 +4,6 @@
 # used for this file's stem and for kbuild's ARCH. Arch::debian_arch() maps between
 # them, so the rootfs bootstraps as armhf while the kernel builds as ARCH=arm.
 kernel_arch   = "arm"                    # ARCH= for kbuild
-uboot_arch    = "arm"                    # unused where the boot method builds no u-boot
 kbuild_image  = "arch/arm/boot/zImage"   # KBUILD_IMAGE — zImage, not Image
 cross_compile = "arm-linux-gnueabihf-"   # used only when host arch != armv7
 

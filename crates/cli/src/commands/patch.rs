@@ -187,7 +187,7 @@ pub(crate) fn import(
     println!("  1. commit it:      git -C {patches} add -A && git -C {patches} commit");
     if recipes.is_empty() {
         println!(
-            "  2. re-pin locks:   boot2deb update <recipe>   (each recipe whose kernel uses series '{}')",
+            "  2. re-pin locks:   boot2deb update <recipe>   (each recipe that applies series '{}')",
             args.series
         );
     } else {
@@ -222,10 +222,18 @@ fn insert_index(position: Option<usize>, len: usize) -> Result<usize, String> {
     }
 }
 
-/// Recipes whose resolved kernel uses patch series `series` — the locks a
-/// `patch import` invalidates, named in its follow-up hint. Best-effort: a recipe
-/// that fails to resolve, or a cwd outside any config root, contributes nothing
-/// rather than failing the import (which itself needs only the patches repo).
+/// Recipes that apply patch series `series` on **either** axis — the locks a
+/// `patch import` invalidates, named in its follow-up hint.
+///
+/// Both axes are scanned because a series name identifies one manifest, not one
+/// axis: `rk3576-loader` and `h96-max-m9-util` are named only by a device's
+/// `default_uboot_series`, so a kernel-only scan would leave an import into them
+/// naming no recipe at all — exactly the recipes whose operator is least likely to
+/// know which locks to re-pin.
+///
+/// Best-effort: a recipe that fails to resolve, or a cwd outside any config root,
+/// contributes nothing rather than failing the import (which itself needs only the
+/// patches repo).
 fn recipes_using_series(root: &ConfigRoot, series: &str) -> Vec<String> {
     let Ok(names) = root.list_recipes() else {
         return Vec::new();
@@ -234,11 +242,15 @@ fn recipes_using_series(root: &ConfigRoot, series: &str) -> Vec<String> {
         .into_iter()
         .filter(|name| {
             resolve_recipe(root, name, &Overrides::default()).is_ok_and(|build| {
-                build
+                let kernel = build
                     .kernel
                     .as_ref()
-                    .map(|k| k.patch_series().iter().any(|p| p == series))
-                    .unwrap_or(false)
+                    .is_some_and(|k| k.patch_series().iter().any(|p| p == series));
+                let uboot = build
+                    .rkbin_boot()
+                    .and_then(|b| b.uboot_series.as_deref())
+                    .is_some_and(|s| s == series);
+                kernel || uboot
             })
         })
         .collect()
@@ -287,5 +299,30 @@ mod tests {
         assert!(recipes_using_series(&root, "no-such-series").is_empty());
         let empty = tempfile::tempdir().unwrap();
         assert!(recipes_using_series(&ConfigRoot::new(empty.path()), "rk3588-accel").is_empty());
+    }
+
+    #[test]
+    fn recipes_using_series_also_scans_the_uboot_axis() {
+        // A u-boot series is named by a device's `default_uboot_series`, never by a
+        // kernel — and `rk3576-generic/loader` has no kernel at all. Scanning only the
+        // kernel axis left `patch import --scope uboot` naming no recipe, so the one
+        // operator who most needs the `boot2deb update` lines got the generic hint.
+        let root = repo_root();
+        let loader = recipes_using_series(&root, "rk3576-loader");
+        assert!(
+            loader.contains(&"rk3576-generic/loader".to_string()),
+            "{loader:?}"
+        );
+        // A board-specific u-boot series is found on the recipe that selects it, and
+        // not on its siblings.
+        let util = recipes_using_series(&root, "h96-max-m9-util");
+        assert!(util.contains(&"h96-max-m9/util".to_string()), "{util:?}");
+        assert!(!util.contains(&"h96-max-m9/forky".to_string()), "{util:?}");
+        // A mixed recipe is matched by its u-boot series as well as its kernel ones.
+        let display = recipes_using_series(&root, "rk3576-display");
+        assert!(
+            display.contains(&"h96-max-m9/forky".to_string()),
+            "{display:?}"
+        );
     }
 }

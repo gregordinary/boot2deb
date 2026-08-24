@@ -45,7 +45,7 @@ pub(crate) fn run(
     // gate validates the config the build actually ships (cross-toolchain-probed
     // symbols included), not a host-probed variant.
     let pf = boot2deb_engine::preflight(build.arch);
-    let cross = pf.cross.then(|| build.cross_compile.clone());
+    let cross = pf.cross_toolchain.then(|| build.cross_compile.clone());
     let sink = |e: Event| print_event(&e);
 
     // Resolve the kernel tree to configure. An explicit `--kernel-path` is used as-is
@@ -67,11 +67,20 @@ pub(crate) fn run(
                     let (patches_root, _dev) = resolve_patches_source(
                         args.patches_path.as_deref(),
                         args.patches_url.as_deref(),
-                        &build,
                         pin,
                         root,
                         &sink,
                     )?;
+                    // The `.config` this gate judges is generated from the series as the
+                    // checkout holds it, so a drifted checkout means the verdict is about
+                    // a kernel other than the locked one. Warn rather than refuse: the
+                    // point of reading the working tree is co-development.
+                    if let Some(drift) = pins::patches_drift(&patches_root, &pin.commit)? {
+                        println!(
+                            "warning: {drift} — configuring against the working tree's series, \
+                             not the pinned one"
+                        );
+                    }
                     // Load and envelope-gate every composed series before fetching, so
                     // a series that does not cover the locked kernel fails fast; the
                     // config gate then compiles against the full composed series.

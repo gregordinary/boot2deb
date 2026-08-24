@@ -194,8 +194,6 @@ kebab_enum!(KernelFlavor {
 pub struct ArchLayer {
     /// `ARCH=` passed to kbuild (e.g. `arm64`).
     pub kernel_arch: String,
-    /// `ARCH=` for the u-boot build (RK3588 builds u-boot as `arm`).
-    pub uboot_arch: String,
     /// `KBUILD_IMAGE` — the built kernel image path within the tree.
     pub kbuild_image: String,
     /// `CROSS_COMPILE` prefix, used only when the host arch differs from the
@@ -1913,8 +1911,6 @@ pub struct ResolvedBuild {
     pub modules: Vec<String>,
     /// `ARCH=` for kbuild (from the arch).
     pub kernel_arch: String,
-    /// `ARCH=` for u-boot (from the arch).
-    pub uboot_arch: String,
     /// `CROSS_COMPILE` prefix (from the arch; used only when cross-building).
     pub cross_compile: String,
     /// `KBUILD_IMAGE` path (from the arch).

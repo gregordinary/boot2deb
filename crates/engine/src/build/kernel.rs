@@ -676,7 +676,14 @@ fn compile(
         .arg(format!("KBUILD_IMAGE={}", build.kbuild_image))
         .arg(format!("LOCALVERSION={}", localversion(build)));
     // Cross builds skip dpkg's build-dep check for target-arch -dev packages we
-    // don't need at compile time (no module signing in this config).
+    // don't need at compile time (no module signing in this config): otherwise
+    // `dpkg-checkbuilddeps` would demand `libssl-dev:arm64` on an x86_64 host.
+    //
+    // The native path keeps the gate, and it is an oracle `doctor` cannot reproduce:
+    // it asks the *dpkg database*, while `doctor` scans `PATH` and `pkg-config`. A
+    // host whose build deps are present but not dpkg-registered therefore passes
+    // preflight and fails here. `doctor` says so in a note on this exact path rather
+    // than re-implementing dpkg's dependency solve.
     if env.cross_compile.is_some() {
         make.arg("DPKG_FLAGS=-d");
     }

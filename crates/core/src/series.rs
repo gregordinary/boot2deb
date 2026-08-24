@@ -205,7 +205,10 @@ impl PatchSeries {
     /// The version-range envelope gating `scope`, if the series declares one: the
     /// [`applies_to_kernel`](Self::applies_to_kernel) range for the kernel-family
     /// scopes, the [`applies_to_uboot`](Self::applies_to_uboot) range for `uboot`.
-    fn envelope(&self, scope: Scope) -> Option<&str> {
+    ///
+    /// `None` means the scope claims every version, so a report that names the
+    /// declared range spells that `*`.
+    pub fn envelope(&self, scope: Scope) -> Option<&str> {
         match scope {
             Scope::Uboot => self.applies_to_uboot.as_deref(),
             _ => self.applies_to_kernel.as_deref(),
@@ -215,6 +218,10 @@ impl PatchSeries {
     /// Parse `scope`'s declared envelope into a [`VersionReq`], or `None` when the
     /// series declares none for it (that scope then applies to any version).
     ///
+    /// Normalizes the range like every other read of one, so a zero-padded u-boot
+    /// envelope parses the same here as it does in a match — otherwise the
+    /// unreachable-entry lint would reject a range the gate accepts.
+    ///
     /// `series` names the owner for the error message only.
     pub fn version_req(
         &self,
@@ -222,13 +229,7 @@ impl PatchSeries {
         scope: Scope,
     ) -> Result<Option<VersionReq>, ConfigError> {
         self.envelope(scope)
-            .map(|req| {
-                VersionReq::parse(req).map_err(|source| ConfigError::InvalidVersionReq {
-                    series: series.to_string(),
-                    value: req.to_string(),
-                    source,
-                })
-            })
+            .map(|req| parse_req(series, req))
             .transpose()
     }
 
@@ -251,9 +252,26 @@ impl PatchSeries {
         kernel_version: &str,
         mode: RangeMatch,
     ) -> Result<bool, ConfigError> {
-        match self.applies_to_kernel.as_deref() {
+        self.applies_to_scope(series, Scope::Kernel, kernel_version, mode)
+    }
+
+    /// True when `version` falls in the [envelope](Self::envelope) gating `scope`;
+    /// always true when that scope declares none.
+    ///
+    /// The scope-generic form of [`applies_to_under`](Self::applies_to_under), so a
+    /// caller reporting on both axes — `update`'s pin-time advisory — asks the same
+    /// question of each rather than carrying two near-copies. `version` is a kernel
+    /// tag for the kernel-family scopes and a u-boot tag for `uboot`.
+    pub fn applies_to_scope(
+        &self,
+        series: &str,
+        scope: Scope,
+        version: &str,
+        mode: RangeMatch,
+    ) -> Result<bool, ConfigError> {
+        match self.envelope(scope) {
             None => Ok(true),
-            Some(req) => matches_range(series, req, kernel_version, mode),
+            Some(req) => matches_range(series, req, version, mode),
         }
     }
 
@@ -529,7 +547,10 @@ pub fn load_series(patches_root: &Path, name: &str) -> Result<PatchSeries, Confi
     })
 }
 
-/// Parse `range` and test `kernel_version` against it under `mode`.
+/// Parse `range` and test `version` against it under `mode`.
+///
+/// `version` is a kernel tag for the kernel-family scopes and a u-boot tag for the
+/// `uboot` scope, so nothing here is kernel-specific.
 ///
 /// Under [`RangeMatch::Candidate`] the version's prerelease is dropped before
 /// matching, which is what makes an `-rc` tree answerable: semver would otherwise
@@ -537,11 +558,11 @@ pub fn load_series(patches_root: &Path, name: &str) -> Result<PatchSeries, Confi
 fn matches_range(
     series: &str,
     range: &str,
-    kernel_version: &str,
+    version: &str,
     mode: RangeMatch,
 ) -> Result<bool, ConfigError> {
     let req = parse_req(series, range)?;
-    let mut ver = parse_kernel_version(kernel_version)?;
+    let mut ver = parse_version(version)?;
     if mode == RangeMatch::Candidate {
         ver.pre = semver::Prerelease::EMPTY;
     }
@@ -549,8 +570,12 @@ fn matches_range(
 }
 
 /// Parse a semver requirement, attributing a failure to `series`.
+///
+/// Each comparator's version core is normalized first, so a range may be written
+/// with the same zero padding as the tags it bounds (`">=2026.04, <2027.01"`) —
+/// see [`normalize_core`].
 fn parse_req(series: &str, range: &str) -> Result<VersionReq, ConfigError> {
-    VersionReq::parse(range).map_err(|source| ConfigError::InvalidVersionReq {
+    VersionReq::parse(&normalize_req(range)).map_err(|source| ConfigError::InvalidVersionReq {
         series: series.to_string(),
         value: range.to_string(),
         source,
@@ -615,33 +640,79 @@ impl Interval {
     }
 }
 
-/// Parse a kernel version tag into a [`Version`], tolerating a leading `v` and a
-/// missing patch component (`v7.1` → `7.1.0`). Prerelease suffixes (`-rc2`) are
-/// preserved as semver prereleases.
-fn parse_kernel_version(s: &str) -> Result<Version, ConfigError> {
+/// Parse a version tag into a [`Version`], tolerating a leading `v`, a missing
+/// patch component (`v7.1` → `7.1.0`), and zero-padded components
+/// (`v2026.04` → `2026.4.0`). Prerelease suffixes (`-rc2`) are preserved as semver
+/// prereleases.
+///
+/// Serves both axes: kernel tags (`v7.1.3`) and u-boot's `vYYYY.MM` release tags.
+fn parse_version(s: &str) -> Result<Version, ConfigError> {
     let stripped = s.strip_prefix('v').unwrap_or(s);
-    let normalized = pad_to_three_components(stripped);
-    Version::parse(&normalized).map_err(|source| ConfigError::InvalidKernelVersion {
+    let (core, rest) = split_core(stripped);
+    let core = normalize_core(core);
+    // Pad a two-component core to three, so `v7.1` parses; a core that is already
+    // three parts (or one) is left as it is.
+    let padded = if core.split('.').count() == 2 {
+        format!("{core}.0")
+    } else {
+        core
+    };
+    Version::parse(&format!("{padded}{rest}")).map_err(|source| ConfigError::InvalidVersion {
         value: s.to_string(),
         source,
     })
 }
 
-/// Pad a `MAJOR.MINOR` core to `MAJOR.MINOR.0` so two-component kernel tags parse
-/// as semver, leaving any `-prerelease` / `+build` suffix and already-three-part
-/// cores untouched.
-fn pad_to_three_components(s: &str) -> String {
-    // Split off the first prerelease/build delimiter; only the numeric core needs
-    // padding.
-    let (core, rest) = match s.find(['-', '+']) {
-        Some(i) => (&s[..i], &s[i..]),
+/// Split a version string at its first prerelease/build delimiter, into the numeric
+/// core and the untouched remainder (`""` when there is none).
+fn split_core(s: &str) -> (&str, &str) {
+    match s.find(['-', '+']) {
+        Some(i) => s.split_at(i),
         None => (s, ""),
-    };
-    if core.split('.').count() == 2 {
-        format!("{core}.0{rest}")
-    } else {
-        s.to_string()
     }
+}
+
+/// Strip leading zeros from each numeric component of a version core.
+///
+/// u-boot releases as `vYYYY.MM` with a zero-padded month (`v2026.04`), which semver
+/// rejects outright — "invalid leading zero in minor version number" — so without
+/// this the u-boot axis could be range-matched only by writing its versions in a
+/// spelling that appears on no tag. Non-numeric components (a `*` or `x` wildcard in
+/// a requirement) are left alone, and an all-zero component collapses to a single
+/// `0` rather than to nothing.
+fn normalize_core(core: &str) -> String {
+    core.split('.')
+        .map(|c| {
+            if c.is_empty() || !c.bytes().all(|b| b.is_ascii_digit()) {
+                return c;
+            }
+            let trimmed = c.trim_start_matches('0');
+            if trimmed.is_empty() {
+                "0"
+            } else {
+                trimmed
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Apply [`normalize_core`] to every comparator in a comma-separated semver
+/// requirement, leaving each comparator's operator prefix intact — so a range may
+/// bound u-boot tags in the spelling they actually carry (`">=2026.04, <2027.01"`).
+fn normalize_req(range: &str) -> String {
+    range
+        .split(',')
+        .map(|comparator| {
+            let trimmed = comparator.trim();
+            let rest = trimmed.trim_start_matches(['=', '>', '<', '^', '~']);
+            let (op, version) = trimmed.split_at(trimmed.len() - rest.len());
+            let version = version.trim_start();
+            let (core, suffix) = split_core(version.strip_prefix('v').unwrap_or(version));
+            format!("{op}{}{suffix}", normalize_core(core))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -888,6 +959,138 @@ mod tests {
         let p = series();
         let err = p.ensure_applies("rk3588-accel", "6.12.0").unwrap_err();
         assert!(matches!(err, ConfigError::KernelOutsideSeriesRange { .. }));
+    }
+
+    #[test]
+    fn uboot_tags_range_match_despite_their_zero_padded_month() {
+        // u-boot releases as `vYYYY.MM` with a zero-padded month, which semver rejects
+        // outright ("invalid leading zero in minor version number"). Without
+        // normalization on both sides, a series could be range-matched against u-boot
+        // only by writing versions in a spelling no tag carries — so the envelope gate
+        // would hard-error on the first series that used it rather than gate.
+        let mut p = series();
+        p.applies_to_uboot = Some(">=2026.01, <2027.01".into());
+        for inside in ["v2026.04", "2026.04", "v2026.4", "v2026.12"] {
+            assert!(
+                p.applies_to_scope("t", Scope::Uboot, inside, RangeMatch::Release)
+                    .unwrap(),
+                "{inside} should be inside >=2026.01, <2027.01"
+            );
+        }
+        for outside in ["v2025.10", "v2027.01", "v2027.04"] {
+            assert!(
+                !p.applies_to_scope("t", Scope::Uboot, outside, RangeMatch::Release)
+                    .unwrap(),
+                "{outside} should be outside >=2026.01, <2027.01"
+            );
+        }
+    }
+
+    #[test]
+    fn the_uboot_envelope_gates_the_uboot_version_and_ignores_the_kernel_one() {
+        // The gate the u-boot node runs. It has to read `applies_to_uboot` and nothing
+        // else: the kernel envelope here admits neither version, and letting it leak in
+        // would refuse a u-boot the series does claim.
+        let mut p = series();
+        assert_eq!(p.applies_to_kernel.as_deref(), Some(">=7.0, <7.2"));
+        p.applies_to_uboot = Some(">=2026.01, <2027.01".into());
+        p.ensure_applies_uboot("t", "v2026.04").unwrap();
+        let err = p.ensure_applies_uboot("t", "v2027.04").unwrap_err();
+        let ConfigError::UbootOutsideSeriesRange {
+            series,
+            uboot_version,
+            applies_to,
+        } = err
+        else {
+            panic!("expected UbootOutsideSeriesRange, got {err:?}");
+        };
+        assert_eq!(series, "t");
+        assert_eq!(uboot_version, "v2027.04");
+        // The declared range is reported as authored, not as normalized.
+        assert_eq!(applies_to, ">=2026.01, <2027.01");
+    }
+
+    #[test]
+    fn the_unreachable_lint_reads_a_uboot_envelope_the_gate_accepts() {
+        // Both sides must parse a range the same way. When only the match normalized
+        // zero padding, a series with `applies_to_uboot = ">=2026.01"` gated fine and
+        // then made `verify-patches` hard-error in its unreachable lint instead.
+        let p = PatchSeries {
+            applies_to_kernel: None,
+            applies_to_uboot: Some(">=2026.01, <2027.01".into()),
+            kernel: vec![],
+            ffmpeg: vec![],
+            userspace: vec![],
+            uboot: vec![
+                always("rk3576/loader/0001-live.patch"),
+                // Capped below the envelope's floor: nothing the series admits selects it.
+                ranged("rk3576/loader/0002-dead.patch", "<2025.01"),
+            ],
+        };
+        assert!(p.version_req("t", Scope::Uboot).unwrap().is_some());
+        let dead = p.unreachable("t").unwrap();
+        assert_eq!(dead.len(), 1, "{dead:?}");
+        assert_eq!(dead[0].0, Scope::Uboot);
+        assert_eq!(dead[0].1.path(), "rk3576/loader/0002-dead.patch");
+    }
+
+    #[test]
+    fn a_series_declaring_no_uboot_envelope_claims_every_uboot() {
+        // Every shipped u-boot series takes this shape — one series per board, written
+        // for the one u-boot generation it runs — so the gate must be a no-op for them
+        // rather than defaulting to the kernel envelope, which they also do not declare.
+        let p = PatchSeries {
+            applies_to_kernel: None,
+            applies_to_uboot: None,
+            kernel: vec![],
+            ffmpeg: vec![],
+            userspace: vec![],
+            uboot: vec![always("rk3576/loader/0001-a.patch")],
+        };
+        p.ensure_applies_uboot("rk3576-loader", "v2026.04").unwrap();
+        p.ensure_applies_uboot("rk3576-loader", "v1999.01").unwrap();
+        assert_eq!(p.envelope(Scope::Uboot), None);
+    }
+
+    #[test]
+    fn a_uboot_entry_range_narrows_on_the_uboot_version() {
+        // The per-entry half of the same axis: a patch that a later u-boot absorbed
+        // drops out at that version instead of failing to apply.
+        let p = PatchSeries {
+            applies_to_kernel: None,
+            applies_to_uboot: None,
+            kernel: vec![],
+            ffmpeg: vec![],
+            userspace: vec![],
+            uboot: vec![
+                always("rk3576/loader/0001-always.patch"),
+                ranged("rk3576/loader/0002-old.patch", "<2026.07"),
+            ],
+        };
+        assert_eq!(
+            p.series_for(Scope::Uboot, "t", "v2026.04", RangeMatch::Release)
+                .unwrap(),
+            [
+                "rk3576/loader/0001-always.patch",
+                "rk3576/loader/0002-old.patch"
+            ]
+        );
+        assert_eq!(
+            p.series_for(Scope::Uboot, "t", "v2026.10", RangeMatch::Release)
+                .unwrap(),
+            ["rk3576/loader/0001-always.patch"]
+        );
+    }
+
+    #[test]
+    fn a_version_that_is_not_semver_is_a_typed_error_naming_no_axis() {
+        // Raised for either axis, so the message must not claim the value was a kernel
+        // version — a u-boot tag reaches the same parser.
+        let mut p = series();
+        p.applies_to_uboot = Some(">=2026.01".into());
+        let err = p.ensure_applies_uboot("t", "not-a-version").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidVersion { .. }));
+        assert!(!err.to_string().contains("kernel"), "{err}");
     }
 
     #[test]

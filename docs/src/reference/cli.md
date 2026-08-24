@@ -203,7 +203,7 @@ work on a fresh clone with no hand-cloned trees.
 
 | What changed / what you want to be sure of | Command |
 | --- | --- |
-| Imported or edited a patch — does the series still apply to the pinned kernel (and ffmpeg/userspace)? | `verify-patches` |
+| Imported or edited a patch — does the series still apply to the pinned kernel and u-boot (and ffmpeg/userspace)? | `verify-patches` |
 | Edited a `.config` fragment or the base defconfig — does the kernel `.config` still generate cleanly (and match a reference)? | `verify-config` |
 | A lock is old — are its pinned commits still fetchable upstream, or has a branch moved out from under them? | `verify-sources` |
 
@@ -213,22 +213,26 @@ linux-stable is large. If you already have a local checkout, point `--kernel-src
 `--ffmpeg-base-src` and `--mpp-src` do the same for the other trees. `verify-sources`
 never clones — it only queries the remotes.
 
-#### The free prerequisite: does the series even claim this kernel?
+#### The free prerequisite: does the series even claim this version?
 
 Before any of those, there is a question that needs no source tree at all — whether
-each composed series' declared `applies_to_kernel` admits the kernel being pinned. It
-is pure metadata, so `update` and `build` both ask it for free:
+each composed series' declared envelope admits the version being pinned. It is pure
+metadata, so `update` and `build` both ask it for free:
 
-- **`update`** says so at pin time and keeps going, because pinning the new kernel is
+- **`update`** says so at pin time and keeps going, because pinning the new version is
   the first step of adopting it. Bumping onto a kernel the series predates is exactly
   the routine move that hits this.
-- **`build`** refuses, before cloning anything. The kernel node asks the same question,
-  but only once the tree is on disk — a minute of network for an answer that was
-  already in the manifests.
+- **`build`** refuses, before cloning anything. The compile nodes ask the same
+  question, but only once the tree is on disk — a minute of network for an answer that
+  was already in the manifests.
 
-Both name the `verify-patches --kernel` line to run next. That ordering is the point:
-the cheap check tells you a series makes no claim about your kernel, and the expensive
-one tells you whether it would have worked anyway.
+Each axis is asked about its own version: `applies_to_kernel` against the pinned kernel
+tag, `applies_to_uboot` against the pinned u-boot tag. A u-boot series makes no claim
+about a kernel, so the two never gate each other.
+
+On the kernel axis both name the `verify-patches --kernel` line to run next. That
+ordering is the point: the cheap check tells you a series makes no claim about your
+kernel, and the expensive one tells you whether it would have worked anyway.
 
 ```
 note: kernel v7.2-rc5 is outside series 'rk3588-accel' (declared >=7.0, <7.2) — a build
@@ -238,6 +242,21 @@ then widen applies_to_kernel in the series if it comes back clean, or retire the
 patches it names.
 ```
 
+u-boot has no `--kernel` equivalent — there is no "verify against a u-boot the lock does
+not pin" mode — so its advisory points straight at the claim:
+
+```
+note: u-boot v2027.04 is outside series 'rk3576-display' (declared >=2026.01, <2027.01) —
+      a build will refuse it. Verify it first, which needs no re-pin:
+  boot2deb verify-patches h96-max-m9/forky --keep-going
+then widen applies_to_uboot in the series if it comes back clean, or retire the patches
+it names.
+```
+
+u-boot's `vYYYY.MM` tags are zero-padded, and both sides of a range accept that
+spelling: `applies_to_uboot = ">=2026.01, <2027.01"` matches the tag `v2026.04` as
+written.
+
 ### verify-patches
 
 ```sh
@@ -245,6 +264,14 @@ patches it names.
 # hard-erroring on the first patch that does not apply. Omit the checkouts and each
 # tree is auto-fetched at its pin.
 cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky
+
+# Both patch axes are covered. A u-boot-only recipe verifies its u-boot series...
+cargo run -p boot2deb-cli -- verify-patches rk3576-generic/loader
+
+# ...and a recipe carrying both reports each at its own version:
+#   kernel series applies (3 patches) against rk3576-mainline-7.1 @ v7.1.3
+#   uboot  series applies (6 patches) against u-boot @ v2026.04
+cargo run -p boot2deb-cli -- verify-patches rk3576-evb1-v10/forky
 
 # Fast path when you already have a local kernel checkout:
 cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky --kernel-src ../linux
@@ -288,15 +315,20 @@ path:
   a batch report shows the *shape* of the damage rather than a final verdict; a rework can
   still change what comes after it.
 
-`--kernel-path` / `--ffmpeg-path` / `--userspace-path` are all **optional**: an omitted
-tree is auto-fetched at its locked commit (ffmpeg and userspace only when the series
-carries patches for that scope). The `--kernel-src` / `--ffmpeg-base-src` / `--mpp-src`
-flags (same names and meaning as `build`'s) override the fetch *source* — a git URL or
-local path used in place of the configured upstream — while the tree still lands at
-exactly the locked commit; they are consulted only on the first materialization and
-ignored when the matching `--*-path` is given. The `patches` checkout is resolved the way
-`build` does: an explicit `--patches-path`, else `../patches` if present, else an
-auto-fetch at the lock's `patches.commit`.
+`--kernel-path` / `--uboot-path` / `--ffmpeg-path` / `--userspace-path` are all
+**optional**: an omitted tree is auto-fetched at its locked commit (ffmpeg and userspace
+only when the series carries patches for that scope). The `--kernel-src` / `--uboot-src`
+/ `--ffmpeg-base-src` / `--mpp-src` flags (same names and meaning as `build`'s) override
+the fetch *source* — a git URL or local path used in place of the configured upstream —
+while the tree still lands at exactly the locked commit; they are consulted only on the
+first materialization and ignored when the matching `--*-path` is given. The `patches`
+checkout is resolved the way `build` does: an explicit `--patches-path`, else
+`../patches` if present, else an auto-fetch at the pinned commit from the repo the
+lock's pin names.
+
+`--kernel` is kernel-axis only. A recipe that pins no kernel patch series rejects it
+rather than quietly verifying its u-boot series and reporting a green that answers
+nothing.
 
 ### verify-config
 

@@ -24,6 +24,12 @@ of each board rather than making them look alike.
 
 - **[Getting started](getting-started.md)** — install the prerequisites and build
   your first image.
+- **[Adapting a shipped recipe](tutorials/adapting-a-recipe.md)** — change the suite,
+  the features, or the localization of an image that already builds.
+- **[Moving a board to a newer kernel](tutorials/newer-kernel.md)** — measure whether a
+  patch series survives a kernel you have not adopted, then adopt it.
+- **[Authoring a recipe](tutorials/authoring-a-recipe.md)** — name a build point of your
+  own, and say what it has been taken through.
 - **[Turing RK1](boards/turing-rk1.md)** — the shipped RK3588 configuration, and how
   to flash it.
 - **[ASUS Chromebook C201](boards/asus-c201.md)** — the shipped RK3288 Chromebook: a

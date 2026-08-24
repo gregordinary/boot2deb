@@ -3,7 +3,7 @@
  * H96 MAX M9 / M9S — RK3576 Android TV box.
  *
  * The board is a lightly-modified Rockchip RK3576 EVB1 V10: eMMC, microSD,
- * SDIO Wi-Fi, one RGMII Ethernet port, HDMI, and an ES8388 analog codec on the
+ * SDIO Wi-Fi, one RGMII Ethernet port, HDMI, and an HT5010 amplifier on the
  * 3.5 mm AV jack. It differs from the EVB in Ethernet RGMII TX timing, the PHY
  * reset pin, the HDMI data-line bias pin, two status LEDs, a power button, and
  * a Wi-Fi part that sits on SDIO rather than PCIe.
@@ -220,10 +220,19 @@
 	};
 
 	/*
-	 * Analog line-out on the 3.5 mm jack. The board's amplifier is a
+	 * Analog line-out on the 3.5 mm jack. The amplifier is an HT5010, a
 	 * control-less part with no I2C interface, so it is modelled as a dummy
 	 * codec (linux,spdif-dit): SAI1 drives it over I2S and provides the master
 	 * clock. SAI1 is wired to sdo2 on this board (see &sai1), not the EVB's sdo0.
+	 *
+	 * The EVB's ES8388 at i2c3 0x10 is not this board's codec and i2c3 is left
+	 * disabled: nothing answers on that bus, on this stack or the vendor's.
+	 *
+	 * The amplifier's enable pins are not described. gpio2 PB1 (speaker) and
+	 * gpio3 PD6 (headphone) are what the EVB drives as simple-audio-amplifier
+	 * aux-devs, and the factory tree names the same two pins -- but only on a
+	 * sound card that never probes, so no capture shows either driven. Adding
+	 * them is the first thing to try if the card plays silence.
 	 */
 	analog_dummy: analog-codec {
 		compatible = "linux,spdif-dit";
@@ -285,6 +294,10 @@
  * disabled; combphy1_psu is enabled because usb_drd1_dwc3 names it as its
  * "usb3-phy". That PHY logs `wait phy status ready timeout` on every boot and no
  * device has ever trained at SuperSpeed on this board -- see the usb_drd1 note.
+ *
+ * Keeping it enabled may also be what keeps usb_drd1's *high* speed working: the
+ * SoC design guide (2.3.4.2) states that with this combo PHY muxed to PCIe or
+ * SATA, the controller's USB2 PHY is unusable as well.
  */
 &combphy1_psu {
 	status = "okay";
@@ -794,8 +807,10 @@
  * failure.
  *
  * The power domains are not a board's business: both core nodes carry both
- * RK3576_PD_NPU0 and RK3576_PD_NPU1 in the SoC dtsi, because rocket attaches
- * them explicitly on every RK3576. See rk3576/npu/README.md in the patches repo.
+ * RK3576_PD_NPU0 and RK3576_PD_NPU1 in the SoC dtsi, because the convolution
+ * buffer is read through PD_NPU1 whichever core computes. rocket attaches
+ * whatever the node lists, so trimming one would run half fed rather than fail;
+ * the binding pins it at two. See rk3576/npu/README.md in the patches repo.
  */
 &rknn_core_0 {
 	npu-supply = <&vdd_npu_s0>;
@@ -993,8 +1008,13 @@
  * on every boot) and nothing has enumerated above high speed here. Whether the
  * SS lane reaches a connector at all is unconfirmed; settle it by plugging a
  * SuperSpeed device into each port and reading which bus it lands on. If this
- * port is high-speed-only, drop the SS phy the way usb_drd0_dwc3 does above and
- * disable combphy1_psu with it.
+ * port is high-speed-only, drop the SS phy the way usb_drd0_dwc3 does above.
+ *
+ * Do not disable combphy1_psu along with it without testing that separately.
+ * Combo PHY 1 is shared with PCIe1 and SATA1, and the SoC design guide (2.3.4.2)
+ * states that with the mux set to PCIe or SATA the USB2 PHY on this controller
+ * is unusable too -- so the enabled combphy may be what keeps the USB 2.0 port
+ * alive, not just its SuperSpeed.
  */
 &usb_drd1_dwc3 {
 	dr_mode = "host";

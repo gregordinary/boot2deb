@@ -452,9 +452,11 @@ pub enum ConfigError {
         value: String,
     },
 
-    /// A kernel version string could not be parsed as a semver version.
-    #[error("kernel version '{value}' is not a valid version: {source}")]
-    InvalidKernelVersion {
+    /// A version tag could not be parsed as a semver version, so no series range
+    /// can be matched against it. Raised for either axis — a kernel tag or a u-boot
+    /// one — hence the axis-neutral wording.
+    #[error("'{value}' is not a version a series range can be matched against: {source}")]
+    InvalidVersion {
         /// The offending version string.
         value: String,
         /// Underlying semver parse error.

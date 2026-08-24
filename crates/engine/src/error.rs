@@ -13,6 +13,18 @@ pub enum EngineError {
     #[error(transparent)]
     Config(#[from] boot2deb_core::ConfigError),
 
+    /// The build host is not Linux. Every stage past resolution needs user
+    /// namespaces, binfmt, and Linux filesystem semantics, so the answer is known at
+    /// preflight rather than minutes into the pipeline.
+    #[error(
+        "builds require a Linux host; this is {os}. The read-only commands \
+         (resolve, list-*, doctor, support-matrix) work here — building does not."
+    )]
+    HostNotLinux {
+        /// `std::env::consts::OS` for the host that cannot build.
+        os: String,
+    },
+
     /// `git` could not be spawned at all (not installed, not on `PATH`).
     #[error("failed to run git ({context}): {source}")]
     GitSpawn {
@@ -108,11 +120,14 @@ pub enum EngineError {
         repo: String,
     },
 
-    /// The `patches` checkout does not match the lock's pin — its HEAD is not the
-    /// locked `patches.commit`, or it has uncommitted changes. The build reads the
-    /// series from this checkout, so a drifted tree would silently apply a
+    /// The `patches` checkout's HEAD is not the locked `patches.commit`. The build
+    /// reads the series from this checkout, so a drifted tree would silently apply a
     /// *different* series than the lock names. An explicit `--patches-path`
     /// override downgrades this to a warning for patch co-development.
+    ///
+    /// Only raised when the commits genuinely differ; a checkout sitting *on* the pin
+    /// with uncommitted work is [`PatchesWorktreeDirty`](EngineError::PatchesWorktreeDirty),
+    /// which is a different problem and must not be reported as a commit mismatch.
     ///
     /// The remedy depends on *which side* moved: a checkout ahead of the pin (or
     /// dirty) holds work the lock should include — the fix is to commit and re-run
@@ -129,12 +144,31 @@ pub enum EngineError {
         root: String,
         /// Commit the lock pins the series at.
         expected: String,
-        /// Commit the checkout is actually at.
+        /// Commit the checkout is actually at, never equal to `expected`.
         actual: String,
         /// Whether the checkout also had uncommitted changes.
         dirty: bool,
         /// How the checkout's HEAD relates to the pin — selects the remedy text.
         relation: PinRelation,
+    },
+
+    /// The `patches` checkout is on the locked commit but its worktree is not clean.
+    /// The lock names a *commit*, so uncommitted work is not part of the series the
+    /// lock describes — building would apply something unreproducible.
+    ///
+    /// Separate from [`PatchesPinMismatch`](EngineError::PatchesPinMismatch) because
+    /// nothing is mismatched: naming one commit as both "is at" and "pins" reads as a
+    /// contradiction and sends the reader looking for drift that is not there.
+    #[error(
+        "patches checkout {root} has uncommitted changes at the pinned commit \
+         {commit}\n  {}",
+        dirty_pin_remedy(.root)
+    )]
+    PatchesWorktreeDirty {
+        /// The patches checkout holding uncommitted work.
+        root: String,
+        /// The commit both the lock and the checkout's HEAD name.
+        commit: String,
     },
 
     /// The `patches` checkout `update` would pin has uncommitted changes. The pin
@@ -562,15 +596,24 @@ pub enum EngineError {
     },
 
     /// No `patches` source could be resolved: no local checkout at
-    /// `--patches-path` / `../patches`, and no `patches_url` to auto-fetch from
-    /// (the kernel omits it and `--patches-url` was not given). The message carries
-    /// the exact commit so the user can fetch the series manually.
+    /// `--patches-path` / `../patches`, no `--patches-url`, and the lock's pin
+    /// records no repo either. The message carries the exact commit so the user can
+    /// fetch the series manually.
+    ///
+    /// The pin's `source` is written by `update` from the resolved config, so the
+    /// durable fix names the axis that lost its URL: `patches_url` lives on the
+    /// kernel definition for a kernel series and on `boot-methods/rockchip-rkbin.toml`
+    /// for a u-boot one. A `deliverable = "uboot"` recipe has no kernel definition at
+    /// all, which is why the message must not name only that one.
     #[error(
-        "no patches source: no local checkout and no patches_url for commit {commit}.\n  \
+        "no patches source: no local checkout, and the lock records no repo for \
+         commit {commit}.\n  \
          Provide one of:\n    \
          --patches-path <dir>   (a local checkout of the patches repo)\n    \
          --patches-url <url>    (auto-fetch the series at {commit})\n  \
-         or set `patches_url` on the kernel definition."
+         or re-record the source with `boot2deb update <recipe>`, which takes it from\n  \
+         `patches_url` on the kernel definition (kernel series) or on\n  \
+         boot-methods/rockchip-rkbin.toml (u-boot series)."
     )]
     PatchesNoSource {
         /// The lock-pinned `patches.commit` the series would be fetched at.
@@ -687,16 +730,24 @@ fn exit_suffix(status: Option<i32>) -> String {
     }
 }
 
+/// The remedy for uncommitted work in a patches checkout: the changes are
+/// unpinnable until committed, so this leads with "commit" whatever HEAD is doing.
+/// Shared by [`EngineError::PatchesWorktreeDirty`] and the dirty case of
+/// [`pin_mismatch_remedy`], which must not drift apart.
+fn dirty_pin_remedy(root: &str) -> String {
+    format!(
+        "the checkout has uncommitted changes — commit them in {root}, then re-pin \
+         with `boot2deb update <recipe>` so the lock includes them (or pass \
+         --patches-path <dir> to build from the working checkout)"
+    )
+}
+
 /// The remedy line of the `PatchesPinMismatch` message, chosen by how the
 /// checkout relates to the pin. A dirty tree always leads with "commit" — its
 /// changes are unpinnable until committed, whatever HEAD's relation is.
 fn pin_mismatch_remedy(relation: PinRelation, dirty: bool, root: &str, expected: &str) -> String {
     if dirty {
-        return format!(
-            "the checkout has uncommitted changes — commit them in {root}, then re-pin \
-             with `boot2deb update <recipe>` so the lock includes them (or pass \
-             --patches-path <dir> to build from the working checkout)"
-        );
+        return dirty_pin_remedy(root);
     }
     match relation {
         PinRelation::Ahead => "the checkout is ahead of the pin — re-pin with \

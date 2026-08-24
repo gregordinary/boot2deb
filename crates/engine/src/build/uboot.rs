@@ -314,6 +314,10 @@ pub fn clone_manifest(
 /// Shallow-clone the pinned u-boot, verify the commit, enforce the patches pin,
 /// and apply any locked u-boot patches. A failure removes the partial tree so
 /// a resume never reuses a half-patched u-boot (via [`build::clone_pinned`]).
+///
+/// The declared-intent gate runs against the u-boot ref, not the kernel's: u-boot
+/// is its own axis, so a series that claims `applies_to_uboot = ">=2026.01"` is
+/// making a claim about `pin.reference` and nothing else.
 fn clone_and_patch(
     lock: &Lock,
     opts: &UbootOptions,
@@ -332,7 +336,7 @@ fn clone_and_patch(
         patches: opts.patches,
         scope: PatchScope::Uboot,
         target: &target,
-        gate_reference: None,
+        gate_reference: Some(&pin.reference),
     };
     let n = build::clone_pinned(&spec, step)?;
     if let (Some(p), 1..) = (opts.patches, n) {

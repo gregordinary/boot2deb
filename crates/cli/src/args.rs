@@ -230,13 +230,13 @@ pub(crate) struct BuildArgs {
     /// `patches` repo checkout the series is read from. Omit to use the config
     /// root's sibling `../patches` (if present, with the lock's `patches.commit`
     /// enforced), else auto-fetch the series at the pinned commit from
-    /// `--patches-url`/the kernel's `patches_url`. Pass an explicit path to
+    /// `--patches-url`/the repo the pin names. Pass an explicit path to
     /// co-develop the series from a working checkout, which downgrades a pin
     /// mismatch to a loud warning.
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
     /// Clone URL for auto-fetching the `patches` series when no local checkout is
-    /// present; default: the kernel definition's `patches_url`. The series is
+    /// present; default: the repo the lock's patch pin names. The series is
     /// fetched at the lock's `patches.commit` into a durable cache and its pin
     /// enforced. Ignored when `--patches-path` or the sibling `../patches` supplies a
     /// checkout.
@@ -502,6 +502,15 @@ pub(crate) struct VerifyArgs {
     /// near-instant. Ignored with `--ffmpeg-path`.
     #[arg(long)]
     pub(crate) ffmpeg_base_src: Option<String>,
+    /// u-boot checkout to verify the u-boot series against. Optional: omit it and,
+    /// when the recipe pins a u-boot series, the locked u-boot is auto-fetched at
+    /// its pin.
+    #[arg(long)]
+    pub(crate) uboot_path: Option<PathBuf>,
+    /// u-boot clone source (git URL or local path) for the auto-fetch, in place of
+    /// the boot method's `uboot_source`. Ignored with `--uboot-path`.
+    #[arg(long)]
+    pub(crate) uboot_src: Option<String>,
     /// Userspace (MPP/RGA) checkout to verify the userspace series against. Optional:
     /// omit it and, when the series carries userspace patches, the locked MPP tree
     /// is auto-fetched at its pin.
@@ -518,7 +527,7 @@ pub(crate) struct VerifyArgs {
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
     /// Clone URL for auto-fetching the `patches` series when no local checkout is
-    /// present; default: the kernel definition's `patches_url`.
+    /// present; default: the repo the lock's patch pin names.
     #[arg(long)]
     pub(crate) patches_url: Option<String>,
     /// Verify against this kernel version instead of the one the lock pins, leaving
@@ -533,6 +542,10 @@ pub(crate) struct VerifyArgs {
     ///
     /// A release candidate is matched against its base release here, so an `-rc`
     /// tree is answerable; the build path stays release-strict.
+    ///
+    /// Kernel axis only: a recipe that pins no kernel (a `deliverable = "uboot"`
+    /// one) rejects it rather than quietly verifying its u-boot series and
+    /// reporting a green that answers nothing.
     #[arg(long, value_name = "VERSION")]
     pub(crate) kernel: Option<String>,
     /// Report every patch that fails to apply rather than stopping at the first.

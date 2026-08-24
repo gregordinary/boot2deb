@@ -116,16 +116,6 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    /// True when a host tool is runnable, so a test needing one skips cleanly
-    /// where it is absent.
-    fn have(tool: &str) -> bool {
-        Command::new(tool)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-
     /// Build a minimal `.deb` (`<pkg>_<version>_arm64.deb`) under `dir` via
     /// `dpkg-deb --build`, returning its path.
     fn make_deb(dir: &Path, pkg: &str, version: &str) -> PathBuf {
@@ -154,8 +144,7 @@ mod tests {
     fn dists_repo_has_the_mirror_layout_the_provisioner_reads() {
         // Only the fixture needs a host tool: the pool itself is written by
         // ferroday-cage, so this runs on a host with no apt archive tooling.
-        if !have("dpkg-deb") {
-            eprintln!("skipping dists_repo_has_the_mirror_layout: dpkg-deb unavailable");
+        if !crate::hosttool::require(&["dpkg-deb"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -206,10 +195,7 @@ mod tests {
         // working path into a literal `%20` lookup, so this is what stops that from
         // ever looking like a fix.
         use ferroday_cage::provision::debian::{Fetch, FetchRequest, HttpFetch};
-        if !have("dpkg-deb") {
-            eprintln!(
-                "skipping unencoded_paths_reach_the_provisioners_fetcher: dpkg-deb unavailable"
-            );
+        if !crate::hosttool::require(&["dpkg-deb"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();

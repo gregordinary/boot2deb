@@ -31,7 +31,8 @@
 //! solved package manifest is verified against the committed reproducibility pin by
 //! [`manifest`]. Host preflight
 //! for `doctor` — identity/cross status ([`preflight`]) plus tool-presence checks
-//! with remediation ([`checks`]) — is also here.
+//! with remediation ([`checks`]) — is also here, over the one probe contract in
+//! [`hosttool`].
 #![warn(missing_docs)]
 
 pub mod artstore;
@@ -45,6 +46,7 @@ pub mod event;
 pub mod extradebs;
 pub mod gc;
 pub mod git;
+pub mod hosttool;
 pub mod image;
 pub mod kconfig;
 pub mod keyring;
@@ -105,30 +107,48 @@ pub(crate) mod test_support {
 use boot2deb_core::host::HostInfo;
 use boot2deb_core::model::Arch;
 
-/// Host identity + cross-arch status for a given target arch.
+/// Host identity + the two cross-arch answers for a given target arch.
 ///
 /// This is the coarse "can this host build this target at all" summary. The
 /// concrete tool/capability checks (git/make/toolchain/qemu-user binfmt/
 /// e2fsprogs, with remediation) are [`checks::tool_checks`].
+///
+/// The two booleans are kept apart because they come apart: see
+/// [`HostInfo::needs_cross_toolchain`] and [`HostInfo::needs_interpreter`].
 #[derive(Debug, Clone)]
 pub struct Preflight {
     /// Detected build host.
     pub host: HostInfo,
-    /// The target architecture being built.
-    pub target_arch: Arch,
-    /// Cross-arch build → needs qemu-user binfmt on the host.
-    pub cross: bool,
-    /// Builds require a Linux host.
-    pub host_is_linux: bool,
+    /// Producing target binaries needs a cross toolchain → pass `CROSS_COMPILE`.
+    pub cross_toolchain: bool,
+    /// Running target binaries needs a `qemu-user` interpreter and a registered
+    /// binfmt handler → the sandbox's maintainer scripts and compiles are emulated.
+    pub interpreter: bool,
 }
 
-/// Detect the host and determine whether building `target_arch` is cross-arch.
+/// Detect the host and answer both cross questions for `target_arch`.
 pub fn preflight(target_arch: Arch) -> Preflight {
     let host = HostInfo::detect();
     Preflight {
-        cross: host.is_cross_for(target_arch),
-        host_is_linux: host.is_linux(),
+        cross_toolchain: host.needs_cross_toolchain(target_arch),
+        interpreter: host.needs_interpreter(target_arch),
         host,
-        target_arch,
+    }
+}
+
+impl Preflight {
+    /// Refuse a host that cannot run a build at all.
+    ///
+    /// Every stage past resolution assumes Linux — user namespaces for the sandbox,
+    /// binfmt for the interpreter, the loop-free image assembly. Answering here rather
+    /// than letting the pipeline discover it means a macOS client fails on the first
+    /// thing it does instead of minutes in, on whichever syscall happened to be first.
+    pub fn ensure_can_build(&self) -> Result<(), EngineError> {
+        if self.host.is_linux() {
+            return Ok(());
+        }
+        Err(EngineError::HostNotLinux {
+            os: self.host.os.to_string(),
+        })
     }
 }

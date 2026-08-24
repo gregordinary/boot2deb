@@ -9,7 +9,7 @@
 # resolved over the `rockchip-rkbin` boot method).
 flavor           = "mainline"
 source           = "linux-stable"        # 7.1.x stable releases live in linux-stable
-track            = "7.1.y"               # resolved to an exact tag/SHA in the lock (v7.1.3)
+track            = "7.1.y"               # the lock pins the exact tag (update --kernel-ref)
 base_defconfig   = "defconfig"           # in-tree arm64 base; fragments merge onto it
 config_fragments = ["base/debian-arm64", "soc/rk3576"]
 patch_series   = ["rk3576-fixes"]      # SoC-wide GPU power-domain fix; a board adds its own via device_patch_series

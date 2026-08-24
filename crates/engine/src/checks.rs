@@ -4,8 +4,9 @@
 //! adds the concrete tool/capability checks the build needs, with per-platform
 //! remediation. It reports exactly what is present or missing *before* any build
 //! work starts — the same "typed error before any work starts" contract as config
-//! validation. What is checked depends on the target and whether the build is
-//! cross-arch:
+//! validation. What is checked depends on the target and on **two** separate
+//! host questions — whether target binaries must be *produced* by a cross toolchain,
+//! and whether they must be *run* under an interpreter:
 //!
 //! - **Always:** host `git` (`git am --3way`), `make` + the target C
 //!   toolchain (native `cc`, else the `<triple>gcc` cross toolchain), the kernel's
@@ -14,9 +15,18 @@
 //!   `.deb`s compile — are bootstrapped and entered in-process through the
 //!   ferroday-cage library, so neither adds a tool beyond the user namespaces
 //!   already listed here.
-//! - **Cross-arch only** (host arch ≠ target arch): a `qemu-<arch>` interpreter and
-//!   a registered+enabled binfmt handler for the target. A same-arch host runs the
-//!   target's binaries directly and skips these entirely.
+//! - **Where the host cannot emit target binaries**
+//!   ([`needs_cross_toolchain`](HostInfo::needs_cross_toolchain)): the
+//!   `<triple>gcc` cross toolchain, named from the arch layer's `cross_compile`.
+//! - **Where the host cannot execute target binaries**
+//!   ([`needs_interpreter`](HostInfo::needs_interpreter)): a `qemu-<arch>`
+//!   interpreter and a registered+enabled binfmt handler for the target.
+//!
+//!   The second is strictly weaker than the first, and the gap is load-bearing: an
+//!   arm64 host building armhf needs `arm-linux-gnueabihf-gcc` and needs no qemu at
+//!   all, because `CONFIG_COMPAT=y` runs those binaries natively. Asking one question
+//!   for both put a blocking qemu requirement on that host for tooling the build
+//!   never invokes.
 //! - **Image path:** `tar` and `cp`, the two POSIX tools the rootfs and image stages
 //!   invoke directly. No filesystem tooling — the rootfs ext4 is formatted and every
 //!   metadata checksum verified in-process by the pure-Rust `ferrosys` formatter;
@@ -313,9 +323,19 @@ pub struct ToolNeeds {
 
 /// Run every host preflight check a build actually needs, in report order.
 pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
+    tool_checks_on(HostInfo::detect(), needs)
+}
+
+/// [`tool_checks`] against an explicit host.
+///
+/// The host decides which checks exist at all, and the interesting split — a host that
+/// needs a cross toolchain but no interpreter — occurs on exactly one host/target pair
+/// (arm64 building armhf). Taking the host as a parameter is what makes that decision
+/// assertable from a CI machine that is not one.
+pub fn tool_checks_on(host: HostInfo, needs: &ToolNeeds) -> Vec<Check> {
     let target = needs.target;
-    let host = HostInfo::detect();
-    let cross = host.is_cross_for(target);
+    let cross_toolchain = host.needs_cross_toolchain(target);
+    let interpreter = host.needs_interpreter(target);
     let pm = PkgManager::detect(&host);
     let mut checks = Vec::new();
 
@@ -358,8 +378,11 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
             ),
             openssl_check(pm),
         ]);
-        // Target C toolchain: native cc when host arch = target, else the cross gcc.
-        if cross {
+        // Target C toolchain: native cc when the host can emit target binaries, else
+        // the cross gcc. This is the toolchain question, not the interpreter one: an
+        // arm64 host building armhf needs `arm-linux-gnueabihf-gcc` even though it runs
+        // the result natively.
+        if cross_toolchain {
             // Both the probed binary and the suggested package come from the arch
             // layer's `cross_compile` — the same value the build exports as
             // `CROSS_COMPILE` — so `doctor` can never name a toolchain the build then
@@ -538,11 +561,16 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         ));
     }
 
-    // Cross-arch: the target's maintainer scripts and compiles run under the host's
-    // qemu-user binfmt handler — during the rootfs bootstrap whatever else the build
-    // does, so this is needed even by a board that compiles nothing. A host whose arch
-    // already matches the target runs them directly and needs no qemu at all.
-    if cross {
+    // Emulated execution: the target's maintainer scripts and compiles run under the
+    // host's qemu-user binfmt handler — during the rootfs bootstrap whatever else the
+    // build does, so this is needed even by a board that compiles nothing.
+    //
+    // Keyed on the *interpreter* question, which is weaker than the toolchain one. A
+    // host that executes the target's binaries directly needs no qemu at all, and that
+    // includes an arm64 host building armhf: CONFIG_COMPAT=y runs those binaries
+    // natively. Asking for qemu there would report a blocking requirement for tooling
+    // the build never invokes -- the exact noise ToolNeeds exists to eliminate.
+    if interpreter {
         let qa = target.qemu_arch();
         let qnames = [format!("qemu-{qa}-static"), format!("qemu-{qa}")];
         let qrefs: Vec<&str> = qnames.iter().map(String::as_str).collect();
@@ -995,7 +1023,7 @@ mod tests {
         // Whichever target is cross-arch for this host — the check only exists then.
         let target = [Arch::Arm64, Arch::Armv7, Arch::Riscv64]
             .into_iter()
-            .find(|a| crate::preflight(*a).cross)
+            .find(|a| crate::preflight(*a).cross_toolchain)
             .expect("at least two of the three targets differ from any one host arch");
         // A deliberately unusual prefix: a hardcoded triple table would answer with the
         // arch's conventional triple and pass, which is exactly what must not happen.
@@ -1057,6 +1085,58 @@ mod tests {
             build_root_uppers: None,
             assembles_image: true,
         }
+    }
+
+    #[test]
+    fn an_arm64_host_building_armhf_needs_the_cross_toolchain_and_no_interpreter() {
+        // The one host/target pair where the two answers differ, and the reason the
+        // predicate was split. An arm64 kernel with CONFIG_COMPAT=y runs armhf binaries
+        // natively, so no qemu-arm-static and no binfmt handler is consulted — but an
+        // aarch64 gcc cannot emit armhf, so the cross toolchain is genuinely required.
+        //
+        // Asserted against an explicit host rather than the running one: no CI machine
+        // here is arm64, and reporting a blocking qemu requirement on the user's only
+        // native-arm64 box is exactly the noise ToolNeeds exists to eliminate.
+        let arm64 = HostInfo {
+            arch: "aarch64",
+            os: "linux",
+        };
+        let checks = tool_checks_on(arm64, &assembling_build());
+        assert!(
+            !checks
+                .iter()
+                .any(|c| c.name == "qemu-arm-static" || c.name.contains("binfmt")),
+            "an arm64 host runs armhf binaries directly: {:?}",
+            checks.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        // A build that compiles nothing asks for no toolchain either way; the one that
+        // does compile asks for the cross gcc, named from the configured prefix.
+        let compiling = ToolNeeds {
+            compiles_sources: true,
+            ..assembling_build()
+        };
+        let checks = tool_checks_on(arm64, &compiling);
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.name == "arm-linux-gnueabihf-gcc" && c.required),
+            "an aarch64 gcc cannot emit armhf: {:?}",
+            checks.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        assert!(!checks.iter().any(|c| c.name == "qemu-arm-static"));
+
+        // The same host building for itself needs neither, and building arm64 from
+        // x86_64 needs both — the two ends the split has to keep intact.
+        let native = tool_checks_on(arm64, &compiling_build());
+        assert!(!native.iter().any(|c| c.name.contains("qemu")));
+        assert!(!native.iter().any(|c| c.name.ends_with("-gcc")));
+        let x86 = HostInfo {
+            arch: "x86_64",
+            os: "linux",
+        };
+        let emulated = tool_checks_on(x86, &compiling_build());
+        assert!(emulated.iter().any(|c| c.name == "qemu-aarch64-static"));
+        assert!(emulated.iter().any(|c| c.name == "aarch64-linux-gnu-gcc"));
     }
 
     #[test]
@@ -1200,12 +1280,13 @@ mod tests {
                 .any(|c| c.name == "unprivileged overlay"),
             "a build that compiles no packages stands up no build root"
         );
-        // qemu-user is the genuinely cross-only half: a matching-arch host runs the
-        // target's binaries directly and never consults a binfmt handler.
+        // qemu-user keys on the interpreter question, not the toolchain one: a host
+        // that runs the target's binaries directly never consults a binfmt handler,
+        // whether or not it can compile for that target.
         let host = HostInfo::detect();
         assert_eq!(
             checks.iter().any(|c| c.name == "qemu-aarch64-static"),
-            host.is_cross_for(Arch::Arm64),
+            host.needs_interpreter(Arch::Arm64),
             "qemu-user is needed exactly when the host cannot run the target's binaries"
         );
     }
@@ -1231,11 +1312,18 @@ mod tests {
         for needed in ["fakeroot", "dpkg-deb"] {
             assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
         }
+        // On an arm64 host neither is asked for: CONFIG_COMPAT=y runs armhf binaries
+        // natively, so the interpreter is genuinely not a requirement there even though
+        // the cross toolchain still is.
         let host = HostInfo::detect();
-        if host.is_cross_for(Arch::Armv7) {
-            assert!(checks.iter().any(|c| c.name == "qemu-arm-static"));
-            assert!(checks.iter().any(|c| c.name.contains("arm binfmt")));
-        }
+        assert_eq!(
+            checks.iter().any(|c| c.name == "qemu-arm-static"),
+            host.needs_interpreter(Arch::Armv7)
+        );
+        assert_eq!(
+            checks.iter().any(|c| c.name.contains("arm binfmt")),
+            host.needs_interpreter(Arch::Armv7)
+        );
     }
 
     #[test]

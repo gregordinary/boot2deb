@@ -634,19 +634,30 @@ mod config {
         )
     }
 
-    /// `/etc/apt/sources.list` for `suite` with the standard component set +
-    /// security and updates pockets. Always the canonical `deb.debian.org` — the
-    /// build-time `--mirror` override only redirects the bootstrap *fetch*, not the
-    /// sources the shipped image points its `apt` at, so a device updates from the
-    /// official mirror regardless of which mirror built it. Plain `http://` is
-    /// standard Debian practice: apt verifies each `Release` signature against the
-    /// device's archive keyring, so the transport carries no integrity burden.
+    /// `/etc/apt/sources.list` for `suite` with the standard component set, one line
+    /// per pocket the suite actually publishes.
+    ///
+    /// The pocket set comes from [`suite::pockets`](boot2deb_core::suite::pockets)
+    /// rather than a `{suite}-security`/`{suite}-updates` format string, because it
+    /// is a property of the suite: unstable has neither, and emitting them regardless
+    /// shipped a bootable image whose every `apt update` errored on two 404s.
+    ///
+    /// Always the canonical `deb.debian.org` — the build-time `--mirror` override only
+    /// redirects the bootstrap *fetch*, not the sources the shipped image points its
+    /// `apt` at, so a device updates from the official mirror regardless of which
+    /// mirror built it. Plain `http://` is standard Debian practice: apt verifies each
+    /// `Release` signature against the device's archive keyring, so the transport
+    /// carries no integrity burden.
     pub fn apt_sources(suite: &str) -> String {
-        format!(
-            "deb http://deb.debian.org/debian {suite} main contrib non-free non-free-firmware\n\
-             deb http://deb.debian.org/debian-security {suite}-security main contrib non-free non-free-firmware\n\
-             deb http://deb.debian.org/debian {suite}-updates main contrib non-free non-free-firmware\n"
-        )
+        boot2deb_core::suite::pockets(suite)
+            .iter()
+            .map(|p| {
+                format!(
+                    "deb http://deb.debian.org/{} {} main contrib non-free non-free-firmware\n",
+                    p.archive, p.suite
+                )
+            })
+            .collect()
     }
 
     /// `/etc/locale.conf` — the system `LANG`.
@@ -1091,12 +1102,31 @@ mod tests {
 
     #[test]
     fn apt_sources_has_suite_pockets_and_components() {
-        let s = config::apt_sources("forky");
-        assert!(s.contains(
-            "deb http://deb.debian.org/debian forky main contrib non-free non-free-firmware"
-        ));
-        assert!(s.contains("forky-security"));
-        assert!(s.contains("forky-updates"));
+        // The emitted text is pinned rather than probed for substrings: this file is
+        // what every `apt update` on the shipped board reads, and the component list
+        // and archive-per-pocket split are both part of the contract.
+        assert_eq!(
+            config::apt_sources("forky"),
+            "deb http://deb.debian.org/debian forky main contrib non-free non-free-firmware\n\
+             deb http://deb.debian.org/debian-security forky-security main contrib non-free non-free-firmware\n\
+             deb http://deb.debian.org/debian forky-updates main contrib non-free non-free-firmware\n"
+        );
+    }
+
+    #[test]
+    fn apt_sources_omits_the_pockets_unstable_does_not_publish() {
+        // Debian publishes neither `sid-security` nor `sid-updates` — both 404. The
+        // generator used to emit them unconditionally, so a `sid` image booted and then
+        // reported two dead sources on every `apt update`. `sid` is a documented,
+        // deliberate suite value, so the fix belongs here and not in suite validation.
+        assert_eq!(
+            config::apt_sources("sid"),
+            "deb http://deb.debian.org/debian sid main contrib non-free non-free-firmware\n"
+        );
+        assert_eq!(
+            config::apt_sources("unstable"),
+            "deb http://deb.debian.org/debian unstable main contrib non-free non-free-firmware\n"
+        );
     }
 
     #[test]

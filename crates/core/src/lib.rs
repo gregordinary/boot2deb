@@ -6,7 +6,8 @@
 //! [`resolve_recipe`] entry points, the [`feature`], [`series`], [`lock`], and
 //! [`kconfig`] formats, patch normalization for `patch import` ([`mbox`]),
 //! device/recipe generation for `new-device` ([`scaffold`]), [`size`] parsing,
-//! source-pin durability form ([`sources`]), and [`host`] detection.
+//! source-pin durability form ([`sources`]), Debian suite facts ([`suite`]), and
+//! [`host`] detection.
 //!
 //! `missing_docs` is a warning here to keep the config surface documented as it
 //! grows.
@@ -29,6 +30,7 @@ pub mod scaffold;
 pub mod series;
 pub mod size;
 pub mod sources;
+pub mod suite;
 pub mod support;
 
 pub use buildpoint::BuildPoint;

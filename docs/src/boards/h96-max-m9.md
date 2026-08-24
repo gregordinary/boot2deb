@@ -3,7 +3,7 @@
 The H96 MAX M9 (and the M9S, the same board) is an Android TV box built on the
 Rockchip **RK3576** — octa-core (4x Cortex-A72 + 4x Cortex-A53), Mali-G52 MC3,
 LPDDR4X, eMMC 5.1, Gigabit ethernet, and HDMI. boot2deb turns it into a mainline
-Debian box: kernel `v7.1.3`, u-boot `v2026.04`, no vendor BSP.
+Debian box: kernel `v7.1.5`, u-boot `v2026.04`, no vendor BSP.
 
 It is a cheap and widely available RK3576 board, which makes it a practical target —
 and an awkward one. There is no SD slot (the pads are depopulated), no reset button,
@@ -15,7 +15,7 @@ is having a bootloader that can recover the board without a cable. That is what 
 
 | Recipe | Deliverable | Status |
 | --- | --- | --- |
-| `h96-max-m9/forky` | Whole-disk Debian image (forky) | validated on hardware |
+| `h96-max-m9/forky` | Whole-disk Debian image (forky) | expected — the board has booted this configuration, but not at this pin |
 | `h96-max-m9/media-accel` | The same image plus HW video decode and the RGA 2D accelerator | experimental |
 | `h96-max-m9/util` | u-boot only — the recovery tool, with this board's ethernet | builds; ethernet validated |
 
@@ -106,22 +106,26 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | Boot to HDMI login, eMMC | works |
 | Ethernet (GMAC0) | works |
 | eMMC (HS400-ES) | works |
-| HDMI video | works — 1080p60 and 4K30 |
-| GPU (Mali-G52 / panfrost) + Mesa GL | works — GL 3.1 / GLES 3.1 |
+| HDMI video | works — up to 340 MHz TMDS, so 1080p60, 1440p60 and 4K30 |
+| HDMI hotplug + EDID | works — unplug/replug re-reads EDID |
+| GPU (Mali-G52 / panfrost) + Mesa GL | works — GL 3.1 / GLES 3.1, full desktop composites on it |
 | Wi-Fi, 2.4 + 5 GHz | works (AIC8800D80) |
 | Bluetooth | works — `hci0` up, LE + classic scan |
 | Suspend / resume (s2idle) | works |
 | USB 2.0 host | works |
 | Bundled remote | works, zero-config |
-| HDMI-CEC | drove a TV on and off; needs re-validation on a current image |
+| IR receiver | works — NEC decoded to input events |
+| HDMI-CEC | works — the box wakes, switches to and standbys a TV. Driving the box from the TV remote needs a kernel with `MEDIA_CEC_RC` |
 | NPU (`rocket`) | device works — jobs compute bit-exact; no userspace for this SoC yet |
-| Analog audio / S/PDIF | card registers; output not yet exercised |
-| HW video decode | driver binds (`/dev/video0`); decode not yet run |
+| HDMI audio | works |
+| S/PDIF (optical) | works |
+| Analog audio (3.5 mm) | root-caused and fixed in tree; awaiting a build to confirm end to end |
+| HW video decode | works — 1080p H.264 and HEVC on the VDPU383, NV12 out |
 | HW video encode | no mainline driver |
 | SD card | absent — the slot is depopulated |
-| USB 3.0 SuperSpeed | unstable on this unit |
+| USB 3.0 SuperSpeed | not available on any port — see below |
 
-Two things the board needs that are worth knowing about:
+Things the board needs that are worth knowing about:
 
 - **Wi-Fi is an out-of-tree module.** The AIC8800D80 has no mainline driver, so
   boot2deb builds one from a pinned upstream repo as a `.deb` through the
@@ -131,6 +135,24 @@ Two things the board needs that are worth knowing about:
 - **`cpuidle.off=1` is in the kernel command line.** A core suspended into the DT
   `CPU_SLEEP` state can miss its wakeup on this platform's BL31. It is a board-level
   workaround, stated in `devices/h96-max-m9.toml` with the condition to drop it.
+- **No port on the box delivers USB 3.0**, for two unrelated reasons. The blue port
+  beside HDMI is `drd0`, capped to high speed in the board `.dts` because SuperSpeed
+  training collapses into a `-62/-71` SetAddress loop that takes the boot medium with
+  it. The black ports are `drd1`, and they sit behind an internal `1a86:8091` 4-port
+  **USB 2.0** hub that also carries the bundled remote's receiver. `drd1` does register
+  a SuperSpeed root hub, but its lane reaches no connector, so that bus is always empty.
+- **4K60 is not reachable on any `dw-hdmi-qp` board**, this one included. The bridge
+  rejects every mode above 340 MHz TMDS because it has no SCDC/scrambling support, so
+  4K30 (297 MHz) is the ceiling even when the display advertises 4K60. This is upstream
+  behaviour, not a board or device-tree limitation.
+- **The 3.5 mm analog jack needed both a device-tree and a kernel fix.** Its DAC sits on
+  SAI1's `sdo2`, and reaching it takes `rockchip,sai-tx-route = <0 1 0>` — in
+  `SAI_PATH_SEL`, TX field *x* selects which stream drives **SDO port x**, so the third
+  entry is the one that matters. The upstream SAI driver programmed that register only
+  at probe and the value did not survive to the running device, which no in-tree board
+  could notice because they all describe the identity mapping the register already holds.
+  The `rk3576-fixes` series carries the driver fix. Verified at the register level by
+  driving each SDO port in turn and listening; an image build confirms it end to end.
 
 ## The NPU
 

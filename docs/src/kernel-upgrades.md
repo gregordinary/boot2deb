@@ -1,5 +1,9 @@
 # Upgrading the kernel
 
+This page is about the kernel on a **board that is already running**. Moving a *recipe* to a
+newer kernel version — re-pinning the tag, and measuring whether the patch series survives
+the bump — is [Moving a board to a newer kernel](tutorials/newer-kernel.md).
+
 On a ChromeOS-firmware board — the [C201](boards/asus-c201.md), the
 [C100P](boards/asus-c100p.md), the [Chromebit](boards/asus-chromebit-cs10.md), and every
 other board using the `depthcharge` boot method — upgrading the kernel is `apt upgrade`,

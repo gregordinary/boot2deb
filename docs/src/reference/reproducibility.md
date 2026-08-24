@@ -144,8 +144,10 @@ What is recorded, because it genuinely does reach the image:
 
 - **`[toolchain]`** — beyond the host/target arch and cross prefix, the version lines of the
   `gcc`, `as`, and `ld` that compiled the kernel, u-boot, and out-of-tree modules, and the
-  `qemu-user` that, on a cross host, executed the target compiler for the sandbox-built
-  packages *and* every maintainer script that configured the rootfs. The compiler
+  `qemu-user` that, on a host that cannot execute target binaries, ran the target compiler
+  for the sandbox-built packages *and* every maintainer script that configured the rootfs.
+  (An arm64 host building armhf cross-compiles and then runs the result natively, so it
+  records no interpreter at all.) The compiler
   is the largest host input to the kernel bytes and no source pin covers it, so an image's
   provenance can answer "which gcc built this". Each is absent when the build compiles
   nothing that needs it. `jobs` records the parallelism: it is recorded but deliberately not

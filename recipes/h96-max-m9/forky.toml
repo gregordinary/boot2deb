@@ -10,13 +10,17 @@ layout     = "combined"
 image_size = "2G"
 
 # The device's NPU series and DT enable are in the base board, so this image is the
-# configuration the NPU results are taken on. Five deltas separate this pin from the
-# last one that booted to a login, and none of them touches a path that boot depends
-# on: the CBUF clocks rknn_core_1 needs to probe (a core that never bound), the
-# removal of an i2c2 RTC that is not fitted, the removal of a serdes PHY enable with
-# no consumer, CPU cache nodes plus quieter Wi-Fi logging, and rocket retiring an
-# RK3576 job on the DPU's own completion. Those are axes not expected to change the
-# outcome, so `expected` until an image from this pin boots.
+# configuration the NPU results are taken on. The last pin that booted to a login was
+# v7.1.3 with the rk3576-npu series through 0011; three classes of delta separate this
+# one from it. The board description: the CBUF clocks rknn_core_1 needs to probe (a
+# core that never bound), the removal of an i2c2 RTC that is not fitted, the removal
+# of a serdes PHY enable with no consumer, CPU cache nodes, and quieter Wi-Fi logging.
+# The rocket driver: 0012 retiring a job on the DPU's own completion, 0015-0017's
+# submit uAPI, and 0013-0014 plus 0018-0020 hardening /dev/accel — all of it reached
+# only through the module's ioctls and completion poll, so none of it is on a path
+# boot depends on. The third is the kernel itself, v7.1.3 to v7.1.5, which is two
+# stable point releases across the whole tree and the one delta that is not confined
+# to the NPU. Hence `expected` until an image from this pin boots.
 [support]
 status = "expected"
-date   = "2026-07-28"
+date   = "2026-07-29"

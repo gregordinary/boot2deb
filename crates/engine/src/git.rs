@@ -176,20 +176,27 @@ pub fn resolve_ref(url: &str, reference: &str) -> Result<String, EngineError> {
     })
 }
 
+/// A throwaway committer identity, supplied inline to every `git am` invocation
+/// without touching the repo config.
+///
+/// Needed by `am --abort` as much as by `am --3way`: the abort unwinds the commits an
+/// interrupted apply made, and git refuses the whole command without an identity. A
+/// host with no global `user.email` would otherwise fail the abort and leave
+/// `.git/rebase-apply` behind, which [`is_clean`] reports as dirty forever — so these
+/// args belong to one constant rather than to each call site.
+const AM_IDENTITY: [&str; 4] = [
+    "-c",
+    "user.email=build@boot2deb",
+    "-c",
+    "user.name=boot2deb verify",
+];
+
 /// Apply one patch with `git am --3way`, returning the raw [`Output`] so the
-/// caller can distinguish a clean apply from a conflict. A throwaway committer
-/// identity is supplied inline (`git am` refuses without one) without touching
-/// the repo config.
+/// caller can distinguish a clean apply from a conflict.
 pub(crate) fn am_3way(repo: &Path, patch: &Path) -> Result<Output, EngineError> {
     command(Some(repo))
-        .args([
-            "-c",
-            "user.email=build@boot2deb",
-            "-c",
-            "user.name=boot2deb verify",
-            "am",
-            "--3way",
-        ])
+        .args(AM_IDENTITY)
+        .args(["am", "--3way"])
         .arg(patch)
         .output()
         .map_err(|source| EngineError::GitSpawn {
@@ -198,9 +205,29 @@ pub(crate) fn am_3way(repo: &Path, patch: &Path) -> Result<Output, EngineError> 
         })
 }
 
-/// Abort an in-progress `git am` (best-effort cleanup after a failed apply).
-pub(crate) fn am_abort(repo: &Path) {
-    let _ = run(Some(repo), &["am", "--abort"], "am --abort");
+/// Abort an in-progress `git am`, returning whether the abort succeeded.
+///
+/// Best-effort by design — callers invoke it while already carrying the error that
+/// matters, and a failed abort must not displace it. The return value lets a caller
+/// that *owns* the checkout (a commit-addressed cache tree) escalate to a harder
+/// cleanup instead of leaving the tree wedged.
+/// A `false` return also covers "there was nothing to abort", which is the ordinary
+/// answer on a clean tree — so it means "the tree may still be mid-apply", not "the
+/// tree is wedged". Ask [`is_clean`] for that.
+pub(crate) fn am_abort(repo: &Path) -> bool {
+    let mut args: Vec<&str> = AM_IDENTITY.to_vec();
+    args.extend(["am", "--abort"]);
+    run(Some(repo), &args, "am --abort")
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// Remove untracked files and directories, so a tree reset to a commit matches it
+/// exactly. [`reset_hard`] alone leaves untracked leftovers, which [`is_clean`]
+/// counts as dirty.
+pub(crate) fn clean_untracked(repo: &Path) -> Result<(), EngineError> {
+    let ctx = format!("clean -fdq in {}", repo.display());
+    checked(Some(repo), &["clean", "-fdq"], &ctx).map(|_| ())
 }
 
 /// The committer timestamp (Unix seconds) of `commit` in `repo`, for a

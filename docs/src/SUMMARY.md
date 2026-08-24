@@ -8,6 +8,12 @@
 - [Upgrading the kernel](kernel-upgrades.md)
 - [Locale, timezone, and keyboard](localization.md)
 
+# Tutorials
+
+- [Adapting a shipped recipe](tutorials/adapting-a-recipe.md)
+- [Moving a board to a newer kernel](tutorials/newer-kernel.md)
+- [Authoring a recipe](tutorials/authoring-a-recipe.md)
+
 # Boards
 
 - [Turing RK1](boards/turing-rk1.md)

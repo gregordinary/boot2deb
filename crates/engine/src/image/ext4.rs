@@ -33,9 +33,17 @@
 //!
 //! The finished image is verified two ways: always by re-reading it with the crate's
 //! own [`Reader`] and checking every metadata checksum (a failure means the formatter
-//! wrote an image its own reader rejects), and — when `e2fsck` is present — by a
-//! read-only `e2fsck -fn` cross-check whose any correction fails the build. `e2fsprogs`
-//! is no longer required; where it is absent the pure-Rust gate stands alone.
+//! wrote an image its own reader rejects), and — when a new enough `e2fsck` is present
+//! — by a read-only `e2fsck -fn` cross-check whose any correction fails the build.
+//! `e2fsprogs` is no longer required; where it is absent the pure-Rust gate stands
+//! alone.
+//!
+//! "New enough" is [`E2FSCK_MIN`], and the floor is not a formality. The pinned feature
+//! set includes `metadata_csum_seed`, which e2fsprogs only learned in 1.43 — an older
+//! `e2fsck` rejects the image over a feature it does not know, so without the floor a
+//! host carrying an ancient `e2fsck` fails a build that a host with **no** `e2fsck`
+//! completes. An optional cross-check must never be worse than absent, so below the
+//! floor it is skipped with a log line.
 //!
 //! The output is the standalone ext4 image the [image orchestrator](super) splices
 //! into the whole-disk image at the rootfs partition offset.
@@ -43,6 +51,7 @@
 use crate::build;
 use crate::error::EngineError;
 use crate::event::Step;
+use crate::hosttool;
 use crate::image::geometry::EXT4_BLOCK;
 use boot2deb_core::provenance::FilesystemProvenance;
 use ferrosys::ext::ondisk::Timestamp;
@@ -307,19 +316,33 @@ impl Source for Entries {
     }
 }
 
+/// Minimum e2fsprogs version the `e2fsck` cross-check is trusted at, as
+/// `(major, minor)`.
+///
+/// `metadata_csum_seed` is in the pinned feature set, and e2fsprogs only learned it in
+/// 1.43 (2016). An older `e2fsck` reports the seed as an unknown feature and exits
+/// non-zero on a perfectly good image — so without this floor, a host carrying an
+/// ancient or non-GNU `e2fsck` on `PATH` fails a build that a host with **no** `e2fsck`
+/// completes. An optional cross-check must never be worse than absent.
+const E2FSCK_MIN: (u32, u32) = (1, 43);
+
 /// Verify the finished image: always with the crate's own [`Reader`] (every metadata
-/// checksum), and additionally with `e2fsck -fn` when it is available.
+/// checksum), and additionally with `e2fsck -fn` where a new enough one is available.
 ///
 /// A checksum failure means the formatter wrote an image its own reader rejects; an
 /// `e2fsck` correction means the formatter and an independent checker disagree about the
 /// layout. Either fails the build — a disagreement that must never ship inside an image.
 ///
 /// The reader check is compiled in and always runs; the `e2fsck` cross-check runs only
-/// where the host carries `e2fsprogs`, which makes verification *depth* host-dependent.
-/// That is a difference in strength, not a hole — but it is one the build host decides,
-/// so the checks that ran are returned and recorded in the image's provenance
-/// (`[verification]`) rather than left to a log line. `doctor` lists `e2fsck` as an
-/// optional tool for the same reason.
+/// where the host carries an `e2fsprogs` of at least [`E2FSCK_MIN`], which makes
+/// verification *depth* host-dependent. That is a difference in strength rather than a
+/// hole, and it is one the build host decides, so the checks that ran are returned and
+/// recorded in the image's provenance (`[verification]`) rather than left to a log
+/// line. `doctor` lists `e2fsck` as an optional tool for the same reason.
+///
+/// Below the floor the check is skipped with a log line rather than run: an e2fsprogs
+/// that predates `metadata_csum_seed` would reject the image over a feature it does not
+/// know, which is a disagreement about the *checker*, not about the layout.
 fn verify_clean(dest: &Path, step: &Step) -> Result<Vec<String>, EngineError> {
     step.log("verifying ext4 image (ferrosys reader: every metadata checksum)");
     let file = std::fs::File::open(dest).map_err(|s| EngineError::io(dest, s))?;
@@ -333,24 +356,52 @@ fn verify_clean(dest: &Path, step: &Step) -> Result<Vec<String>, EngineError> {
         })?;
     let mut ran = vec!["ferrosys-reader".to_string()];
 
-    if have_tool("e2fsck") {
-        step.log("cross-checking with e2fsck -fn (any correction fails the build)");
-        let mut cmd = Command::new("e2fsck");
-        cmd.arg("-fn").arg(dest);
-        build::run(cmd, "e2fsck", "e2fsck -fn (verify formatted rootfs)", step)?;
-        ran.push("e2fsck".to_string());
-    } else {
-        step.log(
-            "e2fsck not found; skipping the external cross-check (ferrosys reader verified) \
-             — the image's provenance records which checks ran",
-        );
+    // `-V`, not `--version`: e2fsck rejects the long form (exit 16) and prints its
+    // banner on stderr under the short one.
+    match e2fsck_usable(hosttool::version("e2fsck", "-V").as_deref()) {
+        E2fsck::Run => {
+            step.log("cross-checking with e2fsck -fn (any correction fails the build)");
+            let mut cmd = Command::new("e2fsck");
+            cmd.arg("-fn").arg(dest);
+            build::run(cmd, "e2fsck", "e2fsck -fn (verify formatted rootfs)", step)?;
+            ran.push("e2fsck".to_string());
+        }
+        E2fsck::Skip(why) => step.log(format!(
+            "{why}; skipping the external cross-check (ferrosys reader verified) \
+             — the image's provenance records which checks ran"
+        )),
     }
     Ok(ran)
 }
 
-/// True when a host tool is runnable (a missing binary fails to spawn).
-fn have_tool(tool: &str) -> bool {
-    Command::new(tool).arg("--version").output().is_ok()
+/// Whether the host's `e2fsck` is one this cross-check will run.
+#[derive(Debug, PartialEq, Eq)]
+enum E2fsck {
+    /// Run `e2fsck -fn` and fail the build on any correction.
+    Run,
+    /// Skip it, carrying the reason to log.
+    Skip(String),
+}
+
+/// Decide from `e2fsck -V`'s banner (`None` when the binary could not be spawned).
+///
+/// Pure, so the floor is unit-testable against real banner text rather than against
+/// whatever e2fsprogs the test host happens to carry. An unparseable banner runs the
+/// check: a version this cannot read is far more likely to be a newer format than a
+/// pre-2016 one, and refusing to check on a spelling change would quietly weaken every
+/// build.
+fn e2fsck_usable(banner: Option<&str>) -> E2fsck {
+    let Some(banner) = banner else {
+        return E2fsck::Skip("e2fsck not found".to_string());
+    };
+    match hosttool::major_minor(banner) {
+        Some(v) if v < E2FSCK_MIN => E2fsck::Skip(format!(
+            "e2fsck {}.{} predates metadata_csum_seed (needs {}.{}), so it would reject \
+             this image over a feature it does not know",
+            v.0, v.1, E2FSCK_MIN.0, E2FSCK_MIN.1
+        )),
+        _ => E2fsck::Run,
+    }
 }
 
 #[cfg(test)]
@@ -361,15 +412,48 @@ mod tests {
     /// True when `tar` is runnable — needed only to build the fixture archive, not to
     /// format it (the formatter is pure Rust). Panics under `BOOT2DEB_REQUIRE_HOST_TOOLS`.
     fn tar_ready() -> bool {
-        if have_tool("tar") {
-            return true;
+        hosttool::require(&["tar"])
+    }
+
+    #[test]
+    fn the_e2fsck_cross_check_declines_an_e2fsprogs_that_predates_the_feature_set() {
+        // An optional cross-check that is strictly *worse* than absent is the failure
+        // mode here: pre-1.43 e2fsprogs does not know `metadata_csum_seed`, which is in
+        // the pinned feature set, so it would reject a perfectly good image — failing a
+        // build that a host with no e2fsck at all completes.
+        let skip = |banner: &str| match e2fsck_usable(Some(banner)) {
+            E2fsck::Skip(why) => why,
+            E2fsck::Run => panic!("expected a skip for {banner:?}"),
+        };
+        let why = skip("e2fsck 1.42.13 (17-May-2015)");
+        assert!(why.contains("1.42"), "{why}");
+        assert!(why.contains("metadata_csum_seed"), "{why}");
+        assert!(why.contains("1.43"), "the floor is named: {why}");
+        assert!(skip("e2fsck 0.9 (old)").contains("predates"));
+        assert!(skip("e2fsck 1.42.0").contains("predates"));
+
+        // At and above the floor it runs — including the version this project is
+        // developed against.
+        for banner in [
+            "e2fsck 1.43 (17-May-2016)",
+            "e2fsck 1.43.4 (31-Jan-2017)",
+            "e2fsck 1.47.0 (5-Feb-2023)",
+            "e2fsck 2.0 (some-future-day)",
+        ] {
+            assert_eq!(e2fsck_usable(Some(banner)), E2fsck::Run, "{banner}");
         }
-        assert!(
-            std::env::var_os("BOOT2DEB_REQUIRE_HOST_TOOLS").is_none(),
-            "BOOT2DEB_REQUIRE_HOST_TOOLS is set but `tar` is unavailable to build the fixture"
+
+        // A banner this cannot parse still runs the check: a spelling change is far
+        // likelier than a pre-2016 binary, and declining would quietly weaken every
+        // build on that host.
+        assert_eq!(e2fsck_usable(Some("e2fsck (unknown build)")), E2fsck::Run);
+
+        // Absent entirely is the documented, supported case — the pure-Rust gate
+        // stands alone and the provenance records that it did.
+        assert_eq!(
+            e2fsck_usable(None),
+            E2fsck::Skip("e2fsck not found".to_string())
         );
-        eprintln!("skipping: tar unavailable to build the fixture");
-        false
     }
 
     /// Little-endian field readers over the superblock (1024 bytes into the image).

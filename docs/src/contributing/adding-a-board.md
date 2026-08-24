@@ -10,7 +10,8 @@ genuinely new *chip family*, which also needs a small Rust change; see
 > build) — for a board or patch that has no lock yet. If you only want to build one of the
 > shipped recipes, take the shorter [Getting started](../getting-started.md) track
 > (doctor → build) instead. To add a *patch* rather than a board, see
-> [Adding a patch](adding-a-patch.md).
+> [Adding a patch](adding-a-patch.md); to name a new build point on a board that is
+> already here, see [Authoring a recipe](../tutorials/authoring-a-recipe.md).
 
 > **Start with the generator.** `boot2deb new-device <name>` scaffolds the device
 > (and a matching recipe) for you — it offers the valid SoC/boot-method/kernel/feature
@@ -68,8 +69,8 @@ for exactly that reason. When you find yourself copying a file from one board to
 move it up instead.
 
 1. **arch** (`arches/<arch>.toml`) — only for a CPU architecture not already present.
-   Arch-wide kbuild facts: the cross triple, the `ARCH=` values for kbuild and u-boot, the
-   kernel image path.
+   Arch-wide kbuild facts: the cross triple, kbuild's `ARCH=`, and the kernel image path.
+   (u-boot takes no `ARCH=` from here — its defconfig carries it.)
 2. **soc** (`socs/<soc>.toml`, plus `socs/<soc>/overlay/` for files baked into the rootfs)
    — the SoC's shared properties: device-tree directory, force-loaded modules, arch, and
    any SoC-wide firmware packages.

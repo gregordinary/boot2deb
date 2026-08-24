@@ -11,7 +11,10 @@ A build is a single point across the axes a user selects:
   A device declares which kernels it supports and a default; override with `--kernel`
   (values from `list-kernels`). Some kernels are [not built at
   all](#kernels-are-compiled-or-installed).
-- **suite** — the Debian suite (e.g. `forky`, `sid`); override with `--suite`.
+- **suite** — the Debian suite (e.g. `forky`, `sid`); override with `--suite`. The
+  image's `sources.list` carries the pockets that suite actually publishes, so a
+  released suite gets `-security` and `-updates` alongside its base and `sid` gets
+  neither.
 - **layout** — how the disk image is packaged: `combined` (one whole-disk image, boot
   payload and rootfs on a single medium) or `split` (separate bootloader and rootfs
   images for a two-medium install); override with `--layout`. Only a boot method that
@@ -165,6 +168,15 @@ kernel = [
 The envelope gates the build; the per-entry ranges select which patches that build
 actually applies. Both are *declared intent* — the `git am` pass is the enforcement.
 
+`applies_to_kernel` governs the kernel-family scopes (`kernel`, `ffmpeg`, `userspace`).
+The `uboot` scope has its own envelope, `applies_to_uboot`, matched against the pinned
+u-boot tag — the two axes move independently, so a series that patches both makes a
+separate claim about each. u-boot's zero-padded `vYYYY.MM` tags are accepted on both
+sides of a range, so `applies_to_uboot = ">=2026.01, <2027.01"` reads the way the tags
+do. A scope whose envelope is omitted claims every version, which is the shape every
+shipped u-boot series takes: each is written for the one u-boot generation its board
+runs.
+
 This shape exists because the patch series changes discontinuously while kernels move
 continuously. A kernel bump where everything still applies changes nothing here except
 the envelope: no copied lists, no forked series. When one patch does break, the
@@ -188,7 +200,8 @@ remember. Retiring such an entry, file included, is safe: an old lock names an o
 A kernel may apply **no series at all** — a stock mainline kernel whose SoC is fully
 upstream, or a vendor tree that already ships its patches. It writes
 `patch_series = "none"`, and then the build never reads the `patches` repo: nothing is
-fetched, nothing is applied, `verify-patches` reports there is nothing to verify, and
+fetched, nothing is applied, `verify-patches` reports there is nothing to verify (on a
+recipe whose u-boot axis is also bare), and
 the lock **omits its `[patches]` block entirely** rather than pinning a commit the build
 never consumes. Such a board builds on a machine with no `patches` checkout.
 
@@ -213,6 +226,11 @@ repo it is fetched from is the boot method's `patches_url`/`patches_ref`, and th
 resolved commit lands in the lock's `[uboot_patches]` block — a full pin like every
 other fetched source, graded by `verify-sources` and recorded in each image's
 provenance manifest.
+
+Everything the kernel axis gets, this axis gets: `verify-patches` dry-runs the series
+against the pinned u-boot, `patch import` names the recipes an import into it
+invalidates, and the series' `applies_to_uboot` envelope gates the build the way
+`applies_to_kernel` gates the kernel one.
 
 A board whose u-boot ships pristine simply declares no series — the RK1 does — or,
 if it lists some and wants none for this build, selects `"none"`, the same sentinel

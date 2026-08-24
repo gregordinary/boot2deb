@@ -20,6 +20,7 @@ use crate::render::{emit_artifact, note, print_event, print_event_json, short};
 use crate::workdir::mark_work_dir;
 use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
 use boot2deb_core::model::{Overrides, ResolvedBoot, ResolvedBuild};
+use boot2deb_core::series::Scope;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
 use boot2deb_engine::build::{ffmpeg, kernel, kmod, uboot, userspace, BuildEnv};
 use boot2deb_engine::debstore::DebStore;
@@ -179,9 +180,11 @@ pub(crate) fn run(
     // only exist for a media-accel build; a base build has no such sources and skips
     // those stages, so these are computed inside the stage blocks below.
 
-    // Cross-arch → pass CROSS_COMPILE; native → none.
+    // The host cannot emit target binaries → pass CROSS_COMPILE; it can → none.
     let pf = boot2deb_engine::preflight(resolved.arch);
-    let cross_compile = pf.cross.then(|| resolved.cross_compile.clone());
+    // Every stage past here assumes Linux, and the answer is already in hand.
+    pf.ensure_can_build()?;
+    let cross_compile = pf.cross_toolchain.then(|| resolved.cross_compile.clone());
     // The Tier-2 artifact store, unless disabled: a durable content-addressed
     // cache of the compile nodes' output `.deb`s under <root>/cache/artifacts, keyed
     // by each node's output signature.
@@ -194,7 +197,11 @@ pub(crate) fn run(
     // whether or not the cache is on, and it is three `--version` calls.
     let toolchain = boot2deb_engine::toolchain::HostToolchain::probe(
         cross_compile.as_deref(),
-        pf.cross.then(|| resolved.arch.qemu_arch()),
+        // The interpreter, not the toolchain: an arm64 host building armhf compiles
+        // through a cross gcc and then runs the result natively, so folding a
+        // qemu-arm-static identity into the sandbox key would name a binary nothing
+        // executes.
+        pf.interpreter.then(|| resolved.arch.qemu_arch()),
     );
     let build_env = BuildEnv {
         toolchain_id: toolchain.compiler_identity(),
@@ -218,7 +225,11 @@ pub(crate) fn run(
         format!(
             "building {recipe} (arch {}, {} build, work {})",
             resolved.arch,
-            if pf.cross { "cross" } else { "native" },
+            if pf.cross_toolchain {
+                "cross"
+            } else {
+                "native"
+            },
             work_dir.display()
         ),
     );
@@ -311,7 +322,6 @@ pub(crate) fn run(
         (Some(pin), true) => Some(resolve_patches_source(
             args.patches_path.as_deref(),
             args.patches_url.as_deref(),
-            &resolved,
             pin,
             root,
             &sink,
@@ -329,7 +339,7 @@ pub(crate) fn run(
         )
         .into());
     }
-    // Declared-intent prerequisite, before any stage runs. The kernel node's gate asks
+    // Declared-intent prerequisite, before any stage runs. The compile nodes' gates ask
     // the same question, but only once the tree is cloned — a minute of network for an
     // answer already sitting on disk in the series manifests. `update` flags this at
     // pin time; this catches a lock that arrived some other way, or one whose series
@@ -337,8 +347,12 @@ pub(crate) fn run(
     if let (Some((patches_root, _)), Some(pin), Some(kernel)) =
         (&checkout, &lock.patches, &lock.kernel)
     {
-        let outside =
-            crate::config::series_outside_envelope(patches_root, &pin.series, &kernel.reference)?;
+        let outside = crate::config::series_outside_envelope(
+            patches_root,
+            &pin.series,
+            Scope::Kernel,
+            &kernel.reference,
+        )?;
         if let Some((name, declared)) = outside.first() {
             return Err(format!(
                 "kernel {} is outside series '{name}' (declared {declared}) — this build would \
@@ -347,6 +361,29 @@ pub(crate) fn run(
                  --kernel-path <checkout> --keep-going\nthen widen applies_to_kernel in the \
                  series if it comes back clean, or retire the patches it names.",
                 kernel.reference, kernel.reference
+            )
+            .into());
+        }
+    }
+    // The same prerequisite on the u-boot axis, asked about the u-boot tag: the two
+    // axes move independently, so a series' `applies_to_uboot` is a claim about the
+    // u-boot version and nothing else. There is no `--kernel`-style candidate path
+    // here, so the remedy is to widen the claim or retire the patches.
+    if let (Some((patches_root, _)), Some(pin), Some(uboot)) =
+        (&checkout, &lock.uboot_patches, &lock.uboot)
+    {
+        let outside = crate::config::series_outside_envelope(
+            patches_root,
+            &pin.series,
+            Scope::Uboot,
+            &uboot.reference,
+        )?;
+        if let Some((name, declared)) = outside.first() {
+            return Err(format!(
+                "u-boot {} is outside series '{name}' (declared {declared}) — this build would \
+                 apply a series that makes no claim about this u-boot. Widen applies_to_uboot \
+                 in the series, or retire the patches it names.",
+                uboot.reference
             )
             .into());
         }
@@ -840,6 +877,7 @@ pub(crate) fn run(
             identity: image_identity(recipe, &resolved),
             compress: !args.no_compress,
             keep_raw: args.keep_raw,
+            jobs: build_env.jobs,
         };
         let artifacts = image::build_image(&resolved, &opts, &sink)?;
         // The raw paths are deleted after compression unless --keep-raw, so only
@@ -962,7 +1000,7 @@ pub(crate) fn run(
         };
         let facts = boot2deb_core::provenance::BuildFacts {
             host_arch: pf.host.arch,
-            cross: pf.cross,
+            cross: pf.cross_toolchain,
             manifest_sha256: &manifest_sha256,
             package_count,
             user: rootfs::DEFAULT_USER,

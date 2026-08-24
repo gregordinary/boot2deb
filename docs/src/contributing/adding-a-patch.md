@@ -6,6 +6,10 @@ userspace, u-boot) before it compiles. The series is declared by a
 lives in the separate `patches` repo. Adding a patch means getting it into that series
 and then into a build. This page walks the loop end to end.
 
+This page is about getting a *new* patch into a series. Carrying an existing series across
+a kernel version — measuring what breaks, and encoding the boundary in the series — is
+[Moving a board to a newer kernel](../tutorials/newer-kernel.md).
+
 It applies to a kernel that names a series. A kernel with `patch_series = "none"`
 applies no series and never reads the `patches` repo; giving such a board a patch means
 first authoring a series for its kernel.
@@ -64,10 +68,11 @@ next steps — no build reads the patch until the series is committed and re-pin
   2. re-pin locks:   boot2deb update turing-rk1/forky
 ```
 
-The re-pin line names each recipe whose kernel uses the series you imported into. The
-checkout path it prints is the one it wrote to: `--patches-path` when you passed one,
-else the config root's sibling `../patches` — anchored to `--root`, not to the
-directory you ran from.
+The re-pin line names each recipe that applies the series you imported into, on either
+axis — a device's `default_uboot_series` counts the same as a kernel's `patch_series`,
+so importing into a u-boot series names the recipes that carry it. The checkout path it
+prints is the one it wrote to: `--patches-path` when you passed one, else the config
+root's sibling `../patches` — anchored to `--root`, not to the directory you ran from.
 
 ## 2. Commit in the patches repo
 
@@ -85,7 +90,7 @@ dirty patches checkout (see [failure modes](#failure-modes)).
 
 ## 3. Verify
 
-Confirm the series still applies cleanly to the pinned kernel:
+Confirm the series still applies cleanly to the pinned tree:
 
 ```sh
 cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky
@@ -97,6 +102,14 @@ you already have a checkout, point `--kernel-src` at it to skip the clone:
 
 ```sh
 cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky --kernel-src ../linux
+```
+
+A `--scope uboot` import verifies the same way, against the recipe that carries the
+u-boot series — the locked u-boot is auto-fetched at its pin, and the run reports the
+`uboot` series at the u-boot tag rather than a kernel one:
+
+```sh
+cargo run -p boot2deb-cli -- verify-patches rk3576-generic/loader
 ```
 
 You can verify before or after committing — the series on disk is what is checked.

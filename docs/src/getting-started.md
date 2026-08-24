@@ -7,7 +7,9 @@ page — for the RK1, see [Turing RK1](boards/turing-rk1.md).
 
 > **Which track are you on?** This is the **shipped-recipe track** — `doctor` then
 > `build`, for a recipe that already ships a committed lock (like `turing-rk1/forky`).
-> Bringing up a *new* board, or authoring a patch, is the longer bring-up track: see
+> To change what a shipped recipe builds, continue with
+> [Adapting a shipped recipe](tutorials/adapting-a-recipe.md). Bringing up a *new* board,
+> or authoring a patch, is the longer bring-up track: see
 > [Adding a board](contributing/adding-a-board.md) and
 > [Adding a patch](contributing/adding-a-patch.md).
 
@@ -39,13 +41,13 @@ cd boot2deb
 cargo run -p boot2deb-cli -- doctor turing-rk1/forky
 ```
 
-It reports your host arch, whether the build is cross-arch, and one line per
-requirement:
+It reports your host arch, the two cross answers, and one line per requirement:
 
 ```
 host arch : x86_64
 target    : turing-rk1/forky (arch arm64)
-cross     : yes — needs qemu-user binfmt for arm64 maintainer scripts/compiles
+toolchain : cross — arm64 cannot be emitted by this host's native cc
+execution : emulated — needs qemu-user binfmt for arm64 maintainer scripts/compiles
 
   ok      git                          /usr/bin/git
   ok      unprivileged user namespaces unshare --map-root-user --map-auto works
@@ -69,7 +71,7 @@ For orientation, the checks fall into a few groups:
 | Image assembly | none — the rootfs ext4 is formatted and checksum-verified in pure Rust; `e2fsck` is an optional independent cross-check when present, and the image's provenance records whether it ran | optional |
 | Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler (native, or the `<triple>gcc` cross compiler) | only if the recipe compiles a kernel or a bootloader |
 | Build roots | an unprivileged overlay whose upper layer sits on the work dir's filesystem | only if the recipe compiles the media-accel packages |
-| Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | cross only |
+| Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | only if this host cannot execute target binaries |
 
 **`doctor` asks only for what *your recipe* will actually invoke**, so the table above
 is a superset. `doctor turing-rk1/media-accel-forky` on an x86_64 host wants the whole
@@ -78,9 +80,13 @@ no compiler at all, because that board installs Debian's kernel and boots its ow
 firmware. That is deliberate: a requirement you do not need is somewhere a requirement
 you *do* need can hide.
 
-The "cross" row applies when your host arch differs from the target — i.e. any x86_64
-host building an arm64 or armhf image. An arm64 host runs the target's binaries directly
-and needs no emulation.
+Note that the last two rows answer different questions, and they come apart. The
+compile toolchain is about *producing* target binaries — needed whenever your host's
+native `cc` cannot emit them. Emulation is about *running* them, and an arm64 host runs
+armhf binaries directly (its kernel is built with `CONFIG_COMPAT=y`). So an arm64 host
+building the armhf C201 image needs `arm-linux-gnueabihf-gcc` and needs no `qemu-arm`
+at all, and `doctor` asks for exactly that. Any x86_64 host building arm64 or armhf
+needs both.
 
 The target-arch sandbox is **not** a cross-only concern. Packages like `ffmpeg-rk` and
 `librga2` are built inside a userland bootstrapped for the target *suite*, never on your
@@ -116,10 +122,27 @@ subuid mapping), and if it fails it prints the fix for your host. The usual case
 `sysctl -w` lasts until reboot; drop the same line in `/etc/sysctl.d/` to make it
 persist.
 
-On a cross build `doctor` also checks that the `qemu-<arch>` **binfmt handler is
-registered and enabled with the `F` (fix-binary) flag** — the sandbox relies on it.
-Installing `qemu-user-static` (with `binfmt-support` / systemd's binfmt) normally
-registers this; `doctor` warns if the flag is missing.
+Where the target's binaries have to be emulated, `doctor` also checks that the
+`qemu-<arch>` **binfmt handler is registered and enabled with the `F` (fix-binary)
+flag** — the sandbox relies on it. Installing `qemu-user-static` (with
+`binfmt-support` / systemd's binfmt) normally registers this; `doctor` warns if the
+flag is missing.
+
+### The one prerequisite `doctor` cannot probe
+
+On a **native** kernel build — your host arch already matches the target, so no cross
+toolchain is involved — `make bindeb-pkg` runs `dpkg-checkbuilddeps`, which consults the
+**dpkg database**. Everything `doctor` checks is a `PATH` scan or a `pkg-config` query,
+and those are different oracles: a host where `libelf-dev` or `debhelper` is present but
+not dpkg-registered passes `doctor` and then fails the build minutes in.
+
+Cross builds skip that gate (`DPKG_FLAGS=-d`), because `dpkg-checkbuilddeps` would
+otherwise demand the target-arch `-dev` packages, which the compile does not need. So
+this applies only to the native path — an arm64 host building an arm64 image.
+
+On an ordinary Debian or Ubuntu host that installed its build deps with `apt`, this is
+already satisfied and there is nothing to do. `doctor` prints a note on exactly this
+path rather than re-implementing dpkg's dependency solve.
 
 ### The overlay check
 
@@ -147,16 +170,19 @@ With `doctor` green:
 cargo run -p boot2deb-cli -- build turing-rk1/forky
 ```
 
-This resolves the recipe's committed lockfile and runs the pipeline end to end. For the
-RK1 that is: compile the kernel and u-boot, build the media-accel userspace and ffmpeg,
-bootstrap the Debian rootfs, and assemble a bootable disk image. **A recipe runs only the
-stages it has** — `build asus-c201/forky` compiles nothing at all, so it is a rootfs
-bootstrap and an image assembly and nothing else.
+This resolves the recipe's committed lockfile and runs the pipeline end to end. For
+`turing-rk1/forky` that is: compile the kernel and u-boot, bootstrap the Debian rootfs,
+and assemble a bootable disk image. **A recipe runs only the stages it has** —
+`turing-rk1/media-accel-forky` adds the Rockchip media userspace and ffmpeg on top of
+those, while `build asus-c201/forky` compiles nothing at all, so it is a rootfs bootstrap
+and an image assembly and nothing else.
 
 The build reads only the lock, so it consults no network for its pins and is reproducible
-from what is committed. The patch series, where a recipe has one, is fetched automatically
+from what is committed. A patch series, where a recipe has one, is fetched automatically
 at its pinned commit if the config root's sibling `../patches` checkout is not already
-present — you do not need to clone it separately.
+present — you do not need to clone it separately. That holds for both patch axes: the
+repo comes from the lock's own pin, so a u-boot-only recipe such as
+`rk3576-generic/loader` fetches its series the same way a kernel recipe does.
 
 The rootfs bootstrap is content-cached, so a rebuild whose solved package set is
 unchanged skips the multi-minute bootstrap. To force a clean rootfs, add

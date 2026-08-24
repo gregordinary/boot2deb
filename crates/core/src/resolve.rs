@@ -109,7 +109,6 @@ pub fn resolve_device(
             dt_dir: soc.dt_dir,
             modules: soc.modules,
             kernel_arch: arch.kernel_arch,
-            uboot_arch: arch.uboot_arch,
             cross_compile: arch.cross_compile,
             kbuild_image: arch.kbuild_image,
             userspace: None,
@@ -303,7 +302,6 @@ pub fn resolve_device(
         dt_dir: soc.dt_dir,
         modules: soc.modules,
         kernel_arch: arch.kernel_arch,
-        uboot_arch: arch.uboot_arch,
         cross_compile: arch.cross_compile,
         kbuild_image: arch.kbuild_image,
         // Sources ride only when a feature builds the stack; a base build drops
@@ -1139,11 +1137,15 @@ fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(
     }
 }
 
-/// Reject a suite that is not a well-formed Debian codename. The
-/// suite becomes an apt `sources.list` pocket (`<suite>-updates`, `<suite>-security`)
-/// and the archive path the bootstrap fetches under, so it must be a bare token
-/// starting with an alphanumeric and drawn from `[A-Za-z0-9._-]`. Pure, so it is
-/// unit-testable.
+/// Reject a suite that is not a well-formed Debian codename. The suite becomes an apt
+/// `sources.list` entry and the archive path the bootstrap fetches under, so it must
+/// be a bare token starting with an alphanumeric and drawn from `[A-Za-z0-9._-]`.
+///
+/// Shape only. *Which* pockets a suite publishes is a separate question, answered by
+/// [`suite::pockets`](crate::suite::pockets) where the sources file is generated —
+/// `sid` is a valid, documented value that simply has no `-security` or `-updates`.
+///
+/// Pure, so it is unit-testable.
 fn validate_suite(suite: &str) -> Result<(), ConfigError> {
     let mut chars = suite.chars();
     let ok = matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
@@ -2186,7 +2188,7 @@ mod tests {
         }
         std::fs::write(
             p.join("arches/armv7.toml"),
-            "kernel_arch = \"arm\"\nuboot_arch = \"arm\"\n\
+            "kernel_arch = \"arm\"\n\
              kbuild_image = \"arch/arm/boot/zImage\"\ncross_compile = \"\"\n",
         )
         .unwrap();
@@ -2679,7 +2681,7 @@ mod tests {
         }
         std::fs::write(
             p.join("arches/armv7.toml"),
-            "kernel_arch = \"arm\"\nuboot_arch = \"arm\"\n\
+            "kernel_arch = \"arm\"\n\
              kbuild_image = \"arch/arm/boot/zImage\"\ncross_compile = \"\"\n",
         )
         .unwrap();
@@ -2741,7 +2743,7 @@ mod tests {
         }
         std::fs::write(
             p.join("arches/armv7.toml"),
-            "kernel_arch = \"arm\"\nuboot_arch = \"arm\"\n\
+            "kernel_arch = \"arm\"\n\
              kbuild_image = \"arch/arm/boot/zImage\"\ncross_compile = \"\"\n",
         )
         .unwrap();
@@ -2993,7 +2995,7 @@ mod tests {
         }
         std::fs::write(
             p.join("arches/armv7.toml"),
-            "kernel_arch = \"arm\"\nuboot_arch = \"arm\"\n\
+            "kernel_arch = \"arm\"\n\
              kbuild_image = \"arch/arm/boot/zImage\"\ncross_compile = \"\"\n",
         )
         .unwrap();
@@ -3278,7 +3280,7 @@ mod fixture_tests {
 
             fs::write(
                 p.join("arches/arm64.toml"),
-                "kernel_arch = \"arm64\"\nuboot_arch = \"arm\"\n\
+                "kernel_arch = \"arm64\"\n\
                  kbuild_image = \"arch/arm64/boot/Image\"\ncross_compile = \"\"\n",
             )
             .unwrap();

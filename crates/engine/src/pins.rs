@@ -598,6 +598,52 @@ fn blob_pin_file(pin: &str) -> &str {
     pin.split('@').next().unwrap_or(pin)
 }
 
+/// How a `patches` checkout departs from a lock's pin, or `None` when it sits on the
+/// pin with a clean worktree — the one state in which a series read from that checkout
+/// is exactly the series the lock names.
+///
+/// Read-only and non-enforcing, for the survey commands: they verify the *working
+/// tree* on purpose, because that is what patch co-development needs, and so they owe
+/// the reader a note that their green says nothing about the pinned series. The build
+/// path is where the pin is enforced instead — see `build::verify_patches_pin`.
+pub fn patches_drift(patches_root: &Path, expected: &str) -> Result<Option<String>, EngineError> {
+    let head = git::rev_parse_head(patches_root)?;
+    let clean = git::is_clean(patches_root)?;
+    if head == expected && clean {
+        return Ok(None);
+    }
+    Ok(Some(describe_patches_drift(
+        patches_root,
+        &head,
+        expected,
+        clean,
+    )))
+}
+
+/// Render one departure as a single clause. Distinguishes the two independent ways a
+/// checkout can depart — HEAD naming another commit, and uncommitted work — so a tree
+/// sitting *on* the pin is never described as being at a different commit than the one
+/// it is at.
+pub(crate) fn describe_patches_drift(
+    root: &Path,
+    head: &str,
+    expected: &str,
+    clean: bool,
+) -> String {
+    let root = root.display();
+    if head == expected {
+        return format!(
+            "patches checkout {root} has uncommitted changes at the pinned commit {expected}"
+        );
+    }
+    let dirt = if clean {
+        ""
+    } else {
+        " with uncommitted changes"
+    };
+    format!("patches checkout {root} is at {head}{dirt}, but the lock pins {expected}")
+}
+
 /// Upstream URL for a kernel source: a known named tree resolves to a git.kernel.org
 /// URL; an explicit `{ git, ref }` uses its URL directly. Also the default
 /// clone source for the kernel build stage when `--kernel-src` is not given.
@@ -651,6 +697,86 @@ mod tests {
             .unwrap()
             .contains("linux-stable.git"));
         assert!(named_tree_url("bogus-tree").is_none());
+    }
+
+    /// The clause distinguishes the three departures, and in particular never renders
+    /// an on-pin dirty tree as a commit mismatch — naming one commit as both "is at"
+    /// and "pins" sends the reader looking for drift that is not there.
+    #[test]
+    fn describe_drift_separates_a_moved_head_from_uncommitted_work() {
+        let root = Path::new("/p");
+        let (a, b) = ("aaaa", "bbbb");
+
+        let on_pin_dirty = describe_patches_drift(root, a, a, false);
+        assert!(
+            on_pin_dirty.contains("uncommitted changes at the pinned commit"),
+            "{on_pin_dirty}"
+        );
+        assert!(
+            !on_pin_dirty.contains("but the lock pins"),
+            "{on_pin_dirty}"
+        );
+
+        assert_eq!(
+            describe_patches_drift(root, b, a, true),
+            format!("patches checkout /p is at {b}, but the lock pins {a}")
+        );
+        assert_eq!(
+            describe_patches_drift(root, b, a, false),
+            format!(
+                "patches checkout /p is at {b} with uncommitted changes, but the lock pins {a}"
+            )
+        );
+    }
+
+    /// `patches_drift` reads a real checkout: silent when it is on the pin and clean,
+    /// and speaking up for each way it can depart. The `None` case is the load-bearing
+    /// one — a survey that warned on every run would train the reader to ignore it.
+    #[test]
+    fn patches_drift_is_silent_only_on_a_clean_checkout_at_the_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let head = commit_one(repo);
+
+        assert_eq!(patches_drift(repo, &head).unwrap(), None);
+
+        std::fs::write(repo.join("extra"), "uncommitted").unwrap();
+        let dirty = patches_drift(repo, &head).unwrap().unwrap();
+        assert!(
+            dirty.contains("uncommitted changes at the pinned commit"),
+            "{dirty}"
+        );
+
+        std::fs::remove_file(repo.join("extra")).unwrap();
+        let other = "0".repeat(40);
+        let moved = patches_drift(repo, &other).unwrap().unwrap();
+        assert!(moved.contains("but the lock pins"), "{moved}");
+        assert!(
+            moved.contains(&head),
+            "the clause names the actual head: {moved}"
+        );
+    }
+
+    /// `git init` plus one commit, returning its HEAD.
+    fn commit_one(dir: &Path) -> String {
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("series"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "one"]);
+        crate::git::rev_parse_head(dir).unwrap()
     }
 
     #[test]

@@ -1,70 +1,72 @@
 # boot2deb
 
-> Build Debian images for your laptop, SBC, tablet, or other device.
+> A build system for Debian device images — for your laptop, SBC, tablet, or TV box.
+
+boot2deb describes a device as **layered TOML config** and builds a bootable Debian image
+from it: compile the kernel and bootloader (or install the distro's), bootstrap the rootfs,
+assemble the disk. A build is a *point* across axes — device × kernel × u-boot × suite ×
+features × layout — resolved from those layers and pinned into one committed lockfile.
+
+It is a typed, unit-tested Rust workspace, and every axis and layer merge is validated
+before a build runs. It ships recipes for six boards, which are both usable images and
+**worked examples of unlike hardware**: what makes a Chromebook different from a compute
+module is visible in the config rather than buried in a script.
 
 ## Status
 
-This project is under active development. There may be breaking changes between commits. The image build process has been primarily tested on an AMD x86_64 laptop running Pop!_OS. A few builds have been performed on a Turing RK1 running a Debian image built by boot2deb. The Turing RK1 is the most tested target (hardware video transcode validated on real hardware); the ASUS Chromebook C201 boots to a login shell with Wi-Fi on both Debian suites it targets. I haven't yet tested the full hardware functionality of the C201, but in theory it is fully supported.
+Under active development, with breaking changes between commits. Builds run mostly on an
+x86_64 Pop!_OS laptop and a few on a Turing RK1 running an image boot2deb built.
+
+**What has actually been booted is a per-recipe, per-pin claim**, and it is generated from
+the locks rather than written by hand — so read it from the tool, not from prose:
+
+```sh
+cargo run -p boot2deb-cli -- support-matrix
+```
+
+Each recipe carries a status — `validated` (an image from these exact pins booted on the
+hardware), `expected` (derived from a validated sibling along an axis not expected to change
+the outcome), or `experimental` (under active bring-up) — plus the date the claim was last
+established. Re-pinning retires a `validated` claim, because the evidence was about the pins
+that moved. The published rendering is the
+[support matrix](https://gregordinary.github.io/boot2deb/reference/support-matrix.html);
+nothing here restates it. No board has been through a full sweep of its peripherals, and an
+absent claim is not a claim that the hardware does not work.
 
 ## AI disclosure
 
-boot2deb was developed by AI, primarily Claude Code (Opus 4.8). Human involvement was
-mostly limited to setting project goals and validating images on hardware. This is a
-side project to support a hobby and comes with no guarantee of quality, accuracy, or
-update frequency.
+boot2deb was developed by AI, primarily Claude Code. Human involvement was mostly limited to
+setting project goals and validating images on hardware. This is a side project to support a
+hobby and comes with no guarantee of quality, accuracy, or update frequency.
 
-## What it is
-
-boot2deb resolves a *build point* from layered TOML config (arch ← soc ← boot-method ←
-device, plus an orthogonal kernel axis) and drives the whole pipeline from one committed
-lockfile: compile the kernel and bootloader (or install the distro's), bootstrap the
-Debian rootfs, and assemble a bootable disk image. It is a typed, unit-tested Rust
-workspace; every axis and layer merge is validated before a build runs.
-
-Two properties it is built around:
+## Two properties it is built around
 
 - **Rootless.** Cross-architecture package builds and the Debian bootstrap run in a
-  rootless, in-process user-namespace sandbox (plus `qemu-user` when cross-building),
-  and the disk image is assembled with no root and no loop devices:
-  GPT tables, `.xz` compression, and the ext4 filesystem are all pure Rust. An x86_64
-  host builds an arm64 image without `sudo`.
-- **Reproducible.** The `.lock` pins every input — source commits, firmware-blob hashes,
-  and the solved apt manifest — and each image ships a provenance manifest recording
-  exactly what went into it, down to the boot2deb commit that built it. Package churn in
-  a rolling suite is pinned against `snapshot.debian.org` on demand. See
+  rootless, in-process user-namespace sandbox (plus `qemu-user` when cross-building), and
+  the disk image is assembled with no root and no loop devices: GPT tables, `.xz`
+  compression, and the ext4 filesystem are all pure Rust. An x86_64 host builds an arm64
+  image without `sudo`.
+- **Reproducible.** The `.lock` pins every input — source commits, firmware-blob hashes, and
+  the solved apt manifest — and each image ships a provenance manifest recording exactly what
+  went into it, down to the boot2deb commit that built it. Package churn in a rolling suite
+  is pinned against `snapshot.debian.org` on demand. See
   [Reproducibility](https://gregordinary.github.io/boot2deb/reference/reproducibility.html).
 
-## Supported boards
+## The boards, and why these boards
 
-| Board | SoC | Arch | Status |
-| --- | --- | --- | --- |
-| [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html) | RK3588 | arm64 | Boots; hardware video transcode validated |
-| [H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html) | RK3576 | arm64 | Boots to an HDMI login; Wi-Fi, Bluetooth, GPU, and suspend/resume validated; NPU binds and computes |
-| [ASUS Chromebook C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html) | RK3288 | armhf | Boots to login + Wi-Fi (forky & trixie) |
-| [ASUS Chromebook Flip C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
-| [ASUS Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
-| [Rockchip RK3576 EVB1 v10](https://gregordinary.github.io/boot2deb/boards/rk3576-evb1-v10.html) | RK3576 | arm64 | Image builds; hardware boot not yet confirmed |
+The six shipped configurations are deliberately unalike: between them they exercise every
+axis of the model, so the nearest example to a board you care about is usually one of them.
 
-The full picture — every shipped recipe, the exact pins it resolves, and what each
-claim rests on — is the
-[support matrix](https://gregordinary.github.io/boot2deb/reference/support-matrix.html).
+| Board | SoC / arch | What this example shows |
+| --- | --- | --- |
+| [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html) | RK3588 / arm64 | The full pipeline: a patched mainline kernel, u-boot written into the disk's raw gap, and an optional Rockchip media userspace (MPP + RGA + ffmpeg-rk) built in a target-arch sandbox |
+| [H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html) | RK3576 / arm64 | A board mainline does not know: its device tree ships with the config, its Wi-Fi driver is an out-of-tree `kmods/` layer, and its u-boot is its own axis — including recipes whose only deliverable is a maskrom-streamable bootloader |
+| [ASUS Chromebook C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html) | RK3288 / armhf | The opposite extreme: 32-bit, Debian's own kernel, ChromeOS firmware in SPI. It compiles nothing, its lock pins nothing from git, and the deliverable is a vboot-signed kernel in a ChromeOS partition — with A/B slots, so a bad kernel upgrade costs one reboot |
+| [ASUS C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html) · [Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 / armhf | What a board costs once its family is here: one device file each, no overlay, no kernel, no code — everything shared lives on the SoC layer |
+| [RK3576 EVB1 v10](https://gregordinary.github.io/boot2deb/boards/rk3576-evb1-v10.html) | RK3576 / arm64 | The reference board beside the retail one, sharing a SoC layer and a kernel while carrying none of the TV box's peripherals |
 
-Each board ships one or more *recipes*, a device plus a Debian suite and any optional
-features. The RK1, for example, comes as a base image (`turing-rk1/forky`), a
-hardware-transcode image that adds the Rockchip MPP/RGA/ffmpeg userspace
-(`turing-rk1/media-accel-forky`) — both with a `trixie` sibling — and a Jellyfin image
-(`turing-rk1/jellyfin`). A recipe need not build an image at all: an RK3576 board also
-ships u-boot-only recipes whose deliverable is a maskrom-streamable bootloader.
-List them with `cargo run -p boot2deb-cli -- list-recipes`.
-
-You are not limited to the combinations someone curated. Features compose a-la-carte —
-name any selection on `update`/`build` and it is pinned and built as its own point, with
-its own lock, beside the recipe it starts from:
-
-```sh
-cargo run -p boot2deb-cli -- update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
-cargo run -p boot2deb-cli -- build  turing-rk1/forky+media-accel-rockchip+jellyfin
-```
+The RK1's headline capability — hardware video transcode — has its kernel side shipped and
+its userspace building, but no boot2deb image has been measured transcoding on it.
 
 ## Quick start
 
@@ -73,8 +75,8 @@ rootless — no `sudo`.
 
 1. Install Rust ([rustup.rs](https://rustup.rs)) and clone this repo.
 
-2. Ask `doctor` what your host is missing. It probes for every build tool and prints the
-   exact install command for *your* distro:
+2. Ask `doctor` what your host is missing. It probes for every build tool the recipe will
+   actually invoke and prints the exact install command for *your* distro:
 
    ```sh
    cd boot2deb
@@ -94,36 +96,69 @@ rootless — no `sudo`.
    unique first-boot password for user `debian` — note it down. For hardware video
    transcode, build `turing-rk1/media-accel-forky` instead.
 
-4. Flash it. This is board-specific — for the RK1 it is the Turing Pi BMC (`tpi` or the
-   web UI), or a removable card. See [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html).
+4. Flash it. This is board-specific — for the RK1 it is the Turing Pi BMC (`tpi` or the web
+   UI), or a removable card. See [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html).
 
 Full walkthrough: [Getting started](https://gregordinary.github.io/boot2deb/getting-started.html).
 
+## Making it yours
+
+A shipped recipe is a starting point, not a ceiling. `list-recipes` shows what is authored;
+most changes need no new file at all.
+
+**Compose features a-la-carte.** Name any selection on `update`/`build` and it is pinned and
+built as its own point, with its own lock, beside the recipe it starts from:
+
+```sh
+cargo run -p boot2deb-cli -- update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
+cargo run -p boot2deb-cli -- build  turing-rk1/forky+media-accel-rockchip+jellyfin
+```
+
+**Keep your own work out-of-tree.** An overlay directory holds your devices, kernels, and
+recipes, wins over the shipped tree name-for-name, and takes the locks `update` writes — so
+there is nothing to fork and nothing to rebase.
+
+The tutorials take these in order:
+
+- [Adapting a shipped recipe](https://gregordinary.github.io/boot2deb/tutorials/adapting-a-recipe.html)
+  — a different suite, feature set, or localization, from a build flag up to a device of your own.
+- [Moving a board to a newer kernel](https://gregordinary.github.io/boot2deb/tutorials/newer-kernel.html)
+  — measure whether a patch series survives a kernel you have not adopted (it changes no
+  pin), encode the boundary, then adopt it.
+- [Authoring a recipe](https://gregordinary.github.io/boot2deb/tutorials/authoring-a-recipe.html)
+  — name a build point, and declare what it has been taken through.
+- [Adding a board](https://gregordinary.github.io/boot2deb/contributing/adding-a-board.html)
+  — bring up hardware that is not here yet, starting from `boot2deb new-device`.
+
 ## How it works
 
-- **Config model** — a build is a point across device × kernel × suite × features ×
-  layout, resolved by merging TOML layers (`arches/ socs/ boot-methods/ devices/`, with
-  the kernel, out-of-tree modules (`kmods/`), and rootfs features (`features/`) as
-  orthogonal axes). [Config model](https://gregordinary.github.io/boot2deb/reference/config-model.html).
-- **Recipes and locks** — a *recipe* pins a build point by name; `update` writes a
-  sibling `.lock` with the exact resolved pins, and `build` reads only that lock.
-- **Kernel patches** — version-coupled patch series and kconfig fragments live on the
-  kernel axis and are applied behind a verify-applies gate; `verify-sources` flags any
-  pin that is not durably re-fetchable.
+- **Config model** — the hardware stack resolves `arches ← socs ← boot-methods ← devices`,
+  with the kernel, the u-boot series, out-of-tree modules (`kmods/`), and rootfs features
+  (`features/`) as orthogonal axes.
+  [Config model](https://gregordinary.github.io/boot2deb/reference/config-model.html).
+- **Recipes and locks** — a *recipe* pins a build point by name; `update` is the only command
+  that consults upstream and writes a sibling `.lock`; `build` reads only that lock.
+- **Kernel patches** — version-coupled patch series and kconfig fragments live on the kernel
+  axis and are applied behind a verify-applies gate. A series declares which kernel versions
+  it claims, and `verify-patches --kernel` measures a version it does not.
   [Adding a patch](https://gregordinary.github.io/boot2deb/contributing/adding-a-patch.html).
-- **Your own boards** — keep out-of-tree devices and recipes in an overlay directory
-  instead of forking. [Overlays](https://gregordinary.github.io/boot2deb/reference/overlays.html).
+- **Not every board needs every stage** — a build compiles a kernel only if the board needs
+  one of its own, and a bootloader only if the board's firmware is ours to make. The model
+  states what is true of each board rather than making them look alike.
 
 ## Documentation
 
 The full documentation is published as a book at
-**[gregordinary.github.io/boot2deb](https://gregordinary.github.io/boot2deb/)**. The
-sources live in [`docs/`](docs/); build them locally with `mdbook serve docs`. Chapters:
+**[gregordinary.github.io/boot2deb](https://gregordinary.github.io/boot2deb/)**. The sources
+live in [`docs/`](docs/); build them locally with `mdbook serve docs`.
 
 - [Introduction](https://gregordinary.github.io/boot2deb/introduction.html)
-- [Getting started](https://gregordinary.github.io/boot2deb/getting-started.html) — prerequisites and your first build
-- [Upgrading the kernel](https://gregordinary.github.io/boot2deb/kernel-upgrades.html)
-- [Locale, timezone, and keyboard](https://gregordinary.github.io/boot2deb/localization.html)
+- User guide — [Getting started](https://gregordinary.github.io/boot2deb/getting-started.html),
+  [Upgrading the kernel](https://gregordinary.github.io/boot2deb/kernel-upgrades.html),
+  [Locale, timezone, and keyboard](https://gregordinary.github.io/boot2deb/localization.html)
+- Tutorials — [Adapting a shipped recipe](https://gregordinary.github.io/boot2deb/tutorials/adapting-a-recipe.html),
+  [Moving a board to a newer kernel](https://gregordinary.github.io/boot2deb/tutorials/newer-kernel.html),
+  [Authoring a recipe](https://gregordinary.github.io/boot2deb/tutorials/authoring-a-recipe.html)
 - Boards — [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html),
   [H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html),
   [RK3576 EVB1 v10](https://gregordinary.github.io/boot2deb/boards/rk3576-evb1-v10.html),
@@ -152,12 +187,12 @@ crates/cli      the boot2deb binary
 arches/ socs/ boot-methods/ devices/ kernels/ kmods/ features/ recipes/
                                                 config layers (TOML)
 blobs/ fragments/                               vendored blobs, kconfig
-docs/                                                     the mdBook
+docs/                                           the mdBook
 ```
 
 ## License
 
 boot2deb is licensed under the GNU General Public License v3.0 or later — see
-[`LICENSE`](LICENSE). Vendored third-party components (the Rockchip `rkbin` firmware
-blobs, the boot and kernel-hook scripts, and the Debian archive keyring) keep their own
-licenses; see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+[`LICENSE`](LICENSE). Vendored third-party components (the Rockchip `rkbin` firmware blobs,
+the boot and kernel-hook scripts, and the Debian archive keyring) keep their own licenses;
+see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

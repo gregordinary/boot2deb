@@ -19,10 +19,16 @@ use std::path::{Path, PathBuf};
 /// Durable and content-addressed like [`crate::patchfetch::fetch_series`]: a present
 /// `cache_root/<commit>` is always a complete checkout at that commit — the fetch
 /// stages into a temp sibling and atomically renames on success, so an interrupted
-/// clone never leaves a half-materialized tree a later run trusts. A hit returns
-/// immediately without touching the network. The resulting tree sits at `commit`
-/// with a clean worktree, so a verify gate can apply a series onto it and hard-reset
-/// around it (see [`apply_kernel_series`] / [`restore_tree`]).
+/// clone never leaves a half-materialized tree a later run trusts. A hit touches no
+/// network. The returned tree always sits at `commit` with a clean worktree, so a
+/// verify gate can apply a series onto it and hard-reset around it (see
+/// [`apply_kernel_series`] / [`restore_tree`]).
+///
+/// That last guarantee is *restored*, not assumed: a hit runs
+/// [`restore_cache_tree`]. A run killed mid-`git am` leaves applied commits and a
+/// `.git/rebase-apply` behind, and because the cache is keyed on the commit and shared
+/// across recipes, the wreckage would otherwise make every later gate against that
+/// commit fail — including for recipes unrelated to the one that died.
 ///
 /// `reference` is the pin's ref (tag/branch) for the shallow fetch; `what` labels the
 /// tree in a [`EngineError::CommitMismatch`] (e.g. `"kernel"`, `"ffmpeg base"`).
@@ -40,6 +46,7 @@ pub fn ensure_tree(
             "{what}: reusing cached checkout at {}",
             short(commit)
         ));
+        restore_cache_tree(&dest, commit, what, step)?;
         return Ok(dest);
     }
     std::fs::create_dir_all(cache_root).map_err(|s| EngineError::io(cache_root, s))?;
@@ -60,6 +67,45 @@ pub fn ensure_tree(
     std::fs::rename(&repo_dir, &dest).map_err(|s| EngineError::io(&dest, s))?;
     step.log(format!("{what}: checked out {}", short(commit)));
     Ok(dest)
+}
+
+/// Bring a commit-addressed cache tree back to `commit` with a clean worktree,
+/// whatever a previous run left in it: abort an interrupted `git am`, drop any applied
+/// patch commits, and remove untracked leftovers.
+///
+/// Unconditionally safe *because* the directory is commit-addressed. Its whole content
+/// is one immutable upstream commit that can be re-fetched, nothing here is ever hand
+/// edited, and the path is keyed on the commit being restored — so there is no work to
+/// lose. This is the opposite of an operator's own `--kernel-path` checkout, where
+/// [`crate::patches::verify_tree`] refuses a dirty tree rather than reset it.
+///
+/// Errors only if the tree is still unclean afterwards, which means something outside
+/// git's control is in the directory; a stale cache entry must be reported rather than
+/// silently patched onto.
+pub fn restore_cache_tree(
+    tree: &Path,
+    commit: &str,
+    what: &str,
+    step: &Step,
+) -> Result<(), EngineError> {
+    if crate::git::is_clean(tree)? && crate::git::rev_parse_head(tree)? == commit {
+        return Ok(());
+    }
+    step.log(format!(
+        "{what}: cached checkout at {} was left unclean by an earlier run — restoring it",
+        short(commit)
+    ));
+    // Ignore the abort's result: it also answers "false" when there was nothing to
+    // abort, so the cleanliness check below is the real verdict.
+    crate::git::am_abort(tree);
+    crate::git::reset_hard(tree, commit)?;
+    crate::git::clean_untracked(tree)?;
+    if !crate::git::is_clean(tree)? {
+        return Err(EngineError::DirtyCheckout {
+            repo: tree.display().to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Prepare a cached kernel tree for the config gate: reset it to the locked
@@ -164,6 +210,57 @@ mod tests {
         let step2 = Step::start(&sink, "test");
         let again = ensure_tree("unused://url", &tag, &commit, "kernel", &cache, &step2).unwrap();
         assert_eq!(again, tree);
+    }
+
+    /// A run killed mid-`git am` leaves applied commits, a `.git/rebase-apply`, and
+    /// untracked files behind. Because the cache is keyed on the commit and shared
+    /// across recipes, a hit must hand back a clean tree at the pin rather than that
+    /// wreckage — otherwise one failed gate breaks every later gate on that kernel.
+    #[test]
+    fn a_cache_hit_restores_a_tree_an_interrupted_run_wedged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        let (tag, commit) = tagged_origin(&origin);
+        let cache = tmp.path().join("cache");
+        let sink = |_e: Event| {};
+
+        let step = Step::start(&sink, "test");
+        let tree = ensure_tree(
+            origin.to_str().unwrap(),
+            &tag,
+            &commit,
+            "kernel",
+            &cache,
+            &step,
+        )
+        .expect("fetch");
+
+        // Wedge it exactly as a killed `git am` does.
+        git_in(&tree, &["config", "user.email", "t@t"]);
+        git_in(&tree, &["config", "user.name", "t"]);
+        std::fs::write(tree.join("Makefile"), "patched\n").unwrap();
+        git_in(&tree, &["commit", "-qam", "half-applied patch"]);
+        let wedged_head = git_in(&tree, &["rev-parse", "HEAD"]);
+        assert_ne!(wedged_head, commit);
+        let git_dir = tree.join(".git");
+        std::fs::create_dir_all(git_dir.join("rebase-apply")).unwrap();
+        std::fs::write(git_dir.join("rebase-apply").join("next"), "3\n").unwrap();
+        std::fs::write(tree.join("untracked-leftover"), "x").unwrap();
+
+        // The origin is gone, so this cannot be a re-fetch — the hit itself heals it.
+        std::fs::remove_dir_all(&origin).unwrap();
+        let step2 = Step::start(&sink, "test");
+        let healed = ensure_tree("unused://url", &tag, &commit, "kernel", &cache, &step2)
+            .expect("a wedged cache tree is recoverable, not fatal");
+
+        assert_eq!(healed, tree);
+        assert_eq!(git_in(&tree, &["rev-parse", "HEAD"]), commit);
+        assert_eq!(git_in(&tree, &["status", "--porcelain"]), "");
+        assert!(
+            !git_dir.join("rebase-apply").exists(),
+            "the interrupted-am state dir is gone, so is_clean() no longer reports dirty"
+        );
+        assert!(!tree.join("untracked-leftover").exists());
     }
 
     #[test]
