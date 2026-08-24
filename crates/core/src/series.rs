@@ -313,8 +313,11 @@ impl PatchSeries {
     /// commit pin exists: an old lock names an old `patches` commit whose tree still
     /// contains both.
     ///
-    /// Conservative: an entry whose range or envelope uses an operator this cannot
-    /// bound (`^`, `~`, `*`) is never reported, so a finding is always a real one.
+    /// Conservative: an entry whose range or envelope this cannot bound — an operator
+    /// outside `=`/`>`/`>=`/`<`/`<=`, or a comparator naming a prerelease — is never
+    /// reported, so a finding is always a real one. A partial comparator is bounded by
+    /// the component it omits (`=7.1` spans all of 7.1.x), which is what keeps a live
+    /// entry from being called dead.
     pub fn unreachable(&self, series: &str) -> Result<Vec<(Scope, &PatchEntry)>, ConfigError> {
         let mut dead = Vec::new();
         for scope in Scope::ALL {
@@ -533,6 +536,11 @@ pub fn load_series(patches_root: &Path, name: &str) -> Result<PatchSeries, Confi
                 kind: "series",
                 name: name.to_string(),
                 path: path.display().to_string(),
+                // The `patches` repo is not the config root, so there is no `list-*`
+                // over it and no inventory to compare against here. A series name
+                // comes from a kernel definition rather than a command line, so the
+                // path it was sought at is the actionable half.
+                similar: Vec::new(),
             }
         } else {
             ConfigError::Io {
@@ -585,10 +593,10 @@ fn parse_req(series: &str, range: &str) -> Result<VersionReq, ConfigError> {
 /// The half-open version span a [`VersionReq`] admits, used to decide whether two
 /// ranges can share a version.
 ///
-/// Only the bounding operators (`=`, `>`, `>=`, `<`, `<=`) are modelled;
-/// [`of`](Interval::of) returns `None` for `^`, `~`, or `*` rather than guess. That
-/// keeps the unreachable lint one-sided: it may miss a dead entry, but it never
-/// reports a live one.
+/// Only the bounding operators (`=`, `>`, `>=`, `<`, `<=`) over release versions are
+/// modelled; [`of`](Interval::of) returns `None` for `^`, `~`, `*`, or a comparator
+/// naming a prerelease rather than guess. That keeps the unreachable lint one-sided:
+/// it may miss a dead entry, but it never reports a live one.
 #[derive(Debug)]
 struct Interval {
     /// Inclusive lower bound; `None` is unbounded below.
@@ -598,18 +606,30 @@ struct Interval {
 }
 
 impl Interval {
-    /// Derive the interval, or `None` if any comparator uses an unmodelled operator.
+    /// Derive the interval, or `None` if any comparator is one this does not model.
     ///
-    /// A comparator's missing components read as zero (`<7.2` bounds at `7.2.0`),
-    /// matching how the series spell their ranges. `<=`/`=` are widened to the
-    /// next patch release so the upper bound stays exclusive throughout.
+    /// A partial comparator constrains only the components it names, so the span it
+    /// admits is bounded by the **omitted** one: `=7.1` is every 7.1.x, not 7.1.0
+    /// alone, and `<=7.1` reaches to the end of 7.1 rather than stopping at 7.1.1.
+    /// [`bumped`](Self::bumped) supplies that bound — the first version past
+    /// everything the comparator names — so `>`/`<=`/`=` all widen by whichever
+    /// component was left off, exactly as `semver` evaluates them. Getting this wrong
+    /// in the narrow direction would report a live entry as dead, which is the one
+    /// answer the lint must never give.
+    ///
+    /// A comparator carrying a prerelease (`>=7.2.0-rc1`) is declined: its bounds
+    /// order below the release core this models, so treating it as the core would
+    /// again narrow the span.
     fn of(req: &VersionReq) -> Option<Self> {
         use semver::Op;
         let mut lo: Option<Version> = None;
         let mut hi: Option<Version> = None;
         for c in &req.comparators {
+            if !c.pre.is_empty() {
+                return None;
+            }
             let at = Version::new(c.major, c.minor.unwrap_or(0), c.patch.unwrap_or(0));
-            let next = Version::new(at.major, at.minor, at.patch + 1);
+            let next = Self::bumped(c);
             let (l, h) = match c.op {
                 Op::GreaterEq => (Some(at), None),
                 Op::Greater => (Some(next), None),
@@ -627,6 +647,20 @@ impl Interval {
             }
         }
         Some(Interval { lo, hi })
+    }
+
+    /// The first version above everything `c` names — its least-significant *stated*
+    /// component incremented, the rest zeroed: `7.1.5` → `7.1.6`, `7.1` → `7.2.0`,
+    /// `7` → `8.0.0`.
+    ///
+    /// `patch` without `minor` is unrepresentable in a parsed comparator, so an absent
+    /// minor bumps the major whatever the patch holds.
+    fn bumped(c: &semver::Comparator) -> Version {
+        match (c.minor, c.patch) {
+            (Some(minor), Some(patch)) => Version::new(c.major, minor, patch + 1),
+            (Some(minor), None) => Version::new(c.major, minor + 1, 0),
+            (None, _) => Version::new(c.major + 1, 0, 0),
+        }
     }
 
     /// True when the two spans share at least one version.
@@ -913,6 +947,100 @@ mod tests {
             uboot: vec![],
         };
         assert!(p.unreachable("t").unwrap().is_empty());
+    }
+
+    #[test]
+    fn unreachable_declines_to_judge_a_prerelease_comparator() {
+        // A prerelease bound orders below its release core, so modelling it as the
+        // core would narrow the span and could call a live entry dead. Declined.
+        let p = PatchSeries {
+            applies_to_kernel: Some(">=7.2.0-rc1, <7.3".into()),
+            applies_to_uboot: None,
+            kernel: vec![ranged("k/010-x.patch", "<7.0")],
+            ffmpeg: vec![],
+            userspace: vec![],
+            uboot: vec![],
+        };
+        assert!(p.unreachable("t").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_partial_comparator_spans_the_component_it_omits() {
+        // The whole point of the lint is that it never calls a live entry dead, and a
+        // partial comparator is where that is easiest to get wrong: `=7.1` selects
+        // every 7.1.x, `<=7.1` reaches to the end of 7.1, and `=7`/`<=7` to the end of
+        // 7 — so each of these overlaps an envelope opening at 7.1.5 and none is dead.
+        for range in ["=7.1", "<=7.1", "=7", "<=7", ">7.0"] {
+            let p = PatchSeries {
+                applies_to_kernel: Some(">=7.1.5, <7.2".into()),
+                applies_to_uboot: None,
+                kernel: vec![ranged("k/010-live.patch", range)],
+                ffmpeg: vec![],
+                userspace: vec![],
+                uboot: vec![],
+            };
+            // The series selects the entry at a kernel the envelope admits...
+            assert!(
+                p.series_for(Scope::Kernel, "t", "v7.1.5", RangeMatch::Release)
+                    .unwrap()
+                    .contains(&"k/010-live.patch"),
+                "'{range}' does not select at v7.1.5"
+            );
+            // ...so the lint must not simultaneously call it unselectable.
+            assert!(
+                p.unreachable("t").unwrap().is_empty(),
+                "'{range}' reported unreachable while it selects"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_comparator_that_really_is_dead_is_still_reported() {
+        // Widening by the omitted component must not blunt the lint: these bounds all
+        // fall clear of an envelope spanning 7.8 to 8.0, so every one is genuinely
+        // dead — including `>7`, which starts at 8.0.0 and so sits *above* it.
+        for range in ["=7.1", "<=7.1", "<7", ">7"] {
+            let p = PatchSeries {
+                applies_to_kernel: Some(">=7.8, <8.0".into()),
+                applies_to_uboot: None,
+                kernel: vec![ranged("k/010-dead.patch", range)],
+                ffmpeg: vec![],
+                userspace: vec![],
+                uboot: vec![],
+            };
+            let dead: Vec<&str> = p
+                .unreachable("t")
+                .unwrap()
+                .iter()
+                .map(|(_, e)| e.path())
+                .collect();
+            assert_eq!(dead, ["k/010-dead.patch"], "'{range}' was not reported");
+        }
+    }
+
+    #[test]
+    fn a_partial_envelope_bounds_by_its_omitted_component_too() {
+        // The envelope goes through the same modelling, so a series declaring `=7.1`
+        // admits all of 7.1.x: an entry pinned into 7.1 is live, one capped below it
+        // is dead.
+        let p = PatchSeries {
+            applies_to_kernel: Some("=7.1".into()),
+            applies_to_uboot: None,
+            kernel: vec![
+                ranged("k/010-live.patch", ">=7.1.5"),
+                ranged("k/020-dead.patch", "<7.0"),
+            ],
+            ffmpeg: vec![],
+            userspace: vec![],
+            uboot: vec![],
+        };
+        let dead: Vec<&str> = p
+            .unreachable("t")
+            .unwrap()
+            .iter()
+            .map(|(_, e)| e.path())
+            .collect();
+        assert_eq!(dead, ["k/020-dead.patch"]);
     }
 
     #[test]

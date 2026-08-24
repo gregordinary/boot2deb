@@ -40,6 +40,41 @@ pub fn parse_size(input: &str) -> Result<u64, ConfigError> {
     value.checked_mul(multiplier).ok_or_else(|| invalid(input))
 }
 
+/// Render a byte count in the largest binary unit that divides it **exactly**,
+/// producing a string [`parse_size`] round-trips.
+///
+/// For a value resolution *derived* rather than read from config — the depthcharge
+/// rootfs offset, computed from the slot geometry. Everything else on a resolved
+/// build carries the author's own string, so a derived value should read like one
+/// instead of appearing as the lone bare byte count in the output.
+///
+/// Exact division only: `76MiB` for 79691776, but a value no unit divides stays
+/// bytes rather than being rounded, since these are offsets and a rounded offset is
+/// the wrong offset.
+///
+/// ```
+/// use boot2deb_core::size::{format_size, parse_size};
+/// assert_eq!(format_size(76 * 1024 * 1024), "76MiB");
+/// assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2GiB");
+/// assert_eq!(format_size(1536), "1536");        // 1.5KiB is not exact
+/// assert_eq!(format_size(0), "0");
+/// assert_eq!(parse_size(&format_size(44 * 1024 * 1024)).unwrap(), 44 * 1024 * 1024);
+/// ```
+pub fn format_size(bytes: u64) -> String {
+    const K: u64 = 1024;
+    for (unit, mult) in [
+        ("TiB", K * K * K * K),
+        ("GiB", K * K * K),
+        ("MiB", K * K),
+        ("KiB", K),
+    ] {
+        if bytes >= mult && bytes.is_multiple_of(mult) {
+            return format!("{}{unit}", bytes / mult);
+        }
+    }
+    bytes.to_string()
+}
+
 /// Byte multiplier for a trimmed unit suffix; `None` for an unrecognized unit.
 /// An empty suffix (or `b`) means raw bytes (×1).
 fn unit_multiplier(unit: &str) -> Option<u64> {
@@ -95,5 +130,21 @@ mod tests {
 
         // Parses as a number but overflows u64 on the unit multiply.
         assert!(parse_size("17000000000000G").is_err());
+    }
+
+    #[test]
+    fn format_size_picks_the_largest_exact_unit_and_round_trips() {
+        assert_eq!(format_size(44 * 1024 * 1024), "44MiB");
+        assert_eq!(format_size(76 * 1024 * 1024), "76MiB");
+        assert_eq!(format_size(32 * 1024), "32KiB");
+        assert_eq!(format_size(1024u64.pow(4)), "1TiB");
+        // Inexact values stay bytes: these are offsets, and a rounded offset is a
+        // different offset.
+        assert_eq!(format_size(1536), "1536");
+        assert_eq!(format_size(1), "1");
+        assert_eq!(format_size(0), "0");
+        for v in [0, 1, 512, 1536, 12 * 1024 * 1024, 76 * 1024 * 1024] {
+            assert_eq!(parse_size(&format_size(v)).unwrap(), v);
+        }
     }
 }

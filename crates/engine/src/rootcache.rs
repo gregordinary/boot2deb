@@ -46,24 +46,14 @@ use crate::signature::{Signature, SignatureBuilder};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// Stage-recipe version for the rootfs cache key. Bump when the node's build
-/// logic changes in a way that alters the produced tree for unchanged inputs (e.g.
-/// the overlay merge order or the generated-config shape), so a logic change forces
-/// a fresh bootstrap rather than a stale hit.
+/// Stage-recipe version for the rootfs cache key: the node's own logic, as an input.
 ///
-/// v4: the node generates the localization config (`/etc/locale.conf`,
-/// `/etc/locale.gen`, `/etc/localtime`, `/etc/default/keyboard`) into the pre-install
-/// overlay, so the `locales`/`keyboard-configuration`/`tzdata` packages configure
-/// themselves against it and `locale-gen` runs during the install — a different tree
-/// from the same inputs.
-///
-/// v6: the node generates `/etc/resolv.conf` and the initramfs drop-in
-/// (`/etc/initramfs-tools/conf.d/boot2deb.conf`), which changes both the tree and the
-/// initramfs built from it.
-///
-/// v7: the node bootstraps in-process under the subordinate identity map, so its
-/// trees carry real system ownership. Entries stored by any earlier version were
-/// produced differently and must not be served to it.
+/// An entry stored under a different version is never served — the key covers the
+/// declared inputs, and this covers everything about the node that turns those inputs
+/// into a tree. Bump it whenever a change alters the produced tree for unchanged
+/// inputs: the overlay merge order, which config files the node generates, how the
+/// bootstrap establishes ownership. Without the bump a hit would restore a tree the
+/// current node would not produce, which is the one thing a content cache must not do.
 ///
 /// The provisioner library counts as the node's logic: ferroday-cage decides the
 /// bootstrapped tree's dpkg state, apt configuration, and configure ordering, so a

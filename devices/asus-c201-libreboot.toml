@@ -1,0 +1,33 @@
+# devices/asus-c201-libreboot.toml — an ASUS Chromebook C201 running libreboot.
+#
+# The same hardware as asus-c201, with a different firmware in the SPI chip. That is
+# a device-layer difference and not a recipe one, because it changes the *geometry*
+# the image is laid out with: the libreboot depthcharge buffers a 32 MiB kernel
+# (CONFIG_KERNEL_SIZE = 0x2000000, unoverridden by veyron_speedy/defconfig) where the
+# stock firmware buffers 16 MiB, and a payload can only use a buffer the partition
+# holding it can also hold. So the profile and the slot size come as a pair, and the
+# pair is what this file is.
+#
+# What the pairing buys: a signed payload up to 32 MiB and a real FIT ramdisk node,
+# instead of 16 MiB with the initramfs address patched into every DTB's /chosen. That
+# is headroom for a debug initramfs carrying the display stack, which brings the panel
+# up seconds after Ctrl+U instead of after the rootfs mounts.
+#
+# What it costs: 32 MiB of image ahead of the rootfs (two slots at 32 MiB rather than
+# two at 16), and an image that boots ONLY on a libreboot unit. depthcharge-tools sets
+# hwid-match = None on this profile, so a running depthchargectl on a libreboot unit
+# resolves to the plain `speedy` profile and applies the stock constraints — which is
+# why asus-c201 is the default and boots on either firmware.
+extends     = "asus-c201"
+description = "ASUS Chromebook C201 running libreboot (RK3288, google,veyron-speedy)"
+
+# Everything else — the SoC, the boot method, the DTB, the kernel set, the suites, the
+# keymap — is the C201's and is inherited, including its overlay/ tree.
+
+[depthcharge]
+board            = "speedy-libreboot"
+supported_boards = ["speedy-libreboot"]
+
+# The slot the 32 MiB profile needs. Resolution derives the rootfs offset from it:
+# 12 MiB + 2 x 32 MiB = 76 MiB, where the stock geometry puts it at 44 MiB.
+kpart_size       = "32MiB"

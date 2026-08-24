@@ -39,7 +39,7 @@ pub fn resolve_device(
 
     // A board carrying its own device tree must actually build the DTB it boots;
     // check that here so a filename typo is a typed error rather than a kernel that
-    // builds fine and then finds no DTB at boot. §4.
+    // builds fine and then finds no DTB at boot.
     validate_device_dts(&device.device_dts, &device.kernel_dtb, device_name)?;
 
     // Out-of-tree modules: each name the board opted into loads its own `kmods/` layer
@@ -47,7 +47,9 @@ pub fn resolve_device(
     // `make M=` a foreign tree, an escaping local-patch path would read a file from
     // outside the config root, and a bad name would produce an unbuildable `.deb`. The
     // "distro kernel compiles nothing" case is caught separately in `resolve_kernel`,
-    // where the kernel choice is known.
+    // where the kernel choice is known. Validated here, before the u-boot-only early
+    // return, so a broken `kmods/<name>.toml` is an error on every path the board
+    // builds — not only the ones that would compile it.
     let device_kmods = resolve_kmods(root, &device.device_kmods, device_name)?;
 
     let kernel_cmdline = validate_kernel_cmdline(device.kernel_cmdline.as_deref())?;
@@ -102,9 +104,13 @@ pub fn resolve_device(
             boot,
             kernel_dtb: device.kernel_dtb,
             device_dts: device.device_dts,
-            // A u-boot-only build compiles no kernel, so no module builds; the field
-            // is carried for a uniform struct but the kmod stage never runs on it.
-            device_kmods,
+            // A u-boot-only build compiles no kernel, so it has nothing to build a
+            // module against and ships no `.ko`. The list is therefore empty rather
+            // than carried: the lock pins one entry per resolved kmod, and pinning a
+            // driver repo this deliverable never fetches would put a commit in the
+            // lock that no artifact of the build depends on — and state, in the
+            // support matrix, that a bootloader image carries a Wi-Fi driver.
+            device_kmods: Vec::new(),
             kernel_cmdline,
             dt_dir: soc.dt_dir,
             modules: soc.modules,
@@ -175,8 +181,10 @@ pub fn resolve_device(
         .unwrap_or_else(|| device.default_suite.clone());
     // A bad suite otherwise fails deep in the bootstrap; reject it here, and
     // the shape guard also keeps a leading-`-` suite from ever reaching the archive as
-    // a positional.
+    // a positional. Shape first, membership second, so a malformed string is named as
+    // malformed rather than reported as absent from a list it could never join.
     validate_suite(&suite)?;
+    check_suite_supported(device_name, &device.supported_suites, &suite)?;
     // A feature that builds the media-accel stack (`requires_media_accel`) needs the
     // SoC to supply the `[userspace]`/`[ffmpeg]` source trees its `.deb`s compile
     // from. Gate here so a bad composition fails at resolve, not deep in the build.
@@ -345,7 +353,7 @@ fn resolve_boot(
                 })?;
             // rkbin is layered: the SoC supplies the defaults (SoC-generic ATF, a
             // common-memory DDR TPL, and BL32 where the boot chain needs OP-TEE) and
-            // the device overrides per field (typically just the DDR TPL). §3.6.
+            // the device overrides per field (typically just the DDR TPL).
             let rkbin = resolve_rkbin(&soc.rkbin, &device.rkbin, device_name)?;
             for s in [&l.idbloader_offset, &l.uboot_itb_offset, &l.rootfs_offset] {
                 crate::size::parse_size(s)?;
@@ -401,9 +409,13 @@ fn resolve_boot(
             // itself config, so a device file could offer a profile whose *name* is
             // hostile.
             validate_board_profile(&board)?;
-            for s in [&l.kpart_offset, &l.kpart_size, &l.rootfs_offset] {
-                crate::size::parse_size(s)?;
-            }
+            // The device's slot size wins over the method's when it states one: the
+            // slot has to be at least as large as the payload the selected profile's
+            // firmware will accept, and only the device knows which firmware it is
+            // built for.
+            let kpart_size = dc.kpart_size.as_ref().unwrap_or(&l.kpart_size);
+            let kpart_offset_bytes = crate::size::parse_size(&l.kpart_offset)?;
+            let kpart_size_bytes = crate::size::parse_size(kpart_size)?;
             // The signing cmdline is the boot method's, then the base console gate,
             // then the device's extra arguments; the merged value must pass the same
             // rules (a device-authored `root=` is caught by validate_kernel_cmdline,
@@ -423,11 +435,28 @@ fn resolve_boot(
             }
             let flags =
                 crate::chromeos::kpart_flags(l.kpart_priority, l.kpart_tries, l.kpart_successful)?;
+            // The rootfs begins where the last slot ends. Derived rather than
+            // authored so widening a slot moves the rootfs with it instead of
+            // overlapping it; the image node re-checks alignment and fit against the
+            // same value. Rendered back through [`size::format_size`] so it reads like
+            // the authored offsets it sits beside rather than as a bare byte count.
+            //
+            // Checked arithmetic even though the slot count is already bounded above:
+            // the offset and size are author-supplied u64s, and a wrap here would
+            // place the rootfs *inside* the kernel slots.
+            let rootfs_offset = kpart_size_bytes
+                .checked_mul(u64::from(l.kpart_slots))
+                .and_then(|slots| kpart_offset_bytes.checked_add(slots))
+                .ok_or_else(|| ConfigError::KpartGeometryOverflow {
+                    offset: l.kpart_offset.clone(),
+                    size: kpart_size.clone(),
+                    slots: l.kpart_slots,
+                })?;
             Ok(ResolvedBoot::Depthcharge(ResolvedDepthchargeBoot {
                 board,
                 kpart: Kpart {
                     offset: l.kpart_offset.clone(),
-                    size: l.kpart_size.clone(),
+                    size: kpart_size.clone(),
                     slots: l.kpart_slots,
                     priority: l.kpart_priority,
                     tries: l.kpart_tries,
@@ -435,7 +464,7 @@ fn resolve_boot(
                     flags,
                 },
                 cmdline,
-                rootfs_offset: l.rootfs_offset.clone(),
+                rootfs_offset: crate::size::format_size(rootfs_offset),
             }))
         }
     }
@@ -691,7 +720,7 @@ fn resolve_kernel(
     }
 }
 
-/// Validate a device's loose device-tree sources against its `kernel_dtb` (§4).
+/// Validate a device's loose device-tree sources against its `kernel_dtb`.
 ///
 /// Two checks, both cheap and both fatal before any build work:
 ///  - **Shape**: every entry is a relative, `..`-free path to a `.dts` or `.dtsi`.
@@ -914,7 +943,7 @@ fn validate_kmod(k: &KmodLayer, name: &str) -> Result<(), ConfigError> {
 
 /// Merge the SoC-layer rkbin defaults with the device overrides (device wins per
 /// field) and validate the result: `atf` and `tpl` are required (a missing or
-/// blank one is a [`ConfigError::MissingBlob`]), `bl32` stays optional. §3.6.
+/// blank one is a [`ConfigError::MissingBlob`]), `bl32` stays optional.
 fn resolve_rkbin(
     soc: &RkbinLayer,
     device: &RkbinLayer,
@@ -1071,7 +1100,7 @@ pub fn resolve_recipe(
         suite: cli.suite.clone().or(recipe.suite),
         layout: cli.layout.or(recipe.layout),
         boot_method: cli.boot_method,
-        board: cli.board.clone(),
+        board: cli.board.clone().or(recipe.board),
         features: cli
             .features
             .clone()
@@ -1155,6 +1184,43 @@ fn validate_suite(suite: &str) -> Result<(), ConfigError> {
     } else {
         Err(ConfigError::InvalidSuite {
             value: suite.to_string(),
+        })
+    }
+}
+
+/// Check a well-formed suite against the device's declared
+/// [`supported_suites`](crate::model::DeviceLayer::supported_suites).
+///
+/// The list is validated on the way through rather than at load time, because a
+/// contradictory list only matters for a build that resolves a suite: a
+/// `deliverable = "uboot"` recipe never reaches here, and refusing to *load* the
+/// device would take its bootloader recipes down with it.
+///
+/// Pure, so it is unit-testable.
+fn check_suite_supported(
+    device_name: &str,
+    supported: &[String],
+    suite: &str,
+) -> Result<(), ConfigError> {
+    let wildcard = supported.iter().any(|s| s == ANY_SUITE);
+    if supported.is_empty() {
+        return Err(ConfigError::NoSupportedSuites {
+            device: device_name.to_string(),
+        });
+    }
+    if wildcard && supported.len() > 1 {
+        return Err(ConfigError::SuiteWildcardMixed {
+            device: device_name.to_string(),
+            supported: supported.join(", "),
+        });
+    }
+    if wildcard || supported.iter().any(|s| s == suite) {
+        Ok(())
+    } else {
+        Err(ConfigError::UnsupportedSuite {
+            device: device_name.to_string(),
+            suite: suite.to_string(),
+            supported: supported.join(", "),
         })
     }
 }
@@ -1511,13 +1577,15 @@ mod tests {
             ]
         );
         // The compat shims are bare filenames under `kmods/aic8800/patches/`, in apply
-        // order — the SDIO 7.1 cfg80211 port, then the two quieting patches.
+        // order — the SDIO 7.1 cfg80211 port, the two quieting patches, then the
+        // suspend fix.
         assert_eq!(
             kmod.local_patches,
             [
                 "0001-sdio-linux-7.1.patch",
                 "0002-quiet-log-level.patch",
-                "0003-quiet-bare-printk.patch"
+                "0003-quiet-bare-printk.patch",
+                "0004-suspend-quiesce-sdio.patch"
             ]
         );
         let fw = kmod
@@ -1564,6 +1632,26 @@ mod tests {
             err,
             ConfigError::UbootOnlyWithoutBootloader { .. }
         ));
+    }
+
+    #[test]
+    fn a_uboot_only_build_resolves_no_out_of_tree_modules() {
+        // The H96 declares an out-of-tree Wi-Fi driver, and its image recipes build
+        // one. Its u-boot-only deliverable compiles no kernel, so there is nothing to
+        // build a module against — and a resolved kmod would be pinned in the lock and
+        // published in the support matrix as a driver this bootloader image carries.
+        let root = repo_root();
+        let img = resolve_device(&root, "h96-max-m9", &Default::default()).unwrap();
+        assert!(
+            !img.device_kmods.is_empty(),
+            "the board is only a useful test if its image build has kmods"
+        );
+        let ov = Overrides {
+            deliverable: Deliverable::Uboot,
+            ..Default::default()
+        };
+        let uboot_only = resolve_device(&root, "h96-max-m9", &ov).unwrap();
+        assert!(uboot_only.device_kmods.is_empty());
     }
 
     #[test]
@@ -1622,10 +1710,12 @@ mod tests {
             Some("rk3576-util")
         );
         assert_eq!(b.layout, Layout::Split);
-        // And the same overrides are accepted on an image recipe of the same SoC, so
-        // the rejection is about the deliverable, not about the values.
+        // And an override from the rejected list is accepted on an image recipe of the
+        // same SoC, so the rejection is about the deliverable, not about the values.
+        // `--image-size` rather than `--suite`, because the RK3576 boards declare one
+        // supported suite and a second value would be refused for that reason instead.
         let ov = Overrides {
-            suite: Some("trixie".into()),
+            image_size: Some("8G".into()),
             ..Default::default()
         };
         assert!(resolve_recipe(&root, "h96-max-m9/forky", &ov).is_ok());
@@ -1724,6 +1814,56 @@ mod tests {
     }
 
     #[test]
+    fn a_suite_is_checked_against_the_devices_declared_set() {
+        let named = ["forky".to_string(), "trixie".to_string()];
+        assert!(check_suite_supported("dev", &named, "forky").is_ok());
+        assert!(check_suite_supported("dev", &named, "trixie").is_ok());
+        // A typo and a suite the board is genuinely not built for land in the same
+        // place, and both name the valid set rather than the path they probed.
+        for bad in ["forkey", "bookworm"] {
+            match check_suite_supported("dev", &named, bad) {
+                Err(ConfigError::UnsupportedSuite {
+                    suite, supported, ..
+                }) => {
+                    assert_eq!(suite, bad);
+                    assert_eq!(supported, "forky, trixie");
+                }
+                other => panic!("{bad} should be rejected, got {other:?}"),
+            }
+        }
+
+        // The wildcard admits anything well-formed, and is the whole list or none.
+        let any = [ANY_SUITE.to_string()];
+        for s in ["forky", "bookworm", "sid"] {
+            assert!(check_suite_supported("dev", &any, s).is_ok());
+        }
+        let mixed = [ANY_SUITE.to_string(), "forky".to_string()];
+        assert!(matches!(
+            check_suite_supported("dev", &mixed, "forky"),
+            Err(ConfigError::SuiteWildcardMixed { .. })
+        ));
+        assert!(matches!(
+            check_suite_supported("dev", &[], "forky"),
+            Err(ConfigError::NoSupportedSuites { .. })
+        ));
+    }
+
+    #[test]
+    fn a_shipped_board_refuses_a_suite_it_is_not_built_for() {
+        let root = repo_root();
+        // `sid` is a well-formed codename, so only the device's own claim can refuse
+        // it — which is the whole point of the axis being typed.
+        let ov = Overrides {
+            suite: Some("sid".into()),
+            ..Default::default()
+        };
+        match resolve_device(&root, "turing-rk1", &ov).unwrap_err() {
+            ConfigError::UnsupportedSuite { suite, .. } => assert_eq!(suite, "sid"),
+            other => panic!("expected UnsupportedSuite, got {other}"),
+        }
+    }
+
+    #[test]
     fn l10n_defaults_come_from_the_layer_that_determines_them() {
         let root = repo_root();
 
@@ -1757,9 +1897,28 @@ mod tests {
         // package builds the choice list `dpkg-reconfigure locales` offers.
         let root = repo_root();
 
+        // These assert the invariant, not the languages base.toml happens to ship: which
+        // locales are worth the image bytes is a policy that moves, and pinning the list
+        // here would only make widening it look like a regression.
         let base = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
-        assert_eq!(base.locales_generate, vec!["C.UTF-8", "en_US.UTF-8"]);
-        assert!(base.locales_generate.contains(&base.locale));
+        assert_eq!(
+            base.locales_generate.first(),
+            Some(&base.locale),
+            "the system locale leads the generated set"
+        );
+        assert_eq!(
+            base.locales_generate
+                .iter()
+                .filter(|l| **l == base.locale)
+                .count(),
+            1,
+            "and appears in it exactly once"
+        );
+        assert!(
+            base.locales_generate.iter().any(|l| l == "en_US.UTF-8"),
+            "en_US.UTF-8 is generated on every image, so an SSH client forwarding it \
+             lands on a locale the image carries"
+        );
 
         // An override the base never lists is generated anyway, and leads the set.
         let de = resolve_recipe(
@@ -1771,7 +1930,19 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(de.locales_generate, vec!["de_DE.UTF-8", "en_US.UTF-8"]);
+        assert_eq!(de.locales_generate.first().unwrap(), "de_DE.UTF-8");
+        assert_eq!(
+            de.locales_generate
+                .iter()
+                .filter(|l| *l == "de_DE.UTF-8")
+                .count(),
+            1,
+            "leading the set does not duplicate a base entry for the same locale"
+        );
+        assert!(
+            de.locales_generate.iter().any(|l| l == "en_US.UTF-8"),
+            "the base's extras still follow the overridden system locale"
+        );
 
         // Naming it in both places generates it once, not twice.
         let dup = resolve_recipe(
@@ -2201,7 +2372,7 @@ mod tests {
         std::fs::write(
             p.join("boot-methods/depthcharge.toml"),
             "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
-             kpart_slots = 2\nrootfs_offset = \"44MiB\"\nkpart_priority = 10\n\
+             kpart_slots = 2\nkpart_priority = 10\n\
              kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n",
         )
         .unwrap();
@@ -2222,7 +2393,8 @@ mod tests {
             "description = \"d\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
              supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/d.dtb\"\n\
              device_config_fragments = []\nsupported_kernels = [\"k\"]\n\
-             default_kernel = \"k\"\ndefault_suite = \"forky\"\ndefault_layout = \"combined\"\n\
+             default_kernel = \"k\"\nsupported_suites = [\"*\"]\n\
+             default_suite = \"forky\"\ndefault_layout = \"combined\"\n\
              hostname = \"d\"\nimage_size = \"4G\"\n\n[depthcharge]\nboard = \"d\"\n\
              supported_boards = [\"d\"]\n",
         )
@@ -2291,12 +2463,12 @@ mod tests {
     fn cli_override_beats_device_default() {
         let root = repo_root();
         let ov = Overrides {
-            suite: Some("sid".to_string()),
+            suite: Some("trixie".to_string()),
             layout: Some(Layout::Split),
             ..Default::default()
         };
         let b = resolve_device(&root, "turing-rk1", &ov).unwrap();
-        assert_eq!(b.suite.as_deref(), Some("sid"));
+        assert_eq!(b.suite.as_deref(), Some("trixie"));
         assert_eq!(b.layout, Layout::Split);
     }
 
@@ -2341,7 +2513,7 @@ mod tests {
         );
         assert_eq!(
             boot.rootfs_offset, "44MiB",
-            "behind both 16 MiB slots (12 + 16 + 16), not behind one"
+            "derived: behind both 16 MiB slots (12 + 16 + 16), not behind one"
         );
         assert!(
             !boot.cmdline.contains("root="),
@@ -2368,6 +2540,59 @@ mod tests {
         // The RK3288 has no Rockchip media-accel stack, so nothing pulls those sources.
         assert!(b.userspace.is_none());
         assert!(b.ffmpeg.is_none());
+    }
+
+    #[test]
+    fn the_libreboot_variant_pairs_its_profile_with_the_slot_that_profile_needs() {
+        // A board profile bounds the payload the *firmware* accepts; the slot bounds
+        // what the *image* can carry. Selecting the 32 MiB profile without the 32 MiB
+        // slot buys nothing, so the two travel together on one device — and the rootfs
+        // offset follows the slots rather than being authored beside them.
+        let root = repo_root();
+        let b = resolve_recipe(&root, "asus-c201-libreboot/forky", &Overrides::default()).unwrap();
+        let boot = b.depthcharge_boot().expect("a depthcharge board");
+        assert_eq!(boot.board, "speedy-libreboot");
+        assert_eq!(
+            boot.kpart.size, "32MiB",
+            "the device overrides the method's"
+        );
+        assert_eq!(boot.kpart.offset, "12MiB", "inherited from the method");
+        assert_eq!(
+            boot.rootfs_offset, "76MiB",
+            "derived from the wider slots: 12 + 32 + 32"
+        );
+
+        // Everything the variant does not restate is the C201's, including the DTB and
+        // the keymap — the point of extending rather than copying.
+        let stock = resolve_recipe(&root, "asus-c201/forky", &Overrides::default()).unwrap();
+        assert_eq!(b.kernel_dtb, stock.kernel_dtb);
+        assert_eq!(b.arch, stock.arch);
+        assert_eq!(b.rootfs_packages, stock.rootfs_packages);
+    }
+
+    #[test]
+    fn a_recipe_selects_a_board_profile_the_device_offers() {
+        // The recipe axis A3 added: a profile that needs no geometry of its own is a
+        // recipe field, checked against the device's `supported_boards` like a `--board`
+        // override. The stock C201 offers both profiles, so it can be asked for either.
+        let root = repo_root();
+        let recipe: Recipe = toml::from_str(
+            "device = \"asus-c201\"\nkernel = \"debian-armmp\"\nsuite = \"forky\"\n\
+             board = \"speedy-libreboot\"\nlayout = \"combined\"\nimage_size = \"2G\"\n",
+        )
+        .unwrap();
+        assert_eq!(recipe.board.as_deref(), Some("speedy-libreboot"));
+
+        // And a profile the device does not offer is refused rather than passed to
+        // depthchargectl to fail against its own database.
+        let ov = Overrides {
+            board: Some("mickey".into()),
+            ..Default::default()
+        };
+        match resolve_device(&root, "asus-c201", &ov).unwrap_err() {
+            ConfigError::UnknownBoardProfile { board, .. } => assert_eq!(board, "mickey"),
+            other => panic!("expected UnknownBoardProfile, got {other}"),
+        }
     }
 
     #[test]
@@ -2694,7 +2919,7 @@ mod tests {
         std::fs::write(
             p.join("boot-methods/depthcharge.toml"),
             "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
-             kpart_slots = 2\nrootfs_offset = \"44MiB\"\nkpart_priority = 10\n\
+             kpart_slots = 2\nkpart_priority = 10\n\
              kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n",
         )
         .unwrap();
@@ -2711,7 +2936,7 @@ mod tests {
             "description = \"d\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
              supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/d.dtb\"\n\
              device_config_fragments = []\nsupported_kernels = [\"k\"]\ndefault_kernel = \"k\"\n\
-             default_suite = \"forky\"\ndefault_layout = \"combined\"\nhostname = \"d\"\n\
+             supported_suites = [\"*\"]\ndefault_suite = \"forky\"\ndefault_layout = \"combined\"\nhostname = \"d\"\n\
              image_size = \"4G\"\n",
         )
         .unwrap();
@@ -2756,7 +2981,7 @@ mod tests {
         std::fs::write(
             p.join("boot-methods/depthcharge.toml"),
             "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
-             kpart_slots = 2\nrootfs_offset = \"44MiB\"\nkpart_priority = 10\n\
+             kpart_slots = 2\nkpart_priority = 10\n\
              kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n",
         )
         .unwrap();
@@ -2771,7 +2996,8 @@ mod tests {
             "description = \"d\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
              supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/d.dtb\"\n\
              device_config_fragments = [\"device/d\"]\nsupported_kernels = [\"k\"]\n\
-             default_kernel = \"k\"\ndefault_suite = \"forky\"\ndefault_layout = \"combined\"\n\
+             default_kernel = \"k\"\nsupported_suites = [\"*\"]\n\
+             default_suite = \"forky\"\ndefault_layout = \"combined\"\n\
              hostname = \"d\"\nimage_size = \"4G\"\n\n[depthcharge]\nboard = \"d\"\n\
              supported_boards = [\"d\"]\n",
         )
@@ -3009,7 +3235,7 @@ mod tests {
             p.join("boot-methods/depthcharge.toml"),
             format!(
                 "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
-                 kpart_slots = {slots}\nrootfs_offset = \"76MiB\"\nkpart_priority = 10\n\
+                 kpart_slots = {slots}\nkpart_priority = 10\n\
                  kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n"
             ),
         )
@@ -3025,7 +3251,7 @@ mod tests {
             "description = \"d\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
              supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/d.dtb\"\n\
              device_config_fragments = []\nsupported_kernels = [\"k\"]\ndefault_kernel = \"k\"\n\
-             default_suite = \"forky\"\ndefault_layout = \"combined\"\nhostname = \"d\"\n\
+             supported_suites = [\"*\"]\ndefault_suite = \"forky\"\ndefault_layout = \"combined\"\nhostname = \"d\"\n\
              image_size = \"4G\"\n\n[depthcharge]\nboard = \"speedy\"\n\
              supported_boards = [\"speedy\"]\n",
         )
@@ -3043,7 +3269,7 @@ mod tests {
         std::fs::write(
             p.join("boot-methods/depthcharge.toml"),
             "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
-             kpart_slots = 2\nrootfs_offset = \"44MiB\"\nkpart_priority = 10\n\
+             kpart_slots = 2\nkpart_priority = 10\n\
              kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n\
              idbloader_offset = \"32KiB\"\n",
         )
@@ -3221,6 +3447,9 @@ mod fixture_tests {
         device_exclude: &'static [&'static str],
         supported_kernels: &'static [&'static str],
         default_kernel: &'static str,
+        /// Defaults to the `*` wildcard so a test exercising some other axis need not
+        /// restate the suite list; the suite-axis tests set it explicitly.
+        supported_suites: &'static [&'static str],
         default_suite: &'static str,
         default_layout: &'static str,
         image_size: &'static str,
@@ -3241,6 +3470,7 @@ mod fixture_tests {
                 device_exclude: &[],
                 supported_kernels: &["k1"],
                 default_kernel: "k1",
+                supported_suites: &["*"],
                 default_suite: "forky",
                 default_layout: "combined",
                 image_size: "2G",
@@ -3329,11 +3559,13 @@ mod fixture_tests {
                     "description = \"dev\"\nsoc = \"rk3588\"\nboot_method = \"rockchip-rkbin\"\n\
                      supported_boot_methods = [\"rockchip-rkbin\"]\nuboot_defconfig = \"d_defconfig\"\n\
                      kernel_dtb = \"rockchip/d.dtb\"\ndevice_config_fragments = []\n\
-                     supported_kernels = {}\ndefault_kernel = {:?}\ndefault_suite = {:?}\n\
+                     supported_kernels = {}\ndefault_kernel = {:?}\n\
+                     supported_suites = {}\ndefault_suite = {:?}\n\
                      default_layout = {:?}\nhostname = \"dev\"\nimage_size = {:?}\n\
                      packages = {}\nexclude = {}\n\n[rkbin]\natf = \"atf.elf\"\ntpl = \"tpl.bin\"\n",
                     arr(self.supported_kernels),
                     self.default_kernel,
+                    arr(self.supported_suites),
                     self.default_suite,
                     self.default_layout,
                     self.image_size,

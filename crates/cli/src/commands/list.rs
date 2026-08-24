@@ -286,4 +286,29 @@ mod tests {
             .iter()
             .all(|n| root.kmod(n).is_ok()));
     }
+
+    #[test]
+    fn a_features_hardware_gate_names_only_hardware_that_exists() {
+        // `list-features` prints these gates verbatim, so a SoC or arch with no layer
+        // under the config root advertises a configuration nobody can select: no
+        // device resolves to it, so the feature it gates is unreachable. The enums are
+        // wider than the tree deliberately (a variant lands in `model.rs` before its
+        // layer does), which is exactly why the shipped config must not name one.
+        let root = repo_root();
+        for name in root.list("features").unwrap() {
+            let f = root.feature(&name).unwrap();
+            for soc in &f.requires_soc {
+                assert!(
+                    root.soc(*soc).is_ok(),
+                    "feature '{name}' requires_soc = {soc}, but there is no socs/{soc}.toml"
+                );
+            }
+            for arch in &f.requires_arch {
+                assert!(
+                    root.arch(*arch).is_ok(),
+                    "feature '{name}' requires_arch = {arch}, but there is no arches/{arch}.toml"
+                );
+            }
+        }
+    }
 }

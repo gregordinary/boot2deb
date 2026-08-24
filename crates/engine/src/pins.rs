@@ -435,6 +435,17 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
             }
         }
     }
+    // Presence before sources, as the userspace trees get: the ffmpeg pin exists iff the
+    // build compiles the media-accel stack, so an appearance or disappearance is the
+    // feature selection having moved since `update` — the same drift the userspace check
+    // below reports, and it must be caught on this axis too rather than only where both
+    // sides happen to agree.
+    presence(
+        &mut axes,
+        "ffmpeg",
+        lock.ffmpeg.is_some(),
+        build.ffmpeg.is_some(),
+    );
     if let (Some(lock_ff), Some(ff)) = (&lock.ffmpeg, &build.ffmpeg) {
         diff(
             &mut axes,
@@ -547,21 +558,13 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
     // Media-accel presence: the lock pins userspace/ffmpeg iff the resolved build
     // builds the stack. A drift here (a feature added or dropped since `update`)
     // would otherwise silently skip or demand the transcode nodes — re-pin instead.
-    if lock.userspace.is_some() != build.userspace.is_some() {
-        axes.push(format!(
-            "media-accel sources: lock {} vs resolved {}",
-            if lock.userspace.is_some() {
-                "present"
-            } else {
-                "absent"
-            },
-            if build.userspace.is_some() {
-                "present"
-            } else {
-                "absent"
-            },
-        ));
-    }
+    // The ffmpeg half is checked with its sources above.
+    presence(
+        &mut axes,
+        "media-accel sources",
+        lock.userspace.is_some(),
+        build.userspace.is_some(),
+    );
     // Out-of-tree modules: the lock pins one per `device_kmods` entry. A board that
     // added, removed, or renamed a kmod — or repointed one at a different repo — must
     // re-pin, since building the old commit from a URL that need not contain it is the
@@ -1123,6 +1126,29 @@ mod tests {
         match check_lock_consistency(&drifted, &build).unwrap_err() {
             EngineError::LockConfigDrift { axes } => assert_eq!(axes.len(), 2),
             other => panic!("expected LockConfigDrift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_media_accel_tree_appearing_or_vanishing_is_drift_on_both_axes() {
+        // The userspace and ffmpeg pins exist together — resolution gates both on the
+        // same media-accel feature — so both must be presence-checked, not only
+        // compared where the lock and the resolve happen to agree. A lock that lost one
+        // would otherwise reach a build that demands it.
+        let build = rk1_build();
+        for drop_axis in ["userspace", "ffmpeg"] {
+            let mut lock = matching_lock(&build);
+            match drop_axis {
+                "userspace" => lock.userspace = None,
+                _ => lock.ffmpeg = None,
+            }
+            match check_lock_consistency(&lock, &build).unwrap_err() {
+                EngineError::LockConfigDrift { axes } => assert!(
+                    axes.iter().any(|a| a.contains("absent")),
+                    "dropping {drop_axis} must report a presence drift: {axes:?}"
+                ),
+                other => panic!("expected LockConfigDrift, got {other:?}"),
+            }
         }
     }
 

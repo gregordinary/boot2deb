@@ -81,6 +81,11 @@ default_kernel          = "rk3576-mainline-7.1"
 # board-neutral loader and util tools are homed on the rk3576-generic device.
 supported_uboot_series = ["rk3576-display", "h96-max-m9-util"]
 default_uboot_series    = "rk3576-display"
+
+# forky only. The RK3576 landed in 6.13 and this board's Wi-Fi rides an out-of-tree
+# driver built against the kernel it ships with, so an older suite has neither the
+# SoC support nor a kernel the driver builds for.
+supported_suites        = ["forky"]
 default_suite           = "forky"
 default_layout          = "combined"               # combined | split
 hostname                = "h96-max-m9"

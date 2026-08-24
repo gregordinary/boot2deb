@@ -18,22 +18,27 @@ to type on a German keyboard.
 | field | layer | default | what it sets |
 |---|---|---|---|
 | `locale` | `base.toml` | `C.UTF-8` | `LANG` in `/etc/locale.conf` |
-| `locales_generate` | `base.toml` | `["en_US.UTF-8"]` | extra locales compiled into the image |
+| `locales_generate` | `base.toml` | 17 widely-spoken locales | extra locales compiled into the image |
 | `timezone` | `base.toml` | `UTC` | the `/etc/localtime` symlink |
 | `keymap` | `devices/<board>.toml` | none | `/etc/default/keyboard` (the XKB variables) |
 
-Each is overridable in a recipe, and on the command line with `--locale`,
-`--locale-gen` (repeatable), `--timezone`, and `--keymap`:
+Each is overridable in a recipe. `resolve` and `doctor` additionally take `--locale`,
+`--locale-gen` (repeatable), `--timezone`, and `--keymap`, so you can see what a
+different choice resolves to before committing it to config:
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-c201/forky \
+cargo run -p boot2deb-cli -- resolve asus-c201/forky \
     --locale de_DE.UTF-8 --timezone Europe/Berlin --keymap de
 ```
+
+`build` takes none of them, and that is the design: an image's localization comes from
+the config its lock was resolved against, so changing what an image ships means changing
+`base.toml` or the recipe — not a flag at build time.
 
 `resolve` shows what a build will bake in:
 
 ```
-locale       : C.UTF-8 (generated: C.UTF-8, en_US.UTF-8)
+locale       : C.UTF-8 (generated: C.UTF-8, en_US.UTF-8, en_GB.UTF-8, de_DE.UTF-8, ...)
 timezone     : UTC
 keymap       : us [pc105]
 ```
@@ -68,6 +73,29 @@ targets no one country, and a US locale is not a better default than any other.
 `en_US.UTF-8` is nevertheless **generated** into every image, and that is not a
 contradiction — see the next section.
 
+### Which languages ship
+
+Every image carries these compiled, in addition to the system locale:
+
+`en_US` `en_GB` `de_DE` `fr_FR` `es_ES` `it_IT` `nl_NL` `pt_BR` `pl_PL` `uk_UA` `ru_RU`
+`vi_VN` `ja_JP` `ko_KR` `zh_CN` `zh_HK` `zh_TW` — all `.UTF-8`.
+
+It is a set of widely-spoken languages, not a complete one, and it is deliberately not
+just English. Two reasons it can afford to be this wide:
+
+- **glibc's locale archive shares data aggressively.** Measured on forky/arm64,
+  `/usr/lib/locale/locale-archive` is 2.9 MiB with `C.UTF-8` + `en_US.UTF-8` alone, and
+  19.2 MiB with the full set — about 1 MiB per added language, not the several MiB a
+  standalone locale suggests.
+- **A locale can only be compiled at build time.** `locale-gen` runs during the image
+  build; no package a user installs later will generate one for them. So a first-run
+  desktop wizard offers exactly the languages the *image* chose, and a graphical
+  installer that lists one language is showing the truth about the image, not a bug in
+  the desktop.
+
+Anything outside the set is still one `dpkg-reconfigure locales` away with no network —
+see [Adding a language](#adding-a-language).
+
 ## The `Setting locale failed` warning
 
 SSH into a fresh board and you may see:
@@ -86,13 +114,13 @@ perl: warning: Please check that your locale settings:
 that locale was never generated on the target, `setlocale()` fails and every Perl-based
 tool says so.
 
-That is why `en_US.UTF-8` is in `locales_generate`: it makes the common client's
-forwarded locale resolve. It costs about 3 MiB.
+That is one of the reasons `en_US.UTF-8` leads `locales_generate`: it makes the common
+client's forwarded locale resolve.
 
-It is *not* a general fix — a `de_DE` client forwarding `de_DE.UTF-8` still warns, and
-chasing that by pre-generating more locales is whack-a-mole. The actual fix is that the
-locale is **changeable**, which is what the rest of this page is about. To silence it
-for one session without changing anything:
+The shipped set covers most clients, but it is not a general fix — a client forwarding a
+locale outside it still warns, and chasing every locale by pre-generating it is
+whack-a-mole. The actual fix is that the locale is **changeable**, which is what the rest
+of this page is about. To silence it for one session without changing anything:
 
 ```sh
 LANG=C.UTF-8 ssh board
@@ -156,6 +184,47 @@ The practical consequence: `dpkg-reconfigure locales` on the running board opens
 the files been written after the packages, they would still be correct on disk, and
 debconf would still be holding Debian's defaults underneath them.
 
+## Adding a language
+
+Two places to do it, depending on whether you want it on *this* board or on every image
+you build.
+
+**On a running board**, no network needed:
+
+```sh
+sudo dpkg-reconfigure locales        # tick the extra languages, keep or change the default
+```
+
+Tick as many as you like and leave the default alone if you only want the language
+*available* — a desktop's language picker reads the generated set, not the default. The
+new locales are compiled on the spot.
+
+**In an image**, so every board built from it ships the language: edit
+`locales_generate` in `base.toml` (all images) or in the recipe (that build point only).
+There is no build-time flag for it, deliberately — see [The knobs](#the-knobs). Each
+entry is a full locale name **with its codeset** —
+`sv_SE.UTF-8`, not `sv_SE`; resolution rejects the bare form rather than let
+`locale-gen` fail mid-build. The system `locale` is always generated whether or not it
+appears in the list, so it never needs repeating.
+
+Valid names come from `/usr/share/i18n/SUPPORTED` on any Debian system — it lists
+`language_TERRITORY.codeset` pairs, not language names, so search by the two-letter
+language code and take the `.UTF-8` line:
+
+```sh
+grep '^sv_.*UTF-8' /usr/share/i18n/SUPPORTED    # sv_FI.UTF-8, sv_SE.UTF-8
+```
+
+Budget roughly 1 MiB of image per added language, and check the result with
+`resolve` before building:
+
+```sh
+cargo run -p boot2deb-cli -- resolve h96-max-m9/forky | grep locale
+```
+
+There is no `locales-all` option here, and that is on purpose: it carries every locale
+Debian has for 231 MiB installed.
+
 ## Notes for the curious
 
 - **`/etc/locale.conf`, not `/etc/default/locale`.** Debian makes the latter a symlink
@@ -168,7 +237,7 @@ debconf would still be holding Debian's defaults underneath them.
   ungenerated. The `locales` package builds the choice list that `dpkg-reconfigure
   locales` offers for the *default locale* out of `/etc/locale.gen` — so a system locale
   missing from that file is one the user cannot see or re-select on the board.
-- **Not `locales-all`.** It carries every locale Debian has, at hundreds of MiB. The
+- **Not `locales-all`.** It carries every locale Debian has, at 231 MiB installed. The
   three packages boot2deb ships cost about 44 MiB installed (measured on forky/arm64),
-  plus ~3 MiB for the generated locale archive — call it ~47 MiB on the image. On a 2 GiB
-  rootfs that is a little over 2%, and it compresses well into the shipped `.img.xz`.
+  plus 19.2 MiB for the generated locale archive — call it ~63 MiB on the image. On a
+  2 GiB rootfs that is about 3%, and it compresses well into the shipped `.img.xz`.

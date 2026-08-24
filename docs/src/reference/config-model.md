@@ -11,10 +11,26 @@ A build is a single point across the axes a user selects:
   A device declares which kernels it supports and a default; override with `--kernel`
   (values from `list-kernels`). Some kernels are [not built at
   all](#kernels-are-compiled-or-installed).
-- **suite** — the Debian suite (e.g. `forky`, `sid`); override with `--suite`. The
+- **suite** — the Debian suite (e.g. `forky`, `trixie`); override with `--suite`. The
   image's `sources.list` carries the pockets that suite actually publishes, so a
   released suite gets `-security` and `-updates` alongside its base and `sid` gets
   neither.
+
+  Like the kernel, the suite is a **closed set per board**: a device declares
+  `supported_suites` and a `default_suite`, and anything else is a resolve-time error
+  naming the valid list. A suite is a claim about the board as much as about Debian —
+  the DT, the firmware, and the driver its Wi-Fi part needs all have to exist in that
+  suite's kernel — so an RK3576 board on `bookworm` is caught at resolve rather than
+  minutes into a bootstrap. A board whose config is genuinely suite-agnostic declares
+  `supported_suites = ["*"]`, which is the whole list or none of it: mixing the wildcard
+  with named codenames states two different claims and is rejected.
+- **u-boot** — the bootloader's own axis, off the kernel entirely: a device declares
+  `supported_uboot_series` and a default, and a recipe or `--uboot-series` picks one.
+  Selecting a series applies its `uboot`-scope patches over the compiled u-boot and
+  leaves the kernel tree untouched, so a bootloader variant costs a series rather than a
+  whole kernel definition. See
+  [The bootloader is its own axis](#the-bootloader-is-its-own-axis). Empty on a board
+  whose u-boot ships pristine, or whose firmware is not ours to build.
 - **layout** — how the disk image is packaged: `combined` (one whole-disk image, boot
   payload and rootfs on a single medium) or `split` (separate bootloader and rootfs
   images for a two-medium install); override with `--layout`. Only a boot method that
@@ -30,10 +46,10 @@ A build is a single point across the axes a user selects:
   the capability, and `turing-rk1/jellyfin` adds the app on top of it. Override with
   `--feature` (repeatable; values from `list-features`).
 
-Three more knobs round out a build without being headline axes: `--boot-method` (a
-device property, rarely overridden), `--board` (the depthcharge board profile — see
-[Boot methods describe different things](#boot-methods-describe-different-things)), and
-`--image-size`.
+Two more knobs round out a build without being headline axes: `--boot-method` (a device
+property, rarely overridden) and `--image-size`. The depthcharge **board profile** is a
+third — see [Board profiles](#board-profiles) — and, like the localization axes, it is
+resolved from config rather than set at build time.
 
 The system locale, timezone, and console keymap are resolved the same way, and are split
 across two layers for a reason: see
@@ -109,10 +125,22 @@ behaviour set* — its payload ceiling, and whether it loads a FIT ramdisk or ne
 initramfs address patched into every DTB. It describes **the firmware a unit runs**, not
 the board model: the same C201 takes one profile on stock firmware and another with
 libreboot installed. So the device declares a default and the profiles it supports, and
-`--board` selects among them.
+a recipe's `board` (or `resolve --board`) selects among them.
 
 The default is deliberately the *stock* profile: a stock-profile image boots on stock
 firmware **and** on a unit running libreboot, while the reverse is not true.
+
+The profile decides what goes into the signed kernel partition, so — like the locale and
+the keymap — it is config the image is resolved *from*, not a flag applied to a finished
+lock. `build` therefore takes no `--board`: selecting a non-default profile means a
+recipe that pins it. `resolve --board` previews one and names the file to write.
+
+A profile also bounds the payload its firmware will accept, and a bound the *partition*
+cannot hold buys nothing — so a device built for a wider profile states the matching
+`kpart_size` in its own `[depthcharge]` block, and resolution derives the rootfs offset
+from `kpart_offset + slots x kpart_size` so the partitions cannot disagree.
+`devices/asus-c201-libreboot.toml` is that pairing: it `extends = "asus-c201"` and states
+only `board = "speedy-libreboot"` and `kpart_size = "32MiB"`.
 
 ## Patch series belong to the kernel
 

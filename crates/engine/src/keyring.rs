@@ -17,7 +17,7 @@
 //!
 //! Parsing is pure-Rust and deliberately narrow: walk the packet stream (RFC 4880
 //! §4.2), take the v4 public-key packets, and fingerprint each as
-//! `SHA-1(0x99 ‖ len_be16 ‖ body)` (§12.2). Anything it does not understand — a
+//! `SHA-1(0x99 ‖ len_be16 ‖ body)` (RFC 4880 §12.2). Anything it does not understand — a
 //! partial length, an unknown key version — is an error, never a skipped packet, so a
 //! keyring this module cannot fully account for is never declared verified.
 

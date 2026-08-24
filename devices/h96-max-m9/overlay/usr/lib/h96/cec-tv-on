@@ -7,12 +7,14 @@
 # source. --active-source carries this adapter's own physical address, so read the
 # configured value back and pass it; when no CEC-capable sink is attached the address
 # is unconfigured (f.f.f.f) and the active-source announcement is skipped. cec-ctl
-# leaves the adapter configured between invocations, so the calls compose. Flags are
-# validated on hardware; override CEC_DEV if the adapter is not cec0.
+# leaves the adapter configured between invocations, so the calls compose. The OSD name
+# is what the TV lists this device as, and CEC caps it at 14 characters. Flags are
+# validated on hardware; override CEC_DEV or OSD_NAME if the defaults do not suit.
 set -eu
 CEC_DEV=${CEC_DEV:-/dev/cec0}
+OSD_NAME=${OSD_NAME:-H96 MAX M9}
 
-cec-ctl -d "$CEC_DEV" --playback >/dev/null
+cec-ctl -d "$CEC_DEV" --playback --osd-name "$OSD_NAME" >/dev/null
 cec-ctl -d "$CEC_DEV" --to 0 --image-view-on
 
 pa=$(cec-ctl -d "$CEC_DEV" | awk '/Physical Address/{print $NF; exit}')

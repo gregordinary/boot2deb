@@ -18,23 +18,24 @@ booted; otherwise the day the claim was last assessed. Re-pinning a lock under a
 `validated` claim is flagged by `boot2deb update`, because moving the pins retires
 the evidence the claim rested on.
 
-| Recipe | Device | Suite | Kernel | Patches | U-boot | Status | As of |
-|---|---|---|---|---|---|---|---|
-| `asus-c100p/forky` | asus-c100p | forky | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
-| `asus-c100p/trixie` | asus-c100p | trixie | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
-| `asus-c201/forky` | asus-c201 | forky | `debian-armmp` (from the suite) | none | none | `validated` | 2026-07-14 |
-| `asus-c201/mainline-forky` | asus-c201 | forky | `rk3288-mainline-7.1` `v7.1.3` | `rk3288-fixes` `main` (`eafaf606cc8c`) | none | `validated` | 2026-07-16 |
-| `asus-c201/trixie` | asus-c201 | trixie | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
-| `asus-chromebit-cs10/forky` | asus-chromebit-cs10 | forky | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
-| `asus-chromebit-cs10/trixie` | asus-chromebit-cs10 | trixie | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
-| `h96-max-m9/forky` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.5` | `rk3576-fixes`, `rk3576-npu` `main` (`a88875b3cab0`) | `rk3576-display` `main` (`a88875b3cab0`) | `expected` | 2026-07-29 |
-| `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.5` | `rk3576-fixes`, `rk3576-npu`, `rk3576-rga` `main` (`a88875b3cab0`) | `rk3576-display` `main` (`a88875b3cab0`) | `experimental` | 2026-07-29 |
-| `h96-max-m9/util` | h96-max-m9 | — | (u-boot only) | none | `h96-max-m9-util` `main` (`eafaf606cc8c`) | `expected` | 2026-07-22 |
-| `rk3576-evb1-v10/forky` | rk3576-evb1-v10 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes` `main` (`eafaf606cc8c`) | `rk3576-loader` `main` (`eafaf606cc8c`) | `expected` | 2026-07-20 |
-| `rk3576-generic/loader` | rk3576-generic | — | (u-boot only) | none | `rk3576-loader` `main` (`eafaf606cc8c`) | `expected` | 2026-07-21 |
-| `rk3576-generic/util` | rk3576-generic | — | (u-boot only) | none | `rk3576-util` `main` (`eafaf606cc8c`) | `expected` | 2026-07-21 |
-| `turing-rk1/forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`eafaf606cc8c`) | none | `validated` | 2026-07-16 |
-| `turing-rk1/jellyfin` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`eafaf606cc8c`) | none | `experimental` | 2026-07-20 |
-| `turing-rk1/media-accel-forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`eafaf606cc8c`) | none | `expected` | 2026-07-20 |
-| `turing-rk1/media-accel-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`eafaf606cc8c`) | none | `expected` | 2026-07-20 |
-| `turing-rk1/trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`eafaf606cc8c`) | none | `expected` | 2026-07-20 |
+| Recipe | Device | Suite | Kernel | Patches | U-boot | Modules | Status | As of |
+|---|---|---|---|---|---|---|---|---|
+| `asus-c100p/forky` | asus-c100p | forky | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
+| `asus-c100p/trixie` | asus-c100p | trixie | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
+| `asus-c201-libreboot/forky` | asus-c201-libreboot | forky | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-31 |
+| `asus-c201/forky` | asus-c201 | forky | `debian-armmp` (from the suite) | none | none | none | `validated` | 2026-07-14 |
+| `asus-c201/mainline-forky` | asus-c201 | forky | `rk3288-mainline-7.1` `v7.1.3` | `rk3288-fixes` `main` (`adfdc19d7caf`) | none | none | `validated` | 2026-07-16 |
+| `asus-c201/trixie` | asus-c201 | trixie | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
+| `asus-chromebit-cs10/forky` | asus-chromebit-cs10 | forky | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
+| `asus-chromebit-cs10/trixie` | asus-chromebit-cs10 | trixie | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
+| `h96-max-m9/forky` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.5` | `rk3576-fixes`, `rk3576-npu` `main` (`adfdc19d7caf`) | `rk3576-display` `main` (`adfdc19d7caf`) | `aic8800` `main` (`6e076049b719`) | `expected` | 2026-07-29 |
+| `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.5` | `rk3576-fixes`, `rk3576-npu`, `rk3576-rga` `main` (`adfdc19d7caf`) | `rk3576-display` `main` (`adfdc19d7caf`) | `aic8800` `main` (`6e076049b719`) | `experimental` | 2026-07-29 |
+| `h96-max-m9/util` | h96-max-m9 | — | (u-boot only) | none | `h96-max-m9-util` `main` (`adfdc19d7caf`) | none | `expected` | 2026-07-22 |
+| `rk3576-evb1-v10/forky` | rk3576-evb1-v10 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes` `main` (`adfdc19d7caf`) | `rk3576-loader` `main` (`adfdc19d7caf`) | none | `expected` | 2026-07-20 |
+| `rk3576-generic/loader` | rk3576-generic | — | (u-boot only) | none | `rk3576-loader` `main` (`adfdc19d7caf`) | none | `expected` | 2026-07-21 |
+| `rk3576-generic/util` | rk3576-generic | — | (u-boot only) | none | `rk3576-util` `main` (`adfdc19d7caf`) | none | `expected` | 2026-07-21 |
+| `turing-rk1/forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `validated` | 2026-07-16 |
+| `turing-rk1/jellyfin` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `experimental` | 2026-07-20 |
+| `turing-rk1/media-accel-forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `expected` | 2026-07-20 |
+| `turing-rk1/media-accel-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `expected` | 2026-07-20 |
+| `turing-rk1/trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `expected` | 2026-07-20 |

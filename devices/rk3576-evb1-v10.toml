@@ -21,6 +21,7 @@ default_kernel          = "rk3576-mainline-7.1"
 # posture (flash over USB); the display/util variants are available too.
 supported_uboot_series = ["rk3576-loader", "rk3576-display", "rk3576-util"]
 default_uboot_series    = "rk3576-loader"
+supported_suites        = ["forky"]                # the suite the RK3576 SoC path is built against
 default_suite           = "forky"
 default_layout          = "combined"
 hostname                = "rk3576-evb1"

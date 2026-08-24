@@ -26,15 +26,13 @@ use std::process::Command;
 const CLONE_STAGE_VERSION: u32 = 1;
 
 /// Stage-recipe version for the u-boot **output** signature (Tier-2 artifact cache):
-/// bump when the compile/package logic changes the produced payloads/deb in a
-/// way the folded inputs do not already capture.
-/// v2: the defconfig is now generated with the blob `make` variables, so a board with
-/// a BL32 resolves `OPTEE_LIB`/`HAS_TEE_IN_BUILD_ENV` at config time and produces a
-/// different `.config` — and payloads — than v1 did.
-/// v3: maskrom boards additionally stage the merged RKBOOT loader
-/// ([`MASKROM_LOADER`]), so the output set grew.
-/// v4: the `.deb` states its compressor rather than inheriting the host `dpkg`
-/// default, so a v3 entry may be a `zstd` archive where this build states `xz`.
+/// this stage's own logic, folded in as an input.
+///
+/// An entry stored under a different version is never restored. Bump it when the
+/// compile or package logic changes the produced payloads or `.deb` in a way the
+/// folded inputs do not already capture — a defconfig generated with different `make`
+/// variables, a change to which artifacts the stage emits, a different archive
+/// compressor.
 const OUTPUT_STAGE_VERSION: u32 = 4;
 
 /// Filesystem inputs for the u-boot stage.
@@ -52,11 +50,23 @@ pub struct UbootOptions<'a> {
     pub work_dir: &'a Path,
     /// Directory the produced boot payloads are staged into.
     pub out_dir: &'a Path,
+    /// The build point's
+    /// [artifact stem](boot2deb_core::buildpoint::BuildPoint::artifact_stem) — every
+    /// payload is published as `<stem>-<name>`. Two recipes on one board can pin
+    /// different u-boot series, so payloads named for the board alone would let the
+    /// second build's bootloader be folded into the first's image, silently.
+    pub stem: &'a str,
     /// Root of the Tier-2 artifact store ([`crate::artstore`]), or `None` to
     /// disable output caching. On a hit the payloads + deb are restored; on a miss
     /// they are stored after the build.
     pub store: Option<&'a Path>,
 }
+
+/// The raw-gap payloads as the u-boot build names them in its tree. Published under
+/// the build point's stem (`<stem>-idbloader.img`) by [`publish`], and stored in the
+/// artifact cache under these canonical names so one entry serves every point.
+const IDBLOADER: &str = "idbloader.img";
+const UBOOT_ITB: &str = "u-boot.itb";
 
 /// binman's maskrom USB download payload filenames, emitted only when the u-boot
 /// build enables `CONFIG_ROCKCHIP_MASKROM_IMAGE` (the `rk3576-loader` series does).
@@ -67,6 +77,16 @@ const MASKROM_USB472: &str = "u-boot-rockchip-usb472.bin";
 /// BootROM to RAM-boot this u-boot. Staged alongside the raw payloads (pyrographer
 /// sends the raw pair; rkdeveloptool takes the merged file).
 const MASKROM_LOADER: &str = "u-boot-rockchip-maskrom.bin";
+
+/// The Tier-2 restore's private staging dir, removed when it goes out of scope —
+/// including on the `?` of a publish that fails partway through it.
+struct RestoreDir(PathBuf);
+
+impl Drop for RestoreDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// The maskrom USB boot images: the CODE471/CODE472 payloads the BootROM download
 /// protocol takes to run this u-boot from RAM over USB with nothing written to
@@ -137,29 +157,52 @@ pub fn build_uboot(
     // Tier-2 output cache: restore the payloads + deb and skip the whole
     // clone/blob-verify/configure/compile when the output signature is stored. The
     // signature folds the blob hashes, so a hit implies the same verified blobs.
+    //
+    // Restored into a private staging dir rather than straight into `out_dir`: the
+    // store holds the payloads under the canonical names the build tree produces (so
+    // one entry serves every build point whose inputs match), while `out_dir` names
+    // them for this point. Staging also keeps [`maskrom_in`]'s discovery honest — it
+    // sees only what this signature restored, never a leftover from another build.
     let out_man = output_manifest(build, boot, lock, env, patches)?;
+    // Emptied before the probe and dropped after it, hit or miss, so a partial restore
+    // leaves nothing a later run could read as this signature's output.
+    let restored = RestoreDir(opts.work_dir.join("uboot-restore"));
+    let _ = std::fs::remove_dir_all(&restored.0);
     if let Some([idbloader, uboot_itb, deb]) = build::restore_stage_outputs(
         opts.store,
         "uboot",
         &out_man.signature(),
-        opts.out_dir,
+        &restored.0,
         &["idbloader", "uboot_itb", "deb"],
         &step,
     )?
     .as_deref()
     {
-        // The store restores every artifact under the signature into out_dir, so a
-        // board whose entry carries the maskrom images has them here already.
-        let maskrom = maskrom_in(opts.out_dir);
+        let idbloader = publish(opts, idbloader)?;
+        let uboot_itb = publish(opts, uboot_itb)?;
+        // The deb carries a package name and version of its own, so it publishes
+        // unrenamed — the artifact ledger, not the file name, scopes a `.deb`.
+        let deb = stage_artifact(opts.out_dir, deb)?;
+        let maskrom = match maskrom_in(&restored.0) {
+            Some(m) => Some(MaskromImages {
+                usb471: publish(opts, &m.usb471)?,
+                usb472: publish(opts, &m.usb472)?,
+                loader: publish(opts, &m.loader)?,
+            }),
+            None => None,
+        };
         step.progress(100);
         step.finish();
         return Ok(UbootArtifacts {
-            idbloader: idbloader.clone(),
-            uboot_itb: uboot_itb.clone(),
-            deb: deb.clone(),
+            idbloader,
+            uboot_itb,
+            deb,
             maskrom,
         });
     }
+    // The probe missed, or restored an entry missing a role: discard the staging dir
+    // rather than carry it through the compile below.
+    drop(restored);
 
     // Tier-1 reuse of the cloned+patched tree: a lock bump rebuilds it.
     // configure() distcleans + reconfigures a *reused* tree (keyed on the returned
@@ -226,16 +269,21 @@ pub fn build_uboot(
 
     // Store the payloads + deb under the output signature, plus the maskrom images
     // when this build produced them, so a Tier-2 restore reproduces the full set.
+    //
+    // Stored from the *tree*, not from the published copies: the signature keys on the
+    // inputs that shape the bytes, and the build point is not one of them, so an entry
+    // must carry the canonical names to be servable to any point whose inputs match.
     let mut outputs = vec![
-        ("idbloader", idbloader.as_path()),
-        ("uboot_itb", uboot_itb.as_path()),
-        ("deb", deb.as_path()),
+        ("idbloader", tree.join(IDBLOADER)),
+        ("uboot_itb", tree.join(UBOOT_ITB)),
+        ("deb", deb.clone()),
     ];
-    if let Some(m) = &maskrom {
-        outputs.push(("usb471", m.usb471.as_path()));
-        outputs.push(("usb472", m.usb472.as_path()));
-        outputs.push(("maskrom_loader", m.loader.as_path()));
+    if maskrom.is_some() {
+        outputs.push(("usb471", tree.join(MASKROM_USB471)));
+        outputs.push(("usb472", tree.join(MASKROM_USB472)));
+        outputs.push(("maskrom_loader", tree.join(MASKROM_LOADER)));
     }
+    let outputs: Vec<(&str, &Path)> = outputs.iter().map(|(r, p)| (*r, p.as_path())).collect();
     build::store_stage_outputs(opts.store, "uboot", &out_man.signature(), &outputs, &step)?;
     step.progress(100);
     step.finish();
@@ -432,16 +480,28 @@ fn blob_vars(cmd: &mut Command, blobs: &BlobPaths) {
     }
 }
 
-/// Stage the produced boot payloads out of the tree, returning
-/// `(idbloader.img, u-boot.itb)`.
+/// Publish one payload into `out_dir` as `<stem>-<its own name>`.
+///
+/// The one place a raw payload's published name is formed, so the build path and the
+/// cache-restore path cannot disagree about what the image node will look for.
+fn publish(opts: &UbootOptions, src: &Path) -> Result<PathBuf, EngineError> {
+    let name = src
+        .file_name()
+        .expect("a payload path has a file name")
+        .to_string_lossy();
+    build::stage_artifact_as(opts.out_dir, src, &format!("{}-{name}", opts.stem))
+}
+
+/// Stage the produced boot payloads out of the tree, returning the published
+/// `(<stem>-idbloader.img, <stem>-u-boot.itb)`.
 fn collect(
     opts: &UbootOptions,
     tree: &Path,
     step: &Step,
 ) -> Result<(PathBuf, PathBuf), EngineError> {
-    let idb_src = tree.join("idbloader.img");
-    let itb_src = tree.join("u-boot.itb");
-    for (what, path) in [("idbloader.img", &idb_src), ("u-boot.itb", &itb_src)] {
+    let idb_src = tree.join(IDBLOADER);
+    let itb_src = tree.join(UBOOT_ITB);
+    for (what, path) in [(IDBLOADER, &idb_src), (UBOOT_ITB, &itb_src)] {
         if !path.exists() {
             return Err(EngineError::ArtifactMissing {
                 what: what.into(),
@@ -449,9 +509,13 @@ fn collect(
             });
         }
     }
-    let idbloader = stage_artifact(opts.out_dir, &idb_src)?;
-    let uboot_itb = stage_artifact(opts.out_dir, &itb_src)?;
-    step.log("staged idbloader.img and u-boot.itb");
+    let idbloader = publish(opts, &idb_src)?;
+    let uboot_itb = publish(opts, &itb_src)?;
+    step.log(format!(
+        "staged {} and {}",
+        idbloader.display(),
+        uboot_itb.display()
+    ));
     Ok((idbloader, uboot_itb))
 }
 
@@ -468,9 +532,13 @@ fn collect_maskrom(
     match (src471.exists(), src472.exists()) {
         (false, false) => Ok(None),
         (true, true) => {
-            let usb471 = stage_artifact(opts.out_dir, &src471)?;
-            let usb472 = stage_artifact(opts.out_dir, &src472)?;
-            let loader = pack_maskrom_loader(opts.out_dir, tree, &usb471, &usb472)?;
+            // The merged loader is packed into the tree beside the two payloads it is
+            // made of, so all three reach the artifact cache under canonical names and
+            // publish through the same [`publish`] rename.
+            let src_loader = pack_maskrom_loader(tree, &src471, &src472)?;
+            let usb471 = publish(opts, &src471)?;
+            let usb472 = publish(opts, &src472)?;
+            let loader = publish(opts, &src_loader)?;
             step.log("staged maskrom USB boot images (usb471 + usb472 + merged loader)");
             Ok(Some(MaskromImages {
                 usb471,
@@ -490,16 +558,11 @@ fn collect_maskrom(
     }
 }
 
-/// Pack the two staged payloads into the merged RKBOOT loader
-/// ([`crate::build::rkboot`]) and write it to `out_dir`. The SoC's four-digit code
-/// (for the container `chipType`) is read from the built u-boot `.config`
-/// (`CONFIG_ROCKCHIP_RK<code>=y`), so the packer stays chip-agnostic.
-fn pack_maskrom_loader(
-    out_dir: &Path,
-    tree: &Path,
-    usb471: &Path,
-    usb472: &Path,
-) -> Result<PathBuf, EngineError> {
+/// Pack the two payloads into the merged RKBOOT loader
+/// ([`crate::build::rkboot`]) and write it into `tree`, beside them. The SoC's
+/// four-digit code (for the container `chipType`) is read from the built u-boot
+/// `.config` (`CONFIG_ROCKCHIP_RK<code>=y`), so the packer stays chip-agnostic.
+fn pack_maskrom_loader(tree: &Path, usb471: &Path, usb472: &Path) -> Result<PathBuf, EngineError> {
     let chip = rk_chip_code(tree).ok_or_else(|| EngineError::ArtifactMissing {
         what: "CONFIG_ROCKCHIP_RK<code> in .config".into(),
         location: tree.display().to_string(),
@@ -507,8 +570,8 @@ fn pack_maskrom_loader(
     let b471 = std::fs::read(usb471).map_err(|source| EngineError::io(usb471, source))?;
     let b472 = std::fs::read(usb472).map_err(|source| EngineError::io(usb472, source))?;
     let bytes = crate::build::rkboot::write_maskrom_loader(chip, &b471, &b472);
-    let dest = out_dir.join(MASKROM_LOADER);
-    let tmp = out_dir.join(format!(".{MASKROM_LOADER}.{}.partial", std::process::id()));
+    let dest = tree.join(MASKROM_LOADER);
+    let tmp = tree.join(format!(".{MASKROM_LOADER}.{}.partial", std::process::id()));
     std::fs::write(&tmp, &bytes).map_err(|source| {
         let _ = std::fs::remove_file(&tmp);
         EngineError::io(&tmp, source)
@@ -534,8 +597,12 @@ fn rk_chip_code(tree: &Path) -> Option<[u8; 4]> {
     })
 }
 
-/// The maskrom images already sitting in `dir` (a Tier-2 restore copies every stored
-/// artifact there), or `None` when this board's entry carried none.
+/// The maskrom images sitting in `dir` under their canonical names, or `None` when
+/// this board's build produced none.
+///
+/// Read from the Tier-2 restore's private staging dir, which holds exactly the
+/// artifacts one signature stored — so "this entry has no maskrom images" cannot be
+/// answered by another build's leftovers.
 fn maskrom_in(dir: &Path) -> Option<MaskromImages> {
     let usb471 = dir.join(MASKROM_USB471);
     let usb472 = dir.join(MASKROM_USB472);
@@ -1190,6 +1257,7 @@ mod tests {
                 blobs_dir: &dummy,
                 work_dir: &work,
                 out_dir: &work,
+                stem: "turing-rk1-forky",
                 store: None,
             };
             let boot = build.rkbin_boot().unwrap();
@@ -1227,6 +1295,7 @@ mod tests {
             blobs_dir: tmp.path(),
             work_dir: tmp.path(),
             out_dir: &out,
+            stem: "turing-rk1-forky",
             store: None,
         };
 
@@ -1243,23 +1312,41 @@ mod tests {
         ));
 
         // Both present (plus a .config naming the SoC): the pair is staged and the
-        // merged RKBOOT loader is packed from them.
+        // merged RKBOOT loader is packed from them. Published under the build point's
+        // stem, so a second recipe on this board does not overwrite them...
         std::fs::write(tree.join(MASKROM_USB472), b"472").unwrap();
         std::fs::write(tree.join(".config"), "CONFIG_ROCKCHIP_RK3576=y\n").unwrap();
         let m = collect_maskrom(&opts, &tree, &step).unwrap().unwrap();
-        assert_eq!(m.usb471, out.join(MASKROM_USB471));
-        assert_eq!(m.usb472, out.join(MASKROM_USB472));
-        assert_eq!(m.loader, out.join(MASKROM_LOADER));
+        assert_eq!(
+            m.usb471,
+            out.join(format!("turing-rk1-forky-{MASKROM_USB471}"))
+        );
+        assert_eq!(
+            m.usb472,
+            out.join(format!("turing-rk1-forky-{MASKROM_USB472}"))
+        );
+        assert_eq!(
+            m.loader,
+            out.join(format!("turing-rk1-forky-{MASKROM_LOADER}"))
+        );
         assert_eq!(std::fs::read(&m.usb472).unwrap(), b"472");
         // The loader is a real RKBOOT container ("LDR " tag) built from the payloads.
         assert_eq!(&std::fs::read(&m.loader).unwrap()[..4], b"LDR ");
-        // maskrom_in recovers the same trio a Tier-2 restore leaves in out_dir.
-        assert_eq!(maskrom_in(&out), Some(m));
+        // ...while all three keep their canonical names in the tree, which is what the
+        // artifact cache stores and what `maskrom_in` reads back on a restore.
+        assert_eq!(
+            maskrom_in(&tree),
+            Some(MaskromImages {
+                usb471: tree.join(MASKROM_USB471),
+                usb472: tree.join(MASKROM_USB472),
+                loader: tree.join(MASKROM_LOADER),
+            })
+        );
 
         // Without a chip code in .config, the payloads exist but the loader cannot
         // be packed — surfaced rather than silently skipped.
         std::fs::write(tree.join(".config"), "CONFIG_FOO=y\n").unwrap();
-        std::fs::remove_file(out.join(MASKROM_LOADER)).unwrap();
+        std::fs::remove_file(tree.join(MASKROM_LOADER)).unwrap();
         assert!(matches!(
             collect_maskrom(&opts, &tree, &step),
             Err(EngineError::ArtifactMissing { .. })

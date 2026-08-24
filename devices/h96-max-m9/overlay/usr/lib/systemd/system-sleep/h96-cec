@@ -1,0 +1,25 @@
+#!/bin/sh
+# Take the TV down and back up with the box.
+#
+# systemd runs this with "pre suspend" before sleeping and "post suspend" after
+# resuming. On the way down the TV is put into standby; on the way back up One
+# Touch Play wakes it and reclaims the input, so a single press of the remote's
+# POWER key moves box and TV together.
+#
+# This defers to the same opt-in the CEC units use: it acts only when
+# cec-tv-on.service is enabled, so a box that has not opted into driving the TV
+# is unaffected by a suspend. Failures are swallowed -- a TV that is absent,
+# unplugged or not CEC-capable must never block a suspend or a resume.
+set -u
+
+systemctl is-enabled --quiet cec-tv-on.service 2>/dev/null || exit 0
+
+case "$1" in
+pre)
+	/usr/lib/h96/cec-tv-standby >/dev/null 2>&1 || :
+	;;
+post)
+	/usr/lib/h96/cec-tv-on >/dev/null 2>&1 || :
+	;;
+esac
+exit 0

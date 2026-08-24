@@ -47,6 +47,11 @@ cargo run -p boot2deb-cli -- build turing-rk1/forky --image-size 4G
 cargo run -p boot2deb-cli -- build turing-rk1/forky --keep-raw --out-dir /mnt/scratch
 ```
 
+Artifacts are named for the whole build point — device and recipe
+(`turing-rk1/forky` → `turing-rk1-forky.img.xz`, `turing-rk1-forky-rootfs.tar`,
+`turing-rk1-forky-idbloader.img`) — so several recipes can share one `--out-dir`
+without one build's rootfs or bootloader being folded into another's image.
+
 Nothing here is recorded as a new point: the lock, the pins, and the support claim all
 still describe the recipe you named. `--stage` narrows the run to one stage, which is how
 you iterate on the image assembly without recompiling a kernel — see the

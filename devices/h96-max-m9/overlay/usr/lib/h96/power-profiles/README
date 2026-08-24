@@ -1,0 +1,31 @@
+What the remote's POWER key does.
+
+The image ships `suspend`, as /usr/lib/systemd/logind.conf.d/50-h96-power-key.conf.
+To choose another, put it in /etc under the same name -- that replaces the shipped
+drop-in rather than racing it -- and restart logind:
+
+    sudo cp /usr/lib/h96/power-profiles/power-key-<choice>.conf \
+            /etc/systemd/logind.conf.d/50-h96-power-key.conf
+    sudo systemctl restart systemd-logind
+
+  suspend   the shipped default: the box sleeps (s2idle) and the same key wakes
+            it. With cec-tv-on.service enabled the TV follows, via the h96-cec
+            sleep hook.
+  poweroff  systemd's upstream default: the key shuts the box down. Nothing on
+            this board can then power it back on -- there is no button, and the
+            remote's receiver is unpowered -- so the box needs its supply cycled.
+            That is why the image does not ship it.
+  ignore    the key does nothing, for a box driven entirely by a remote app.
+
+Reverting to the shipped behaviour is
+`sudo rm /etc/systemd/logind.conf.d/50-h96-power-key.conf`.
+
+Waking works because the receiver drives gpio0 PD3, the gpio-keys POWER input,
+which is a wakeup-source in the always-on domain. The receiver's USB side cannot
+wake anything: it does not set the remote-wakeup bit in its config descriptor,
+so it has no power/wakeup node at all.
+
+A USB keyboard or mouse can also wake the box, if its receiver does set that bit:
+/etc/udev/rules.d/70-h96-usb-wakeup.rules arms every HID device that has a
+power/wakeup node. `grep . /sys/bus/usb/devices/*/power/wakeup` shows which ones
+those are.

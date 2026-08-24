@@ -50,10 +50,19 @@ repo_patches = [
 #    on a Debian kernel, so the firmware-download trace and get_txpwr_max() survive both
 #    0002 and `loglevel=`. The tx-power one is the reason this exists: it is on
 #    rwnx_cfg80211_get_tx_power(), so it reprints for as long as the system runs.
+#  - 0004: makes system suspend survivable. `CONFIG_FDRV_NO_REG_SDIO` (below) skips
+#    `sdio_register_driver()`, so the `dev_pm_ops` that driver struct carries never
+#    attach and the driver's own suspend/resume never run -- leaving `is_bus_suspend`,
+#    the flag its three bus threads gate on, permanently clear. They then touch SDIO
+#    after the host is suspended, take a synchronous external abort, and die holding
+#    the MMC host claim, so resume blocks forever in `__mmc_claim_host()`. This
+#    delivers the same two callbacks from a PM notifier, which fires whether or not a
+#    bus driver is bound. Required for the board to wake from s2idle at all.
 local_patches = [
     "0001-sdio-linux-7.1.patch",
     "0002-quiet-log-level.patch",
     "0003-quiet-bare-printk.patch",
+    "0004-suspend-quiesce-sdio.patch",
 ]
 
 # `CONFIG_FDRV_NO_REG_SDIO=y` takes the driver's direct-probe SDIO path (the registered-

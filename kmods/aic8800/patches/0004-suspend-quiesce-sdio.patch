@@ -1,0 +1,100 @@
+aic8800: quiesce the SDIO bus across system suspend
+
+The board builds CONFIG_FDRV_NO_REG_SDIO, which takes the driver's direct-probe
+path because the registered-bus bind is rejected -EBUSY on a 7.1 kernel and
+wlan0 is never created otherwise. That path calls aicwf_sdio_probe_() itself and
+skips sdio_register_driver(), so aicwf_sdio_driver -- the only thing carrying
+.pm = &aicwf_sdio_pm_ops -- is never registered, and the suspend and resume
+callbacks it points at never run.
+
+Those callbacks are what set is_bus_suspend, the flag sdio_busirq_thread(),
+sdio_bustx_thread() and sdio_busrx_thread() all spin on before they touch the
+bus, and what stops the temperature poll. With nothing ever raising it the gates
+are dead code: the threads keep issuing SDIO after dpm_suspend_noirq has cut the
+dwmmc host clock, an MMIO read of the powered-down controller raises a
+synchronous external abort, and the thread dies still holding the MMC host
+claim. On resume mmc_sdio_resume() blocks forever in __mmc_claim_host(), so
+dpm_resume() never completes and userspace never thaws -- the box goes to sleep
+and does not come back.
+
+Deliver the same callbacks from a PM notifier, which fires on
+PM_SUSPEND_PREPARE/PM_POST_SUSPEND regardless of whether a bus driver is bound.
+The notifier is registered only on the direct-probe branch, so the registered-bus
+build keeps using dev_pm_ops alone and cannot suspend twice. Both callbacks are
+reused unchanged, so the chip-level power handling, the netif detach and the
+temperature timer keep their existing behaviour.
+
+diff --git a/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/aicwf_sdio.c b/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/aicwf_sdio.c
+index bbd54a0..62fdd43 100644
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/aicwf_sdio.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/aicwf_sdio.c
+@@ -15,6 +15,7 @@
+ #include <linux/semaphore.h>
+ #include <linux/debugfs.h>
+ #include <linux/kthread.h>
++#include <linux/suspend.h>
+ #include "aicwf_txrxif.h"
+ #include "aicwf_sdio.h"
+ #include "sdio_host.h"
+@@ -1227,6 +1228,45 @@ void aicwf_sdio_probe_(struct sdio_func *func, const struct sdio_device_id *id);
+ void aicwf_sdio_remove_(struct sdio_func *func);
+ #endif
+ 
++/*
++ * The direct-probe path never registers aicwf_sdio_driver, so the dev_pm_ops it
++ * carries are never attached and aicwf_sdio_suspend()/aicwf_sdio_resume() never
++ * run. Their job is to raise is_bus_suspend, which is the flag the bus threads
++ * spin on before touching SDIO, and to stop the temperature poll. Without it
++ * those threads keep issuing SDIO after the host has been suspended, take a
++ * synchronous external abort, and die holding the MMC host claim -- so the
++ * resume path blocks forever in __mmc_claim_host. Deliver the same callbacks
++ * from a PM notifier instead, which fires whether or not a bus driver is bound.
++ */
++static int aicwf_sdio_pm_notify(struct notifier_block *nb, unsigned long action,
++				void *ptr)
++{
++	struct sdio_func *func = get_sdio_func();
++	int ret;
++
++	if (!func)
++		return NOTIFY_DONE;
++
++	switch (action) {
++	case PM_SUSPEND_PREPARE:
++		ret = aicwf_sdio_suspend(&func->dev);
++		if (ret)
++			sdio_err("pm notifier suspend failed: %d\n", ret);
++		break;
++	case PM_POST_SUSPEND:
++		ret = aicwf_sdio_resume(&func->dev);
++		if (ret)
++			sdio_err("pm notifier resume failed: %d\n", ret);
++		break;
++	}
++
++	return NOTIFY_DONE;
++}
++
++static struct notifier_block aicwf_sdio_pm_nb = {
++	.notifier_call = aicwf_sdio_pm_notify,
++};
++
+ void aicwf_sdio_register(void)
+ {
+ #if 0
+@@ -1271,6 +1311,7 @@ void aicwf_sdio_register(void)
+ 		}
+ 	} else {
+ 		aicwf_sdio_probe_(get_sdio_func(), NULL);
++		register_pm_notifier(&aicwf_sdio_pm_nb);
+ 	}
+ }
+ 
+@@ -1300,6 +1341,7 @@ void aicwf_sdio_exit(void)
+ 	if(!get_fdrv_no_reg_sdio()) {
+ 		sdio_unregister_driver(&aicwf_sdio_driver);
+ 	} else {
++		unregister_pm_notifier(&aicwf_sdio_pm_nb);
+ 		aicwf_sdio_remove_(get_sdio_func());
+ 	}
+ 

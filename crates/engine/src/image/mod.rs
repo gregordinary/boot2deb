@@ -83,6 +83,12 @@ pub struct ImageOptions<'a> {
     pub boot: BootPayload<'a>,
     /// Directory the finished image(s) are written to.
     pub out_dir: &'a Path,
+    /// The build point's
+    /// [artifact stem](boot2deb_core::buildpoint::BuildPoint::artifact_stem) — the
+    /// finished images are `<stem>.img`, `<stem>-boot.img`, `<stem>-rootfs.img`. Named
+    /// for the point rather than the board because a board has several recipes and
+    /// only one of their images can hold a given file name.
+    pub stem: &'a str,
     /// Scratch directory for the intermediate ext4 partition image.
     pub work_dir: &'a Path,
     /// ext4 volume label and GPT partition name (≤ 16 bytes), e.g. `rootfs`.
@@ -163,14 +169,14 @@ impl ImageIdentity {
 pub enum ImageOutput {
     /// One whole-disk image with the bootloader in the raw gap.
     Combined {
-        /// The `<device>.img` file.
+        /// The `<stem>.img` file.
         image: PathBuf,
     },
     /// Separate bootloader and rootfs images for a two-medium install.
     Split {
-        /// `<device>-boot.img` — raw bootloader payloads for the boot medium.
+        /// `<stem>-boot.img` — raw bootloader payloads for the boot medium.
         bootloader: PathBuf,
-        /// `<device>-rootfs.img` — GPT + rootfs partition, bootloader-agnostic.
+        /// `<stem>-rootfs.img` — GPT + rootfs partition, bootloader-agnostic.
         rootfs: PathBuf,
     },
 }
@@ -308,7 +314,7 @@ pub fn build_image(
 
     let output = match build.layout {
         Layout::Combined => {
-            let image = opts.out_dir.join(format!("{}.img", build.device));
+            let image = opts.out_dir.join(format!("{}.img", opts.stem));
             assemble_disk(&image, &geom, &ext4, kpart.as_deref(), true, opts, &step)?;
             step.log(format!("wrote combined image {}", image.display()));
             ImageOutput::Combined { image }
@@ -333,10 +339,10 @@ pub fn build_image(
                 });
             };
             // Rootfs image: GPT + rootfs partition, empty raw gap (bootloader-agnostic).
-            let rootfs = opts.out_dir.join(format!("{}-rootfs.img", build.device));
+            let rootfs = opts.out_dir.join(format!("{}-rootfs.img", opts.stem));
             assemble_disk(&rootfs, &geom, &ext4, None, false, opts, &step)?;
             // Bootloader image: just the raw-gap payloads on a gap-sized medium.
-            let bootloader = opts.out_dir.join(format!("{}-boot.img", build.device));
+            let bootloader = opts.out_dir.join(format!("{}-boot.img", opts.stem));
             assemble_bootloader(&bootloader, &geom, idbloader, uboot_itb, &step)?;
             step.log(format!(
                 "wrote split images {} + {}",
@@ -386,11 +392,14 @@ pub fn build_image(
 /// Unlike [`build_image`] this needs no rootfs, so a `--stage uboot` run can emit
 /// a directly-flashable boot medium — an eMMC (or SPI) that chain-loads the OS
 /// from a separate disk — without bootstrapping a Debian rootfs first. The image
-/// is the same `<device>-boot.img` the [`Split`](Layout::Split) layout produces.
+/// is the same `<stem>-boot.img` the [`Split`](Layout::Split) layout produces, named
+/// for the build point's
+/// [artifact stem](boot2deb_core::buildpoint::BuildPoint::artifact_stem).
 /// It is left raw and uncompressed: gap-sized (a few MiB) and written straight to
 /// the medium, so `.xz` would only add a decompress step before flashing.
 pub fn build_bootloader_image(
     build: &ResolvedBuild,
+    stem: &str,
     idbloader: &Path,
     uboot_itb: &Path,
     out_dir: &Path,
@@ -404,7 +413,7 @@ pub fn build_bootloader_image(
         ("u-boot.itb", file_len(uboot_itb)?),
     ])?;
     std::fs::create_dir_all(out_dir).map_err(|s| EngineError::io(out_dir, s))?;
-    let image = out_dir.join(format!("{}-boot.img", build.device));
+    let image = out_dir.join(format!("{stem}-boot.img"));
     assemble_bootloader(&image, &geom, idbloader, uboot_itb, &step)?;
     step.log(format!("wrote bootloader image {}", image.display()));
     step.finish();
@@ -827,11 +836,12 @@ mod tests {
 
         let build = small_rk1_build("192MiB");
         let sink = |_: crate::event::Event| {};
-        let image = build_bootloader_image(&build, &idb, &itb, &out, &sink).unwrap();
+        let image =
+            build_bootloader_image(&build, "turing-rk1-forky", &idb, &itb, &out, &sink).unwrap();
 
-        // Named after the device, and sized to the raw gap (rootfs offset = 16 MiB),
-        // NOT the 48 MiB image size — this medium carries only the bootloader.
-        assert_eq!(image.file_name().unwrap(), "turing-rk1-boot.img");
+        // Named after the build point, and sized to the raw gap (rootfs offset =
+        // 16 MiB), NOT the 48 MiB image size — this medium carries only the bootloader.
+        assert_eq!(image.file_name().unwrap(), "turing-rk1-forky-boot.img");
         assert_eq!(std::fs::metadata(&image).unwrap().len(), 16 * 1024 * 1024);
 
         let bytes = std::fs::read(&image).unwrap();
@@ -870,6 +880,7 @@ mod tests {
                 uboot_itb: &itb,
             },
             out_dir: &out,
+            stem: "turing-rk1-forky",
             work_dir: &work,
             rootfs_label: "rootfs",
             identity: ImageIdentity::derive("test-seed", "turing-rk1"),
@@ -960,6 +971,7 @@ mod tests {
                     uboot_itb: &itb,
                 },
                 out_dir: out,
+                stem: "turing-rk1-forky",
                 work_dir: &out.join("work"),
                 rootfs_label: "rootfs",
                 identity: ImageIdentity::derive("test-seed", "turing-rk1"),
@@ -1014,6 +1026,7 @@ mod tests {
                 uboot_itb: &itb,
             },
             out_dir: &tmp.path().join("out"),
+            stem: "turing-rk1-forky",
             work_dir: &tmp.path().join("work"),
             rootfs_label: "rootfs",
             identity: ImageIdentity::derive("test-seed", "turing-rk1"),

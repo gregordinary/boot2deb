@@ -30,6 +30,11 @@ default_kernel          = "rk3576-mainline-7.1"
 # bring-up; util = the recovery/diagnostic tool. Both are board-neutral.
 supported_uboot_series = ["rk3576-loader", "rk3576-util"]
 default_uboot_series    = "rk3576-loader"
+
+# This device exists to host u-boot-only recipes, which resolve no suite at all. The
+# axis is still declared, because resolving the device directly does produce an image
+# point and that point should answer the same question every other board answers.
+supported_suites        = ["forky"]
 default_suite           = "forky"
 default_layout          = "combined"
 hostname                = "rk3576-generic"

@@ -1,11 +1,14 @@
 #!/bin/sh
 # TV remote drives the box: run a CEC follower with remote-control passthrough, so
-# the TV's own remote generates input events on this box. Configure the adapter as a
-# Playback device with RC passthrough, then run cec-follower in the foreground for
-# the life of the service (it keeps the device responsive to polls and power-status
-# queries). Flags validated on hardware; override CEC_DEV if the adapter is not cec0.
+# the TV's own remote generates input events on this box. Configuring the adapter as
+# a Playback device already sets the Allow-RC-Passthrough flag, so the follower needs
+# no further setup; cec-follower then runs in the foreground for the life of the
+# service, answering the polls, power-status and OSD-name queries a TV sends a device
+# it has discovered. Flags validated on hardware; override CEC_DEV or OSD_NAME if the
+# defaults do not suit.
 set -eu
 CEC_DEV=${CEC_DEV:-/dev/cec0}
+OSD_NAME=${OSD_NAME:-H96 MAX M9}
 
-cec-ctl -d "$CEC_DEV" --playback --rc-passthrough >/dev/null
+cec-ctl -d "$CEC_DEV" --playback --osd-name "$OSD_NAME" >/dev/null
 exec cec-follower -d "$CEC_DEV"

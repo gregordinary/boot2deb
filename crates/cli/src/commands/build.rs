@@ -50,6 +50,10 @@ pub(crate) fn run(
     let point = crate::config::build_point(recipe, args.features.clone())?;
     let reference = point.reference();
     let recipe = reference.as_str();
+    // Every artifact this build publishes is named for the point rather than the
+    // board, so several recipes can share one `--out-dir` without folding each
+    // other's rootfs or bootloader into an image.
+    let stem = point.artifact_stem();
     let lock = root
         .lock(recipe)
         .map_err(|err| -> Box<dyn std::error::Error> {
@@ -160,6 +164,31 @@ pub(crate) fn run(
     // for explicitly.
     let compiles_kernel = resolved.compiles_kernel();
     let builds_uboot = resolved.rkbin_boot().is_some();
+    // A `--kmod-src` naming no declared module would be silently ignored — the kmod
+    // node looks its overrides up by name and falls back to the locked source, so a
+    // mistyped name would fetch from upstream and report nothing. Checked here, before
+    // any stage runs, so the answer does not arrive after a kernel compile.
+    if let Some((name, _)) = args
+        .kmod_srcs
+        .iter()
+        .find(|(n, _)| !resolved.device_kmods.iter().any(|k| &k.name == n))
+    {
+        let declared: Vec<&str> = resolved
+            .device_kmods
+            .iter()
+            .map(|k| k.name.as_str())
+            .collect();
+        return Err(format!(
+            "--kmod-src names '{name}', which recipe '{recipe}' does not build. \
+             Declared modules: {}",
+            if declared.is_empty() {
+                "none".to_string()
+            } else {
+                declared.join(", ")
+            }
+        )
+        .into());
+    }
 
     let kernel_src = match (
         &args.kernel_src,
@@ -542,7 +571,7 @@ pub(crate) fn run(
         let local_patches = kmod_local_patches(root, &resolved)?;
         let opts = kmod::KmodOptions {
             kernel,
-            sources: &[],
+            sources: &args.kmod_srcs,
             local_patches: &local_patches,
             work_dir: &work_dir,
             out_dir: &out_dir,
@@ -563,6 +592,7 @@ pub(crate) fn run(
             blobs_dir: &blobs_dir,
             work_dir: &work_dir,
             out_dir: &out_dir,
+            stem: &stem,
             store: artifact_store.as_deref(),
         };
         let artifacts = uboot::build_uboot(&resolved, &lock, &opts, &build_env, &sink)?;
@@ -580,7 +610,7 @@ pub(crate) fn run(
         }
         record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
         // A uboot-only build also emits a standalone, directly-flashable bootloader
-        // image (`<device>-boot.img`) — the eMMC/SPI medium for a split install
+        // image (`<stem>-boot.img`) — the eMMC/SPI medium for a split install
         // whose OS lives on another disk. Emitted for an explicit `--stage uboot`, and
         // for a u-boot-only recipe's full build (which has no image stage to fold u-boot
         // into). An image build's `--stage all` skips it: the image stage folds u-boot
@@ -588,6 +618,7 @@ pub(crate) fn run(
         if matches!(args.stage, StageArg::Uboot) || !resolved.produces_image() {
             let boot_img = image::build_bootloader_image(
                 &resolved,
+                &stem,
                 &artifacts.idbloader,
                 &artifacts.uboot_itb,
                 &out_dir,
@@ -752,7 +783,11 @@ pub(crate) fn run(
         // kernel release), so they too are installed by discovered name from the ledger.
         let mut extra_packages = kernel_packages(&kernel_image_deb, &repo_debs)?;
         extra_packages.extend(kmod_packages(&kmod_debs, &repo_debs)?);
-        let manifest_out = out_dir.join(&rootfs_pin.manifest);
+        // Published under the point's stem, not the lock's `manifest` name: that name
+        // is a bare leaf, correct beside the lock in its device folder and ambiguous in
+        // a flat output directory two boards' `forky` recipes can share. The committed
+        // copy `--save-manifest` writes keeps the lock's name.
+        let manifest_out = out_dir.join(format!("{stem}.pkgs.lock"));
         // Resolve each feature apt source's signing keyring to the vendored host
         // path the bootstrap verifies the repo against. Existence was already gated at
         // preflight; this stage-time resolution is the backstop for a keyring
@@ -775,6 +810,7 @@ pub(crate) fn run(
             image_identity: &system_identity,
             rootfs_partuuid: identity.rootfs_partuuid,
             out_dir: &out_dir,
+            stem: &stem,
             // The build's own scratch tree: the provisioned userland is multi-GB and
             // carries xattrs, so it must not land on whatever `TMPDIR` names.
             scratch_dir: &work_dir,
@@ -829,7 +865,7 @@ pub(crate) fn run(
         // same auto-discovery the u-boot payloads get below.
         let rootfs_tar = rootfs_tar
             .clone()
-            .unwrap_or_else(|| out_dir.join(format!("{}-rootfs.tar", resolved.device)));
+            .unwrap_or_else(|| out_dir.join(format!("{stem}-rootfs.tar")));
         if !rootfs_tar.exists() {
             return Err(format!(
                 "rootfs tar not found at {} — run `build {recipe} --stage rootfs` first (or pass --rootfs-tar)",
@@ -846,17 +882,17 @@ pub(crate) fn run(
         // by the u-boot stage; a depthcharge board's signed kernel needs nothing here,
         // because it is already inside the rootfs tarball (`depthchargectl` built it
         // there, so the same tool re-signs it on the running board).
-        let idbloader = out_dir.join("idbloader.img");
-        let uboot_itb = out_dir.join("u-boot.itb");
+        let idbloader = out_dir.join(format!("{stem}-idbloader.img"));
+        let uboot_itb = out_dir.join(format!("{stem}-u-boot.itb"));
         // Matched on the resolved boot method, not on a boolean, so adding a third
         // method is a compile error here rather than a silent route into the wrong arm.
         let boot = match &resolved.boot {
             ResolvedBoot::RockchipRkbin(_) => {
-                for (what, p) in [("idbloader.img", &idbloader), ("u-boot.itb", &uboot_itb)] {
+                for p in [&idbloader, &uboot_itb] {
                     if !p.exists() {
                         return Err(format!(
-                            "{what} not found in {} — run `build {recipe} --stage uboot` first",
-                            out_dir.display()
+                            "{} not found — run `build {recipe} --stage uboot` first",
+                            p.display()
                         )
                         .into());
                     }
@@ -872,6 +908,7 @@ pub(crate) fn run(
             rootfs_tar: &rootfs_tar,
             boot,
             out_dir: &out_dir,
+            stem: &stem,
             work_dir: &work_dir,
             rootfs_label: &args.rootfs_label,
             identity: image_identity(recipe, &resolved),
@@ -922,7 +959,7 @@ pub(crate) fn run(
         }
         lock.rootfs
             .as_ref()
-            .map(|r| out_dir.join(&r.manifest))
+            .map(|_| out_dir.join(format!("{stem}.pkgs.lock")))
             .filter(|p| p.exists())
     });
 
@@ -933,7 +970,7 @@ pub(crate) fn run(
     // It joins the lock's pins, the resolved build point, the solved-manifest digest,
     // the blob hashes, the toolchain identity, and the first-boot credential into
     // one "exactly what went into this image" document for support/security.
-    let prov_path = out_dir.join(format!("{}.provenance.toml", leaf_of(recipe)));
+    let prov_path = out_dir.join(format!("{stem}.provenance.toml"));
     if first_boot_password.is_some() && image_manifest.is_none() {
         // An image was built and no manifest describes it. Any document here belongs to
         // an earlier image; removing it beats leaving one that reads as authoritative.
@@ -971,7 +1008,7 @@ pub(crate) fn run(
             // Paired, not defaulted: the sandbox is bootstrapped *for* the resolved
             // suite, so a base without one is not a state this can reach.
             (Some(suite), Some(base_manifest)) => {
-                let name = format!("{}.sandbox.pkgs", leaf_of(recipe));
+                let name = format!("{stem}.sandbox.pkgs");
                 let published = out_dir.join(&name);
                 std::fs::copy(&base_manifest, &published).map_err(|e| {
                     format!(
@@ -1118,14 +1155,4 @@ pub(crate) fn run(
 /// lived with by hand ("never insert both cards at once") and this removes.
 fn image_identity(recipe: &str, build: &ResolvedBuild) -> image::ImageIdentity {
     image::ImageIdentity::derive(recipe, &build.device)
-}
-
-/// A recipe's leaf name — the stem every artifact this build publishes is named for.
-///
-/// Recipes nest under a device directory (`turing-rk1/media-accel-forky`), and the
-/// artifacts all land in one flat directory, so the separator has to go. Taking the
-/// leaf rather than flattening the whole path keeps the names short and matches the
-/// solved manifest's, which the lock already carries as a leaf.
-fn leaf_of(recipe: &str) -> &str {
-    recipe.rsplit('/').next().unwrap_or(recipe)
 }

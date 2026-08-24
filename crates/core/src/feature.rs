@@ -19,7 +19,7 @@
 //! patch and configure the kernel to exist at all, and pinning that on the kernel
 //! or device layer would force it on every build of that SoC or board, including
 //! ones that never selected the capability. Contributing it from the feature keeps
-//! the opt-in and the thing opted into in one place. §5.4.
+//! the opt-in and the thing opted into in one place.
 
 use crate::error::ConfigError;
 use crate::model::{AptSource, Arch, Soc};

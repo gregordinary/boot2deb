@@ -416,7 +416,7 @@ pub enum EngineError {
     /// ships. `device_dts` owns the *new* board file; an edit to an *existing*
     /// upstream `.dts`/`.dtsi` is a patch in the kernel's patch series, which `git
     /// am` applies with conflict detection. Silently clobbering the upstream file
-    /// would hide that the fork has drifted, so the copy refuses. §4.
+    /// would hide that the fork has drifted, so the copy refuses.
     #[error(
         "device_dts source '{src}' already exists in the kernel tree at {dest} — \
          device_dts adds a new board device tree; edit an existing one with a patch instead"

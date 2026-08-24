@@ -1,10 +1,12 @@
 #!/bin/sh
 # Box drives the TV: put a CEC-capable TV into standby. Run at service stop (box
 # shutdown/reboot) when cec-tv-standby.service is enabled. Claim a logical address,
-# then send Standby to the TV (CEC logical address 0). Flags validated on hardware;
-# override CEC_DEV if the adapter is not cec0.
+# then send Standby to the TV (CEC logical address 0). Standby is directed rather than
+# broadcast, so it puts only the TV to sleep and leaves other devices on the bus alone.
+# Flags validated on hardware; override CEC_DEV or OSD_NAME if the defaults do not suit.
 set -eu
 CEC_DEV=${CEC_DEV:-/dev/cec0}
+OSD_NAME=${OSD_NAME:-H96 MAX M9}
 
-cec-ctl -d "$CEC_DEV" --playback >/dev/null
+cec-ctl -d "$CEC_DEV" --playback --osd-name "$OSD_NAME" >/dev/null
 cec-ctl -d "$CEC_DEV" --to 0 --standby

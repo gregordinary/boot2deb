@@ -45,6 +45,11 @@ pub struct MatrixRow {
     /// The u-boot patch series pinned for this build: series, ref, and short commit.
     /// [`None`] where the boot method compiles no u-boot, or u-boot ships pristine.
     pub uboot: Option<PatchesCell>,
+    /// The out-of-tree kernel modules the image ships, in lock order. Empty for a
+    /// board that declares no `device_kmods`. Stated because a `.ko` built from a
+    /// driver repo is shipped bytes like any other pin, and it is the one the board's
+    /// Wi-Fi works or does not work by.
+    pub kmods: Vec<KmodCell>,
     /// The maintainer's claim.
     pub status: SupportStatus,
     /// `YYYY-MM-DD` the claim was last established.
@@ -58,6 +63,18 @@ pub struct PatchesCell {
     /// Series names selecting the series, in apply order (comma-joined for display).
     pub series: Vec<String>,
     /// The release tag or branch the pin was taken at.
+    pub reference: String,
+    /// The exact commit, truncated for display.
+    pub commit: String,
+}
+
+/// One out-of-tree kernel module the image carries: which driver, and the commit its
+/// `.ko` was built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KmodCell {
+    /// The `device_kmods` entry name, which is also the `<name>-modules-<kver>` deb's.
+    pub name: String,
+    /// The branch or tag the pin was taken at.
     pub reference: String,
     /// The exact commit, truncated for display.
     pub commit: String,
@@ -120,6 +137,15 @@ fn row(
         kernel_ref: lock.kernel.as_ref().map(|k| k.reference.clone()),
         patches: patches_cell(lock.patches.as_ref()),
         uboot: patches_cell(lock.uboot_patches.as_ref()),
+        kmods: lock
+            .kmods
+            .iter()
+            .map(|k| KmodCell {
+                name: k.name.clone(),
+                reference: k.reference.clone(),
+                commit: k.commit.chars().take(SHORT_COMMIT).collect(),
+            })
+            .collect(),
         status: claim.status,
         date: claim.date.clone(),
     }
@@ -157,6 +183,20 @@ impl MatrixRow {
         Self::pin_cell(self.uboot.as_ref())
     }
 
+    /// The out-of-tree-modules cell: `name ref (commit)` per module, comma-joined, or
+    /// `none` for a board that declares none. Plain text, like
+    /// [`kernel_cell`](Self::kernel_cell).
+    pub fn kmods_cell(&self) -> String {
+        if self.kmods.is_empty() {
+            return "none".to_string();
+        }
+        self.kmods
+            .iter()
+            .map(|k| format!("{} {} ({})", k.name, k.reference, k.commit))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Render a patch-pin cell as `series ref (commit)` (series comma-joined), or
     /// `none` when absent.
     fn pin_cell(pin: Option<&PatchesCell>) -> String {
@@ -169,35 +209,48 @@ impl MatrixRow {
 
 /// The pinned identity of one source axis, as a label and the `ref (commit)` pair
 /// that identifies it. [`None`] where the lock records no pin for that axis.
-type AxisPin = (&'static str, Option<String>);
+///
+/// The label is owned rather than static because the per-item axes — one per
+/// out-of-tree module, one per pre-built `.deb` — name the item they pin, and that
+/// name is what makes two locks' axes comparable.
+type AxisPin = (String, Option<String>);
 
 /// Every source axis a lock can pin, in report order, as `ref (short commit)`.
 ///
 /// Ordered kernel-first because that is the axis a re-pin usually moves and the one
 /// a reader checks first.
+///
+/// **Every pin in the lock appears here.** The set is the lock's whole identity, not a
+/// selection from it: an axis left out is one a re-pin can move under a
+/// [`Validated`](SupportStatus::Validated) claim with nobody told, which is exactly the
+/// failure [`pin_changes`] exists to prevent. A new pin in [`Lock`] therefore belongs
+/// in this list as well.
 fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
     let git =
         |r: &str, c: &str| format!("{r} ({})", c.chars().take(SHORT_COMMIT).collect::<String>());
     let mut v: Vec<AxisPin> = vec![
         (
-            "kernel",
+            "kernel".into(),
             lock.kernel.as_ref().map(|k| git(&k.reference, &k.commit)),
         ),
         (
-            "patches",
+            "patches".into(),
             lock.patches.as_ref().map(|p| git(&p.reference, &p.commit)),
         ),
         (
-            "u-boot",
+            "u-boot".into(),
             lock.uboot.as_ref().map(|u| git(&u.reference, &u.commit)),
         ),
         (
-            "u-boot patches",
+            "u-boot patches".into(),
             lock.uboot_patches
                 .as_ref()
                 .map(|p| git(&p.reference, &p.commit)),
         ),
-        ("suite", lock.rootfs.as_ref().map(|r| r.suite.clone())),
+        (
+            "suite".into(),
+            lock.rootfs.as_ref().map(|r| r.suite.clone()),
+        ),
     ];
     // A tree the SoC does not declare has no row at all, rather than a row reading
     // "none": these axes exist only for a build whose SoC has that hardware.
@@ -208,20 +261,43 @@ fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
             ("libmali", &us.libmali),
         ] {
             if let Some(p) = pin {
-                v.push((axis, Some(git(&p.reference, &p.commit))));
+                v.push((axis.into(), Some(git(&p.reference, &p.commit))));
             }
         }
     }
     if let Some(ff) = &lock.ffmpeg {
-        v.push(("ffmpeg", Some(git(&ff.base.reference, &ff.base.commit))));
+        v.push((
+            "ffmpeg".into(),
+            Some(git(&ff.base.reference, &ff.base.commit)),
+        ));
         if let Some(rk) = &ff.rockchip {
-            v.push(("ffmpeg-rk", Some(git(&rk.reference, &rk.commit))));
+            v.push(("ffmpeg-rk".into(), Some(git(&rk.reference, &rk.commit))));
         }
     }
+    // One axis per out-of-tree module, keyed by the module's own name: a board's kmods
+    // move independently, and moving one changes a `.ko` the image ships. Adding or
+    // dropping a module shows up as the label appearing or disappearing, which
+    // `pin_changes` already reports as a move to/from `none`.
+    for k in &lock.kmods {
+        v.push((
+            format!("kmod {}", k.name),
+            Some(git(&k.reference, &k.commit)),
+        ));
+    }
+    // Pre-built `.deb`s are content pins, so the sha256 *is* the axis — a changed hash
+    // is changed shipped bytes with no ref or commit standing between. Keyed by
+    // locator, the only stable name they have.
+    for d in &lock.extra_debs {
+        let locator = d.url.as_deref().or(d.path.as_deref()).unwrap_or("?");
+        v.push((
+            format!("extra deb {locator}"),
+            Some(d.sha256.chars().take(SHORT_COMMIT).collect()),
+        ));
+    }
     if let Some(b) = &lock.blobs {
-        v.push(("blob atf", Some(b.atf.clone())));
-        v.push(("blob tpl", Some(b.tpl.clone())));
-        v.push(("blob bl32", b.bl32.clone()));
+        v.push(("blob atf".into(), Some(b.atf.clone())));
+        v.push(("blob tpl".into(), Some(b.tpl.clone())));
+        v.push(("blob bl32".into(), b.bl32.clone()));
     }
     v
 }
@@ -241,23 +317,23 @@ pub fn pin_changes(prev: &Lock, next: &Lock) -> Vec<String> {
     let (before, after) = (axis_pins(prev), axis_pins(next));
     let mut out = Vec::new();
     // Axes are keyed by label rather than zipped: the optional userspace/ffmpeg/blob
-    // groups make the two vectors different lengths whenever one of those appears or
-    // disappears, which is precisely a case worth reporting.
-    let labels: Vec<&'static str> =
-        before
-            .iter()
-            .chain(after.iter())
-            .map(|(l, _)| *l)
-            .fold(Vec::new(), |mut acc, l| {
-                if !acc.contains(&l) {
-                    acc.push(l);
-                }
-                acc
-            });
+    // groups and the per-item kmod/extra-deb axes make the two vectors different
+    // lengths whenever one of those appears or disappears, which is precisely a case
+    // worth reporting.
+    let labels: Vec<&str> = before
+        .iter()
+        .chain(after.iter())
+        .map(|(l, _)| l.as_str())
+        .fold(Vec::new(), |mut acc, l| {
+            if !acc.contains(&l) {
+                acc.push(l);
+            }
+            acc
+        });
     for label in labels {
         let find = |v: &[AxisPin]| {
             v.iter()
-                .find(|(l, _)| *l == label)
+                .find(|(l, _)| l == label)
                 .and_then(|(_, p)| p.clone())
         };
         let (was, now) = (find(&before), find(&after));
@@ -308,8 +384,10 @@ pub fn render_markdown(matrix: &Matrix) -> String {
     let mut s = String::from(PAGE_BANNER);
     s.push('\n');
     s.push_str(PAGE_INTRO);
-    s.push_str("\n| Recipe | Device | Suite | Kernel | Patches | U-boot | Status | As of |\n");
-    s.push_str("|---|---|---|---|---|---|---|---|\n");
+    s.push_str(
+        "\n| Recipe | Device | Suite | Kernel | Patches | U-boot | Modules | Status | As of |\n",
+    );
+    s.push_str("|---|---|---|---|---|---|---|---|---|\n");
     for r in &matrix.rows {
         // Code spans mark the values a reader would copy — an id, a tag, a commit.
         // The qualifiers around them ("from the suite", "none") are prose about the
@@ -331,8 +409,17 @@ pub fn render_markdown(matrix: &Matrix) -> String {
             }
             None => "none".to_string(),
         };
+        let kmods = if r.kmods.is_empty() {
+            "none".to_string()
+        } else {
+            r.kmods
+                .iter()
+                .map(|k| format!("`{}` `{}` (`{}`)", k.name, k.reference, k.commit))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         s.push_str(&format!(
-            "| `{}` | {} | {} | {kernel} | {} | {} | `{}` | {} |\n",
+            "| `{}` | {} | {} | {kernel} | {} | {} | {kmods} | `{}` | {} |\n",
             r.recipe,
             r.device,
             r.suite_cell(),
@@ -365,12 +452,14 @@ mod tests {
                 commit: "527d03d54ea6".into(),
             }),
             uboot: None,
+            kmods: vec![],
             status: SupportStatus::Validated,
             date: "2026-07-14".into(),
         };
         assert_eq!(compiled.kernel_cell(), "rk3588-mainline-7.1 v7.1.1");
         assert_eq!(compiled.patches_cell(), "rk3588-accel main (527d03d54ea6)");
         assert_eq!(compiled.uboot_cell(), "none");
+        assert_eq!(compiled.kmods_cell(), "none");
 
         // A distro kernel pins no commit — its version comes from the suite — and
         // applies no series. Neither cell may imply a pin the lock does not hold.
@@ -397,12 +486,36 @@ mod tests {
                 reference: "main".into(),
                 commit: "e86ef2a00000".into(),
             }),
+            kmods: vec![],
             status: SupportStatus::Expected,
             date: "2026-07-21".into(),
         };
         assert_eq!(uboot_only.kernel_cell(), "(u-boot only)");
         assert_eq!(uboot_only.suite_cell(), "—");
         assert_eq!(uboot_only.uboot_cell(), "rk3576-loader main (e86ef2a00000)");
+
+        // A board with out-of-tree modules states each one's pin: the driver `.ko` is
+        // shipped bytes, and a reader asking "which AIC8800 does this image carry"
+        // gets an answer instead of an omission.
+        let with_kmods = MatrixRow {
+            kmods: vec![
+                KmodCell {
+                    name: "aic8800".into(),
+                    reference: "main".into(),
+                    commit: "abc123def456".into(),
+                },
+                KmodCell {
+                    name: "sunplus".into(),
+                    reference: "v1.2".into(),
+                    commit: "0011223344ff".into(),
+                },
+            ],
+            ..uboot_only
+        };
+        assert_eq!(
+            with_kmods.kmods_cell(),
+            "aic8800 main (abc123def456), sunplus v1.2 (0011223344ff)"
+        );
     }
 
     /// The rendered page carries the generated banner and one table row per matrix
@@ -418,6 +531,7 @@ mod tests {
                 kernel_ref: None,
                 patches: None,
                 uboot: None,
+                kmods: vec![],
                 status: SupportStatus::Expected,
                 date: "2026-07-20".into(),
             }],
@@ -499,6 +613,67 @@ manifest = \"r.pkgs.lock\"
                 "kernel v7.1.1 (c9acdc466e9a) -> v7.1.4 (a1b2c3d4e5f6)",
                 "suite forky -> trixie",
             ]
+        );
+    }
+
+    /// A lock's per-item pins — one per out-of-tree module, one per pre-built `.deb` —
+    /// are part of its identity too: each names a `.ko` or a package the image ships,
+    /// so moving one under a `validated` claim leaves the claim describing different
+    /// bytes. Keyed by the item's own name, so a board's modules move independently.
+    #[test]
+    fn moving_a_kmod_or_an_extra_deb_is_a_reported_move() {
+        const WITH_ITEMS: &str = "\
+[[kmods]]
+name = \"aic8800\"
+source = \"https://example.invalid/aic8800.git\"
+ref = \"main\"
+commit = \"1111111111111111111111111111111111111111\"
+
+[[kmods]]
+name = \"sunplus\"
+source = \"https://example.invalid/sunplus.git\"
+ref = \"v1.2\"
+commit = \"2222222222222222222222222222222222222222\"
+
+[[extra_debs]]
+url = \"https://example.invalid/vendor-firmware.deb\"
+sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+";
+        assert!(pin_changes(&lock(WITH_ITEMS), &lock(WITH_ITEMS)).is_empty());
+
+        // One module bumped: named individually, so the reader sees which driver moved
+        // rather than "kmods changed".
+        let bumped = WITH_ITEMS.replace(
+            "1111111111111111111111111111111111111111",
+            "3333333333333333333333333333333333333333",
+        );
+        assert_eq!(
+            pin_changes(&lock(WITH_ITEMS), &lock(&bumped)),
+            ["kmod aic8800 main (111111111111) -> main (333333333333)"]
+        );
+
+        // A content-pinned deb has no ref or commit between the claim and the bytes,
+        // so the sha256 is the axis.
+        let rehashed = WITH_ITEMS.replace(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        assert_eq!(
+            pin_changes(&lock(WITH_ITEMS), &lock(&rehashed)),
+            ["extra deb https://example.invalid/vendor-firmware.deb \
+                 aaaaaaaaaaaa -> bbbbbbbbbbbb"]
+        );
+
+        // Dropping a module entirely is a move to `none`, not silence.
+        let (head, _) =
+            WITH_ITEMS.split_at(WITH_ITEMS.find("[[kmods]]\nname = \"sunplus\"").unwrap());
+        let dropped = format!(
+            "{head}{}",
+            &WITH_ITEMS[WITH_ITEMS.find("[[extra_debs]]").unwrap()..]
+        );
+        assert_eq!(
+            pin_changes(&lock(WITH_ITEMS), &lock(&dropped)),
+            ["kmod sunplus v1.2 (222222222222) -> none"]
         );
     }
 }

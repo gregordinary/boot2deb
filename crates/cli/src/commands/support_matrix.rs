@@ -33,7 +33,7 @@ pub(crate) fn run(root: &ConfigRoot, markdown: bool) -> Result {
 /// Render the matrix as an aligned terminal table, sized to its widest cell so a
 /// long recipe or kernel name does not wrap the columns out of alignment.
 fn print_table(matrix: &Matrix) {
-    let cells: Vec<[String; 8]> = matrix
+    let cells: Vec<[String; 9]> = matrix
         .rows
         .iter()
         .map(|r| {
@@ -44,13 +44,14 @@ fn print_table(matrix: &Matrix) {
                 r.kernel_cell(),
                 r.patches_cell(),
                 r.uboot_cell(),
+                r.kmods_cell(),
                 r.status.to_string(),
                 r.date.clone(),
             ]
         })
         .collect();
     let headers = [
-        "RECIPE", "DEVICE", "SUITE", "KERNEL", "PATCHES", "U-BOOT", "STATUS", "AS OF",
+        "RECIPE", "DEVICE", "SUITE", "KERNEL", "PATCHES", "U-BOOT", "MODULES", "STATUS", "AS OF",
     ];
     let mut widths = headers.map(str::len);
     for row in &cells {
@@ -58,7 +59,7 @@ fn print_table(matrix: &Matrix) {
             *w = (*w).max(c.chars().count());
         }
     }
-    let line = |row: &[String; 8]| {
+    let line = |row: &[String; 9]| {
         let mut s = String::new();
         for (i, (c, w)) in row.iter().zip(widths).enumerate() {
             // The last column is not padded: trailing whitespace on every line is

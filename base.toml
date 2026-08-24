@@ -12,43 +12,113 @@
 locale = "C.UTF-8"
 
 # Locales compiled into every image *in addition to* the one above, so a pre-built
-# image can be switched to one of them offline. en_US.UTF-8 is here because Debian's
-# stock sshd ships `AcceptEnv LANG LC_*`: an SSH client forwards its own LANG, and a
-# session that lands on a locale the image never generated is what makes a shell
-# print `perl: warning: Setting locale failed`. Generating it costs ~3 MiB and makes
-# the common client work; any *other* locale is one `dpkg-reconfigure locales` away,
-# with no network, because the `locales` package below ships on the image.
-locales_generate = ["en_US.UTF-8"]
+# image can be switched to one of them offline, and so a first-run desktop wizard has
+# more than one language to offer — a locale is compiled by `locale-gen` at build time,
+# which is a thing no package dependency can do for you later.
+#
+# en_US.UTF-8 leads the list for a second reason: Debian's stock sshd ships
+# `AcceptEnv LANG LC_*`, so an SSH client forwards its own LANG, and a session landing
+# on a locale the image never generated is what makes a shell print
+# `perl: warning: Setting locale failed`.
+#
+# The set is the widely-spoken languages, not a complete one — glibc's locale archive
+# shares data aggressively, so the marginal cost is far below what a per-locale figure
+# suggests. Measured on forky/arm64: C.UTF-8 + en_US.UTF-8 alone is 2.9 MiB of
+# /usr/lib/locale/locale-archive, and the full set below is 19.2 MiB. Any locale *not*
+# here is still one `dpkg-reconfigure locales` away with no network, because the
+# `locales` package ships on the image. `locales-all` is the thing to avoid: it is
+# 231 MiB installed.
+locales_generate = [
+    "en_US.UTF-8",
+    "en_GB.UTF-8",
+    "de_DE.UTF-8",
+    "fr_FR.UTF-8",
+    "es_ES.UTF-8",
+    "it_IT.UTF-8",
+    "nl_NL.UTF-8",
+    "pt_BR.UTF-8",
+    "pl_PL.UTF-8",
+    "uk_UA.UTF-8",
+    "ru_RU.UTF-8",
+    "vi_VN.UTF-8",
+    "ja_JP.UTF-8",
+    "ko_KR.UTF-8",
+    "zh_CN.UTF-8",
+    "zh_HK.UTF-8",
+    "zh_TW.UTF-8",
+]
 
 # Sets the /etc/localtime symlink. UTC is what a server should log in regardless of
 # where it sits; `timedatectl set-timezone` changes it on a running image.
 timezone = "UTC"
 
 # --- Packages -----------------------------------------------------------------
+# The base system is Debian's `required` + `important` priority set; everything below
+# stacks onto it. Two properties of the install decide what has to be named here:
+# dependency resolution follows `Depends` only — **`Recommends` are never installed** —
+# and priority `standard` is not part of the base set. So a package that an ordinary
+# Debian install would have arrived at by either route is absent unless it is listed.
+# `ca-certificates` is the case to keep in mind: it is priority `standard` and merely
+# *Recommended* by libcurl, so it reaches the image only by being named here — and
+# without it, curl and wget cannot fetch an https URL at all.
 packages = [
+    # Boot and system services.
     "initramfs-tools",
     "dbus",
     "dhcpcd",
     "libpam-systemd",
-    "openssh-server",
     "systemd-timesyncd",
-    "curl",
-    "pciutils",
     "sudo",
-    "unzip",
+
+    # Remote access, both directions. The server's `Depends` already pull
+    # openssh-sftp-server, so scp/sftp *to* a board works without the client; the
+    # client is what makes scp, sftp, ssh-keygen and ssh-copy-id work *from* it.
+    "openssh-server",
+    "openssh-client",
+
+    # Fetching and moving files. ca-certificates is what makes the https half of curl
+    # and wget function.
+    "ca-certificates",
+    "curl",
     "wget",
-    "xxd",
-    "xz-utils",
+    "rsync",
+
+    # Name resolution, for triaging a board whose network is the thing that is wrong:
+    # dig and host. ~6 MiB with bind9-libs.
+    "bind9-dnsutils",
+
+    # Archives.
+    "unzip",
     "zip",
+    "xz-utils",
     "zstd",
+
+    # Hardware inventory. usbutils earns its place ahead of pciutils on these boards —
+    # an SBC's peripherals are far more often on USB than on PCIe.
+    "pciutils",
+    "usbutils",
+
+    # Looking at a running system, and at bytes.
+    "htop",
+    "lsof",
+    "psmisc",
+    "xxd",
+    # `file` costs ~10.6 MiB, nearly all of it libmagic-mgc's compiled magic database.
+    "file",
+
+    # Shell usability. man-db brings groff-base, bsdextrautils and libpipeline1 for
+    # ~9.2 MiB total, which buys the ~3.9 MiB of manual pages the image already carries
+    # from every other package and otherwise has no reader for.
+    "bash-completion",
+    "man-db",
+
     # The three packages that make a *pre-built* image reconfigurable with no network.
     # `dpkg-reconfigure locales` / `keyboard-configuration` / `tzdata` only exist if
     # the package does, so an image without them forces a user who wants a German
     # locale or a UK keymap onto the network before the knob even appears. Measured on
     # forky/arm64 they cost ~44 MiB installed (locales 15.4 + xkb-data 10.6 +
     # console-setup-linux 7.1 + libc-l10n 4.7 + kbd 2.9 + keyboard-configuration 2.8 +
-    # console-setup 0.4), plus ~3 MiB for the generated locale-archive. NOT
-    # `locales-all`, which is hundreds of MiB.
+    # console-setup 0.4), plus the generated locale-archive above.
     "locales",
     "keyboard-configuration",
     "console-setup",

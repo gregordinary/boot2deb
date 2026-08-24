@@ -903,7 +903,8 @@ mod tests {
             [
                 "0001-sdio-linux-7.1.patch",
                 "0002-quiet-log-level.patch",
-                "0003-quiet-bare-printk.patch"
+                "0003-quiet-bare-printk.patch",
+                "0004-suspend-quiesce-sdio.patch"
             ]
         );
         assert!(paths.iter().all(|p| p.is_absolute() && p.is_file()));

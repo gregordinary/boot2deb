@@ -245,8 +245,19 @@
 		simple-audio-card,format = "i2s";
 		simple-audio-card,mclk-fs = <256>;
 
+		/*
+		 * The `clocks` reference is what ungates MCLK to the pin.
+		 * CLK_SAI1_MCLKOUT_TO_IO is a GRF gate, and nothing enables it
+		 * implicitly: `assigned-clocks` above fixes its rate but never its
+		 * enable state, and the SAI driver only enables the clocks it looks
+		 * up by name ("mclk", "hclk"). simple-audio-card reads `clocks` from
+		 * this sub-node and holds it prepared for the life of the stream,
+		 * which is the role the EVB's ES8388 node plays on a board that has
+		 * an I2C codec to carry the reference.
+		 */
 		simple-audio-card,cpu {
 			sound-dai = <&sai1>;
+			clocks = <&cru CLK_SAI1_MCLKOUT_TO_IO>;
 		};
 
 		simple-audio-card,codec {
@@ -835,6 +846,23 @@
  * sdo2 (the EVB uses sdo0), and the 12.288 MHz master clock leaves on
  * sai1m0_mclk -- with the amplifier modelled as a pinless dummy codec, the SAI
  * owns the MCLK pin and rate rather than an I2C codec.
+ *
+ * `rockchip,sai-tx-route` is what makes the sdo2 choice real, and its value is not
+ * what the binding's prose implies. Measured on this hardware: in SAI_PATH_SEL, TX
+ * field *x* selects which TX data stream drives **SDO port x** -- the field index is
+ * the port, the value is the stream. The driver writes entry *i* of this property
+ * into field *i*, so reaching SDO port 2 takes three entries and the third is the
+ * one that matters. `<0 1 0>` is the reset mapping with field 2 changed to stream 0,
+ * i.e. sdo2 carries the playback stream.
+ *
+ * The binding documents `<3>` as "sdo3 is sending to data0", which would make the
+ * index the data stream and the value the port -- the opposite assignment. Written
+ * that way (`<2>`) the jack is silent: the engine streams, every clock and pin reads
+ * correct, and the stream leaves on a port that reaches nothing. Confirmed by poking
+ * SAI_PATH_SEL live and listening, one SDO port at a time.
+ *
+ * The array length also declares the lane count. Three here is an upper bound only:
+ * stereo needs one lane, and hw_params clamps to what the channel count requires.
  */
 &sai1 {
 	assigned-clocks = <&cru CLK_SAI1_MCLKOUT_TO_IO>;
@@ -845,6 +873,7 @@
 		     &sai1m0_sdi0
 		     &sai1m0_sdo2
 		     &sai1m0_mclk>;
+	rockchip,sai-tx-route = <0 1 0>;
 	status = "okay";
 };
 
@@ -877,10 +906,13 @@
 };
 
 /*
- * The AIC8800D80 Wi-Fi/BT module on SDIO. `keep-power-in-suspend` and
- * `non-removable` describe a soldered part; the aic8800 driver (aic8800 patch
- * profile) claims it. SDR104 signals at 1.8 V, so the controller needs the bus
- * I/O rail as `vqmmc-supply` to drive and switch the signalling voltage --
+ * The AIC8800D80 Wi-Fi/BT module on SDIO. `non-removable` describes a soldered
+ * part; the out-of-tree aic8800 driver claims it (the device's `device_kmods`).
+ * `keep-power-in-suspend` is load-bearing rather than descriptive: that driver's
+ * suspend callback returns early unless the host offers MMC_PM_KEEP_POWER, and
+ * the callback is what parks the bus threads before the host loses its clock, so
+ * without this the board does not survive a suspend. SDR104 signals at 1.8 V, so
+ * the controller needs the bus I/O rail as `vqmmc-supply` to switch signalling --
  * `vccio_sd_s0` (RK806 PLDO5), the same rail the SD slot uses. `vcc_wifi_reg_on`
  * gates the module's own supply and is driven by the power sequence, separately.
  */

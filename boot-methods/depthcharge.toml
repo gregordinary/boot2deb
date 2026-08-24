@@ -29,10 +29,15 @@ description = "ChromeOS depthcharge: a vboot-signed kernel FIT in a ChromeOS ker
 # With ONE slot none of that is available -- `depthchargectl` has to overwrite the
 # kernel it is booted from (`--allow-current`), and a kernel that does not come up
 # leaves the board with nothing to boot and no way in but external media.
+# The slot size is the default for a board that does not state its own. It bounds
+# the payload the *image* can carry, and it has to agree with the firmware's own
+# buffer, which is a property of the board profile. 16 MiB matches the stock Veyron
+# profile; a device built for a profile with a larger buffer overrides it in its
+# [depthcharge] block. The rootfs offset is not authored — resolution derives it from
+# offset + slots * size, so a wider slot moves the rootfs rather than overlapping it.
 kpart_offset  = "12MiB"                  # LBA 24576 — start of KERN-A
-kpart_size    = "16MiB"                  # 32768 sectors, per slot
+kpart_size    = "16MiB"                  # 32768 sectors, per slot; rootfs then starts at 44MiB
 kpart_slots   = 2                        # KERN-A (payload) + KERN-B (spare) -> A/B upgrades
-rootfs_offset = "44MiB"                  # LBA 90112 — immediately after the last slot
 
 # GPT attribute bits 48-63 of the *payload* slot's entry (KERN-A). `successful` is
 # what stops the firmware decrementing `tries` to zero and giving up on the image.

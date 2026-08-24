@@ -89,7 +89,7 @@ pub struct PlanInputs<'a> {
     /// The build's resolved `device_dts` sources. Their content is folded into the
     /// kernel tree signature (the stage copies them into the tree), so the prediction
     /// must fold it too or an edited board `.dts` would be reported as "reuse". Empty
-    /// for a board whose DTB is upstream. §4.
+    /// for a board whose DTB is upstream.
     pub device_dts: &'a [PathBuf],
     /// The build's `device_kmods` descriptors — each predicts a `kmod:<name>` tree
     /// node. Empty for a board with no out-of-tree modules.

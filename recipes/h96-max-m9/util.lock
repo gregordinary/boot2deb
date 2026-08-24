@@ -10,13 +10,7 @@ commit = "88dc2788777babfd6322fa655df549a019aa1e69"
 series = ["h96-max-m9-util"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "eafaf606cc8c351d9c82478cccab1b86f8390ff5"
-
-[[kmods]]
-name = "aic8800"
-source = "https://github.com/radxa-pkg/aic8800.git"
-ref = "main"
-commit = "6e076049b719ac2ff7ce5c92786a680407b11cdb"
+commit = "adfdc19d7caf61c5fc1617972f5ad0d226074d1f"
 
 [blobs]
 atf = "rk3576_bl31_v1.24.elf@sha256:e2cf4e0e920dfe1daa6412c05f49dc7e5c0f9888d3a3e8eecc85fbe1e86a23d1"

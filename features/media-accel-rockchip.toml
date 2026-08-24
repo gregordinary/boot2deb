@@ -16,10 +16,13 @@
 # currently exist.
 description  = "Rockchip HW video transcode (MPP + RGA + ffmpeg-rk) for RK35xx"
 packages     = ["ffmpeg-rk", "librockchip-mpp1", "librga2"]
-# Only the SoCs whose kernel carries the vendor `mpp_service` this stack talks to.
-# Not RK3576: that part is mainline-only, so MPP has nothing to bind and its
-# media-accel capability is provided by `media-accel-v4l2` instead.
-requires_soc = ["rk3588", "rk3566"]
+# Only the SoCs whose kernel carries the vendor `mpp_service` this stack talks to,
+# and only those the config tree can actually resolve — `list-features` publishes
+# this list to users, so a SoC named here without a socs/<soc>.toml layer would
+# advertise a configuration no device can select. Not RK3576: that part is
+# mainline-only, so MPP has nothing to bind and its media-accel capability is
+# provided by `media-accel-v4l2` instead.
+requires_soc = ["rk3588"]
 # The two providers both build an `ffmpeg-rk` deb; only one can win.
 conflicts    = ["media-accel-v4l2"]
 

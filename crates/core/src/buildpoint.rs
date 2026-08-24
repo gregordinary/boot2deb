@@ -28,7 +28,7 @@
 //! therefore two references, which is the honest answer. A repeated feature is
 //! rejected outright rather than silently folded, since it can only be a mistake.
 //!
-//! Pure: parsing and validation only, no filesystem access. §5.4.
+//! Pure: parsing and validation only, no filesystem access.
 
 use crate::error::ConfigError;
 
@@ -132,6 +132,32 @@ impl BuildPoint {
     pub fn feature_override(&self) -> Option<Vec<String>> {
         (!self.features.is_empty()).then(|| self.features.clone())
     }
+
+    /// The stem every artifact this point publishes is named for — the whole
+    /// [reference](Self::reference) with its `/` flattened:
+    /// `turing-rk1/media-accel-forky` → `turing-rk1-media-accel-forky`.
+    ///
+    /// Artifacts land in one flat output directory, so the separator has to go — but
+    /// the *device* half cannot go with it. A recipe leaf is unique only within its
+    /// device folder, and the leaves that repeat are exactly the ones a reader most
+    /// needs told apart: `forky.img` names both `asus-c201/forky` (Debian's armmp
+    /// kernel) and `turing-rk1/forky`, and sits one letter from
+    /// `asus-c201/mainline-forky`. An image outlives the directory it was built in —
+    /// it gets copied to a flashing host, kept beside three others — so its name has to
+    /// carry the whole point on its own.
+    ///
+    /// **Every artifact the build point owns is named for this**, `.deb`s aside: the
+    /// image, the rootfs tarball, the boot payloads, the solved package manifest, the
+    /// provenance document. That is what lets several recipes share one `--out-dir`
+    /// without one silently folding another's bootloader or rootfs into its image.
+    /// (`.deb`s carry a package name and version instead, and are scoped by the output
+    /// dir's artifact ledger.)
+    ///
+    /// A variant keeps its `+feature` suffixes, so a selection never publishes over the
+    /// recipe it starts from.
+    pub fn artifact_stem(&self) -> String {
+        self.reference().replace('/', "-")
+    }
 }
 
 impl std::fmt::Display for BuildPoint {
@@ -192,6 +218,41 @@ mod tests {
             err.to_string().contains("jellyfin"),
             "the error names the feature: {err}"
         );
+    }
+
+    #[test]
+    fn the_artifact_stem_names_the_whole_point_not_just_its_leaf() {
+        // The stem travels with the file, so it carries the device as well as the
+        // recipe — and a variant carries its features, or a `--feature` build would
+        // publish over the recipe it started from.
+        for (reference, stem) in [
+            ("turing-rk1/forky", "turing-rk1-forky"),
+            (
+                "turing-rk1/media-accel-forky",
+                "turing-rk1-media-accel-forky",
+            ),
+            ("turing-rk1/forky+jellyfin", "turing-rk1-forky+jellyfin"),
+            ("h96-max-m9/util", "h96-max-m9-util"),
+            ("bare-leaf", "bare-leaf"),
+        ] {
+            assert_eq!(BuildPoint::parse(reference).unwrap().artifact_stem(), stem);
+        }
+        // Two boards' `forky` recipes are the case the leaf alone could not tell
+        // apart, and the reason the device half stays.
+        assert_ne!(
+            BuildPoint::parse("asus-c201/forky")
+                .unwrap()
+                .artifact_stem(),
+            BuildPoint::parse("turing-rk1/forky")
+                .unwrap()
+                .artifact_stem()
+        );
+        // The stem is a bare file-name component: it is joined into artifact names, so
+        // it must never reintroduce the separator the reference had.
+        assert!(!BuildPoint::parse("turing-rk1/forky")
+            .unwrap()
+            .artifact_stem()
+            .contains('/'));
     }
 
     #[test]

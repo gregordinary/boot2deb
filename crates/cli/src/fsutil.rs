@@ -8,14 +8,21 @@ use std::path::{Component, Path, PathBuf};
 /// safe to use as a sandbox bind source and working directory (the cage exposes
 /// each bind at its host path). Falls back to the input if the current dir is
 /// unreadable.
+///
+/// [Normalized](normalize) on the way out. `--root` defaults to the literal `.`, so
+/// every path joined onto it carries a `/./` into the middle of an otherwise absolute
+/// path — and these are exactly the paths a build, `why-rebuild`, and `clean` print.
+/// The value is the same directory either way; the difference is whether it reads
+/// like one.
 pub(crate) fn absolutize(path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
+    let absolute = if path.is_absolute() {
         path
     } else {
         std::env::current_dir()
             .map(|cwd| cwd.join(&path))
             .unwrap_or(path)
-    }
+    };
+    normalize(absolute)
 }
 
 /// Lexically normalize `path`: drop `.` components and cancel each `..` against the

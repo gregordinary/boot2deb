@@ -1,8 +1,7 @@
 # The maskrom loader
 
-Some boards' u-boot builds emit a **maskrom loader** — `u-boot-rockchip-maskrom.bin`, a
-single file you stream to a Rockchip SoC over USB to run that u-boot from RAM, writing
-nothing to storage.
+Some boards' u-boot builds emit a **maskrom loader** — a single file you stream to a
+Rockchip SoC over USB to run that u-boot from RAM, writing nothing to storage.
 
 It exists for the case where the board's own bootloader cannot help you. A Rockchip SoC
 whose eMMC carries no bootloader, or a broken one, still enters the BootROM's download
@@ -14,13 +13,15 @@ the case open.
 
 The artifact appears when the board's u-boot build enables
 `CONFIG_ROCKCHIP_MASKROM_IMAGE`. On a build that produces it, three files are staged
-beside the usual `idbloader.img` and `u-boot.itb`:
+beside the usual `<point>-idbloader.img` and `<point>-u-boot.itb`. `<point>` is the
+build point with its `/` flattened — `rk3576-generic/util` → `rk3576-generic-util` —
+like every other artifact a build publishes:
 
 | Artifact | What it is |
 |---|---|
-| `u-boot-rockchip-usb471.bin` | CODE471 — the DDR init blob (TPL), which the BootROM runs first to bring RAM up |
-| `u-boot-rockchip-usb472.bin` | CODE472 — SPL plus the FIT, which runs once there is RAM to run it in |
-| `u-boot-rockchip-maskrom.bin` | the two above packed into one RKBOOT container |
+| `<point>-u-boot-rockchip-usb471.bin` | CODE471 — the DDR init blob (TPL), which the BootROM runs first to bring RAM up |
+| `<point>-u-boot-rockchip-usb472.bin` | CODE472 — SPL plus the FIT, which runs once there is RAM to run it in |
+| `<point>-u-boot-rockchip-maskrom.bin` | the two above packed into one RKBOOT container |
 
 The split matters because the two host tools want different things. Tools that speak the
 download protocol directly take the raw pair, in order. `rkdeveloptool db` takes the single
@@ -43,7 +44,7 @@ rkdeveloptool ld           # lists devices and their mode
 Then stream the loader and let it run:
 
 ```sh
-rkdeveloptool db u-boot-rockchip-maskrom.bin
+rkdeveloptool db rk3576-generic-util-u-boot-rockchip-maskrom.bin
 ```
 
 The board now runs that u-boot out of RAM. Nothing has been written, so a power cycle

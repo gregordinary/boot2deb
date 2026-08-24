@@ -103,8 +103,8 @@ boot2deb build <recipe> --stage uboot
 ```
 
 For the maskrom-delivered images (loader and util), the deliverable is the
-`u-boot-rockchip-usb471.bin` / `usb472.bin` pair (and the packed
-`u-boot-rockchip-maskrom.bin`) — stream them into RAM with the BootROM download
+`<point>-u-boot-rockchip-usb471.bin` / `usb472.bin` pair (and the packed
+`<point>-u-boot-rockchip-maskrom.bin`) — stream them into RAM with the BootROM download
 protocol and run u-boot with nothing written to storage. See
 [The maskrom loader](maskrom-loader.md).
 

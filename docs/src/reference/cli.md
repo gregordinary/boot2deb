@@ -147,7 +147,7 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   [`device_kmods`](config-model.md#out-of-tree-modules-are-their-own-layer))
   against an existing kernel tree, so a
   driver bump need not rebuild the kernel. A `--stage uboot` run
-  also emits a standalone, directly-flashable `<device>-boot.img` (see below). Asking for
+  also emits a standalone, directly-flashable `<point>-boot.img` (see below). Asking for
   a node this recipe does not *have* — `--stage kernel` on a board that installs Debian's
   kernel — is an error naming why, not a silent no-op.
 - **`--layout combined|split`** overrides the image packaging. `combined` is one
@@ -167,6 +167,13 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   [Locale, timezone, and keyboard](../localization.md).
 - **`--refresh-rootfs`** forces a clean rootfs bootstrap instead of restoring the
   content cache.
+- **`--kernel-src`, `--uboot-src`, `--mpp-src`, `--librga-src`, `--libmali-src`,
+  `--ffmpeg-base-src`, `--kmod-src`** redirect where a tree is *cloned from*, without
+  changing what is built: the commit still comes from the lock, so a local checkout
+  holding it makes the fetch near-instant and produces the same result. A board can
+  declare several out-of-tree modules, so `--kmod-src` names the one it applies to —
+  `--kmod-src aic8800=../aic8800`, repeatable. A name the recipe does not build is an
+  error rather than a silently ignored flag.
 
 The rootfs stage is content-cached: the resolved package plan keys a store,
 so a rebuild whose *solved* package set is unchanged restores the bootstrapped tree
@@ -185,8 +192,10 @@ DTB a full `--stage kernel` ships inside the `linux-image` deb.
 
 ### Standalone bootloader image
 
-`build <recipe> --stage uboot` writes `<device>-boot.img` next to the raw `idbloader.img`
-and `u-boot.itb`: a small, GPT-less image holding just the bootloader at its offsets. It
+`build <recipe> --stage uboot` writes `<point>-boot.img` next to the raw
+`<point>-idbloader.img` and `<point>-u-boot.itb`, where `<point>` is the build point
+with its `/` flattened (`turing-rk1/forky` → `turing-rk1-forky`): a small, GPT-less
+image holding just the bootloader at its offsets. It
 needs no rootfs, so you can produce a flashable eMMC/SPI bootloader image without building
 a whole OS. The `split` layout emits the same image as part of a full build. See
 [Turing RK1](../boards/turing-rk1.md) for the eMMC-plus-NVMe workflow this serves.
@@ -269,7 +278,7 @@ cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky
 cargo run -p boot2deb-cli -- verify-patches rk3576-generic/loader
 
 # ...and a recipe carrying both reports each at its own version:
-#   kernel series applies (3 patches) against rk3576-mainline-7.1 @ v7.1.3
+#   kernel series applies (4 patches) against rk3576-mainline-7.1 @ v7.1.3
 #   uboot  series applies (6 patches) against u-boot @ v2026.04
 cargo run -p boot2deb-cli -- verify-patches rk3576-evb1-v10/forky
 

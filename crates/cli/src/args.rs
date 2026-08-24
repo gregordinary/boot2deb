@@ -224,6 +224,13 @@ pub(crate) struct BuildArgs {
     /// URL. A local checkout makes the fetch near-instant.
     #[arg(long)]
     pub(crate) ffmpeg_base_src: Option<String>,
+    /// Out-of-tree module clone source, as `NAME=SRC`, repeatable; default: that
+    /// kmod's locked `source`. Unlike the single-tree axes there are several modules,
+    /// so each override names the `device_kmods` entry it applies to
+    /// (`--kmod-src aic8800=../aic8800`). The clone is still made at the locked
+    /// commit, so the named tree must contain it.
+    #[arg(long = "kmod-src", value_name = "NAME=SRC", value_parser = parse_named_source)]
+    pub(crate) kmod_srcs: Vec<(String, String)>,
     /// Also build the Mali userspace (off by default — unused on a headless box).
     #[arg(long)]
     pub(crate) build_libmali: bool,
@@ -258,7 +265,8 @@ pub(crate) struct BuildArgs {
     /// Scratch dir for clones + builds (default: `<root>/build/RECIPE`).
     #[arg(long)]
     pub(crate) work_dir: Option<PathBuf>,
-    /// Where produced artifacts are staged (default: WORK_DIR/artifacts).
+    /// Where produced artifacts are staged (default: WORK_DIR/artifacts). Every
+    /// artifact is named for the recipe, so several builds may share one directory.
     #[arg(long)]
     pub(crate) out_dir: Option<PathBuf>,
     /// `make -j` parallelism (default: host available parallelism). Must be at
@@ -765,6 +773,23 @@ fn parse_scope(s: &str) -> Result<Scope, String> {
     s.parse()
 }
 
+/// Parse a `NAME=SRC` clone-source override into its two halves.
+///
+/// Split at the *first* `=`, because a source may contain one (a URL query, a path)
+/// while a `device_kmods` entry name may not — names are bare identifiers. Both halves
+/// must be non-empty: `--kmod-src aic8800=` is a truncated command line, not a request
+/// to clone from nowhere.
+fn parse_named_source(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((name, src)) if !name.is_empty() && !src.is_empty() => {
+            Ok((name.to_string(), src.to_string()))
+        }
+        _ => Err(format!(
+            "expected NAME=SRC (e.g. aic8800=../aic8800), got '{s}'"
+        )),
+    }
+}
+
 /// Parse `--jobs`: a positive `make -j` count. 0 is rejected — `make -j0` means
 /// "unlimited", which is never what a typo intends.
 fn parse_jobs(s: &str) -> Result<usize, String> {
@@ -784,6 +809,26 @@ mod tests {
         assert_eq!(parse_jobs("4"), Ok(4));
         assert!(parse_jobs("0").unwrap_err().contains("at least 1"));
         assert!(parse_jobs("x").is_err());
+    }
+
+    #[test]
+    fn a_named_source_splits_at_the_first_equals() {
+        assert_eq!(
+            parse_named_source("aic8800=../aic8800"),
+            Ok(("aic8800".into(), "../aic8800".into()))
+        );
+        // A source may hold `=` (a URL query); a kmod name may not, so the first
+        // separator is the right one and the rest belongs to the source.
+        assert_eq!(
+            parse_named_source("aic8800=https://host/r.git?a=b"),
+            Ok(("aic8800".into(), "https://host/r.git?a=b".into()))
+        );
+        for bad in ["aic8800", "=../src", "aic8800=", ""] {
+            assert!(
+                parse_named_source(bad).unwrap_err().contains("NAME=SRC"),
+                "'{bad}' should be rejected"
+            );
+        }
     }
 
     #[test]

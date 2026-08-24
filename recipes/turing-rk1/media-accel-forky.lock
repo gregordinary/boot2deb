@@ -11,7 +11,7 @@ commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
 series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "eafaf606cc8c351d9c82478cccab1b86f8390ff5"
+commit = "adfdc19d7caf61c5fc1617972f5ad0d226074d1f"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"

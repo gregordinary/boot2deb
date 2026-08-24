@@ -95,6 +95,12 @@ pub struct RootfsOptions<'a> {
     pub rootfs_partuuid: uuid::Uuid,
     /// Directory the rootfs tarball is written to.
     pub out_dir: &'a Path,
+    /// The build point's
+    /// [artifact stem](boot2deb_core::buildpoint::BuildPoint::artifact_stem) — the
+    /// tarball is published as `<stem>-rootfs.tar`. A board carries several recipes
+    /// with different package sets, so a tarball named for the board alone would let
+    /// one recipe's userland be formatted into another's image.
+    pub stem: &'a str,
     /// The build's scratch tree — where this node stages the overlays and provisions
     /// the rootfs before exporting it.
     ///

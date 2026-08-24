@@ -145,7 +145,7 @@ pub fn build_rootfs(
     let localrepo =
         LocalDistsRepo::assemble(&pool_dir, opts.repo_debs, build.image_suite(), arch, &step)?;
 
-    let tarball = opts.out_dir.join(format!("{}-rootfs.tar", build.device));
+    let tarball = opts.out_dir.join(format!("{}-rootfs.tar", opts.stem));
 
     // 4. Build the provisioner and resolve the plan. The plan is both the
     //    cache key and the manifest, so it is taken up front, before the
@@ -156,7 +156,7 @@ pub fn build_rootfs(
     let mut debian = build_debian(
         build,
         opts,
-        &localrepo.file_url(),
+        localrepo.file_url(),
         feature_repositories(opts.apt_sources)?,
         &deb_cache,
         &preinstall,

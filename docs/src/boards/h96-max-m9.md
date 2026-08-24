@@ -27,7 +27,7 @@ Build the shipped image as in [Getting started](../getting-started.md):
 cargo run -p boot2deb-cli -- build h96-max-m9/forky
 ```
 
-That writes `build/h96-max-m9/forky/artifacts/h96-max-m9.img.xz` — GPT, u-boot in the
+That writes `build/h96-max-m9/forky/artifacts/h96-max-m9-forky.img.xz` — GPT, u-boot in the
 raw gap ahead of the first partition, then the ext4 rootfs, so one write lays down
 everything.
 
@@ -52,7 +52,7 @@ The eMMC appears on your laptop as a USB block device. Write the image to it as 
 would any disk:
 
 ```sh
-xzcat build/h96-max-m9/forky/artifacts/h96-max-m9.img.xz \
+xzcat build/h96-max-m9/forky/artifacts/h96-max-m9-forky.img.xz \
   | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
 ```
 
@@ -115,11 +115,11 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | USB 2.0 host | works |
 | Bundled remote | works, zero-config |
 | IR receiver | works — NEC decoded to input events |
-| HDMI-CEC | works — the box wakes, switches to and standbys a TV. Driving the box from the TV remote needs a kernel with `MEDIA_CEC_RC` |
+| HDMI-CEC | works — the box wakes, switches to and standbys a TV; opt-in, see below |
 | NPU (`rocket`) | device works — jobs compute bit-exact; no userspace for this SoC yet |
 | HDMI audio | works |
 | S/PDIF (optical) | works |
-| Analog audio (3.5 mm) | root-caused and fixed in tree; awaiting a build to confirm end to end |
+| Analog audio (3.5 mm) | fixed in tree — the DAC is on `sdo2`; end-to-end confirmation on a shipped image still owed |
 | HW video decode | works — 1080p H.264 and HEVC on the VDPU383, NV12 out |
 | HW video encode | no mainline driver |
 | SD card | absent — the slot is depopulated |
@@ -151,8 +151,114 @@ Things the board needs that are worth knowing about:
   entry is the one that matters. The upstream SAI driver programmed that register only
   at probe and the value did not survive to the running device, which no in-tree board
   could notice because they all describe the identity mapping the register already holds.
-  The `rk3576-fixes` series carries the driver fix. Verified at the register level by
-  driving each SDO port in turn and listening; an image build confirms it end to end.
+  The `rk3576-fixes` series carries the driver fix, as patch 103. Verified at the register
+  level by driving each SDO port in turn and listening; the device tree alone cannot fix
+  this board.
+
+## HDMI-CEC
+
+CEC is a control channel inside the HDMI cable, and this box drives it both ways: it can
+wake a television, claim its input and put it back into standby, and the television's own
+remote can drive the box. The kernel side is present in every image for this board —
+`DRM_DW_HDMI_QP_CEC` and `MEDIA_CEC_RC` are set at the SoC layer — so `/dev/cec0` exists on
+a fresh boot and the adapter comes up as Playback Device 1 at physical address `1.0.0.0`.
+
+None of it acts until you ask. Three units ship installed but **disabled**, because a box
+plugged into a computer monitor, or into a television whose owner would rather it kept to
+itself, must not start sending CEC messages on its own:
+
+| Unit | What it sends | When |
+| --- | --- | --- |
+| `cec-tv-on` | `IMAGE_VIEW_ON`, then `ACTIVE_SOURCE` — wakes the TV and switches it to this input | at boot, and on resume from sleep |
+| `cec-tv-standby` | a directed `STANDBY` to the TV | at shutdown and reboot |
+| `cec-passthrough` | nothing; runs `cec-follower` so the TV remote's keys arrive as input events | continuously |
+
+Box drives TV, which is what most people want:
+
+```sh
+sudo systemctl enable --now cec-tv-on.service
+sudo systemctl enable cec-tv-standby.service
+```
+
+`--now` on the first one wakes the TV immediately, which doubles as the test that it works.
+The second deliberately has no `--now`: its work runs at *stop*, so it fires when the box
+goes down, not when you enable it.
+
+**Enabling `cec-tv-on` is also what makes the TV follow the box into sleep.** The
+`h96-cec` hook in `/usr/lib/systemd/system-sleep/` reads that one unit for both directions
+— with it enabled, a POWER press standbys the TV on the way down and wakes it on the way
+back up. `cec-tv-standby` covers only shutdown and reboot, so enabling that one on its own
+leaves suspend untouched: the box sleeps, the HDMI signal simply stops, and the television
+shows its own "No Signal" instead of going dark. Without CEC that is the whole story of
+what a suspend looks like on screen — the TV was never in standby, it just lost its source.
+
+For the other direction, the TV's remote driving the box, enable `cec-passthrough` **and**
+`cec-tv-on`. The dependency is not incidental: a television forwards `USER_CONTROL_PRESSED`
+only to whatever it believes is the active source, so a box that never announced itself
+receives nothing.
+
+Once `cec-tv-on` has run the adapter stays configured, so the bus is visible from the box:
+
+```sh
+cec-ctl -d /dev/cec0 -S
+```
+
+A television that implements CEC answers as `0.0.0.0: TV` with its vendor ID. Everything
+else on the cable is listed too, which is worth reading before enabling `cec-tv-standby`:
+the standby it sends is directed at the TV rather than broadcast, precisely so a games
+console or receiver sharing the bus is not put to sleep along with it.
+
+Two results that look like faults and are not:
+
+- **A physical address is not evidence of CEC support.** `Physical Address: 1.0.0.0` is
+  derived from a mandatory EDID field, so it is reported even when nothing at the other end
+  speaks the protocol. The real test is whether messages are acknowledged;
+  `Tx, Not Acknowledged (4), Max Retries` means nothing is driving the CEC line at all.
+  Computer monitors generally do not, including ones from vendors whose televisions do.
+- **Some queries go unanswered.** `GIVE_OSD_NAME` and `GIVE_CEC_VERSION` time out against
+  televisions that omit them, and a CEC 2.0 `REPORT_FEATURES` can come back
+  `unrecognized-op`. Those are the sink's omissions — the transmits themselves are
+  acknowledged, so nothing local is wrong.
+
+The box appears in the TV's device list as `H96 MAX M9`. The wrappers in `/usr/lib/h96/`
+take `OSD_NAME` and `CEC_DEV` from the environment if a different name or a second adapter
+is wanted; CEC caps the name at 14 characters.
+
+## Sleep and the POWER key
+
+The remote's POWER key suspends the box, and the same key wakes it. That is the shipped
+default rather than systemd's, and the reason is that the alternative is not recoverable
+here: the box has no power button, and once it is off the remote's receiver is unpowered,
+so `HandlePowerKey=poweroff` would leave cycling the supply as the only way back. To
+choose `poweroff` or `ignore` anyway, see `/usr/lib/h96/power-profiles/README` on the
+board.
+
+Sleep is **suspend-to-idle**, pinned by `50-h96-s2idle.conf`. The SoC also offers `deep`,
+and selects it by default, but nothing resumes from it — the box powers down and needs
+its supply cycled — so the image names `freeze` explicitly rather than letting systemd
+write `mem`. Anything that asks logind to suspend, a desktop's idle timer included, takes
+that path.
+
+The television does not follow the box unless you tell it to. Suspending stops the HDMI
+signal and nothing more, which a TV shows as "No Signal" while staying on; putting it into
+standby alongside the box is one `systemctl enable cec-tv-on.service` away, and
+[HDMI-CEC](#hdmi-cec) covers what that turns on.
+
+Waking is out of band: the receiver drives gpio0 PD3, the `gpio-keys` POWER input, which
+is a `wakeup-source` in the always-on power domain. **The bundled remote is the only
+wake source the box has out of the box.** Its receiver cannot wake anything over USB —
+it leaves the remote-wakeup bit clear in its configuration descriptor, so the kernel
+creates no `power/wakeup` node for it — and there is no RTC on this board, so there is no
+`rtcwake` either.
+
+A USB keyboard or mouse can wake it if its receiver *does* set that bit.
+`70-h96-usb-wakeup.rules` arms every HID device that has a `power/wakeup` node, which
+skips the bundled receiver and catches a wakeup-capable one. What is armed on a running
+box:
+
+```sh
+grep . /sys/bus/usb/devices/*/power/wakeup
+```
 
 ## The NPU
 

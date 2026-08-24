@@ -25,6 +25,7 @@ device_config_fragments = []
 
 supported_kernels       = ["debian-armmp", "rk3288-mainline-7.1"]
 default_kernel          = "debian-armmp"
+supported_suites        = ["forky", "trixie"]
 default_suite           = "forky"                           # validated on the hardware; trixie also boots
 default_layout          = "combined"
 hostname                = "asus-c201"
@@ -45,11 +46,15 @@ keymap                  = "us"
 # stock-profile image boots on stock firmware AND on a unit running libreboot, while
 # the reverse is not true. Both are confirmed on the hardware.
 #
-# `speedy-libreboot` is selectable (`--board speedy-libreboot`) for a unit with
-# libreboot installed. It buys a 32 MiB payload ceiling instead of 16 MiB, which is
-# headroom for a debug initramfs carrying the display stack — worth having, not worth
-# defaulting to. It is the only libreboot profile depthcharge-tools ships for this
-# family: the C100P and the Chromebit have stock profiles only.
+# `speedy-libreboot` is the profile for a unit running libreboot: real FIT ramdisks
+# instead of an initramfs address patched into every DTB, and a 32 MiB firmware buffer
+# instead of 16 MiB. Taking the buffer needs a matching kernel slot, which is a
+# geometry the whole family would otherwise pay for — so that pairing is its own
+# device, asus-c201-libreboot. This file keeps the stock slot and stays the one to
+# build for a unit whose firmware you have not replaced.
+#
+# It is the only libreboot profile depthcharge-tools ships for this family: the C100P
+# and the Chromebit have stock profiles only.
 #
 # (This table is last because TOML scopes every key after a table header into it.)
 [depthcharge]

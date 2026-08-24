@@ -64,7 +64,8 @@ what a tool running somewhere else cannot do. Re-signing a C201's kernel from a 
 means passing `--board speedy`, and this file is how that laptop knows to.
 
 It also distinguishes firmware, not just hardware: a stock C201 and a libreboot'd one are
-the same board and take different profiles.
+the same board and take different profiles — which is why they are separate build points
+(`asus-c201/forky` and `asus-c201-libreboot/forky`) rather than one image with a flag.
 
 The field is absent under a boot method that has no board profile, rather than being an
 empty string a reader would have to special-case.

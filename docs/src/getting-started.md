@@ -194,17 +194,20 @@ unchanged skips the multi-minute bootstrap. To force a clean rootfs, add
 
 Artifacts land under the recipe's work dir, `build/turing-rk1/forky/artifacts/`:
 
-- **`turing-rk1.img.xz`** — the compressed bootable image (the file is named after the
-  device, not the recipe).
-- **`forky.provenance.toml`** — exactly what went into the image: the
+- **`turing-rk1-forky.img.xz`** — the compressed bootable image.
+- **`turing-rk1-forky.provenance.toml`** — exactly what went into the image: the
   resolved pins, package count, toolchain identity, and the first-boot credential.
+
+Every artifact is named for the whole build point — device and recipe
+(`turing-rk1/forky` → `turing-rk1-forky`) — so several recipes can share one
+`--out-dir`, and an image copied to a flashing host still says what it is.
 
 The build prints the exact paths on its final lines, including the credential:
 
 ```
-compressed    : .../build/turing-rk1/forky/artifacts/turing-rk1.img.xz
+compressed    : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.img.xz
 first-boot pw : <generated>  (user debian, expired — change at first login)
-provenance    : .../build/turing-rk1/forky/artifacts/forky.provenance.toml
+provenance    : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.provenance.toml
 ```
 
 **Note the first-boot password down.** It is unique per image, shown once here, and

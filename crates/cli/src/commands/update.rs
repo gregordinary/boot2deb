@@ -178,7 +178,10 @@ pub(crate) fn run(
         // The manifest is a bare filename living beside the recipe in its device
         // folder, so it is named for the recipe's leaf, not the slashed reference:
         // `recipes/turing-rk1/media-accel-forky.pkgs.lock`, filename
-        // `media-accel-forky.pkgs.lock`.
+        // `media-accel-forky.pkgs.lock`. Deliberately *not* the point's artifact stem,
+        // which carries the device: the stem exists to disambiguate a flat output
+        // directory, and inside `recipes/turing-rk1/` the device is the folder name
+        // already. `build` publishes its own copy under the stem.
         let leaf = recipe.rsplit('/').next().unwrap_or(recipe);
         format!("{leaf}.pkgs.lock")
     });

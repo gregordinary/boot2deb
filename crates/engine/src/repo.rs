@@ -42,6 +42,10 @@ pub struct LocalDistsRepo {
     /// Absolute repo root — the `file://` mirror URL base the provisioner fetches
     /// `dists/<suite>/…` and `pool/…` under.
     dir: PathBuf,
+    /// The mirror URL naming [`dir`](Self::dir), as the [`Pool`] that owns the layout
+    /// spells it. Taken from the pool rather than composed here, so the base the
+    /// provisioner is pointed at and the tree the pool wrote cannot disagree.
+    mirror_url: String,
 }
 
 impl LocalDistsRepo {
@@ -59,7 +63,8 @@ impl LocalDistsRepo {
     /// `debs`: `Pool::publish` is incremental by design, and this repo is a
     /// per-build view of one artifact ledger rather than an accumulating pool.
     /// A `.deb` whose `Architecture` is neither `arch` nor `all` is rejected
-    /// rather than indexed where nothing can resolve it. `dir` should be absolute.
+    /// rather than indexed where nothing can resolve it. A relative `dir` is made
+    /// absolute for the mirror URL, which cannot spell a relative path.
     pub fn assemble(
         dir: &Path,
         debs: &[PathBuf],
@@ -73,18 +78,20 @@ impl LocalDistsRepo {
             debs.len(),
             dir.display()
         ));
-        Pool::at(dir)
+        let pool = Pool::at(dir)
             .suite(suite)
             .component("main")
-            .architecture(arch)
-            .publish(debs)
-            .map_err(|e| EngineError::Bootstrap {
-                context: format!("publish the local .deb pool at {}", dir.display()),
-                message: e.to_string(),
-            })?;
+            .architecture(arch);
+        let fail = |e: ferroday_cage::provision::debian::DebianError| EngineError::Bootstrap {
+            context: format!("publish the local .deb pool at {}", dir.display()),
+            message: e.to_string(),
+        };
+        pool.publish(debs).map_err(fail)?;
+        let mirror_url = pool.mirror_url().map_err(fail)?;
 
         Ok(LocalDistsRepo {
             dir: dir.to_path_buf(),
+            mirror_url,
         })
     }
 
@@ -101,8 +108,8 @@ impl LocalDistsRepo {
     /// attacker-supplied, and nothing downstream parses a query or fragment out of
     /// it. `unencoded_paths_reach_the_provisioners_fetcher` holds this to the
     /// fetcher's actual behavior rather than to an assumption about URL syntax.
-    pub fn file_url(&self) -> String {
-        format!("file://{}", self.dir.display())
+    pub fn file_url(&self) -> &str {
+        &self.mirror_url
     }
 
     /// The repo directory.
@@ -186,6 +193,39 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_repo_dir_still_yields_an_absolute_mirror_url() {
+        // The work dir is whatever the caller passed `--work-dir`, and a relative one
+        // is ordinary for a build run from its own tree. A `file://` URL names an
+        // absolute path, so a relative repo dir has to be resolved before it can be
+        // handed to the provisioner — otherwise the base is `file://build/…` and the
+        // fetcher opens a path relative to whatever directory it happens to run in.
+        if !crate::hosttool::require(&["dpkg-deb"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let deb = make_deb(tmp.path(), "ffmpeg-rk", "3e53143");
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "repo");
+        // Relative to the process's own directory, which is where the fetcher would
+        // otherwise resolve the un-absolutized base from.
+        let repo_dir = std::env::current_dir()
+            .unwrap()
+            .join(tmp.path().file_name().unwrap());
+        let relative = pathdiff(&repo_dir);
+
+        let repo = LocalDistsRepo::assemble(&relative, &[deb], "forky", "arm64", &step).unwrap();
+        assert_eq!(repo.file_url(), format!("file://{}", repo_dir.display()));
+        let _ = std::fs::remove_dir_all(&repo_dir);
+    }
+
+    /// `path` expressed relative to the current directory, which it must be under.
+    fn pathdiff(path: &Path) -> PathBuf {
+        path.strip_prefix(std::env::current_dir().unwrap())
+            .expect("a path under the current directory")
+            .to_path_buf()
+    }
+
+    #[test]
     fn unencoded_paths_reach_the_provisioners_fetcher() {
         // The work dir — and so the repo dir under it — is a user-chosen path, and a
         // space or a `#` in it is ordinary on a desktop. This asserts the whole join
@@ -205,6 +245,7 @@ mod tests {
         let step = Step::start(&sink, "repo");
         let repo = LocalDistsRepo::assemble(&repo_dir, &[deb], "forky", "arm64", &step).unwrap();
         assert!(repo.file_url().contains("My Projects/build #1"));
+        assert!(!repo.file_url().contains('%'));
 
         let mut fetch = HttpFetch::new();
         for suffix in [

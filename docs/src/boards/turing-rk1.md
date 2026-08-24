@@ -37,18 +37,20 @@ or, for a ready hardware-transcode host, the media-accel variant:
 cargo run -p boot2deb-cli -- build turing-rk1/media-accel-forky
 ```
 
-Either produces `build/<recipe>/artifacts/turing-rk1.img.xz` — a whole-disk image (GPT,
-u-boot in the reserved gap ahead of the first partition, then the ext4 rootfs), so a
-single write lays down everything, bootloader included. The flashing and boot notes
-below use `turing-rk1/forky`; they are identical for any variant (the bootloader and
-disk layout do not change), so substitute your recipe name in the artifact path.
+Either produces a whole-disk image (GPT, u-boot in the reserved gap ahead of the first
+partition, then the ext4 rootfs), so a single write lays down everything, bootloader
+included. Artifacts are named for the whole build point, so `turing-rk1/forky` writes
+`build/turing-rk1/forky/artifacts/turing-rk1-forky.img.xz` and the media-accel variant
+writes `turing-rk1-media-accel-forky.img.xz`. The flashing and boot notes below use
+`turing-rk1/forky`; they are identical for any variant (the bootloader and disk layout
+do not change), so substitute your recipe name throughout.
 
 ## Flash
 
 The RK1 is a compute module, not a board you plug a card reader into, so the usual
 path is the Turing Pi's BMC, which writes the module's **eMMC**:
 
-- **`tpi flash -n <node> -l -i /absolute/path/to/turing-rk1.img`** — copy the image to
+- **`tpi flash -n <node> -l -i /absolute/path/to/turing-rk1-forky.img`** — copy the image to
   the BMC first (e.g. onto its SD card, mounted at `/mnt/sdcard`) and use an absolute
   path, or
 - the **BMC web UI**'s flash upload.
@@ -58,7 +60,7 @@ decompress and `dd` it — the same image boots from any medium the board scans,
 u-boot discovers its root device at runtime:
 
 ```sh
-xzcat build/turing-rk1/forky/artifacts/turing-rk1.img.xz \
+xzcat build/turing-rk1/forky/artifacts/turing-rk1-forky.img.xz \
   | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
 ```
 
@@ -78,9 +80,9 @@ of one:
 cargo run -p boot2deb-cli -- build turing-rk1/forky --layout split
 ```
 
-- `turing-rk1-boot.img` — u-boot only (idbloader + `u-boot.itb` at their offsets, no
-  GPT), for the eMMC.
-- `turing-rk1-rootfs.img` — GPT + rootfs, for the NVMe/USB disk.
+- `turing-rk1-forky-boot.img` — u-boot only (idbloader + `u-boot.itb` at their
+  offsets, no GPT), for the eMMC.
+- `turing-rk1-forky-rootfs.img` — GPT + rootfs, for the NVMe/USB disk.
 
 **Just the bootloader** — if you only need the eMMC u-boot image (e.g. to re-flash the
 bootloader across nodes) without building a whole OS, the u-boot stage emits it on its
@@ -90,9 +92,9 @@ own:
 cargo run -p boot2deb-cli -- build turing-rk1/forky --stage uboot
 ```
 
-This writes `turing-rk1-boot.img` (a few MiB, gap-sized) alongside the raw `idbloader.img`
-and `u-boot.itb`. Flash `turing-rk1-boot.img` to the eMMC with `tpi`/web UI; write the
-rootfs image to the target disk.
+This writes `turing-rk1-forky-boot.img` (a few MiB, gap-sized) alongside the raw
+`turing-rk1-forky-idbloader.img` and `turing-rk1-forky-u-boot.itb`. Flash the
+`-boot.img` to the eMMC with `tpi`/web UI; write the rootfs image to the target disk.
 
 Because `tpi`/web UI flash the eMMC only, the rootfs image goes onto the NVMe/USB disk
 by another route — typically `dd` from a running system on the node, or written on

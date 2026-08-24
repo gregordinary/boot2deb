@@ -31,6 +31,16 @@ use std::str::FromStr;
 /// after this one and the kernel takes the last value.
 pub const CONSOLE_LOGLEVEL_ARG: &str = "loglevel=4";
 
+/// The [`supported_suites`](DeviceLayer::supported_suites) entry meaning "any
+/// well-formed Debian codename".
+///
+/// A wildcard rather than a codename, deliberately: Debian codenames are drawn from
+/// `[A-Za-z0-9._-]`, so `*` can never name a real suite and a device can never mean
+/// this by accident. It is the whole list or none of it — a device that admits
+/// everything has nothing more to say, and `["*", "forky"]` would state two
+/// incompatible claims at once.
+pub const ANY_SUITE: &str = "*";
+
 /// Instruction-set architecture of a target.
 ///
 /// Serialized in kebab-case (`arm64`, `armv7`, `riscv64`), which is also the
@@ -268,7 +278,7 @@ fn default_kmod_patch_dir() -> String {
 /// [`repo_patches`](Self::repo_patches) (from the repo's own quilt) then
 /// [`local_patches`](Self::local_patches) (boot2deb-authored, e.g. a per-kernel compat
 /// shim), builds the module against the freshly built kernel tree, and stages the
-/// resulting `.ko`s into `/lib/modules/<kver>/updates/`. §4.
+/// resulting `.ko`s into `/lib/modules/<kver>/updates/`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KmodLayer {
@@ -410,7 +420,7 @@ pub struct SocLayer {
     /// rkbin blob defaults shared by boards on this SoC: the SoC-generic ATF and a
     /// common-memory DDR TPL, plus BL32 where the boot chain needs OP-TEE. A device
     /// inherits these and overrides per field (typically just the TPL for different
-    /// DRAM); resolution requires the merged `atf` and `tpl` to be present. §3.6.
+    /// DRAM); resolution requires the merged `atf` and `tpl` to be present.
     #[serde(default)]
     pub rkbin: RkbinLayer,
     /// Accel/media modules force-loaded at boot via `/etc/modules-load.d/`, so
@@ -579,9 +589,11 @@ pub struct DepthchargeLayer {
     /// must clear the 8 MiB region a Veyron eMMC reserves at its head, which
     /// `12MiB` does on eMMC and costs nothing on SD/USB.
     pub kpart_offset: String,
-    /// Size of **each** ChromeOS kernel slot (e.g. `16MiB`). It bounds the signed
-    /// payload the image can carry; the *firmware's* own ceiling is a property of
-    /// the board profile and is enforced by `depthchargectl`.
+    /// Size of **each** ChromeOS kernel slot (e.g. `16MiB`), for a device that does
+    /// not state its own. It bounds the signed payload the image can carry; the
+    /// *firmware's* own ceiling is a property of the board profile and is enforced by
+    /// `depthchargectl`. A device built for a profile with a larger buffer overrides
+    /// it with [`DeviceDepthcharge::kpart_size`].
     pub kpart_size: String,
     /// How many kernel slots the image lays down, back to back from
     /// [`kpart_offset`](Self::kpart_offset). Range
@@ -596,9 +608,6 @@ pub struct DepthchargeLayer {
     /// in place and a bad upgrade needs external media to recover. See
     /// [`chromeos`](crate::chromeos) for the protocol.
     pub kpart_slots: u8,
-    /// Start offset of the rootfs partition (e.g. `44MiB`) — at or after the end of
-    /// the **last** kernel slot.
-    pub rootfs_offset: String,
     /// GPT attribute bits 51:48 — boot priority of the slot that ships the payload.
     /// 15 is highest; 0 means never boot. Range 0-15. Spare slots are not authored:
     /// they take [`SPARE_KPART_FLAGS`](crate::chromeos::SPARE_KPART_FLAGS).
@@ -781,7 +790,7 @@ fn reject_unsafe_path(rel: &str) -> Result<(), ConfigError> {
 /// field is optional so a layer states only its deltas: the SoC supplies the
 /// defaults and a device overrides per field. Resolution merges SoC `(+)` device
 /// (device wins per field) into a resolved [`Rkbin`], where `atf` and `tpl` are
-/// required and `bl32` stays optional. §3.6.
+/// required and `bl32` stays optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RkbinLayer {
@@ -834,17 +843,37 @@ pub struct Rkbin {
 pub struct DeviceDepthcharge {
     /// Board profile used when `--board` is not given.
     pub board: String,
-    /// Board profiles this device can use; a `--board` override must be one of
-    /// these. Each is passed verbatim to `depthchargectl`, which resolves it against
-    /// its own board database — the payload ceiling and DTB-patching policy live
-    /// there and are deliberately not duplicated here.
+    /// Board profiles this device can use; a `--board` override or a recipe's
+    /// [`board`](Recipe::board) must be one of these. Each is passed verbatim to
+    /// `depthchargectl`, which resolves it against its own board database — the
+    /// payload ceiling and DTB-patching policy live there and are deliberately not
+    /// duplicated here.
     pub supported_boards: Vec<String>,
+    /// Size of each ChromeOS kernel slot, overriding the boot method's
+    /// [`kpart_size`](DepthchargeLayer::kpart_size) (authored string, e.g. `32MiB`).
+    ///
+    /// The slot bounds the payload the *image* can carry; the firmware's own ceiling
+    /// is a property of the board profile and lives in `depthchargectl`'s database.
+    /// The two have to agree to be useful — a profile whose firmware buffers 32 MiB
+    /// buys nothing while the partition holding the payload is 16 MiB. So a device
+    /// built for such a profile states the matching slot size here, and every other
+    /// board keeps the method's default rather than paying for headroom it cannot use
+    /// (the slots sit ahead of the rootfs, so a larger one costs image space on every
+    /// medium).
+    ///
+    /// Resolution derives the rootfs offset from this, so widening a slot moves the
+    /// rootfs back on its own.
+    #[serde(default)]
+    pub kpart_size: Option<String>,
 }
 
-/// A device: hardware invariants plus the defaults that let `boot2deb build
-/// <device>` resolve a complete build with no other input. A device
+/// A device: hardware invariants plus the defaults that let `boot2deb resolve
+/// <device>` produce a complete build point with no other input. A device
 /// states only its deltas; everything else comes from its soc/arch/boot-method
 /// layers.
+///
+/// Building that point needs a [`Recipe`] naming the device, because a build reads
+/// its pins from the recipe's `.lock` — a device on its own has nothing pinned.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceLayer {
@@ -881,7 +910,7 @@ pub struct DeviceLayer {
     #[serde(default)]
     pub uboot_defconfig: Option<String>,
     /// Depthcharge board-profile selection. Required by the `depthcharge` boot
-    /// method and absent otherwise. §3.2.
+    /// method and absent otherwise.
     #[serde(default)]
     pub depthcharge: Option<DeviceDepthcharge>,
     /// Board device-tree blob path, relative to the DT output dir.
@@ -893,7 +922,7 @@ pub struct DeviceLayer {
     /// stage copies them into the in-tree DT dir and teaches that dir's Makefile to
     /// build the DTB. Empty for a board whose DTB is already upstream, which is the
     /// case a plain mainline build already covers. Resolution requires
-    /// [`kernel_dtb`](Self::kernel_dtb) to name one of these sources. §4.
+    /// [`kernel_dtb`](Self::kernel_dtb) to name one of these sources.
     #[serde(default)]
     pub device_dts: Vec<String>,
     /// Extra kernel command-line arguments for this board, space-separated
@@ -949,7 +978,26 @@ pub struct DeviceLayer {
     /// must name one of them.
     #[serde(default)]
     pub default_uboot_series: Option<String>,
-    /// Debian suite used when none is specified (RK1: `forky`).
+    /// Debian suites valid for this board — the suite analogue of
+    /// [`supported_kernels`](Self::supported_kernels), and the axis a `--suite`
+    /// override or a recipe's `suite` is checked against.
+    ///
+    /// A suite is a claim about the *board*, not only about Debian: a board's DT,
+    /// its firmware, and the driver its Wi-Fi part needs all have to exist in the
+    /// suite's kernel, and an RK3576 board on `bookworm` fails minutes into a
+    /// bootstrap rather than at resolve. Listing the suites a board is actually built
+    /// for turns that into a typed error naming the valid set.
+    ///
+    /// The single entry [`ANY_SUITE`] opts out — "any well-formed Debian codename" —
+    /// for a board whose config is genuinely suite-agnostic. It is not a codename, so
+    /// it can never collide with one; mixing it into a longer list is a contradiction
+    /// and rejected.
+    ///
+    /// [`default_suite`](Self::default_suite) is checked like any other selection, so
+    /// a device whose default is missing from its own list fails at resolve.
+    pub supported_suites: Vec<String>,
+    /// Debian suite used when none is specified (RK1: `forky`). Must be admitted by
+    /// [`supported_suites`](Self::supported_suites).
     pub default_suite: String,
     /// Image layout used when none is specified.
     pub default_layout: Layout,
@@ -966,7 +1014,7 @@ pub struct DeviceLayer {
     /// rkbin blob overrides for this board's memory configuration, merged over the
     /// SoC layer's defaults (device wins per field). A board on standard memory
     /// omits this block entirely and inherits the SoC's blobs; a board with
-    /// different DRAM overrides `tpl`. §3.6.
+    /// different DRAM overrides `tpl`.
     #[serde(default)]
     pub rkbin: RkbinLayer,
     /// Board-specific rootfs packages added to the base set; empty for the
@@ -1503,7 +1551,20 @@ pub struct Recipe {
     /// name one of the device's [`supported_uboot_series`](DeviceLayer::supported_uboot_series).
     #[serde(default)]
     pub uboot_series: Option<String>,
-    /// Suite override; `None` → device `default_suite`. Ignored for a
+    /// Depthcharge board profile override; `None` → the device's
+    /// [`[depthcharge] board`](DeviceDepthcharge::board). Must name one of the
+    /// device's [`supported_boards`](DeviceDepthcharge::supported_boards); ignored by
+    /// boot methods with no board profile.
+    ///
+    /// A profile is a property of the *firmware a unit runs*, not of the board model,
+    /// and it decides what the signed kernel partition is built for — so, like the
+    /// localization axes, it is config an image is resolved from rather than a knob
+    /// applied to a finished lock. Selecting a non-default profile is therefore a
+    /// recipe that pins it, not a `build` flag.
+    #[serde(default)]
+    pub board: Option<String>,
+    /// Suite override; `None` → device `default_suite`. Must be one of the device's
+    /// [`supported_suites`](DeviceLayer::supported_suites). Ignored for a
     /// [`Deliverable::Uboot`] recipe, which resolves no suite.
     #[serde(default)]
     pub suite: Option<String>,
@@ -1798,7 +1859,15 @@ pub struct ResolvedDepthchargeBoot {
     /// with the device's extra [`kernel_cmdline`](DeviceLayer::kernel_cmdline)
     /// (if any) appended; the merged value passes the same validation.
     pub cmdline: String,
-    /// Start offset of the rootfs partition.
+    /// Start offset of the rootfs partition — the byte the **last** kernel slot ends
+    /// at, so the two can never disagree.
+    ///
+    /// Derived rather than authored, because it is not a free choice: the slots are
+    /// real GPT partitions laid back to back from
+    /// [`offset`](Kpart::offset), and the rootfs begins where they stop. Authoring it
+    /// alongside the slot geometry would let a device widen a slot and silently
+    /// overlap the rootfs — the one arrangement that corrupts an image rather than
+    /// failing to boot it.
     pub rootfs_offset: String,
 }
 
@@ -1888,7 +1957,7 @@ pub struct ResolvedBuild {
     /// in-tree DT dir before `make` (from the device). Empty when the board's DTB is
     /// already upstream. Resolution guarantees each path is contained (relative, no
     /// `..`), names a `.dts`/`.dtsi`, and that [`kernel_dtb`](Self::kernel_dtb) is
-    /// compiled from one of them. §4.
+    /// compiled from one of them.
     pub device_dts: Vec<String>,
     /// Out-of-tree kernel-module sets, in the order the device named them: each
     /// `kmods/<name>.toml` loaded and validated, built against this build's kernel tree

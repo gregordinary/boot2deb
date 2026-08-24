@@ -1,15 +1,53 @@
 # H96 MAX M9 -- IR remote keymap for rc-core / ir-keytable.
 #
-# Recovered from the vendor Android device tree's rockchip,usercode /
-# rockchip,key_table nodes (the out-of-tree pwm-remotectl driver has no mainline
-# equivalent). The board's IR receiver is a plain GPIO (GPIO0_C4) decoded by
-# gpio-ir-receiver + the rc-core NEC decoder; this maps the decoded scancodes to
-# input keycodes. The vendor shipped six remote variants (six usercodes); their
-# NEC addresses differ, so every variant is listed and only the matching handset's
-# scancodes ever fire. A live `ir-keytable -t` press confirms the variant and the
-# byte orientation; adjust here if a press decodes to the bit-reverse of a listed
-# scancode. The vendor maps the centre/OK button to KEY_REPLY (its Android keylayout
-# retranslated it); change those entries to KEY_OK/KEY_ENTER if a frontend expects it.
+# The board's IR receiver is a plain GPIO (GPIO0_C4) decoded by gpio-ir-receiver
+# and the rc-core NEC decoder; this maps decoded scancodes to input keycodes.
+#
+# The handset bundled with the H96 MAX M9 is 2.4 GHz RF on an internal USB receiver,
+# not infrared, so nothing in this file serves the remote that ships in the box. The
+# IR receiver is still real hardware and still worth mapping: other H96 models' remotes
+# are infrared, and a box is a natural target for a universal remote.
+#
+# The `h96-max-h313` block is the only one verified on this hardware -- every entry is a
+# scancode this receiver decoded from a named button press on an H96 Max H313 handset (a
+# different H96 model, whose remote is infrared). It confirms the receiver end to end and
+# is useful in its own right to anyone pairing a spare H96 remote with this box.
+#
+# It speaks plain NEC on address 0x04, so its scancodes are the 16-bit
+# `(address << 8) | command` form. `protocol = "nec"` carries as much weight as the codes
+# themselves -- rc-core will not match a 16-bit NEC scancode against a block declaring
+# `necx`, whose scancodes are 24-bit.
+#
+# The blocks after it are the six variants named in the vendor Android device tree's
+# rockchip,usercode / rockchip,key_table nodes. Their addresses are disjoint from each
+# other and from 0x04, none has been verified on hardware, and a variant whose codes
+# never fire is inert -- so they are retained as free coverage at no runtime cost.
+#
+# To learn another handset: `ir-keytable -s rc0 -t`, press each button, record the
+# scancode it prints, and add a block naming the protocol that press decoded as.
+#
+# Loading this prints "Can't find necx bpf protocol". That is benign and expected:
+# `necx` is not a separate kernel protocol, it is the 24-bit scancode form the one NEC
+# decoder emits, and ir-keytable only fails to find a *BPF* decoder by that name. The
+# enabled protocol set ends up "nec", which decodes all three widths.
+[[protocols]]
+name = "h96-max-h313"
+protocol = "nec"
+[protocols.scancodes]
+0x408 = "KEY_POWER"
+0x445 = "KEY_UP"
+0x446 = "KEY_DOWN"
+0x447 = "KEY_LEFT"
+0x448 = "KEY_RIGHT"
+0x444 = "KEY_OK"
+0x41a = "KEY_BACK"
+0x42d = "KEY_HOME"
+0x44a = "KEY_MENU"
+0x402 = "KEY_VOLUMEUP"
+0x403 = "KEY_VOLUMEDOWN"
+0x409 = "KEY_MUTE"
+0x4a4 = "KEY_SEARCH"
+
 [[protocols]]
 name = "h96-uc4040"
 protocol = "necx"

@@ -1,0 +1,22 @@
+# Arm USB remote wakeup on human-interface devices that advertise it, so a keyboard
+# or mouse can wake the box from s2idle alongside the remote's POWER key.
+#
+# Installed to /etc/udev/rules.d/. It fires on the USB *interface* (HID is an interface
+# class, not a device class) and writes the attribute on the parent USB device, which is
+# where power/wakeup lives -- hence the `../` in the path.
+#
+# The TEST guard is the whole selectivity of the rule. The kernel creates power/wakeup
+# only for devices whose configuration descriptor sets the remote-wakeup bit
+# (USB_CONFIG_ATT_WAKEUP, 0x20); a device that leaves it clear has no such attribute and
+# can never be armed. The bundled infrared receiver (0a45:0008) is one of those, so this
+# rule silently skips it and the remote continues to wake the box the way it always has:
+# out of band, through gpio0 PD3. A wakeup-capable receiver -- the Logitech unifying
+# dongle is one -- gets armed instead.
+#
+# Two things this rule alone does not settle, both answerable only on hardware:
+# whether the dwc3 controllers are wakeup sources across s2idle on this SoC, and whether
+# an intervening hub relays the wakeup. Check with:
+#
+#     grep . /sys/bus/usb/devices/*/power/wakeup
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", \
+  ATTR{bInterfaceClass}=="03", TEST=="../power/wakeup", ATTR{../power/wakeup}="enabled"

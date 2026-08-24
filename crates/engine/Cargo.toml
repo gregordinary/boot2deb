@@ -42,7 +42,7 @@ ferrosys = { version = "0.2", features = ["tar"] }
 # `debian` feature adds the in-process archive provisioner that bootstraps the
 # target suite/arch rootfs (pure Rust: tar extraction + OpenPGP release
 # verification, no external binary, no C dep).
-ferroday-cage = { version = "0.1", features = ["debian", "subid"] }
+ferroday-cage = { version = "0.1.2", features = ["debian", "subid"] }
 # Randomly-named, fail-if-exists staging dirs for the build's intermediate trees,
 # so a local user cannot pre-create and own one.
 tempfile.workspace = true

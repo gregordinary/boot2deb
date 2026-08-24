@@ -354,7 +354,7 @@ pub fn build_ffmpeg(
     let root = sandbox.build_root(
         &BuildRootSpec {
             packages: &packages,
-            pool: Some(&pool.file_url()),
+            pool: Some(pool.file_url()),
             stage: "ffmpeg",
         },
         &step,

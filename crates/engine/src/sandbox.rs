@@ -732,16 +732,13 @@ fn profile() -> ferroday_cage::CageBuilder {
     builder
 }
 
-/// Recipe version of the sandbox base — bumped when a tree an earlier version published
-/// is no longer a base this one may compile in, for a reason the rest of the path does
-/// not already capture.
+/// Recipe version of the sandbox base — this module's own logic, folded into the base
+/// key so a tree published under a different version is never reused.
 ///
-/// v2: the base is immutable. Under v1 the stage that used it installed its build-deps
-/// *into* it, so a v1 tree holds an unrecorded superset of [`BASE_DEPS`] — the packages
-/// of whichever recipes ran in that work dir — while the manifest beside it states only
-/// what the bootstrap resolved. Reusing one would compile in an environment its own
-/// record contradicts, and would resolve an increment against packages no declaration
-/// asked for.
+/// Bump it when a change means a tree an earlier version published is no longer a base
+/// this one may compile in, for a reason the rest of the key does not already capture.
+/// The base is immutable and its manifest states exactly what the bootstrap resolved,
+/// so what this guards is compiling in an environment whose own record contradicts it.
 const BASE_STAGE_VERSION: u32 = 2;
 
 /// Where the build sandbox's rootfs lives, for a build whose scratch tree is `work_dir`.

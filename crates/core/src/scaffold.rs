@@ -186,6 +186,14 @@ impl DeviceScaffold {
         let _ = writeln!(s, "device_config_fragments = []");
         let _ = writeln!(s, "supported_kernels       = [{:?}]", self.kernel);
         let _ = writeln!(s, "default_kernel          = {:?}", self.kernel);
+        // The one suite this board has been scaffolded for, which is the only one it
+        // can honestly claim yet. Widen it as each further suite is built, or use
+        // ["*"] for a board whose config is genuinely suite-agnostic.
+        let _ = writeln!(
+            s,
+            "supported_suites        = [{:?}]        # add each suite as you build it; [\"*\"] for any",
+            self.suite
+        );
         let _ = writeln!(s, "default_suite           = {:?}", self.suite);
         let _ = writeln!(
             s,

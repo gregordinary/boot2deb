@@ -23,6 +23,7 @@ device_config_fragments = []
 
 supported_kernels       = ["debian-armmp"]
 default_kernel          = "debian-armmp"
+supported_suites        = ["forky", "trixie"]               # both ship as recipes
 default_suite           = "forky"
 default_layout          = "combined"
 hostname                = "asus-chromebit-cs10"

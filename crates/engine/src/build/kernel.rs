@@ -7,7 +7,7 @@
 //! base defconfig + fragments merged out-of-tree, then copied into the tree, so the
 //! shipped kernel is configured from the same fragments `verify-config` checks.
 //!
-//! A board whose `.dts` is not yet upstream carries it in `device_dts` (§4): the
+//! A board whose `.dts` is not yet upstream carries it in `device_dts`: the
 //! clone step copies those sources into the in-tree DT dir and registers the board
 //! DTB in that dir's `Makefile`, so `bindeb-pkg` ships it in the `linux-image` deb
 //! like any in-tree board. [`build_dtb`] rebuilds just that DTB for the bring-up
@@ -44,12 +44,12 @@ const CLONE_STAGE_VERSION: u32 = 1;
 const KERNEL_DEB_PREFIXES: &[&str] = &["linux-image-", "linux-headers-", "linux-libc-dev"];
 
 /// Stage-recipe version for the kernel **output** signature (Tier-2 artifact cache):
-/// bump when the compile/package logic changes the produced `.deb`s in a way
-/// the folded inputs do not already capture (e.g. a changed `make` invocation).
-/// v2: the config is now generated with `CROSS_COMPILE`, so the same fragments
-/// resolve a different `.config` (the cross-toolchain-probed symbols) than under v1.
-/// v3: the `.deb`s state their compressor through `KDEB_COMPRESS`, so a v2 entry may
-/// be a `zstd` archive where this build states `xz`.
+/// this stage's own logic, folded in as an input.
+///
+/// An entry stored under a different version is never restored. Bump it when the
+/// compile or package logic changes the produced `.deb`s in a way the folded inputs do
+/// not already capture — a changed `make` invocation, a `.config` generated under
+/// different toolchain variables, a different archive compressor.
 const OUTPUT_STAGE_VERSION: u32 = 3;
 
 /// Filesystem inputs for the kernel stage (the lock and resolved build carry the
@@ -67,7 +67,7 @@ pub struct KernelOptions<'a> {
     pub fragments: &'a [PathBuf],
     /// Resolved `device_dts` sources (the board `.dts` plus any board `.dtsi`), in
     /// authored order, as produced from the resolved build's `device_dts` names.
-    /// Empty for a board whose DTB is already upstream. §4.
+    /// Empty for a board whose DTB is already upstream.
     pub device_dts: &'a [PathBuf],
     /// Scratch directory holding the kernel clone (`<work>/linux`) and the `.deb`s
     /// `bindeb-pkg` drops beside it.
@@ -109,7 +109,7 @@ pub fn tree_dir(work_dir: &Path) -> PathBuf {
 ///
 /// That is a scoped loss, not a hole in the reproducibility claim: the guarantee is the
 /// *content pin* — every package by name, version, and sha256 in the solved manifest —
-/// and it is untouched. The ext4 filesystem is not byte-reproducible either (§3.6), so
+/// and it is untouched. The ext4 filesystem is not byte-reproducible either, so
 /// the whole-image byte claim already waits on the Phase-F formatter.
 pub fn source_date_epoch(work_dir: &Path, lock: &Lock) -> Option<u64> {
     let pin = lock.kernel.as_ref()?;
@@ -279,7 +279,7 @@ pub fn ensure_module_tree(
 }
 
 /// Rebuild only the board DTB (`make <dt_dir>/<board>.dtb`) in the already-patched
-/// tree, staging it into `out_dir` — the bring-up fast path (§4).
+/// tree, staging it into `out_dir` — the bring-up fast path.
 ///
 /// Prepares the tree exactly as [`build_kernel`] does (clone + `git am` +
 /// `device_dts` install on a stale or absent tree, reuse on a fresh one) and
@@ -479,7 +479,7 @@ fn dt_source_dir(build: &ResolvedBuild, tree: &Path) -> PathBuf {
 
 /// Copy the board's loose device-tree sources into the kernel's DT dir and register
 /// the board DTB with kbuild, so `bindeb-pkg` compiles and ships it like any in-tree
-/// board (§4).
+/// board.
 ///
 /// Copy-into-tree rather than a standalone `dtc` run: a forked board `.dts`'s
 /// `#include "<soc>.dtsi"` then resolves for free, and the DTB rides in the

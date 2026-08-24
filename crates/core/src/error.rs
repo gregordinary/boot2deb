@@ -9,7 +9,10 @@
 pub enum ConfigError {
     /// A referenced config file does not exist. `kind` is the layer kind
     /// (`"device"`, `"kernel"`, …) for a readable message.
-    #[error("{kind} '{name}' not found (looked at {path})")]
+    #[error(
+        "{kind} '{name}' not found (looked at {path}){}",
+        not_found_hint(kind, similar)
+    )]
     NotFound {
         /// Layer kind, e.g. `"device"`.
         kind: &'static str,
@@ -17,6 +20,15 @@ pub enum ConfigError {
         name: String,
         /// The path that was tried.
         path: String,
+        /// Names of the same kind close enough to `name` to be the intended one,
+        /// best match first, or empty when nothing is near.
+        ///
+        /// A name is an *open* set — unlike a closed axis such as `--kernel`, whose
+        /// error can name every valid value — so the honest answer to a typo is the
+        /// handful it might have been, not the whole inventory. Empty is not "no such
+        /// names exist"; it is "none of them look like this one", and the message then
+        /// falls back to naming the command that lists them.
+        similar: Vec<String>,
     },
 
     /// A flat layer name or manifest filename (from a CLI argument or a config
@@ -262,6 +274,23 @@ pub enum ConfigError {
         board: String,
         /// Comma-separated profiles the device does support.
         supported: String,
+    },
+
+    /// The derived rootfs offset (`kpart_offset + slots × kpart_size`) overflows
+    /// [`u64`]. Only reachable from author-supplied sizes near the type's ceiling, and
+    /// reported rather than wrapped: a wrapped value would place the rootfs partition
+    /// inside the kernel slots.
+    #[error(
+        "depthcharge geometry overflows: kpart offset {offset} + {slots} × {size} does \
+         not fit a 64-bit byte offset"
+    )]
+    KpartGeometryOverflow {
+        /// The authored first-slot offset.
+        offset: String,
+        /// The authored per-slot size (the device's if it states one).
+        size: String,
+        /// The slot count.
+        slots: u8,
     },
 
     /// The depthcharge board profile name is not a bare identifier. Separate from
@@ -636,6 +665,48 @@ pub enum ConfigError {
         value: String,
     },
 
+    /// The resolved suite is well-formed but not in the device's `supported_suites`.
+    /// Separate from [`InvalidSuite`](Self::InvalidSuite): that one asks whether the
+    /// string could name a suite at all, this one whether *this board* is built for
+    /// it. Catches both a typo and a suite whose kernel predates the SoC — either of
+    /// which would otherwise fail minutes into a bootstrap.
+    #[error("device '{device}' does not support suite '{suite}' (supported: {supported})")]
+    UnsupportedSuite {
+        /// The device being resolved.
+        device: String,
+        /// The requested suite.
+        suite: String,
+        /// Comma-separated suites the device does support.
+        supported: String,
+    },
+
+    /// A device's `supported_suites` mixes the `*` wildcard with named codenames.
+    /// The wildcard already admits everything, so the named entries can only be a
+    /// narrowing the list does not perform — two incompatible claims in one field.
+    #[error(
+        "device '{device}' lists supported_suites = [{supported}]: the '*' wildcard \
+         admits every codename, so naming others alongside it states two different \
+         claims — use either ['*'] or the explicit list"
+    )]
+    SuiteWildcardMixed {
+        /// The device whose list is contradictory.
+        device: String,
+        /// Comma-separated entries as authored.
+        supported: String,
+    },
+
+    /// A device declares an empty `supported_suites`, which admits nothing: every
+    /// suite — including its own `default_suite` — would be rejected, so no image
+    /// could ever be built for it.
+    #[error(
+        "device '{device}' declares an empty supported_suites, so no suite resolves — \
+         list the codenames this board is built for, or ['*'] for any"
+    )]
+    NoSupportedSuites {
+        /// The device with the empty list.
+        device: String,
+    },
+
     /// An `extra_debs` entry does not set exactly one locator: it must carry either
     /// a `url` or a `path`, not both and not neither. The sha256
     /// identifies the offending entry.
@@ -728,4 +799,120 @@ pub enum ConfigError {
         /// Why it cannot be used.
         why: &'static str,
     },
+}
+
+/// The trailing hint on a [`ConfigError::NotFound`]: the near-miss names, or the
+/// command that lists what does exist.
+///
+/// The two halves answer different questions. Near misses answer "did I typo this?",
+/// which is the common case for a name a user typed. When nothing is near, the useful
+/// answer is where to look — and that only exists for the kinds the CLI can enumerate,
+/// so the rest get no hint rather than a pointer to a command that does not exist.
+fn not_found_hint(kind: &str, similar: &[String]) -> String {
+    if !similar.is_empty() {
+        let names: Vec<String> = similar.iter().map(|n| format!("'{n}'")).collect();
+        return format!(" — did you mean {}?", names.join(" or "));
+    }
+    match kind {
+        "device" => " — `boot2deb list-devices` shows what is available".into(),
+        "recipe" | "lock" => " — `boot2deb list-recipes` shows what is available".into(),
+        "kernel" => " — `boot2deb list-kernels` shows what is available".into(),
+        "feature" => " — `boot2deb list-features` shows what is available".into(),
+        "kmod" => " — `boot2deb list-kmods` shows what is available".into(),
+        _ => String::new(),
+    }
+}
+
+/// Names from `candidates` close enough to `name` to be worth suggesting, best first.
+///
+/// Two rules, both cheap and both aimed at the mistakes people actually make:
+/// a candidate that *contains* `name` (or vice versa) is a truncation or an extra
+/// qualifier, and a candidate within a small edit distance is a typo. The distance
+/// budget scales with length — one edit in a short name is a different word, three in
+/// a long one is still recognisably the same one.
+///
+/// At most three, because a list long enough to scan is not a suggestion.
+pub(crate) fn similar_names(name: &str, candidates: &[String]) -> Vec<String> {
+    let budget = match name.chars().count() {
+        0..=4 => 1,
+        5..=9 => 2,
+        _ => 3,
+    };
+    let mut scored: Vec<(usize, &String)> = candidates
+        .iter()
+        .filter(|c| c.as_str() != name)
+        .filter_map(|c| {
+            // A containment match ranks ahead of any edit-distance one: `turing-rk1`
+            // against `turing-rk1/forky` is not a typo, it is an under-specified name.
+            if c.contains(name) || name.contains(c.as_str()) {
+                return Some((0, c));
+            }
+            let d = edit_distance(name, c);
+            (d <= budget).then_some((d, c))
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    scored.into_iter().take(3).map(|(_, c)| c.clone()).collect()
+}
+
+/// Levenshtein distance between `a` and `b`, over characters.
+///
+/// The two-row form: only the previous row is needed, so the cost is O(len(a)) memory
+/// for candidate lists that are at most a few dozen names.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=a.len()).collect();
+    let mut cur = vec![0usize; a.len() + 1];
+    for (j, bc) in b.iter().enumerate() {
+        cur[0] = j + 1;
+        for (i, ac) in a.iter().enumerate() {
+            let cost = usize::from(ac != bc);
+            cur[i + 1] = (prev[i + 1] + 1).min(cur[i] + 1).min(prev[i] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[a.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_typo_suggests_the_name_it_is_one_edit_from() {
+        let names: Vec<String> = ["turing-rk1", "h96-max-m9", "asus-c201"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(similar_names("turing-rk", &names), vec!["turing-rk1"]);
+        assert_eq!(similar_names("asus-c202", &names), vec!["asus-c201"]);
+        // Nothing near: no suggestion rather than the least-bad of a bad set.
+        assert!(similar_names("nope", &names).is_empty());
+        // An exact match is not a suggestion — it would not be an error.
+        assert!(similar_names("turing-rk1", &names).is_empty());
+    }
+
+    #[test]
+    fn an_under_specified_name_suggests_what_extends_it() {
+        let recipes: Vec<String> = ["turing-rk1/forky", "turing-rk1/trixie", "asus-c201/forky"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let hits = similar_names("turing-rk1", &recipes);
+        assert!(hits.contains(&"turing-rk1/forky".to_string()), "{hits:?}");
+        assert!(hits.contains(&"turing-rk1/trixie".to_string()), "{hits:?}");
+        assert!(!hits.contains(&"asus-c201/forky".to_string()), "{hits:?}");
+    }
+
+    #[test]
+    fn the_hint_falls_back_to_the_command_that_lists_the_kind() {
+        assert!(not_found_hint("device", &[]).contains("list-devices"));
+        assert!(not_found_hint("recipe", &[]).contains("list-recipes"));
+        // A kind with no listing command gets no pointer rather than a wrong one.
+        assert_eq!(not_found_hint("series", &[]), "");
+        // Near misses win over the fallback: they are the more specific answer.
+        let hint = not_found_hint("device", &["turing-rk1".to_string()]);
+        assert_eq!(hint, " — did you mean 'turing-rk1'?");
+    }
 }

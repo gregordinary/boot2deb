@@ -1,0 +1,27 @@
+# recipes/asus-c201-libreboot/forky.toml — a libreboot'd ASUS Chromebook C201 on
+# Debian forky (armhf).
+#
+# The same build as asus-c201/forky in every axis a recipe names. What differs is the
+# device it names: asus-c201-libreboot pairs the `speedy-libreboot` board profile with
+# the 32 MiB kernel slot that profile's firmware buffer needs.
+#
+# The image boots only on a unit running libreboot. Reach for `asus-c201/forky`
+# otherwise — the stock profile boots on stock firmware and on libreboot both, which
+# is why it is the default and this is the opt-in.
+#
+# It is a separate build point, so it gets its own PARTUUID and can be flashed to a
+# second card without the kernel mistaking one image for the other.
+device     = "asus-c201-libreboot"
+kernel     = "debian-armmp"    # Debian's own armhf kernel; forky resolves 7.1.x
+suite      = "forky"
+features   = []                # a base image, exactly as asus-c201/forky
+layout     = "combined"
+
+# The C201's own size. The wider kernel slots take 32 MiB more of it ahead of the
+# rootfs (which therefore starts at 76 MiB, not 44), and first boot grows the
+# partition to fill the card regardless.
+image_size = "2G"
+
+[support]
+status = "expected"
+date   = "2026-07-31"

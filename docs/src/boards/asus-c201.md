@@ -3,21 +3,29 @@
 The `asus-c201/forky` recipe builds a bootable Debian **forky** image for the ASUS
 Chromebook C201/C201PA (`google,veyron-speedy`) — an RK3288 Veyron Chromebook, and the
 first 32-bit Arm board and first ChromeOS-firmware board boot2deb supports.
-`asus-c201/trixie` is the same board on the stable suite.
+
+| Recipe | Kernel | Status |
+| --- | --- | --- |
+| `asus-c201/forky` | Debian's `armmp`, installed from the archive | validated |
+| `asus-c201/trixie` | the same, on the stable suite | expected |
+| `asus-c201/mainline-forky` | compiled here from mainline 7.1.y | validated |
+
+The first two are the board as Debian ships it. The third is the seam for changing the
+kernel — see [A kernel of your own](#a-kernel-of-your-own) below.
 
 ```sh
 cargo run -p boot2deb-cli -- build asus-c201/forky
 ```
 
-That produces `build/asus-c201/forky/artifacts/asus-c201.img.xz` — a whole-disk image
+That produces `build/asus-c201/forky/artifacts/asus-c201-forky.img.xz` — a whole-disk image
 carrying a signed kernel partition and the ext4 rootfs, so one write lays down
 everything the firmware needs.
 
 ## What is unusual about this board
 
 Almost nothing is built. The RK3288 and all ten Veyron boards are upstream, Debian's own
-armhf kernel runs them, and the bootloader is not ours to make — so this recipe compiles
-neither a kernel nor a bootloader, and its lock pins nothing from git:
+armhf kernel runs them, and the bootloader is not ours to make — so `asus-c201/forky`
+compiles neither a kernel nor a bootloader, and its lock pins nothing from git:
 
 ```toml
 [rootfs]
@@ -49,28 +57,69 @@ atomic and reversible: `apt` writes the slot the board is *not* running from, an
 new kernel fails to boot, the firmware falls back to the old one by itself. See
 [Upgrading the kernel](../kernel-upgrades.md).
 
+## A kernel of your own
+
+`asus-c201/mainline-forky` is the same board and the same suite, with the kernel compiled
+here from **mainline 7.1.y** instead of installed from the archive. Its kconfig comes from
+the fragments — a Debian-parity baseline plus the RK3288 slice — on top of the in-tree
+`multi_v7_defconfig`, and the `rk3288-fixes` patch series rides along. Everything else is
+identical: the same signed-kernel boot payload, the same board profiles, the same
+`combined` layout.
+
+```sh
+cargo run -p boot2deb-cli -- build asus-c201/mainline-forky
+```
+
+That series currently carries one patch, and it is a good illustration of why the recipe
+exists. RK3288's `crypto/rk_crypto` hashes do not inherit their fallback's `statesize`,
+so any user of the shash export/import path gets a truncated state; the fix is four lines,
+and nothing about it is board-specific — it is simply not in a released kernel yet. A
+compiled recipe is where a fix like that lives until it is.
+
+The trade is what you would expect. This recipe compiles a kernel, so a cold build wants a
+cross toolchain and real time, where `asus-c201/forky` is a rootfs bootstrap and an image
+assembly. It also takes on the maintenance Debian was doing for you: a `7.1.y` point
+release is an `update --kernel-ref` and a rebuild, not an `apt upgrade`. Take it when you
+need a kernel change; stay on `asus-c201/forky` when you do not.
+
 ## Board profiles
 
 A depthcharge **board profile** describes the *firmware a unit runs*, not the board
-model. The C201 supports two:
+model. The C201 has two, and each is a whole shipped build point:
 
-| profile | payload ceiling | for |
-|---|---|---|
-| `speedy` (default) | 16 MiB | stock ChromeOS firmware — **and** libreboot |
-| `speedy-libreboot` | 32 MiB | a unit running libreboot, when the headroom is wanted |
+| build | profile | payload | initrd delivery | boots on |
+|---|---|---|---|---|
+| `asus-c201/forky` | `speedy` | 16 MiB slots | patched into every DTB's `/chosen` | stock firmware **and** libreboot |
+| `asus-c201-libreboot/forky` | `speedy-libreboot` | 32 MiB slots | a real FIT ramdisk node | libreboot only |
 
-The stock profile is the default deliberately: a stock-profile image boots on stock
-firmware **and** on a libreboot unit, while the reverse is not true. Both are confirmed
-on the hardware. Select the other with `--board speedy-libreboot`; its extra headroom is
-useful for a debug initramfs carrying the display stack, which makes the boot visible on
-the panel a few seconds after Ctrl+U instead of after the rootfs mounts.
+Both are confirmed on the hardware. **The stock profile is the default deliberately**: a
+stock-profile image boots on either firmware, while the reverse is not true —
+depthcharge-tools sets `hwid-match = None` on the libreboot profile, so a running
+`depthchargectl` on a libreboot unit resolves back to plain `speedy` and applies the
+stock constraints.
+
+The libreboot build exists for the payload headroom: libreboot's depthcharge buffers a
+32 MiB kernel (`CONFIG_KERNEL_SIZE = 0x2000000`) where the stock firmware buffers 16,
+which is room for a debug initramfs carrying the display stack — making the boot visible
+on the panel a few seconds after Ctrl+U instead of after the rootfs mounts. Taking that
+headroom needs a matching kernel *partition*, not just the profile, so the two travel
+together on `devices/asus-c201-libreboot.toml`: it `extends = "asus-c201"` and states
+only the profile and `kpart_size = "32MiB"`. Everything else — the DTB, the kernel set,
+the keymap, the overlay tree — is the C201's and is inherited.
+
+The wider slots move the rootfs from 44 MiB to 76 MiB into the image, which is the whole
+cost. Build it like any other recipe:
+
+```sh
+boot2deb build asus-c201-libreboot/forky
+```
 
 ## Flash and boot
 
 Write the image to a microSD card or a USB stick:
 
 ```sh
-xzcat build/asus-c201/forky/artifacts/asus-c201.img.xz \
+xzcat build/asus-c201/forky/artifacts/asus-c201-forky.img.xz \
   | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
 ```
 
@@ -185,6 +234,12 @@ with, and the device keeps that identity for life — first boot grows the parti
 never rewrites its PARTUUID, so the signature stays valid with nothing to re-sign. KERN-A
 ships signed and correct; the empty KERN-B spare is first populated by a kernel upgrade,
 which writes the slot it is not running from and leaves the proven one as the fallback.
+
+**The compiled-kernel recipe boots too.** An `asus-c201/mainline-forky` image came up on
+the same unit with no self-test failures, no warnings, and taint 0 — so the mainline 7.1.y
+kernel and the `rk3288-fixes` patch are both proven on silicon. A later build of it
+also booted from USB and **installed cleanly to internal eMMC**, which exercises the whole
+image path rather than just the boot.
 
 Expect a **white screen for roughly 10 seconds** after Ctrl+U before the boot messages
 appear. That is normal and not a fault: there is no display driver in the initramfs, so

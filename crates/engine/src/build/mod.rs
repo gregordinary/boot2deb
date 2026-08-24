@@ -1184,7 +1184,7 @@ pub(crate) fn series_identity<'a>(
 }
 
 /// The ordered content fingerprint of a board's loose device-tree sources — for each
-/// resolved `device_dts` path, in order, `"<basename>=<sha256 of its bytes>"` (§4).
+/// resolved `device_dts` path, in order, `"<basename>=<sha256 of its bytes>"`.
 ///
 /// Folded into the kernel's Tier-1 tree signature, because these files are copied into
 /// the tree: editing the board `.dts` must restamp the tree so the next build re-copies
@@ -1240,8 +1240,30 @@ pub(crate) fn fold_patch_series(
     }
 }
 
-/// Copy `src` into `out_dir` (created if needed), returning the destination path.
-/// Used to stage a built artifact out of a scratch tree.
+/// Copy `src` into `out_dir` (created if needed) under its own name, returning the
+/// destination path. Used to stage a built artifact out of a scratch tree.
+///
+/// See [`stage_artifact_as`] for the publish's atomicity contract, and for the case
+/// where the published name is not the source's.
+fn stage_artifact(out_dir: &Path, src: &Path) -> Result<PathBuf, EngineError> {
+    let file_name = src
+        .file_name()
+        .expect("artifact path has a file name")
+        .to_string_lossy()
+        .into_owned();
+    stage_artifact_as(out_dir, src, &file_name)
+}
+
+/// Copy `src` into `out_dir` (created if needed) as `file_name`, returning the
+/// destination path.
+///
+/// The published name is separate from the source's because the two answer different
+/// questions: a build tree names a file for what it *is* (`idbloader.img`), while the
+/// output dir names it for the build point that owns it
+/// ([`BuildPoint::artifact_stem`](boot2deb_core::buildpoint::BuildPoint::artifact_stem)),
+/// so several recipes can share one `--out-dir` without overwriting each other. The
+/// same split lets the artifact cache store one copy under the canonical name and
+/// serve it to every point whose signature matches.
 ///
 /// The publish is atomic: the bytes copy into a sibling `.partial` temp on
 /// the same filesystem, then a rename moves it over `dest`. An interrupted copy leaves
@@ -1249,15 +1271,10 @@ pub(crate) fn fold_patch_series(
 /// valid name — which would either overwrite a previously-staged good artifact the
 /// ledger already trusts or, on a rootfs-only retry, be ingested as a half-written
 /// package. Two runs staging the same name use pid-distinct temps.
-fn stage_artifact(out_dir: &Path, src: &Path) -> Result<PathBuf, EngineError> {
+fn stage_artifact_as(out_dir: &Path, src: &Path, file_name: &str) -> Result<PathBuf, EngineError> {
     std::fs::create_dir_all(out_dir).map_err(|source| EngineError::io(out_dir, source))?;
-    let file_name = src.file_name().expect("artifact path has a file name");
     let dest = out_dir.join(file_name);
-    let tmp = out_dir.join(format!(
-        ".{}.{}.partial",
-        file_name.to_string_lossy(),
-        std::process::id()
-    ));
+    let tmp = out_dir.join(format!(".{file_name}.{}.partial", std::process::id()));
     std::fs::copy(src, &tmp).map_err(|source| {
         let _ = std::fs::remove_file(&tmp);
         EngineError::io(src, source)

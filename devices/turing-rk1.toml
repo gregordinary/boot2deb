@@ -9,6 +9,9 @@ kernel_dtb              = "rockchip/rk3588-turing-rk1.dtb"
 device_config_fragments = ["device/turing-rk1"]    # board-specific kconfig only
 supported_kernels       = ["rk3588-mainline-7.1"]
 default_kernel          = "rk3588-mainline-7.1"
+# forky is the validated suite; trixie builds and ships as its own recipe. Anything
+# older predates the RK3588 support this board's kernel and firmware assume.
+supported_suites        = ["forky", "trixie"]
 default_suite           = "forky"                  # validated, supported suite for this board
 default_layout          = "combined"               # combined | split
 hostname                = "turing-rk1"

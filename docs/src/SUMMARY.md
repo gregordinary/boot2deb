@@ -26,6 +26,7 @@
 # Reference
 
 - [Config model](reference/config-model.md)
+- [What the base image contains](reference/base-image.md)
 - [CLI](reference/cli.md)
 - [Support matrix](reference/support-matrix.md)
 - [RK3576 u-boot images](reference/rk3576-uboot-images.md)

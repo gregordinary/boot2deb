@@ -27,17 +27,16 @@ use std::process::Command;
 /// bump when the fetch/patch logic that shapes a reused driver tree changes.
 const TREE_STAGE_VERSION: u32 = 1;
 
-/// Stage-recipe version for a kmod **output** signature (Tier-2 `.deb`): bump when the
-/// build/package logic changes the produced `.deb` in a way the folded inputs do not
-/// already capture.
-/// v2: the `.deb` states its compressor rather than inheriting the host `dpkg`
-/// default, so a v1 entry may be a `zstd` archive where this build states `xz`.
+/// Stage-recipe version for a kmod **output** signature (Tier-2 `.deb`): this stage's
+/// own logic, folded in as an input. An entry stored under a different version is
+/// never restored. Bump it when the build or package logic changes the produced `.deb`
+/// in a way the folded inputs do not already capture.
 const OUTPUT_STAGE_VERSION: u32 = 2;
 
-/// Stage-recipe version for a kmod **firmware** signature (Tier-2 `<name>-firmware.deb`):
-/// bump when the firmware collect/package logic changes the produced `.deb`.
-/// v2: the `.deb` states its compressor, as [`OUTPUT_STAGE_VERSION`]'s v2 does and
-/// for the same reason — both archives come from [`build::dpkg_deb_build`].
+/// Stage-recipe version for a kmod **firmware** signature (Tier-2
+/// `<name>-firmware.deb`), tracked apart from [`OUTPUT_STAGE_VERSION`] so a change to
+/// one archive does not invalidate the other's cached entries. Bump it when the
+/// firmware collect or package logic changes the produced `.deb`.
 const FIRMWARE_STAGE_VERSION: u32 = 2;
 
 /// Filesystem inputs for the kmod stage. The resolved build carries the descriptors
@@ -48,8 +47,13 @@ pub struct KmodOptions<'a> {
     /// kernel cache hit left no tree, rebuild) the built kernel tree via
     /// [`kernel::ensure_module_tree`](crate::build::kernel::ensure_module_tree).
     pub kernel: &'a crate::build::kernel::KernelOptions<'a>,
-    /// Per-name clone-source overrides (`(name, url-or-path)`) for co-development; a
+    /// Per-name clone-source overrides (`(name, url-or-path)`) from `--kmod-src`; a
     /// name absent here uses that kmod's locked `source`.
+    ///
+    /// Keyed by name because a board declares several modules, unlike the single-tree
+    /// axes whose `--*-src` flags take a bare source. The override redirects only
+    /// *where* the tree is cloned from — the commit is still the lock's, so a local
+    /// mirror is a faster fetch and never a different build.
     pub sources: &'a [(String, String)],
     /// Per-name resolved local-patch paths (`(name, [abs path, …])`) — each kmod's
     /// `local_patches`, expanded from bare filenames to absolute paths by the CLI, in

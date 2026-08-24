@@ -248,6 +248,13 @@ impl ConfigRoot {
                 kind,
                 name: name.to_string(),
                 path: last_path.display().to_string(),
+                // The subdir `rel` lives under is the inventory this name should have
+                // come from. `base.toml` has none, and then there is nothing to
+                // suggest — which is right: it is not a name a user typed.
+                similar: match rel.split_once('/') {
+                    Some((subdir, _)) => self.near_names(subdir, name),
+                    None => Vec::new(),
+                },
             });
         };
         Ok((value, top_path.unwrap_or(last_path)))
@@ -439,6 +446,13 @@ impl ConfigRoot {
                 kind: "lock",
                 name: name.to_string(),
                 path: path.display().to_string(),
+                // Recipes, not locks: a lock is derived from a recipe, so a name that
+                // has no lock is either a typo for a recipe or a recipe awaiting
+                // `update`, and both are answered by the recipe inventory.
+                similar: crate::error::similar_names(
+                    name,
+                    &self.list_recipes().unwrap_or_default(),
+                ),
             }),
         }
     }
@@ -477,6 +491,23 @@ impl ConfigRoot {
             .parent()
             .expect("recipes/<ref>.toml always has a parent");
         Ok(owning.join(dir).join(filename))
+    }
+
+    /// Names under `subdir` close enough to `name` to be the one that was meant, for a
+    /// [`ConfigError::NotFound`]'s "did you mean" hint.
+    ///
+    /// Best-effort: an unreadable directory yields no suggestions rather than an
+    /// error, because this decorates a failure that has already happened and must not
+    /// replace it with a different one.
+    fn near_names(&self, subdir: &str, name: &str) -> Vec<String> {
+        // Recipes nest one level under their device folder, so they have their own
+        // lister; every other layer is a flat directory of `<name>.toml`.
+        let candidates = if subdir == "recipes" {
+            self.list_recipes()
+        } else {
+            self.list(subdir)
+        };
+        crate::error::similar_names(name, &candidates.unwrap_or_default())
     }
 
     /// Stems of every `*.toml` in `subdir`, unioned across the search path, sorted
@@ -963,7 +994,8 @@ mod tests {
             "description = \"{name}\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
              supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/{name}.dtb\"\n\
              device_config_fragments = []\nsupported_kernels = [\"k\"]\n\
-             default_kernel = \"k\"\ndefault_suite = \"forky\"\ndefault_layout = \"combined\"\n\
+             default_kernel = \"k\"\nsupported_suites = [\"*\"]\n\
+             default_suite = \"forky\"\ndefault_layout = \"combined\"\n\
              hostname = \"{name}\"\n{extra}"
         )
     }
