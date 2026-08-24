@@ -35,8 +35,11 @@ pub(crate) fn mark_work_dir(work_dir: &Path) -> Result<(), Box<dyn std::error::E
         .map_err(|e| format!("failed to create {}: {e}", work_dir.display()))?;
     let marker = work_dir.join(WORK_DIR_MARKER);
     if !marker.exists() {
-        std::fs::write(&marker, "boot2deb work dir; `boot2deb clean` may remove this tree\n")
-            .map_err(|e| format!("failed to write {}: {e}", marker.display()))?;
+        std::fs::write(
+            &marker,
+            "boot2deb work dir; `boot2deb clean` may remove this tree\n",
+        )
+        .map_err(|e| format!("failed to write {}: {e}", marker.display()))?;
     }
     Ok(())
 }

@@ -111,7 +111,10 @@ mod tests {
         assert!(!dir.join(".fetch-XYZ").exists());
         assert!(!dir.join("kernel").join(".sig.5.partial").exists());
         assert!(dir.join("linux-image_arm64.deb").exists(), "real deb kept");
-        assert!(dir.join("kernel").join("real.deb").exists(), "nested real deb kept");
+        assert!(
+            dir.join("kernel").join("real.deb").exists(),
+            "nested real deb kept"
+        );
     }
 
     #[test]

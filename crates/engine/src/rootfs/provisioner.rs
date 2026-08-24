@@ -197,14 +197,15 @@ pub fn build_rootfs(
         step.progress(20);
         step.log(format!(
             "bootstrapping {} {} rootfs into a staging tree (subordinate id-map, real ownership)",
-            build.arch, build.image_suite(),
+            build.arch,
+            build.image_suite(),
         ));
         // A transient provisioned tree carrying subordinate-mapped ownership
         // the caller cannot unlink; the guard removes it through the map. Kept
         // out of `work` so its TempDir drop is not asked to remove ids it
         // cannot. `provision::ensure` requires a non-existent destination.
-        let rootfs_dir = std::env::temp_dir()
-            .join(format!("boot2deb-prov-rootfs-{}", std::process::id()));
+        let rootfs_dir =
+            std::env::temp_dir().join(format!("boot2deb-prov-rootfs-{}", std::process::id()));
         let _ = provision::remove(&rootfs_dir);
         // The bootstrap resolves the install closure a second time, for itself,
         // and installs *that* result — the plan above was resolved earlier and
@@ -220,12 +221,12 @@ pub fn build_rootfs(
             }
             forward_bootstrap_event(&step, event);
         };
-        provision::ensure(&rootfs_dir, &mut debian.observe(&mut bootstrap_sink)).map_err(
-            |e| EngineError::Bootstrap {
+        provision::ensure(&rootfs_dir, &mut debian.observe(&mut bootstrap_sink)).map_err(|e| {
+            EngineError::Bootstrap {
                 context: "provision the rootfs".into(),
                 message: e.to_string(),
-            },
-        )?;
+            }
+        })?;
         let _provisioned = ProvisionedRoot(rootfs_dir.clone());
         // The two resolutions agreeing is the ordinary case; a divergence means
         // the archive moved mid-build, which is worth seeing rather than
@@ -250,7 +251,14 @@ pub fn build_rootfs(
         };
         step.progress(55);
 
-        customize(&rootfs_dir, &overlay, build, opts.boot_config, DEFAULT_USER, &step)?;
+        customize(
+            &rootfs_dir,
+            &overlay,
+            build,
+            opts.boot_config,
+            DEFAULT_USER,
+            &step,
+        )?;
         step.progress(65);
 
         export_rootfs_tar(&rootfs_dir, &tarball, opts.source_date_epoch, &step)?;
@@ -367,7 +375,11 @@ fn build_debian(
     }
 
     b.build().map_err(|e| EngineError::Bootstrap {
-        context: format!("configure the {} {} bootstrap", build.arch, build.image_suite()),
+        context: format!(
+            "configure the {} {} bootstrap",
+            build.arch,
+            build.image_suite()
+        ),
         message: e.to_string(),
     })
 }
@@ -753,7 +765,12 @@ mod tests {
 
     /// The media-accel build (carries ffmpeg-rk et al. + depthcharge is absent).
     fn rk1() -> ResolvedBuild {
-        resolve_recipe(&repo_root(), "turing-rk1/media-accel-forky", &Overrides::default()).unwrap()
+        resolve_recipe(
+            &repo_root(),
+            "turing-rk1/media-accel-forky",
+            &Overrides::default(),
+        )
+        .unwrap()
     }
 
     /// A depthcharge board with a distro kernel.
@@ -764,13 +781,26 @@ mod tests {
     #[test]
     fn render_plan_manifest_is_sorted_and_pinned() {
         let rows = vec![
-            ("libc6".into(), "2.41-1".into(), "arm64".into(), "aaaa".into()),
-            ("ffmpeg-rk".into(), "3e53143".into(), "arm64".into(), "cccc".into()),
+            (
+                "libc6".into(),
+                "2.41-1".into(),
+                "arm64".into(),
+                "aaaa".into(),
+            ),
+            (
+                "ffmpeg-rk".into(),
+                "3e53143".into(),
+                "arm64".into(),
+                "cccc".into(),
+            ),
         ];
         let body = render_plan_manifest(&rows);
         let lines: Vec<&str> = body.lines().filter(|l| !l.starts_with('#')).collect();
         // Sorted by name, each carrying its archive-recorded sha256.
-        assert_eq!(lines, vec!["ffmpeg-rk 3e53143 arm64 cccc", "libc6 2.41-1 arm64 aaaa"]);
+        assert_eq!(
+            lines,
+            vec!["ffmpeg-rk 3e53143 arm64 cccc", "libc6 2.41-1 arm64 aaaa"]
+        );
     }
 
     #[test]
@@ -808,7 +838,10 @@ mod tests {
         let rkbin = customize_script(DEFAULT_USER, &rk1(), None);
         assert_valid_shell("rkbin", &rkbin);
         assert!(!rkbin.contains("chroot"), "cage-native: the rootfs is /");
-        assert!(!rkbin.contains("$rootfs"), "cage-native: no host-side rootfs prefix");
+        assert!(
+            !rkbin.contains("$rootfs"),
+            "cage-native: no host-side rootfs prefix"
+        );
         // The account is created locked; the per-image password is spliced later.
         assert!(rkbin.contains("useradd -m -s /bin/bash 'debian'"));
         assert!(!rkbin.contains("chpasswd"));
@@ -843,13 +876,28 @@ mod tests {
                 cmdline: "console=tty1 ro",
             }),
         );
-        assert!(script.contains("depthchargectl build"), "builds the signed payload");
-        assert!(script.contains("vbutil_kernel --verify"), "proves the firmware will take it");
-        assert!(script.contains("lsinitramfs"), "proves the initramfs has what it needs");
+        assert!(
+            script.contains("depthchargectl build"),
+            "builds the signed payload"
+        );
+        assert!(
+            script.contains("vbutil_kernel --verify"),
+            "proves the firmware will take it"
+        );
+        assert!(
+            script.contains("lsinitramfs"),
+            "proves the initramfs has what it needs"
+        );
         for module in REQUIRED_INITRD_MODULES {
-            assert!(script.contains(module), "asserts {module} into the initramfs");
+            assert!(
+                script.contains(module),
+                "asserts {module} into the initramfs"
+            );
         }
-        assert!(script.contains("--show-depends"), "asserts the module list resolves");
+        assert!(
+            script.contains("--show-depends"),
+            "asserts the module list resolves"
+        );
         assert!(
             script.contains("enable-system-hooks = True"),
             "arms on-device kernel upgrades before shipping"

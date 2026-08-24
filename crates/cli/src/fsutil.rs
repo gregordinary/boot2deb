@@ -25,7 +25,11 @@ pub(crate) fn write_scaffold_file(
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if path.exists() && !force {
-        return Err(format!("{} already exists — pass --force to overwrite", path.display()).into());
+        return Err(format!(
+            "{} already exists — pass --force to overwrite",
+            path.display()
+        )
+        .into());
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -64,7 +68,9 @@ mod tests {
         write_scaffold_file(&path, "first\n", false).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\n");
         // A second write without --force leaves the hand-edited file intact.
-        let err = write_scaffold_file(&path, "second\n", false).unwrap_err().to_string();
+        let err = write_scaffold_file(&path, "second\n", false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("--force"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\n");
         // With --force it is overwritten.

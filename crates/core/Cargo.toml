@@ -3,6 +3,7 @@ name = "boot2deb-core"
 description = "boot2deb config model, layer resolution, and lock/kconfig formats"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

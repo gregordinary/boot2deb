@@ -270,7 +270,14 @@ c9acdc466e9aa96352f658b9276aa8a45b8e817d\trefs/tags/v7.1.1^{}\n";
         let repo = tmp.path();
         let git = |args: &[&str]| {
             assert!(
-                Command::new("git").arg("-C").arg(repo).args(args).output().unwrap().status.success(),
+                Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
                 "git {args:?} failed"
             );
         };

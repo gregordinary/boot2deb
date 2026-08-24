@@ -3,6 +3,7 @@ name = "boot2deb-cli"
 description = "boot2deb command-line interface: resolve, update, verify, and build device images"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [[bin]]

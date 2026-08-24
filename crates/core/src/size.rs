@@ -92,6 +92,7 @@ mod tests {
         assert!(parse_size("abc").is_err());
         assert!(parse_size("12qb").is_err()); // unknown unit
         assert!(parse_size("MiB").is_err()); // no number
+
         // Parses as a number but overflows u64 on the unit multiply.
         assert!(parse_size("17000000000000G").is_err());
     }

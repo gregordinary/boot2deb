@@ -74,7 +74,9 @@ pub fn is_full_sha(s: &str) -> bool {
 /// because the generators (`sha256_hex`) emit lowercase and the pins are
 /// compared as bytes.
 pub fn is_sha256_hex(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Canonicalize a git reference for a pin: a full 40-hex sha is lowercased to git's
@@ -111,7 +113,10 @@ mod tests {
         assert_eq!(form.as_str(), "named-ref");
         // A branch pin: same shape (a name, not the commit).
         assert_eq!(
-            PinForm::classify("mainline-cma-fix", "95a6c48816d39b190be4b7333ad6fc249c08590c"),
+            PinForm::classify(
+                "mainline-cma-fix",
+                "95a6c48816d39b190be4b7333ad6fc249c08590c"
+            ),
             PinForm::NamedRef
         );
         // The durable mpp tag is a named ref, not a bare commit.

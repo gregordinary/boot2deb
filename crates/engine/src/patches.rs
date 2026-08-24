@@ -293,7 +293,12 @@ mod tests {
         // Stop the second would never be reached.
         let bad_gen = tmp.path().join("bad");
         init_repo(&bad_gen, "hello.txt", "wholly\nunrelated\ncontent\n");
-        let bad = make_patch(&bad_gen, "hello.txt", "wholly\nCHANGED\ncontent\n", &patches);
+        let bad = make_patch(
+            &bad_gen,
+            "hello.txt",
+            "wholly\nCHANGED\ncontent\n",
+            &patches,
+        );
         fs::rename(&bad, patches.join("s/0001-bad.patch")).unwrap();
 
         let good_gen = tmp.path().join("good");
@@ -340,8 +345,15 @@ mod tests {
         fs::rename(&p, patches.join(&label)).unwrap();
 
         let before = git_in(&src, &["rev-parse", "HEAD"]);
-        let (n, failed) = verify_tree(&patches, &[&label], &src, "kernel", "test @ base", OnFailure::Stop)
-            .unwrap();
+        let (n, failed) = verify_tree(
+            &patches,
+            &[&label],
+            &src,
+            "kernel",
+            "test @ base",
+            OnFailure::Stop,
+        )
+        .unwrap();
         assert_eq!(n, 1);
         assert!(failed.is_empty());
         // Pure verify: HEAD unchanged and worktree clean.
@@ -369,7 +381,10 @@ mod tests {
         assert_eq!(n, 1);
         // Unlike verify, apply advances HEAD and leaves the change in the tree.
         assert_ne!(git_in(&src, &["rev-parse", "HEAD"]), before);
-        assert_eq!(fs::read_to_string(src.join("hello.txt")).unwrap(), "alpha\nBETA\ngamma\n");
+        assert_eq!(
+            fs::read_to_string(src.join("hello.txt")).unwrap(),
+            "alpha\nBETA\ngamma\n"
+        );
         assert_eq!(git_in(&src, &["status", "--porcelain"]), "");
     }
 
@@ -390,8 +405,15 @@ mod tests {
         fs::rename(&p, patches.join(&label)).unwrap();
 
         let before = git_in(&src, &["rev-parse", "HEAD"]);
-        let err = verify_tree(&patches, &[&label], &src, "kernel", "test @ base", OnFailure::Stop)
-            .unwrap_err();
+        let err = verify_tree(
+            &patches,
+            &[&label],
+            &src,
+            "kernel",
+            "test @ base",
+            OnFailure::Stop,
+        )
+        .unwrap_err();
         match err {
             EngineError::PatchDoesNotApply { patch, tree, .. } => {
                 assert_eq!(patch, label);
@@ -411,7 +433,15 @@ mod tests {
         init_repo(&src, "hello.txt", "alpha\n");
         // Leave an uncommitted change.
         fs::write(src.join("hello.txt"), "alpha\nbeta\n").unwrap();
-        let err = verify_tree(tmp.path(), &[], &src, "kernel", "test @ base", OnFailure::Stop).unwrap_err();
+        let err = verify_tree(
+            tmp.path(),
+            &[],
+            &src,
+            "kernel",
+            "test @ base",
+            OnFailure::Stop,
+        )
+        .unwrap_err();
         assert!(matches!(err, EngineError::DirtyCheckout { .. }));
     }
 

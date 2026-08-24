@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+# Nothing here writes to the repo.
+permissions:
+  contents: read
+
+# Superseded runs on the same ref are pointless; drop them.
+concurrency:
+  group: "ci-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Split out because it needs no compile: it fails in seconds rather than after
+  # a full build. `rustfmt.toml` pins `style_edition`, so the runner's rustfmt
+  # agrees with a local one without pinning the toolchain itself.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  # Tests, clippy, and rustdoc share one job so they share a target directory; a
+  # second job would pay the same compile twice for no extra signal.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      # Engine tests that shell out to an absent host tool skip themselves rather
+      # than fail, so an uninstalled dependency silently costs coverage. fakeroot
+      # is the only one ubuntu-latest lacks; the rest (dpkg-deb, git, tar, xz,
+      # openssl, e2fsprogs, util-linux) are already on the image.
+      - name: Install host tools the engine tests exercise
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fakeroot
+      - name: Run tests
+        run: cargo test --workspace
+      # `--all-targets` so test and example code is linted too, not just the libs.
+      # The toolchain is not pinned, so a new stable can add a lint and fail this on
+      # an unrelated change; fix the lint or add a scoped `#[allow]` with a reason.
+      - name: Lint, warning-clean
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # `core` and `engine` carry `#![warn(missing_docs)]`; denying warnings here
+      # is what makes an undocumented public item, or a broken intra-doc link, a
+      # build failure instead of a note nobody reads.
+      - name: Build the docs, warning-clean
+        run: cargo doc --no-deps --workspace
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # An MSRV nobody builds is a guess. `rust-version` in the workspace manifest is a
+  # promise to anyone on an older toolchain; this job is what keeps it true, failing
+  # as soon as a newer language or library feature slips in. The floor is read back
+  # out of Cargo.toml rather than repeated here, so the gate cannot drift from the
+  # claim it enforces. `--all-targets` because the floor covers test code too.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the declared MSRV toolchain
+        run: |
+          msrv="$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)"
+          echo "Declared MSRV: $msrv"
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+      - name: Build at the MSRV floor
+        run: cargo "+$MSRV" check --workspace --all-targets

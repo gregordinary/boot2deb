@@ -65,7 +65,11 @@ pub(crate) fn run(
             }
             plan::NodeStatus::Rebuild(changes) => (
                 "rebuild",
-                changes.iter().map(|c| c.summary()).collect::<Vec<_>>().join(", "),
+                changes
+                    .iter()
+                    .map(|c| c.summary())
+                    .collect::<Vec<_>>()
+                    .join(", "),
             ),
         };
         if reason.is_empty() {

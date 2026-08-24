@@ -168,9 +168,7 @@ pub enum EngineError {
     /// A patch in the series did not apply to the target tree — the verify gate's
     /// hard error, naming the failing patch and the kernel it was checked against.
     /// Patches are never silently skipped or fuzzed in.
-    #[error(
-        "patch does not apply to {tree} at {target}:\n  {patch}\n{detail}"
-    )]
+    #[error("patch does not apply to {tree} at {target}:\n  {patch}\n{detail}")]
     PatchDoesNotApply {
         /// Which source tree the series targets (e.g. `kernel`).
         tree: String,
@@ -239,9 +237,7 @@ pub enum EngineError {
     /// exist in the blob directory, so there is nothing to hash into a lock pin.
     /// Blobs are vendored files, never fetched, so the remedy is to vendor the
     /// file — named here rather than surfacing as a bare I/O error.
-    #[error(
-        "blob {filename} not found under {dir} — vendor it there (see blobs/README.md)"
-    )]
+    #[error("blob {filename} not found under {dir} — vendor it there (see blobs/README.md)")]
     BlobMissing {
         /// The blob filename the resolved build names.
         filename: String,
@@ -313,7 +309,7 @@ pub enum EngineError {
          {}{}\n  \
          refresh both together, or restore the keyring — see blobs/keyrings/README.md",
         crate::error::fmt_keys("\n  unexpected key (not vetted): ", unexpected),
-        crate::error::fmt_keys("\n  vetted key not in the keyring: ", missing),
+        crate::error::fmt_keys("\n  vetted key not in the keyring: ", missing)
     )]
     KeyringFingerprintMismatch {
         /// The keyring whose contents were rejected.
@@ -389,7 +385,9 @@ pub enum EngineError {
     /// The in-tree device-tree directory's `Makefile` has no `dtb-$(CONFIG_…) += …`
     /// rule to model the board's DTB entry on, so the engine cannot teach kbuild to
     /// build the copied `.dts` — a `.dts` compiled by nothing yields no DTB.
-    #[error("no 'dtb-$(CONFIG_…) +=' rule found in {makefile} — cannot register '{dtb}' for build")]
+    #[error(
+        "no 'dtb-$(CONFIG_…) +=' rule found in {makefile} — cannot register '{dtb}' for build"
+    )]
     DeviceDtsNoMakefileRule {
         /// The device-tree directory Makefile that was inspected.
         makefile: String,
@@ -580,7 +578,9 @@ pub enum EngineError {
     /// A destination label handed to `patch import` (via `--as`) escapes the
     /// patches repo — it is absolute or contains a `..` component. The repo-relative
     /// label must stay inside the repo.
-    #[error("unsafe patch label '{label}': must be a repo-relative path with no '..' or leading '/'")]
+    #[error(
+        "unsafe patch label '{label}': must be a repo-relative path with no '..' or leading '/'"
+    )]
     PatchImportUnsafeLabel {
         /// The offending label.
         label: String,

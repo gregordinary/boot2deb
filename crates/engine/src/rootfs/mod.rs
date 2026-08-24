@@ -197,7 +197,9 @@ fn copy_overlay_trees(
     for dir in overlay_dirs {
         if dir.exists() {
             let mut cmd = Command::new("cp");
-            cmd.arg("-a").arg(format!("{}/.", dir.display())).arg(staging);
+            cmd.arg("-a")
+                .arg(format!("{}/.", dir.display()))
+                .arg(staging);
             crate::build::run(cmd, "cp", &format!("stage overlay {}", dir.display()), step)?;
         }
     }
@@ -249,7 +251,11 @@ fn stage_preinstall_overlay(
         write_staged(staging, "etc/kernel/cmdline", &format!("{cmdline}\n"))?;
     }
 
-    write_staged(staging, "etc/locale.conf", &config::locale_conf(&build.locale))?;
+    write_staged(
+        staging,
+        "etc/locale.conf",
+        &config::locale_conf(&build.locale),
+    )?;
     write_staged(
         staging,
         "etc/locale.gen",
@@ -291,7 +297,11 @@ fn stage_overlay(
     write_staged(staging, "etc/fstab", &config::fstab(build, rootfs_partuuid))?;
     write_staged(staging, "etc/hostname", &config::hostname(&build.hostname))?;
     write_staged(staging, "etc/hosts", &config::hosts(&build.hostname))?;
-    write_staged(staging, "etc/apt/sources.list", &config::apt_sources(build.image_suite()))?;
+    write_staged(
+        staging,
+        "etc/apt/sources.list",
+        &config::apt_sources(build.image_suite()),
+    )?;
     write_staged(staging, "etc/kernel-img.conf", &config::kernel_img_conf())?;
     // Two files that exist because the build host is not the board. `dhcpcd` cannot
     // start without a `/etc/resolv.conf` to bind, and `update-initramfs` — running here,
@@ -328,7 +338,10 @@ fn stage_overlay(
     // The sudoers drop-in is written by the customize-hook directly into the chroot,
     // not staged here: at mode 0440 it would be unreadable to the hook's mapped uid
     // when it copies the overlay in.
-    step.log(format!("staged overlay + generated config at {}", staging.display()));
+    step.log(format!(
+        "staged overlay + generated config at {}",
+        staging.display()
+    ));
     Ok(())
 }
 
@@ -698,7 +711,12 @@ mod tests {
     fn rk1() -> ResolvedBuild {
         // The media-accel build: these rootfs tests assert the bootstrap includes the
         // feature packages (ffmpeg-rk et al.), so they need the userspace-carrying recipe.
-        resolve_recipe(&repo_root(), "turing-rk1/media-accel-forky", &Overrides::default()).unwrap()
+        resolve_recipe(
+            &repo_root(),
+            "turing-rk1/media-accel-forky",
+            &Overrides::default(),
+        )
+        .unwrap()
     }
 
     /// A lock with nothing pinned. These tests exercise how the rootfs node *stages* the
@@ -846,7 +864,10 @@ mod tests {
         // rewrites its PARTUUID — so no label and no filesystem UUID appears here.
         let f = config::fstab(&rk1(), PARTUUID);
         let expected = format!("PARTUUID={}\t/\text4", PARTUUID.hyphenated());
-        assert!(f.contains(&expected), "fstab must root on the derived PARTUUID:\n{f}");
+        assert!(
+            f.contains(&expected),
+            "fstab must root on the derived PARTUUID:\n{f}"
+        );
         assert!(!f.contains("LABEL="));
         assert!(!f.contains("\tUUID="));
         assert!(f.contains("mk_extlinux"));
@@ -859,7 +880,10 @@ mod tests {
         // would not resolve, and not a filesystem UUID, which does not exist yet.
         let f = config::fstab(&c201(), PARTUUID);
         let expected = format!("PARTUUID={}\t/\text4", PARTUUID.hyphenated());
-        assert!(f.contains(&expected), "fstab must root on the derived PARTUUID:\n{f}");
+        assert!(
+            f.contains(&expected),
+            "fstab must root on the derived PARTUUID:\n{f}"
+        );
         assert!(!f.contains("LABEL="));
         // And it says how to re-sign, because editing this line without doing so
         // produces a system that boots once and then does not.
@@ -882,7 +906,9 @@ mod tests {
     #[test]
     fn apt_sources_has_suite_pockets_and_components() {
         let s = config::apt_sources("forky");
-        assert!(s.contains("deb http://deb.debian.org/debian forky main contrib non-free non-free-firmware"));
+        assert!(s.contains(
+            "deb http://deb.debian.org/debian forky main contrib non-free non-free-firmware"
+        ));
         assert!(s.contains("forky-security"));
         assert!(s.contains("forky-updates"));
     }
@@ -942,8 +968,7 @@ mod tests {
             "sr_RS.UTF-8@latin".to_string(),
         ]);
         assert_eq!(
-            g,
-            "C.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\nsr_RS.UTF-8@latin UTF-8\n",
+            g, "C.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\nsr_RS.UTF-8@latin UTF-8\n",
             "a modifier rides after the codeset, not inside it"
         );
     }
@@ -997,7 +1022,10 @@ mod tests {
              derive from the disk; without it the file has no reason to exist:\n{text}"
         );
         assert!(text.contains("device = \"asus-c201\""));
-        assert!(text.contains("version = 1"), "a wire format read by other programs");
+        assert!(
+            text.contains("version = 1"),
+            "a wire format read by other programs"
+        );
 
         let data: String = text
             .lines()
@@ -1028,7 +1056,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "test");
-        stage_overlay(tmp.path(), &[], &build, uuid::Uuid::nil(), &ident(&build), &step).unwrap();
+        stage_overlay(
+            tmp.path(),
+            &[],
+            &build,
+            uuid::Uuid::nil(),
+            &ident(&build),
+            &step,
+        )
+        .unwrap();
 
         // `dhcpcd.service` lists /etc/resolv.conf in its ReadWritePaths under
         // ProtectSystem=strict, and systemd refuses the namespace if the path is absent
@@ -1045,7 +1081,10 @@ mod tests {
         // and ships an initramfs with no fsck — so root goes unchecked at every boot.
         // The type is the formatter's, not a literal, so the helper matches the image.
         assert!(
-            conf.contains(&format!("FSTYPE={}", crate::image::rootfs_filesystem_pin().kind)),
+            conf.contains(&format!(
+                "FSTYPE={}",
+                crate::image::rootfs_filesystem_pin().kind
+            )),
             "{conf}"
         );
     }
@@ -1108,5 +1147,4 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o644);
     }
-
 }

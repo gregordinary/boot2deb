@@ -42,7 +42,9 @@ impl ConfigRoot {
     /// Wrap a single directory as a config root (no overlays). Does not touch the
     /// filesystem; missing files surface as [`ConfigError::NotFound`] on lookup.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { roots: vec![root.into()] }
+        Self {
+            roots: vec![root.into()],
+        }
     }
 
     /// A primary (shipped) root plus ordered overlay directories. Overlays
@@ -227,10 +229,11 @@ impl ConfigRoot {
             let Some(text) = Self::read_file(&path)? else {
                 continue;
             };
-            let value: toml::Value = toml::from_str(&text).map_err(|source| ConfigError::Parse {
-                path: path.display().to_string(),
-                source,
-            })?;
+            let value: toml::Value =
+                toml::from_str(&text).map_err(|source| ConfigError::Parse {
+                    path: path.display().to_string(),
+                    source,
+                })?;
             top_path = Some(path);
             merged = Some(match merged {
                 Some(mut base) => {
@@ -344,7 +347,9 @@ impl ConfigRoot {
         let rel = format!("boot-methods/{}.toml", bm.as_str());
         let (value, path) = self.merge_value("boot-method", bm.as_str(), &rel)?;
         Ok(match bm {
-            BootMethod::RockchipRkbin => BootMethodLayer::RockchipRkbin(deserialize_at(value, &path)?),
+            BootMethod::RockchipRkbin => {
+                BootMethodLayer::RockchipRkbin(deserialize_at(value, &path)?)
+            }
             BootMethod::Depthcharge => BootMethodLayer::Depthcharge(deserialize_at(value, &path)?),
         })
     }
@@ -660,7 +665,12 @@ mod tests {
 
     #[test]
     fn valid_names_pass() {
-        for n in ["turing-rk1", "turing-rk1-forky", "rk3588-mainline-7.1", "a_b.c"] {
+        for n in [
+            "turing-rk1",
+            "turing-rk1-forky",
+            "rk3588-mainline-7.1",
+            "a_b.c",
+        ] {
             assert!(validate_name("device", n).is_ok(), "{n} should be valid");
         }
     }
@@ -697,7 +707,10 @@ mod tests {
             "turing-rk1/media-accel-forky",
             "h96-max-m9/console-forky",
         ] {
-            assert!(validate_recipe_ref(ok).is_ok(), "{ok:?} should be a valid recipe ref");
+            assert!(
+                validate_recipe_ref(ok).is_ok(),
+                "{ok:?} should be a valid recipe ref"
+            );
         }
         // Anything that could traverse out of `recipes/` is rejected: empty, a second
         // separator, a leading/trailing/absolute/doubled slash, and dot segments.
@@ -714,7 +727,10 @@ mod tests {
             "a b/forky",           // space
         ] {
             assert!(
-                matches!(validate_recipe_ref(bad), Err(ConfigError::InvalidRecipeRef { .. })),
+                matches!(
+                    validate_recipe_ref(bad),
+                    Err(ConfigError::InvalidRecipeRef { .. })
+                ),
                 "{bad:?} should be rejected"
             );
         }
@@ -783,7 +799,8 @@ mod tests {
         if let Some(b) = overlay_base {
             std::fs::write(o.path().join("base.toml"), b).unwrap();
         }
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
         (p, o, root)
     }
 
@@ -813,7 +830,8 @@ mod tests {
         std::fs::write(o.path().join("recipes/d/extra.toml"), "device = \"d\"\n").unwrap();
         // `d/shipped` in both roots: overlay adds a suite, must merge, not duplicate.
         std::fs::write(o.path().join("recipes/d/shipped.toml"), "suite = \"sid\"\n").unwrap();
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
 
         assert_eq!(root.list_recipes().unwrap(), vec!["d/extra", "d/shipped"]);
         let extra = root.recipe("d/extra").unwrap();
@@ -845,8 +863,10 @@ mod tests {
             o.path().join("recipes/turing-rk1/media-accel-forky.lock")
         );
         assert_eq!(
-            root.recipe_sibling(rref, "media-accel-forky.pkgs.lock").unwrap(),
-            o.path().join("recipes/turing-rk1/media-accel-forky.pkgs.lock")
+            root.recipe_sibling(rref, "media-accel-forky.pkgs.lock")
+                .unwrap(),
+            o.path()
+                .join("recipes/turing-rk1/media-accel-forky.pkgs.lock")
         );
         // The manifest filename itself must stay a bare name (no separator)...
         assert!(root.recipe_sibling(rref, "a/b.pkgs.lock").is_err());
@@ -862,10 +882,14 @@ mod tests {
         let o = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(o.path().join("recipes")).unwrap();
         std::fs::write(o.path().join("recipes/ov.toml"), "device = \"d\"\n").unwrap();
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
 
         let lp = root.lock_path("ov").unwrap();
-        assert!(lp.starts_with(o.path()), "lock should write into the overlay: {lp:?}");
+        assert!(
+            lp.starts_with(o.path()),
+            "lock should write into the overlay: {lp:?}"
+        );
         // A recipe not on the path defaults to the primary root.
         let lp2 = root.lock_path("nowhere").unwrap();
         assert!(lp2.starts_with(p.path()));
@@ -874,8 +898,14 @@ mod tests {
         // overlay recipe's manifest lands beside its lock rather than in the primary
         // root (Finding 5). A recipe not on the path defaults to the primary root.
         let ms = root.recipe_sibling("ov", "ov.pkgs.lock").unwrap();
-        assert!(ms.starts_with(o.path()), "manifest should write into the overlay: {ms:?}");
-        assert!(root.recipe_sibling("nowhere", "x.pkgs.lock").unwrap().starts_with(p.path()));
+        assert!(
+            ms.starts_with(o.path()),
+            "manifest should write into the overlay: {ms:?}"
+        );
+        assert!(root
+            .recipe_sibling("nowhere", "x.pkgs.lock")
+            .unwrap()
+            .starts_with(p.path()));
         // A traversal recipe or filename is rejected as a write target.
         assert!(root.recipe_sibling("../x", "m").is_err());
         assert!(root.recipe_sibling("ov", "../m").is_err());
@@ -908,7 +938,10 @@ mod tests {
     #[test]
     fn extends_merges_a_parent_under_a_variant_and_reports_the_lineage() {
         let (_tmp, root) = device_root(&[
-            ("base", device_toml("base", "packages = [\"a\", \"b\"]\nimage_size = \"2G\"\n")),
+            (
+                "base",
+                device_toml("base", "packages = [\"a\", \"b\"]\nimage_size = \"2G\"\n"),
+            ),
             (
                 "variant",
                 // No image_size: it is inherited. An explicit hostname and packages: one
@@ -962,7 +995,10 @@ mod tests {
         match root.device_with_lineage("x").unwrap_err() {
             ConfigError::DeviceExtendsCycle { device, chain } => {
                 assert_eq!(device, "x");
-                assert_eq!(chain, "x -> y -> x", "the whole walk, so the bad edge is visible");
+                assert_eq!(
+                    chain, "x -> y -> x",
+                    "the whole walk, so the bad edge is visible"
+                );
             }
             other => panic!("expected DeviceExtendsCycle, got {other:?}"),
         }
@@ -1069,15 +1105,27 @@ mod tests {
             ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
 
         // The primary root owns the recipe, so its lock is the one read...
-        assert_eq!(root.lock("r").unwrap().kernel.unwrap().commit, "a".repeat(40));
+        assert_eq!(
+            root.lock("r").unwrap().kernel.unwrap().commit,
+            "a".repeat(40)
+        );
         // ...and the write target agrees with the read source.
-        assert_eq!(root.lock_path("r").unwrap(), p.path().join("recipes/r.lock"));
+        assert_eq!(
+            root.lock_path("r").unwrap(),
+            p.path().join("recipes/r.lock")
+        );
 
         // Overlaying the recipe itself moves ownership — and with it both the
         // lock read and the lock write — to the overlay.
         std::fs::write(o.path().join("recipes/r.toml"), "device = \"d\"\n").unwrap();
-        assert_eq!(root.lock("r").unwrap().kernel.unwrap().commit, "b".repeat(40));
-        assert_eq!(root.lock_path("r").unwrap(), o.path().join("recipes/r.lock"));
+        assert_eq!(
+            root.lock("r").unwrap().kernel.unwrap().commit,
+            "b".repeat(40)
+        );
+        assert_eq!(
+            root.lock_path("r").unwrap(),
+            o.path().join("recipes/r.lock")
+        );
     }
 
     #[test]
@@ -1087,18 +1135,28 @@ mod tests {
         let root = |o: PathBuf| ConfigRoot::with_overlays(primary.path().to_path_buf(), [o]);
 
         // An existing directory composes the search path.
-        assert_eq!(root(good.path().to_path_buf()).unwrap().search_paths().len(), 2);
+        assert_eq!(
+            root(good.path().to_path_buf())
+                .unwrap()
+                .search_paths()
+                .len(),
+            2
+        );
 
         // An empty `--overlay ''` would resolve every asset against the process's
         // current directory — refused, not silently accepted.
-        let err = root(PathBuf::new()).err().expect("empty overlay is refused");
+        let err = root(PathBuf::new())
+            .err()
+            .expect("empty overlay is refused");
         assert!(
             matches!(&err, ConfigError::InvalidOverlay { why, .. } if *why == "the path is empty"),
             "{err}"
         );
         // A typo'd overlay would shadow nothing, so the build would quietly use the
         // shipped config instead of the operator's.
-        let err = root(primary.path().join("nope")).err().expect("missing overlay is refused");
+        let err = root(primary.path().join("nope"))
+            .err()
+            .expect("missing overlay is refused");
         assert!(
             matches!(&err, ConfigError::InvalidOverlay { why, .. } if *why == "no such directory"),
             "{err}"
@@ -1119,7 +1177,8 @@ mod tests {
         let o = tempfile::tempdir().unwrap();
         std::fs::write(p.path().join("blob.bin"), "primary").unwrap();
         std::fs::write(o.path().join("blob.bin"), "overlay").unwrap();
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
         // Highest precedence wins.
         assert!(root.find_asset("blob.bin").unwrap().starts_with(o.path()));
         // All copies, low→high (primary first).
@@ -1135,13 +1194,21 @@ mod tests {
         let o = tempfile::tempdir().unwrap();
         std::fs::write(p.path().join("keyring.gpg"), "shipped").unwrap();
         // No overlay copy: the shipped anchor resolves.
-        let root_no_shadow = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
-        let anchor = root_no_shadow.find_trust_anchor("keyring.gpg", false).unwrap().unwrap();
-        assert!(anchor.starts_with(p.path()), "must resolve from the shipped root");
+        let root_no_shadow =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+        let anchor = root_no_shadow
+            .find_trust_anchor("keyring.gpg", false)
+            .unwrap()
+            .unwrap();
+        assert!(
+            anchor.starts_with(p.path()),
+            "must resolve from the shipped root"
+        );
 
         // An overlay copy is a swap attempt: fail closed.
         std::fs::write(o.path().join("keyring.gpg"), "overlay").unwrap();
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
         assert!(matches!(
             root.find_trust_anchor("keyring.gpg", false),
             Err(ConfigError::OverlayTrustAnchor { .. })
@@ -1153,7 +1220,10 @@ mod tests {
             .unwrap()
             .starts_with(o.path()));
         // Absent everywhere → None (caller falls back to the host trust store).
-        assert!(root.find_trust_anchor("absent.gpg", false).unwrap().is_none());
+        assert!(root
+            .find_trust_anchor("absent.gpg", false)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1179,7 +1249,8 @@ mod tests {
         // A kmod is a layer like any other, so an overlay retunes one key of it without
         // forking the file — here, pinning the driver at a ref of the operator's own.
         std::fs::write(o.path().join("kmods/aic8800.toml"), "ref = \"my-fork\"\n").unwrap();
-        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
         let merged = root.kmod("aic8800").unwrap();
         assert_eq!(merged.git_ref, "my-fork");
         assert_eq!(merged.modules, ["a"], "unstated keys survive the merge");

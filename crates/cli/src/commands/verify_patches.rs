@@ -35,7 +35,10 @@ pub(crate) fn run(
         return Ok(());
     };
     // A patch series implies a tree to apply it to, so the lock pins both or neither.
-    let (Some(kernel), Some(kernel_pin)) = (build.kernel.as_ref().and_then(|k| k.compiled()), lock.kernel.as_ref()) else {
+    let (Some(kernel), Some(kernel_pin)) = (
+        build.kernel.as_ref().and_then(|k| k.compiled()),
+        lock.kernel.as_ref(),
+    ) else {
         return Err(format!(
             "the lock for '{recipe}' pins a patch series but no kernel to apply it to — \
              re-run `boot2deb update`"
@@ -219,7 +222,10 @@ pub(crate) fn run(
     if !failures.is_empty() {
         // The whole point of the keep-going pass: every boundary in one report,
         // rather than one per re-run.
-        println!("\n{} patch(es) did not apply against {target}:\n", failures.len());
+        println!(
+            "\n{} patch(es) did not apply against {target}:\n",
+            failures.len()
+        );
         for f in &failures {
             println!("  [{}] {}\n{}\n", f.tree, f.patch, f.detail);
         }
@@ -251,6 +257,8 @@ fn tree_for_scope(
     match explicit {
         Some(p) => Ok(Some(p)),
         None if series.is_empty() => Ok(None),
-        None => Ok(Some(fetch_verify_tree(source, reference, commit, what, cache_root, sink)?)),
+        None => Ok(Some(fetch_verify_tree(
+            source, reference, commit, what, cache_root, sink,
+        )?)),
     }
 }

@@ -260,9 +260,17 @@ impl BuildSandbox for RootlessSandbox {
         // `Existing` means a prior build already published this rootfs; anything
         // else means this call produced it.
         if outcome == Provisioned::Existing {
-            step.log(format!("reusing {} rootfs at {}", self.arch, self.rootfs.display()));
+            step.log(format!(
+                "reusing {} rootfs at {}",
+                self.arch,
+                self.rootfs.display()
+            ));
         } else {
-            step.log(format!("{} rootfs ready at {}", self.arch, self.rootfs.display()));
+            step.log(format!(
+                "{} rootfs ready at {}",
+                self.arch,
+                self.rootfs.display()
+            ));
         }
         Ok(())
     }
@@ -303,9 +311,15 @@ impl BuildSandbox for RootlessSandbox {
         // absolute paths as direct argv (no shell) lets apt resolve transitive
         // runtime deps from the suite while a path with shell metacharacters cannot
         // be reinterpreted.
-        step.log(format!("installing {} userspace .deb(s) into the sandbox", debs.len()));
+        step.log(format!(
+            "installing {} userspace .deb(s) into the sandbox",
+            debs.len()
+        ));
         self.apt(&["update", "-q"], &[], &ro_binds, "apt-get update", step)?;
-        let paths: Vec<String> = debs.iter().map(|d| d.to_string_lossy().into_owned()).collect();
+        let paths: Vec<String> = debs
+            .iter()
+            .map(|d| d.to_string_lossy().into_owned())
+            .collect();
         self.apt(
             &["install", "-y", "--no-install-recommends"],
             &paths,
@@ -316,10 +330,13 @@ impl BuildSandbox for RootlessSandbox {
     }
 
     fn run(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
-        let cage = self.cage(spec).build().map_err(|source| EngineError::Sandbox {
-            context: spec.context.to_string(),
-            source,
-        })?;
+        let cage = self
+            .cage(spec)
+            .build()
+            .map_err(|source| EngineError::Sandbox {
+                context: spec.context.to_string(),
+                source,
+            })?;
         let mut observer = StepObserver::new(step);
         let status = cage
             .run_with(&mut observer)
@@ -355,7 +372,11 @@ impl RootlessSandbox {
         let mut builder = baseline(&self.rootfs)
             .command(&spec.argv[0])
             .args(&spec.argv[1..])
-            .network(if spec.net { Network::Host } else { Network::Isolated })
+            .network(if spec.net {
+                Network::Host
+            } else {
+                Network::Isolated
+            })
             .current_dir(spec.work);
         for (key, value) in spec.env {
             builder = builder.env(key, value);
@@ -460,7 +481,10 @@ fn project(inputs: ferroday_cage::ResolvedInputs) -> SandboxProvenance {
             .env
             .iter()
             .map(|(name, value)| {
-                (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
             })
             .collect(),
         mounts: inputs.mounts.iter().map(project_mount).collect(),
@@ -487,7 +511,11 @@ fn project_mount(mount: &ResolvedMount) -> SandboxMount {
         read_only: None,
     };
     match mount {
-        ResolvedMount::Tmpfs { target: _, flags, data } => SandboxMount {
+        ResolvedMount::Tmpfs {
+            target: _,
+            flags,
+            data,
+        } => SandboxMount {
             flags: Some(hex_flags(*flags)),
             options: data_string(data),
             ..base("tmpfs")
@@ -497,12 +525,22 @@ fn project_mount(mount: &ResolvedMount) -> SandboxMount {
             options: data_string(data),
             ..base("devpts")
         },
-        ResolvedMount::Bind { source, target: _, read_only } => SandboxMount {
+        ResolvedMount::Bind {
+            source,
+            target: _,
+            read_only,
+        } => SandboxMount {
             source: Some(source.display().to_string()),
             read_only: Some(*read_only),
             ..base("bind")
         },
-        ResolvedMount::Raw { source, target: _, fstype, flags, data } => SandboxMount {
+        ResolvedMount::Raw {
+            source,
+            target: _,
+            fstype,
+            flags,
+            data,
+        } => SandboxMount {
             source: source.as_ref().map(|p| p.display().to_string()),
             fstype: fstype.clone(),
             flags: Some(hex_flags(*flags)),
@@ -562,12 +600,16 @@ pub(crate) fn forward_bootstrap_event(step: &Step, event: DebianEvent<'_>) {
         // The closure the bootstrap itself resolved and is about to install — the
         // build sandbox's only record of what it contains, and the rootfs node's
         // manifest source.
-        DebianEvent::Resolved { plan, .. } => {
-            step.log(format!("bootstrap resolved {} packages", plan.packages.len()))
-        }
-        DebianEvent::Downloading { package, index, total, .. } => {
-            step.log(format!("downloading {package} ({index}/{total})"))
-        }
+        DebianEvent::Resolved { plan, .. } => step.log(format!(
+            "bootstrap resolved {} packages",
+            plan.packages.len()
+        )),
+        DebianEvent::Downloading {
+            package,
+            index,
+            total,
+            ..
+        } => step.log(format!("downloading {package} ({index}/{total})")),
         DebianEvent::Extracting { package, .. } => step.log(format!("extracting {package}")),
         DebianEvent::CommandOutput { stream, bytes, .. } => {
             let text = String::from_utf8_lossy(bytes);
@@ -681,7 +723,11 @@ impl<'a> StepObserver<'a> {
 
     /// The retained stderr tail, joined for a failure message.
     pub(crate) fn stderr_tail(&self) -> String {
-        self.stderr_tail.iter().cloned().collect::<Vec<_>>().join("\n")
+        self.stderr_tail
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -769,7 +815,10 @@ mod tests {
             );
             if mount.kind == "bind" {
                 let source = mount.source.as_deref().expect("a bind names its source");
-                assert!(source.starts_with("/dev/"), "the profile binds a host path: {source}");
+                assert!(
+                    source.starts_with("/dev/"),
+                    "the profile binds a host path: {source}"
+                );
             }
         }
 
@@ -781,7 +830,13 @@ mod tests {
             .filter(|m| m.kind == "symlink")
             .map(|m| m.target.as_str())
             .collect();
-        for link in ["/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/fd", "/dev/ptmx"] {
+        for link in [
+            "/dev/stdin",
+            "/dev/stdout",
+            "/dev/stderr",
+            "/dev/fd",
+            "/dev/ptmx",
+        ] {
             assert!(links.contains(&link), "missing {link} in {links:?}");
         }
     }

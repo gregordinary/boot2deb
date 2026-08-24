@@ -562,7 +562,10 @@ fn validate_depthcharge_cmdline(cmdline: &str) -> Result<(), ConfigError> {
              past that round-trip",
         );
     }
-    if cmdline.split_whitespace().any(|tok| tok.starts_with("root=")) {
+    if cmdline
+        .split_whitespace()
+        .any(|tok| tok.starts_with("root="))
+    {
         return bad(
             "it sets `root=`, which depthchargectl derives from the image's /etc/fstab and \
              strips when it disagrees — remove it and let fstab be the single source",
@@ -715,7 +718,10 @@ fn validate_device_dts(
         {
             return Err(invalid(entry, "the path escapes the config root via '..'"));
         }
-        if !matches!(path.extension().and_then(|e| e.to_str()), Some("dts" | "dtsi")) {
+        if !matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("dts" | "dtsi")
+        ) {
             return Err(invalid(entry, "the file is not a .dts or .dtsi"));
         }
     }
@@ -834,7 +840,10 @@ fn validate_kmod(k: &KmodLayer, name: &str) -> Result<(), ConfigError> {
         }
         Ok(())
     };
-    let name_ok = name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+    let name_ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '+' | '.'));
@@ -952,7 +961,9 @@ fn merge_extra_debs(
 /// fields and the brackets delimit its option block, so either would be parsed
 /// as structure, not content.
 fn apt_line_token(v: &str) -> bool {
-    !v.is_empty() && v.chars().all(|c| c.is_ascii_graphic() && c != '[' && c != ']')
+    !v.is_empty()
+        && v.chars()
+            .all(|c| c.is_ascii_graphic() && c != '[' && c != ']')
 }
 
 /// Validate a feature's [`AptSource`] against the one-line source grammar the
@@ -1049,7 +1060,11 @@ pub fn resolve_recipe(
 
 /// Append `src` package names to `acc`, skipping any already present, so the
 /// merged rootfs set is order-preserving and de-duplicated.
-fn extend_unique(acc: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, src: &[String]) {
+fn extend_unique(
+    acc: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+    src: &[String],
+) {
     for pkg in src {
         if seen.insert(pkg.clone()) {
             acc.push(pkg.clone());
@@ -1316,7 +1331,8 @@ mod tests {
             other => panic!("expected MissingBlob, got {other:?}"),
         }
         // A blank override does not mask a good SoC default.
-        let blanked = resolve_rkbin(&soc, &layer(Some("  "), Some("ddr.bin"), None), "h96").unwrap();
+        let blanked =
+            resolve_rkbin(&soc, &layer(Some("  "), Some("ddr.bin"), None), "h96").unwrap();
         assert_eq!(blanked.atf, "atf.elf");
     }
 
@@ -1330,12 +1346,23 @@ mod tests {
         let root = repo_root();
 
         let patched = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
-        let k = patched.kernel.as_ref().unwrap().compiled().expect("a compiled kernel");
+        let k = patched
+            .kernel
+            .as_ref()
+            .unwrap()
+            .compiled()
+            .expect("a compiled kernel");
         assert_eq!(k.patch_profiles, vec!["rk3588-accel".to_string()]);
-        assert!(k.patches_url.as_deref().is_some_and(|u| u.contains("patches")));
+        assert!(k
+            .patches_url
+            .as_deref()
+            .is_some_and(|u| u.contains("patches")));
         // No release tag exists yet, so the branch is the honest ref: it says the pin
         // came from the tip of development rather than implying a release never cut.
-        assert_eq!(k.patches_ref.as_deref(), Some(crate::model::DEFAULT_PATCHES_REF));
+        assert_eq!(
+            k.patches_ref.as_deref(),
+            Some(crate::model::DEFAULT_PATCHES_REF)
+        );
 
         // A kernel applying no series pins nothing, so it names neither.
         let unpatched = resolve_recipe(&root, "asus-c201/forky", &Overrides::default()).unwrap();
@@ -1379,13 +1406,20 @@ mod tests {
         assert_eq!(kprofiles, ["rk3576-fixes"]);
         // The board opts into the aic8800 external module by name; every field below is
         // the shipped `kmods/aic8800.toml`, not something the device restates.
-        let kmod = img.device_kmods.iter().find(|k| k.name == "aic8800").expect("aic8800 device_kmod");
+        let kmod = img
+            .device_kmods
+            .iter()
+            .find(|k| k.name == "aic8800")
+            .expect("aic8800 device_kmod");
         assert_eq!(kmod.modules, ["aic8800_bsp", "aic8800_fdrv"]);
         // Both make args are load-bearing: without NO_REG_SDIO the driver never creates
         // wlan0, and BTLPM does not compile on a 7.1 kernel.
         assert_eq!(
             kmod.make_args,
-            ["CONFIG_AIC8800_BTLPM_SUPPORT=n", "CONFIG_FDRV_NO_REG_SDIO=y"]
+            [
+                "CONFIG_AIC8800_BTLPM_SUPPORT=n",
+                "CONFIG_FDRV_NO_REG_SDIO=y"
+            ]
         );
         // The compat shims are bare filenames under `kmods/aic8800/patches/`, in apply
         // order — the SDIO 7.1 cfg80211 port before the log-level default.
@@ -1393,7 +1427,10 @@ mod tests {
             kmod.local_patches,
             ["0001-sdio-linux-7.1.patch", "0002-quiet-log-level.patch"]
         );
-        let fw = kmod.firmware.as_ref().expect("the aic8800 kmod ships firmware");
+        let fw = kmod
+            .firmware
+            .as_ref()
+            .expect("the aic8800 kmod ships firmware");
         // The install path is what fix-sdio-firmware-path.patch compiles into the BSP
         // loader; a drift here is a driver that boots and then finds no firmware.
         assert_eq!(fw.subdir, "src/SDIO/driver_fw/fw/aic8800D80");
@@ -1414,7 +1451,10 @@ mod tests {
             ..Default::default()
         };
         let err = resolve_device(&root, "h96-max-m9", &ov).unwrap_err();
-        assert!(matches!(err, ConfigError::UnknownUbootProfileForDevice { .. }));
+        assert!(matches!(
+            err,
+            ConfigError::UnknownUbootProfileForDevice { .. }
+        ));
     }
 
     #[test]
@@ -1427,7 +1467,10 @@ mod tests {
             ..Default::default()
         };
         let err = resolve_device(&root, "asus-c201", &ov).unwrap_err();
-        assert!(matches!(err, ConfigError::UbootOnlyWithoutBootloader { .. }));
+        assert!(matches!(
+            err,
+            ConfigError::UbootOnlyWithoutBootloader { .. }
+        ));
     }
 
     #[test]
@@ -1437,7 +1480,10 @@ mod tests {
         // against the magic string. The kernel axis expresses "no series" as an empty
         // `patch_profiles` list instead, so it does not go through this helper.
         assert_eq!(crate::profile::patch_profile("none"), None);
-        assert_eq!(crate::profile::patch_profile("rk3588-accel"), Some("rk3588-accel"));
+        assert_eq!(
+            crate::profile::patch_profile("rk3588-accel"),
+            Some("rk3588-accel")
+        );
     }
 
     #[test]
@@ -1462,7 +1508,9 @@ mod tests {
         // A typo'd `kernel_dtb` names a DTB no source builds -> typed error, not a bad boot.
         let err = validate_device_dts(&dts, "rockchip/rk3576-h96-max-m9s.dtb", "h96").unwrap_err();
         match err {
-            ConfigError::KernelDtbNotInDeviceDts { device, expected, .. } => {
+            ConfigError::KernelDtbNotInDeviceDts {
+                device, expected, ..
+            } => {
                 assert_eq!(device, "h96");
                 assert_eq!(expected, "rk3576-h96-max-m9s.dts");
             }
@@ -1476,32 +1524,39 @@ mod tests {
     #[test]
     fn device_dts_entries_must_be_contained_dt_sources() {
         let bad = |entry: &str| {
-            let err = validate_device_dts(&[entry.to_string()], "rockchip/b.dtb", "h96").unwrap_err();
+            let err =
+                validate_device_dts(&[entry.to_string()], "rockchip/b.dtb", "h96").unwrap_err();
             assert!(
                 matches!(err, ConfigError::InvalidDeviceDts { .. }),
                 "expected InvalidDeviceDts for {entry:?}, got {err:?}"
             );
         };
-        bad("");                                   // empty
-        bad("/etc/passwd.dts");                    // absolute
-        bad("../../outside/b.dts");                // escapes the config root
-        bad("devices/h96/dts/../../../b.dts");     // escapes mid-path
-        bad("devices/h96/dts/b.dtb");              // a blob, not a source
-        bad("devices/h96/dts/b");                  // no extension
+        bad(""); // empty
+        bad("/etc/passwd.dts"); // absolute
+        bad("../../outside/b.dts"); // escapes the config root
+        bad("devices/h96/dts/../../../b.dts"); // escapes mid-path
+        bad("devices/h96/dts/b.dtb"); // a blob, not a source
+        bad("devices/h96/dts/b"); // no extension
     }
 
     #[test]
     fn validate_suite_accepts_codenames_and_rejects_bad_shapes() {
-        for s in ["forky", "trixie", "sid", "bookworm", "stable-proposed-updates"] {
+        for s in [
+            "forky",
+            "trixie",
+            "sid",
+            "bookworm",
+            "stable-proposed-updates",
+        ] {
             assert!(validate_suite(s).is_ok(), "{s} should be a valid suite");
         }
         for s in [
-            "",                             // empty
-            "-updates",                     // leading dash (option-like)
-            "..",                           // traversal
-            "for ky",                       // space
-            "forky;rm -rf /",               // shell metacharacters
-            "forky/../etc",                 // path separator
+            "",               // empty
+            "-updates",       // leading dash (option-like)
+            "..",             // traversal
+            "for ky",         // space
+            "forky;rm -rf /", // shell metacharacters
+            "forky/../etc",   // path separator
         ] {
             assert!(
                 matches!(validate_suite(s), Err(ConfigError::InvalidSuite { .. })),
@@ -1525,9 +1580,14 @@ mod tests {
         // configures anything on. It takes the same system-wide locale.
         let c201 = resolve_recipe(&root, "asus-c201/forky", &Overrides::default()).unwrap();
         assert_eq!(c201.locale, "C.UTF-8");
-        let keymap = c201.keymap.expect("a board with a keyboard declares a keymap");
+        let keymap = c201
+            .keymap
+            .expect("a board with a keyboard declares a keymap");
         assert_eq!(keymap.layout, "us");
-        assert_eq!(keymap.model, "pc105", "the bare-string form takes Debian's model");
+        assert_eq!(
+            keymap.model, "pc105",
+            "the bare-string form takes Debian's model"
+        );
     }
 
     #[test]
@@ -1612,27 +1672,38 @@ mod tests {
         assert_eq!(crate::model::locale_codeset("C.UTF-8"), Some("UTF-8"));
         // A modifier rides *after* the codeset: `sr_RS.UTF-8@latin UTF-8` is the real
         // /etc/locale.gen line, so the modifier must not be swept into the codeset.
-        assert_eq!(crate::model::locale_codeset("sr_RS.UTF-8@latin"), Some("UTF-8"));
+        assert_eq!(
+            crate::model::locale_codeset("sr_RS.UTF-8@latin"),
+            Some("UTF-8")
+        );
         assert_eq!(crate::model::locale_codeset("de_DE"), None);
         assert_eq!(crate::model::locale_codeset("de_DE."), None);
     }
 
     #[test]
     fn validate_timezone_rejects_anything_that_escapes_the_zone_database() {
-        for ok in ["UTC", "America/New_York", "Etc/GMT+5", "America/Argentina/Buenos_Aires"] {
+        for ok in [
+            "UTC",
+            "America/New_York",
+            "Etc/GMT+5",
+            "America/Argentina/Buenos_Aires",
+        ] {
             assert!(validate_timezone(ok).is_ok(), "{ok} should be a valid zone");
         }
         for bad in [
-            "",                        // empty
-            "/etc/shadow",             // absolute: escapes /usr/share/zoneinfo
-            "../../../etc/shadow",     // traversal: /etc/localtime would point at it
-            "America/../../etc/shadow",// traversal mid-path
-            "Europe/",                 // trailing separator
-            "Europe/Ber lin",          // space
-            "Europe/Berlin;id",        // shell metacharacter
+            "",                         // empty
+            "/etc/shadow",              // absolute: escapes /usr/share/zoneinfo
+            "../../../etc/shadow",      // traversal: /etc/localtime would point at it
+            "America/../../etc/shadow", // traversal mid-path
+            "Europe/",                  // trailing separator
+            "Europe/Ber lin",           // space
+            "Europe/Berlin;id",         // shell metacharacter
         ] {
             assert!(
-                matches!(validate_timezone(bad), Err(ConfigError::InvalidTimezone { .. })),
+                matches!(
+                    validate_timezone(bad),
+                    Err(ConfigError::InvalidTimezone { .. })
+                ),
                 "{bad:?} should be rejected"
             );
         }
@@ -1657,7 +1728,10 @@ mod tests {
         };
         assert!(matches!(
             validate_keymap(&injected),
-            Err(ConfigError::InvalidKeymap { field: "layout", .. })
+            Err(ConfigError::InvalidKeymap {
+                field: "layout",
+                ..
+            })
         ));
         let subst = Keymap {
             options: "$(id)".into(),
@@ -1665,11 +1739,17 @@ mod tests {
         };
         assert!(matches!(
             validate_keymap(&subst),
-            Err(ConfigError::InvalidKeymap { field: "options", .. })
+            Err(ConfigError::InvalidKeymap {
+                field: "options",
+                ..
+            })
         ));
         assert!(matches!(
             validate_keymap(&Keymap::from_layout("")),
-            Err(ConfigError::InvalidKeymap { field: "layout", .. })
+            Err(ConfigError::InvalidKeymap {
+                field: "layout",
+                ..
+            })
         ));
     }
 
@@ -1700,7 +1780,8 @@ mod tests {
     #[test]
     fn rk1_media_accel_recipe_resolves_expected_axes() {
         let root = repo_root();
-        let b = resolve_recipe(&root, "turing-rk1/media-accel-forky", &Overrides::default()).unwrap();
+        let b =
+            resolve_recipe(&root, "turing-rk1/media-accel-forky", &Overrides::default()).unwrap();
         assert_eq!(b.arch, Arch::Arm64);
         assert_eq!(b.soc, Soc::Rk3588);
         assert_eq!(b.boot_method, BootMethod::RockchipRkbin);
@@ -1711,8 +1792,14 @@ mod tests {
         assert_eq!(b.features, vec!["media-accel-rockchip"]);
         // media-accel-rockchip declares `requires_media_accel`, so the resolved
         // build carries the SoC's userspace + ffmpeg source trees (built as a unit).
-        assert!(b.userspace.is_some(), "media-accel build carries userspace sources");
-        assert!(b.ffmpeg.is_some(), "media-accel build carries ffmpeg sources");
+        assert!(
+            b.userspace.is_some(),
+            "media-accel build carries userspace sources"
+        );
+        assert!(
+            b.ffmpeg.is_some(),
+            "media-accel build carries ffmpeg sources"
+        );
         // The shipped media-accel-rockchip feature adds no third-party apt source.
         assert!(b.apt_sources.is_empty());
         // Merged rootfs set: base packages + the feature's packages, base excludes.
@@ -1725,7 +1812,12 @@ mod tests {
         assert!(b.modules.contains(&"rkvenc".to_string()));
         // kernel fragments precede device fragments in apply order; the generated
         // Debian baseline is first, then the curated rockchip slices.
-        let kernel = b.kernel.as_ref().unwrap().compiled().expect("the RK1 compiles its kernel");
+        let kernel = b
+            .kernel
+            .as_ref()
+            .unwrap()
+            .compiled()
+            .expect("the RK1 compiles its kernel");
         assert_eq!(
             kernel.config_fragments,
             vec![
@@ -1767,7 +1859,12 @@ mod tests {
         // The kernel is the accel kernel: accel/full is present exactly as on the
         // media-accel build. This split — capability in the kernel, userspace in the
         // feature — is what lets a base image light up transcode later.
-        let kernel = b.kernel.as_ref().unwrap().compiled().expect("the RK1 compiles its kernel");
+        let kernel = b
+            .kernel
+            .as_ref()
+            .unwrap()
+            .compiled()
+            .expect("the RK1 compiles its kernel");
         assert!(kernel.config_fragments.contains(&"accel/full".to_string()));
         assert_eq!(b.kernel.as_ref().unwrap().id(), "rk3588-mainline-7.1");
     }
@@ -1782,7 +1879,9 @@ mod tests {
         let base = resolve_recipe(&root, "h96-max-m9/forky", &Overrides::default()).unwrap();
         let base_k = base.kernel.as_ref().unwrap().compiled().unwrap();
         assert_eq!(base_k.patch_profiles, vec!["rk3576-fixes".to_string()]);
-        assert!(!base_k.config_fragments.contains(&"accel/rk3576-rga".to_string()));
+        assert!(!base_k
+            .config_fragments
+            .contains(&"accel/rk3576-rga".to_string()));
 
         let accel = resolve_recipe(
             &root,
@@ -1826,10 +1925,19 @@ mod tests {
             },
         )
         .unwrap();
-        let us = b.userspace.as_ref().expect("the capability builds userspace");
+        let us = b
+            .userspace
+            .as_ref()
+            .expect("the capability builds userspace");
         assert!(us.mpp.is_none(), "no vendor mpp_service on this SoC");
-        assert!(us.libmali.is_none(), "the GPU userspace is Mesa, from the mirror");
-        assert!(us.librga.is_some(), "RGA is the one vendor tree this SoC builds");
+        assert!(
+            us.libmali.is_none(),
+            "the GPU userspace is Mesa, from the mirror"
+        );
+        assert!(
+            us.librga.is_some(),
+            "RGA is the one vendor tree this SoC builds"
+        );
         let ff = b.ffmpeg.as_ref().expect("the capability builds ffmpeg");
         assert!(ff.rockchip.is_none(), "the base tree builds unmodified");
     }
@@ -1866,7 +1974,14 @@ mod tests {
         // failure is unambiguously this one and not an earlier gate.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        for sub in ["arches", "socs", "boot-methods", "devices", "kernels", "features"] {
+        for sub in [
+            "arches",
+            "socs",
+            "boot-methods",
+            "devices",
+            "kernels",
+            "features",
+        ] {
             std::fs::create_dir_all(p.join(sub)).unwrap();
         }
         std::fs::write(
@@ -1914,11 +2029,18 @@ mod tests {
         let err = resolve_device(
             &synthetic,
             "dev",
-            &Overrides { features: Some(vec!["cap".into()]), ..Overrides::default() },
+            &Overrides {
+                features: Some(vec!["cap".into()]),
+                ..Overrides::default()
+            },
         )
         .unwrap_err();
         match err {
-            ConfigError::FeatureNeedsCompiledKernel { feature, kernel, what } => {
+            ConfigError::FeatureNeedsCompiledKernel {
+                feature,
+                kernel,
+                what,
+            } => {
                 assert_eq!(feature, "cap");
                 assert_eq!(kernel, "k");
                 assert_eq!(what, "config_fragments");
@@ -1948,11 +2070,18 @@ mod tests {
             .config_fragments
             .contains(&"accel/full".to_string()));
 
-        let accel =
-            resolve_recipe(&root, "turing-rk1/media-accel-trixie", &Overrides::default()).unwrap();
+        let accel = resolve_recipe(
+            &root,
+            "turing-rk1/media-accel-trixie",
+            &Overrides::default(),
+        )
+        .unwrap();
         assert_eq!(accel.suite.as_deref(), Some("trixie"));
         assert_eq!(accel.features, vec!["media-accel-rockchip"]);
-        assert!(accel.userspace.is_some(), "the media-accel variant carries userspace");
+        assert!(
+            accel.userspace.is_some(),
+            "the media-accel variant carries userspace"
+        );
         assert!(accel.ffmpeg.is_some());
     }
 
@@ -1992,7 +2121,10 @@ mod tests {
         // one of them. These are the values read back off the image that boots the unit.
         assert!(b.rkbin_boot().is_none(), "this board has no rkbin chain");
         let boot = b.depthcharge_boot().expect("a depthcharge board");
-        assert_eq!(boot.board, "speedy", "the stock profile, which boots both firmwares");
+        assert_eq!(
+            boot.board, "speedy",
+            "the stock profile, which boots both firmwares"
+        );
         assert_eq!(boot.kpart.offset, "12MiB");
         assert_eq!(boot.kpart.size, "16MiB");
         assert_eq!(boot.kpart.flags, 0x015A_0000_0000_0000);
@@ -2001,12 +2133,18 @@ mod tests {
         // to come up leaves the previous one intact for the firmware to fall back to. At
         // one slot it would have to overwrite the running kernel in place, and a bad
         // upgrade would need external media to recover.
-        assert_eq!(boot.kpart.slots, 2, "an A/B pair — the spare is the rollback");
+        assert_eq!(
+            boot.kpart.slots, 2,
+            "an A/B pair — the spare is the rollback"
+        );
         assert_eq!(
             boot.rootfs_offset, "44MiB",
             "behind both 16 MiB slots (12 + 16 + 16), not behind one"
         );
-        assert!(!boot.cmdline.contains("root="), "root= is depthchargectl's to derive");
+        assert!(
+            !boot.cmdline.contains("root="),
+            "root= is depthchargectl's to derive"
+        );
         // The console gate is signed in with the rest of the cmdline. It has to be:
         // this value lives inside the vboot signature, so it cannot be edited on the
         // device — a board that shipped a verbose console would need a reflash.
@@ -2141,7 +2279,11 @@ mod tests {
             ..Default::default()
         };
         match resolve_device(&root, "asus-c201", &ov).unwrap_err() {
-            ConfigError::UnknownBoardProfile { device, board, supported } => {
+            ConfigError::UnknownBoardProfile {
+                device,
+                board,
+                supported,
+            } => {
                 assert_eq!(device, "asus-c201");
                 assert_eq!(board, "kevin");
                 assert!(supported.contains("speedy"));
@@ -2161,7 +2303,11 @@ mod tests {
             ..Default::default()
         };
         match resolve_device(&root, "asus-c201", &ov).unwrap_err() {
-            ConfigError::UnsupportedLayout { boot_method, layout, .. } => {
+            ConfigError::UnsupportedLayout {
+                boot_method,
+                layout,
+                ..
+            } => {
                 assert_eq!(boot_method, "depthcharge");
                 assert_eq!(layout, "split");
             }
@@ -2369,7 +2515,11 @@ mod tests {
         .unwrap();
         let root = ConfigRoot::new(p);
         match resolve_device(&root, "dev", &Overrides::default()).unwrap_err() {
-            ConfigError::MissingBootField { device, boot_method, what } => {
+            ConfigError::MissingBootField {
+                device,
+                boot_method,
+                what,
+            } => {
                 assert_eq!(device, "dev");
                 assert_eq!(boot_method, "depthcharge");
                 assert!(what.contains("depthcharge"));
@@ -2426,7 +2576,11 @@ mod tests {
         .unwrap();
         let root = ConfigRoot::new(p);
         match resolve_device(&root, "dev", &Overrides::default()).unwrap_err() {
-            ConfigError::DistroKernelCompilesNothing { device, kernel, what } => {
+            ConfigError::DistroKernelCompilesNothing {
+                device,
+                kernel,
+                what,
+            } => {
                 assert_eq!(device, "dev");
                 assert_eq!(kernel, "k");
                 assert_eq!(what, "device_config_fragments");
@@ -2462,25 +2616,46 @@ mod tests {
     #[test]
     fn validate_kmod_rejects_malformed_layers() {
         // Each mutation trips exactly one rule; the error names the offending kmod file.
-        let escaping_subdir = KmodLayer { subdir: "../evil".into(), ..valid_kmod() };
-        let non_bare_patch =
-            KmodLayer { repo_patches: vec!["sub/dir.patch".into()], ..valid_kmod() };
+        let escaping_subdir = KmodLayer {
+            subdir: "../evil".into(),
+            ..valid_kmod()
+        };
+        let non_bare_patch = KmodLayer {
+            repo_patches: vec!["sub/dir.patch".into()],
+            ..valid_kmod()
+        };
         // A local patch is joined under `kmods/<name>/patches/`, so it is bare too — an
         // absolute path would reach a file outside the kmod's own directory.
-        let escaping_local = KmodLayer { local_patches: vec!["/etc/shadow".into()], ..valid_kmod() };
-        let bad_make_arg = KmodLayer { make_args: vec!["rm -rf /".into()], ..valid_kmod() };
+        let escaping_local = KmodLayer {
+            local_patches: vec!["/etc/shadow".into()],
+            ..valid_kmod()
+        };
+        let bad_make_arg = KmodLayer {
+            make_args: vec!["rm -rf /".into()],
+            ..valid_kmod()
+        };
         let escaping_fw = KmodLayer {
-            firmware: Some(KmodFirmware { subdir: "../fw".into(), install: "usr/lib/firmware".into() }),
+            firmware: Some(KmodFirmware {
+                subdir: "../fw".into(),
+                install: "usr/lib/firmware".into(),
+            }),
             ..valid_kmod()
         };
         let absolute_fw_install = KmodLayer {
-            firmware: Some(KmodFirmware { subdir: "fw".into(), install: "/usr/lib/firmware".into() }),
+            firmware: Some(KmodFirmware {
+                subdir: "fw".into(),
+                install: "/usr/lib/firmware".into(),
+            }),
             ..valid_kmod()
         };
 
         for kmod in [
-            &escaping_subdir, &non_bare_patch, &escaping_local, &bad_make_arg,
-            &escaping_fw, &absolute_fw_install,
+            &escaping_subdir,
+            &non_bare_patch,
+            &escaping_local,
+            &bad_make_arg,
+            &escaping_fw,
+            &absolute_fw_install,
         ] {
             match validate_kmod(kmod, "aic8800").unwrap_err() {
                 ConfigError::InvalidKmod { kmod, .. } => assert_eq!(kmod, "aic8800"),
@@ -2666,7 +2841,8 @@ mod tests {
         let root = ConfigRoot::new(p);
         let err = root.boot_method(BootMethod::Depthcharge).unwrap_err();
         assert!(
-            matches!(err, ConfigError::Parse { .. }) && err.to_string().contains("idbloader_offset"),
+            matches!(err, ConfigError::Parse { .. })
+                && err.to_string().contains("idbloader_offset"),
             "expected a parse error naming the stray field, got: {err}"
         );
     }
@@ -2751,15 +2927,24 @@ mod tests {
 
     #[test]
     fn apt_sources_dedup_identical_and_reject_clashes() {
-        let a = ("app-a".to_string(), feat_with_sources(vec![src("jellyfin", "u1")]));
+        let a = (
+            "app-a".to_string(),
+            feat_with_sources(vec![src("jellyfin", "u1")]),
+        );
         // Identical duplicate collapses to one entry.
-        let a2 = ("app-a2".to_string(), feat_with_sources(vec![src("jellyfin", "u1")]));
+        let a2 = (
+            "app-a2".to_string(),
+            feat_with_sources(vec![src("jellyfin", "u1")]),
+        );
         let merged = merge_apt_sources(&[a.clone(), a2]).unwrap();
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].name, "jellyfin");
 
         // Same name, different URI is a hard clash.
-        let b = ("app-b".to_string(), feat_with_sources(vec![src("jellyfin", "u2")]));
+        let b = (
+            "app-b".to_string(),
+            feat_with_sources(vec![src("jellyfin", "u2")]),
+        );
         assert!(matches!(
             merge_apt_sources(&[a, b]).unwrap_err(),
             ConfigError::ConflictingAptSource { .. }
@@ -2768,8 +2953,14 @@ mod tests {
 
     #[test]
     fn apt_sources_union_preserves_first_appearance_order() {
-        let a = ("app-a".to_string(), feat_with_sources(vec![src("one", "u1")]));
-        let b = ("app-b".to_string(), feat_with_sources(vec![src("two", "u2")]));
+        let a = (
+            "app-a".to_string(),
+            feat_with_sources(vec![src("one", "u1")]),
+        );
+        let b = (
+            "app-b".to_string(),
+            feat_with_sources(vec![src("two", "u2")]),
+        );
         let merged = merge_apt_sources(&[a, b]).unwrap();
         assert_eq!(
             merged.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
@@ -2865,7 +3056,15 @@ mod fixture_tests {
         fn write(&self) -> TempDir {
             let dir = tempfile::tempdir().unwrap();
             let p = dir.path();
-            for sub in ["arches", "socs", "boot-methods", "devices", "kernels", "features", "recipes"] {
+            for sub in [
+                "arches",
+                "socs",
+                "boot-methods",
+                "devices",
+                "kernels",
+                "features",
+                "recipes",
+            ] {
                 fs::create_dir_all(p.join(sub)).unwrap();
             }
 
@@ -3008,7 +3207,10 @@ mod fixture_tests {
         assert_eq!(b.rootfs_packages, vec!["shared", "d", "e", "g"]);
         // No name is both included and excluded — what the reconciliation guarantees.
         for x in &b.rootfs_exclude {
-            assert!(!b.rootfs_packages.contains(x), "{x} leaked into the include set");
+            assert!(
+                !b.rootfs_packages.contains(x),
+                "{x} leaked into the include set"
+            );
         }
     }
 
@@ -3017,8 +3219,16 @@ mod fixture_tests {
         let tree = Tree {
             supported_kernels: &["k1", "k2"],
             features: vec![
-                Feat { name: "f1", packages: &["p1"], exclude: &[] },
-                Feat { name: "f2", packages: &["p2"], exclude: &[] },
+                Feat {
+                    name: "f1",
+                    packages: &["p1"],
+                    exclude: &[],
+                },
+                Feat {
+                    name: "f2",
+                    packages: &["p2"],
+                    exclude: &[],
+                },
             ],
             recipe: Some(RecipeSpec {
                 kernel: Some("k1"),
@@ -3053,7 +3263,11 @@ mod fixture_tests {
     fn recipe_axes_apply_when_cli_unset() {
         let tree = Tree {
             supported_kernels: &["k1", "k2"],
-            features: vec![Feat { name: "f1", packages: &["p1"], exclude: &[] }],
+            features: vec![Feat {
+                name: "f1",
+                packages: &["p1"],
+                exclude: &[],
+            }],
             recipe: Some(RecipeSpec {
                 kernel: Some("k2"),
                 suite: Some("bookworm"),
@@ -3078,7 +3292,11 @@ mod fixture_tests {
         // `Some(vec![])` is an explicit "no features", distinct from `None`
         // (defer to the recipe). It must clear the recipe's feature set.
         let tree = Tree {
-            features: vec![Feat { name: "f1", packages: &["p1"], exclude: &[] }],
+            features: vec![Feat {
+                name: "f1",
+                packages: &["p1"],
+                exclude: &[],
+            }],
             recipe: Some(RecipeSpec {
                 features: &["f1"],
                 ..Default::default()
@@ -3110,7 +3328,11 @@ mod fixture_tests {
         let sha_a = sha('a');
         let sha_b = sha('b');
         let tree = Tree {
-            features: vec![Feat { name: "f1", packages: &["p1"], exclude: &[] }],
+            features: vec![Feat {
+                name: "f1",
+                packages: &["p1"],
+                exclude: &[],
+            }],
             ..Default::default()
         };
         let dir = tree.write();
@@ -3133,7 +3355,10 @@ mod fixture_tests {
         )
         .unwrap();
         let root = ConfigRoot::new(p);
-        let ov = Overrides { features: Some(vec!["f1".into()]), ..Default::default() };
+        let ov = Overrides {
+            features: Some(vec!["f1".into()]),
+            ..Default::default()
+        };
         let b = resolve_device(&root, "dev", &ov).unwrap();
 
         assert_eq!(b.extra_debs.len(), 2, "the A-copy dedups by sha256");
@@ -3182,7 +3407,11 @@ mod fixture_tests {
         // dedicated error naming the feature, not build a stack with no
         // sources.
         let tree = Tree {
-            features: vec![Feat { name: "accel", packages: &["p1"], exclude: &[] }],
+            features: vec![Feat {
+                name: "accel",
+                packages: &["p1"],
+                exclude: &[],
+            }],
             ..Default::default()
         };
         let dir = tree.write();
@@ -3201,7 +3430,10 @@ mod fixture_tests {
         )
         .unwrap();
         let root = ConfigRoot::new(p);
-        let cli = Overrides { features: Some(vec!["accel".into()]), ..Default::default() };
+        let cli = Overrides {
+            features: Some(vec!["accel".into()]),
+            ..Default::default()
+        };
         match resolve_device(&root, "dev", &cli).unwrap_err() {
             ConfigError::FeatureRequiresMediaAccel { feature, soc } => {
                 assert_eq!(feature, "accel");

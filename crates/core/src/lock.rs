@@ -550,13 +550,33 @@ mod tests {
             }),
             uboot_patches: None,
             userspace: Some(UserspacePins {
-                mpp: Some(GitPin { source: "m://s".into(), reference: "m".into(), commit: "1".repeat(40) }),
-                librga: Some(GitPin { source: "r://s".into(), reference: "r".into(), commit: "2".repeat(40) }),
-                libmali: Some(GitPin { source: "l://s".into(), reference: "l".into(), commit: "3".repeat(40) }),
+                mpp: Some(GitPin {
+                    source: "m://s".into(),
+                    reference: "m".into(),
+                    commit: "1".repeat(40),
+                }),
+                librga: Some(GitPin {
+                    source: "r://s".into(),
+                    reference: "r".into(),
+                    commit: "2".repeat(40),
+                }),
+                libmali: Some(GitPin {
+                    source: "l://s".into(),
+                    reference: "l".into(),
+                    commit: "3".repeat(40),
+                }),
             }),
             ffmpeg: Some(FfmpegPins {
-                base: GitPin { source: "b://s".into(), reference: "b".into(), commit: "4".repeat(40) },
-                rockchip: Some(GitPin { source: "rk://s".into(), reference: "rk".into(), commit: "5".repeat(40) }),
+                base: GitPin {
+                    source: "b://s".into(),
+                    reference: "b".into(),
+                    commit: "4".repeat(40),
+                },
+                rockchip: Some(GitPin {
+                    source: "rk://s".into(),
+                    reference: "rk".into(),
+                    commit: "5".repeat(40),
+                }),
             }),
             rootfs: Some(RootfsPin {
                 suite: "forky".into(),
@@ -564,8 +584,10 @@ mod tests {
                 manifest_sha256: None,
             }),
             blobs: Some(BlobsPin {
-                atf: "atf@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
-                tpl: "tpl@sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
+                atf: "atf@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .into(),
+                tpl: "tpl@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                    .into(),
                 bl32: None,
             }),
             kmods: vec![],
@@ -599,7 +621,14 @@ mod tests {
             snapshot: None,
         };
         let text = lock.to_toml_string().unwrap();
-        for absent in ["[kernel]", "[patches]", "[uboot]", "[blobs]", "[userspace", "[ffmpeg"] {
+        for absent in [
+            "[kernel]",
+            "[patches]",
+            "[uboot]",
+            "[blobs]",
+            "[userspace",
+            "[ffmpeg",
+        ] {
             assert!(
                 !text.contains(absent),
                 "a distro-kernel depthcharge lock must omit {absent}:\n{text}"
@@ -635,7 +664,10 @@ mod tests {
         // An empty `kmods` writes no `[[kmods]]` array (skip_serializing_if) and reads
         // back as an empty vec, not a placeholder.
         let empty = base_lock().to_toml_string().unwrap();
-        assert!(!empty.contains("[[kmods]]"), "empty kmods must omit the array:\n{empty}");
+        assert!(
+            !empty.contains("[[kmods]]"),
+            "empty kmods must omit the array:\n{empty}"
+        );
         assert!(toml::from_str::<Lock>(&empty).unwrap().kmods.is_empty());
 
         // A pinned module writes a `[[kmods]]` entry that round-trips exactly, including
@@ -666,9 +698,16 @@ mod tests {
             commit: "6".repeat(40),
         }];
         let text = lock.to_toml_string().unwrap();
-        let bad = text.replacen(&format!("commit = \"{}\"", "6".repeat(40)), "commit = \"nope\"", 1);
+        let bad = text.replacen(
+            &format!("commit = \"{}\"", "6".repeat(40)),
+            "commit = \"nope\"",
+            1,
+        );
         assert_ne!(text, bad, "fixture must carry the kmod commit");
-        assert!(toml::from_str::<Lock>(&bad).is_err(), "a non-sha kmod commit must be rejected");
+        assert!(
+            toml::from_str::<Lock>(&bad).is_err(),
+            "a non-sha kmod commit must be rejected"
+        );
     }
 
     #[test]
@@ -708,10 +747,22 @@ mod tests {
             // No separator at all.
             (atf.clone(), "atf-no-separator".to_string(), "separator"),
             // Digest too short / wrong case.
-            (atf.clone(), format!("atf@sha256:{}", "0".repeat(63)), "64 lowercase hex"),
-            (atf.clone(), format!("atf@sha256:{}", "A".repeat(64)), "64 lowercase hex"),
+            (
+                atf.clone(),
+                format!("atf@sha256:{}", "0".repeat(63)),
+                "64 lowercase hex",
+            ),
+            (
+                atf.clone(),
+                format!("atf@sha256:{}", "A".repeat(64)),
+                "64 lowercase hex",
+            ),
             // Filename with a path separator.
-            (atf.clone(), format!("../atf@sha256:{}", "0".repeat(64)), "filename"),
+            (
+                atf.clone(),
+                format!("../atf@sha256:{}", "0".repeat(64)),
+                "filename",
+            ),
             // Manifest must be a bare filename.
             (
                 "manifest = \"rec.pkgs.lock\"".to_string(),
@@ -730,7 +781,9 @@ mod tests {
             "manifest = \"rec.pkgs.lock\"\nmanifest_sha256 = \"DEADBEEF\"",
             1,
         );
-        let err = toml::from_str::<Lock>(&with_digest).unwrap_err().to_string();
+        let err = toml::from_str::<Lock>(&with_digest)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("64 lowercase hex"), "{err}");
     }
 
@@ -785,7 +838,10 @@ mod tests {
         let lock = base_lock();
         assert_eq!(lock.blobs.as_ref().unwrap().bl32, None);
         let text = lock.to_toml_string().unwrap();
-        assert!(!text.contains("bl32"), "absent bl32 must be omitted:\n{text}");
+        assert!(
+            !text.contains("bl32"),
+            "absent bl32 must be omitted:\n{text}"
+        );
         assert_eq!(
             toml::from_str::<Lock>(&text).unwrap().blobs.unwrap().bl32,
             None

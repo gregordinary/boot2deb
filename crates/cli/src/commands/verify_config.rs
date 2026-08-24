@@ -7,7 +7,9 @@
 //! auto-fetched and patched for the caller, so the gate works on a fresh clone.
 
 use crate::args::ConfigArgs;
-use crate::config::{fetch_verify_tree, fragment_paths, resolve_patches_source, verify_trees_cache};
+use crate::config::{
+    fetch_verify_tree, fragment_paths, resolve_patches_source, verify_trees_cache,
+};
 use crate::render::print_event;
 use boot2deb_core::model::Overrides;
 use boot2deb_core::{load_profile, resolve_recipe, ConfigRoot};
@@ -25,13 +27,17 @@ pub(crate) fn run(
     // There is a kernel config to verify only where a kernel is configured. A distro
     // kernel arrives pre-built from the mirror: Debian owns its `.config`, so there
     // are no fragments to merge and nothing this gate could compare.
-    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or_else(|| {
-        format!(
-            "recipe '{recipe}' uses kernel '{}', a distro package built by Debian — its \
+    let kernel = build
+        .kernel
+        .as_ref()
+        .and_then(|k| k.compiled())
+        .ok_or_else(|| {
+            format!(
+                "recipe '{recipe}' uses kernel '{}', a distro package built by Debian — its \
              kernel config is not ours to generate, so there is nothing to verify",
-            build.kernel.as_ref().map(|k| k.id()).unwrap_or("(none)")
-        )
-    })?;
+                build.kernel.as_ref().map(|k| k.id()).unwrap_or("(none)")
+            )
+        })?;
     // Fragment names resolve to fragments/<name>.config along the config search
     // path (overlay-aware), erroring if any is missing.
     let fragments = fragment_paths(root, &build)?;
@@ -137,7 +143,13 @@ pub(crate) fn run(
         std::env::temp_dir().join(format!("boot2deb-{slug}-kconfig"))
     });
 
-    let result = run_config_gate(&inputs, args.reference_config.as_deref(), &work_dir, recipe, &sink);
+    let result = run_config_gate(
+        &inputs,
+        args.reference_config.as_deref(),
+        &work_dir,
+        recipe,
+        &sink,
+    );
     // Restore the shared cache tree to a clean base regardless of the gate's outcome,
     // so a later verify-patches reuse (and this command's own next run) sees the pin.
     if let Some((tree, base)) = &restore {

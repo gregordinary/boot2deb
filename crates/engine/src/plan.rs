@@ -61,7 +61,11 @@ impl NodePlan {
                 Some(prev) => NodeStatus::Rebuild(SignatureManifest::diff(&prev, current)),
             }
         };
-        NodePlan { node: node.to_string(), tree, status }
+        NodePlan {
+            node: node.to_string(),
+            tree,
+            status,
+        }
     }
 }
 
@@ -112,14 +116,13 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
     // patched by `[uboot_patches]`, every other scope by the kernel-side `[patches]`.
     // Folding the wrong pin for u-boot would predict a shared stamp for distinct u-boot
     // profiles — exactly the artifact-cache collision `uboot::clone_manifest` guards.
-    let fingerprint = |pin: Option<&boot2deb_core::lock::PatchesPin>, scope| {
-        match (inputs.patches_root, pin) {
+    let fingerprint =
+        |pin: Option<&boot2deb_core::lock::PatchesPin>, scope| match (inputs.patches_root, pin) {
             (Some(root), Some(pin)) if inputs.patches_dev => {
                 crate::build::patch_series_fingerprint(root, &pin.profiles, scope)
             }
             _ => Vec::new(),
-        }
-    };
+        };
     let dev = inputs.patches_dev;
     let kernel_fp = fingerprint(lock.patches.as_ref(), crate::build::PatchScope::Kernel);
     let uboot_fp = fingerprint(lock.uboot_patches.as_ref(), crate::build::PatchScope::Uboot);
@@ -136,7 +139,9 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
     // reporting a phantom one as perpetually stale. Both manifests are therefore
     // computed from the pin, and a `None` pin simply contributes no node.
     let mut nodes = Vec::new();
-    if let Ok(man) = crate::build::kernel::clone_manifest(lock, patch_series(dev, &kernel_fp), &dts_fp) {
+    if let Ok(man) =
+        crate::build::kernel::clone_manifest(lock, patch_series(dev, &kernel_fp), &dts_fp)
+    {
         nodes.push(NodePlan::evaluate("kernel", w.join("linux"), &man));
     }
     if let Ok(man) = crate::build::uboot::clone_manifest(lock, patch_series(dev, &uboot_fp)) {
@@ -248,20 +253,49 @@ mod tests {
     };
 
     fn lock_fixture(kernel_commit: &str, mpp_commit: &str) -> Lock {
-        let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
+        let git = |c: &str| GitPin {
+            source: "s".into(),
+            reference: "r".into(),
+            commit: c.into(),
+        };
         Lock {
-            kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v7.1.1".into(), commit: kernel_commit.into() }),
-            patches: Some(PatchesPin { profiles: vec!["rk3588-accel".into()], source: "ps".into(), reference: "main".into(), commit: "p1".into() }),
-            uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "u1".into() }),
+            kernel: Some(KernelPin {
+                id: "k".into(),
+                source: "ks".into(),
+                reference: "v7.1.1".into(),
+                commit: kernel_commit.into(),
+            }),
+            patches: Some(PatchesPin {
+                profiles: vec!["rk3588-accel".into()],
+                source: "ps".into(),
+                reference: "main".into(),
+                commit: "p1".into(),
+            }),
+            uboot: Some(UbootPin {
+                source: "us".into(),
+                reference: "v".into(),
+                commit: "u1".into(),
+            }),
             uboot_patches: None,
             userspace: Some(UserspacePins {
                 mpp: Some(git(mpp_commit)),
                 librga: Some(git("rga1")),
                 libmali: Some(git("mali1")),
             }),
-            ffmpeg: Some(FfmpegPins { base: git("b1"), rockchip: Some(git("rk1")) }),
-            rootfs: Some(RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None }),
-            blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
+            ffmpeg: Some(FfmpegPins {
+                base: git("b1"),
+                rockchip: Some(git("rk1")),
+            }),
+            rootfs: Some(RootfsPin {
+                suite: "forky".into(),
+                manifest: "m".into(),
+                manifest_sha256: None,
+            }),
+            blobs: Some(BlobsPin {
+                atf: "a".into(),
+                tpl: "t".into(),
+                bl32: None,
+            }),
             kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
@@ -269,7 +303,11 @@ mod tests {
     }
 
     fn status_of<'a>(plan: &'a [NodePlan], node: &str) -> &'a NodeStatus {
-        &plan.iter().find(|n| n.node == node).expect("node present").status
+        &plan
+            .iter()
+            .find(|n| n.node == node)
+            .expect("node present")
+            .status
     }
 
     #[test]
@@ -290,7 +328,16 @@ mod tests {
         assert!(plan.iter().all(|n| n.status == NodeStatus::Absent));
         // Build order: kernel, uboot, the two userspace packages, ffmpeg (no libmali).
         let names: Vec<&str> = plan.iter().map(|n| n.node.as_str()).collect();
-        assert_eq!(names, ["kernel", "uboot", "userspace:mpp", "userspace:librga", "ffmpeg"]);
+        assert_eq!(
+            names,
+            [
+                "kernel",
+                "uboot",
+                "userspace:mpp",
+                "userspace:librga",
+                "ffmpeg"
+            ]
+        );
     }
 
     #[test]

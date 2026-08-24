@@ -36,7 +36,10 @@ pub fn ensure_tree(
 ) -> Result<PathBuf, EngineError> {
     let dest = cache_root.join(commit);
     if dest.exists() {
-        step.log(format!("{what}: reusing cached checkout at {}", short(commit)));
+        step.log(format!(
+            "{what}: reusing cached checkout at {}",
+            short(commit)
+        ));
         return Ok(dest);
     }
     std::fs::create_dir_all(cache_root).map_err(|s| EngineError::io(cache_root, s))?;
@@ -142,8 +145,15 @@ mod tests {
         let sink = |_e: Event| {};
 
         let step = Step::start(&sink, "test");
-        let tree = ensure_tree(origin.to_str().unwrap(), &tag, &commit, "kernel", &cache, &step)
-            .expect("fetch");
+        let tree = ensure_tree(
+            origin.to_str().unwrap(),
+            &tag,
+            &commit,
+            "kernel",
+            &cache,
+            &step,
+        )
+        .expect("fetch");
         // Commit-addressed, at the pinned commit, worktree clean.
         assert_eq!(tree, cache.join(&commit));
         assert_eq!(git_in(&tree, &["rev-parse", "HEAD"]), commit);
@@ -167,12 +177,28 @@ mod tests {
         std::fs::create_dir_all(patches.join("k")).unwrap();
         // Build the patch from a sibling clone so it applies to the base commit.
         let gen = tmp.path().join("gen");
-        git_in(tmp.path(), &["clone", "-q", origin.to_str().unwrap(), gen.to_str().unwrap()]);
+        git_in(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                gen.to_str().unwrap(),
+            ],
+        );
         git_in(&gen, &["config", "user.email", "t@t"]);
         git_in(&gen, &["config", "user.name", "t"]);
         std::fs::write(gen.join("Makefile"), "all:\n\techo hi\n").unwrap();
         git_in(&gen, &["commit", "-qam", "change"]);
-        git_in(&gen, &["format-patch", "-1", "-o", patches.join("k").to_str().unwrap()]);
+        git_in(
+            &gen,
+            &[
+                "format-patch",
+                "-1",
+                "-o",
+                patches.join("k").to_str().unwrap(),
+            ],
+        );
         let label = std::fs::read_dir(patches.join("k"))
             .unwrap()
             .next()
@@ -184,8 +210,15 @@ mod tests {
 
         let sink = |_e: Event| {};
         let step = Step::start(&sink, "test");
-        let tree = ensure_tree(origin.to_str().unwrap(), &tag, &commit, "kernel", &cache, &step)
-            .unwrap();
+        let tree = ensure_tree(
+            origin.to_str().unwrap(),
+            &tag,
+            &commit,
+            "kernel",
+            &cache,
+            &step,
+        )
+        .unwrap();
 
         let n = apply_kernel_series(
             &tree,

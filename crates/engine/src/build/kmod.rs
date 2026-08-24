@@ -18,7 +18,7 @@ use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::signature::{Signature, SignatureBuilder, SignatureManifest};
 use boot2deb_core::lock::{KmodPin, Lock};
-use boot2deb_core::model::{ResolvedKmod, KmodFirmware};
+use boot2deb_core::model::{KmodFirmware, ResolvedKmod};
 use boot2deb_core::ResolvedBuild;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -102,7 +102,18 @@ pub fn build_kmods(
         let locals = local_patches_for(opts, &k.name);
         // One kmod yields the per-kernel modules deb and, when it ships firmware, a
         // companion `<name>-firmware` deb.
-        let produced = build_one(build, lock, opts, env, &stage_root, k, pin, locals, &kernel_sig, &step)?;
+        let produced = build_one(
+            build,
+            lock,
+            opts,
+            env,
+            &stage_root,
+            k,
+            pin,
+            locals,
+            &kernel_sig,
+            &step,
+        )?;
         debs.extend(produced);
         step.progress((100 * (idx + 1) / build.device_kmods.len().max(1)) as u8);
     }
@@ -135,13 +146,37 @@ fn build_one(
     // tree signature (which embeds the kver), the firmware deb via the driver commit.
     // Restoring is the whole point of not materializing a tree, so probe both up front.
     let mod_node = node_name(&k.name);
-    let mod_man = output_manifest(k, pin, &local_fps, kernel_sig, build.arch.debian_arch(), &env.toolchain_id);
-    let mod_cached = build::restore_stage_outputs(opts.store, &mod_node, &mod_man.signature(), opts.out_dir, &["deb"], step)?;
+    let mod_man = output_manifest(
+        k,
+        pin,
+        &local_fps,
+        kernel_sig,
+        build.arch.debian_arch(),
+        &env.toolchain_id,
+    );
+    let mod_cached = build::restore_stage_outputs(
+        opts.store,
+        &mod_node,
+        &mod_man.signature(),
+        opts.out_dir,
+        &["deb"],
+        step,
+    )?;
 
     let fw_node = firmware_node_name(&k.name);
-    let fw_man = k.firmware.as_ref().map(|f| firmware_output_manifest(k, f, pin, &local_fps));
+    let fw_man = k
+        .firmware
+        .as_ref()
+        .map(|f| firmware_output_manifest(k, f, pin, &local_fps));
     let fw_cached = match &fw_man {
-        Some(m) => build::restore_stage_outputs(opts.store, &fw_node, &m.signature(), opts.out_dir, &["deb"], step)?,
+        Some(m) => build::restore_stage_outputs(
+            opts.store,
+            &fw_node,
+            &m.signature(),
+            opts.out_dir,
+            &["deb"],
+            step,
+        )?,
         None => None,
     };
 
@@ -163,9 +198,13 @@ fn build_one(
     let driver_tree = stage_root.join(&k.name);
     let source = source_for(opts, &k.name).unwrap_or(&pin.source);
     let tree_man = tree_signature_manifest(k, pin, &local_fps);
-    build::reuse_or_refresh_tree(&driver_tree, &tree_man, &format!("kmod {}", k.name), step, || {
-        fetch_and_patch(source, pin, k, local_patches, &driver_tree, step)
-    })?;
+    build::reuse_or_refresh_tree(
+        &driver_tree,
+        &tree_man,
+        &format!("kmod {}", k.name),
+        step,
+        || fetch_and_patch(source, pin, k, local_patches, &driver_tree, step),
+    )?;
     let epoch = crate::git::commit_epoch(&driver_tree, &pin.commit).ok();
 
     let mut debs = Vec::new();
@@ -175,14 +214,43 @@ fn build_one(
         let ktree = crate::build::kernel::ensure_module_tree(build, lock, opts.kernel, env, step)?;
         let kver = kernel_release(&ktree)?;
         let subdir = driver_tree.join(&k.subdir);
-        compile_module(build, env, &ktree, &subdir, k, epoch, step)?;
+        let mk = ModuleMake {
+            build,
+            env,
+            ktree: &ktree,
+            subdir: &subdir,
+            k,
+            step,
+        };
+        compile_module(&mk, epoch)?;
         let pkg_stage = stage_root.join(format!("{}-pkg", k.name));
         let _ = std::fs::remove_dir_all(&pkg_stage);
-        install_modules(build, env, &ktree, &subdir, k, &kver, &pkg_stage, step)?;
-        let deb = package_deb(k, pin, &kver, build.arch.debian_arch(), stage_root, &pkg_stage, epoch, step)?;
+        install_modules(&mk, &kver, &pkg_stage)?;
+        let deb = package_deb(
+            k,
+            pin,
+            &kver,
+            build.arch.debian_arch(),
+            stage_root,
+            &pkg_stage,
+            epoch,
+            step,
+        )?;
         let staged = build::stage_artifact(opts.out_dir, &deb)?;
-        build::store_stage_outputs(opts.store, &mod_node, &mod_man.signature(), &[("deb", staged.as_path())], step)?;
-        step.log(format!("staged {}", staged.file_name().and_then(|n| n.to_str()).unwrap_or("kmod deb")));
+        build::store_stage_outputs(
+            opts.store,
+            &mod_node,
+            &mod_man.signature(),
+            &[("deb", staged.as_path())],
+            step,
+        )?;
+        step.log(format!(
+            "staged {}",
+            staged
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("kmod deb")
+        ));
         debs.push(staged);
     } else {
         debs.push(mod_cached.expect("modules cache hit")[0].clone());
@@ -193,8 +261,20 @@ fn build_one(
         if need_firmware {
             let deb = package_firmware_deb(k, fw, pin, &driver_tree, stage_root, epoch, step)?;
             let staged = build::stage_artifact(opts.out_dir, &deb)?;
-            build::store_stage_outputs(opts.store, &fw_node, &man.signature(), &[("deb", staged.as_path())], step)?;
-            step.log(format!("staged {}", staged.file_name().and_then(|n| n.to_str()).unwrap_or("firmware deb")));
+            build::store_stage_outputs(
+                opts.store,
+                &fw_node,
+                &man.signature(),
+                &[("deb", staged.as_path())],
+                step,
+            )?;
+            step.log(format!(
+                "staged {}",
+                staged
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("firmware deb")
+            ));
             debs.push(staged);
         } else {
             debs.push(fw_cached.expect("firmware cache hit")[0].clone());
@@ -216,7 +296,14 @@ fn fetch_and_patch(
     tree: &Path,
     step: &Step,
 ) -> Result<(), EngineError> {
-    build::fetch_commit(source, &pin.reference, &pin.commit, &format!("kmod {}", k.name), tree, step)?;
+    build::fetch_commit(
+        source,
+        &pin.reference,
+        &pin.commit,
+        &format!("kmod {}", k.name),
+        tree,
+        step,
+    )?;
     for name in &k.repo_patches {
         let patch = tree.join(&k.patch_dir).join(name);
         git_apply(tree, &patch, step)?;
@@ -236,45 +323,71 @@ fn git_apply(tree: &Path, patch: &Path, step: &Step) -> Result<(), EngineError> 
         });
     }
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(tree).args(["apply", "-p1", "--verbose"]).arg(patch);
+    cmd.arg("-C")
+        .arg(tree)
+        .args(["apply", "-p1", "--verbose"])
+        .arg(patch);
     build::run(cmd, "git", &format!("git apply {}", patch.display()), step)
+}
+
+/// The context every `make M=` invocation for one kmod shares: which kernel tree to build
+/// against, which subdir of the fetched driver tree holds the module sources, and the
+/// descriptors that shape the command line and its environment. Held together because the
+/// compile and the install are one `make` conversation against a single kernel tree —
+/// splitting the kernel tree from the subdir it is invoked over would let them disagree.
+struct ModuleMake<'a> {
+    /// Supplies `ARCH` and the cross toolchain via [`apply_kbuild_env`].
+    build: &'a ResolvedBuild,
+    /// Supplies `-j` and the `CROSS_COMPILE` prefix.
+    env: &'a BuildEnv,
+    /// The built kernel tree, passed as `make -C`. Modules link against its
+    /// `Module.symvers`, so it must be the tree whose vermagic the `.deb` claims.
+    ktree: &'a Path,
+    /// Absolute path to `<driver_tree>/<subdir>`, passed as `M=`.
+    subdir: &'a Path,
+    /// The kmod descriptor: `make_args` overrides and the module set to ship.
+    k: &'a ResolvedKmod,
+    /// Sink for the two `make` runs' output.
+    step: &'a Step<'a>,
 }
 
 /// `make -C <ktree> M=<subdir> [make_args] modules` (after a `clean`), with the kernel's
 /// `ARCH`/`SOURCE_DATE_EPOCH` and cross toolchain. The `make_args` (bare `KEY=VALUE`,
 /// validated at resolve) are command-line overrides — how a board selects a build knob
 /// like the direct-probe SDIO path or drops a module that will not build.
-fn compile_module(
-    build: &ResolvedBuild,
-    env: &BuildEnv,
-    ktree: &Path,
-    subdir: &Path,
-    k: &ResolvedKmod,
-    epoch: Option<u64>,
-    step: &Step,
-) -> Result<(), EngineError> {
+fn compile_module(mk: &ModuleMake, epoch: Option<u64>) -> Result<(), EngineError> {
     // A clean first, so a make_args change (which kbuild does not track per-object) never
     // links stale objects into the module.
     let mut clean = Command::new("make");
     clean
         .arg("-C")
-        .arg(ktree)
-        .arg(format!("M={}", subdir.display()))
+        .arg(mk.ktree)
+        .arg(format!("M={}", mk.subdir.display()))
         .arg("clean");
-    apply_kbuild_env(&mut clean, build, env, epoch);
-    build::run(clean, "make", &format!("make M= clean ({})", k.name), step)?;
+    apply_kbuild_env(&mut clean, mk.build, mk.env, epoch);
+    build::run(
+        clean,
+        "make",
+        &format!("make M= clean ({})", mk.k.name),
+        mk.step,
+    )?;
 
     let mut make = Command::new("make");
     make.arg("-C")
-        .arg(ktree)
-        .arg(format!("-j{}", env.jobs()))
-        .arg(format!("M={}", subdir.display()));
-    for arg in &k.make_args {
+        .arg(mk.ktree)
+        .arg(format!("-j{}", mk.env.jobs()))
+        .arg(format!("M={}", mk.subdir.display()));
+    for arg in &mk.k.make_args {
         make.arg(arg);
     }
     make.arg("modules");
-    apply_kbuild_env(&mut make, build, env, epoch);
-    build::run(make, "make", &format!("make M= modules ({})", k.name), step)
+    apply_kbuild_env(&mut make, mk.build, mk.env, epoch);
+    build::run(
+        make,
+        "make",
+        &format!("make M= modules ({})", mk.k.name),
+        mk.step,
+    )
 }
 
 /// `make … modules_install` into `pkg_stage`, landing the `.ko`s under
@@ -283,37 +396,33 @@ fn compile_module(
 /// Then prunes everything under `lib/modules/<kver>/` except `updates/` (the stray
 /// `modules.order`/`modules.builtin` the install writes would shadow the kernel deb's),
 /// and, when the device names a module set, verifies each is present and drops extras.
-fn install_modules(
-    build: &ResolvedBuild,
-    env: &BuildEnv,
-    ktree: &Path,
-    subdir: &Path,
-    k: &ResolvedKmod,
-    kver: &str,
-    pkg_stage: &Path,
-    step: &Step,
-) -> Result<(), EngineError> {
+fn install_modules(mk: &ModuleMake, kver: &str, pkg_stage: &Path) -> Result<(), EngineError> {
     std::fs::create_dir_all(pkg_stage).map_err(|s| EngineError::io(pkg_stage, s))?;
     let mut make = Command::new("make");
     make.arg("-C")
-        .arg(ktree)
-        .arg(format!("M={}", subdir.display()))
+        .arg(mk.ktree)
+        .arg(format!("M={}", mk.subdir.display()))
         .arg(format!("INSTALL_MOD_PATH={}", pkg_stage.display()))
         .arg("INSTALL_MOD_DIR=updates")
         .arg("INSTALL_MOD_STRIP=1")
         .arg("DEPMOD=/bin/true");
-    for arg in &k.make_args {
+    for arg in &mk.k.make_args {
         make.arg(arg);
     }
     make.arg("modules_install");
-    apply_kbuild_env(&mut make, build, env, None);
-    build::run(make, "make", &format!("make M= modules_install ({})", k.name), step)?;
+    apply_kbuild_env(&mut make, mk.build, mk.env, None);
+    build::run(
+        make,
+        "make",
+        &format!("make M= modules_install ({})", mk.k.name),
+        mk.step,
+    )?;
 
     let mods_dir = pkg_stage.join(format!("lib/modules/{kver}"));
     let updates = mods_dir.join("updates");
     if !updates.exists() {
         return Err(EngineError::ArtifactMissing {
-            what: format!("built modules for kmod '{}' under updates/", k.name),
+            what: format!("built modules for kmod '{}' under updates/", mk.k.name),
             location: updates.display().to_string(),
         });
     }
@@ -329,7 +438,7 @@ fn install_modules(
             }
         }
     }
-    prune_and_verify_modules(&updates, k, step)
+    prune_and_verify_modules(&updates, mk.k, mk.step)
 }
 
 /// When the device names a `modules` set, verify each named `.ko` was built and remove
@@ -340,7 +449,11 @@ fn install_modules(
 /// lands at `updates/<subdir>/<name>.ko` (e.g. `updates/aic8800_bsp/aic8800_bsp.ko`),
 /// not flat under `updates/`. The `.ko` set is therefore collected recursively, matched
 /// by basename; pruning an unlisted module also removes any subdirectory it emptied.
-fn prune_and_verify_modules(updates: &Path, k: &ResolvedKmod, step: &Step) -> Result<(), EngineError> {
+fn prune_and_verify_modules(
+    updates: &Path,
+    k: &ResolvedKmod,
+    step: &Step,
+) -> Result<(), EngineError> {
     if k.modules.is_empty() {
         return Ok(());
     }
@@ -368,7 +481,10 @@ fn prune_and_verify_modules(updates: &Path, k: &ResolvedKmod, step: &Step) -> Re
     for w in &want {
         if !present.contains(w) {
             return Err(EngineError::ArtifactMissing {
-                what: format!("module '{w}.ko' named in device_kmods '{}' but not built", k.name),
+                what: format!(
+                    "module '{w}.ko' named in device_kmods '{}' but not built",
+                    k.name
+                ),
                 location: updates.display().to_string(),
             });
         }
@@ -398,7 +514,11 @@ fn prune_empty_dirs(root: &Path) -> Result<(), EngineError> {
         let path = entry.map_err(|s| EngineError::io(root, s))?.path();
         if path.is_dir() {
             prune_empty_dirs(&path)?;
-            if std::fs::read_dir(&path).map_err(|s| EngineError::io(&path, s))?.next().is_none() {
+            if std::fs::read_dir(&path)
+                .map_err(|s| EngineError::io(&path, s))?
+                .next()
+                .is_none()
+            {
                 std::fs::remove_dir(&path).map_err(|s| EngineError::io(&path, s))?;
             }
         }
@@ -429,10 +549,14 @@ fn package_deb(
     build::normalize_data_tree(pkg_stage)?;
     let debian = pkg_stage.join("DEBIAN");
     std::fs::create_dir_all(&debian).map_err(|s| EngineError::io(&debian, s))?;
-    std::fs::write(debian.join("control"), control_text(&pkg, &version, arch, kver, &k.name))
-        .map_err(|s| EngineError::io(&debian.join("control"), s))?;
+    std::fs::write(
+        debian.join("control"),
+        control_text(&pkg, &version, arch, kver, &k.name),
+    )
+    .map_err(|s| EngineError::io(&debian.join("control"), s))?;
     let postinst = debian.join("postinst");
-    std::fs::write(&postinst, maintainer_script(kver)).map_err(|s| EngineError::io(&postinst, s))?;
+    std::fs::write(&postinst, maintainer_script(kver))
+        .map_err(|s| EngineError::io(&postinst, s))?;
     let postrm = debian.join("postrm");
     std::fs::write(&postrm, maintainer_script(kver)).map_err(|s| EngineError::io(&postrm, s))?;
     // `normalize_data_tree` refuses trees with maintainer scripts, so the DEBIAN dir is
@@ -445,7 +569,9 @@ fn package_deb(
     let deb_name = format!("{pkg}_{version}_{arch}.deb");
     let deb_out = stage_root.join(&deb_name);
     let mut cmd = Command::new("fakeroot");
-    cmd.args(["dpkg-deb", "--build"]).arg(pkg_stage).arg(&deb_out);
+    cmd.args(["dpkg-deb", "--build"])
+        .arg(pkg_stage)
+        .arg(&deb_out);
     if let Some(e) = epoch {
         cmd.env("SOURCE_DATE_EPOCH", e.to_string());
     }
@@ -471,7 +597,10 @@ fn package_firmware_deb(
     let src = driver_tree.join(&fw.subdir);
     if !src.is_dir() {
         return Err(EngineError::ArtifactMissing {
-            what: format!("firmware source dir for kmod '{}' (subdir {})", k.name, fw.subdir),
+            what: format!(
+                "firmware source dir for kmod '{}' (subdir {})",
+                k.name, fw.subdir
+            ),
             location: src.display().to_string(),
         });
     }
@@ -502,15 +631,20 @@ fn package_firmware_deb(
     build::normalize_data_tree(&pkg_stage)?;
     let debian = pkg_stage.join("DEBIAN");
     std::fs::create_dir_all(&debian).map_err(|s| EngineError::io(&debian, s))?;
-    std::fs::write(debian.join("control"), firmware_control_text(&pkg, &version, &k.name, count))
-        .map_err(|s| EngineError::io(&debian.join("control"), s))?;
+    std::fs::write(
+        debian.join("control"),
+        firmware_control_text(&pkg, &version, &k.name, count),
+    )
+    .map_err(|s| EngineError::io(&debian.join("control"), s))?;
     build::set_mode(&debian, 0o755)?;
     build::set_mode(&debian.join("control"), 0o644)?;
 
     let deb_name = format!("{pkg}_{version}_all.deb");
     let deb_out = stage_root.join(&deb_name);
     let mut cmd = Command::new("fakeroot");
-    cmd.args(["dpkg-deb", "--build"]).arg(&pkg_stage).arg(&deb_out);
+    cmd.args(["dpkg-deb", "--build"])
+        .arg(&pkg_stage)
+        .arg(&deb_out);
     if let Some(e) = epoch {
         cmd.env("SOURCE_DATE_EPOCH", e.to_string());
     }
@@ -603,7 +737,11 @@ fn maintainer_script(kver: &str) -> String {
 /// and its own quilt) plus the applied in-repo patch list, patch dir, and local-patch
 /// fingerprints. The subdir/make_args do not shape the *tree*, only the build, so they
 /// live in the output signature.
-pub fn tree_signature_manifest(k: &ResolvedKmod, pin: &KmodPin, local_fps: &[String]) -> SignatureManifest {
+pub fn tree_signature_manifest(
+    k: &ResolvedKmod,
+    pin: &KmodPin,
+    local_fps: &[String],
+) -> SignatureManifest {
     let mut b = SignatureBuilder::new(&node_name(&k.name), TREE_STAGE_VERSION);
     b.fold_scalar("commit", &pin.commit);
     b.fold_scalar("patch_dir", &k.patch_dir);
@@ -681,7 +819,8 @@ fn kernel_release(ktree: &Path) -> Result<String, EngineError> {
 /// The lock-derived kernel tree signature, folded into every kmod output key so a kernel
 /// repin invalidates the modules `.deb` without needing the tree present.
 fn kernel_tree_signature(lock: &Lock, opts: &KmodOptions) -> Result<Signature, EngineError> {
-    let series_fp = build::dev_series_fingerprint(opts.kernel.patches, crate::build::PatchScope::Kernel);
+    let series_fp =
+        build::dev_series_fingerprint(opts.kernel.patches, crate::build::PatchScope::Kernel);
     let patches = build::series_identity(opts.kernel.patches, &series_fp);
     let dts_fp = build::device_dts_fingerprint(opts.kernel.device_dts);
     Ok(crate::build::kernel::clone_manifest(lock, patches, &dts_fp)?.signature())
@@ -703,7 +842,10 @@ fn local_patches_for<'a>(opts: &'a KmodOptions, name: &str) -> &'a [PathBuf] {
 
 /// A per-name clone-source override, when one was given.
 fn source_for<'a>(opts: &'a KmodOptions, name: &str) -> Option<&'a str> {
-    opts.sources.iter().find(|(n, _)| n == name).map(|(_, s)| s.as_str())
+    opts.sources
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, s)| s.as_str())
 }
 
 #[cfg(test)]
@@ -759,7 +901,13 @@ mod tests {
 
     #[test]
     fn control_text_declares_the_kernel_dep_and_updates_path() {
-        let text = control_text("aic8800-modules-7.1.3-1-arm64", "0~main+gabc", "arm64", "7.1.3-1-arm64", "aic8800");
+        let text = control_text(
+            "aic8800-modules-7.1.3-1-arm64",
+            "0~main+gabc",
+            "arm64",
+            "7.1.3-1-arm64",
+            "aic8800",
+        );
         assert!(text.contains("Package: aic8800-modules-7.1.3-1-arm64"));
         assert!(text.contains("Depends: linux-image-7.1.3-1-arm64"));
         assert!(text.contains("/lib/modules/7.1.3-1-arm64/updates/"));
@@ -775,7 +923,10 @@ mod tests {
         let text = firmware_control_text("aic8800-firmware", "0~main+gabc", "aic8800", 7);
         assert!(text.contains("Package: aic8800-firmware"));
         assert!(text.contains("Architecture: all"));
-        assert!(!text.contains("Depends:"), "firmware deb must not depend on a kernel");
+        assert!(
+            !text.contains("Depends:"),
+            "firmware deb must not depend on a kernel"
+        );
         assert_eq!(firmware_package_name("aic8800"), "aic8800-firmware");
         assert_eq!(firmware_node_name("aic8800"), "kmod-fw:aic8800");
     }
@@ -794,15 +945,36 @@ mod tests {
         let base = firmware_output_manifest(&k, &fw, &p, &[]).signature();
 
         // A different source dir or install path restamps the firmware deb.
-        let other_subdir = KmodFirmware { subdir: "src/USB/driver_fw/fw".into(), ..fw.clone() };
-        assert_ne!(base, firmware_output_manifest(&k, &other_subdir, &p, &[]).signature());
-        let other_install = KmodFirmware { install: "usr/lib/firmware/aic8800".into(), ..fw.clone() };
-        assert_ne!(base, firmware_output_manifest(&k, &other_install, &p, &[]).signature());
+        let other_subdir = KmodFirmware {
+            subdir: "src/USB/driver_fw/fw".into(),
+            ..fw.clone()
+        };
+        assert_ne!(
+            base,
+            firmware_output_manifest(&k, &other_subdir, &p, &[]).signature()
+        );
+        let other_install = KmodFirmware {
+            install: "usr/lib/firmware/aic8800".into(),
+            ..fw.clone()
+        };
+        assert_ne!(
+            base,
+            firmware_output_manifest(&k, &other_install, &p, &[]).signature()
+        );
         // A driver commit bump restamps it (the firmware bytes at that commit changed).
-        let bumped = KmodPin { commit: "b".repeat(40), ..pin("main") };
-        assert_ne!(base, firmware_output_manifest(&k, &fw, &bumped, &[]).signature());
+        let bumped = KmodPin {
+            commit: "b".repeat(40),
+            ..pin("main")
+        };
+        assert_ne!(
+            base,
+            firmware_output_manifest(&k, &fw, &bumped, &[]).signature()
+        );
         // An edited local shim restamps it too (a patch could touch the firmware dir).
-        assert_ne!(base, firmware_output_manifest(&k, &fw, &p, &["deadbeef".into()]).signature());
+        assert_ne!(
+            base,
+            firmware_output_manifest(&k, &fw, &p, &["deadbeef".into()]).signature()
+        );
     }
 
     #[test]
@@ -810,7 +982,8 @@ mod tests {
         let k = kmod();
         let p = pin("main");
         let base_tree = tree_signature_manifest(&k, &p, &[]).signature();
-        let base_out = output_manifest(&k, &p, &[], &kernel_sig("k1"), "arm64", "gcc-13").signature();
+        let base_out =
+            output_manifest(&k, &p, &[], &kernel_sig("k1"), "arm64", "gcc-13").signature();
 
         // The kernel signature is an output-only input (module vermagic): a kernel bump
         // must restamp the deb but leaves the fetched+patched *tree* untouched.
@@ -822,7 +995,10 @@ mod tests {
 
         // The subdir/make_args shape the build, not the tree, so they live in the output
         // signature only.
-        let other_subdir = ResolvedKmod { subdir: "src/USB/driver".into(), ..kmod() };
+        let other_subdir = ResolvedKmod {
+            subdir: "src/USB/driver".into(),
+            ..kmod()
+        };
         assert_eq!(
             base_tree,
             tree_signature_manifest(&other_subdir, &p, &[]).signature(),
@@ -830,16 +1006,31 @@ mod tests {
         );
         assert_ne!(
             base_out,
-            output_manifest(&other_subdir, &p, &[], &kernel_sig("k1"), "arm64", "gcc-13").signature(),
+            output_manifest(&other_subdir, &p, &[], &kernel_sig("k1"), "arm64", "gcc-13")
+                .signature(),
             "subdir must move the output signature"
         );
 
         // The applied in-repo patch list shapes the tree, so it moves both signatures.
-        let other_patches = ResolvedKmod { repo_patches: vec!["fix-other.patch".into()], ..kmod() };
-        assert_ne!(base_tree, tree_signature_manifest(&other_patches, &p, &[]).signature());
+        let other_patches = ResolvedKmod {
+            repo_patches: vec!["fix-other.patch".into()],
+            ..kmod()
+        };
+        assert_ne!(
+            base_tree,
+            tree_signature_manifest(&other_patches, &p, &[]).signature()
+        );
         assert_ne!(
             base_out,
-            output_manifest(&other_patches, &p, &[], &kernel_sig("k1"), "arm64", "gcc-13").signature(),
+            output_manifest(
+                &other_patches,
+                &p,
+                &[],
+                &kernel_sig("k1"),
+                "arm64",
+                "gcc-13"
+            )
+            .signature(),
         );
 
         // A local-patch content fingerprint change (an edited compat shim) restamps both.
@@ -869,7 +1060,10 @@ mod tests {
         prune_and_verify_modules(&updates, &kmod(), &step).unwrap();
         assert!(updates.join("aic8800_bsp/aic8800_bsp.ko").exists());
         assert!(updates.join("aic8800_fdrv/aic8800_fdrv.ko").exists());
-        assert!(!updates.join("aic8800_btlpm").exists(), "unlisted module + its dir dropped");
+        assert!(
+            !updates.join("aic8800_btlpm").exists(),
+            "unlisted module + its dir dropped"
+        );
 
         // A named module that was never built is a hard error, not a silent empty deb.
         std::fs::remove_dir_all(updates.join("aic8800_fdrv")).unwrap();
@@ -884,8 +1078,14 @@ mod tests {
         let updates = dir.path().join("updates");
         std::fs::create_dir_all(&updates).unwrap();
         std::fs::write(updates.join("whatever.ko"), b"ko").unwrap();
-        let all = ResolvedKmod { modules: vec![], ..kmod() };
+        let all = ResolvedKmod {
+            modules: vec![],
+            ..kmod()
+        };
         prune_and_verify_modules(&updates, &all, &step).unwrap();
-        assert!(updates.join("whatever.ko").exists(), "empty module set ships all");
+        assert!(
+            updates.join("whatever.ko").exists(),
+            "empty module set ships all"
+        );
     }
 }

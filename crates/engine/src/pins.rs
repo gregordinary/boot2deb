@@ -75,7 +75,11 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     // missing checkout gets the tailored setup error, not a raw git failure: this is
     // the one command that *requires* a local clone, where `build` would auto-fetch),
     // then pin each axis against it. A build with neither profile never reads it.
-    let kernel_profiles = build.kernel.as_ref().map(|k| k.patch_profiles()).unwrap_or(&[]);
+    let kernel_profiles = build
+        .kernel
+        .as_ref()
+        .map(|k| k.patch_profiles())
+        .unwrap_or(&[]);
     let uboot_profile = build.rkbin_boot().and_then(|b| b.uboot_profile.as_deref());
     let patches_commit = if !kernel_profiles.is_empty() || uboot_profile.is_some() {
         if !opts.patches_path.join(".git").exists() {
@@ -186,7 +190,11 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
             // Each tree is pinned only if the SoC declares it, so the lock's tables
             // mirror the SoC's own statement about what hardware it has.
             Ok(UserspacePins {
-                mpp: u.mpp.as_ref().map(|s| git_pin(&s.git, opts.mpp_ref)).transpose()?,
+                mpp: u
+                    .mpp
+                    .as_ref()
+                    .map(|s| git_pin(&s.git, opts.mpp_ref))
+                    .transpose()?,
                 librga: u
                     .librga
                     .as_ref()
@@ -237,7 +245,16 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
         })
         .collect::<Result<Vec<_>, EngineError>>()?;
     Ok(assemble_lock(
-        build, opts, kernel, uboot, patches, uboot_patches, userspace, ffmpeg, blobs, kmods,
+        build,
+        opts,
+        kernel,
+        uboot,
+        patches,
+        uboot_patches,
+        userspace,
+        ffmpeg,
+        blobs,
+        kmods,
     ))
 }
 
@@ -264,7 +281,10 @@ fn git_pin(url: &str, reference: &str) -> Result<GitPin, EngineError> {
 pub fn write_lock(path: &Path, lock: &Lock) -> Result<(), EngineError> {
     let text = lock.to_toml_string()?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("recipe.lock");
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("recipe.lock");
     let tmp = dir.join(format!(".{file_name}.{}.partial", std::process::id()));
     std::fs::write(&tmp, text).map_err(|source| EngineError::io(&tmp, source))?;
     std::fs::rename(&tmp, path).map_err(|source| {
@@ -376,7 +396,10 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         lock.kernel.is_some(),
         build.compiles_kernel(),
     );
-    if let (Some(pin), Some(kernel)) = (&lock.kernel, build.kernel.as_ref().and_then(|k| k.compiled())) {
+    if let (Some(pin), Some(kernel)) = (
+        &lock.kernel,
+        build.kernel.as_ref().and_then(|k| k.compiled()),
+    ) {
         diff(&mut axes, "kernel id", &pin.id, &kernel.id);
         // The kernel URL is derived from the definition's source; an unknown named
         // tree cannot resolve to a comparable URL here, and the build fails on it
@@ -413,7 +436,12 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         }
     }
     if let (Some(lock_ff), Some(ff)) = (&lock.ffmpeg, &build.ffmpeg) {
-        diff(&mut axes, "ffmpeg base source", &lock_ff.base.source, &ff.base.git);
+        diff(
+            &mut axes,
+            "ffmpeg base source",
+            &lock_ff.base.source,
+            &ff.base.git,
+        );
         presence(
             &mut axes,
             "ffmpeg rockchip",
@@ -434,8 +462,18 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         build.rkbin_boot().is_some(),
     );
     if let (Some(pins), Some(boot)) = (&lock.blobs, build.rkbin_boot()) {
-        diff(&mut axes, "atf blob", blob_pin_file(&pins.atf), &boot.rkbin.atf);
-        diff(&mut axes, "tpl blob", blob_pin_file(&pins.tpl), &boot.rkbin.tpl);
+        diff(
+            &mut axes,
+            "atf blob",
+            blob_pin_file(&pins.atf),
+            &boot.rkbin.atf,
+        );
+        diff(
+            &mut axes,
+            "tpl blob",
+            blob_pin_file(&pins.tpl),
+            &boot.rkbin.tpl,
+        );
         match (&pins.bl32, &boot.rkbin.bl32) {
             (Some(locked), Some(resolved)) => {
                 diff(&mut axes, "bl32 blob", blob_pin_file(locked), resolved)
@@ -454,8 +492,16 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         }
     };
     // The kernel composes an ordered profile list; a changed set or order must re-pin.
-    let lock_profiles: &[String] = lock.patches.as_ref().map(|p| p.profiles.as_slice()).unwrap_or(&[]);
-    let resolved_profiles = build.kernel.as_ref().map(|k| k.patch_profiles()).unwrap_or(&[]);
+    let lock_profiles: &[String] = lock
+        .patches
+        .as_ref()
+        .map(|p| p.profiles.as_slice())
+        .unwrap_or(&[]);
+    let resolved_profiles = build
+        .kernel
+        .as_ref()
+        .map(|k| k.patch_profiles())
+        .unwrap_or(&[]);
     if lock_profiles != resolved_profiles {
         axes.push(format!(
             "patch profiles: lock '{}' vs resolved '{}'",
@@ -482,7 +528,12 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
     }
     // The rootfs pin exists iff the build produces an image; a suite drift is only
     // meaningful when both sides have one.
-    presence(&mut axes, "rootfs", lock.rootfs.is_some(), build.produces_image());
+    presence(
+        &mut axes,
+        "rootfs",
+        lock.rootfs.is_some(),
+        build.produces_image(),
+    );
     if let (Some(pin), Some(suite)) = (&lock.rootfs, &build.suite) {
         diff(&mut axes, "suite", &pin.suite, suite);
     }
@@ -499,8 +550,16 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
     if lock.userspace.is_some() != build.userspace.is_some() {
         axes.push(format!(
             "media-accel sources: lock {} vs resolved {}",
-            if lock.userspace.is_some() { "present" } else { "absent" },
-            if build.userspace.is_some() { "present" } else { "absent" },
+            if lock.userspace.is_some() {
+                "present"
+            } else {
+                "absent"
+            },
+            if build.userspace.is_some() {
+                "present"
+            } else {
+                "absent"
+            },
         ));
     }
     // Out-of-tree modules: the lock pins one per `device_kmods` entry. A board that
@@ -520,7 +579,10 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
     }
     for pin in &lock.kmods {
         if !build.device_kmods.iter().any(|k| k.name == pin.name) {
-            axes.push(format!("kmod '{}': in lock but no longer resolved", pin.name));
+            axes.push(format!(
+                "kmod '{}': in lock but no longer resolved",
+                pin.name
+            ));
         }
     }
     if axes.is_empty() {
@@ -541,11 +603,8 @@ fn blob_pin_file(pin: &str) -> &str {
 /// clone source for the kernel build stage when `--kernel-src` is not given.
 pub fn kernel_source_url(source: &KernelSource) -> Result<String, EngineError> {
     match source {
-        KernelSource::Named(name) => {
-            named_tree_url(name).ok_or_else(|| EngineError::UnknownSourceTree {
-                name: name.clone(),
-            })
-        }
+        KernelSource::Named(name) => named_tree_url(name)
+            .ok_or_else(|| EngineError::UnknownSourceTree { name: name.clone() }),
         KernelSource::Git { git, .. } => Ok(git.clone()),
     }
 }
@@ -553,9 +612,7 @@ pub fn kernel_source_url(source: &KernelSource) -> Result<String, EngineError> {
 /// Map a well-known kernel tree name to its clone URL.
 fn named_tree_url(name: &str) -> Option<String> {
     let url = match name {
-        "linux-stable" => {
-            "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-        }
+        "linux-stable" => "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git",
         "torvalds" | "linux" => {
             "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
         }
@@ -590,7 +647,9 @@ mod tests {
 
     #[test]
     fn named_tree_maps_to_kernel_org() {
-        assert!(named_tree_url("linux-stable").unwrap().contains("linux-stable.git"));
+        assert!(named_tree_url("linux-stable")
+            .unwrap()
+            .contains("linux-stable.git"));
         assert!(named_tree_url("bogus-tree").is_none());
     }
 
@@ -608,10 +667,15 @@ mod tests {
             }
             e => panic!("expected BlobMissing, got {e:?}"),
         }
-        assert!(err.to_string().contains("vendor it there"), "remedy in message: {err}");
+        assert!(
+            err.to_string().contains("vendor it there"),
+            "remedy in message: {err}"
+        );
         // A present blob still pins.
         std::fs::write(dir.path().join("blob.bin"), b"bytes").unwrap();
-        assert!(blob_pin(dir.path(), "blob.bin").unwrap().starts_with("blob.bin@sha256:"));
+        assert!(blob_pin(dir.path(), "blob.bin")
+            .unwrap()
+            .starts_with("blob.bin@sha256:"));
     }
 
     #[test]
@@ -663,7 +727,10 @@ mod tests {
             }
             e => panic!("expected PatchesDirty, got {e:?}"),
         }
-        assert!(err.to_string().contains("commit them"), "remedy in message: {err}");
+        assert!(
+            err.to_string().contains("commit them"),
+            "remedy in message: {err}"
+        );
     }
 
     #[test]
@@ -741,16 +808,53 @@ mod tests {
         };
         // Commits are full 40-hex shas so the round-trip deserialize accepts them;
         // the char picks them apart.
-        let git = |c: char| GitPin { source: "s".into(), reference: "r".into(), commit: std::iter::repeat_n(c, 40).collect() };
+        let git = |c: char| GitPin {
+            source: "s".into(),
+            reference: "r".into(),
+            commit: std::iter::repeat_n(c, 40).collect(),
+        };
         let lock = Lock {
-            kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v7.1.1".into(), commit: "a".repeat(40) }),
-            patches: Some(PatchesPin { profiles: vec!["rk3588-accel".into()], source: "ps".into(), reference: "main".into(), commit: "b".repeat(40) }),
-            uboot: Some(UbootPin { source: "us".into(), reference: "v2026.04".into(), commit: "c".repeat(40) }),
+            kernel: Some(KernelPin {
+                id: "k".into(),
+                source: "ks".into(),
+                reference: "v7.1.1".into(),
+                commit: "a".repeat(40),
+            }),
+            patches: Some(PatchesPin {
+                profiles: vec!["rk3588-accel".into()],
+                source: "ps".into(),
+                reference: "main".into(),
+                commit: "b".repeat(40),
+            }),
+            uboot: Some(UbootPin {
+                source: "us".into(),
+                reference: "v2026.04".into(),
+                commit: "c".repeat(40),
+            }),
             uboot_patches: None,
-            userspace: Some(UserspacePins { mpp: Some(git('1')), librga: Some(git('2')), libmali: Some(git('3')) }),
-            ffmpeg: Some(FfmpegPins { base: git('4'), rockchip: Some(git('5')) }),
-            rootfs: Some(RootfsPin { suite: "forky".into(), manifest: "m.lock".into(), manifest_sha256: None }),
-            blobs: Some(BlobsPin { atf: "a.elf@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(), tpl: "t.bin@sha256:1111111111111111111111111111111111111111111111111111111111111111".into(), bl32: None }),
+            userspace: Some(UserspacePins {
+                mpp: Some(git('1')),
+                librga: Some(git('2')),
+                libmali: Some(git('3')),
+            }),
+            ffmpeg: Some(FfmpegPins {
+                base: git('4'),
+                rockchip: Some(git('5')),
+            }),
+            rootfs: Some(RootfsPin {
+                suite: "forky".into(),
+                manifest: "m.lock".into(),
+                manifest_sha256: None,
+            }),
+            blobs: Some(BlobsPin {
+                atf:
+                    "a.elf@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .into(),
+                tpl:
+                    "t.bin@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                        .into(),
+                bl32: None,
+            }),
             kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
@@ -835,18 +939,27 @@ mod tests {
             "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
         );
         assert_eq!(kernel_pin.reference, "v7.1.1");
-        assert_eq!(lock.patches.as_ref().unwrap().profiles, vec!["rk3588-accel".to_string()]);
+        assert_eq!(
+            lock.patches.as_ref().unwrap().profiles,
+            vec!["rk3588-accel".to_string()]
+        );
         // The u-boot source is recorded from the resolved boot method.
         let uboot_pin = lock.uboot.as_ref().unwrap();
         assert_eq!(uboot_pin.source, build.rkbin_boot().unwrap().uboot_source);
         assert_eq!(uboot_pin.reference, "v2026.04");
         let us = lock.userspace.as_ref().unwrap();
         let ff = lock.ffmpeg.as_ref().unwrap();
-        assert_eq!(us.mpp.as_ref().unwrap().commit, "95a6c48816d39b190be4b7333ad6fc249c08590c");
+        assert_eq!(
+            us.mpp.as_ref().unwrap().commit,
+            "95a6c48816d39b190be4b7333ad6fc249c08590c"
+        );
         assert_eq!(ff.base.commit, "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935");
         assert_eq!(ff.rockchip.as_ref().unwrap().reference, "8.1");
         assert_eq!(lock.rootfs.as_ref().unwrap().suite, "forky");
-        assert_eq!(lock.rootfs.as_ref().unwrap().manifest, "turing-rk1-forky.pkgs.lock");
+        assert_eq!(
+            lock.rootfs.as_ref().unwrap().manifest,
+            "turing-rk1-forky.pkgs.lock"
+        );
         assert!(lock.snapshot.is_none());
         // The shipped RK1 config pulls no pre-built debs; the recorded set is empty
         // (and omitted from the committed lock).
@@ -869,7 +982,11 @@ mod tests {
         match check_lock_consistency(&drifted, &build).unwrap_err() {
             EngineError::LockConfigDrift { axes } => {
                 assert_eq!(axes.len(), 1);
-                assert!(axes[0].contains("suite"), "message names the axis: {}", axes[0]);
+                assert!(
+                    axes[0].contains("suite"),
+                    "message names the axis: {}",
+                    axes[0]
+                );
             }
             other => panic!("expected LockConfigDrift, got {other:?}"),
         }
@@ -924,11 +1041,15 @@ mod tests {
         for (label, lock) in [
             (
                 "u-boot source",
-                base_lock(&|l| l.uboot.as_mut().unwrap().source = "https://other.example/u-boot.git".into()),
+                base_lock(&|l| {
+                    l.uboot.as_mut().unwrap().source = "https://other.example/u-boot.git".into()
+                }),
             ),
             (
                 "kernel source",
-                base_lock(&|l| l.kernel.as_mut().unwrap().source = "https://other.example/linux.git".into()),
+                base_lock(&|l| {
+                    l.kernel.as_mut().unwrap().source = "https://other.example/linux.git".into()
+                }),
             ),
             (
                 "mpp source",
@@ -940,12 +1061,15 @@ mod tests {
             (
                 "ffmpeg base source",
                 base_lock(&|l| {
-                    l.ffmpeg.as_mut().unwrap().base.source = "https://other.example/ffmpeg.git".into()
+                    l.ffmpeg.as_mut().unwrap().base.source =
+                        "https://other.example/ffmpeg.git".into()
                 }),
             ),
             (
                 "atf blob",
-                base_lock(&|l| l.blobs.as_mut().unwrap().atf = "rk3588_bl31_v0.99.elf@sha256:aa".into()),
+                base_lock(&|l| {
+                    l.blobs.as_mut().unwrap().atf = "rk3588_bl31_v0.99.elf@sha256:aa".into()
+                }),
             ),
             (
                 "bl32 blob",
@@ -982,7 +1106,11 @@ mod tests {
                 commit: "kc".into(),
             }),
             patches: {
-                let profiles = build.kernel.as_ref().map(|k| k.patch_profiles()).unwrap_or(&[]);
+                let profiles = build
+                    .kernel
+                    .as_ref()
+                    .map(|k| k.patch_profiles())
+                    .unwrap_or(&[]);
                 (!profiles.is_empty()).then(|| PatchesPin {
                     profiles: profiles.to_vec(),
                     source: "https://example.invalid/patches.git".into(),

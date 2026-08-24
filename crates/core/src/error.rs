@@ -144,7 +144,9 @@ pub enum ConfigError {
     },
 
     /// The chosen u-boot profile is not in the device's `supported_uboot_profiles`.
-    #[error("device '{device}' does not support u-boot profile '{profile}' (supported: {supported})")]
+    #[error(
+        "device '{device}' does not support u-boot profile '{profile}' (supported: {supported})"
+    )]
     UnknownUbootProfileForDevice {
         /// The device being resolved.
         device: String,
@@ -191,7 +193,9 @@ pub enum ConfigError {
     },
 
     /// The chosen boot method is not in the device's `supported_boot_methods`.
-    #[error("device '{device}' does not support boot method '{boot_method}' (supported: {supported})")]
+    #[error(
+        "device '{device}' does not support boot method '{boot_method}' (supported: {supported})"
+    )]
     UnsupportedBootMethod {
         /// The device being resolved.
         device: String,

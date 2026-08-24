@@ -207,7 +207,10 @@ fn run_ls_remote(url: &str) -> Result<Vec<LsRef>, String> {
                 .unwrap_or("unknown error")
                 .trim()
         )),
-        Bounded::TimedOut => Err(format!("ls-remote exceeded {}s", LS_REMOTE_TIMEOUT.as_secs())),
+        Bounded::TimedOut => Err(format!(
+            "ls-remote exceeded {}s",
+            LS_REMOTE_TIMEOUT.as_secs()
+        )),
         Bounded::Spawn(e) => Err(format!("could not run git: {e}")),
     }
 }
@@ -242,7 +245,9 @@ pub fn probe(url: &str, reference: &str, commit: &str) -> Durability {
         RefVerdict::BranchTip(branch) => {
             Durability::Ephemeral(format!("tip of branch {branch} (pin a tag for durability)"))
         }
-        RefVerdict::NotAdvertised { ref_branch } => ancestry_probe(url, reference, commit, ref_branch),
+        RefVerdict::NotAdvertised { ref_branch } => {
+            ancestry_probe(url, reference, commit, ref_branch)
+        }
     }
 }
 
@@ -250,7 +255,12 @@ pub fn probe(url: &str, reference: &str, commit: &str) -> Durability {
 /// fetch-by-sha (one commit), then a timeout-bounded full-history fetch. Reports the
 /// commit reachable (ephemeral), orphaned, or — when the history fetch times out on
 /// a huge repo — skipped.
-fn ancestry_probe(url: &str, reference: &str, commit: &str, ref_branch: Option<String>) -> Durability {
+fn ancestry_probe(
+    url: &str,
+    reference: &str,
+    commit: &str,
+    ref_branch: Option<String>,
+) -> Durability {
     let Ok(tmp) = tempfile::tempdir() else {
         return Durability::Skipped("could not create a scratch dir for the ancestry probe".into());
     };
@@ -265,10 +275,13 @@ fn ancestry_probe(url: &str, reference: &str, commit: &str, ref_branch: Option<S
     if matches!(
         run_bounded(fetch_by_sha_cmd(dir, url, commit), FETCH_BY_SHA_TIMEOUT),
         Bounded::Ok(o) if o.status.success()
-    ) && matches!(crate::build::probe_object(dir, commit), crate::build::ObjectProbe::Present)
-    {
+    ) && matches!(
+        crate::build::probe_object(dir, commit),
+        crate::build::ObjectProbe::Present
+    ) {
         return Durability::Ephemeral(
-            "reachable by direct commit fetch, but not tag-anchored (pin a tag for durability)".into(),
+            "reachable by direct commit fetch, but not tag-anchored (pin a tag for durability)"
+                .into(),
         );
     }
 
@@ -432,7 +445,11 @@ fn run_bounded(mut command: Command, timeout: Duration) -> Bounded {
         if timed_out {
             Bounded::TimedOut
         } else {
-            Bounded::Ok(Output { status, stdout, stderr })
+            Bounded::Ok(Output {
+                status,
+                stdout,
+                stderr,
+            })
         }
     })
 }
@@ -451,9 +468,13 @@ fn kill_group(pgid: i32) {
 /// `wait` itself errors after a kill.
 fn exit_placeholder() -> std::process::ExitStatus {
     // A non-zero exit via a trivially-failing command; only used if `wait` errors.
-    Command::new("false")
-        .status()
-        .unwrap_or_else(|_| std::process::Command::new("sh").arg("-c").arg("exit 1").status().expect("shell exits"))
+    Command::new("false").status().unwrap_or_else(|_| {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 1")
+            .status()
+            .expect("shell exits")
+    })
 }
 
 #[cfg(test)]
@@ -461,7 +482,10 @@ mod tests {
     use super::*;
 
     fn r(sha: &str, name: &str) -> LsRef {
-        LsRef { sha: sha.into(), name: name.into() }
+        LsRef {
+            sha: sha.into(),
+            name: name.into(),
+        }
     }
 
     #[test]
@@ -481,11 +505,20 @@ abc1230000000000000000000000000000000000\trefs/heads/master\n";
         // the tag object (different sha) and must not be mistaken for the commit.
         let commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d";
         let refs = vec![
-            r("1111111111111111111111111111111111111111", "refs/tags/v7.1.1"),
+            r(
+                "1111111111111111111111111111111111111111",
+                "refs/tags/v7.1.1",
+            ),
             r(commit, "refs/tags/v7.1.1^{}"),
-            r("abc1230000000000000000000000000000000000", "refs/heads/master"),
+            r(
+                "abc1230000000000000000000000000000000000",
+                "refs/heads/master",
+            ),
         ];
-        assert_eq!(classify_refs(&refs, "v7.1.1", commit), RefVerdict::TagTarget("v7.1.1".into()));
+        assert_eq!(
+            classify_refs(&refs, "v7.1.1", commit),
+            RefVerdict::TagTarget("v7.1.1".into())
+        );
     }
 
     #[test]
@@ -516,11 +549,11 @@ abc1230000000000000000000000000000000000\trefs/heads/master\n";
     fn a_tag_wins_over_a_same_commit_branch_tip() {
         // A commit that is both a tag target and a branch tip is reported durable.
         let commit = "abc1230000000000000000000000000000000000";
-        let refs = vec![
-            r(commit, "refs/tags/v2.0"),
-            r(commit, "refs/heads/release"),
-        ];
-        assert_eq!(classify_refs(&refs, "v2.0", commit), RefVerdict::TagTarget("v2.0".into()));
+        let refs = vec![r(commit, "refs/tags/v2.0"), r(commit, "refs/heads/release")];
+        assert_eq!(
+            classify_refs(&refs, "v2.0", commit),
+            RefVerdict::TagTarget("v2.0".into())
+        );
     }
 
     #[test]
@@ -528,7 +561,10 @@ abc1230000000000000000000000000000000000\trefs/heads/master\n";
         let commit = "dead0000000000000000000000000000000000ff";
         // The mpp anti-pattern: pinned by bare commit, its branch deleted → no branch
         // named by the reference remains, and the commit is not a tip.
-        let refs = vec![r("aaaa000000000000000000000000000000000000", "refs/heads/develop")];
+        let refs = vec![r(
+            "aaaa000000000000000000000000000000000000",
+            "refs/heads/develop",
+        )];
         assert_eq!(
             classify_refs(&refs, commit, commit),
             RefVerdict::NotAdvertised { ref_branch: None }
@@ -537,7 +573,9 @@ abc1230000000000000000000000000000000000\trefs/heads/master\n";
         // still names a live branch.
         assert_eq!(
             classify_refs(&refs, "develop", commit),
-            RefVerdict::NotAdvertised { ref_branch: Some("develop".into()) }
+            RefVerdict::NotAdvertised {
+                ref_branch: Some("develop".into())
+            }
         );
     }
 
@@ -569,8 +607,14 @@ abc1230000000000000000000000000000000000\trefs/heads/master\n";
         let mut slow = Command::new("sh");
         slow.args(["-c", "sleep 30"]);
         let start = Instant::now();
-        assert!(matches!(run_bounded(slow, Duration::from_millis(300)), Bounded::TimedOut));
-        assert!(start.elapsed() < Duration::from_secs(5), "should not wait for the full sleep");
+        assert!(matches!(
+            run_bounded(slow, Duration::from_millis(300)),
+            Bounded::TimedOut
+        ));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "should not wait for the full sleep"
+        );
     }
 
     #[test]

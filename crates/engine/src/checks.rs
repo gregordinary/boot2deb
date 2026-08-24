@@ -326,24 +326,74 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     // on a board with no bootloader of its own needs none of this.
     if needs.compiles_sources {
         checks.extend([
-            exe(pm, target, "git", &["git"], "fetch pinned sources + git am the patch series", true, Pkg::Git),
-            exe(pm, target, "make", &["make"], "kernel/u-boot compile", true, Pkg::Make),
-            exe(pm, target, "bc", &["bc"], "kernel build dependency", true, Pkg::Bc),
-            exe(pm, target, "flex", &["flex"], "kernel build dependency", true, Pkg::Flex),
-            exe(pm, target, "bison", &["bison"], "kernel build dependency", true, Pkg::Bison),
+            exe(
+                pm,
+                target,
+                "git",
+                &["git"],
+                "fetch pinned sources + git am the patch series",
+                true,
+                Pkg::Git,
+            ),
+            exe(
+                pm,
+                target,
+                "make",
+                &["make"],
+                "kernel/u-boot compile",
+                true,
+                Pkg::Make,
+            ),
+            exe(
+                pm,
+                target,
+                "bc",
+                &["bc"],
+                "kernel build dependency",
+                true,
+                Pkg::Bc,
+            ),
+            exe(
+                pm,
+                target,
+                "flex",
+                &["flex"],
+                "kernel build dependency",
+                true,
+                Pkg::Flex,
+            ),
+            exe(
+                pm,
+                target,
+                "bison",
+                &["bison"],
+                "kernel build dependency",
+                true,
+                Pkg::Bison,
+            ),
             openssl_check(pm, target),
         ]);
         // Target C toolchain: native cc when host arch = target, else the cross gcc.
         if cross {
             let cc = format!("{}gcc", needs.cross_compile);
             checks.push(exe(
-                pm, target, &cc, &[&cc],
-                "cross C toolchain for the target", true, Pkg::CrossToolchain,
+                pm,
+                target,
+                &cc,
+                &[&cc],
+                "cross C toolchain for the target",
+                true,
+                Pkg::CrossToolchain,
             ));
         } else {
             checks.push(exe(
-                pm, target, "cc", &["cc", "gcc"],
-                "native C toolchain for the target", true, Pkg::NativeToolchain,
+                pm,
+                target,
+                "cc",
+                &["cc", "gcc"],
+                "native C toolchain for the target",
+                true,
+                Pkg::NativeToolchain,
             ));
         }
     }
@@ -355,12 +405,58 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     // and then the build would die minutes in on `dpkg-checkbuilddeps`. Gated on
     // `compiles_kernel`: a bootloader-only build packages no kernel and needs none.
     if needs.compiles_kernel {
-        checks.push(exe(pm, target, "dh", &["dh"], "kernel .deb build (debhelper)", true, Pkg::Debhelper));
-        checks.push(pkgconfig_check(pm, target, "libelf", "libelf", "objtool/BTF — kernel .deb build", Pkg::Libelf));
-        checks.push(pkgconfig_check(pm, target, "libdw", "libdw", "objtool — kernel .deb build", Pkg::Libdw));
-        checks.push(exe(pm, target, "rsync", &["rsync"], "kernel .deb build dependency", true, Pkg::Rsync));
-        checks.push(exe(pm, target, "cpio", &["cpio"], "kernel .deb build dependency", true, Pkg::Cpio));
-        checks.push(exe(pm, target, "depmod", &["depmod"], "kernel module tooling (kmod)", true, Pkg::Kmod));
+        checks.push(exe(
+            pm,
+            target,
+            "dh",
+            &["dh"],
+            "kernel .deb build (debhelper)",
+            true,
+            Pkg::Debhelper,
+        ));
+        checks.push(pkgconfig_check(
+            pm,
+            target,
+            "libelf",
+            "libelf",
+            "objtool/BTF — kernel .deb build",
+            Pkg::Libelf,
+        ));
+        checks.push(pkgconfig_check(
+            pm,
+            target,
+            "libdw",
+            "libdw",
+            "objtool — kernel .deb build",
+            Pkg::Libdw,
+        ));
+        checks.push(exe(
+            pm,
+            target,
+            "rsync",
+            &["rsync"],
+            "kernel .deb build dependency",
+            true,
+            Pkg::Rsync,
+        ));
+        checks.push(exe(
+            pm,
+            target,
+            "cpio",
+            &["cpio"],
+            "kernel .deb build dependency",
+            true,
+            Pkg::Cpio,
+        ));
+        checks.push(exe(
+            pm,
+            target,
+            "depmod",
+            &["depmod"],
+            "kernel module tooling (kmod)",
+            true,
+            Pkg::Kmod,
+        ));
     }
 
     // u-boot's build generates its `pylibfdt` device-tree bindings and runs `binman`.
@@ -368,10 +464,39 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     // `setuptools`/`pyelftools` modules — a fresh host has none by default, and the
     // failure is a mid-build Python traceback rather than a clear "missing dep".
     if needs.builds_uboot {
-        checks.push(exe(pm, target, "swig", &["swig"], "u-boot pylibfdt bindings", true, Pkg::Swig));
-        checks.push(pkgconfig_check(pm, target, "python3", "python3-dev", "u-boot pylibfdt extension headers", Pkg::Python3Dev));
-        checks.push(python_module_check(pm, target, "setuptools", "python3-setuptools", "u-boot pylibfdt build", Pkg::Python3Setuptools));
-        checks.push(python_module_check(pm, target, "elftools", "python3-pyelftools", "u-boot binman image assembly", Pkg::Pyelftools));
+        checks.push(exe(
+            pm,
+            target,
+            "swig",
+            &["swig"],
+            "u-boot pylibfdt bindings",
+            true,
+            Pkg::Swig,
+        ));
+        checks.push(pkgconfig_check(
+            pm,
+            target,
+            "python3",
+            "python3-dev",
+            "u-boot pylibfdt extension headers",
+            Pkg::Python3Dev,
+        ));
+        checks.push(python_module_check(
+            pm,
+            target,
+            "setuptools",
+            "python3-setuptools",
+            "u-boot pylibfdt build",
+            Pkg::Python3Setuptools,
+        ));
+        checks.push(python_module_check(
+            pm,
+            target,
+            "elftools",
+            "python3-pyelftools",
+            "u-boot binman image assembly",
+            Pkg::Pyelftools,
+        ));
     }
 
     // Rootless namespaces — needed on every build. Both bootstraps (the *OS* rootfs
@@ -395,8 +520,24 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     // `fakeroot` is what makes the staged tree package as `root:root`, so without it
     // the debs would carry the build user's ownership. Missing either, `doctor` would
     // pass and the build then die mid-package on a non-Debian host.
-    checks.push(exe(pm, target, "fakeroot", &["fakeroot"], "root-owned staging for the u-boot and kmod .debs", true, Pkg::Fakeroot));
-    checks.push(exe(pm, target, "dpkg-deb", &["dpkg-deb"], "assemble the u-boot and kmod .debs", true, Pkg::Dpkg));
+    checks.push(exe(
+        pm,
+        target,
+        "fakeroot",
+        &["fakeroot"],
+        "root-owned staging for the u-boot and kmod .debs",
+        true,
+        Pkg::Fakeroot,
+    ));
+    checks.push(exe(
+        pm,
+        target,
+        "dpkg-deb",
+        &["dpkg-deb"],
+        "assemble the u-boot and kmod .debs",
+        true,
+        Pkg::Dpkg,
+    ));
 
     // Cross-arch: the target's maintainer scripts and compiles run under the host's
     // qemu-user binfmt handler — during the rootfs bootstrap whatever else the build
@@ -407,8 +548,13 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         let qnames = [format!("qemu-{qa}-static"), format!("qemu-{qa}")];
         let qrefs: Vec<&str> = qnames.iter().map(String::as_str).collect();
         checks.push(exe(
-            pm, target, &format!("qemu-{qa}-static"), &qrefs,
-            "run target binaries under binfmt", true, Pkg::QemuUser,
+            pm,
+            target,
+            &format!("qemu-{qa}-static"),
+            &qrefs,
+            "run target binaries under binfmt",
+            true,
+            Pkg::QemuUser,
         ));
         checks.push(binfmt_check(pm, target, qa));
     }
@@ -416,7 +562,15 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     // Image assembly is pure Rust (ferrosys): the rootfs ext4 is formatted and every
     // metadata checksum verified in-process, so no `mke2fs`/`e2fsprogs` is required.
     // `e2fsck` is an optional `-fn` cross-check the image stage runs only when present.
-    checks.push(exe(pm, target, "e2fsck", &["e2fsck"], "optional cross-check of the formatted rootfs ext4 image", false, Pkg::E2fsprogs));
+    checks.push(exe(
+        pm,
+        target,
+        "e2fsck",
+        &["e2fsck"],
+        "optional cross-check of the formatted rootfs ext4 image",
+        false,
+        Pkg::E2fsprogs,
+    ));
 
     checks
 }
@@ -435,14 +589,23 @@ fn exe(
         Some(path) => CheckStatus::Present(path.display().to_string()),
         None => CheckStatus::Missing(pm.remedy(pkg, target)),
     };
-    Check { name: name.to_string(), purpose, required, status }
+    Check {
+        name: name.to_string(),
+        purpose,
+        required,
+        status,
+    }
 }
 
 /// openssl headers, probed via `pkg-config` (a dev lib, not an executable).
 fn openssl_check(pm: PkgManager, target: Arch) -> Check {
     pkgconfig_check(
-        pm, target, "openssl", "libssl (openssl)",
-        "kernel/u-boot certificate + TLS build dep", Pkg::Openssl,
+        pm,
+        target,
+        "openssl",
+        "libssl (openssl)",
+        "kernel/u-boot certificate + TLS build dep",
+        Pkg::Openssl,
     )
 }
 
@@ -676,7 +839,10 @@ mod tests {
         // Either verdict names the probed directory. Which verdict it is depends on the
         // host, which is the point of the check — so the assertion is on the report.
         let check = overlay_check(&uppers);
-        assert!(check.required, "a build root cannot be established without it");
+        assert!(
+            check.required,
+            "a build root cannot be established without it"
+        );
         let detail = match &check.status {
             CheckStatus::Present(d) | CheckStatus::Missing(d) => d,
         };
@@ -696,7 +862,10 @@ mod tests {
             PkgManager::Dnf
         );
         assert_eq!(PkgManager::from_os_release("ID=arch\n"), PkgManager::Pacman);
-        assert_eq!(PkgManager::from_os_release("ID=void\n"), PkgManager::Unknown);
+        assert_eq!(
+            PkgManager::from_os_release("ID=void\n"),
+            PkgManager::Unknown
+        );
     }
 
     #[test]
@@ -722,14 +891,35 @@ mod tests {
             "sudo pacman -S base-devel"
         );
         // Kernel bindeb-pkg deps: the exact package a user installs on a miss.
-        assert_eq!(PkgManager::Apt.remedy(Pkg::Debhelper, Arch::Arm64), "sudo apt install debhelper");
-        assert_eq!(PkgManager::Apt.remedy(Pkg::Libelf, Arch::Arm64), "sudo apt install libelf-dev");
-        assert_eq!(PkgManager::Apt.remedy(Pkg::Libdw, Arch::Arm64), "sudo apt install libdw-dev");
-        assert_eq!(PkgManager::Dnf.remedy(Pkg::Libelf, Arch::Arm64), "sudo dnf install elfutils-libelf-devel");
+        assert_eq!(
+            PkgManager::Apt.remedy(Pkg::Debhelper, Arch::Arm64),
+            "sudo apt install debhelper"
+        );
+        assert_eq!(
+            PkgManager::Apt.remedy(Pkg::Libelf, Arch::Arm64),
+            "sudo apt install libelf-dev"
+        );
+        assert_eq!(
+            PkgManager::Apt.remedy(Pkg::Libdw, Arch::Arm64),
+            "sudo apt install libdw-dev"
+        );
+        assert_eq!(
+            PkgManager::Dnf.remedy(Pkg::Libelf, Arch::Arm64),
+            "sudo dnf install elfutils-libelf-devel"
+        );
         // u-boot pylibfdt/binman deps.
-        assert_eq!(PkgManager::Apt.remedy(Pkg::Swig, Arch::Arm64), "sudo apt install swig");
-        assert_eq!(PkgManager::Apt.remedy(Pkg::Python3Setuptools, Arch::Arm64), "sudo apt install python3-setuptools");
-        assert_eq!(PkgManager::Apt.remedy(Pkg::Pyelftools, Arch::Arm64), "sudo apt install python3-pyelftools");
+        assert_eq!(
+            PkgManager::Apt.remedy(Pkg::Swig, Arch::Arm64),
+            "sudo apt install swig"
+        );
+        assert_eq!(
+            PkgManager::Apt.remedy(Pkg::Python3Setuptools, Arch::Arm64),
+            "sudo apt install python3-setuptools"
+        );
+        assert_eq!(
+            PkgManager::Apt.remedy(Pkg::Pyelftools, Arch::Arm64),
+            "sudo apt install python3-pyelftools"
+        );
     }
 
     /// The RK1 shape: compiles a kernel and a bootloader, and builds the media-accel
@@ -767,10 +957,16 @@ mod tests {
         // Image assembly needs no host filesystem tool now; `e2fsck` rides along as the
         // sole optional cross-check, and every other tool is a hard requirement.
         assert!(
-            checks.iter().filter(|c| c.name != "e2fsck").all(|c| c.required),
+            checks
+                .iter()
+                .filter(|c| c.name != "e2fsck")
+                .all(|c| c.required),
             "only e2fsck is optional"
         );
-        let e2fsck = checks.iter().find(|c| c.name == "e2fsck").expect("e2fsck check present");
+        let e2fsck = checks
+            .iter()
+            .find(|c| c.name == "e2fsck")
+            .expect("e2fsck check present");
         assert!(!e2fsck.required, "e2fsck is an optional cross-check");
     }
 
@@ -787,7 +983,10 @@ mod tests {
             );
         }
         // A kernel-less build packages no kernel, so it must NOT ask for the deb deps.
-        let no_kernel = ToolNeeds { compiles_kernel: false, ..compiling_build() };
+        let no_kernel = ToolNeeds {
+            compiles_kernel: false,
+            ..compiling_build()
+        };
         for absent in ["dh", "libelf", "libdw", "depmod"] {
             assert!(
                 !tool_checks(&no_kernel).iter().any(|c| c.name == absent),
@@ -801,15 +1000,28 @@ mod tests {
         // u-boot compiles its pylibfdt bindings + runs binman; a fresh host has none of
         // this and fails on a mid-build Python traceback, not a clear missing-dep error.
         let checks = tool_checks(&compiling_build());
-        for needed in ["swig", "python3-dev", "python3-setuptools", "python3-pyelftools"] {
+        for needed in [
+            "swig",
+            "python3-dev",
+            "python3-setuptools",
+            "python3-pyelftools",
+        ] {
             assert!(
                 checks.iter().any(|c| c.name == needed && c.required),
                 "a u-boot build must require {needed}"
             );
         }
         // A board that boots its own firmware compiles no u-boot and skips them.
-        let no_uboot = ToolNeeds { builds_uboot: false, ..compiling_build() };
-        for absent in ["swig", "python3-dev", "python3-setuptools", "python3-pyelftools"] {
+        let no_uboot = ToolNeeds {
+            builds_uboot: false,
+            ..compiling_build()
+        };
+        for absent in [
+            "swig",
+            "python3-dev",
+            "python3-setuptools",
+            "python3-pyelftools",
+        ] {
             assert!(
                 !tool_checks(&no_uboot).iter().any(|c| c.name == absent),
                 "{absent} is a u-boot dep; a firmware-boot board should not ask for it"
@@ -825,22 +1037,30 @@ mod tests {
         // that every build already requires.
         let checks = tool_checks(&compiling_build());
         assert!(
-            !checks.iter().any(|c| c.name == "bwrap" || c.name == "bubblewrap"),
+            !checks
+                .iter()
+                .any(|c| c.name == "bwrap" || c.name == "bubblewrap"),
             "the in-process sandbox needs no external sandbox binary"
         );
         assert!(
-            checks.iter().any(|c| c.name.contains("user namespace") && c.required),
+            checks
+                .iter()
+                .any(|c| c.name.contains("user namespace") && c.required),
             "every build requires unprivileged user namespaces"
         );
         // The overlay behind each component's build root is the sandbox's one host
         // requirement beyond those namespaces, and it is asked for only by a build that
         // compiles packages in there.
         assert!(
-            checks.iter().any(|c| c.name == "unprivileged overlay" && c.required),
+            checks
+                .iter()
+                .any(|c| c.name == "unprivileged overlay" && c.required),
             "a sandbox build requires an unprivileged overlay"
         );
         assert!(
-            !tool_checks(&assembling_build()).iter().any(|c| c.name == "unprivileged overlay"),
+            !tool_checks(&assembling_build())
+                .iter()
+                .any(|c| c.name == "unprivileged overlay"),
             "a build that compiles no packages stands up no build root"
         );
         // qemu-user is the genuinely cross-only half: a matching-arch host runs the

@@ -121,7 +121,15 @@ fn name_field(name: &str) -> [u8; 40] {
 }
 
 /// Write one 57-byte entry descriptor into `buf` at `at`.
-fn write_entry(buf: &mut [u8], at: usize, ty: u32, name: &str, data_off: u32, data_size: u32, delay: u32) {
+fn write_entry(
+    buf: &mut [u8],
+    at: usize,
+    ty: u32,
+    name: &str,
+    data_off: u32,
+    data_size: u32,
+    delay: u32,
+) {
     let e = &mut buf[at..at + ENTRY_LEN];
     e[0] = ENTRY_LEN as u8;
     e[1..5].copy_from_slice(&ty.to_le_bytes());
@@ -179,9 +187,33 @@ pub fn write_maskrom_loader(chip: [u8; 4], usb471: &[u8], usb472: &[u8]) -> Vec<
     buf[44] = 1; // rc4Flag — 1 means RC4 disabled (blobs plaintext)
 
     // Entry descriptors.
-    write_entry(&mut buf, off_471 as usize, TYPE_471, "UsbHead", head_off as u32, PAGE as u32, 1);
-    write_entry(&mut buf, off_471 as usize + ENTRY_LEN, TYPE_471, "usb471", b471_off as u32, p471.len() as u32, 1);
-    write_entry(&mut buf, off_472 as usize, TYPE_472, "usb472", b472_off as u32, p472.len() as u32, 0);
+    write_entry(
+        &mut buf,
+        off_471 as usize,
+        TYPE_471,
+        "UsbHead",
+        head_off as u32,
+        PAGE as u32,
+        1,
+    );
+    write_entry(
+        &mut buf,
+        off_471 as usize + ENTRY_LEN,
+        TYPE_471,
+        "usb471",
+        b471_off as u32,
+        p471.len() as u32,
+        1,
+    );
+    write_entry(
+        &mut buf,
+        off_472 as usize,
+        TYPE_472,
+        "usb472",
+        b472_off as u32,
+        p472.len() as u32,
+        0,
+    );
 
     // Data region: UsbHead, then the two padded payloads, contiguous.
     buf[head_off..head_off + PAGE].copy_from_slice(&usb_head(&p471, &p472));
@@ -212,14 +244,21 @@ mod tests {
         // tag "LDR ", header size, chipType.
         assert_eq!(&b[0..4], b"LDR ");
         assert_eq!(u16::from_le_bytes([b[4], b[5]]), HEADER_LEN as u16);
-        assert_eq!(u32::from_le_bytes([b[21], b[22], b[23], b[24]]), 0x3335_3736);
+        assert_eq!(
+            u32::from_le_bytes([b[21], b[22], b[23], b[24]]),
+            0x3335_3736
+        );
         // Entry counts / offsets.
         assert_eq!(b[25], 2); // 471 entries
         assert_eq!(b[31], 1); // 472 entries
         assert_eq!(b[37], 0); // no loader entries
         assert_eq!(b[44], 1); // rc4Flag = disabled
+
         // 472 entry offset = header + 2 * entry.
-        assert_eq!(u32::from_le_bytes([b[32], b[33], b[34], b[35]]), (HEADER_LEN + 2 * ENTRY_LEN) as u32);
+        assert_eq!(
+            u32::from_le_bytes([b[32], b[33], b[34], b[35]]),
+            (HEADER_LEN + 2 * ENTRY_LEN) as u32
+        );
         // Blobs padded up to the page.
         let usb472_entry = HEADER_LEN + 2 * ENTRY_LEN;
         let d472_size = u32::from_le_bytes([
@@ -246,7 +285,9 @@ mod tests {
         // Section counts in 512-byte sectors, contiguous after the 4096 header.
         assert_eq!(u16::from_le_bytes([h[120], h[121]]), 8);
         assert_eq!(u16::from_le_bytes([h[122], h[123]]), (PAGE / SECTOR) as u16);
-        assert_eq!(u16::from_le_bytes([h[208], h[209]]), 8 + (PAGE / SECTOR) as u16);
+        assert_eq!(
+            u16::from_le_bytes([h[208], h[209]]),
+            8 + (PAGE / SECTOR) as u16
+        );
     }
 }
-

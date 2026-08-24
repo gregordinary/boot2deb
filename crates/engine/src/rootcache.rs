@@ -228,7 +228,9 @@ impl RootfsStore {
             .map_err(|s| EngineError::io(manifest, s))?;
         // Move any prior entry aside (atomic; the `.partial` infix keeps it
         // sweepable if we crash before the cleanup below).
-        let replaced = self.root.join(format!(".{}.{pid}.partial-replaced", key.as_str()));
+        let replaced = self
+            .root
+            .join(format!(".{}.{pid}.partial-replaced", key.as_str()));
         let _ = std::fs::remove_dir_all(&replaced);
         match std::fs::rename(&entry, &replaced) {
             Ok(()) => {}
@@ -286,13 +288,19 @@ mod tests {
         store.put(&key, &tar_one, &manifest, &step).unwrap();
         let hit = store.get(&key).expect("stored entry");
         assert_eq!(std::fs::read(&hit.tar).unwrap(), b"tar-one");
-        assert!(foreign.join("rootfs.tar").exists(), "foreign staging must survive");
+        assert!(
+            foreign.join("rootfs.tar").exists(),
+            "foreign staging must survive"
+        );
 
         // A re-put replaces the entry (--refresh-rootfs refreshes stored bytes)...
         let tar_two = tmp.path().join("b.tar");
         std::fs::write(&tar_two, b"tar-two").unwrap();
         store.put(&key, &tar_two, &manifest, &step).unwrap();
-        assert_eq!(std::fs::read(store.get(&key).unwrap().tar).unwrap(), b"tar-two");
+        assert_eq!(
+            std::fs::read(store.get(&key).unwrap().tar).unwrap(),
+            b"tar-two"
+        );
 
         // ...and leaves nothing behind but the entry and the foreign staging.
         let leftovers: Vec<String> = std::fs::read_dir(tmp.path().join("rootfs"))
@@ -306,18 +314,51 @@ mod tests {
 
     #[test]
     fn cache_key_reacts_to_every_folded_input_but_not_order() {
-        let solved = vec!["libc6 2.41-2 arm64".to_string(), "bash 5.2-1 arm64".to_string()];
+        let solved = vec![
+            "libc6 2.41-2 arm64".to_string(),
+            "bash 5.2-1 arm64".to_string(),
+        ];
         let base = cache_key(&solved, &["ov1".into()], &["deb1".into()], "arm64", "forky");
         // Order-insensitive in the solved set (apt resolves the same set either way).
-        let reordered = vec!["bash 5.2-1 arm64".to_string(), "libc6 2.41-2 arm64".to_string()];
-        assert_eq!(base, cache_key(&reordered, &["ov1".into()], &["deb1".into()], "arm64", "forky"));
+        let reordered = vec![
+            "bash 5.2-1 arm64".to_string(),
+            "libc6 2.41-2 arm64".to_string(),
+        ];
+        assert_eq!(
+            base,
+            cache_key(
+                &reordered,
+                &["ov1".into()],
+                &["deb1".into()],
+                "arm64",
+                "forky"
+            )
+        );
         // A different solved version, overlay, repo deb, arch, or suite each moves it.
-        let bumped = vec!["libc6 2.41-3 arm64".to_string(), "bash 5.2-1 arm64".to_string()];
-        assert_ne!(base, cache_key(&bumped, &["ov1".into()], &["deb1".into()], "arm64", "forky"));
-        assert_ne!(base, cache_key(&solved, &["ov2".into()], &["deb1".into()], "arm64", "forky"));
-        assert_ne!(base, cache_key(&solved, &["ov1".into()], &["deb2".into()], "arm64", "forky"));
-        assert_ne!(base, cache_key(&solved, &["ov1".into()], &["deb1".into()], "amd64", "forky"));
-        assert_ne!(base, cache_key(&solved, &["ov1".into()], &["deb1".into()], "arm64", "sid"));
+        let bumped = vec![
+            "libc6 2.41-3 arm64".to_string(),
+            "bash 5.2-1 arm64".to_string(),
+        ];
+        assert_ne!(
+            base,
+            cache_key(&bumped, &["ov1".into()], &["deb1".into()], "arm64", "forky")
+        );
+        assert_ne!(
+            base,
+            cache_key(&solved, &["ov2".into()], &["deb1".into()], "arm64", "forky")
+        );
+        assert_ne!(
+            base,
+            cache_key(&solved, &["ov1".into()], &["deb2".into()], "arm64", "forky")
+        );
+        assert_ne!(
+            base,
+            cache_key(&solved, &["ov1".into()], &["deb1".into()], "amd64", "forky")
+        );
+        assert_ne!(
+            base,
+            cache_key(&solved, &["ov1".into()], &["deb1".into()], "arm64", "sid")
+        );
     }
 
     #[test]
@@ -333,11 +374,17 @@ mod tests {
         assert_ne!(base, dir_fingerprints(root).unwrap());
         // A mode change moves it too.
         std::fs::write(root.join("etc/hostname"), "rk1\n").unwrap();
-        std::fs::set_permissions(root.join("etc/hostname"), std::fs::Permissions::from_mode(0o600))
-            .unwrap();
+        std::fs::set_permissions(
+            root.join("etc/hostname"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         assert_ne!(base, dir_fingerprints(root).unwrap());
         // The symlink target is recorded (a retarget would show up).
-        assert!(dir_fingerprints(root).unwrap().iter().any(|f| f.contains("/proc/self/mounts")));
+        assert!(dir_fingerprints(root)
+            .unwrap()
+            .iter()
+            .any(|f| f.contains("/proc/self/mounts")));
         // A non-existent dir is an empty set, not an error.
         assert!(dir_fingerprints(&root.join("nope")).unwrap().is_empty());
     }
@@ -360,7 +407,8 @@ mod tests {
 
     #[test]
     fn splice_shadow_replaces_only_the_user_line_and_forces_change() {
-        let shadow = "root:*:20000:0:99999:7:::\ndebian:!:20000:0:99999:7:::\ndaemon:*:20000::::::\n";
+        let shadow =
+            "root:*:20000:0:99999:7:::\ndebian:!:20000:0:99999:7:::\ndaemon:*:20000::::::\n";
         let out = splice_shadow(shadow, "debian", "$6$salt$hash").unwrap();
         // The debian line carries the hash and last-change 0 (force change at login).
         assert!(out.contains("debian:$6$salt$hash:0:0:99999:7:::\n"));
@@ -391,9 +439,16 @@ mod tests {
         // Hit returns both artifacts, byte-identical.
         let hit = store.get(&key).expect("stored entry is a hit");
         assert_eq!(std::fs::read(&hit.tar).unwrap(), b"TARBYTES");
-        assert_eq!(std::fs::read(&hit.manifest).unwrap(), b"libc6 2.41-2 arm64 abc\n");
+        assert_eq!(
+            std::fs::read(&hit.manifest).unwrap(),
+            b"libc6 2.41-2 arm64 abc\n"
+        );
         // No leftover .partial after a successful publish.
-        assert!(!tmp.path().join("rootfs").join(format!("{}.partial", key.as_str())).exists());
+        assert!(!tmp
+            .path()
+            .join("rootfs")
+            .join(format!("{}.partial", key.as_str()))
+            .exists());
         // A different key is still a miss.
         let other = cache_key(&["bash 5.2-1 arm64".into()], &[], &[], "arm64", "forky");
         assert!(store.get(&other).is_none());

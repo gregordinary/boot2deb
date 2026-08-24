@@ -239,13 +239,8 @@ mod tests {
 
         let sink = |_e: Event| {};
         let step = Step::start(&sink, "test");
-        let checkout = fetch_profile(
-            origin.to_str().unwrap(),
-            &first,
-            &cache,
-            &step,
-        )
-        .expect("fetch");
+        let checkout =
+            fetch_profile(origin.to_str().unwrap(), &first, &cache, &step).expect("fetch");
 
         // Commit-addressed: the checkout lives under cache/<commit>.
         assert_eq!(checkout, cache.join(&first));

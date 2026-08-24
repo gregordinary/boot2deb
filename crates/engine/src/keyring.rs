@@ -58,12 +58,11 @@ pub fn verify(keyring: &Path) -> Result<Vec<Key>, EngineError> {
     }
     let manifest_text =
         std::fs::read_to_string(&manifest).map_err(|source| EngineError::io(&manifest, source))?;
-    let expected = parse_manifest(&manifest_text).map_err(|reason| {
-        EngineError::KeyringManifestMalformed {
+    let expected =
+        parse_manifest(&manifest_text).map_err(|reason| EngineError::KeyringManifestMalformed {
             manifest: manifest.display().to_string(),
             reason,
-        }
-    })?;
+        })?;
 
     let bytes = std::fs::read(keyring).map_err(|source| EngineError::io(keyring, source))?;
     let actual = fingerprints(&bytes).map_err(|reason| EngineError::KeyringMalformed {
@@ -142,7 +141,9 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Key>, String> {
         }
         let fingerprint = fingerprint.to_ascii_uppercase();
         if keys.iter().any(|k| k.fingerprint == fingerprint) {
-            return Err(format!("line {lineno}: duplicate fingerprint {fingerprint}"));
+            return Err(format!(
+                "line {lineno}: duplicate fingerprint {fingerprint}"
+            ));
         }
         keys.push(Key {
             fingerprint,
@@ -267,8 +268,12 @@ fn fingerprint_v4(body: &[u8]) -> Result<String, String> {
         }
         None => return Err("empty public-key packet".into()),
     }
-    let len = u16::try_from(body.len())
-        .map_err(|_| format!("public-key packet of {} bytes exceeds v4's 16-bit length", body.len()))?;
+    let len = u16::try_from(body.len()).map_err(|_| {
+        format!(
+            "public-key packet of {} bytes exceeds v4's 16-bit length",
+            body.len()
+        )
+    })?;
     let mut hasher = Sha1::new();
     hasher.update([0x99]);
     hasher.update(len.to_be_bytes());
@@ -292,6 +297,7 @@ mod tests {
         let mut body = vec![4]; // version
         body.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // creation time
         body.push(1); // algo: RSA
+
         // One 16-bit MPI: bit length, then the big-endian value.
         body.extend_from_slice(&[0x00, 0x10]);
         body.extend_from_slice(&[0xC0, 0xFF]);
@@ -320,9 +326,14 @@ mod tests {
         // Independently: sha1(0x99 || 0x000c || body) for this 12-byte body.
         let fpr = fingerprint_v4(&body).unwrap();
         assert_eq!(fpr.len(), 40);
-        assert!(fpr.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_lowercase()));
+        assert!(fpr
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_lowercase()));
         // Stable across calls and independent of surrounding packets.
-        assert_eq!(fingerprints(&old_packet(TAG_PUBLIC_KEY, &body)).unwrap(), vec![fpr]);
+        assert_eq!(
+            fingerprints(&old_packet(TAG_PUBLIC_KEY, &body)).unwrap(),
+            vec![fpr]
+        );
     }
 
     #[test]
@@ -383,10 +394,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(keys.len(), 2);
-        assert_eq!(keys[0].fingerprint, "1F89983E0081FDE018F3CC9673A4F27B8DD47936");
-        assert_eq!(keys[0].label, "Debian Archive Automatic Signing Key (11/bullseye)");
+        assert_eq!(
+            keys[0].fingerprint,
+            "1F89983E0081FDE018F3CC9673A4F27B8DD47936"
+        );
+        assert_eq!(
+            keys[0].label,
+            "Debian Archive Automatic Signing Key (11/bullseye)"
+        );
         // Case is normalized, so a lowercase manifest still matches the keyring.
-        assert_eq!(keys[1].fingerprint, "AC530D520F2F3269F5E98313A48449044AAD5C5D");
+        assert_eq!(
+            keys[1].fingerprint,
+            "AC530D520F2F3269F5E98313A48449044AAD5C5D"
+        );
         assert_eq!(keys[1].label, "");
     }
 
@@ -431,7 +451,12 @@ mod tests {
         bytes.extend(old_packet(TAG_PUBLIC_KEY, &rogue));
         let (_tmp, keyring) = fixture(&bytes, &format!("{fpr}  Test Key\n"));
         let err = verify(&keyring).unwrap_err();
-        let EngineError::KeyringFingerprintMismatch { unexpected, missing, .. } = err else {
+        let EngineError::KeyringFingerprintMismatch {
+            unexpected,
+            missing,
+            ..
+        } = err
+        else {
             panic!("expected a fingerprint mismatch, got {err:?}");
         };
         assert_eq!(unexpected.len(), 1, "the extra key is named");
@@ -450,12 +475,20 @@ mod tests {
             &format!("{expected}  Test Key\n"),
         );
         let err = verify(&keyring).unwrap_err();
-        let EngineError::KeyringFingerprintMismatch { unexpected, missing, .. } = err else {
+        let EngineError::KeyringFingerprintMismatch {
+            unexpected,
+            missing,
+            ..
+        } = err
+        else {
             panic!("expected a fingerprint mismatch, got {err:?}");
         };
         assert_eq!(unexpected.len(), 1);
         assert_eq!(missing.len(), 1, "the vetted key is reported as gone");
-        assert!(missing[0].contains("Test Key"), "the label rides along: {missing:?}");
+        assert!(
+            missing[0].contains("Test Key"),
+            "the label rides along: {missing:?}"
+        );
     }
 
     #[test]
@@ -500,6 +533,10 @@ mod tests {
                 checked += 1;
             }
         }
-        assert!(checked > 0, "no keyrings found under {}", keyrings.display());
+        assert!(
+            checked > 0,
+            "no keyrings found under {}",
+            keyrings.display()
+        );
     }
 }

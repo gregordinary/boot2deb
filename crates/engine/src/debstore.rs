@@ -113,6 +113,9 @@ mod tests {
         assert!(!store.has(&pinned));
         // No stored file and no leftover temp.
         let entries: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().flatten().collect();
-        assert!(entries.is_empty(), "mismatch left files behind: {entries:?}");
+        assert!(
+            entries.is_empty(),
+            "mismatch left files behind: {entries:?}"
+        );
     }
 }

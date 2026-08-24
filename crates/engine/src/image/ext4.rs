@@ -47,8 +47,8 @@ use crate::image::geometry::EXT4_BLOCK;
 use boot2deb_core::provenance::FilesystemProvenance;
 use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
-    ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions,
-    GrowReservation, InodeCount, Reader, ReservedRatio, Source, SourceEntry, format_to,
+    format_to, ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions,
+    GrowReservation, InodeCount, Reader, ReservedRatio, Source, SourceEntry,
 };
 use sha2::{Digest, Sha256};
 use std::num::NonZeroU64;
@@ -488,7 +488,10 @@ mod tests {
             out.contains("debian:$6$saltsalt$hashhashhash:0:0:99999:7:::"),
             "spliced line missing, got: {out}"
         );
-        assert!(out.contains("root:*:19000:0:99999:7:::"), "root line preserved");
+        assert!(
+            out.contains("root:*:19000:0:99999:7:::"),
+            "root line preserved"
+        );
         // Only the content changes: the entry's mode and mtime are its own metadata.
         assert_eq!(entries[0].meta.mode, 0o640, "shadow mode preserved");
         assert_eq!(entries[0].meta.mtime, mtime, "shadow mtime preserved");
@@ -496,7 +499,10 @@ mod tests {
 
     #[test]
     fn splice_first_boot_password_errors_when_the_account_is_absent() {
-        let mut entries = vec![shadow_entry(b"root:*:19000:0:99999:7:::\n", Timestamp::from_secs(1))];
+        let mut entries = vec![shadow_entry(
+            b"root:*:19000:0:99999:7:::\n",
+            Timestamp::from_secs(1),
+        )];
         let first_boot = FirstBoot {
             user: "debian",
             password_hash: "$6$x$y",
@@ -541,7 +547,10 @@ mod tests {
         assert!(f.is_sparse_super(), "sparse_super");
         assert!(f.has_journal(), "has_journal");
         assert!(f.has_metadata_csum(), "metadata_csum");
-        assert!(f.has_csum_seed(), "metadata_csum_seed (seed decoupled from the UUID)");
+        assert!(
+            f.has_csum_seed(),
+            "metadata_csum_seed (seed decoupled from the UUID)"
+        );
         assert!(f.has_extents(), "extents");
         assert!(f.is_64bit(), "64bit");
         assert!(f.has_dir_index(), "dir_index");
@@ -607,8 +616,16 @@ mod tests {
         // nothing the formatter's baseline contributed. `EMPTY` carries the formatter's
         // default block and inode sizes, which the recorded pin must agree with — the
         // names alone say nothing about either.
-        assert_eq!(FeatureSet::EMPTY.block_size, pin.block_size, "block size matches the baseline");
-        assert_eq!(FeatureSet::EMPTY.inode_size, pin.inode_size, "inode size matches the baseline");
+        assert_eq!(
+            FeatureSet::EMPTY.block_size,
+            pin.block_size,
+            "block size matches the baseline"
+        );
+        assert_eq!(
+            FeatureSet::EMPTY.inode_size,
+            pin.inode_size,
+            "inode size matches the baseline"
+        );
         // Every recorded name is one the formatter still knows...
         let rebuilt = pin
             .features
@@ -628,6 +645,9 @@ mod tests {
         assert_eq!(derive_hash_seed(uuid), derive_hash_seed(uuid));
         // Distinct from the UUID bytes, and distinct for a different UUID.
         assert_ne!(derive_hash_seed(uuid), *uuid.as_bytes());
-        assert_ne!(derive_hash_seed(uuid), derive_hash_seed(Uuid::from_bytes([0x5b; 16])));
+        assert_ne!(
+            derive_hash_seed(uuid),
+            derive_hash_seed(Uuid::from_bytes([0x5b; 16]))
+        );
     }
 }

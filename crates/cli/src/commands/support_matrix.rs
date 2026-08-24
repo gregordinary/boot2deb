@@ -49,7 +49,9 @@ fn print_table(matrix: &Matrix) {
             ]
         })
         .collect();
-    let headers = ["RECIPE", "DEVICE", "SUITE", "KERNEL", "PATCHES", "U-BOOT", "STATUS", "AS OF"];
+    let headers = [
+        "RECIPE", "DEVICE", "SUITE", "KERNEL", "PATCHES", "U-BOOT", "STATUS", "AS OF",
+    ];
     let mut widths = headers.map(str::len);
     for row in &cells {
         for (w, c) in widths.iter_mut().zip(row) {
@@ -88,7 +90,8 @@ mod tests {
     fn the_committed_docs_page_matches_the_generated_one() {
         let matrix = support::matrix(&repo_root()).expect("the shipped config builds a matrix");
         let path = repo_root_path().join("docs/src/reference/support-matrix.md");
-        let committed = std::fs::read_to_string(&path).expect("the support-matrix page is committed");
+        let committed =
+            std::fs::read_to_string(&path).expect("the support-matrix page is committed");
         assert_eq!(
             committed,
             support::render_markdown(&matrix),

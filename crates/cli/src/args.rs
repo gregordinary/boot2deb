@@ -702,7 +702,9 @@ fn parse_snapshot_mode(s: &str) -> Result<SnapshotMode, String> {
         "off" => Ok(SnapshotMode::Off),
         "fallback" => Ok(SnapshotMode::Fallback),
         "pin" => Ok(SnapshotMode::Pin),
-        other => Err(format!("unknown snapshot mode '{other}' (expected off|fallback|pin)")),
+        other => Err(format!(
+            "unknown snapshot mode '{other}' (expected off|fallback|pin)"
+        )),
     }
 }
 /// Parse the `patch import --scope` value; reuses the model's `FromStr`.

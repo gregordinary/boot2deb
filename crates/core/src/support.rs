@@ -106,7 +106,12 @@ fn patches_cell(pin: Option<&crate::lock::PatchesPin>) -> Option<PatchesCell> {
 }
 
 /// Assemble one row from a recipe's claim, its resolution, and its lock.
-fn row(recipe: String, claim: &Support, build: &crate::model::ResolvedBuild, lock: &Lock) -> MatrixRow {
+fn row(
+    recipe: String,
+    claim: &Support,
+    build: &crate::model::ResolvedBuild,
+    lock: &Lock,
+) -> MatrixRow {
     MatrixRow {
         recipe,
         device: build.device.clone(),
@@ -171,18 +176,37 @@ type AxisPin = (&'static str, Option<String>);
 /// Ordered kernel-first because that is the axis a re-pin usually moves and the one
 /// a reader checks first.
 fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
-    let git = |r: &str, c: &str| format!("{r} ({})", c.chars().take(SHORT_COMMIT).collect::<String>());
+    let git =
+        |r: &str, c: &str| format!("{r} ({})", c.chars().take(SHORT_COMMIT).collect::<String>());
     let mut v: Vec<AxisPin> = vec![
-        ("kernel", lock.kernel.as_ref().map(|k| git(&k.reference, &k.commit))),
-        ("patches", lock.patches.as_ref().map(|p| git(&p.reference, &p.commit))),
-        ("u-boot", lock.uboot.as_ref().map(|u| git(&u.reference, &u.commit))),
-        ("u-boot patches", lock.uboot_patches.as_ref().map(|p| git(&p.reference, &p.commit))),
+        (
+            "kernel",
+            lock.kernel.as_ref().map(|k| git(&k.reference, &k.commit)),
+        ),
+        (
+            "patches",
+            lock.patches.as_ref().map(|p| git(&p.reference, &p.commit)),
+        ),
+        (
+            "u-boot",
+            lock.uboot.as_ref().map(|u| git(&u.reference, &u.commit)),
+        ),
+        (
+            "u-boot patches",
+            lock.uboot_patches
+                .as_ref()
+                .map(|p| git(&p.reference, &p.commit)),
+        ),
         ("suite", lock.rootfs.as_ref().map(|r| r.suite.clone())),
     ];
     // A tree the SoC does not declare has no row at all, rather than a row reading
     // "none": these axes exist only for a build whose SoC has that hardware.
     if let Some(us) = &lock.userspace {
-        for (axis, pin) in [("mpp", &us.mpp), ("librga", &us.librga), ("libmali", &us.libmali)] {
+        for (axis, pin) in [
+            ("mpp", &us.mpp),
+            ("librga", &us.librga),
+            ("libmali", &us.libmali),
+        ] {
             if let Some(p) = pin {
                 v.push((axis, Some(git(&p.reference, &p.commit))));
             }
@@ -219,18 +243,23 @@ pub fn pin_changes(prev: &Lock, next: &Lock) -> Vec<String> {
     // Axes are keyed by label rather than zipped: the optional userspace/ffmpeg/blob
     // groups make the two vectors different lengths whenever one of those appears or
     // disappears, which is precisely a case worth reporting.
-    let labels: Vec<&'static str> = before
-        .iter()
-        .chain(after.iter())
-        .map(|(l, _)| *l)
-        .fold(Vec::new(), |mut acc, l| {
-            if !acc.contains(&l) {
-                acc.push(l);
-            }
-            acc
-        });
+    let labels: Vec<&'static str> =
+        before
+            .iter()
+            .chain(after.iter())
+            .map(|(l, _)| *l)
+            .fold(Vec::new(), |mut acc, l| {
+                if !acc.contains(&l) {
+                    acc.push(l);
+                }
+                acc
+            });
     for label in labels {
-        let find = |v: &[AxisPin]| v.iter().find(|(l, _)| *l == label).and_then(|(_, p)| p.clone());
+        let find = |v: &[AxisPin]| {
+            v.iter()
+                .find(|(l, _)| *l == label)
+                .and_then(|(_, p)| p.clone())
+        };
         let (was, now) = (find(&before), find(&after));
         if was != now {
             let show = |p: Option<String>| p.unwrap_or_else(|| "none".to_string());
@@ -452,7 +481,10 @@ manifest = \"r.pkgs.lock\"
 
         // Losing a whole axis is a change, not an absence to skip over: a build that
         // stops applying a patch series is not the build that was validated.
-        let (head, tail) = (BASE.find("[patches]").unwrap(), BASE.find("[rootfs]").unwrap());
+        let (head, tail) = (
+            BASE.find("[patches]").unwrap(),
+            BASE.find("[rootfs]").unwrap(),
+        );
         let no_patches = lock(&format!("{}{}", &BASE[..head], &BASE[tail..]));
         assert_eq!(
             pin_changes(&lock(BASE), &no_patches),

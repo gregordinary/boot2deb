@@ -100,7 +100,11 @@ pub(crate) fn import(
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&dest_path, &normalized.mbox)?;
-    println!("patch import: wrote {} ({} bytes)", label, normalized.mbox.len());
+    println!(
+        "patch import: wrote {} ({} bytes)",
+        label,
+        normalized.mbox.len()
+    );
 
     // Recipes whose kernel uses this profile — named in both the "verify it now" hint
     // (when the import is unverified) and the re-pin follow-up. Computed once.
@@ -145,7 +149,9 @@ pub(crate) fn import(
             eprintln!("\n!! patch written but NOT verified — it has not been dry-run against a kernel tree.");
             eprintln!("   verify it now:   {verify_cmd}");
             eprintln!("                    (auto-fetches the locked kernel at its pin — no checkout needed)");
-            eprintln!("   next time:        add --verify-tree <kernel-checkout> to verify during import.");
+            eprintln!(
+                "   next time:        add --verify-tree <kernel-checkout> to verify during import."
+            );
         }
     }
 
@@ -172,7 +178,9 @@ pub(crate) fn import(
     // series is read at the lock's pinned patches commit, so an uncommitted or
     // unpinned import surfaces later as a build-time pin mismatch.
     let patches = args.patches_path.display();
-    println!("\nnext steps — no build reads the patch until the series is committed and re-pinned:");
+    println!(
+        "\nnext steps — no build reads the patch until the series is committed and re-pinned:"
+    );
     println!("  1. commit it:      git -C {patches} add -A && git -C {patches} commit");
     if recipes.is_empty() {
         println!(
@@ -181,7 +189,11 @@ pub(crate) fn import(
         );
     } else {
         for (i, recipe) in recipes.iter().enumerate() {
-            let head = if i == 0 { "2. re-pin locks:  " } else { "                  " };
+            let head = if i == 0 {
+                "2. re-pin locks:  "
+            } else {
+                "                  "
+            };
             println!("  {head} boot2deb update {recipe}");
         }
     }
@@ -195,7 +207,10 @@ pub(crate) fn import(
 fn insert_index(position: Option<usize>, len: usize) -> Result<usize, String> {
     match position {
         None => Ok(len),
-        Some(0) => Err(format!("is 1-based; use 1..={}, or omit it to append", len + 1)),
+        Some(0) => Err(format!(
+            "is 1-based; use 1..={}, or omit it to append",
+            len + 1
+        )),
         Some(p) if p > len + 1 => Err(format!(
             "{p} is past the end of the {len}-entry list; use 1..={}",
             len + 1
@@ -215,14 +230,13 @@ fn recipes_using_profile(root: &ConfigRoot, profile: &str) -> Vec<String> {
     names
         .into_iter()
         .filter(|name| {
-            resolve_recipe(root, name, &Overrides::default())
-                .is_ok_and(|build| {
-                    build
-                        .kernel
-                        .as_ref()
-                        .map(|k| k.patch_profiles().iter().any(|p| p == profile))
-                        .unwrap_or(false)
-                })
+            resolve_recipe(root, name, &Overrides::default()).is_ok_and(|build| {
+                build
+                    .kernel
+                    .as_ref()
+                    .map(|k| k.patch_profiles().iter().any(|p| p == profile))
+                    .unwrap_or(false)
+            })
         })
         .collect()
 }
@@ -242,7 +256,9 @@ mod tests {
         // 0 is not a position (the flag is 1-based)...
         assert!(insert_index(Some(0), 3).unwrap_err().contains("1-based"));
         // ...and past-the-end values are errors, not a silent clamp-to-append.
-        assert!(insert_index(Some(5), 3).unwrap_err().contains("past the end"));
+        assert!(insert_index(Some(5), 3)
+            .unwrap_err()
+            .contains("past the end"));
     }
 
     #[test]
@@ -253,9 +269,18 @@ mod tests {
         // profile (or an unusable root) degrades to the generic hint.
         let root = repo_root();
         let recipes = recipes_using_profile(&root, "rk3588-accel");
-        assert!(recipes.contains(&"turing-rk1/forky".to_string()), "{recipes:?}");
-        assert!(recipes.contains(&"turing-rk1/media-accel-forky".to_string()), "{recipes:?}");
-        assert!(recipes.contains(&"turing-rk1/jellyfin".to_string()), "{recipes:?}");
+        assert!(
+            recipes.contains(&"turing-rk1/forky".to_string()),
+            "{recipes:?}"
+        );
+        assert!(
+            recipes.contains(&"turing-rk1/media-accel-forky".to_string()),
+            "{recipes:?}"
+        );
+        assert!(
+            recipes.contains(&"turing-rk1/jellyfin".to_string()),
+            "{recipes:?}"
+        );
         assert!(recipes_using_profile(&root, "no-such-profile").is_empty());
         let empty = tempfile::tempdir().unwrap();
         assert!(recipes_using_profile(&ConfigRoot::new(empty.path()), "rk3588-accel").is_empty());

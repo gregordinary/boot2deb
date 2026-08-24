@@ -155,8 +155,7 @@ mod tests {
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "repo");
 
-        let repo =
-            LocalDistsRepo::assemble(&repo_dir, &[a, b], "forky", "arm64", &step).unwrap();
+        let repo = LocalDistsRepo::assemble(&repo_dir, &[a, b], "forky", "arm64", &step).unwrap();
 
         // The debs live at their archive pool paths (a `lib*` package under its
         // `lib` + fourth letter), and the file:// URL bases at the repo root.

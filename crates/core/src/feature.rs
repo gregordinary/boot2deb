@@ -341,8 +341,12 @@ mod tests {
         f.requires_arch = vec![Arch::Arm64];
         assert!(f.supports_arch(Arch::Arm64));
         assert!(!f.supports_arch(Arch::Riscv64));
-        assert!(f.ensure_supports_arch("media-accel-rockchip", Arch::Arm64).is_ok());
-        let err = f.ensure_supports_arch("some-x86-feature", Arch::Riscv64).unwrap_err();
+        assert!(f
+            .ensure_supports_arch("media-accel-rockchip", Arch::Arm64)
+            .is_ok());
+        let err = f
+            .ensure_supports_arch("some-x86-feature", Arch::Riscv64)
+            .unwrap_err();
         assert!(matches!(err, ConfigError::IncompatibleFeatureArch { .. }));
     }
 
@@ -365,7 +369,9 @@ mod tests {
         let f = feat(vec![Soc::Rk3588, Soc::Rk3576], vec![]);
         assert!(f.supports_soc(Soc::Rk3588));
         assert!(!f.supports_soc(Soc::Rk3288));
-        let err = f.ensure_supports_soc("media-accel-rockchip", Soc::Rk3288).unwrap_err();
+        let err = f
+            .ensure_supports_soc("media-accel-rockchip", Soc::Rk3288)
+            .unwrap_err();
         assert!(matches!(err, ConfigError::IncompatibleFeatureSoc { .. }));
     }
 
@@ -382,7 +388,10 @@ mod tests {
 
     #[test]
     fn compatible_set_passes() {
-        let a = ("media-accel-rockchip".to_string(), feat(vec![Soc::Rk3588], vec![]));
+        let a = (
+            "media-accel-rockchip".to_string(),
+            feat(vec![Soc::Rk3588], vec![]),
+        );
         let b = ("crypto-accel".to_string(), feat(vec![], vec![]));
         assert!(ensure_no_conflicts(&[a, b]).is_ok());
     }
@@ -411,6 +420,9 @@ mod tests {
             ("jellyfin".to_string(), plain),
             ("media-accel-rockchip".to_string(), provider),
         ];
-        assert_eq!(first_requiring_media_accel(&set), Some("media-accel-rockchip"));
+        assert_eq!(
+            first_requiring_media_accel(&set),
+            Some("media-accel-rockchip")
+        );
     }
 }

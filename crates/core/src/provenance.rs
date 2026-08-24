@@ -644,8 +644,11 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             uboot_commit: lock.uboot.as_ref().map(|u| u.commit.clone()),
             // Present in lockstep: resolution pins userspace and ffmpeg together or
             // not at all, so a single `zip` yields the whole block or `None`.
-            media_accel: lock.userspace.as_ref().zip(lock.ffmpeg.as_ref()).map(|(us, ff)| {
-                MediaAccelProvenance {
+            media_accel: lock
+                .userspace
+                .as_ref()
+                .zip(lock.ffmpeg.as_ref())
+                .map(|(us, ff)| MediaAccelProvenance {
                     mpp_ref: us.mpp.as_ref().map(|p| p.reference.clone()),
                     mpp_commit: us.mpp.as_ref().map(|p| p.commit.clone()),
                     librga_ref: us.librga.as_ref().map(|p| p.reference.clone()),
@@ -656,8 +659,7 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
                     ffmpeg_base_commit: ff.base.commit.clone(),
                     ffmpeg_rockchip_ref: ff.rockchip.as_ref().map(|p| p.reference.clone()),
                     ffmpeg_rockchip_commit: ff.rockchip.as_ref().map(|p| p.commit.clone()),
-                }
-            }),
+                }),
         },
         rootfs: RootfsProvenance {
             suite: rootfs.suite.clone(),
@@ -715,19 +717,31 @@ fn source_durability_rows(lock: &Lock) -> Vec<SourceDurability> {
     if let Some(us) = &lock.userspace {
         // Only the trees the SoC declares: a row for an absent tree would claim a
         // fetch this build never makes.
-        for (name, pin) in [("mpp", &us.mpp), ("librga", &us.librga), ("libmali", &us.libmali)] {
+        for (name, pin) in [
+            ("mpp", &us.mpp),
+            ("librga", &us.librga),
+            ("libmali", &us.libmali),
+        ] {
             if let Some(p) = pin {
                 rows.push(source_durability(name, &p.reference, &p.commit));
             }
         }
     }
     if let Some(ff) = &lock.ffmpeg {
-        rows.push(source_durability("ffmpeg-base", &ff.base.reference, &ff.base.commit));
+        rows.push(source_durability(
+            "ffmpeg-base",
+            &ff.base.reference,
+            &ff.base.commit,
+        ));
     }
     // Each out-of-tree kernel module is fetched from its own pinned repo, so its pin has
     // the same re-fetch durability question as any other source.
     for kmod in &lock.kmods {
-        rows.push(source_durability(&format!("kmod:{}", kmod.name), &kmod.reference, &kmod.commit));
+        rows.push(source_durability(
+            &format!("kmod:{}", kmod.name),
+            &kmod.reference,
+            &kmod.commit,
+        ));
     }
     rows
 }
@@ -737,7 +751,9 @@ fn source_durability(source: &str, reference: &str, commit: &str) -> SourceDurab
     SourceDurability {
         source: source.to_string(),
         reference: reference.to_string(),
-        form: crate::sources::PinForm::classify(reference, commit).as_str().to_string(),
+        form: crate::sources::PinForm::classify(reference, commit)
+            .as_str()
+            .to_string(),
     }
 }
 
@@ -892,8 +908,12 @@ mod tests {
 
     /// A depthcharge build — the boot method that *has* a board profile.
     fn depthcharge_build() -> ResolvedBuild {
-        crate::resolve_recipe(&config_root(), "asus-c201/forky", &crate::Overrides::default())
-            .unwrap()
+        crate::resolve_recipe(
+            &config_root(),
+            "asus-c201/forky",
+            &crate::Overrides::default(),
+        )
+        .unwrap()
     }
 
     /// The identity document ships **inside** the image, so the one thing it must never
@@ -904,13 +924,21 @@ mod tests {
     #[test]
     fn the_on_device_identity_carries_no_secret() {
         let lock = sample_lock();
-        let text = system_identity(&sample_build(), &lock).to_toml_string().unwrap();
+        let text = system_identity(&sample_build(), &lock)
+            .to_toml_string()
+            .unwrap();
         // The banner *documents* that the file carries no secret, so it says the words.
         // What must not contain them is the data.
-        let body: String = text.lines().filter(|l| !l.trim_start().starts_with('#')).collect();
+        let body: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect();
 
         // The password `assemble` would have put in the manifest.
-        assert!(!body.contains("Kp7rTx"), "identity leaked the first-boot password:\n{text}");
+        assert!(
+            !body.contains("Kp7rTx"),
+            "identity leaked the first-boot password:\n{text}"
+        );
         for forbidden in ["password", "credentials", "shadow", "secret"] {
             assert!(
                 !body.contains(forbidden),
@@ -932,8 +960,13 @@ mod tests {
             filesystem: sample_filesystem(),
             sandbox: sample_sandbox(),
         };
-        let manifest = assemble(&sample_build(), &lock, &facts).to_toml_string().unwrap();
-        assert!(manifest.contains("Kp7rTx"), "the manifest is the document that has it");
+        let manifest = assemble(&sample_build(), &lock, &facts)
+            .to_toml_string()
+            .unwrap();
+        assert!(
+            manifest.contains("Kp7rTx"),
+            "the manifest is the document that has it"
+        );
     }
 
     /// The board profile is the reason the file exists: it is not recoverable from the
@@ -961,7 +994,9 @@ mod tests {
     /// a top-level scalar after one), and the whole thing must re-parse.
     #[test]
     fn the_identity_is_a_versioned_parseable_document() {
-        let text = system_identity(&depthcharge_build(), &sample_lock()).to_toml_string().unwrap();
+        let text = system_identity(&depthcharge_build(), &sample_lock())
+            .to_toml_string()
+            .unwrap();
         assert!(text.starts_with("# boot2deb image identity"));
 
         let parsed: toml::Value = toml::from_str(&text).unwrap();
@@ -972,7 +1007,10 @@ mod tests {
         // A distro kernel names its package and pins no commit; that pairing is what
         // tells a reader an upgrade arrives via apt rather than a hand-placed .deb.
         assert_eq!(parsed["kernel"]["flavor"].as_str(), Some("distro-package"));
-        assert_eq!(parsed["kernel"]["package"].as_str(), Some("linux-image-armmp"));
+        assert_eq!(
+            parsed["kernel"]["package"].as_str(),
+            Some("linux-image-armmp")
+        );
 
         // `version` must precede `[image]` in the serialized text, not merely exist.
         let v = text.find("version = 1").expect("version scalar");
@@ -999,7 +1037,11 @@ mod tests {
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.sources.kernel_commit.as_deref(), Some("kc"));
         assert_eq!(prov.sources.kernel_flavor, "mainline");
-        let media = prov.sources.media_accel.as_ref().expect("media-accel build has sources");
+        let media = prov
+            .sources
+            .media_accel
+            .as_ref()
+            .expect("media-accel build has sources");
         assert_eq!(media.ffmpeg_rockchip_ref.as_deref(), Some("8.1"));
         assert_eq!(prov.rootfs.manifest_sha256, "abc123");
         assert_eq!(prov.rootfs.package_count, 223);
@@ -1031,27 +1073,48 @@ mod tests {
             "password = \"Kp7rTx\"",
             "version = \"0.0.0-test\"",
         ] {
-            assert!(text.contains(needle), "provenance TOML missing {needle}:\n{text}");
+            assert!(
+                text.contains(needle),
+                "provenance TOML missing {needle}:\n{text}"
+            );
         }
         // The emitted document is valid TOML (guards the section field ordering —
         // a scalar after a nested table would be a parse error).
         let parsed: toml::Value = toml::from_str(&text).unwrap();
-        assert_eq!(parsed["sources"]["media_accel"]["ffmpeg_base_commit"].as_str(), Some("fbc"));
-        assert_eq!(parsed["image"]["features"][0].as_str(), Some("media-accel-rockchip"));
+        assert_eq!(
+            parsed["sources"]["media_accel"]["ffmpeg_base_commit"].as_str(),
+            Some("fbc")
+        );
+        assert_eq!(
+            parsed["image"]["features"][0].as_str(),
+            Some("media-accel-rockchip")
+        );
         // The builder stamp: an as-built record of which boot2deb produced the image.
         assert_eq!(parsed["built_with"]["version"].as_str(), Some("0.0.0-test"));
-        assert_eq!(parsed["built_with"]["commit"].as_str(), Some("cafef00dbabe"));
+        assert_eq!(
+            parsed["built_with"]["commit"].as_str(),
+            Some("cafef00dbabe")
+        );
         assert_eq!(parsed["built_with"]["dirty"].as_bool(), Some(false));
         // The filesystem pin: the on-disk contract the rootfs was formatted to, which no
         // source pin covers. Both spellings survive the join and the TOML round-trip —
         // the raw words as hex strings (a bit set, not a quantity) and the readable names.
         assert_eq!(parsed["filesystem"]["kind"].as_str(), Some("ext4"));
         assert_eq!(parsed["filesystem"]["compat"].as_str(), Some("0x0000003c"));
-        assert_eq!(parsed["filesystem"]["incompat"].as_str(), Some("0x000022c2"));
-        assert_eq!(parsed["filesystem"]["ro_compat"].as_str(), Some("0x0000046b"));
+        assert_eq!(
+            parsed["filesystem"]["incompat"].as_str(),
+            Some("0x000022c2")
+        );
+        assert_eq!(
+            parsed["filesystem"]["ro_compat"].as_str(),
+            Some("0x0000046b")
+        );
         assert_eq!(parsed["filesystem"]["block_size"].as_integer(), Some(4096));
         assert_eq!(parsed["filesystem"]["inode_size"].as_integer(), Some(256));
-        assert_eq!(parsed["filesystem"]["features"][0].as_str(), Some("has_journal"));
+        assert_eq!(
+            parsed["filesystem"]["features"][0].as_str(),
+            Some("has_journal")
+        );
         // No extra_debs in this build → the array-of-tables is omitted entirely.
         assert!(!text.contains("extra_debs"));
     }
@@ -1088,13 +1151,19 @@ mod tests {
         assert!(text.contains("[[source_durability]]"));
         let parsed: toml::Value = toml::from_str(&text).unwrap();
         assert_eq!(parsed["credentials"]["user"].as_str(), Some("debian"));
-        assert_eq!(parsed["extra_debs"][0]["sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            parsed["extra_debs"][0]["sha256"].as_str().unwrap().len(),
+            64
+        );
         // The durability list carries every fetched source axis.
         assert_eq!(parsed["source_durability"].as_array().unwrap().len(), 6);
         // A build outside a git checkout stamps its version but omits the commit
         // entirely (not an empty string a reader would have to special-case).
         assert_eq!(parsed["built_with"]["version"].as_str(), Some("0.0.0-test"));
-        assert!(parsed["built_with"].get("commit").is_none(), "no commit for a non-git build");
+        assert!(
+            parsed["built_with"].get("commit").is_none(),
+            "no commit for a non-git build"
+        );
     }
 
     /// The sandbox profile is one fact split across the table/array-of-tables boundary,
@@ -1115,7 +1184,9 @@ mod tests {
             filesystem: sample_filesystem(),
             sandbox: sample_sandbox(),
         };
-        let text = assemble(&sample_build(), &sample_lock(), &facts).to_toml_string().unwrap();
+        let text = assemble(&sample_build(), &sample_lock(), &facts)
+            .to_toml_string()
+            .unwrap();
 
         // `[sandbox_env]` is a table, so it must precede every array-of-tables or the
         // rows that follow would land inside it.
@@ -1143,11 +1214,19 @@ mod tests {
         assert_eq!(mounts[2]["source"].as_str(), Some("/dev/null"));
         assert_eq!(mounts[2]["read_only"].as_bool(), Some(false));
         assert_eq!(mounts[3]["source"].as_str(), Some("pts/ptmx"));
-        assert!(mounts[3].get("read_only").is_none(), "a symlink is not remounted");
+        assert!(
+            mounts[3].get("read_only").is_none(),
+            "a symlink is not remounted"
+        );
         // A field the kind does not have is absent, not empty — so a reader never has to
         // tell "no flags" apart from "flags 0".
-        assert!(mounts[0].get("flags").is_none(), "procfs passes no flag word");
-        assert!(mounts[0].get("options").is_none(), "procfs passes no data string");
+        assert!(
+            mounts[0].get("flags").is_none(),
+            "procfs passes no flag word"
+        );
+        assert!(
+            mounts[0].get("options").is_none(),
+            "procfs passes no data string"
+        );
     }
 }
-

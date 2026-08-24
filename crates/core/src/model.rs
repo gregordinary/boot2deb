@@ -719,7 +719,10 @@ impl ExtraDeb {
             reject_unsafe_path(rel)?;
         }
         let ok = self.sha256.len() == 64
-            && self.sha256.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            && self
+                .sha256
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
         if ok {
             Ok(())
         } else {
@@ -746,10 +749,15 @@ impl ExtraDeb {
 fn reject_unsafe_path(rel: &str) -> Result<(), ConfigError> {
     use std::path::{Component, Path};
     let unsafe_component = Path::new(rel).components().any(|c| {
-        matches!(c, Component::RootDir | Component::Prefix(_) | Component::ParentDir)
+        matches!(
+            c,
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir
+        )
     });
     if unsafe_component {
-        Err(ConfigError::ExtraDebUnsafePath { value: rel.to_string() })
+        Err(ConfigError::ExtraDebUnsafePath {
+            value: rel.to_string(),
+        })
     } else {
         Ok(())
     }
@@ -1409,7 +1417,8 @@ fn check_iso_date(s: &str) -> Result<(), String> {
     let [y, m, d] = parts[..] else {
         return Err("is not in YYYY-MM-DD form".into());
     };
-    if (y.len(), m.len(), d.len()) != (4, 2, 2) || !s.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+    if (y.len(), m.len(), d.len()) != (4, 2, 2)
+        || !s.bytes().all(|b| b.is_ascii_digit() || b == b'-')
     {
         return Err("is not in YYYY-MM-DD form".into());
     }
@@ -1430,7 +1439,9 @@ fn check_iso_date(s: &str) -> Result<(), String> {
         _ => 28,
     };
     if !(1..=last).contains(&day) {
-        return Err(format!("has day {day}, but month {month} of {year} has {last}"));
+        return Err(format!(
+            "has day {day}, but month {month} of {year} has {last}"
+        ));
     }
     Ok(())
 }
@@ -2016,28 +2027,48 @@ mod tests {
             sha256: hex64.clone(),
         };
         assert!(with_url.validate().is_ok());
-        assert_eq!(with_url.locator().unwrap(), ExtraDebLocator::Url("https://x/a.deb"));
+        assert_eq!(
+            with_url.locator().unwrap(),
+            ExtraDebLocator::Url("https://x/a.deb")
+        );
         let with_path = ExtraDeb {
             url: None,
             path: Some("vendor/a.deb".into()),
             sha256: hex64.clone(),
         };
-        assert_eq!(with_path.locator().unwrap(), ExtraDebLocator::Path("vendor/a.deb"));
+        assert_eq!(
+            with_path.locator().unwrap(),
+            ExtraDebLocator::Path("vendor/a.deb")
+        );
 
         // Neither / both locators is ExtraDebLocator.
-        let neither = ExtraDeb { url: None, path: None, sha256: hex64.clone() };
-        assert!(matches!(neither.validate(), Err(ConfigError::ExtraDebLocator { .. })));
+        let neither = ExtraDeb {
+            url: None,
+            path: None,
+            sha256: hex64.clone(),
+        };
+        assert!(matches!(
+            neither.validate(),
+            Err(ConfigError::ExtraDebLocator { .. })
+        ));
         let both = ExtraDeb {
             url: Some("u".into()),
             path: Some("p".into()),
             sha256: hex64.clone(),
         };
-        assert!(matches!(both.validate(), Err(ConfigError::ExtraDebLocator { .. })));
+        assert!(matches!(
+            both.validate(),
+            Err(ConfigError::ExtraDebLocator { .. })
+        ));
 
         // A malformed hash (wrong length, uppercase, non-hex) is ExtraDebBadHash —
         // uppercase would spuriously mismatch the lowercase content hash.
         for bad in ["", "abc", &"A".repeat(64), &"g".repeat(64)] {
-            let d = ExtraDeb { url: None, path: Some("p".into()), sha256: bad.to_string() };
+            let d = ExtraDeb {
+                url: None,
+                path: Some("p".into()),
+                sha256: bad.to_string(),
+            };
             assert!(
                 matches!(d.validate(), Err(ConfigError::ExtraDebBadHash { .. })),
                 "expected a bad-hash error for {bad:?}"
@@ -2060,7 +2091,10 @@ mod tests {
         // before any read — an out-of-root file is not a valid deb source.
         for bad in ["/etc/passwd", "../../etc/passwd", "vendor/../../x.deb"] {
             assert!(
-                matches!(unsafe_deb(bad).validate(), Err(ConfigError::ExtraDebUnsafePath { .. })),
+                matches!(
+                    unsafe_deb(bad).validate(),
+                    Err(ConfigError::ExtraDebUnsafePath { .. })
+                ),
                 "expected an unsafe-path error for {bad:?}"
             );
         }
@@ -2081,16 +2115,37 @@ mod tests {
         // unknown status is a typo, not a fourth state.
         let none: Recipe = toml::from_str("device = \"turing-rk1\"\n").unwrap();
         assert!(none.support.is_none());
-        assert!(toml::from_str::<Support>("status = \"probably-fine\"\ndate = \"2026-07-14\"\n")
-            .is_err());
+        assert!(
+            toml::from_str::<Support>("status = \"probably-fine\"\ndate = \"2026-07-14\"\n")
+                .is_err()
+        );
 
         // Shape failures.
-        for bad in ["2026-7-14", "26-07-14", "2026/07/14", "2026-07-14T00:00:00Z", "", "x"] {
-            assert!(check_iso_date(bad).is_err(), "expected {bad:?} to be rejected");
+        for bad in [
+            "2026-7-14",
+            "26-07-14",
+            "2026/07/14",
+            "2026-07-14T00:00:00Z",
+            "",
+            "x",
+        ] {
+            assert!(
+                check_iso_date(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
         }
         // Calendar failures: a date that parses but cannot exist.
-        for bad in ["2026-13-01", "2026-00-10", "2026-04-31", "2026-02-30", "2026-01-00"] {
-            assert!(check_iso_date(bad).is_err(), "expected {bad:?} to be rejected");
+        for bad in [
+            "2026-13-01",
+            "2026-00-10",
+            "2026-04-31",
+            "2026-02-30",
+            "2026-01-00",
+        ] {
+            assert!(
+                check_iso_date(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
         }
         // February follows the proleptic-Gregorian leap rule: 2024 and 2000 are
         // leap years, 2026 and 1900 are not.

@@ -153,21 +153,45 @@ impl DeviceScaffold {
             name = self.name
         );
         let _ = writeln!(s, "description             = {:?}", self.description);
-        let _ = writeln!(s, "soc                     = {:?}                # -> arch, dt_dir, modules", self.soc.as_str());
-        let _ = writeln!(s, "boot_method             = {:?}", self.boot_method.as_str());
-        let _ = writeln!(s, "supported_boot_methods  = [{:?}]", self.boot_method.as_str());
+        let _ = writeln!(
+            s,
+            "soc                     = {:?}                # -> arch, dt_dir, modules",
+            self.soc.as_str()
+        );
+        let _ = writeln!(
+            s,
+            "boot_method             = {:?}",
+            self.boot_method.as_str()
+        );
+        let _ = writeln!(
+            s,
+            "supported_boot_methods  = [{:?}]",
+            self.boot_method.as_str()
+        );
         if self.boot_method == BootMethod::RockchipRkbin {
             let _ = writeln!(s, "\n# TODO: verify this defconfig exists in the u-boot tree (unvalidated — fails at the u-boot build).");
-            let _ = writeln!(s, "uboot_defconfig         = {:?}", self.uboot_defconfig_suggestion());
+            let _ = writeln!(
+                s,
+                "uboot_defconfig         = {:?}",
+                self.uboot_defconfig_suggestion()
+            );
         }
         let _ = writeln!(s, "# TODO: verify this DTB path exists in the kernel tree (unvalidated — fails at the kernel build).");
-        let _ = writeln!(s, "kernel_dtb              = {:?}", self.kernel_dtb_suggestion());
+        let _ = writeln!(
+            s,
+            "kernel_dtb              = {:?}",
+            self.kernel_dtb_suggestion()
+        );
         let _ = writeln!(s, "# TODO: board-specific kconfig fragments, or [] for none. Naming a fragment makes its file mandatory.");
         let _ = writeln!(s, "device_config_fragments = []");
         let _ = writeln!(s, "supported_kernels       = [{:?}]", self.kernel);
         let _ = writeln!(s, "default_kernel          = {:?}", self.kernel);
         let _ = writeln!(s, "default_suite           = {:?}", self.suite);
-        let _ = writeln!(s, "default_layout          = {:?}               # combined | split", self.layout.as_str());
+        let _ = writeln!(
+            s,
+            "default_layout          = {:?}               # combined | split",
+            self.layout.as_str()
+        );
         let _ = writeln!(s, "hostname                = {:?}", self.hostname);
         let _ = writeln!(s, "image_size              = {:?}", self.image_size);
         // Left commented, because the honest default for a board nobody has typed at is
@@ -175,8 +199,14 @@ impl DeviceScaffold {
         // default stands. Only a board with a keyboard under the user's hands — a
         // laptop — has a layout to declare. (Emitted before the boot-method table:
         // every key after a TOML table header is scoped into it.)
-        let _ = writeln!(s, "# Console keymap. Uncomment only if this board HAS a keyboard (a laptop); a");
-        let _ = writeln!(s, "# headless board leaves it unset. A table gives the model/variant/options too.");
+        let _ = writeln!(
+            s,
+            "# Console keymap. Uncomment only if this board HAS a keyboard (a laptop); a"
+        );
+        let _ = writeln!(
+            s,
+            "# headless board leaves it unset. A table gives the model/variant/options too."
+        );
         let _ = writeln!(s, "#   keymap                = \"us\"");
         match self.boot_method {
             BootMethod::RockchipRkbin => self.write_rkbin_block(&mut s),
@@ -191,15 +221,33 @@ impl DeviceScaffold {
         if self.soc_supplies_blobs() {
             // Standard-memory board: inherit the SoC's rkbin. Emit no `[rkbin]`
             // block, only the override recipe for a board with different DRAM.
-            let _ = writeln!(s, "\n# rkbin (ATF + DDR TPL) is inherited from socs/{}.toml. The DDR TPL is", self.soc.as_str());
-            let _ = writeln!(s, "# board-memory-specific: if this board's DRAM differs from the SoC default,");
-            let _ = writeln!(s, "# override just the TPL (vendor the file under blobs/{}/):", self.soc.as_str());
+            let _ = writeln!(
+                s,
+                "\n# rkbin (ATF + DDR TPL) is inherited from socs/{}.toml. The DDR TPL is",
+                self.soc.as_str()
+            );
+            let _ = writeln!(
+                s,
+                "# board-memory-specific: if this board's DRAM differs from the SoC default,"
+            );
+            let _ = writeln!(
+                s,
+                "# override just the TPL (vendor the file under blobs/{}/):",
+                self.soc.as_str()
+            );
             let _ = writeln!(s, "#   [rkbin]");
             let _ = writeln!(s, "#   tpl = {:?}", self.tpl_suggestion());
         } else {
             // No SoC default: the author must supply the whole blob set here.
-            let _ = writeln!(s, "\n# TODO: the SoC layer supplies no rkbin defaults — provide the blob set and");
-            let _ = writeln!(s, "# vendor the files under blobs/{}/. The DDR TPL must match this board's memory.", self.soc.as_str());
+            let _ = writeln!(
+                s,
+                "\n# TODO: the SoC layer supplies no rkbin defaults — provide the blob set and"
+            );
+            let _ = writeln!(
+                s,
+                "# vendor the files under blobs/{}/. The DDR TPL must match this board's memory.",
+                self.soc.as_str()
+            );
             let _ = writeln!(s, "[rkbin]");
             let _ = writeln!(s, "atf = {:?}", self.atf_suggestion());
             let _ = writeln!(s, "tpl = {:?}", self.tpl_suggestion());
@@ -210,11 +258,26 @@ impl DeviceScaffold {
     /// `depthchargectl` signs for.
     fn write_depthcharge_block(&self, s: &mut String) {
         let board = self.board_suggestion();
-        let _ = writeln!(s, "\n# TODO: the depthcharge-tools board profile for this unit — its `board` codename");
-        let _ = writeln!(s, "# (`depthchargectl list-boards`). A profile describes the *firmware* the unit runs,");
-        let _ = writeln!(s, "# not the board model, so a unit with replacement firmware may take a different one.");
-        let _ = writeln!(s, "# Prefer the stock profile as the default: a stock-profile image also boots on a");
-        let _ = writeln!(s, "# unit with replacement firmware, while the reverse is not true.");
+        let _ = writeln!(
+            s,
+            "\n# TODO: the depthcharge-tools board profile for this unit — its `board` codename"
+        );
+        let _ = writeln!(
+            s,
+            "# (`depthchargectl list-boards`). A profile describes the *firmware* the unit runs,"
+        );
+        let _ = writeln!(
+            s,
+            "# not the board model, so a unit with replacement firmware may take a different one."
+        );
+        let _ = writeln!(
+            s,
+            "# Prefer the stock profile as the default: a stock-profile image also boots on a"
+        );
+        let _ = writeln!(
+            s,
+            "# unit with replacement firmware, while the reverse is not true."
+        );
         let _ = writeln!(s, "[depthcharge]");
         let _ = writeln!(s, "board            = {board:?}");
         let _ = writeln!(s, "supported_boards = [{board:?}]");
@@ -341,7 +404,10 @@ mod tests {
     #[test]
     fn suggestions_follow_the_rockchip_conventions() {
         let d = rk1_like();
-        assert_eq!(d.uboot_defconfig_suggestion(), "h96-max-m9-rk3588_defconfig");
+        assert_eq!(
+            d.uboot_defconfig_suggestion(),
+            "h96-max-m9-rk3588_defconfig"
+        );
         assert_eq!(d.kernel_dtb_suggestion(), "rockchip/rk3588-h96-max-m9.dtb");
         // RK3588 has known blob hints, so the ATF is a concrete suggestion, not a
         // placeholder; the TPL is a (board-memory-specific) starting point.
@@ -392,7 +458,10 @@ mod tests {
         d.soc_rkbin = RkbinLayer::default();
         assert!(d.atf_suggestion().contains(PLACEHOLDER));
         let toml = d.device_toml();
-        assert!(toml.contains("[rkbin]"), "must emit an explicit rkbin block");
+        assert!(
+            toml.contains("[rkbin]"),
+            "must emit an explicit rkbin block"
+        );
         // Parses as a DeviceLayer even with the placeholder blob set.
         let _: crate::model::DeviceLayer = toml::from_str(&toml).unwrap();
         let fields: Vec<&str> = d.research_notes().iter().map(|n| n.field).collect();
@@ -414,9 +483,18 @@ mod tests {
 
         let toml = d.device_toml();
         let parsed: crate::model::DeviceLayer = toml::from_str(&toml).unwrap();
-        assert!(parsed.uboot_defconfig.is_none(), "no u-boot is compiled here");
-        assert_eq!(parsed.rkbin, RkbinLayer::default(), "no rkbin chain on this board");
-        let dc = parsed.depthcharge.expect("a depthcharge board needs a board profile");
+        assert!(
+            parsed.uboot_defconfig.is_none(),
+            "no u-boot is compiled here"
+        );
+        assert_eq!(
+            parsed.rkbin,
+            RkbinLayer::default(),
+            "no rkbin chain on this board"
+        );
+        let dc = parsed
+            .depthcharge
+            .expect("a depthcharge board needs a board profile");
         assert_eq!(dc.board, "asus-c201");
         assert_eq!(dc.supported_boards, vec!["asus-c201"]);
         assert!(!toml.contains("uboot_defconfig"));
@@ -438,7 +516,11 @@ mod tests {
         assert!(!toml.lines().any(|l| l.trim_start() == "[rkbin]"));
         assert!(toml.contains("inherited from socs/rk3588.toml"));
         let parsed: crate::model::DeviceLayer = toml::from_str(&toml).unwrap();
-        assert_eq!(parsed.rkbin, RkbinLayer::default(), "inherits, overrides nothing");
+        assert_eq!(
+            parsed.rkbin,
+            RkbinLayer::default(),
+            "inherits, overrides nothing"
+        );
         let notes = d.research_notes();
         let tpl = notes.iter().find(|n| n.field == "rkbin.tpl").unwrap();
         assert!(tpl.guidance.contains("inherited"));

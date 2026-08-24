@@ -123,7 +123,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("blob.bin"), b"payload").unwrap();
         let good = pin("blob.bin", b"payload");
-        assert_eq!(verify(tmp.path(), &good).unwrap(), tmp.path().join("blob.bin"));
+        assert_eq!(
+            verify(tmp.path(), &good).unwrap(),
+            tmp.path().join("blob.bin")
+        );
 
         let bad = pin("blob.bin", b"different");
         assert!(matches!(

@@ -23,7 +23,9 @@ pub(crate) fn run(
     // The name is a file stem and a TOML value; keep it to the safe set the loader
     // accepts for the layers it will live beside.
     if name.is_empty()
-        || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
         return Err(format!(
             "device name '{name}' is invalid — use lowercase letters, digits, and dashes"
@@ -35,8 +37,11 @@ pub(crate) fn run(
     // SoC: the closed enum, narrowed to those that actually have a `socs/<soc>.toml`
     // here (a genuinely new SoC family needs a model.rs edit first — out of scope for
     // scaffolding a board). The SoC fixes arch, dt_dir, and the module list.
-    let available_socs: Vec<Soc> =
-        Soc::all().iter().copied().filter(|s| root.soc(*s).is_ok()).collect();
+    let available_socs: Vec<Soc> = Soc::all()
+        .iter()
+        .copied()
+        .filter(|s| root.soc(*s).is_ok())
+        .collect();
     if available_socs.is_empty() {
         return Err(
             "no socs/<soc>.toml found under the config root — nothing to build a device on".into(),
@@ -45,7 +50,11 @@ pub(crate) fn run(
     // The SoC is the identifying choice, so it is required (never silently defaulted)
     // when there is no terminal to prompt at.
     if !interactive && args.soc.is_none() {
-        let valid = available_socs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+        let valid = available_socs
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(
             format!("--soc is required in non-interactive mode (choose one of: {valid})").into(),
         );
@@ -106,8 +115,12 @@ pub(crate) fn run(
     let suite = ask_value("suite", args.suite, "forky", interactive);
     let hostname = ask_value("hostname", args.hostname, name, interactive);
     let image_size = ask_value("image size", args.image_size, "2G", interactive);
-    let description =
-        ask_value("description", args.description, &format!("{name} ({soc})"), interactive);
+    let description = ask_value(
+        "description",
+        args.description,
+        &format!("{name} ({soc})"),
+        interactive,
+    );
 
     // Features compatible with the resolved SoC/arch (the same gates resolution
     // enforces), offered for the recipe scaffold.
@@ -194,7 +207,10 @@ pub(crate) fn run(
     }
 
     println!("\nnext steps:");
-    println!("  1. edit {} and replace the TODO values", device_path.display());
+    println!(
+        "  1. edit {} and replace the TODO values",
+        device_path.display()
+    );
     if !args.no_recipe {
         println!("  2. boot2deb update {recipe_ref}    # resolve pins into the lock");
         println!("  3. boot2deb build  {recipe_ref}    # build the image");
@@ -231,14 +247,18 @@ mod tests {
     fn new_device_rejects_a_bad_name() {
         // An invalid name fails before any file is written (no SoC lookup needed).
         let root = repo_root();
-        let err = run(&root, "Bad Name", new_device_args()).unwrap_err().to_string();
+        let err = run(&root, "Bad Name", new_device_args())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("invalid"), "{err}");
     }
 
     #[test]
     fn new_device_non_interactive_requires_soc() {
         let root = repo_root();
-        let err = run(&root, "some-board", new_device_args()).unwrap_err().to_string();
+        let err = run(&root, "some-board", new_device_args())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("--soc is required"), "{err}");
     }
 
@@ -258,7 +278,10 @@ mod tests {
         // Files land in the overlay, not the primary root.
         assert!(overlay.path().join("devices/test-board.toml").is_file());
         // The starter recipe nests under its device folder, leaf = suite (forky).
-        assert!(overlay.path().join("recipes/test-board/forky.toml").is_file());
+        assert!(overlay
+            .path()
+            .join("recipes/test-board/forky.toml")
+            .is_file());
         // The scaffolded recipe resolves against the composed search path, carrying
         // its selected feature — and the media-accel feature pulls in the SoC sources
         //. (The device alone has no features; they live in the recipe.)
@@ -279,6 +302,9 @@ mod tests {
             ..new_device_args()
         };
         let err = run(&root, "test-board", args).unwrap_err().to_string();
-        assert!(err.contains("not compatible") || err.contains("does not exist"), "{err}");
+        assert!(
+            err.contains("not compatible") || err.contains("does not exist"),
+            "{err}"
+        );
     }
 }

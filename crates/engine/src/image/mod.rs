@@ -308,7 +308,11 @@ pub fn build_image(
                     why: "this boot method has no separate bootloader medium to emit",
                 });
             };
-            let BootPayload::RockchipRkbin { idbloader, uboot_itb } = opts.boot else {
+            let BootPayload::RockchipRkbin {
+                idbloader,
+                uboot_itb,
+            } = opts.boot
+            else {
                 return Err(EngineError::StageNotApplicable {
                     stage: "image (split layout)",
                     why: "no bootloader payloads were supplied",
@@ -569,7 +573,8 @@ fn splice_file(image: &Path, offset: u64, src: &Path) -> Result<(), EngineError>
             dst.seek(SeekFrom::Current(n as i64))
                 .map_err(|s| EngineError::io(image, s))?;
         } else {
-            dst.write_all(chunk).map_err(|s| EngineError::io(image, s))?;
+            dst.write_all(chunk)
+                .map_err(|s| EngineError::io(image, s))?;
         }
     }
     Ok(())
@@ -611,9 +616,10 @@ fn compress_xz(src: &Path, dst: &Path, step: &Step) -> Result<(), EngineError> {
     let output = std::fs::File::create(dst).map_err(|s| EngineError::io(dst, s))?;
     let mut opts = XzOptions::with_preset(XZ_PRESET);
     // MT requires an explicit block size — it is the work-unit boundary.
-    opts.set_block_size(Some(NonZeroU64::new(XZ_BLOCK_SIZE).expect("block size is non-zero")));
-    let mut writer =
-        XzWriterMt::new(output, opts, workers).map_err(|s| EngineError::io(dst, s))?;
+    opts.set_block_size(Some(
+        NonZeroU64::new(XZ_BLOCK_SIZE).expect("block size is non-zero"),
+    ));
+    let mut writer = XzWriterMt::new(output, opts, workers).map_err(|s| EngineError::io(dst, s))?;
     std::io::copy(&mut std::io::BufReader::new(input), &mut writer)
         .map_err(|s| EngineError::io(src, s))?;
     writer.finish().map_err(|s| EngineError::io(dst, s))?;
@@ -654,7 +660,8 @@ mod tests {
     /// Resolve the RK1 build, overriding the image size so tests build a small
     /// (but geometry-valid) image quickly.
     fn small_rk1_build(image_size: &str) -> ResolvedBuild {
-        let mut b = resolve_recipe(&repo_root(), "turing-rk1/forky", &Overrides::default()).unwrap();
+        let mut b =
+            resolve_recipe(&repo_root(), "turing-rk1/forky", &Overrides::default()).unwrap();
         b.image_size = image_size.to_string();
         b
     }
@@ -678,8 +685,11 @@ mod tests {
     /// important image assertions cannot silently drop out of the run; unset (a
     /// tool-minimal dev host), the caller skips with a printed note.
     fn require_host_tools(tools: &[&str]) -> bool {
-        let missing: Vec<String> =
-            tools.iter().filter(|t| !have(t)).map(|t| t.to_string()).collect();
+        let missing: Vec<String> = tools
+            .iter()
+            .filter(|t| !have(t))
+            .map(|t| t.to_string())
+            .collect();
         if missing.is_empty() {
             return true;
         }
@@ -724,7 +734,10 @@ mod tests {
 
     #[test]
     fn append_xz_adds_suffix() {
-        assert_eq!(append_xz(Path::new("/o/turing-rk1.img")), Path::new("/o/turing-rk1.img.xz"));
+        assert_eq!(
+            append_xz(Path::new("/o/turing-rk1.img")),
+            Path::new("/o/turing-rk1.img.xz")
+        );
     }
 
     #[test]
@@ -773,7 +786,11 @@ mod tests {
         compress_xz(&src, &xz, &step).unwrap();
 
         let out = Command::new("xz").args(["-dc"]).arg(&xz).output().unwrap();
-        assert!(out.status.success(), "xz -d failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "xz -d failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert_eq!(out.stdout, payload);
     }
 
@@ -869,7 +886,11 @@ mod tests {
         let geom = Geometry::resolve(&build.boot, &build.image_size).unwrap();
         let sb = 16 * 1024 * 1024 + 1024;
         let blocks_count = u32::from_le_bytes(bytes[sb + 4..sb + 8].try_into().unwrap()) as u64;
-        assert_eq!(blocks_count, geom.rootfs_bytes / 4096, "fs block count matches geometry");
+        assert_eq!(
+            blocks_count,
+            geom.rootfs_bytes / 4096,
+            "fs block count matches geometry"
+        );
         assert!(
             blocks_count * 4096 <= geom.rootfs_length_lba * 512,
             "filesystem ({blocks_count} blocks) must fit its partition ({} sectors)",
@@ -879,7 +900,11 @@ mod tests {
         // If `sfdisk` is around, the GPT must be parseable and name the partition —
         // an sfdisk *failure* means a corrupt table and fails the test.
         if have("sfdisk") {
-            let o = Command::new("sfdisk").arg("-d").arg(&image).output().unwrap();
+            let o = Command::new("sfdisk")
+                .arg("-d")
+                .arg(&image)
+                .output()
+                .unwrap();
             assert!(
                 o.status.success(),
                 "sfdisk -d failed on the image (corrupt GPT?): {}",

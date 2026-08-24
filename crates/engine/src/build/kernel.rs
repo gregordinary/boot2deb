@@ -14,7 +14,7 @@
 //! edit → reflash loop.
 
 use crate::build::{
-    self, deb_names, pick_deb, stage_artifact, BuildEnv, ClonePinned, CloneMode, PatchScope,
+    self, deb_names, pick_deb, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope,
     PatchSeries, PatchSource,
 };
 use crate::error::EngineError;
@@ -129,11 +129,13 @@ pub fn build_kernel(
 ) -> Result<KernelArtifacts, EngineError> {
     // Narrow the build once: everything below reads the compile inputs — the source,
     // the defconfig, the fragments — which only a compiled kernel has.
-    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(EngineError::StageNotApplicable {
-        stage: "kernel",
-        why: "the resolved kernel is a distro package installed from the Debian mirror, \
+    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(
+        EngineError::StageNotApplicable {
+            stage: "kernel",
+            why: "the resolved kernel is a distro package installed from the Debian mirror, \
               so there is no source tree to compile",
-    })?;
+        },
+    )?;
     let step = Step::start(sink, "kernel");
     let tree = tree_dir(opts.work_dir);
 
@@ -234,11 +236,13 @@ pub fn ensure_module_tree(
     env: &BuildEnv,
     step: &Step,
 ) -> Result<PathBuf, EngineError> {
-    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(EngineError::StageNotApplicable {
-        stage: "kmod",
-        why: "the resolved kernel is a distro package installed from the Debian mirror, \
+    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(
+        EngineError::StageNotApplicable {
+            stage: "kmod",
+            why: "the resolved kernel is a distro package installed from the Debian mirror, \
               so there is no kernel tree to build an external module against",
-    })?;
+        },
+    )?;
     let tree = tree_dir(opts.work_dir);
     let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Kernel);
     let patches = build::series_identity(opts.patches, &series_fp);
@@ -289,11 +293,13 @@ pub fn build_dtb(
     env: &BuildEnv,
     sink: &dyn EventSink,
 ) -> Result<PathBuf, EngineError> {
-    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(EngineError::StageNotApplicable {
-        stage: "dtb",
-        why: "the resolved kernel is a distro package installed from the Debian mirror, \
+    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(
+        EngineError::StageNotApplicable {
+            stage: "dtb",
+            why: "the resolved kernel is a distro package installed from the Debian mirror, \
               so there is no kernel tree to compile a device tree in",
-    })?;
+        },
+    )?;
     let step = Step::start(sink, "dtb");
     let tree = tree_dir(opts.work_dir);
 
@@ -332,11 +338,8 @@ pub fn build_dtb(
     }
     build::run(make, "make", "make <board>.dtb", &step)?;
 
-    let built = dt_source_dir(build, &tree).join(
-        Path::new(&build.kernel_dtb)
-            .file_name()
-            .unwrap_or_default(),
-    );
+    let built = dt_source_dir(build, &tree)
+        .join(Path::new(&build.kernel_dtb).file_name().unwrap_or_default());
     if !built.exists() {
         return Err(EngineError::ArtifactMissing {
             what: build.kernel_dtb.clone(),
@@ -451,7 +454,10 @@ fn clone_and_patch(
     };
     let n = build::clone_pinned(&spec, step)?;
     match opts.patches {
-        Some(p) => step.log(format!("applied {n} kernel patches ({})", p.pin.profiles.join(", "))),
+        Some(p) => step.log(format!(
+            "applied {n} kernel patches ({})",
+            p.pin.profiles.join(", ")
+        )),
         None => step.log("no patch profile: compiling the kernel tree as cloned"),
     }
     install_device_dts(build, opts.device_dts, tree, step)?;
@@ -612,7 +618,10 @@ fn in_tree_build_state(build: &ResolvedBuild, tree: &Path) -> [PathBuf; 3] {
     [
         tree.join(".config"),
         tree.join("include").join("config"),
-        tree.join("arch").join(&build.kernel_arch).join("include").join("generated"),
+        tree.join("arch")
+            .join(&build.kernel_arch)
+            .join("include")
+            .join("generated"),
     ]
 }
 
@@ -686,10 +695,11 @@ fn collect(opts: &KernelOptions, step: &Step) -> Result<KernelArtifacts, EngineE
         what: "linux-image .deb".into(),
         location: opts.work_dir.display().to_string(),
     })?;
-    let headers = pick_deb(&names, "linux-headers-").ok_or_else(|| EngineError::ArtifactMissing {
-        what: "linux-headers .deb".into(),
-        location: opts.work_dir.display().to_string(),
-    })?;
+    let headers =
+        pick_deb(&names, "linux-headers-").ok_or_else(|| EngineError::ArtifactMissing {
+            what: "linux-headers .deb".into(),
+            location: opts.work_dir.display().to_string(),
+        })?;
     let image_deb = stage_artifact(opts.out_dir, &opts.work_dir.join(&image))?;
     let headers_deb = stage_artifact(opts.out_dir, &opts.work_dir.join(&headers))?;
     step.log(format!("staged {image} and {headers}"));
@@ -735,16 +745,49 @@ mod tests {
     };
 
     fn lock_with(kernel_commit: &str, patches_commit: &str) -> Lock {
-        let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
+        let git = |c: &str| GitPin {
+            source: "s".into(),
+            reference: "r".into(),
+            commit: c.into(),
+        };
         Lock {
-            kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: kernel_commit.into() }),
-            patches: Some(PatchesPin { profiles: vec!["rk3588-accel".into()], source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
-            uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "u".into() }),
+            kernel: Some(KernelPin {
+                id: "k".into(),
+                source: "ks".into(),
+                reference: "v".into(),
+                commit: kernel_commit.into(),
+            }),
+            patches: Some(PatchesPin {
+                profiles: vec!["rk3588-accel".into()],
+                source: "ps".into(),
+                reference: "main".into(),
+                commit: patches_commit.into(),
+            }),
+            uboot: Some(UbootPin {
+                source: "us".into(),
+                reference: "v".into(),
+                commit: "u".into(),
+            }),
             uboot_patches: None,
-            userspace: Some(UserspacePins { mpp: Some(git("m")), librga: Some(git("r")), libmali: Some(git("l")) }),
-            ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: Some(git("rk")) }),
-            rootfs: Some(RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None }),
-            blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
+            userspace: Some(UserspacePins {
+                mpp: Some(git("m")),
+                librga: Some(git("r")),
+                libmali: Some(git("l")),
+            }),
+            ffmpeg: Some(FfmpegPins {
+                base: git("b"),
+                rockchip: Some(git("rk")),
+            }),
+            rootfs: Some(RootfsPin {
+                suite: "forky".into(),
+                manifest: "m".into(),
+                manifest_sha256: None,
+            }),
+            blobs: Some(BlobsPin {
+                atf: "a".into(),
+                tpl: "t".into(),
+                bl32: None,
+            }),
             kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
@@ -753,7 +796,11 @@ mod tests {
 
     #[test]
     fn clone_manifest_tracks_pin_and_dev_inputs() {
-        let sig = |kc, pc, patches| clone_manifest(&lock_with(kc, pc), patches, &[]).unwrap().signature;
+        let sig = |kc, pc, patches| {
+            clone_manifest(&lock_with(kc, pc), patches, &[])
+                .unwrap()
+                .signature
+        };
         let base = sig("kc1", "pc1", PatchSeries::Pinned);
         // Same pins → same signature (a plain rebuild reuses the tree).
         assert_eq!(base, sig("kc1", "pc1", PatchSeries::Pinned));
@@ -784,20 +831,33 @@ mod tests {
         a.kernel.as_mut().unwrap().reference = "v7.1.1".into();
         b.kernel.as_mut().unwrap().reference = "v7.1.2".into();
         assert_ne!(
-            clone_manifest(&a, PatchSeries::Pinned, &[]).unwrap().signature,
-            clone_manifest(&b, PatchSeries::Pinned, &[]).unwrap().signature
+            clone_manifest(&a, PatchSeries::Pinned, &[])
+                .unwrap()
+                .signature,
+            clone_manifest(&b, PatchSeries::Pinned, &[])
+                .unwrap()
+                .signature
         );
     }
 
     #[test]
     fn device_dts_content_folds_into_the_clone_signature() {
         let lock = lock_with("kc1", "pc1");
-        let sig = |dts: &[String]| clone_manifest(&lock, PatchSeries::Pinned, dts).unwrap().signature;
+        let sig = |dts: &[String]| {
+            clone_manifest(&lock, PatchSeries::Pinned, dts)
+                .unwrap()
+                .signature
+        };
 
         // A board with an upstream DTB folds nothing, so its tree signature is exactly
         // what it was before `device_dts` existed — its cached tree stays valid.
         let upstream = sig(&[]);
-        assert_eq!(upstream, clone_manifest(&lock, PatchSeries::Pinned, &[]).unwrap().signature);
+        assert_eq!(
+            upstream,
+            clone_manifest(&lock, PatchSeries::Pinned, &[])
+                .unwrap()
+                .signature
+        );
 
         // Carrying a board `.dts` at all distinguishes the tree (it now holds an extra
         // source and a Makefile rule).
@@ -851,8 +911,12 @@ mod tests {
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "kernel");
         let staged = collect(&opts, &step).unwrap();
-        assert!(staged.image_deb.ends_with("linux-image-7.1.1-1-arm64_7.1.1-1_arm64.deb"));
-        assert!(staged.headers_deb.ends_with("linux-headers-7.1.1-1-arm64_7.1.1-1_arm64.deb"));
+        assert!(staged
+            .image_deb
+            .ends_with("linux-image-7.1.1-1-arm64_7.1.1-1_arm64.deb"));
+        assert!(staged
+            .headers_deb
+            .ends_with("linux-headers-7.1.1-1-arm64_7.1.1-1_arm64.deb"));
     }
 
     #[test]
@@ -866,7 +930,17 @@ mod tests {
         // A freshly-cloned tree carries none of the three, so nothing is cleaned and
         // no `make` runs (this test never shells out).
         assert!(!in_tree_build_state(&build, tree).iter().any(|p| p.exists()));
-        mrproper_if_dirty(&build, &BuildEnv { cross_compile: None, jobs: None, toolchain_id: String::new() }, tree, &step).unwrap();
+        mrproper_if_dirty(
+            &build,
+            &BuildEnv {
+                cross_compile: None,
+                jobs: None,
+                toolchain_id: String::new(),
+            },
+            tree,
+            &step,
+        )
+        .unwrap();
 
         // Each of kbuild's three markers, alone, makes the tree dirty. `configure`
         // itself creates the first by copying the generated `.config` in, which is why
@@ -899,7 +973,10 @@ mod tests {
             Some("CONFIG_ARCH_SUNXI")
         );
         // Leading whitespace is tolerated; a non-CONFIG variable is not a guard.
-        assert_eq!(dtb_config_symbol("  dtb-$(CONFIG_X) += a.dtb"), Some("CONFIG_X"));
+        assert_eq!(
+            dtb_config_symbol("  dtb-$(CONFIG_X) += a.dtb"),
+            Some("CONFIG_X")
+        );
         assert_eq!(dtb_config_symbol("dtb-$(FOO) += a.dtb\n"), None);
         assert_eq!(dtb_config_symbol("subdir-y += rockchip\n"), None);
     }
@@ -909,12 +986,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let makefile = dir.join("Makefile");
-        std::fs::write(&makefile, "dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3576-evb1-v10.dtb\n").unwrap();
+        std::fs::write(
+            &makefile,
+            "dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3576-evb1-v10.dtb\n",
+        )
+        .unwrap();
 
         register_dtb(dir, "rk3576-h96-max-m9.dtb").unwrap();
         let after = std::fs::read_to_string(&makefile).unwrap();
         assert!(after.contains("dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3576-h96-max-m9.dtb"));
-        assert!(after.contains("rk3576-evb1-v10.dtb"), "upstream rules are preserved");
+        assert!(
+            after.contains("rk3576-evb1-v10.dtb"),
+            "upstream rules are preserved"
+        );
 
         // A reused tree must not accumulate duplicate rules.
         register_dtb(dir, "rk3576-h96-max-m9.dtb").unwrap();
@@ -949,7 +1033,11 @@ mod tests {
         let build = rk1_build();
         let dt_dir = dt_source_dir(&build, &tree);
         std::fs::create_dir_all(&dt_dir).unwrap();
-        std::fs::write(dt_dir.join("Makefile"), "dtb-$(CONFIG_ARCH_ROCKCHIP) += up.dtb\n").unwrap();
+        std::fs::write(
+            dt_dir.join("Makefile"),
+            "dtb-$(CONFIG_ARCH_ROCKCHIP) += up.dtb\n",
+        )
+        .unwrap();
         std::fs::write(dt_dir.join("upstream.dts"), "/* in-tree */\n").unwrap();
 
         let src_dir = tmp.path().join("cfg");
@@ -974,7 +1062,10 @@ mod tests {
         // An empty source list is the upstream-DTB case: nothing is touched.
         let untouched = std::fs::read_to_string(dt_dir.join("Makefile")).unwrap();
         install_device_dts(&build, &[], &tree, &step).unwrap();
-        assert_eq!(untouched, std::fs::read_to_string(dt_dir.join("Makefile")).unwrap());
+        assert_eq!(
+            untouched,
+            std::fs::read_to_string(dt_dir.join("Makefile")).unwrap()
+        );
 
         // A source colliding with an in-tree file is refused: editing upstream DT is a
         // patch's job, and clobbering it would hide the drift.
@@ -1016,9 +1107,17 @@ mod tests {
             toolchain_id: tc.to_string(),
         };
         let sig = |lock: &Lock, env: &BuildEnv| {
-            output_manifest(&build, build.kernel.as_ref().unwrap().compiled().unwrap(), lock, &opts, env, PatchSeries::Pinned, &[])
-                .unwrap()
-                .signature
+            output_manifest(
+                &build,
+                build.kernel.as_ref().unwrap().compiled().unwrap(),
+                lock,
+                &opts,
+                env,
+                PatchSeries::Pinned,
+                &[],
+            )
+            .unwrap()
+            .signature
         };
         let base = sig(&lock, &env("gcc-1"));
         // Identical inputs → identical signature (a plain rebuild restores).

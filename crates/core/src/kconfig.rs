@@ -180,7 +180,10 @@ mod tests {
         assert_eq!(cfg.get("CONFIG_ROCKCHIP_MULTI_RGA"), Value::Set("m".into()));
         assert_eq!(cfg.get("CONFIG_VIDEO_ROCKCHIP_RGA"), Value::NotSet);
         assert_eq!(cfg.get("CONFIG_LOG_BUF_SHIFT"), Value::Set("18".into()));
-        assert_eq!(cfg.get("CONFIG_LOCALVERSION"), Value::Set("\"-rk1\"".into()));
+        assert_eq!(
+            cfg.get("CONFIG_LOCALVERSION"),
+            Value::Set("\"-rk1\"".into())
+        );
         // Banner and section comments are not symbols.
         assert_eq!(cfg.len(), 5);
     }

@@ -1,0 +1,5 @@
+# Pin the formatting style explicitly rather than letting it track `edition`.
+# rustfmt derives `style_edition` from the crate edition when unset, so bumping
+# `workspace.package.edition` would silently restyle the whole tree in the same
+# commit as the language change. Pinned, the two move independently.
+style_edition = "2021"

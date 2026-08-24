@@ -303,8 +303,20 @@ impl Geometry {
                         payloads.len()
                     )));
                 };
-                fits("idbloader.img", *idb_len, idbloader_off, uboot_itb_off, "u-boot.itb offset")?;
-                fits("u-boot.itb", *itb_len, uboot_itb_off, self.rootfs_off, "rootfs offset")?;
+                fits(
+                    "idbloader.img",
+                    *idb_len,
+                    idbloader_off,
+                    uboot_itb_off,
+                    "u-boot.itb offset",
+                )?;
+                fits(
+                    "u-boot.itb",
+                    *itb_len,
+                    uboot_itb_off,
+                    self.rootfs_off,
+                    "rootfs offset",
+                )?;
             }
             BootGeometry::Kpart { ref slots } => {
                 let [(what, len)] = payloads else {
@@ -405,6 +417,7 @@ mod tests {
         );
         assert_eq!(g.rootfs_off, 16 * 1024 * 1024);
         assert_eq!(g.rootfs_first_lba, 16 * 1024 * 1024 / SECTOR); // 32768
+
         // The filesystem fills the partition exactly: the usable range after the
         // 16 MiB gap and the 34-sector backup-GPT+1 tail, floored to a whole ext4
         // block. For 2 GiB that is 520187 blocks.
@@ -516,7 +529,9 @@ mod tests {
     #[test]
     fn payload_fit_catches_overruns() {
         let g = Geometry::resolve(&rk1_boot(), "2G").unwrap();
-        let gap = |idb: u64, itb: u64| g.check_payload_fit(&[("idbloader.img", idb), ("u-boot.itb", itb)]);
+        let gap = |idb: u64, itb: u64| {
+            g.check_payload_fit(&[("idbloader.img", idb), ("u-boot.itb", itb)])
+        };
         // Comfortably-sized payloads fit.
         assert!(gap(400 * 1024, 2 * 1024 * 1024).is_ok());
         // An idbloader larger than the 32KiB..8MiB slot is rejected.

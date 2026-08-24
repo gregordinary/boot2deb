@@ -130,7 +130,13 @@ pub fn run(
     step: &Step,
 ) -> Result<(), EngineError> {
     command.env("TZ", "UTC").env("LC_ALL", "C.UTF-8");
-    for flag_var in ["KCFLAGS", "KAFLAGS", "KCPPFLAGS", "MAKEFLAGS", "GNUMAKEFLAGS"] {
+    for flag_var in [
+        "KCFLAGS",
+        "KAFLAGS",
+        "KCPPFLAGS",
+        "MAKEFLAGS",
+        "GNUMAKEFLAGS",
+    ] {
         command.env_remove(flag_var);
     }
     command.stdin(Stdio::null());
@@ -198,10 +204,13 @@ const GIT_STALL_SECS: &str = "60";
 /// and via `GIT_HTTP_LOW_SPEED_*` env (read by the `git-remote-https` helper). Local
 /// git ops (init/checkout/rev-parse/cat-file) touch no remote and are left unbounded.
 pub(crate) fn bound_git_network(cmd: &mut Command) {
-    cmd.args(["-c", &format!("http.lowSpeedLimit={GIT_STALL_BYTES_PER_SEC}")])
-        .args(["-c", &format!("http.lowSpeedTime={GIT_STALL_SECS}")])
-        .env("GIT_HTTP_LOW_SPEED_LIMIT", GIT_STALL_BYTES_PER_SEC)
-        .env("GIT_HTTP_LOW_SPEED_TIME", GIT_STALL_SECS);
+    cmd.args([
+        "-c",
+        &format!("http.lowSpeedLimit={GIT_STALL_BYTES_PER_SEC}"),
+    ])
+    .args(["-c", &format!("http.lowSpeedTime={GIT_STALL_SECS}")])
+    .env("GIT_HTTP_LOW_SPEED_LIMIT", GIT_STALL_BYTES_PER_SEC)
+    .env("GIT_HTTP_LOW_SPEED_TIME", GIT_STALL_SECS);
 }
 
 /// Total clone attempts before a transient failure is fatal (initial try + retries).
@@ -233,7 +242,14 @@ pub fn clone_shallow(
         clone
             // `--end-of-options` stops a `source`/`tree` beginning with `-` from
             // being read as a flag; the value guards above reject the same up front.
-            .args(["clone", "--depth", "1", "--branch", reference, "--end-of-options"])
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                reference,
+                "--end-of-options",
+            ])
             .arg(source)
             .arg(tree);
         match run(clone, "git", &ctx, step) {
@@ -268,8 +284,8 @@ fn is_transient_clone_error(e: &EngineError) -> bool {
     /// Substrings that mark a transport-layer failure git can recover from on a retry.
     const MARKERS: &[&str] = &[
         "rpc failed",
-        "http 5",                        // 500/502/503/504 from the git host
-        "returned error: 5",             // curl's rendering of an HTTP 5xx
+        "http 5",            // 500/502/503/504 from the git host
+        "returned error: 5", // curl's rendering of an HTTP 5xx
         "early eof",
         "unexpected disconnect",
         "remote end hung up",
@@ -282,7 +298,7 @@ fn is_transient_clone_error(e: &EngineError) -> bool {
         "gnutls_handshake",
         "ssl_error",
         "ssl connect error",
-        "expected 'acknowledgments'",    // truncated protocol-v2 response
+        "expected 'acknowledgments'", // truncated protocol-v2 response
     ];
     MARKERS.iter().any(|m| s.contains(m))
 }
@@ -411,7 +427,12 @@ fn fetch_commit_inner(
             .args(["fetch", "--tags", "--end-of-options"])
             .arg(&resolved)
             .arg("+refs/heads/*:refs/remotes/origin/*");
-        run(fetch, "git", &format!("fetch (full history) {resolved}"), step)?;
+        run(
+            fetch,
+            "git",
+            &format!("fetch (full history) {resolved}"),
+            step,
+        )?;
         // Even a full history may not contain the pin if its upstream branch was
         // rebased/force-pushed/deleted (the commit is orphaned upstream). Detect that
         // here and report it actionably, rather than letting `checkout` fail with a
@@ -506,7 +527,10 @@ pub(crate) fn probe_object(dir: &Path, commit: &str) -> ObjectProbe {
                 ObjectProbe::Errored(stderr.to_string())
             }
         }
-        Err(e) => ObjectProbe::Errored(format!("could not run git cat-file in {}: {e}", dir.display())),
+        Err(e) => ObjectProbe::Errored(format!(
+            "could not run git cat-file in {}: {e}",
+            dir.display()
+        )),
     }
 }
 
@@ -544,7 +568,10 @@ pub(crate) fn reject_optionlike(what: &'static str, value: &str) -> Result<(), E
 /// tool). Legitimate defconfig targets are bare identifiers, so both shapes are
 /// refused before the value reaches `make`; call sites additionally pass the target
 /// after `--` so make cannot reinterpret it. Pure, so it is unit-testable.
-pub(crate) fn reject_unsafe_make_target(what: &'static str, value: &str) -> Result<(), EngineError> {
+pub(crate) fn reject_unsafe_make_target(
+    what: &'static str,
+    value: &str,
+) -> Result<(), EngineError> {
     if value.starts_with('-') || value.contains('=') {
         Err(EngineError::UnsafeMakeTarget {
             what,
@@ -732,7 +759,14 @@ fn clone_pinned_inner(spec: &ClonePinned, step: &Step) -> Result<usize, EngineEr
         }
         // fetch_commit verifies the commit itself (and cleans up its own partial dir).
         CloneMode::Fetch => {
-            fetch_commit(spec.source, spec.reference, spec.commit, spec.what, spec.tree, step)?;
+            fetch_commit(
+                spec.source,
+                spec.reference,
+                spec.commit,
+                spec.what,
+                spec.tree,
+                step,
+            )?;
         }
     }
     apply_profile_scope(
@@ -791,7 +825,12 @@ pub(crate) fn apply_profile_scope(spec: &ApplyScope, step: &Step) -> Result<usiz
         .pin
         .profiles
         .iter()
-        .map(|name| Ok((name.as_str(), boot2deb_core::load_profile(patches.root, name)?)))
+        .map(|name| {
+            Ok((
+                name.as_str(),
+                boot2deb_core::load_profile(patches.root, name)?,
+            ))
+        })
         .collect::<Result<_, EngineError>>()?;
     if let Some(reference) = spec.gate_reference {
         // Declared-intent gate before touching the tree, against the envelope for this
@@ -841,7 +880,11 @@ fn verify_patches_pin(
                  applying the working tree's series (--patches-path override)",
                 patches_root.display(),
                 head,
-                if clean { "" } else { " (with uncommitted changes)" },
+                if clean {
+                    ""
+                } else {
+                    " (with uncommitted changes)"
+                },
                 expected,
             ),
         );
@@ -886,7 +929,10 @@ pub(crate) fn sanitize_deb_version(raw: &str) -> String {
 /// or `None` if the entry did not carry that role (a foreign/older layout — the
 /// caller then falls through to a rebuild rather than trusting a partial restore).
 pub(crate) fn role_path(restored: &[(String, PathBuf)], role: &str) -> Option<PathBuf> {
-    restored.iter().find(|(r, _)| r == role).map(|(_, p)| p.clone())
+    restored
+        .iter()
+        .find(|(r, _)| r == role)
+        .map(|(_, p)| p.clone())
 }
 
 /// Tier-2 early exit shared by the compile stages: restore `node`'s stored
@@ -1052,7 +1098,10 @@ pub(crate) fn patch_series_fingerprint(
 /// borrows the result; the two are split so the `Vec` outlives the borrowing
 /// [`PatchSeries`]. Every compile stage computes its series identity through this
 /// pair, so "no patch profile" is handled once rather than per stage.
-pub(crate) fn dev_series_fingerprint(patches: Option<PatchSource>, scope: PatchScope) -> Vec<String> {
+pub(crate) fn dev_series_fingerprint(
+    patches: Option<PatchSource>,
+    scope: PatchScope,
+) -> Vec<String> {
     match patches {
         Some(p) if p.dev => patch_series_fingerprint(p.root, &p.pin.profiles, scope),
         _ => Vec::new(),
@@ -1063,7 +1112,10 @@ pub(crate) fn dev_series_fingerprint(patches: Option<PatchSource>, scope: PatchS
 /// [`dev_series_fingerprint`]. A build with no patch source reports `Pinned`, which
 /// [`fold_patch_series`] then ignores in favour of its `patches = "none"` scalar —
 /// there is no series to be pinned or co-developed.
-pub(crate) fn series_identity<'a>(patches: Option<PatchSource>, fp: &'a [String]) -> PatchSeries<'a> {
+pub(crate) fn series_identity<'a>(
+    patches: Option<PatchSource>,
+    fp: &'a [String],
+) -> PatchSeries<'a> {
     if patches.is_some_and(|p| p.dev) {
         PatchSeries::Dev(fp)
     } else {
@@ -1139,9 +1191,7 @@ pub(crate) fn fold_patch_series(
 /// package. Two runs staging the same name use pid-distinct temps.
 fn stage_artifact(out_dir: &Path, src: &Path) -> Result<PathBuf, EngineError> {
     std::fs::create_dir_all(out_dir).map_err(|source| EngineError::io(out_dir, source))?;
-    let file_name = src
-        .file_name()
-        .expect("artifact path has a file name");
+    let file_name = src.file_name().expect("artifact path has a file name");
     let dest = out_dir.join(file_name);
     let tmp = out_dir.join(format!(
         ".{}.{}.partial",
@@ -1454,8 +1504,8 @@ mod tests {
         let orphan = "0123456789abcdef0123456789abcdef01234567";
         let sink = |_: Event| {};
         let step = Step::start(&sink, "t");
-        let err = fetch_commit(src.to_str().unwrap(), orphan, orphan, "mpp", &dst, &step)
-            .unwrap_err();
+        let err =
+            fetch_commit(src.to_str().unwrap(), orphan, orphan, "mpp", &dst, &step).unwrap_err();
         match err {
             EngineError::CommitUnreachable { what, commit, .. } => {
                 assert_eq!(what, "mpp");
@@ -1543,7 +1593,10 @@ mod tests {
             std::fs::write(tmp.path().join(n), b"x").unwrap();
         }
         // Sorted regardless of read_dir order; the non-.deb is excluded.
-        assert_eq!(deb_names(tmp.path()).unwrap(), vec!["a.deb", "b.deb", "c.deb"]);
+        assert_eq!(
+            deb_names(tmp.path()).unwrap(),
+            vec!["a.deb", "b.deb", "c.deb"]
+        );
     }
 
     #[test]
@@ -1667,8 +1720,17 @@ mod tests {
         let origin = tmp.path().join("origin");
         std::fs::create_dir_all(&origin).unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git").arg("-C").arg(&origin).args(args).output().unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&origin)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         git(&["init", "-q", "-b", "main"]);
@@ -1712,8 +1774,12 @@ mod tests {
         }
         purge_stage_debs(dir, &["linux-image-", "linux-headers-"]).unwrap();
         // The swept prefixes are gone; another stage's deb and non-deb files stay.
-        assert!(!dir.join("linux-image-7.1.2-1-arm64_7.1.2-1_arm64.deb").exists());
-        assert!(!dir.join("linux-headers-7.1.2-1-arm64_7.1.2-1_arm64.deb").exists());
+        assert!(!dir
+            .join("linux-image-7.1.2-1-arm64_7.1.2-1_arm64.deb")
+            .exists());
+        assert!(!dir
+            .join("linux-headers-7.1.2-1-arm64_7.1.2-1_arm64.deb")
+            .exists());
         assert!(dir.join("u-boot-turing-rk1_2026.04_arm64.deb").exists());
         assert!(dir.join("notes.txt").exists());
         // An absent dir is a no-op, not an error.
@@ -1757,15 +1823,23 @@ mod tests {
         let other = "0000000000000000000000000000000000000000";
         let err = verify_patches_pin(repo, other, false, &step).unwrap_err();
         match &err {
-            EngineError::PatchesPinMismatch { expected, dirty, .. } => {
+            EngineError::PatchesPinMismatch {
+                expected, dirty, ..
+            } => {
                 assert_eq!(expected, other);
                 assert!(!dirty);
             }
             e => panic!("expected PatchesPinMismatch, got {e:?}"),
         }
         let msg = err.to_string();
-        assert!(msg.contains("boot2deb update"), "unknown-relation remedy offers update: {msg}");
-        assert!(msg.contains(other), "unknown-relation remedy offers the pin: {msg}");
+        assert!(
+            msg.contains("boot2deb update"),
+            "unknown-relation remedy offers update: {msg}"
+        );
+        assert!(
+            msg.contains(other),
+            "unknown-relation remedy offers the pin: {msg}"
+        );
         // The --patches-path co-dev override downgrades the mismatch to a warning.
         verify_patches_pin(repo, other, true, &step).unwrap();
 
@@ -1774,16 +1848,32 @@ mod tests {
         std::fs::write(repo.join("f"), "newer").unwrap();
         git(&["add", "f"]);
         git(&["commit", "-qm", "newer"]);
-        let msg = verify_patches_pin(repo, &head, false, &step).unwrap_err().to_string();
-        assert!(msg.contains("ahead of the pin"), "ahead remedy names the state: {msg}");
-        assert!(msg.contains("boot2deb update"), "ahead remedy points at update: {msg}");
+        let msg = verify_patches_pin(repo, &head, false, &step)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("ahead of the pin"),
+            "ahead remedy names the state: {msg}"
+        );
+        assert!(
+            msg.contains("boot2deb update"),
+            "ahead remedy points at update: {msg}"
+        );
         let newer_head = git::rev_parse_head(repo).unwrap();
 
         // A stale checkout (HEAD behind the pin) is told to check out the pin.
         git(&["checkout", "-q", head.as_str()]);
-        let msg = verify_patches_pin(repo, &newer_head, false, &step).unwrap_err().to_string();
-        assert!(msg.contains("behind the pin"), "behind remedy names the state: {msg}");
-        assert!(msg.contains(&format!("checkout {newer_head}")), "behind remedy gives the command: {msg}");
+        let msg = verify_patches_pin(repo, &newer_head, false, &step)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("behind the pin"),
+            "behind remedy names the state: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("checkout {newer_head}")),
+            "behind remedy gives the command: {msg}"
+        );
         git(&["checkout", "-q", "-"]);
 
         // An uncommitted change fails the clean check even at the right commit,
@@ -1795,7 +1885,10 @@ mod tests {
             "expected dirty PatchesPinMismatch, got {err:?}"
         );
         let msg = err.to_string();
-        assert!(msg.contains("commit them"), "dirty remedy leads with commit: {msg}");
+        assert!(
+            msg.contains("commit them"),
+            "dirty remedy leads with commit: {msg}"
+        );
         // ...but the override tolerates a dirty co-dev checkout too.
         verify_patches_pin(repo, &newer_head, true, &step).unwrap();
     }
@@ -1806,7 +1899,12 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap()
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap()
         };
         if !git(&["init", "-q"]).status.success() {
             eprintln!("skipping probe_object test: git unavailable");
@@ -1857,7 +1955,9 @@ mod tests {
     #[test]
     fn reject_unsafe_make_target_guards_defconfig() {
         // Real defconfig targets are bare identifiers.
-        assert!(reject_unsafe_make_target("uboot_defconfig", "turing-rk1-rk3588_defconfig").is_ok());
+        assert!(
+            reject_unsafe_make_target("uboot_defconfig", "turing-rk1-rk3588_defconfig").is_ok()
+        );
         assert!(reject_unsafe_make_target("make target", "olddefconfig").is_ok());
         // A leading dash would be read as a make option.
         assert!(matches!(
@@ -1894,7 +1994,11 @@ mod tests {
         normalize_data_tree(&root).unwrap();
 
         let mode = |p: &str| {
-            std::fs::metadata(root.join(p)).unwrap().permissions().mode() & 0o777
+            std::fs::metadata(root.join(p))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
         };
         assert_eq!(mode("usr"), 0o755);
         assert_eq!(mode("usr/lib"), 0o755);

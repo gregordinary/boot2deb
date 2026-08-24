@@ -699,12 +699,29 @@ mod tests {
             userspace: vec![],
             uboot: vec![],
         };
-        let at = |v| p.series_for(Scope::Kernel, "t", v, RangeMatch::Release).unwrap();
+        let at = |v| {
+            p.series_for(Scope::Kernel, "t", v, RangeMatch::Release)
+                .unwrap()
+        };
 
         // 7.1: the pre-rework AV1 patch and the not-yet-upstreamed fix.
-        assert_eq!(at("7.1.1"), ["k/040-always.patch", "k/050-v14.patch", "k/084-upstreamed.patch"]);
+        assert_eq!(
+            at("7.1.1"),
+            [
+                "k/040-always.patch",
+                "k/050-v14.patch",
+                "k/084-upstreamed.patch"
+            ]
+        );
         // 7.2: the AV1 successor takes over; the fix is still needed.
-        assert_eq!(at("7.2.0"), ["k/040-always.patch", "k/050-v15.patch", "k/084-upstreamed.patch"]);
+        assert_eq!(
+            at("7.2.0"),
+            [
+                "k/040-always.patch",
+                "k/050-v15.patch",
+                "k/084-upstreamed.patch"
+            ]
+        );
         // 7.3: mainline absorbed 084, so it drops out by its own upper bound.
         assert_eq!(at("7.3.0"), ["k/040-always.patch", "k/050-v15.patch"]);
     }
@@ -743,7 +760,12 @@ mod tests {
             userspace: vec![],
             uboot: vec![],
         };
-        let dead: Vec<&str> = p.unreachable("t").unwrap().iter().map(|(_, e)| e.path()).collect();
+        let dead: Vec<&str> = p
+            .unreachable("t")
+            .unwrap()
+            .iter()
+            .map(|(_, e)| e.path())
+            .collect();
         assert_eq!(dead, ["k/084-old.patch", "k/091-future.patch"]);
     }
 
@@ -805,10 +827,7 @@ mod tests {
     fn ensure_applies_hard_errors_out_of_range() {
         let p = profile();
         let err = p.ensure_applies("rk3588-accel", "6.12.0").unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::KernelOutsideProfileRange { .. }
-        ));
+        assert!(matches!(err, ConfigError::KernelOutsideProfileRange { .. }));
     }
 
     #[test]

@@ -44,9 +44,10 @@ pub(crate) fn recipes(root: &ConfigRoot, json: bool) -> Result {
     for name in root.list_recipes()? {
         let (lock_state, lock_note) = match root.lock(&name) {
             Ok(_) => ("ok", ""),
-            Err(boot2deb_core::ConfigError::NotFound { .. }) => {
-                ("missing", "  [no lock — run `boot2deb update` to make it buildable]")
-            }
+            Err(boot2deb_core::ConfigError::NotFound { .. }) => (
+                "missing",
+                "  [no lock — run `boot2deb update` to make it buildable]",
+            ),
             Err(_) => ("unreadable", "  [lock unreadable]"),
         };
         match root.recipe(&name) {
@@ -62,8 +63,10 @@ pub(crate) fn recipes(root: &ConfigRoot, json: bool) -> Result {
                 let support = r.support.as_ref().map_or("-", |s| s.status.as_str());
                 // Trimmed: the support column is padded to align an absent lock note,
                 // which on the common path leaves every line ending in blanks.
-                let line =
-                    format!("{name:<24} device={:<14} support={support:<13}{lock_note}", r.device);
+                let line = format!(
+                    "{name:<24} device={:<14} support={support:<13}{lock_note}",
+                    r.device
+                );
                 println!("{}", line.trim_end());
             }
             Err(e) if json => {
@@ -253,11 +256,34 @@ mod tests {
             let names = root.list(kind).unwrap();
             assert!(!names.is_empty(), "{kind} lists nothing");
         }
-        assert!(!root.list_recipes().unwrap().is_empty(), "recipes lists nothing");
-        assert!(root.list("devices").unwrap().iter().all(|n| root.device(n).is_ok()));
-        assert!(root.list_recipes().unwrap().iter().all(|n| root.recipe(n).is_ok()));
-        assert!(root.list("kernels").unwrap().iter().all(|n| root.kernel(n).is_ok()));
-        assert!(root.list("features").unwrap().iter().all(|n| root.feature(n).is_ok()));
-        assert!(root.list("kmods").unwrap().iter().all(|n| root.kmod(n).is_ok()));
+        assert!(
+            !root.list_recipes().unwrap().is_empty(),
+            "recipes lists nothing"
+        );
+        assert!(root
+            .list("devices")
+            .unwrap()
+            .iter()
+            .all(|n| root.device(n).is_ok()));
+        assert!(root
+            .list_recipes()
+            .unwrap()
+            .iter()
+            .all(|n| root.recipe(n).is_ok()));
+        assert!(root
+            .list("kernels")
+            .unwrap()
+            .iter()
+            .all(|n| root.kernel(n).is_ok()));
+        assert!(root
+            .list("features")
+            .unwrap()
+            .iter()
+            .all(|n| root.feature(n).is_ok()));
+        assert!(root
+            .list("kmods")
+            .unwrap()
+            .iter()
+            .all(|n| root.kmod(n).is_ok()));
     }
 }

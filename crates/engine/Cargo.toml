@@ -3,6 +3,7 @@ name = "boot2deb-engine"
 description = "boot2deb engine: compile/patch/rootfs/image stages and host preflight"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
@@ -33,16 +34,15 @@ lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "x
 # the userns staging they required. The `tar` feature carries the archive source that
 # reads the rootfs tarball's ownership, xattrs, ACLs, and device nodes, and reads each
 # member's bytes out of the archive as that file is placed rather than buffering the
-# whole rootfs. A path dependency while 0.2.0 is unreleased; it becomes a version pin
-# once the crate is published.
-ferrosys = { path = "../../../ferrosys/crates/ferrosys", features = ["tar"] }
+# whole rootfs.
+ferrosys = { version = "0.2", features = ["tar"] }
 # Pure-Rust build sandbox (see the engine's sandbox module): enters the
 # target-arch rootfs and runs each package-build command in fresh namespaces
 # with the caller mapped to root, replacing the external `bwrap` binary. The
 # `debian` feature adds the in-process archive provisioner that bootstraps the
 # target suite/arch rootfs (pure Rust: tar extraction + OpenPGP release
 # verification, no external binary, no C dep).
-ferroday-cage = { path = "../../../ferroday-cage/crates/ferroday-cage", features = ["debian", "subid"] }
+ferroday-cage = { version = "0.1", features = ["debian", "subid"] }
 # Randomly-named, fail-if-exists staging dirs for the build's intermediate trees,
 # so a local user cannot pre-create and own one.
 tempfile.workspace = true

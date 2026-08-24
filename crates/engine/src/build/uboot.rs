@@ -8,10 +8,10 @@
 //! passed — the defconfig carries it. The blobs are verified against the lock's
 //! hashes ([`crate::blobs`]) before `make` consumes them.
 
-use crate::build::{
-    self, stage_artifact, BuildEnv, ClonePinned, CloneMode, PatchScope, PatchSeries, PatchSource,
-};
 use crate::blobs;
+use crate::build::{
+    self, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope, PatchSeries, PatchSource,
+};
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use boot2deb_core::lock::Lock;
@@ -171,12 +171,24 @@ pub fn build_uboot(
     // Verify blobs against the lock and stage the verified bytes into a private
     // dir the build consumes, so `make` reads exactly what was hashed.
     let blob_stage = opts.work_dir.join("blobs");
-    let atf = absolute(blobs::verify_to(opts.blobs_dir, &blob_pins.atf, &blob_stage)?)?;
-    let tpl = absolute(blobs::verify_to(opts.blobs_dir, &blob_pins.tpl, &blob_stage)?)?;
+    let atf = absolute(blobs::verify_to(
+        opts.blobs_dir,
+        &blob_pins.atf,
+        &blob_stage,
+    )?)?;
+    let tpl = absolute(blobs::verify_to(
+        opts.blobs_dir,
+        &blob_pins.tpl,
+        &blob_stage,
+    )?)?;
     // BL32/OP-TEE only where the boot chain has one (RK3576); BL31-only SoCs
     // (RK3588/RK1) pin no bl32, so nothing is verified or passed.
     let bl32 = match &blob_pins.bl32 {
-        Some(pin) => Some(absolute(blobs::verify_to(opts.blobs_dir, pin, &blob_stage)?)?),
+        Some(pin) => Some(absolute(blobs::verify_to(
+            opts.blobs_dir,
+            pin,
+            &blob_stage,
+        )?)?),
         None => None,
     };
     step.log(if bl32.is_some() {
@@ -199,7 +211,16 @@ pub fn build_uboot(
     let maskrom = collect_maskrom(opts, &tree, &step)?;
     step.progress(90);
 
-    let deb = package_deb(build, boot, &uboot.reference, opts, epoch, &idbloader, &uboot_itb, &step)?;
+    let deb = package_deb(
+        build,
+        boot,
+        &uboot.reference,
+        opts,
+        epoch,
+        &idbloader,
+        &uboot_itb,
+        &step,
+    )?;
 
     // Store the payloads + deb under the output signature, plus the maskrom images
     // when this build produced them, so a Tier-2 restore reproduces the full set.
@@ -313,7 +334,10 @@ fn clone_and_patch(
     };
     let n = build::clone_pinned(&spec, step)?;
     if let (Some(p), 1..) = (opts.patches, n) {
-        step.log(format!("applied {n} u-boot patches ({})", p.pin.profiles.join(", ")));
+        step.log(format!(
+            "applied {n} u-boot patches ({})",
+            p.pin.profiles.join(", ")
+        ));
     }
     Ok(())
 }
@@ -404,7 +428,11 @@ fn blob_vars(cmd: &mut Command, blobs: &BlobPaths) {
 
 /// Stage the produced boot payloads out of the tree, returning
 /// `(idbloader.img, u-boot.itb)`.
-fn collect(opts: &UbootOptions, tree: &Path, step: &Step) -> Result<(PathBuf, PathBuf), EngineError> {
+fn collect(
+    opts: &UbootOptions,
+    tree: &Path,
+    step: &Step,
+) -> Result<(PathBuf, PathBuf), EngineError> {
     let idb_src = tree.join("idbloader.img");
     let itb_src = tree.join("u-boot.itb");
     for (what, path) in [("idbloader.img", &idb_src), ("u-boot.itb", &itb_src)] {
@@ -438,10 +466,19 @@ fn collect_maskrom(
             let usb472 = stage_artifact(opts.out_dir, &src472)?;
             let loader = pack_maskrom_loader(opts.out_dir, tree, &usb471, &usb472)?;
             step.log("staged maskrom USB boot images (usb471 + usb472 + merged loader)");
-            Ok(Some(MaskromImages { usb471, usb472, loader }))
+            Ok(Some(MaskromImages {
+                usb471,
+                usb472,
+                loader,
+            }))
         }
         (has471, _) => Err(EngineError::ArtifactMissing {
-            what: if has471 { MASKROM_USB472 } else { MASKROM_USB471 }.into(),
+            what: if has471 {
+                MASKROM_USB472
+            } else {
+                MASKROM_USB471
+            }
+            .into(),
             location: tree.display().to_string(),
         }),
     }
@@ -482,7 +519,9 @@ fn pack_maskrom_loader(
 fn rk_chip_code(tree: &Path) -> Option<[u8; 4]> {
     let config = std::fs::read_to_string(tree.join(".config")).ok()?;
     config.lines().find_map(|line| {
-        let code = line.strip_prefix("CONFIG_ROCKCHIP_RK")?.strip_suffix("=y")?;
+        let code = line
+            .strip_prefix("CONFIG_ROCKCHIP_RK")?
+            .strip_suffix("=y")?;
         let bytes = code.as_bytes();
         (bytes.len() == 4 && bytes.iter().all(u8::is_ascii_digit))
             .then(|| bytes.try_into().unwrap())
@@ -495,8 +534,11 @@ fn maskrom_in(dir: &Path) -> Option<MaskromImages> {
     let usb471 = dir.join(MASKROM_USB471);
     let usb472 = dir.join(MASKROM_USB472);
     let loader = dir.join(MASKROM_LOADER);
-    (usb471.is_file() && usb472.is_file() && loader.is_file())
-        .then_some(MaskromImages { usb471, usb472, loader })
+    (usb471.is_file() && usb472.is_file() && loader.is_file()).then_some(MaskromImages {
+        usb471,
+        usb472,
+        loader,
+    })
 }
 
 /// Add `CROSS_COMPILE` to a `make` invocation when cross-building.
@@ -548,7 +590,9 @@ fn package_deb(
     // Assemble under a clean pkg-stage (a stale tree would ship leftover files).
     let pkg_stage = opts.work_dir.join("uboot-deb");
     let _ = std::fs::remove_dir_all(&pkg_stage);
-    stage_tree(&pkg_stage, build, boot, &pkg, &version, arch, idbloader, uboot_itb)?;
+    stage_tree(
+        &pkg_stage, build, boot, &pkg, &version, arch, idbloader, uboot_itb,
+    )?;
     // Force uniform data modes (dirs 0755, files 0644) so the host umask does not leak
     // into the packaged tree — the u-boot deb is data-only, so this is byte-safe and
     // makes the .deb reproducible across hosts.
@@ -730,16 +774,54 @@ mod tests {
     // tree signature tracks. The kernel `[patches]` pin is held fixed so the tests can
     // also assert the u-boot signature is independent of it.
     fn lock_with(uboot_commit: &str, patches_commit: &str) -> Lock {
-        let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
+        let git = |c: &str| GitPin {
+            source: "s".into(),
+            reference: "r".into(),
+            commit: c.into(),
+        };
         Lock {
-            kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() }),
-            patches: Some(PatchesPin { profiles: vec!["rk3588-accel".into()], source: "ps".into(), reference: "main".into(), commit: "kernel-pc".into() }),
-            uboot: Some(UbootPin { source: "us".into(), reference: "v2026.04".into(), commit: uboot_commit.into() }),
-            uboot_patches: Some(PatchesPin { profiles: vec!["rk3576-util".into()], source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
-            userspace: Some(UserspacePins { mpp: Some(git("m")), librga: Some(git("r")), libmali: Some(git("l")) }),
-            ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: Some(git("rk")) }),
-            rootfs: Some(RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None }),
-            blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
+            kernel: Some(KernelPin {
+                id: "k".into(),
+                source: "ks".into(),
+                reference: "v".into(),
+                commit: "kc".into(),
+            }),
+            patches: Some(PatchesPin {
+                profiles: vec!["rk3588-accel".into()],
+                source: "ps".into(),
+                reference: "main".into(),
+                commit: "kernel-pc".into(),
+            }),
+            uboot: Some(UbootPin {
+                source: "us".into(),
+                reference: "v2026.04".into(),
+                commit: uboot_commit.into(),
+            }),
+            uboot_patches: Some(PatchesPin {
+                profiles: vec!["rk3576-util".into()],
+                source: "ps".into(),
+                reference: "main".into(),
+                commit: patches_commit.into(),
+            }),
+            userspace: Some(UserspacePins {
+                mpp: Some(git("m")),
+                librga: Some(git("r")),
+                libmali: Some(git("l")),
+            }),
+            ffmpeg: Some(FfmpegPins {
+                base: git("b"),
+                rockchip: Some(git("rk")),
+            }),
+            rootfs: Some(RootfsPin {
+                suite: "forky".into(),
+                manifest: "m".into(),
+                manifest_sha256: None,
+            }),
+            blobs: Some(BlobsPin {
+                atf: "a".into(),
+                tpl: "t".into(),
+                bl32: None,
+            }),
             kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
@@ -768,13 +850,21 @@ mod tests {
         // A SoC with OP-TEE (RK3576) passes it, at both config and compile time.
         assert_eq!(
             vars(Some("/b/bl32.bin")),
-            ["BL31=/b/bl31.elf", "ROCKCHIP_TPL=/b/ddr.bin", "TEE=/b/bl32.bin"]
+            [
+                "BL31=/b/bl31.elf",
+                "ROCKCHIP_TPL=/b/ddr.bin",
+                "TEE=/b/bl32.bin"
+            ]
         );
     }
 
     #[test]
     fn clone_manifest_tracks_pin_and_dev_inputs() {
-        let sig = |uc, pc, patches| clone_manifest(&lock_with(uc, pc), patches).unwrap().signature;
+        let sig = |uc, pc, patches| {
+            clone_manifest(&lock_with(uc, pc), patches)
+                .unwrap()
+                .signature
+        };
         let base = sig("uc1", "pc1", PatchSeries::Pinned);
         assert_eq!(base, sig("uc1", "pc1", PatchSeries::Pinned));
         // A u-boot bump or a u-boot-patches-pin bump each invalidate the reused tree.
@@ -785,15 +875,24 @@ mod tests {
         // folding the wrong pin collided every u-boot profile in the artifact cache).
         let mut kernel_bumped = lock_with("uc1", "pc1");
         kernel_bumped.patches.as_mut().unwrap().commit = "kernel-pc-2".into();
-        assert_eq!(base, clone_manifest(&kernel_bumped, PatchSeries::Pinned).unwrap().signature);
+        assert_eq!(
+            base,
+            clone_manifest(&kernel_bumped, PatchSeries::Pinned)
+                .unwrap()
+                .signature
+        );
         // And two different u-boot profiles at the same commit stay distinct.
         let mut util = lock_with("uc1", "pc1");
         util.uboot_patches.as_mut().unwrap().profiles = vec!["rk3576-util".into()];
         let mut util_net = lock_with("uc1", "pc1");
         util_net.uboot_patches.as_mut().unwrap().profiles = vec!["rk3576-util-net".into()];
         assert_ne!(
-            clone_manifest(&util, PatchSeries::Pinned).unwrap().signature,
-            clone_manifest(&util_net, PatchSeries::Pinned).unwrap().signature
+            clone_manifest(&util, PatchSeries::Pinned)
+                .unwrap()
+                .signature,
+            clone_manifest(&util_net, PatchSeries::Pinned)
+                .unwrap()
+                .signature
         );
         // Co-dev mode splits the key; a co-dev content change restamps.
         let empty: Vec<String> = vec![];
@@ -816,13 +915,21 @@ mod tests {
         };
         let boot = build.rkbin_boot().unwrap();
         let man = |lock: &Lock, env: &BuildEnv, patches| {
-            output_manifest(&build, boot, lock, env, patches).unwrap().signature
+            output_manifest(&build, boot, lock, env, patches)
+                .unwrap()
+                .signature
         };
         let base = man(&lock_with("uc1", "pc1"), &env("gcc-1"), PatchSeries::Pinned);
         // Stable under identical inputs.
-        assert_eq!(base, man(&lock_with("uc1", "pc1"), &env("gcc-1"), PatchSeries::Pinned));
+        assert_eq!(
+            base,
+            man(&lock_with("uc1", "pc1"), &env("gcc-1"), PatchSeries::Pinned)
+        );
         // A u-boot pin bump reaches the output signature through the tree dependency.
-        assert_ne!(base, man(&lock_with("uc2", "pc1"), &env("gcc-1"), PatchSeries::Pinned));
+        assert_ne!(
+            base,
+            man(&lock_with("uc2", "pc1"), &env("gcc-1"), PatchSeries::Pinned)
+        );
         // A blob change → new signature (a hit must imply the same verified blobs).
         let mut lock_blob = lock_with("uc1", "pc1");
         lock_blob.blobs.as_mut().unwrap().atf = "different-atf-hash".into();
@@ -832,9 +939,19 @@ mod tests {
         lock_bl32.blobs.as_mut().unwrap().bl32 = Some("rk3576_bl32@sha256:cd".into());
         assert_ne!(base, man(&lock_bl32, &env("gcc-1"), PatchSeries::Pinned));
         // Toolchain and co-dev mode each split the key.
-        assert_ne!(base, man(&lock_with("uc1", "pc1"), &env("gcc-2"), PatchSeries::Pinned));
+        assert_ne!(
+            base,
+            man(&lock_with("uc1", "pc1"), &env("gcc-2"), PatchSeries::Pinned)
+        );
         let empty: Vec<String> = vec![];
-        assert_ne!(base, man(&lock_with("uc1", "pc1"), &env("gcc-1"), PatchSeries::Dev(&empty)));
+        assert_ne!(
+            base,
+            man(
+                &lock_with("uc1", "pc1"),
+                &env("gcc-1"),
+                PatchSeries::Dev(&empty)
+            )
+        );
     }
 
     #[test]
@@ -888,7 +1005,14 @@ mod tests {
 
     #[test]
     fn readme_documents_offsets_and_dd() {
-        let r = readme_text("turing-rk1", "Turing RK1 (RK3588)", "32KiB", 32768, "8MiB", 8_388_608);
+        let r = readme_text(
+            "turing-rk1",
+            "Turing RK1 (RK3588)",
+            "32KiB",
+            32768,
+            "8MiB",
+            8_388_608,
+        );
         assert!(r.contains("offset 32768 bytes (32KiB)"));
         assert!(r.contains("offset 8388608 bytes (8MiB)"));
         assert!(r.contains("bs=4096 seek=8"));
@@ -909,15 +1033,28 @@ mod tests {
 
         let pkg_stage = tmp.path().join("pkg-stage");
         let boot = build.rkbin_boot().unwrap();
-        stage_tree(&pkg_stage, &build, boot, "u-boot-turing-rk1", "2026.04", "arm64", &idb, &itb)
-            .unwrap();
+        stage_tree(
+            &pkg_stage,
+            &build,
+            boot,
+            "u-boot-turing-rk1",
+            "2026.04",
+            "arm64",
+            &idb,
+            &itb,
+        )
+        .unwrap();
 
         // Payloads + install.conf land under /usr/lib/u-boot/<device>/.
         let libd = pkg_stage.join("usr/lib/u-boot/turing-rk1");
-        assert_eq!(std::fs::read(libd.join("idbloader.img")).unwrap(), b"IDBLOADER");
+        assert_eq!(
+            std::fs::read(libd.join("idbloader.img")).unwrap(),
+            b"IDBLOADER"
+        );
         assert_eq!(std::fs::read(libd.join("u-boot.itb")).unwrap(), b"UBOOTITB");
         let conf = std::fs::read_to_string(libd.join("install.conf")).unwrap();
         assert!(conf.contains("idbloader_offset=32768")); // rk1: idbloader @ 32KiB
+
         // control + doc present; no maintainer scripts (never auto-flash).
         assert!(pkg_stage.join("DEBIAN/control").exists());
         assert!(pkg_stage
@@ -939,7 +1076,9 @@ mod tests {
                 .unwrap_or(false)
         };
         if !have("dpkg-deb") || !have("fakeroot") {
-            eprintln!("skipping dpkg_deb_accepts_the_staged_package: dpkg-deb/fakeroot unavailable");
+            eprintln!(
+                "skipping dpkg_deb_accepts_the_staged_package: dpkg-deb/fakeroot unavailable"
+            );
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -950,8 +1089,17 @@ mod tests {
         std::fs::write(&itb, b"ITB").unwrap();
         let pkg_stage = tmp.path().join("pkg-stage");
         let boot = build.rkbin_boot().unwrap();
-        stage_tree(&pkg_stage, &build, boot, "u-boot-turing-rk1", "2026.04", "arm64", &idb, &itb)
-            .unwrap();
+        stage_tree(
+            &pkg_stage,
+            &build,
+            boot,
+            "u-boot-turing-rk1",
+            "2026.04",
+            "arm64",
+            &idb,
+            &itb,
+        )
+        .unwrap();
 
         let deb = tmp.path().join("u-boot-turing-rk1_2026.04_arm64.deb");
         let built = Command::new("fakeroot")
@@ -967,14 +1115,25 @@ mod tests {
         );
 
         // dpkg-deb parses our control and reports the fields back.
-        let info = Command::new("dpkg-deb").arg("-I").arg(&deb).output().unwrap();
+        let info = Command::new("dpkg-deb")
+            .arg("-I")
+            .arg(&deb)
+            .output()
+            .unwrap();
         let info = String::from_utf8_lossy(&info.stdout);
-        assert!(info.contains("Package: u-boot-turing-rk1"), "info was: {info}");
+        assert!(
+            info.contains("Package: u-boot-turing-rk1"),
+            "info was: {info}"
+        );
         assert!(info.contains("Version: 2026.04"));
         assert!(info.contains("Architecture: arm64"));
 
         // The payloads + install.conf ship at the documented path.
-        let contents = Command::new("dpkg-deb").arg("-c").arg(&deb).output().unwrap();
+        let contents = Command::new("dpkg-deb")
+            .arg("-c")
+            .arg(&deb)
+            .output()
+            .unwrap();
         let contents = String::from_utf8_lossy(&contents.stdout);
         assert!(contents.contains("/usr/lib/u-boot/turing-rk1/idbloader.img"));
         assert!(contents.contains("/usr/lib/u-boot/turing-rk1/u-boot.itb"));
@@ -1019,9 +1178,17 @@ mod tests {
                 store: None,
             };
             let boot = build.rkbin_boot().unwrap();
-            let deb =
-                package_deb(&build, boot, "2026.04", &opts, Some(1_600_000_000), &idb, &itb, &step)
-                    .unwrap();
+            let deb = package_deb(
+                &build,
+                boot,
+                "2026.04",
+                &opts,
+                Some(1_600_000_000),
+                &idb,
+                &itb,
+                &step,
+            )
+            .unwrap();
             std::fs::read(&deb).unwrap()
         };
 

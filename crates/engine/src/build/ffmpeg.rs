@@ -21,13 +21,13 @@
 //! [`userspace`]: crate::build::userspace
 
 use crate::build::{
-    self, deb_names, pick_deb, stage_artifact, BuildEnv, ClonePinned, CloneMode, PatchScope,
+    self, deb_names, pick_deb, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope,
     PatchSeries, PatchSource,
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
-use crate::sandbox::{BuildSandbox, SandboxRun};
 use crate::git;
+use crate::sandbox::{BuildSandbox, SandboxRun};
 use boot2deb_core::lock::{FfmpegPins, Lock, UserspacePins};
 use std::path::{Path, PathBuf};
 
@@ -121,7 +121,10 @@ const BASE_CONFIGURE_FLAGS: &[&str] = &[
 /// built and shipped for programs that speak its API directly; it just is not an
 /// ffmpeg filter.
 fn configure_flags(userspace: &UserspacePins) -> Vec<String> {
-    let mut flags: Vec<String> = BASE_CONFIGURE_FLAGS.iter().map(|s| (*s).to_string()).collect();
+    let mut flags: Vec<String> = BASE_CONFIGURE_FLAGS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     if userspace.mpp.is_some() {
         flags.push("--enable-rkmpp".to_string());
         if userspace.librga.is_some() {
@@ -130,7 +133,6 @@ fn configure_flags(userspace: &UserspacePins) -> Vec<String> {
     }
     flags
 }
-
 
 /// Filesystem inputs for the ffmpeg stage.
 pub struct FfmpegOptions<'a> {
@@ -257,7 +259,14 @@ pub fn build_ffmpeg(
         .map(|e| vec![("SOURCE_DATE_EPOCH".to_string(), e.to_string())])
         .unwrap_or_default();
 
-    configure(sandbox, &tree, &binds, &build_env, &configure_flags(userspace), &step)?;
+    configure(
+        sandbox,
+        &tree,
+        &binds,
+        &build_env,
+        &configure_flags(userspace),
+        &step,
+    )?;
     step.progress(55);
     compile(sandbox, env, &tree, &binds, &build_env, &step)?;
     step.progress(85);
@@ -275,7 +284,14 @@ pub fn build_ffmpeg(
     write_control(&pkg_stage, &control)?;
     let deb_name = format!("{PKG_NAME}_{version}_{arch}.deb");
     let deb_in_stage = stage_root.join(&deb_name);
-    package_deb(sandbox, &pkg_stage, &deb_in_stage, &build_env, &binds, &step)?;
+    package_deb(
+        sandbox,
+        &pkg_stage,
+        &deb_in_stage,
+        &build_env,
+        &binds,
+        &step,
+    )?;
 
     let deb = stage_artifact(opts.out_dir, &deb_in_stage)?;
     step.log(format!("staged {deb_name}"));
@@ -345,14 +361,20 @@ fn output_manifest(
     // keeps the signature a statement about what was actually linked. `flags` already
     // records *which* trees those were, so the two cannot disagree.
     if let Some(mpp) = &userspace.mpp {
-        let dep =
-            crate::build::userspace::output_manifest_for("mpp", &mpp.commit, suite, arch, Some(&mpp_inputs))
-                .signature();
+        let dep = crate::build::userspace::output_manifest_for(
+            "mpp",
+            &mpp.commit,
+            suite,
+            arch,
+            Some(&mpp_inputs),
+        )
+        .signature();
         b.fold_dep(&dep);
     }
     if let Some(rga) = &userspace.librga {
-        let dep = crate::build::userspace::output_manifest_for("librga", &rga.commit, suite, arch, None)
-            .signature();
+        let dep =
+            crate::build::userspace::output_manifest_for("librga", &rga.commit, suite, arch, None)
+                .signature();
         b.fold_dep(&dep);
     }
     b.manifest()
@@ -409,7 +431,10 @@ fn fetch_and_patch(
     };
     let n = build::clone_pinned(&spec, step)?;
     if let Some(p) = opts.patches {
-        step.log(format!("applied {n} ffmpeg patch(es) ({})", p.pin.profiles.join(", ")));
+        step.log(format!(
+            "applied {n} ffmpeg patch(es) ({})",
+            p.pin.profiles.join(", ")
+        ));
     }
     Ok(())
 }
@@ -554,7 +579,9 @@ fn required_userspace_debs(
             Some(name) => debs.push(dir.join(name)),
             None => {
                 return Err(EngineError::ArtifactMissing {
-                    what: format!("userspace dependency {prefix}*.deb (run the userspace stage first)"),
+                    what: format!(
+                        "userspace dependency {prefix}*.deb (run the userspace stage first)"
+                    ),
                     location: dir.display().to_string(),
                 })
             }
@@ -673,7 +700,9 @@ fn scan_binaries(pkg_stage: &Path) -> Result<Vec<PathBuf>, EngineError> {
 /// `Depends`.
 fn read_dir_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, EngineError> {
     match std::fs::read_dir(dir) {
-        Ok(entries) => entries.map(|e| e.map_err(|s| EngineError::io(dir, s))).collect(),
+        Ok(entries) => entries
+            .map(|e| e.map_err(|s| EngineError::io(dir, s)))
+            .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(EngineError::io(dir, e)),
     }
@@ -781,9 +810,17 @@ mod tests {
     /// A pin set declaring every userspace tree — the RK3588-shaped stack.
     fn all_trees() -> UserspacePins {
         let git = |c: &str| {
-            Some(GitPin { source: "s".into(), reference: "r".into(), commit: c.into() })
+            Some(GitPin {
+                source: "s".into(),
+                reference: "r".into(),
+                commit: c.into(),
+            })
         };
-        UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }
+        UserspacePins {
+            mpp: git("m"),
+            librga: git("r"),
+            libmali: git("l"),
+        }
     }
 
     /// A pin set with librga but no MPP and no libmali — the RK3576-shaped stack,
@@ -791,14 +828,22 @@ mod tests {
     fn rga_only() -> UserspacePins {
         UserspacePins {
             mpp: None,
-            librga: Some(GitPin { source: "s".into(), reference: "r".into(), commit: "r".into() }),
+            librga: Some(GitPin {
+                source: "s".into(),
+                reference: "r".into(),
+                commit: "r".into(),
+            }),
             libmali: None,
         }
     }
 
     /// The base flags plus nothing: a SoC declaring no vendor userspace at all.
     fn no_trees() -> UserspacePins {
-        UserspacePins { mpp: None, librga: None, libmali: None }
+        UserspacePins {
+            mpp: None,
+            librga: None,
+            libmali: None,
+        }
     }
 
     #[test]
@@ -828,9 +873,17 @@ mod tests {
         // exactly when it is configured against that library.
         assert_eq!(
             userspace_dep_prefixes(&all_trees()),
-            vec!["librockchip-mpp1_", "librockchip-mpp-dev_", "librga2_", "librga-dev_"]
+            vec![
+                "librockchip-mpp1_",
+                "librockchip-mpp-dev_",
+                "librga2_",
+                "librga-dev_"
+            ]
         );
-        assert_eq!(userspace_dep_prefixes(&rga_only()), vec!["librga2_", "librga-dev_"]);
+        assert_eq!(
+            userspace_dep_prefixes(&rga_only()),
+            vec!["librga2_", "librga-dev_"]
+        );
         assert!(userspace_dep_prefixes(&no_trees()).is_empty());
     }
 
@@ -840,20 +893,55 @@ mod tests {
         // dependency check must not treat its absence as a forgotten stage.
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("never-created");
-        assert!(required_userspace_debs(&missing, &no_trees()).unwrap().is_empty());
+        assert!(required_userspace_debs(&missing, &no_trees())
+            .unwrap()
+            .is_empty());
     }
 
     fn lock_with(base_commit: &str, patches_commit: &str) -> Lock {
-        let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
+        let git = |c: &str| GitPin {
+            source: "s".into(),
+            reference: "r".into(),
+            commit: c.into(),
+        };
         Lock {
-            kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() }),
-            patches: Some(PatchesPin { profiles: vec!["rk3588-accel".into()], source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
-            uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "uc".into() }),
+            kernel: Some(KernelPin {
+                id: "k".into(),
+                source: "ks".into(),
+                reference: "v".into(),
+                commit: "kc".into(),
+            }),
+            patches: Some(PatchesPin {
+                profiles: vec!["rk3588-accel".into()],
+                source: "ps".into(),
+                reference: "main".into(),
+                commit: patches_commit.into(),
+            }),
+            uboot: Some(UbootPin {
+                source: "us".into(),
+                reference: "v".into(),
+                commit: "uc".into(),
+            }),
             uboot_patches: None,
-            userspace: Some(UserspacePins { mpp: Some(git("m")), librga: Some(git("r")), libmali: Some(git("l")) }),
-            ffmpeg: Some(FfmpegPins { base: git(base_commit), rockchip: Some(git("rk")) }),
-            rootfs: Some(RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None }),
-            blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
+            userspace: Some(UserspacePins {
+                mpp: Some(git("m")),
+                librga: Some(git("r")),
+                libmali: Some(git("l")),
+            }),
+            ffmpeg: Some(FfmpegPins {
+                base: git(base_commit),
+                rockchip: Some(git("rk")),
+            }),
+            rootfs: Some(RootfsPin {
+                suite: "forky".into(),
+                manifest: "m".into(),
+                manifest_sha256: None,
+            }),
+            blobs: Some(BlobsPin {
+                atf: "a".into(),
+                tpl: "t".into(),
+                bl32: None,
+            }),
             kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
@@ -865,7 +953,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         // An absent directory is a legitimate empty scan...
-        assert!(read_dir_entries(&tmp.path().join("missing")).unwrap().is_empty());
+        assert!(read_dir_entries(&tmp.path().join("missing"))
+            .unwrap()
+            .is_empty());
         // ...but an unreadable one must surface, or `dpkg-shlibdeps` would compute
         // an incomplete Depends from a silently-shrunk input set.
         let dir = tmp.path().join("noread");
@@ -950,18 +1040,39 @@ mod tests {
         let sig = |lock: &Lock| {
             let ff = lock.ffmpeg.as_ref().unwrap();
             let us = lock.userspace.as_ref().unwrap();
-            output_manifest(lock, ff, us, "arm64", PatchSeries::Pinned, PatchSeries::Pinned)
-                .signature
-                .clone()
+            output_manifest(
+                lock,
+                ff,
+                us,
+                "arm64",
+                PatchSeries::Pinned,
+                PatchSeries::Pinned,
+            )
+            .signature
+            .clone()
         };
         let base = sig(&lock_with("bc1", "pc1"));
         // An MPP pin bump (ffmpeg base/patch/suite/arch unchanged) splits the key.
         let mut mpp_bump = lock_with("bc1", "pc1");
-        mpp_bump.userspace.as_mut().unwrap().mpp.as_mut().unwrap().commit = "m2".into();
+        mpp_bump
+            .userspace
+            .as_mut()
+            .unwrap()
+            .mpp
+            .as_mut()
+            .unwrap()
+            .commit = "m2".into();
         assert_ne!(base, sig(&mpp_bump));
         // An RGA pin bump likewise splits it.
         let mut rga_bump = lock_with("bc1", "pc1");
-        rga_bump.userspace.as_mut().unwrap().librga.as_mut().unwrap().commit = "r2".into();
+        rga_bump
+            .userspace
+            .as_mut()
+            .unwrap()
+            .librga
+            .as_mut()
+            .unwrap()
+            .commit = "r2".into();
         assert_ne!(base, sig(&rga_bump));
     }
 
@@ -983,7 +1094,11 @@ mod tests {
 
     #[test]
     fn control_text_has_arch_version_and_runtime_deps() {
-        let c = control_text("arm64", "8.1-19-g942418aa06", "librockchip-mpp1, librga2, libc6");
+        let c = control_text(
+            "arm64",
+            "8.1-19-g942418aa06",
+            "librockchip-mpp1, librga2, libc6",
+        );
         assert!(c.contains("Package: ffmpeg-rk"));
         assert!(c.contains("Version: 8.1-19-g942418aa06"));
         assert!(c.contains("Architecture: arm64"));

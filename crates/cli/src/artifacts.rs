@@ -36,17 +36,30 @@ pub(crate) fn record_artifacts(
         }
     }
     let body = names.into_iter().collect::<Vec<_>>().join("\n");
-    std::fs::write(&ledger, body)
-        .map_err(|source| format!("cannot write artifact ledger {} ({source})", ledger.display()))?;
+    std::fs::write(&ledger, body).map_err(|source| {
+        format!(
+            "cannot write artifact ledger {} ({source})",
+            ledger.display()
+        )
+    })?;
     Ok(())
 }
 
 /// The ledger's recorded file names, or an empty set if the ledger does not exist.
 fn read_ledger_names(ledger: &Path) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
     match std::fs::read_to_string(ledger) {
-        Ok(text) => Ok(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()),
+        Ok(text) => Ok(text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
-        Err(source) => Err(format!("cannot read artifact ledger {} ({source})", ledger.display()).into()),
+        Err(source) => Err(format!(
+            "cannot read artifact ledger {} ({source})",
+            ledger.display()
+        )
+        .into()),
     }
 }
 
@@ -281,7 +294,11 @@ mod tests {
             uboot.clone(),
             kmod.clone(),
         ];
-        scope_repo_to_current_artifacts(&mut repo, &Some(built.clone()), std::slice::from_ref(&kmod));
+        scope_repo_to_current_artifacts(
+            &mut repo,
+            &Some(built.clone()),
+            std::slice::from_ref(&kmod),
+        );
         // Only this run's kernel version survives; u-boot and the kmod are untouched.
         assert!(repo.contains(&built) && repo.contains(&built_headers));
         assert!(!repo.contains(&stale_image) && !repo.contains(&stale_headers));
@@ -360,9 +377,9 @@ mod tests {
     #[test]
     fn kmod_packages_prefers_this_runs_artifacts() {
         // Modules built this run are authoritative; stale kmod debs in out_dir ignored.
-        let built = vec![
-            PathBuf::from("/out/aic8800-modules-7.1.3-1-arm64_1_arm64.deb"),
-        ];
+        let built = vec![PathBuf::from(
+            "/out/aic8800-modules-7.1.3-1-arm64_1_arm64.deb",
+        )];
         let repo = vec![
             built[0].clone(),
             PathBuf::from("/out/aic8800-modules-6.9.0-1-arm64_1_arm64.deb"),
@@ -386,7 +403,10 @@ mod tests {
         let pkgs = kmod_packages(&[], &repo).unwrap();
         assert_eq!(
             pkgs,
-            vec!["aic8800-firmware".to_string(), "aic8800-modules-7.1.3-1-arm64".to_string()]
+            vec![
+                "aic8800-firmware".to_string(),
+                "aic8800-modules-7.1.3-1-arm64".to_string()
+            ]
         );
     }
 
@@ -398,7 +418,10 @@ mod tests {
             PathBuf::from("/out/aic8800-modules-6.9.0-1-arm64_1_arm64.deb"),
         ];
         let err = kmod_packages(&[], &repo).unwrap_err().to_string();
-        assert!(err.contains("multiple kernel-module package versions"), "{err}");
+        assert!(
+            err.contains("multiple kernel-module package versions"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -422,7 +445,11 @@ mod tests {
         std::fs::write(out.join("evil_1.0_arm64.deb"), b"deb").unwrap();
 
         let debs = ledger_debs(out).unwrap();
-        assert_eq!(debs, vec![recorded.clone()], "only the recorded deb is ingested");
+        assert_eq!(
+            debs,
+            vec![recorded.clone()],
+            "only the recorded deb is ingested"
+        );
 
         // A recorded deb whose file was removed is silently skipped.
         std::fs::remove_file(&recorded).unwrap();

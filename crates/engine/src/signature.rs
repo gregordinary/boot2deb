@@ -96,9 +96,11 @@ impl SignatureBuilder {
     /// concatenation. Does **not** touch the record list — that is the caller's
     /// choice per fold kind (`node`/`stage_version` are hashed but not recorded).
     fn write_field(&mut self, label: &str, value: &[u8]) {
-        self.buf.extend_from_slice(&(label.len() as u64).to_le_bytes());
+        self.buf
+            .extend_from_slice(&(label.len() as u64).to_le_bytes());
         self.buf.extend_from_slice(label.as_bytes());
-        self.buf.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        self.buf
+            .extend_from_slice(&(value.len() as u64).to_le_bytes());
         self.buf.extend_from_slice(value);
     }
 
@@ -199,7 +201,9 @@ impl SignatureManifest {
         let group = |recs: &[Record]| -> BTreeMap<String, Vec<String>> {
             let mut m: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for r in recs {
-                m.entry(r.label.clone()).or_default().extend(r.values.iter().cloned());
+                m.entry(r.label.clone())
+                    .or_default()
+                    .extend(r.values.iter().cloned());
             }
             m
         };
@@ -270,8 +274,10 @@ impl RecordChange {
                 format!("{}: {} → {}", self.label, self.old[0], self.new[0])
             }
             ChangeKind::Changed => {
-                let removed: Vec<&String> = self.old.iter().filter(|v| !self.new.contains(v)).collect();
-                let added: Vec<&String> = self.new.iter().filter(|v| !self.old.contains(v)).collect();
+                let removed: Vec<&String> =
+                    self.old.iter().filter(|v| !self.new.contains(v)).collect();
+                let added: Vec<&String> =
+                    self.new.iter().filter(|v| !self.old.contains(v)).collect();
                 let mut parts = Vec::new();
                 for r in removed {
                     parts.push(format!("-{r}"));
@@ -361,13 +367,19 @@ mod tests {
             b.fold_scalar("commit", "abc");
         });
         // Changed value.
-        assert_ne!(base, sig("kernel", |b| {
-            b.fold_scalar("commit", "abd");
-        }));
+        assert_ne!(
+            base,
+            sig("kernel", |b| {
+                b.fold_scalar("commit", "abd");
+            })
+        );
         // Changed node.
-        assert_ne!(base, sig("uboot", |b| {
-            b.fold_scalar("commit", "abc");
-        }));
+        assert_ne!(
+            base,
+            sig("uboot", |b| {
+                b.fold_scalar("commit", "abc");
+            })
+        );
         // Changed stage version.
         let bumped = {
             let mut b = SignatureBuilder::new("kernel", 2);
@@ -488,6 +500,7 @@ mod tests {
         });
         let new = man("kernel", |b| {
             b.fold_scalar("kernel.commit", "bbb"); // changed
+
             // patches.commit removed
             b.fold_ordered("frags", &["base", "soc", "accel"]); // list grew
             b.fold_scalar("patches_dev", "1"); // added

@@ -38,7 +38,8 @@ pub fn generate_password() -> Result<String, EngineError> {
     let mut out = String::with_capacity(LEN);
     let mut buf = [0u8; 64];
     while out.len() < LEN {
-        rng.read_exact(&mut buf).map_err(|s| EngineError::io(path, s))?;
+        rng.read_exact(&mut buf)
+            .map_err(|s| EngineError::io(path, s))?;
         for &b in &buf {
             if out.len() == LEN {
                 break;

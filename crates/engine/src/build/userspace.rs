@@ -13,7 +13,9 @@
 //! `debian/targets` is filtered to the board's Mali variant to avoid compiling the
 //! full variant matrix.
 
-use crate::build::{self, deb_names, stage_artifact, BuildEnv, PatchScope, PatchSeries, PatchSource};
+use crate::build::{
+    self, deb_names, stage_artifact, BuildEnv, PatchScope, PatchSeries, PatchSource,
+};
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::sandbox::{BuildSandbox, SandboxRun};
@@ -185,7 +187,10 @@ pub fn build_userspace(
     // payoff after a `clean --sandbox`). The per-package output signature folds the
     // fetch pin + patch series (MPP) + build recipe + suite/arch (
     // `package_output_manifest`).
-    let store = opts.store.map(crate::artstore::ArtifactStore::open).transpose()?;
+    let store = opts
+        .store
+        .map(crate::artstore::ArtifactStore::open)
+        .transpose()?;
     // The userspace node runs only for a media-accel image build, which pins a rootfs.
     let suite = lock
         .rootfs
@@ -281,7 +286,14 @@ fn build_one(
         // Purge stale-version `.deb`s so `collect` cannot ship an old one and
         // `package_staged` cannot be fooled by it.
         build::purge_stage_debs(stage_root, pkg.deb_prefixes)?;
-        build::fetch_commit(pkg.source, &pkg.pin.reference, &pkg.pin.commit, pkg.name, &tree, step)?;
+        build::fetch_commit(
+            pkg.source,
+            &pkg.pin.reference,
+            &pkg.pin.commit,
+            pkg.name,
+            &tree,
+            step,
+        )?;
         // Apply the profile's `userspace` scope onto the fetched base — the MPP CMA
         // fix, mirroring the kernel/ffmpeg stages' clone→apply flow. Only
         // MPP is patched; librga/libmali are unpatched upstream. The series is
@@ -433,7 +445,11 @@ fn apply_patches(
         step,
     )?;
     if let Some(p) = ctx.patches {
-        step.log(format!("{}: applied {n} userspace patch(es) ({})", pkg.name, p.pin.profiles.join(", ")));
+        step.log(format!(
+            "{}: applied {n} userspace patch(es) ({})",
+            pkg.name,
+            p.pin.profiles.join(", ")
+        ));
     }
     Ok(())
 }
@@ -496,8 +512,10 @@ pub fn output_manifest_for(
     patches: Option<&PatchInputs>,
 ) -> crate::signature::SignatureManifest {
     let tree_sig = signature_manifest(name, commit, patches).signature();
-    let mut b =
-        crate::signature::SignatureBuilder::new(&format!("userspace:{name}:out"), OUTPUT_STAGE_VERSION);
+    let mut b = crate::signature::SignatureBuilder::new(
+        &format!("userspace:{name}:out"),
+        OUTPUT_STAGE_VERSION,
+    );
     b.fold_dep(&tree_sig)
         .fold_scalar("relax_cflags", RELAX_CFLAGS)
         .fold_scalar("suite", suite)
@@ -604,7 +622,9 @@ fn filter_libmali_targets(targets: &Path, variant: &str, step: &Step) -> Result<
     }
     std::fs::write(targets, &filtered).map_err(|s| EngineError::io(targets, s))?;
     let kept = filtered.lines().count();
-    step.log(format!("libmali: filtered to {kept} target(s) matching {variant}"));
+    step.log(format!(
+        "libmali: filtered to {kept} target(s) matching {variant}"
+    ));
     Ok(())
 }
 
@@ -674,18 +694,55 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
 
     #[test]
     fn package_signature_tracks_commit_and_name() {
-        let pin_a = GitPin { source: "s".into(), reference: "master".into(), commit: "c1".into() };
-        let pin_b = GitPin { source: "s".into(), reference: "master".into(), commit: "c2".into() };
-        let mpp_a = Package { name: "mpp", source: "", pin: &pin_a, deb_prefixes: &[] };
-        let mpp_a2 = Package { name: "mpp", source: "x", pin: &pin_a, deb_prefixes: &["y_"] };
-        let mpp_b = Package { name: "mpp", source: "", pin: &pin_b, deb_prefixes: &[] };
-        let rga_a = Package { name: "librga", source: "", pin: &pin_a, deb_prefixes: &[] };
+        let pin_a = GitPin {
+            source: "s".into(),
+            reference: "master".into(),
+            commit: "c1".into(),
+        };
+        let pin_b = GitPin {
+            source: "s".into(),
+            reference: "master".into(),
+            commit: "c2".into(),
+        };
+        let mpp_a = Package {
+            name: "mpp",
+            source: "",
+            pin: &pin_a,
+            deb_prefixes: &[],
+        };
+        let mpp_a2 = Package {
+            name: "mpp",
+            source: "x",
+            pin: &pin_a,
+            deb_prefixes: &["y_"],
+        };
+        let mpp_b = Package {
+            name: "mpp",
+            source: "",
+            pin: &pin_b,
+            deb_prefixes: &[],
+        };
+        let rga_a = Package {
+            name: "librga",
+            source: "",
+            pin: &pin_a,
+            deb_prefixes: &[],
+        };
         // Same commit → same signature (source/prefixes are not tree-shaping).
-        assert_eq!(package_signature(&mpp_a, None), package_signature(&mpp_a2, None));
+        assert_eq!(
+            package_signature(&mpp_a, None),
+            package_signature(&mpp_a2, None)
+        );
         // A commit bump invalidates the reused tree + debs.
-        assert_ne!(package_signature(&mpp_a, None), package_signature(&mpp_b, None));
+        assert_ne!(
+            package_signature(&mpp_a, None),
+            package_signature(&mpp_b, None)
+        );
         // Different packages at the same commit never collide.
-        assert_ne!(package_signature(&mpp_a, None), package_signature(&rga_a, None));
+        assert_ne!(
+            package_signature(&mpp_a, None),
+            package_signature(&rga_a, None)
+        );
     }
 
     #[test]
@@ -700,7 +757,12 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
             reference: "v1.5.0-1-20260121-750e76e".into(),
             commit: "750e76ec2d9287babfaf08c8bf395ebc5e8778ea".into(),
         };
-        let mpp = Package { name: "mpp", source: "", pin: &pin, deb_prefixes: &[] };
+        let mpp = Package {
+            name: "mpp",
+            source: "",
+            pin: &pin,
+            deb_prefixes: &[],
+        };
         let pin_at = |commit: &str| boot2deb_core::lock::PatchesPin {
             profiles: vec!["rk3588-accel".into()],
             source: "https://example.invalid/patches.git".into(),
@@ -708,30 +770,60 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
             commit: commit.into(),
         };
         let (pin1, pin2) = (pin_at("p1"), pin_at("p2"));
-        let p1 = PatchInputs { pin: Some(&pin1), patches: PatchSeries::Pinned };
-        let p2 = PatchInputs { pin: Some(&pin2), patches: PatchSeries::Pinned };
+        let p1 = PatchInputs {
+            pin: Some(&pin1),
+            patches: PatchSeries::Pinned,
+        };
+        let p2 = PatchInputs {
+            pin: Some(&pin2),
+            patches: PatchSeries::Pinned,
+        };
         let empty: Vec<String> = vec![];
         let p1_dev = PatchInputs {
             pin: Some(&pin1),
             patches: PatchSeries::Dev(&empty),
         };
         // Folding a patch series changes the tree signature vs an unpatched fetch...
-        assert_ne!(package_signature(&mpp, None), package_signature(&mpp, Some(&p1)));
+        assert_ne!(
+            package_signature(&mpp, None),
+            package_signature(&mpp, Some(&p1))
+        );
         // ...a patch-pin bump changes it again (a patch change restamps the tree)...
-        assert_ne!(package_signature(&mpp, Some(&p1)), package_signature(&mpp, Some(&p2)));
+        assert_ne!(
+            package_signature(&mpp, Some(&p1)),
+            package_signature(&mpp, Some(&p2))
+        );
         // ...and a co-dev build never shares a stamp with a pinned one.
-        assert_ne!(package_signature(&mpp, Some(&p1)), package_signature(&mpp, Some(&p1_dev)));
+        assert_ne!(
+            package_signature(&mpp, Some(&p1)),
+            package_signature(&mpp, Some(&p1_dev))
+        );
         // ...and a co-dev userspace-patch content change restamps the MPP tree.
         let fp1 = vec!["media-accel/userspace/001.patch=aaa".to_string()];
         let fp2 = vec!["media-accel/userspace/001.patch=bbb".to_string()];
-        let dev1 = PatchInputs { pin: Some(&pin1), patches: PatchSeries::Dev(&fp1) };
-        let dev2 = PatchInputs { pin: Some(&pin1), patches: PatchSeries::Dev(&fp2) };
-        assert_ne!(package_signature(&mpp, Some(&dev1)), package_signature(&mpp, Some(&dev2)));
+        let dev1 = PatchInputs {
+            pin: Some(&pin1),
+            patches: PatchSeries::Dev(&fp1),
+        };
+        let dev2 = PatchInputs {
+            pin: Some(&pin1),
+            patches: PatchSeries::Dev(&fp2),
+        };
+        assert_ne!(
+            package_signature(&mpp, Some(&dev1)),
+            package_signature(&mpp, Some(&dev2))
+        );
         // A build with no patch profile signs distinctly from every patched variant and
         // from an unpatched fetch — its MPP tree really is unpatched, but the node still
         // records that the scope was considered.
-        let none = PatchInputs { pin: None, patches: PatchSeries::Pinned };
-        assert_ne!(package_signature(&mpp, Some(&none)), package_signature(&mpp, Some(&p1)));
+        let none = PatchInputs {
+            pin: None,
+            patches: PatchSeries::Pinned,
+        };
+        assert_ne!(
+            package_signature(&mpp, Some(&none)),
+            package_signature(&mpp, Some(&p1))
+        );
     }
 
     #[test]
@@ -746,10 +838,22 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         // deb must not survive a fresh stage that produced 1.5.0.
         std::fs::write(out_dir.join("librockchip-mpp1_1.6.0_arm64.deb"), b"stale").unwrap();
         // Another stage's artifact in the shared out_dir stays untouched.
-        std::fs::write(out_dir.join("u-boot-turing-rk1_2026.04_arm64.deb"), b"other").unwrap();
-        std::fs::write(stage_root.join("librockchip-mpp1_1.5.0_arm64.deb"), b"fresh").unwrap();
+        std::fs::write(
+            out_dir.join("u-boot-turing-rk1_2026.04_arm64.deb"),
+            b"other",
+        )
+        .unwrap();
+        std::fs::write(
+            stage_root.join("librockchip-mpp1_1.5.0_arm64.deb"),
+            b"fresh",
+        )
+        .unwrap();
 
-        let pin = GitPin { source: "s".into(), reference: "c".into(), commit: "c".into() };
+        let pin = GitPin {
+            source: "s".into(),
+            reference: "c".into(),
+            commit: "c".into(),
+        };
         let mpp = Package {
             name: "mpp",
             source: "",
@@ -773,7 +877,11 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         let tmp = tempfile::tempdir().unwrap();
         let stage_root = tmp.path().join("userspace");
         std::fs::create_dir_all(&stage_root).unwrap();
-        let pin = GitPin { source: "s".into(), reference: "c".into(), commit: "c".into() };
+        let pin = GitPin {
+            source: "s".into(),
+            reference: "c".into(),
+            commit: "c".into(),
+        };
         let mpp = Package {
             name: "mpp",
             source: "",
@@ -826,7 +934,12 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         let arts = collect(&packages, &stage_root, &out, &step).unwrap();
         assert_eq!(arts.debs.len(), 3);
         // mpp deb staged before the rga debs (package order preserved).
-        assert!(arts.debs[0].file_name().unwrap().to_str().unwrap().starts_with("librockchip-mpp1_"));
+        assert!(arts.debs[0]
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("librockchip-mpp1_"));
         assert!(arts.debs.iter().all(|p| p.exists()));
     }
 
@@ -840,7 +953,11 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
                 deb_prefixes: &["librockchip-mpp1_"],
             }
         }
-        let pin = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
+        let pin = |c: &str| GitPin {
+            source: "s".into(),
+            reference: "r".into(),
+            commit: c.into(),
+        };
         let p1 = pin("c1");
         let sig = |pkg: &Package, suite: &str, arch: &str| {
             package_output_manifest(pkg, suite, arch, None).signature
@@ -861,13 +978,21 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
             reference: "main".into(),
             commit: "pc1".into(),
         };
-        let patches = PatchInputs { pin: Some(&pc1), patches: PatchSeries::Pinned };
+        let patches = PatchInputs {
+            pin: Some(&pc1),
+            patches: PatchSeries::Pinned,
+        };
         assert_ne!(
             base,
             package_output_manifest(&mpp(&p1), "forky", "arm64", Some(&patches)).signature
         );
         // Distinct packages never share an output entry (their node names differ).
-        let rga = Package { name: "librga", source: "", pin: &p1, deb_prefixes: &["librga2_"] };
+        let rga = Package {
+            name: "librga",
+            source: "",
+            pin: &p1,
+            deb_prefixes: &["librga2_"],
+        };
         assert_ne!(base, sig(&rga, "forky", "arm64"));
     }
 }

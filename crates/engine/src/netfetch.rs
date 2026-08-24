@@ -37,7 +37,10 @@ pub fn fetch_bounded(url: &str, max_bytes: u64, timeout: Duration) -> Result<Vec
     require_http(url)?;
     // Auto-redirect off: we follow manually so each hop passes the scheme/downgrade
     // policy before it is requested.
-    let agent = ureq::AgentBuilder::new().timeout(timeout).redirects(0).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(timeout)
+        .redirects(0)
+        .build();
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         let resp = agent
@@ -46,9 +49,12 @@ pub fn fetch_bounded(url: &str, max_bytes: u64, timeout: Duration) -> Result<Vec
             .map_err(|e| FetchError(e.to_string()))?;
         // ureq returns Err for >=400, so an Ok response is 2xx or (redirects off) 3xx.
         if (300..400).contains(&resp.status()) {
-            let loc = resp
-                .header("Location")
-                .ok_or_else(|| FetchError(format!("redirect {} without a Location header", resp.status())))?;
+            let loc = resp.header("Location").ok_or_else(|| {
+                FetchError(format!(
+                    "redirect {} without a Location header",
+                    resp.status()
+                ))
+            })?;
             let next = resolve_redirect(&current, loc)?;
             require_http(&next)?;
             reject_downgrade(&current, &next)?;
@@ -68,7 +74,9 @@ pub fn fetch_bounded(url: &str, max_bytes: u64, timeout: Duration) -> Result<Vec
         }
         return Ok(bytes);
     }
-    Err(FetchError(format!("too many redirects (more than {MAX_REDIRECTS})")))
+    Err(FetchError(format!(
+        "too many redirects (more than {MAX_REDIRECTS})"
+    )))
 }
 
 /// Refuse a URL whose scheme is not `http`/`https` — nothing else is a valid fetch
@@ -111,8 +119,10 @@ fn resolve_redirect(base: &str, loc: &str) -> Result<String, FetchError> {
         format!("{}{rest}", &base[..scheme_end])
     } else {
         // Split scheme://authority from the path portion.
-        let authority_len =
-            base[scheme_end..].find('/').map(|i| scheme_end + i).unwrap_or(base.len());
+        let authority_len = base[scheme_end..]
+            .find('/')
+            .map(|i| scheme_end + i)
+            .unwrap_or(base.len());
         let scheme_authority = &base[..authority_len];
         if loc.starts_with('/') {
             format!("{scheme_authority}{loc}")
@@ -120,7 +130,11 @@ fn resolve_redirect(base: &str, loc: &str) -> Result<String, FetchError> {
             // Path-relative: replace the last path segment of the base.
             let dir_end = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
             // Never let the relative join fall back into the authority separator.
-            let dir = if dir_end < authority_len { authority_len } else { dir_end };
+            let dir = if dir_end < authority_len {
+                authority_len
+            } else {
+                dir_end
+            };
             format!("{}{loc}", &base[..dir])
         }
     };
@@ -144,7 +158,11 @@ fn normalize_url_path(url: &str) -> Result<String, FetchError> {
         None => (url.len(), ""),
     };
     let path = &url[path_start..path_end];
-    Ok(format!("{}{}{tail}", &url[..path_start], normalize_dot_segments(path)))
+    Ok(format!(
+        "{}{}{tail}",
+        &url[..path_start],
+        normalize_dot_segments(path)
+    ))
 }
 
 /// Remove `.`/`..` segments from an absolute URL path (RFC 3986 section 5.2.4),
@@ -177,7 +195,11 @@ mod tests {
 
     /// Serve one HTTP response (status + optional Location + body) on an ephemeral
     /// localhost port. Hermetic: no external network.
-    fn serve_once(status_line: &'static str, extra_headers: String, body: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+    fn serve_once(
+        status_line: &'static str,
+        extra_headers: String,
+        body: Vec<u8>,
+    ) -> (String, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}/thing");

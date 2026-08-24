@@ -31,7 +31,10 @@ pub(crate) fn print_event(event: &Event) {
 /// ([`Event`]'s serde tagging is the schema).
 pub(crate) fn print_event_json(event: &Event) {
     // Event serialization cannot fail (string/enum fields only).
-    println!("{}", serde_json::to_string(event).expect("event serializes"));
+    println!(
+        "{}",
+        serde_json::to_string(event).expect("event serializes")
+    );
 }
 
 /// Report one produced artifact on the build stream ([`Event::Artifact`]): the
@@ -109,7 +112,11 @@ pub(crate) fn constraint<T: std::fmt::Display>(items: &[T]) -> String {
     if items.is_empty() {
         "any".to_string()
     } else {
-        items.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+        items
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -140,7 +147,10 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     // config inputs, a distro one by the package that installs it.
     match &b.kernel {
         Some(ResolvedKernel::Compiled(k)) => {
-            println!("kernel       : {} ({}, base {})", k.id, k.flavor, k.base_defconfig);
+            println!(
+                "kernel       : {} ({}, base {})",
+                k.id, k.flavor, k.base_defconfig
+            );
             println!("  track      : {}", k.track.as_deref().unwrap_or("-"));
             println!(
                 "  profiles   : {}",
@@ -154,7 +164,10 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
         }
         Some(ResolvedKernel::Distro(k)) => {
             println!("kernel       : {} (distro-package)", k.id);
-            println!("  package    : {} (version pinned in the package manifest)", k.package);
+            println!(
+                "  package    : {} (version pinned in the package manifest)",
+                k.package
+            );
         }
         None => println!("kernel       : (none — u-boot-only build)"),
     }
@@ -164,7 +177,11 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     }
     println!(
         "features     : {}",
-        if b.features.is_empty() { "-".to_string() } else { b.features.join(", ") }
+        if b.features.is_empty() {
+            "-".to_string()
+        } else {
+            b.features.join(", ")
+        }
     );
     println!("rootfs pkgs  : {}", b.rootfs_packages.join(", "));
     if !b.apt_sources.is_empty() {
@@ -190,7 +207,11 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     println!("layout       : {}", b.layout);
     println!("image size   : {}", b.image_size);
     println!("hostname     : {}", b.hostname);
-    println!("locale       : {} (generated: {})", b.locale, b.locales_generate.join(", "));
+    println!(
+        "locale       : {} (generated: {})",
+        b.locale,
+        b.locales_generate.join(", ")
+    );
     println!("timezone     : {}", b.timezone);
     // A headless board has no keymap and prints none — an empty line would suggest the
     // knob exists and was left blank, when in fact Debian's default is what ships.
@@ -216,7 +237,10 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     // gap, the other signs a kernel into a partition the firmware picks by its bits.
     match &b.boot {
         ResolvedBoot::RockchipRkbin(boot) => {
-            println!("u-boot       : {} ({})", boot.uboot_ref, boot.uboot_defconfig);
+            println!(
+                "u-boot       : {} ({})",
+                boot.uboot_ref, boot.uboot_defconfig
+            );
             println!(
                 "u-boot prof  : {}",
                 boot.uboot_profile.as_deref().unwrap_or("none (pristine)")
@@ -278,7 +302,10 @@ mod tests {
 
     #[test]
     fn short_truncates_on_character_boundaries() {
-        assert_eq!(short("c9acdc466e9aa96352f658b9276aa8a45b8e817d"), "c9acdc466e9a");
+        assert_eq!(
+            short("c9acdc466e9aa96352f658b9276aa8a45b8e817d"),
+            "c9acdc466e9a"
+        );
         assert_eq!(short("abc"), "abc");
         // Multibyte input truncates by characters, not bytes.
         assert_eq!(short("ééééééééééééééé"), "éééééééééééé");
@@ -294,6 +321,9 @@ mod tests {
     #[test]
     fn constraint_renders_an_empty_list_as_any() {
         assert_eq!(constraint::<String>(&[]), "any");
-        assert_eq!(constraint(&["arm64".to_string(), "riscv64".to_string()]), "arm64,riscv64");
+        assert_eq!(
+            constraint(&["arm64".to_string(), "riscv64".to_string()]),
+            "arm64,riscv64"
+        );
     }
 }

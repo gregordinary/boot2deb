@@ -36,7 +36,10 @@ pub(crate) fn run(
             build.arch
         );
     } else {
-        println!("cross     : no — native {} build, no qemu-user needed", build.arch);
+        println!(
+            "cross     : no — native {} build, no qemu-user needed",
+            build.arch
+        );
     }
 
     // Tool-presence preflight: report each requirement with its path or a
@@ -83,7 +86,9 @@ pub(crate) fn run(
     println!();
     println!("trust anchors (apt keyrings verified against blobs/keyrings/*.fingerprints):");
     let mut anchors: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(archive) = root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", false)? {
+    if let Some(archive) =
+        root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", false)?
+    {
         anchors.push(archive);
     }
     for source in &build.apt_sources {
@@ -111,6 +116,9 @@ pub(crate) fn run(
         println!("result    : all required host tools present");
         Ok(())
     } else {
-        Err(format!("{blocking} required host tool(s) missing — install them before building").into())
+        Err(
+            format!("{blocking} required host tool(s) missing — install them before building")
+                .into(),
+        )
     }
 }

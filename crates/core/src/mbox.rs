@@ -248,7 +248,15 @@ fn normalize_git_show(text: &str, meta: &ImportMeta) -> Result<Normalized, Confi
         .unwrap_or_else(|| DEFAULT_AUTHOR.to_string());
 
     Ok(Normalized {
-        mbox: render_mbox(&sha, &author, date.as_deref(), &subject, &body, meta.origin.as_deref(), &diff),
+        mbox: render_mbox(
+            &sha,
+            &author,
+            date.as_deref(),
+            &subject,
+            &body,
+            meta.origin.as_deref(),
+            &diff,
+        ),
         subject,
         kind: PatchKind::GitShow,
     })
@@ -269,10 +277,21 @@ fn normalize_bare_diff(text: &str, meta: &ImportMeta) -> Result<Normalized, Conf
         Some(s) => s.trim().to_string(),
         None => derive_subject(&diff).ok_or(ConfigError::PatchMissingSubject)?,
     };
-    let author = meta.author.clone().unwrap_or_else(|| DEFAULT_AUTHOR.to_string());
+    let author = meta
+        .author
+        .clone()
+        .unwrap_or_else(|| DEFAULT_AUTHOR.to_string());
 
     Ok(Normalized {
-        mbox: render_mbox(&"0".repeat(40), &author, None, &subject, "", meta.origin.as_deref(), &diff),
+        mbox: render_mbox(
+            &"0".repeat(40),
+            &author,
+            None,
+            &subject,
+            "",
+            meta.origin.as_deref(),
+            &diff,
+        ),
         subject,
         kind: PatchKind::BareDiff,
     })
@@ -515,7 +534,9 @@ mod tests {
     fn header_only_email_gets_a_synthetic_separator() {
         let input = format!("From: A <a@a>\nSubject: [PATCH] tidy\n\nmsg\n---\n{DIFF}");
         let n = normalize(&input, &ImportMeta::default()).unwrap();
-        assert!(n.mbox.starts_with("From 0000000000000000000000000000000000000000 Mon Sep 17"));
+        assert!(n
+            .mbox
+            .starts_with("From 0000000000000000000000000000000000000000 Mon Sep 17"));
         assert!(n.mbox.contains("Subject: [PATCH] tidy"));
         assert_eq!(n.subject, "tidy");
     }
@@ -538,9 +559,13 @@ mod tests {
         ));
         assert!(n.mbox.contains("From: Jane Dev <jane@example.org>\n"));
         assert!(n.mbox.contains("Date: Sat May 9 19:54:04 2026 -0400\n"));
-        assert!(n.mbox.contains("Subject: [PATCH] rga3: forward-port to 7.1\n"));
+        assert!(n
+            .mbox
+            .contains("Subject: [PATCH] rga3: forward-port to 7.1\n"));
         // Body dedented, and the diff carried under a synthesized `---` cut.
-        assert!(n.mbox.contains("\nThree API adjustments.\nSecond body line.\n"));
+        assert!(n
+            .mbox
+            .contains("\nThree API adjustments.\nSecond body line.\n"));
         assert!(n.mbox.contains("\n---\ndiff --git a/foo.c b/foo.c\n"));
     }
 
@@ -550,7 +575,9 @@ mod tests {
         assert_eq!(n.kind, PatchKind::BareDiff);
         // Subject derived from the first changed file.
         assert_eq!(n.subject, "update foo.c");
-        assert!(n.mbox.starts_with("From 0000000000000000000000000000000000000000 Mon Sep 17"));
+        assert!(n
+            .mbox
+            .starts_with("From 0000000000000000000000000000000000000000 Mon Sep 17"));
         assert!(n.mbox.contains("From: boot2deb import <import@boot2deb>\n"));
         assert!(n.mbox.contains("Subject: [PATCH] update foo.c\n\n---\n"));
         assert!(n.mbox.contains("diff --git a/foo.c b/foo.c"));
@@ -590,9 +617,15 @@ mod tests {
 
     #[test]
     fn empty_and_diffless_inputs_are_rejected() {
-        assert!(matches!(normalize("   \n", &ImportMeta::default()), Err(ConfigError::PatchEmpty)));
+        assert!(matches!(
+            normalize("   \n", &ImportMeta::default()),
+            Err(ConfigError::PatchEmpty)
+        ));
         let no_diff = "From: A <a@a>\nSubject: [PATCH] x\n\njust prose, no diff\n";
-        assert!(matches!(normalize(no_diff, &ImportMeta::default()), Err(ConfigError::PatchNoDiff)));
+        assert!(matches!(
+            normalize(no_diff, &ImportMeta::default()),
+            Err(ConfigError::PatchNoDiff)
+        ));
     }
 
     #[test]
@@ -612,7 +645,8 @@ mod tests {
         assert_eq!(slugify("  Trim -- Me  "), "trim-me");
         assert_eq!(slugify("!!!"), "patch");
         // Long subject caps at a word boundary, ≤60 chars.
-        let long = slugify("one two three four five six seven eight nine ten eleven twelve thirteen");
+        let long =
+            slugify("one two three four five six seven eight nine ten eleven twelve thirteen");
         assert!(long.len() <= 60, "len {}", long.len());
         assert!(!long.ends_with('-'));
     }
@@ -644,7 +678,10 @@ mod tests {
              @@ -1 +1 @@\n-x\n+y\n";
         let n = normalize(input, &ImportMeta::default()).unwrap();
         // Folded subject unfolded for the label.
-        assert_eq!(n.subject, "lavfi/rkrga: accept v4l2-request 10-bit (NV15/NV20)");
+        assert_eq!(
+            n.subject,
+            "lavfi/rkrga: accept v4l2-request 10-bit (NV15/NV20)"
+        );
         // Canonical, byte-for-byte pass-through.
         assert_eq!(n.mbox, input);
     }

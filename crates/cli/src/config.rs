@@ -13,13 +13,20 @@ use boot2deb_engine::rootfs;
 use boot2deb_engine::{image, patchfetch, pins, EngineError, EventSink};
 use std::path::{Path, PathBuf};
 
+/// Every lookup here fails with a message for the operator, not a type the caller
+/// matches on — a missing fragment or an unvendored keyring is a config mistake to
+/// print, not a variant to branch on. Shadows the prelude `Result`; [`resolve`], which
+/// returns a [`ConfigError`](boot2deb_core::ConfigError) callers do inspect, spells out
+/// `std::result::Result`.
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
 /// Structural check that the primary `--root` points at a boot2deb config tree —
 /// `base.toml` plus a `devices/` directory — run before any command dispatches
 /// against it. Only the primary root is checked: overlays are partial by design
 /// (a single retuned layer file is a valid overlay). The message shows the
 /// absolutized path, since the offending value is usually the implicit default
 /// `.` and "`.` not found" names nothing.
-pub(crate) fn ensure_config_root(root: &ConfigRoot) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn ensure_config_root(root: &ConfigRoot) -> Result<()> {
     let primary = root.path();
     if primary.join("base.toml").is_file() && primary.join("devices").is_dir() {
         return Ok(());
@@ -38,7 +45,7 @@ pub(crate) fn resolve(
     root: &ConfigRoot,
     target: &str,
     overrides: Overrides,
-) -> Result<ResolvedBuild, boot2deb_core::ConfigError> {
+) -> std::result::Result<ResolvedBuild, boot2deb_core::ConfigError> {
     let is_recipe = root.list_recipes()?.iter().any(|n| n == target);
     // A `/` is unambiguously a recipe reference — devices are flat — so route a
     // slashed target to recipe resolution even when it names no recipe: a "recipe not
@@ -66,10 +73,7 @@ pub(crate) fn resolve(
 /// stage compiles) — a bad `rootfs_offset`, a typo'd fragment name, or a missing
 /// keyring surfaces at resolution rather than deep in the build, the same
 /// fail-early discipline as the device/kernel/suite checks.
-pub(crate) fn preflight_config(
-    root: &ConfigRoot,
-    build: &ResolvedBuild,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn preflight_config(root: &ConfigRoot, build: &ResolvedBuild) -> Result<()> {
     image::validate_geometry(build)?;
     // Resolve each fragment purely to assert it exists; the paths are re-resolved where
     // the kernel stage actually consumes them.
@@ -87,10 +91,7 @@ pub(crate) fn preflight_config(
 /// along the config search path, erroring if any is missing. An overlay may
 /// ship the fragments for a device/kernel it adds; the highest-precedence copy
 /// wins.
-pub(crate) fn fragment_paths(
-    root: &ConfigRoot,
-    build: &ResolvedBuild,
-) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+pub(crate) fn fragment_paths(root: &ConfigRoot, build: &ResolvedBuild) -> Result<Vec<PathBuf>> {
     // A distro kernel merges no fragments — Debian owns its config — so it resolves
     // to an empty list rather than an error.
     let Some(kernel) = build.kernel.as_ref().and_then(|k| k.compiled()) else {
@@ -111,10 +112,7 @@ pub(crate) fn fragment_paths(
 /// erroring if any is missing. The entries are already validated at resolution
 /// to be contained, relative `.dts`/`.dtsi` paths; an overlay commonly ships them for
 /// the device it adds, and the highest-precedence copy wins as for any other asset.
-pub(crate) fn device_dts_paths(
-    root: &ConfigRoot,
-    build: &ResolvedBuild,
-) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+pub(crate) fn device_dts_paths(root: &ConfigRoot, build: &ResolvedBuild) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for rel in &build.device_dts {
         let path = root.find_asset(rel).ok_or_else(|| {
@@ -136,7 +134,7 @@ pub(crate) fn device_dts_paths(
 pub(crate) fn kmod_local_patches(
     root: &ConfigRoot,
     build: &ResolvedBuild,
-) -> Result<Vec<(String, Vec<PathBuf>)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<(String, Vec<PathBuf>)>> {
     let mut out = Vec::with_capacity(build.device_kmods.len());
     for kmod in &build.device_kmods {
         let mut paths = Vec::with_capacity(kmod.local_patches.len());
@@ -168,7 +166,7 @@ pub(crate) fn kmod_local_patches(
 pub(crate) fn apt_source_keyrings<'a>(
     root: &ConfigRoot,
     sources: &'a [boot2deb_core::model::AptSource],
-) -> Result<Vec<rootfs::AptRepo<'a>>, Box<dyn std::error::Error>> {
+) -> Result<Vec<rootfs::AptRepo<'a>>> {
     let mut repos = Vec::with_capacity(sources.len());
     for source in sources {
         let rel = format!("blobs/keyrings/{}", source.signed_by);
@@ -217,7 +215,9 @@ pub(crate) fn overlay_dirs(
     for feature in &b.features {
         rels.push(format!("features/{feature}/{dir}"));
     }
-    rels.iter().flat_map(|rel| root.find_asset_all(rel)).collect()
+    rels.iter()
+        .flat_map(|rel| root.find_asset_all(rel))
+        .collect()
 }
 
 /// When a layer's overlay tree is laid into the rootfs.
@@ -277,7 +277,7 @@ pub(crate) fn fetch_verify_tree(
     what: &str,
     cache_root: &Path,
     sink: &dyn EventSink,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+) -> Result<PathBuf> {
     let step = Step::start(sink, "fetch-source");
     let tree =
         boot2deb_engine::srcfetch::ensure_tree(source, reference, commit, what, cache_root, &step)?;
@@ -312,7 +312,7 @@ pub(crate) fn resolve_patches_source(
     pin: &boot2deb_core::lock::PatchesPin,
     root: &ConfigRoot,
     sink: &dyn EventSink,
-) -> Result<(PathBuf, bool), Box<dyn std::error::Error>> {
+) -> Result<(PathBuf, bool)> {
     if let Some(path) = patches_path {
         return Ok((path.to_path_buf(), true));
     }
@@ -322,7 +322,13 @@ pub(crate) fn resolve_patches_source(
     }
     let url = patches_url
         .map(str::to_string)
-        .or_else(|| resolved.kernel.as_ref().and_then(|k| k.compiled()).and_then(|k| k.patches_url.clone()))
+        .or_else(|| {
+            resolved
+                .kernel
+                .as_ref()
+                .and_then(|k| k.compiled())
+                .and_then(|k| k.patches_url.clone())
+        })
         .ok_or_else(|| EngineError::PatchesNoSource {
             commit: pin.commit.clone(),
         })?;
@@ -355,12 +361,15 @@ pub(crate) struct SourceAxis<'a> {
 pub(crate) fn source_axes<'a>(
     build: &ResolvedBuild,
     lock: &'a boot2deb_core::lock::Lock,
-) -> Result<Vec<SourceAxis<'a>>, Box<dyn std::error::Error>> {
+) -> Result<Vec<SourceAxis<'a>>> {
     // Only sources the build actually fetches from git have a re-fetch durability to
     // report. A distro-package kernel is installed from the mirror and a depthcharge
     // board builds no bootloader, so neither contributes an axis.
     let mut axes = Vec::new();
-    if let (Some(kernel), Some(pin)) = (build.kernel.as_ref().and_then(|k| k.compiled()), &lock.kernel) {
+    if let (Some(kernel), Some(pin)) = (
+        build.kernel.as_ref().and_then(|k| k.compiled()),
+        &lock.kernel,
+    ) {
         axes.push(SourceAxis {
             name: "kernel".into(),
             url: pins::kernel_source_url(&kernel.source)?,
@@ -461,15 +470,22 @@ mod tests {
         if let boot2deb_core::model::ResolvedBoot::RockchipRkbin(boot) = &mut bad_geom.boot {
             boot.offsets.rootfs = "1".to_string();
         }
-        assert!(preflight_config(&root, &bad_geom).is_err(), "bad geometry must fail preflight");
+        assert!(
+            preflight_config(&root, &bad_geom).is_err(),
+            "bad geometry must fail preflight"
+        );
 
         // A referenced-but-missing kernel fragment is rejected.
         let mut bad_frag = resolved.clone();
         if let Some(boot2deb_core::model::ResolvedKernel::Compiled(k)) = &mut bad_frag.kernel {
-            k.config_fragments.push("definitely-no-such-fragment".to_string());
+            k.config_fragments
+                .push("definitely-no-such-fragment".to_string());
         }
         let err = preflight_config(&root, &bad_frag).unwrap_err().to_string();
-        assert!(err.contains("fragment not found"), "expected a fragment error, got: {err}");
+        assert!(
+            err.contains("fragment not found"),
+            "expected a fragment error, got: {err}"
+        );
 
         // A declared apt source whose signing keyring is not vendored is rejected at
         // preflight, not after the compile stages.
@@ -510,8 +526,13 @@ mod tests {
         // --root remedy — the one clear error that replaces the per-command
         // "not found" cascade.
         let dir = tempfile::tempdir().unwrap();
-        let err = ensure_config_root(&ConfigRoot::new(dir.path())).unwrap_err().to_string();
-        assert!(err.contains("does not look like a boot2deb config root"), "{err}");
+        let err = ensure_config_root(&ConfigRoot::new(dir.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("does not look like a boot2deb config root"),
+            "{err}"
+        );
         assert!(err.contains("--root"), "remedy names the flag: {err}");
         // base.toml alone is not enough — devices/ must exist too.
         std::fs::write(dir.path().join("base.toml"), "packages = []\n").unwrap();
@@ -534,9 +555,19 @@ mod tests {
         let names: Vec<&str> = axes.iter().map(|a| a.name.as_ref()).collect();
         assert_eq!(
             names,
-            ["kernel", "u-boot", "mpp", "librga", "libmali", "ffmpeg-base", "patches"]
+            [
+                "kernel",
+                "u-boot",
+                "mpp",
+                "librga",
+                "libmali",
+                "ffmpeg-base",
+                "patches"
+            ]
         );
-        assert!(axes.iter().all(|a| !a.url.is_empty() && !a.commit.is_empty()));
+        assert!(axes
+            .iter()
+            .all(|a| !a.url.is_empty() && !a.commit.is_empty()));
         // The patches axis is the reason the pin carries a source at all: `update`
         // takes its commit from a local HEAD, so it is the likeliest of any axis to
         // name something unreachable, and it could not be graded until now.
@@ -554,8 +585,7 @@ mod tests {
         // and nothing else, and every runtime file it needs belongs to the board it
         // extends.
         let root = repo_root();
-        let variant =
-            resolve_device(&root, "h96-max-m9-npu", &Overrides::default()).unwrap();
+        let variant = resolve_device(&root, "h96-max-m9-npu", &Overrides::default()).unwrap();
         assert_eq!(variant.device_lineage, ["h96-max-m9", "h96-max-m9-npu"]);
 
         let dirs = overlay_dirs(&root, &variant, OverlayStage::Customize);
@@ -577,7 +607,9 @@ mod tests {
         // tree here, so the check is that it precedes where the variant's would sit.
         let parent_at = dirs.iter().position(|d| d == &base_tree).unwrap();
         assert!(
-            dirs[..parent_at].iter().all(|d| !d.ends_with("devices/h96-max-m9-npu/overlay")),
+            dirs[..parent_at]
+                .iter()
+                .all(|d| !d.ends_with("devices/h96-max-m9-npu/overlay")),
             "the variant's own tree must not precede what it extends"
         );
 
@@ -588,7 +620,9 @@ mod tests {
         let base_dirs = overlay_dirs(&root, &base, OverlayStage::Customize);
         assert!(base_dirs.contains(&base_tree));
         assert!(
-            !base_dirs.iter().any(|d| d.ends_with("devices/h96-max-m9-npu/overlay")),
+            !base_dirs
+                .iter()
+                .any(|d| d.ends_with("devices/h96-max-m9-npu/overlay")),
             "a board must not pick up its variant's tree"
         );
     }
@@ -607,7 +641,10 @@ mod tests {
             "the NPU variant's kmods must be exactly what it extends"
         );
         assert_eq!(
-            base.device_kmods.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+            base.device_kmods
+                .iter()
+                .map(|k| k.name.as_str())
+                .collect::<Vec<_>>(),
             ["aic8800"]
         );
     }
@@ -627,8 +664,13 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_str().unwrap())
             .collect();
-        assert_eq!(names, ["0001-sdio-linux-7.1.patch", "0002-quiet-log-level.patch"]);
+        assert_eq!(
+            names,
+            ["0001-sdio-linux-7.1.patch", "0002-quiet-log-level.patch"]
+        );
         assert!(paths.iter().all(|p| p.is_absolute() && p.is_file()));
-        assert!(paths.iter().all(|p| p.parent().unwrap().ends_with("kmods/aic8800/patches")));
+        assert!(paths
+            .iter()
+            .all(|p| p.parent().unwrap().ends_with("kmods/aic8800/patches")));
     }
 }

@@ -46,11 +46,12 @@ pub fn resolve_mirrors(
     match mode {
         SnapshotMode::Off => Ok(vec![base_mirror.to_string()]),
         SnapshotMode::Fallback | SnapshotMode::Pin => {
-            let ts = snapshot
-                .map(|s| s.timestamp.as_str())
-                .ok_or(EngineError::SnapshotUnavailable {
-                    mode: mode.as_str(),
-                })?;
+            let ts =
+                snapshot
+                    .map(|s| s.timestamp.as_str())
+                    .ok_or(EngineError::SnapshotUnavailable {
+                        mode: mode.as_str(),
+                    })?;
             let snap = snapshot_mirror(ts);
             Ok(match mode {
                 SnapshotMode::Pin => vec![snap],

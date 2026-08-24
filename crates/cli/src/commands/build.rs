@@ -110,7 +110,8 @@ pub(crate) fn run(
     boot2deb_engine::gc::sweep_stale_temps(&out_dir);
     let blobs_dir = args.blobs_dir.clone().unwrap_or_else(|| {
         let rel = format!("blobs/{}", resolved.soc.as_str());
-        root.find_asset(&rel).unwrap_or_else(|| root.path().join(rel))
+        root.find_asset(&rel)
+            .unwrap_or_else(|| root.path().join(rel))
     });
     // Which compile nodes this build even has. Both are properties of the resolved
     // build, not of the stage flags: a distro-package kernel is installed from the
@@ -121,7 +122,10 @@ pub(crate) fn run(
     let compiles_kernel = resolved.compiles_kernel();
     let builds_uboot = resolved.rkbin_boot().is_some();
 
-    let kernel_src = match (&args.kernel_src, resolved.kernel.as_ref().and_then(|k| k.compiled())) {
+    let kernel_src = match (
+        &args.kernel_src,
+        resolved.kernel.as_ref().and_then(|k| k.compiled()),
+    ) {
         (Some(s), _) => s.clone(),
         (None, Some(k)) => pins::kernel_source_url(&k.source)?,
         // Not fetched: a distro kernel has no source tree.
@@ -145,8 +149,8 @@ pub(crate) fn run(
     // by each node's output signature. The host toolchain identity is folded into the
     // kernel/u-boot output signatures, so probe it once here (skipped when the cache
     // is off — its value then keys nothing).
-    let artifact_store: Option<PathBuf> = (!args.no_artifact_cache)
-        .then(|| absolutize(root.path().join("cache").join("artifacts")));
+    let artifact_store: Option<PathBuf> =
+        (!args.no_artifact_cache).then(|| absolutize(root.path().join("cache").join("artifacts")));
     let build_env = BuildEnv {
         toolchain_id: if artifact_store.is_some() {
             boot2deb_engine::toolchain::host_cc_identity(cross_compile.as_deref())
@@ -209,9 +213,10 @@ pub(crate) fn run(
     // stages that use it run only on a media-accel image build. A u-boot-only build
     // resolves no suite and stands up no sandbox.
     let sandbox: Option<Box<dyn BuildSandbox>> = resolved.suite.as_ref().map(|suite| {
-        let rootfs = work_dir
-            .join("sandbox")
-            .join(format!("{}-{}", resolved.arch.debian_arch(), suite));
+        let rootfs =
+            work_dir
+                .join("sandbox")
+                .join(format!("{}-{}", resolved.arch.debian_arch(), suite));
         Box::new(RootlessSandbox::new(
             rootfs,
             suite.clone(),
@@ -322,7 +327,11 @@ pub(crate) fn run(
             "recipe '{recipe}' uses kernel '{}', which is a distro package installed from \
              the Debian mirror — there is no kernel tree to compile, so the requested \
              stage has nothing to build",
-            resolved.kernel.as_ref().map(|k| k.id()).unwrap_or("(none — u-boot-only recipe)")
+            resolved
+                .kernel
+                .as_ref()
+                .map(|k| k.id())
+                .unwrap_or("(none — u-boot-only recipe)")
         )
         .into());
     }
@@ -350,24 +359,31 @@ pub(crate) fn run(
     // these stages. The fragment/dts Vecs are bound first so the borrowed
     // `KernelOptions` outlives both stage blocks.
     let kernel_inputs = if compiles_kernel {
-        Some((fragment_paths(root, &resolved)?, device_dts_paths(root, &resolved)?))
+        Some((
+            fragment_paths(root, &resolved)?,
+            device_dts_paths(root, &resolved)?,
+        ))
     } else {
         None
     };
-    let kernel_opts = kernel_inputs.as_ref().map(|(fragments, device_dts)| kernel::KernelOptions {
-        source: &kernel_src,
-        patches: kernel_patches,
-        fragments,
-        device_dts,
-        work_dir: &work_dir,
-        out_dir: &out_dir,
-        store: artifact_store.as_deref(),
-    });
+    let kernel_opts = kernel_inputs
+        .as_ref()
+        .map(|(fragments, device_dts)| kernel::KernelOptions {
+            source: &kernel_src,
+            patches: kernel_patches,
+            fragments,
+            device_dts,
+            work_dir: &work_dir,
+            out_dir: &out_dir,
+            store: artifact_store.as_deref(),
+        });
 
     // The kernel stage and the DTB fast path share every filesystem input; both
     // prepare the same `<work>/linux` tree.
     if matches!(args.stage, StageArg::All | StageArg::Kernel | StageArg::Dtb) && compiles_kernel {
-        let opts = kernel_opts.as_ref().expect("a kernel-compiling build resolved kernel options");
+        let opts = kernel_opts
+            .as_ref()
+            .expect("a kernel-compiling build resolved kernel options");
         if matches!(args.stage, StageArg::Dtb) {
             let dtb = kernel::build_dtb(&resolved, &lock, opts, &build_env, &sink)?;
             emit_artifact(&sink, "dtb", "dtb", &dtb);
@@ -398,7 +414,9 @@ pub(crate) fn run(
     }
     let mut kmod_debs: Vec<PathBuf> = Vec::new();
     if matches!(args.stage, StageArg::All | StageArg::Kmod) && compiles_kernel && has_kmods {
-        let kernel = kernel_opts.as_ref().expect("a kernel-compiling build resolved kernel options");
+        let kernel = kernel_opts
+            .as_ref()
+            .expect("a kernel-compiling build resolved kernel options");
         // The device's boot2deb-side compat patches (e.g. the SDIO-7.1 shim), resolved
         // from config-root-relative to absolute along the config search path.
         let local_patches = kmod_local_patches(root, &resolved)?;
@@ -473,11 +491,16 @@ pub(crate) fn run(
     }
 
     if matches!(args.stage, StageArg::All | StageArg::Userspace) && media_accel {
-        let us = resolved.userspace.as_ref().expect("media-accel build has userspace sources");
+        let us = resolved
+            .userspace
+            .as_ref()
+            .expect("media-accel build has userspace sources");
         // A tree the SoC does not declare has no clone source; the userspace stage
         // skips it, so the empty string is never read.
         let src = |flag: &Option<String>, decl: &Option<boot2deb_core::model::GitSource>| {
-            flag.clone().or_else(|| decl.as_ref().map(|s| s.git.clone())).unwrap_or_default()
+            flag.clone()
+                .or_else(|| decl.as_ref().map(|s| s.git.clone()))
+                .unwrap_or_default()
         };
         let mpp_src = src(&args.mpp_src, &us.mpp);
         let librga_src = src(&args.librga_src, &us.librga);
@@ -497,7 +520,9 @@ pub(crate) fn run(
             &opts,
             resolved.arch.debian_arch(),
             &build_env,
-            sandbox.as_deref().expect("a media-accel build resolves a suite and a sandbox"),
+            sandbox
+                .as_deref()
+                .expect("a media-accel build resolves a suite and a sandbox"),
             &sink,
         )?;
         for deb in &artifacts.debs {
@@ -507,8 +532,14 @@ pub(crate) fn run(
     }
 
     if matches!(args.stage, StageArg::All | StageArg::Ffmpeg) && media_accel {
-        let ff = resolved.ffmpeg.as_ref().expect("media-accel build has ffmpeg sources");
-        let ffmpeg_base_src = args.ffmpeg_base_src.clone().unwrap_or_else(|| ff.base.git.clone());
+        let ff = resolved
+            .ffmpeg
+            .as_ref()
+            .expect("media-accel build has ffmpeg sources");
+        let ffmpeg_base_src = args
+            .ffmpeg_base_src
+            .clone()
+            .unwrap_or_else(|| ff.base.git.clone());
         // ffmpeg build-depends on the userspace .debs; they are staged in
         // out_dir by the userspace stage (run it first, or with --stage all).
         let opts = ffmpeg::FfmpegOptions {
@@ -524,7 +555,9 @@ pub(crate) fn run(
             &opts,
             resolved.arch.debian_arch(),
             &build_env,
-            sandbox.as_deref().expect("a media-accel build resolves a suite and a sandbox"),
+            sandbox
+                .as_deref()
+                .expect("a media-accel build resolves a suite and a sandbox"),
             &sink,
         )?;
         emit_artifact(&sink, "ffmpeg", "deb", &artifacts.deb);
@@ -542,10 +575,12 @@ pub(crate) fn run(
         // The boot-method config the rootfs generates for itself. Only depthcharge has
         // any: its boot payload is a signed kernel built *inside* the rootfs, so the
         // rootfs has to know which board profile to sign for and what cmdline to bake in.
-        let boot_config = resolved.depthcharge_boot().map(|b| rootfs::BootConfig::Depthcharge {
-            board: &b.board,
-            cmdline: &b.cmdline,
-        });
+        let boot_config = resolved
+            .depthcharge_boot()
+            .map(|b| rootfs::BootConfig::Depthcharge {
+                board: &b.board,
+                cmdline: &b.cmdline,
+            });
         // The rootfs PARTUUID is an *input* here, not an output of the image node: under
         // depthcharge the signed kernel's root= is derived from this rootfs's own
         // /etc/fstab, so the partition has to be named before the filesystem exists.
@@ -874,12 +909,21 @@ pub(crate) fn run(
                 json,
                 &sink,
                 "build",
-                format!("saved manifest: {} (sha256 {})", committed.display(), short(digest)),
+                format!(
+                    "saved manifest: {} (sha256 {})",
+                    committed.display(),
+                    short(digest)
+                ),
             );
         }
         let path = root.lock_path(recipe)?;
         pins::write_lock(&path, &new_lock)?;
-        note(json, &sink, "build", format!("updated lock  : {}", path.display()));
+        note(
+            json,
+            &sink,
+            "build",
+            format!("updated lock  : {}", path.display()),
+        );
     }
     Ok(())
 }

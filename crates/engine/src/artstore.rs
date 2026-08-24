@@ -88,7 +88,9 @@ impl ArtifactStore {
     /// stat of its manifest, used to decide up front whether a stage needs to build
     /// anything at all (e.g. skip a sandbox bootstrap when every package is cached).
     pub fn has(&self, node: &str, signature: &str) -> bool {
-        self.entry_dir(node, signature).join("manifest.toml").is_file()
+        self.entry_dir(node, signature)
+            .join("manifest.toml")
+            .is_file()
     }
 
     /// Restore a stored `(node, signature)` output into `dest`, returning the ordered
@@ -172,8 +174,10 @@ impl ArtifactStore {
             signature: signature.to_string(),
             artifacts: entries,
         };
-        let man_text = toml::to_string(&man).map_err(|e| EngineError::io(&tmp, std::io::Error::other(e)))?;
-        std::fs::write(tmp.join("manifest.toml"), man_text).map_err(|s| EngineError::io(&tmp, s))?;
+        let man_text =
+            toml::to_string(&man).map_err(|e| EngineError::io(&tmp, std::io::Error::other(e)))?;
+        std::fs::write(tmp.join("manifest.toml"), man_text)
+            .map_err(|s| EngineError::io(&tmp, s))?;
 
         let final_dir = self.entry_dir(node, signature);
         match std::fs::rename(&tmp, &final_dir) {
@@ -251,12 +255,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = ArtifactStore::open(tmp.path()).unwrap();
         let src = write(tmp.path(), "librga2_2_arm64.deb", b"rga");
-        store.put("userspace:librga", "sig1", &[("deb", &src)]).unwrap();
+        store
+            .put("userspace:librga", "sig1", &[("deb", &src)])
+            .unwrap();
         // Stored under a `:`-free directory, yet addressed by the colon name.
         assert!(tmp.path().join("userspace-librga").join("sig1").is_dir());
         assert!(store.has("userspace:librga", "sig1"));
         let dest = tmp.path().join("out");
-        assert!(store.restore("userspace:librga", "sig1", &dest).unwrap().is_some());
+        assert!(store
+            .restore("userspace:librga", "sig1", &dest)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

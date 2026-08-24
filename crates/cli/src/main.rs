@@ -77,9 +77,11 @@ fn run(root: &ConfigRoot, command: Command, json: bool) -> Result<(), Box<dyn st
         Command::Resolve { target, overrides } => {
             commands::resolve::run(root, &target, overrides.into(), json)
         }
-        Command::Doctor { target, work_dir, overrides } => {
-            commands::doctor::run(root, target, work_dir, overrides.into())
-        }
+        Command::Doctor {
+            target,
+            work_dir,
+            overrides,
+        } => commands::doctor::run(root, target, work_dir, overrides.into()),
         Command::Update { recipe, args } => commands::update::run(root, &recipe, args),
         Command::VerifyPatches { recipe, args } => {
             commands::verify_patches::run(root, &recipe, args)

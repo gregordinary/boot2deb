@@ -167,7 +167,10 @@ mod tests {
         // The serialized form is the CLI's `--json` wire format; these literals
         // are the documented schema, so a rename or retag is a breaking change
         // this test makes deliberate.
-        let started = serde_json::to_string(&Event::StepStarted { step: "kernel".into() }).unwrap();
+        let started = serde_json::to_string(&Event::StepStarted {
+            step: "kernel".into(),
+        })
+        .unwrap();
         assert_eq!(started, r#"{"event":"step_started","step":"kernel"}"#);
         let artifact = serde_json::to_string(&Event::Artifact {
             step: "image".into(),
@@ -197,14 +200,21 @@ mod tests {
         assert_eq!(
             *events,
             vec![
-                Event::StepStarted { step: "kernel".into() },
-                Event::Progress { step: "kernel".into(), pct: 10 },
+                Event::StepStarted {
+                    step: "kernel".into()
+                },
+                Event::Progress {
+                    step: "kernel".into(),
+                    pct: 10
+                },
                 Event::Log {
                     step: "kernel".into(),
                     stream: Stream::Stdout,
                     line: "configuring".into(),
                 },
-                Event::StepFinished { step: "kernel".into() },
+                Event::StepFinished {
+                    step: "kernel".into()
+                },
             ]
         );
     }

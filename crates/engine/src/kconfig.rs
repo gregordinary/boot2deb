@@ -84,13 +84,32 @@ impl ParityReport {
 /// Generate a `.config` from the base defconfig + fragments into `out_dir` (an
 /// out-of-tree `O=` build, so the source tree is not modified). Returns the
 /// resolved config and any unmet fragment symbols.
-pub fn generate(inputs: &ConfigInputs, out_dir: &Path, step: &Step) -> Result<Generated, EngineError> {
+pub fn generate(
+    inputs: &ConfigInputs,
+    out_dir: &Path,
+    step: &Step,
+) -> Result<Generated, EngineError> {
     let out = prepare_out(out_dir)?;
     // Base: `make <base_defconfig>` writes out/.config.
-    make_target(inputs.tree, &out, inputs.arch, inputs.cross_compile, inputs.base_defconfig, step)?;
+    make_target(
+        inputs.tree,
+        &out,
+        inputs.arch,
+        inputs.cross_compile,
+        inputs.base_defconfig,
+        step,
+    )?;
     let dot_config = out.join(".config");
     // Layer fragments with the tree's merge_config.sh (runs alldefconfig).
-    run_merge_config(inputs.tree, &out, inputs.arch, inputs.cross_compile, &dot_config, inputs.fragments, step)?;
+    run_merge_config(
+        inputs.tree,
+        &out,
+        inputs.arch,
+        inputs.cross_compile,
+        &dot_config,
+        inputs.fragments,
+        step,
+    )?;
     let config = KernelConfig::parse(&read_config(&dot_config)?);
     // Clean-merge check computed against our fragments directly (not scraped from
     // merge_config, whose own check also flags base-defconfig toolchain symbols).
@@ -204,7 +223,8 @@ fn run_merge_config(
     // under the default relative `--root`). Canonicalizing keeps the invocation
     // CWD-independent and fails here, naming the script, when the tree carries no
     // merge_config.sh at all.
-    let script = std::fs::canonicalize(&script).map_err(|source| EngineError::io(&script, source))?;
+    let script =
+        std::fs::canonicalize(&script).map_err(|source| EngineError::io(&script, source))?;
     let context = format!("merge_config.sh for {}", tree.display());
     let mut cmd = Command::new("sh");
     cmd.arg(&script)
@@ -268,7 +288,10 @@ mod tests {
         let final_config =
             KernelConfig::parse("CONFIG_A=y\nCONFIG_B=y\nCONFIG_C=y\nCONFIG_PAHOLE_X=y\n");
         // B and C are unmet; A took; the base symbol PAHOLE_X is not our concern.
-        assert_eq!(unmet_symbols(&requested, &final_config), vec!["CONFIG_B", "CONFIG_C"]);
+        assert_eq!(
+            unmet_symbols(&requested, &final_config),
+            vec!["CONFIG_B", "CONFIG_C"]
+        );
     }
 
     #[test]

@@ -135,7 +135,10 @@ mod tests {
         let err = ask_choice("SoC", Some("rk3566"), &socs, false, show, parse)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("not available here") && err.contains("rk3588"), "{err}");
+        assert!(
+            err.contains("not available here") && err.contains("rk3588"),
+            "{err}"
+        );
 
         // An unparseable value fails on the model's own FromStr.
         assert!(ask_choice("SoC", Some("nope"), &socs, false, show, parse).is_err());
@@ -153,18 +156,36 @@ mod tests {
         let show = |k: &String| k.clone();
         let parse = |s: &str| Ok(s.to_string());
         assert_eq!(
-            ask_choice("kernel", Some("rk3588-mainline-7.1"), &kernels, false, show, parse).unwrap(),
+            ask_choice(
+                "kernel",
+                Some("rk3588-mainline-7.1"),
+                &kernels,
+                false,
+                show,
+                parse
+            )
+            .unwrap(),
             "rk3588-mainline-7.1"
         );
-        let err = ask_choice("kernel", Some("no-such-kernel"), &kernels, false, show, parse)
-            .unwrap_err()
-            .to_string();
+        let err = ask_choice(
+            "kernel",
+            Some("no-such-kernel"),
+            &kernels,
+            false,
+            show,
+            parse,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("not available here"), "{err}");
     }
 
     #[test]
     fn ask_value_takes_the_flag_then_the_default() {
-        assert_eq!(ask_value("suite", Some("sid".into()), "forky", false), "sid");
+        assert_eq!(
+            ask_value("suite", Some("sid".into()), "forky", false),
+            "sid"
+        );
         assert_eq!(ask_value("suite", None, "forky", false), "forky");
     }
 }

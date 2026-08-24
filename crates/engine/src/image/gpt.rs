@@ -249,7 +249,11 @@ mod tests {
         write_table(&b, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS).unwrap();
 
         let ba = std::fs::read(&a).unwrap();
-        assert_eq!(ba, std::fs::read(&b).unwrap(), "GPT image must reproduce byte-for-byte");
+        assert_eq!(
+            ba,
+            std::fs::read(&b).unwrap(),
+            "GPT image must reproduce byte-for-byte"
+        );
 
         // Both GUIDs appear in the table (GPT stores GUIDs mixed-endian, so match
         // the raw fields via the crate's own writer round-trip rather than raw bytes).
@@ -258,7 +262,11 @@ mod tests {
             .logical_block_size(LogicalBlockSize::Lb512)
             .open(&a)
             .unwrap();
-        assert_eq!(disk.guid(), &DISK_GUID, "header carries the derived disk GUID");
+        assert_eq!(
+            disk.guid(),
+            &DISK_GUID,
+            "header carries the derived disk GUID"
+        );
         let parts = disk.partitions();
         assert_eq!(parts.len(), 1, "a raw-gap bootloader is not a GPT entry");
         assert_eq!(

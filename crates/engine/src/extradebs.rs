@@ -50,7 +50,10 @@ pub fn materialize(
         pin.validate()?;
         let locator = pin.locator_label();
         if store.has(&pin.sha256) {
-            step.log(format!("extra_deb {locator} — cached ({})", short(&pin.sha256)));
+            step.log(format!(
+                "extra_deb {locator} — cached ({})",
+                short(&pin.sha256)
+            ));
             paths.push(store.path_for(&pin.sha256));
             continue;
         }
@@ -65,7 +68,10 @@ pub fn materialize(
             }
         };
         let path = store.put_bytes(&bytes, &pin.sha256, &locator)?;
-        step.log(format!("extra_deb {locator} — stored ({})", short(&pin.sha256)));
+        step.log(format!(
+            "extra_deb {locator} — stored ({})",
+            short(&pin.sha256)
+        ));
         paths.push(path);
     }
     Ok(paths)
@@ -80,10 +86,14 @@ pub fn materialize(
 /// canonicalized and must still lie within a config root, so a symlink planted in
 /// the tree cannot redirect the read to an arbitrary host location.
 fn read_path(root: &ConfigRoot, rel: &str) -> Result<Vec<u8>, EngineError> {
-    let path = root.find_asset(rel).unwrap_or_else(|| root.path().join(rel));
+    let path = root
+        .find_asset(rel)
+        .unwrap_or_else(|| root.path().join(rel));
     if let Ok(canon) = path.canonicalize() {
         let contained = root.search_paths().iter().any(|base| {
-            base.canonicalize().map(|b| canon.starts_with(b)).unwrap_or(false)
+            base.canonicalize()
+                .map(|b| canon.starts_with(b))
+                .unwrap_or(false)
         });
         if !contained {
             return Err(EngineError::ExtraDebFetch {

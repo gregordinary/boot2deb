@@ -33,11 +33,12 @@ pub(crate) fn run(
     // commit back to the current branch head. Flags still override; a first update
     // (no prior lock) falls back to the config default.
     let prev = root.lock(recipe).ok();
-    let ref_for =
-        |flag: Option<String>, from_lock: fn(&boot2deb_core::lock::Lock) -> String, default: &str| {
-            flag.or_else(|| prev.as_ref().map(from_lock))
-                .unwrap_or_else(|| default.to_string())
-        };
+    let ref_for = |flag: Option<String>,
+                   from_lock: fn(&boot2deb_core::lock::Lock) -> String,
+                   default: &str| {
+        flag.or_else(|| prev.as_ref().map(from_lock))
+            .unwrap_or_else(|| default.to_string())
+    };
     // The kernel ref has no config default (the config carries only a `track`, not a
     // concrete tag), so an omitted `--kernel-ref` inherits the previous lock's ref —
     // the "re-pin what changed" model for a patch-only update. Only the first update
@@ -65,7 +66,12 @@ pub(crate) fn run(
         .unwrap_or_default();
     let uboot_ref = ref_for(
         args.uboot_ref,
-        |l| l.uboot.as_ref().map(|u| u.reference.clone()).unwrap_or_default(),
+        |l| {
+            l.uboot
+                .as_ref()
+                .map(|u| u.reference.clone())
+                .unwrap_or_default()
+        },
         &configured_uboot_ref,
     );
     // Media-accel source refs are pinned only when the recipe builds the transcode
@@ -91,15 +97,31 @@ pub(crate) fn run(
     };
     let (mpp_ref, librga_ref, libmali_ref) = match &build.userspace {
         Some(us) => (
-            one(args.mpp_ref, prev_us.and_then(|u| u.mpp.as_ref()), us.mpp.as_ref()),
-            one(args.librga_ref, prev_us.and_then(|u| u.librga.as_ref()), us.librga.as_ref()),
-            one(args.libmali_ref, prev_us.and_then(|u| u.libmali.as_ref()), us.libmali.as_ref()),
+            one(
+                args.mpp_ref,
+                prev_us.and_then(|u| u.mpp.as_ref()),
+                us.mpp.as_ref(),
+            ),
+            one(
+                args.librga_ref,
+                prev_us.and_then(|u| u.librga.as_ref()),
+                us.librga.as_ref(),
+            ),
+            one(
+                args.libmali_ref,
+                prev_us.and_then(|u| u.libmali.as_ref()),
+                us.libmali.as_ref(),
+            ),
         ),
         None => (String::new(), String::new(), String::new()),
     };
     let (ffmpeg_base_ref, ffmpeg_rockchip_ref) = match &build.ffmpeg {
         Some(ff) => (
-            pick(args.ffmpeg_base_ref, prev_ff.map(|f| f.base.reference.clone()), &ff.base.git_ref),
+            pick(
+                args.ffmpeg_base_ref,
+                prev_ff.map(|f| f.base.reference.clone()),
+                &ff.base.git_ref,
+            ),
             one(
                 args.ffmpeg_rockchip_ref,
                 prev_ff.and_then(|f| f.rockchip.as_ref()),
@@ -126,7 +148,8 @@ pub(crate) fn run(
         .collect();
     let blobs_dir = args.blobs_dir.clone().unwrap_or_else(|| {
         let rel = format!("blobs/{}", build.soc.as_str());
-        root.find_asset(&rel).unwrap_or_else(|| root.path().join(rel))
+        root.find_asset(&rel)
+            .unwrap_or_else(|| root.path().join(rel))
     });
     let manifest = args.rootfs_manifest.unwrap_or_else(|| {
         // The manifest is a bare filename living beside the recipe in its device
@@ -179,7 +202,11 @@ pub(crate) fn run(
         None => println!("  u-boot   (none — this board's firmware is its own)"),
     }
     if let Some(p) = &lock.uboot_patches {
-        println!("  u-boot patches {} {}", p.profiles.join(", "), short(&p.commit));
+        println!(
+            "  u-boot patches {} {}",
+            p.profiles.join(", "),
+            short(&p.commit)
+        );
     }
     // A no-patch kernel has no series to report; printing an empty row would imply
     // one exists.
@@ -201,9 +228,17 @@ pub(crate) fn run(
         }
     }
     if let Some(ff) = &lock.ffmpeg {
-        println!("  ffmpeg   {} {}", ff.base.reference, short(&ff.base.commit));
+        println!(
+            "  ffmpeg   {} {}",
+            ff.base.reference,
+            short(&ff.base.commit)
+        );
         if let Some(rk) = &ff.rockchip {
-            println!("  ff-rk    {} {} (graft provenance)", rk.reference, short(&rk.commit));
+            println!(
+                "  ff-rk    {} {} (graft provenance)",
+                rk.reference,
+                short(&rk.commit)
+            );
         }
     }
     match &lock.rootfs {
@@ -253,7 +288,10 @@ pub(crate) fn run(
                 );
             }
             sources::PinWarning::Skipped(reason) => {
-                eprintln!("  note: could not check {} pin durability: {reason}", axis.name);
+                eprintln!(
+                    "  note: could not check {} pin durability: {reason}",
+                    axis.name
+                );
             }
         }
     }

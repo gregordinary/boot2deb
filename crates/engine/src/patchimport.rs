@@ -53,9 +53,12 @@ fn fetch_url(url: &str) -> Result<Vec<u8>, EngineError> {
 pub fn safe_label(label: &str) -> Result<(), EngineError> {
     let path = Path::new(label);
     let escapes = path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)));
+        || path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        });
     if escapes {
         Err(EngineError::PatchImportUnsafeLabel {
             label: label.to_string(),
@@ -80,13 +83,14 @@ pub fn insert_into_profile(
     index: usize,
     label: &str,
 ) -> Result<(), EngineError> {
-    let text = std::fs::read_to_string(profile_path).map_err(|e| EngineError::io(profile_path, e))?;
-    let mut doc = text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| EngineError::PatchImportProfile {
-            path: profile_path.display().to_string(),
-            detail: e.to_string(),
-        })?;
+    let text =
+        std::fs::read_to_string(profile_path).map_err(|e| EngineError::io(profile_path, e))?;
+    let mut doc =
+        text.parse::<toml_edit::DocumentMut>()
+            .map_err(|e| EngineError::PatchImportProfile {
+                path: profile_path.display().to_string(),
+                detail: e.to_string(),
+            })?;
 
     let key = scope.as_str();
     // Create the scope array if the manifest omits it (a valid partial profile).
@@ -193,7 +197,8 @@ uboot = []
             toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             reparsed.uboot.iter().map(|e| e.path()).collect::<Vec<_>>(),
-            vec!["uboot/001-fix.patch"]);
+            vec!["uboot/001-fix.patch"]
+        );
     }
 
     #[test]
@@ -214,7 +219,8 @@ uboot = []
         let reparsed: boot2deb_core::PatchProfile = toml::from_str(&edited).unwrap();
         assert_eq!(
             reparsed.kernel.iter().map(|e| e.path()).collect::<Vec<_>>(),
-            vec!["k/040-a.patch", "k/050-b.patch"]);
+            vec!["k/040-a.patch", "k/050-b.patch"]
+        );
     }
 
     #[test]
@@ -229,6 +235,7 @@ uboot = []
             toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             reparsed.ffmpeg.iter().map(|e| e.path()).collect::<Vec<_>>(),
-            vec!["media-accel/ffmpeg/0001-x.patch"]);
+            vec!["media-accel/ffmpeg/0001-x.patch"]
+        );
     }
 }
