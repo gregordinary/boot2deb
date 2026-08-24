@@ -158,7 +158,7 @@ Supporting assets:
 - **board device tree** — only when the board's `.dts` is not yet upstream; see
   [`device_dts`](#when-the-boards-device-tree-is-not-upstream).
 
-Finally, a **recipe** (`recipes/<recipe>.toml`) pins one point across the axes — device,
+Finally, a **recipe** (`recipes/<device>/<leaf>.toml`) pins one point across the axes — device,
 kernel, suite, features, layout.
 
 ## Values you must research
@@ -255,7 +255,7 @@ atf = "rk3588_bl31_v1.51.elf"
 tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
 ```
 
-`recipes/my-board-forky.toml`:
+`recipes/my-board/forky.toml`:
 
 ```toml
 device   = "my-board"
@@ -265,7 +265,7 @@ features = ["media-accel-rockchip"]   # or [] for a plain image
 layout   = "combined"
 ```
 
-Then run the [bring-it-up](#bring-it-up) sequence against `my-board-forky`. A **new SoC**
+Then run the [bring-it-up](#bring-it-up) sequence against `my-board/forky`. A **new SoC**
 would additionally need `socs/<soc>.toml` (with the required userspace/ffmpeg stanzas) and
 its fragments; a **new family** would need the code change from
 [What needs code](#what-needs-code).

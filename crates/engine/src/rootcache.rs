@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 /// overlay, so the `locales`/`keyboard-configuration`/`tzdata` packages configure
 /// themselves against it and `locale-gen` runs during the install — a different tree
 /// from the same inputs.
-const ROOTFS_STAGE_VERSION: u32 = 4;
+const ROOTFS_STAGE_VERSION: u32 = 5;
 
 /// Parse `mmdebstrap --simulate --verbose` output into the solved package set: one
 /// `"name version arch"` line per configured package, sorted and de-duplicated.
@@ -86,7 +86,40 @@ pub fn cache_key(
     arch: &str,
     suite: &str,
 ) -> Signature {
-    let mut b = SignatureBuilder::new("rootfs", ROOTFS_STAGE_VERSION);
+    key_in("rootfs", solved, overlay, repo_debs, arch, suite)
+}
+
+/// The rootfs cache key for the ferroday-cage provisioner backend
+/// ([`crate::rootfs::ProvisionerRootfs`]) — the same folds as [`cache_key`] over
+/// a **distinct** signature domain, so the two backends never serve each other's
+/// stored trees. Their trees are not interchangeable for the same inputs: the
+/// provisioner seeds the `important` base variant and lays real
+/// (subordinate-mapped) ownership, where the `mmdebstrap` backend's variant and
+/// ownership handling differ. The solved set here is derived from the resolved
+/// [`Plan`](ferroday_cage::provision::debian::Plan), not an `mmdebstrap
+/// --simulate` solve, but is the same `name version arch` shape. Pure.
+pub fn provisioner_cache_key(
+    solved: &[String],
+    overlay: &[String],
+    repo_debs: &[String],
+    arch: &str,
+    suite: &str,
+) -> Signature {
+    key_in("rootfs-provisioner", solved, overlay, repo_debs, arch, suite)
+}
+
+/// The shared fold behind [`cache_key`] and [`provisioner_cache_key`]: everything
+/// that determines the produced tree *except* the per-image password, under the
+/// given signature `domain`.
+fn key_in(
+    domain: &'static str,
+    solved: &[String],
+    overlay: &[String],
+    repo_debs: &[String],
+    arch: &str,
+    suite: &str,
+) -> Signature {
+    let mut b = SignatureBuilder::new(domain, ROOTFS_STAGE_VERSION);
     b.fold_scalar("arch", arch);
     b.fold_scalar("suite", suite);
     b.fold_set("solved", solved);

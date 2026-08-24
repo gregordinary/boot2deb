@@ -48,6 +48,25 @@
 		};
 	};
 
+	/*
+	 * IR receiver for the bundled infrared handset. The demodulated signal sits
+	 * on GPIO0_C4 -- the SoC's PWM0 IR-capture pin, which the vendor kernel drove
+	 * with its out-of-tree pwm-remotectl block. Mainline has no such driver, so the
+	 * pin is used as a plain GPIO and rc-core software-decodes the frames:
+	 * gpio-ir-receiver times the edges, the NEC decoder rebuilds the scancode, and
+	 * ir-keytable applies the h96 keymap (recovered from the vendor device tree,
+	 * shipped in the device overlay). The demodulator idles high and pulls low on
+	 * carrier, hence active-low; it starts on the empty built-in map, which
+	 * userspace replaces.
+	 */
+	ir_receiver: ir-receiver {
+		compatible = "gpio-ir-receiver";
+		gpios = <&gpio0 RK_PC4 GPIO_ACTIVE_LOW>;
+		linux,rc-map-name = "rc-empty";
+		pinctrl-names = "default";
+		pinctrl-0 = <&ir_receiver_pin>;
+	};
+
 	hdmi-con {
 		compatible = "hdmi-connector";
 		type = "a";
@@ -79,15 +98,17 @@
 	};
 
 	/*
-	 * The Wi-Fi module's reset line. Its supply rail is `vcc_wifi_reg_on`;
-	 * the two are separate pins and both must be driven for the SDIO card to
-	 * enumerate.
+	 * The Wi-Fi module's reset line (WL_REG_ON). `vcc_wifi_reg_on` gates the
+	 * module's supply; the reset here is a separate pin. The chip needs time to
+	 * come out of reset before the controller probes it at boot -- too short a
+	 * delay loses the boot-time enumeration to a power-on race (the card then
+	 * only appears on a later re-probe), so hold 500 ms after releasing reset.
 	 */
 	sdio_pwrseq: sdio-pwrseq {
 		compatible = "mmc-pwrseq-simple";
 		pinctrl-names = "default";
 		pinctrl-0 = <&wifi_enable_h>;
-		post-power-on-delay-ms = <200>;
+		post-power-on-delay-ms = <500>;
 		reset-gpios = <&gpio0 RK_PD2 GPIO_ACTIVE_LOW>;
 	};
 
@@ -198,43 +219,54 @@
 		vin-supply = <&vcc_1v8_s3>;
 	};
 
-	sound {
+	/*
+	 * Analog line-out on the 3.5 mm jack. The board's amplifier is a
+	 * control-less part with no I2C interface, so it is modelled as a dummy
+	 * codec (linux,spdif-dit): SAI1 drives it over I2S and provides the master
+	 * clock. SAI1 is wired to sdo2 on this board (see &sai1), not the EVB's sdo0.
+	 */
+	analog_dummy: analog-codec {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
+	};
+
+	analog_sound: analog-sound {
 		compatible = "simple-audio-card";
-		simple-audio-card,name = "On-board Analog ES8388";
-		simple-audio-card,aux-devs = <&spk_power>;
-		simple-audio-card,bitclock-master = <&masterdai>;
+		simple-audio-card,name = "H96 Analog";
 		simple-audio-card,format = "i2s";
-		simple-audio-card,frame-master = <&masterdai>;
 		simple-audio-card,mclk-fs = <256>;
-		simple-audio-card,pin-switches = "Speaker";
-		simple-audio-card,routing =
-			"Speaker Power INL", "LOUT2",
-			"Speaker Power INR", "ROUT2",
-			"Speaker", "Speaker Power OUTL",
-			"Speaker", "Speaker Power OUTR",
-			"LINPUT1", "Main Mic",
-			"LINPUT2", "Main Mic";
-		simple-audio-card,widgets =
-			"Microphone", "Main Mic",
-			"Speaker", "Speaker";
 
 		simple-audio-card,cpu {
 			sound-dai = <&sai1>;
 		};
 
-		masterdai: simple-audio-card,codec {
-			sound-dai = <&es8388>;
-			system-clock-frequency = <12288000>;
+		simple-audio-card,codec {
+			sound-dai = <&analog_dummy>;
 		};
 	};
 
-	spk_power: speaker-amplifier {
-		compatible = "simple-audio-amplifier";
-		enable-gpios = <&gpio2 RK_PB1 GPIO_ACTIVE_HIGH>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&spk_ctl>;
-		sound-name-prefix = "Speaker Power";
-		VCC-supply = <&vcc5v0_device>;
+	/*
+	 * S/PDIF out. The transmitter has no receiver to describe, so it too takes
+	 * a dummy DIT codec; SPDIF_TX1 drives the board's m1 pin group (see
+	 * &spdif_tx1).
+	 */
+	spdif_dummy: spdif-codec {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
+	};
+
+	spdif_sound: spdif-sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "H96 SPDIF";
+		simple-audio-card,mclk-fs = <128>;
+
+		simple-audio-card,cpu {
+			sound-dai = <&spdif_tx1>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&spdif_dummy>;
+		};
 	};
 };
 
@@ -280,14 +312,39 @@
 };
 
 /*
+ * Enable vdd_gpu_s0 before the GPU power domain is powered. The RK3576 GPU
+ * domain is fed by this rail; if the domain is toggled while the boot-on rail
+ * has been disabled as unused (which a late, deferred panfrost probe races),
+ * the power controller never acks the transition and panfrost's soft-reset
+ * faults the unpowered block with an SError. Pairs with the rk3576-fixes
+ * pmdomain patch that gives RK3576_PD_GPU a regulator and the pd_gpu label.
+ */
+&pd_gpu {
+	domain-supply = <&vdd_gpu_s0>;
+};
+
+/*
  * gpio2 PB0 biases the HDMI data lines: the board drives it low for HDMI 2.1
  * FRL signalling and high for HDMI 1.4/2.0 TMDS, which is the active-low sense
  * of the encoder's `frl-enable` line.
+ *
+ * `pinctrl-0` restates the SoC's three default groups and then appends this
+ * board's pin, because a board-level property assignment *replaces* the
+ * inherited one rather than extending it. Listing `hdmi_frl_en` alone would
+ * silently unmux everything rk3576.dtsi muxes for this controller:
+ *
+ *   hdmi_txm0_pins  gpio4 PC0 = CEC, gpio4 PC1 = hot-plug detect in
+ *   hdmi_tx_scl     gpio4 PC2 = DDC clock  (EDID)
+ *   hdmi_tx_sda     gpio4 PC3 = DDC data   (EDID)
+ *
+ * The m0 variant is this board's: the factory device tree muxes the same three
+ * groups (bank 4 pins 16-19, function 9), and the m1 alternative on gpio0 goes
+ * unused. Nothing else here claims gpio4 PC0-PC3.
  */
 &hdmi {
 	frl-enable-gpios = <&gpio2 RK_PB0 GPIO_ACTIVE_LOW>;
 	pinctrl-names = "default";
-	pinctrl-0 = <&hdmi_frl_en>;
+	pinctrl-0 = <&hdmi_txm0_pins &hdmi_tx_scl &hdmi_tx_sda &hdmi_frl_en>;
 	status = "okay";
 };
 
@@ -635,25 +692,6 @@
 	};
 };
 
-&i2c3 {
-	status = "okay";
-
-	es8388: audio-codec@10 {
-		compatible = "everest,es8388", "everest,es8328";
-		reg = <0x10>;
-		AVDD-supply = <&vcca_3v3_s0>;
-		DVDD-supply = <&vcc_1v8_s0>;
-		HPVDD-supply = <&vcca_3v3_s0>;
-		PVDD-supply = <&vcc_1v8_s0>;
-		assigned-clocks = <&cru CLK_SAI1_MCLKOUT_TO_IO>;
-		assigned-clock-rates = <12288000>;
-		clocks = <&cru CLK_SAI1_MCLKOUT_TO_IO>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&sai1m0_mclk>;
-		#sound-dai-cells = <0>;
-	};
-};
-
 &mdio0 {
 	rgmii_phy0: ethernet-phy@1 {
 		compatible = "ethernet-phy-id001c.c916";
@@ -670,12 +708,6 @@
 };
 
 &pinctrl {
-	audio {
-		spk_ctl: spk-ctl {
-			rockchip,pins = <2 RK_PB1 RK_FUNC_GPIO &pcfg_pull_none>;
-		};
-	};
-
 	hdmi {
 		hdmi_frl_en: hdmi-frl-en {
 			rockchip,pins = <2 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>;
@@ -685,6 +717,14 @@
 	hym8563 {
 		rtc_int: rtc-int {
 			rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	ir {
+		/* PWM0 IR pin as plain GPIO input; the demodulator drives it
+		 * push-pull, so no bias (matches the vendor pinmux). */
+		ir_receiver_pin: ir-receiver-pin {
+			rockchip,pins = <0 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 
@@ -715,6 +755,7 @@
 			rockchip,pins = <1 RK_PC6 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
+
 };
 
 /*
@@ -739,12 +780,28 @@
 	};
 };
 
+/*
+ * SAI1 drives the analog line-out amplifier. On this board the I2S data pin is
+ * sdo2 (the EVB uses sdo0), and the 12.288 MHz master clock leaves on
+ * sai1m0_mclk -- with the amplifier modelled as a pinless dummy codec, the SAI
+ * owns the MCLK pin and rate rather than an I2C codec.
+ */
 &sai1 {
+	assigned-clocks = <&cru CLK_SAI1_MCLKOUT_TO_IO>;
+	assigned-clock-rates = <12288000>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&sai1m0_lrck
 		     &sai1m0_sclk
 		     &sai1m0_sdi0
-		     &sai1m0_sdo0>;
+		     &sai1m0_sdo2
+		     &sai1m0_mclk>;
+	status = "okay";
+};
+
+/* S/PDIF transmitter on the board's m1 pin group. */
+&spdif_tx1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spdifm1_tx1>;
 	status = "okay";
 };
 
@@ -770,10 +827,12 @@
 };
 
 /*
- * The AIC8800D80 Wi-Fi/BT module. `keep-power-in-suspend` and `non-removable`
- * describe a soldered SDIO part; no in-tree driver claims it, so the bus
- * enumerates the card and stops there. The module's own rail is
- * `vcc_wifi_reg_on`, which is always-on, so the bus needs no switchable supply.
+ * The AIC8800D80 Wi-Fi/BT module on SDIO. `keep-power-in-suspend` and
+ * `non-removable` describe a soldered part; the aic8800 driver (aic8800 patch
+ * profile) claims it. SDR104 signals at 1.8 V, so the controller needs the bus
+ * I/O rail as `vqmmc-supply` to drive and switch the signalling voltage --
+ * `vccio_sd_s0` (RK806 PLDO5), the same rail the SD slot uses. `vcc_wifi_reg_on`
+ * gates the module's own supply and is driven by the power sequence, separately.
  */
 &sdio {
 	bus-width = <4>;
@@ -790,6 +849,7 @@
 	pinctrl-0 = <&sdmmc1m0_bus4 &sdmmc1m0_clk &sdmmc1m0_cmd>;
 	sd-uhs-sdr104;
 	status = "okay";
+	vqmmc-supply = <&vccio_sd_s0>;
 };
 
 /*
@@ -832,6 +892,32 @@
 	status = "okay";
 };
 
+/*
+ * UART4 (m1 pin group) carries the AIC8800D80 Bluetooth HCI. The BT firmware,
+ * downloaded over SDIO during Wi-Fi bringup, is configured for 1.5 Mbaud with
+ * hardware flow control, so the port needs its CTS/RTS lines. The BT core has no
+ * in-tree serdev driver; the aic8800-bluetooth.service attaches the H4 line
+ * discipline to the resulting /dev/ttyS4 (hciattach ... any 1500000 flow nosleep)
+ * once BT_REG_ON and HST_WAK_BT are asserted (see the &gpio1 hogs below).
+ */
+&uart4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart4m1_xfer &uart4m1_ctsn &uart4m1_rtsn>;
+	uart-has-rtscts;
+	status = "okay";
+};
+
+/*
+ * The AIC8800D80's two Bluetooth control lines -- BT_REG_ON (PWR_BT, gpio1 PC7,
+ * the BT-core enable) and HST_WAK_BT (host-wake-bluetooth, gpio1 PD4, active-high)
+ * -- are named here but deliberately left undriven by the device tree. They are
+ * driven high by aic8800-bluetooth.service instead: the controller comes out of
+ * the SDIO firmware load in low-power sleep, and it is the low->high transition of
+ * these lines *after* that load which wakes it. A static gpio-hog asserted at gpio
+ * probe (before the firmware) gives no such edge and the controller never answers
+ * HCI_Reset. The pins sit next to WL_REG_ON (PC6).
+ */
+
 &ufshc {
 	status = "disabled";
 };
@@ -848,16 +934,26 @@
  * usbdp PHY tuning or with different hardware): delete both overrides
  * and re-enable &usbdp_phy with `rockchip,dp-lane-mux = <2 3>`.
  */
+/*
+ * `dis_u2_susphy_quirk` on both host controllers to fix an xHC resume error
+ * (`xHC error in resume, USBSTS 0x401, Reinit`) after s2idle. The SoC dtsi sets
+ * `dis_enblslpm_quirk`, which makes dwc3 assert BOTH the ENBLSLPM and SUSPHY bits
+ * of GUSB2PHYCFG on host suspend, but the resume path clears SUSPHY only when
+ * `dis_u2_susphy_quirk` is set — so without it the U2 PHY stays parked in suspend
+ * across resume and the xHC faults. Setting the quirk restores that symmetry.
+ */
 &usb_drd0_dwc3 {
 	dr_mode = "host";
 	maximum-speed = "high-speed";
 	phys = <&u2phy0_otg>;
 	phy-names = "usb2-phy";
+	snps,dis_u2_susphy_quirk;
 	status = "okay";
 };
 
 &usb_drd1_dwc3 {
 	dr_mode = "host";
+	snps,dis_u2_susphy_quirk;
 	status = "okay";
 };
 

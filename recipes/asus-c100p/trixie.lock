@@ -3,4 +3,4 @@
 # re-run `boot2deb update` to re-resolve within the recipe's constraints.
 [rootfs]
 suite = "trixie"
-manifest = "asus-c100p-trixie.pkgs.lock"
+manifest = "trixie.pkgs.lock"

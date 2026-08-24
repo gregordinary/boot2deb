@@ -13,10 +13,12 @@
 //! reserved group-descriptor-table blocks to the most the format can address (~8 TiB
 //! under this feature set, at a cost of ~4 MiB), so first boot grows the mounted root
 //! onto a larger NVMe with `resize2fs` and no descriptor-table relocation. The feature
-//! set is pinned here (not inherited from the library default) so the on-disk layout is
-//! host- and library-independent; `metadata_csum_seed` stores the checksum seed in the
-//! superblock, decoupled from the UUID, so an operator's `tune2fs -U` (rescue, cloning
-//! hygiene) never has to rewrite every metadata checksum.
+//! set is chosen here rather than left to the formatter's default, but it is expressed
+//! relative to that default and so still moves with it: what the image was formatted to
+//! is recorded by [`rootfs_filesystem_pin`] and pinned by test, not guaranteed by this
+//! module. `metadata_csum_seed` stores the checksum seed in the superblock, decoupled
+//! from the UUID, so an operator's `tune2fs -U` (rescue, cloning hygiene) never has to
+//! rewrite every metadata checksum.
 //!
 //! The per-image first-boot password is spliced into `/etc/shadow` here — the one
 //! per-build-unique step. The cacheable rootfs tarball leaves the default account
@@ -36,6 +38,7 @@ use crate::build;
 use crate::error::EngineError;
 use crate::event::Step;
 use crate::image::geometry::EXT4_BLOCK;
+use boot2deb_core::provenance::FilesystemProvenance;
 use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
     ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FormatOptions, GrowReservation, InodeCount,
@@ -171,19 +174,42 @@ fn format_options(uuid: Uuid, label: &str, entries: &[SourceEntry]) -> FormatOpt
     options
 }
 
-/// The feature set the image is formatted with, pinned here rather than inherited from
-/// the library default so the on-disk layout is host- and library-independent — the
-/// same reason the old explicit `mke2fs -O` list existed.
-///
-/// It is [`FeatureSet::DEFAULT`] minus `orphan_file`: the modern ext4 set the target
-/// kernel and the online-resize path need (`resize_inode` + `sparse_super` for growth,
+/// The feature set the image is formatted with: the modern ext4 set the target kernel
+/// and the online-resize path need — `resize_inode` + `sparse_super` for growth,
 /// `metadata_csum` + `metadata_csum_seed` with the checksum seed stored independent of
-/// the UUID, extents, `64bit`, `dir_index`, `has_journal`), matching the validated
-/// feature contract.
+/// the UUID, extents, `64bit`, `dir_index`, `has_journal` — and `orphan_file` off.
+///
+/// It is expressed as [`FeatureSet::DEFAULT`] minus one feature, which makes the set
+/// **library-dependent**: `DEFAULT` is documented as the formatter's current good ext4
+/// configuration and is free to grow, so a feature added there lands in every image
+/// with no change here and no compile error. That is what [`rootfs_filesystem_pin`]
+/// records into the provenance manifest and what
+/// `the_pinned_feature_set_is_exactly_these_words` fails on, so the drift is caught in
+/// CI rather than discovered in an image.
 fn feature_set() -> FeatureSet {
     FeatureSet::DEFAULT
         .with_feature("orphan_file", false)
         .expect("orphan_file is a known feature name")
+}
+
+/// The rootfs filesystem's on-disk contract as provenance data: the feature set this
+/// build resolves, projected into the record the manifest carries.
+///
+/// This is a *resolved* value, not a declared one. It is computed from the same
+/// expression the formatter is handed, so the manifest reports the words an image
+/// actually carries — including a feature that arrived from the formatter's baseline
+/// rather than from anything in this file.
+pub fn rootfs_filesystem_pin() -> FilesystemProvenance {
+    let f = feature_set();
+    FilesystemProvenance {
+        kind: "ext4".to_string(),
+        features: f.names().into_iter().map(str::to_string).collect(),
+        compat: format!("{:#010x}", f.compat.bits()),
+        incompat: format!("{:#010x}", f.incompat.bits()),
+        ro_compat: format!("{:#010x}", f.ro_compat.bits()),
+        block_size: f.block_size,
+        inode_size: f.inode_size,
+    }
 }
 
 /// The 16-byte `s_volume_name`: the label's bytes, truncated to sixteen and NUL-padded.
@@ -490,6 +516,80 @@ mod tests {
         assert!(!f.has_orphan_file(), "orphan_file pinned off");
         assert_eq!(f.block_size, EXT4_BLOCK as u32);
         assert_eq!(f.inode_size, 256);
+    }
+
+    /// The exact on-disk contract, pinned as bytes rather than as predicates.
+    ///
+    /// The test above asserts what the set must *contain*, which by construction cannot
+    /// fail on a feature the formatter's baseline gains: [`feature_set`] is
+    /// `FeatureSet::DEFAULT` minus one feature, and `DEFAULT` is documented as free to
+    /// grow. So a formatter upgrade can change every image's layout while every
+    /// predicate above still passes. This is the assertion that fails instead.
+    ///
+    /// A failure here is not necessarily a defect — it means the on-disk layout moved,
+    /// and the decision (adopt the new feature, or pin it off in [`feature_set`]) has to
+    /// be made deliberately. Update these words only together with that decision.
+    #[test]
+    fn the_pinned_feature_set_is_exactly_these_words() {
+        let pin = rootfs_filesystem_pin();
+        assert_eq!(pin.kind, "ext4");
+        assert_eq!(pin.compat, "0x0000003c");
+        assert_eq!(pin.incompat, "0x000022c2");
+        assert_eq!(pin.ro_compat, "0x0000046b");
+        assert_eq!(pin.block_size, 4096);
+        assert_eq!(pin.inode_size, 256);
+        assert_eq!(
+            pin.features,
+            [
+                // compat
+                "has_journal",
+                "ext_attr",
+                "resize_inode",
+                "dir_index",
+                // incompat
+                "filetype",
+                "extent",
+                "64bit",
+                "flex_bg",
+                "metadata_csum_seed",
+                // ro_compat
+                "sparse_super",
+                "large_file",
+                "huge_file",
+                "dir_nlink",
+                "extra_isize",
+                "metadata_csum",
+            ]
+        );
+    }
+
+    /// The names and the raw words are two spellings of one set, so they cannot be
+    /// allowed to drift apart: a name the formatter renames would change `features`
+    /// while every word stayed put, and the pin above would still pass on the half a
+    /// human reads. This checks they agree by round-tripping the names back to bits.
+    #[test]
+    fn the_pinned_names_and_raw_words_describe_the_same_set() {
+        use ferrosys::ext::{Compat, Incompat, RoCompat};
+        let pin = rootfs_filesystem_pin();
+        // Start from no features at all, so the result is what the names say and
+        // nothing the formatter's baseline contributed.
+        let empty = FeatureSet {
+            compat: Compat::from_bits(0),
+            incompat: Incompat::from_bits(0),
+            ro_compat: RoCompat::from_bits(0),
+            block_size: pin.block_size,
+            inode_size: pin.inode_size,
+        };
+        // Every recorded name is one the formatter still knows...
+        let rebuilt = pin
+            .features
+            .iter()
+            .try_fold(empty, |acc, name| acc.with_feature(name, true))
+            .expect("every pinned feature name is known to the formatter");
+        // ...and the set they name is the set the words pin.
+        assert_eq!(format!("{:#010x}", rebuilt.compat.bits()), pin.compat);
+        assert_eq!(format!("{:#010x}", rebuilt.incompat.bits()), pin.incompat);
+        assert_eq!(format!("{:#010x}", rebuilt.ro_compat.bits()), pin.ro_compat);
     }
 
     #[test]

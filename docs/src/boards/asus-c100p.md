@@ -1,14 +1,14 @@
 # ASUS Chromebook Flip C100P
 
-The `asus-c100p-forky` recipe builds a bootable Debian **forky** image for the ASUS
+The `asus-c100p/forky` recipe builds a bootable Debian **forky** image for the ASUS
 Chromebook Flip C100P/C100PA (`google,veyron-minnie`) — the 10.1" convertible of the
-RK3288 Veyron family. `asus-c100p-trixie` is the same board on the stable suite.
+RK3288 Veyron family. `asus-c100p/trixie` is the same board on the stable suite.
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-c100p-forky
+cargo run -p boot2deb-cli -- build asus-c100p/forky
 ```
 
-That produces `build/asus-c100p-forky/artifacts/asus-c100p.img.xz` — a whole-disk image
+That produces `build/asus-c100p/forky/artifacts/asus-c100p.img.xz` — a whole-disk image
 carrying two ChromeOS kernel slots and the ext4 rootfs, so one write lays down everything
 the firmware needs. The kernel is in the first slot; the second ships empty, and is what
 lets a later kernel upgrade roll itself back if the new kernel does not boot. See
@@ -44,7 +44,7 @@ Write the image to a microSD card or a USB stick (the C100P has both, and two US
 so unlike the [Chromebit](asus-chromebit-cs10.md) nothing here needs a hub):
 
 ```sh
-xzcat build/asus-c100p-forky/artifacts/asus-c100p.img.xz \
+xzcat build/asus-c100p/forky/artifacts/asus-c100p.img.xz \
   | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
 ```
 
@@ -87,7 +87,7 @@ OS there is one command from a booted card:
 
 ```sh
 lsblk                       # the eMMC is mmcblk0 — the one with mmcblk0boot0 beside it
-xzcat asus-c100p-forky.img.xz | sudo dd of=/dev/mmcblk0 bs=4M status=progress conv=fsync
+xzcat asus-c100p.img.xz | sudo dd of=/dev/mmcblk0 bs=4M status=progress conv=fsync
 sudo reboot                 # Ctrl+D boots the eMMC, Ctrl+U the card
 ```
 
@@ -122,7 +122,7 @@ an SBS one, which Debian does build, and it has no touchscreen.
 A laptop, so it declares a console keymap — `keymap = "us"`, the layout the C100PA ships.
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-c100p-forky --keymap gb
+cargo run -p boot2deb-cli -- build asus-c100p/forky --keymap gb
 sudo dpkg-reconfigure keyboard-configuration && sudo setupcon   # or, on the board
 ```
 

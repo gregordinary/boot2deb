@@ -9,10 +9,17 @@
 //! patch profile.
 //!
 //! Pure: parsing plus compatibility checks (the SoC/arch gates and pairwise
-//! conflicts). A feature is rootfs-only in v1 (packages + overlay + third-party
-//! apt sources); the slot for a feature that also contributes kernel fragments or
-//! a patch-profile addend is reserved and intentionally not modeled here
-//! yet.
+//! conflicts).
+//!
+//! A feature reaches the kernel as well as the rootfs. Alongside its packages,
+//! overlay, and third-party apt sources, it may contribute
+//! [`config_fragments`](Feature::config_fragments) and
+//! [`patch_profiles`](Feature::patch_profiles) — because a capability is often not
+//! purely userspace. A hardware-accel provider whose driver is out-of-tree has to
+//! patch and configure the kernel to exist at all, and pinning that on the kernel
+//! or device layer would force it on every build of that SoC or board, including
+//! ones that never selected the capability. Contributing it from the feature keeps
+//! the opt-in and the thing opted into in one place. §5.4.
 
 use crate::error::ConfigError;
 use crate::model::{AptSource, Arch, Soc};
@@ -103,6 +110,34 @@ pub struct Feature {
     /// mirror-only add-in) need no source build.
     #[serde(default)]
     pub requires_media_accel: bool,
+    /// Kconfig fragments this feature merges into the kernel build, by fragment
+    /// path (`accel/rk3576-rga`), appended after the kernel's own and the device's
+    /// — so a feature's value wins a conflict, matching the way its packages stack
+    /// last in the rootfs merge.
+    ///
+    /// For a capability whose driver is not in the base kernel: the fragment
+    /// compiles it, and lives here rather than on the kernel layer so a build that
+    /// did not select the capability does not carry the driver.
+    ///
+    /// Requires a *compiled* kernel. A distro-package kernel merges no kconfig, so
+    /// selecting such a feature against one is a
+    /// [`ConfigError::FeatureNeedsCompiledKernel`] rather than a value silently
+    /// ignored.
+    #[serde(default)]
+    pub config_fragments: Vec<String>,
+    /// Kernel patch profiles this feature adds, by name (`rk3576-rga`), appended
+    /// after the kernel's `patch_profiles` and the device's `device_patch_profiles`
+    /// and resolved from the same `patches` checkout at the same pin.
+    ///
+    /// The patch-series half of [`config_fragments`](Feature::config_fragments): a
+    /// fragment can only turn on code the tree contains, so a feature carrying an
+    /// out-of-tree driver supplies both — the series that adds the source and the
+    /// fragment that compiles it.
+    ///
+    /// Same compiled-kernel requirement, and the same error, as
+    /// [`config_fragments`](Feature::config_fragments).
+    #[serde(default)]
+    pub patch_profiles: Vec<String>,
 }
 
 impl Feature {
@@ -173,6 +208,47 @@ pub fn first_requiring_media_accel(selected: &[(String, Feature)]) -> Option<&st
         .map(|(name, _)| name.as_str())
 }
 
+/// The kconfig fragments and kernel patch profiles a selected feature set
+/// contributes, as `(config_fragments, patch_profiles)`.
+///
+/// Both lists follow recipe selection order, and each is de-duplicated keeping the
+/// first occurrence: two features naming the same profile express one requirement,
+/// and applying a series twice would fail the second time. The caller appends these
+/// after the kernel's and the device's, so a feature is the last word.
+pub fn kernel_contributions(selected: &[(String, Feature)]) -> (Vec<String>, Vec<String>) {
+    fn dedup<'a>(items: impl Iterator<Item = &'a String>) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        items
+            .filter(|s| seen.insert((*s).clone()))
+            .cloned()
+            .collect()
+    }
+    (
+        dedup(selected.iter().flat_map(|(_, f)| &f.config_fragments)),
+        dedup(selected.iter().flat_map(|(_, f)| &f.patch_profiles)),
+    )
+}
+
+/// The first selected feature (in recipe order) that contributes a kernel input,
+/// paired with the field name it used — `None` when the set is rootfs-only.
+///
+/// Only a compiled kernel can act on either field, so this is what lets resolution
+/// name the offending feature *and* field when the resolved kernel is a distro
+/// package.
+pub fn first_contributing_kernel_input(
+    selected: &[(String, Feature)],
+) -> Option<(&str, &'static str)> {
+    selected.iter().find_map(|(name, f)| {
+        if !f.config_fragments.is_empty() {
+            Some((name.as_str(), "config_fragments"))
+        } else if !f.patch_profiles.is_empty() {
+            Some((name.as_str(), "patch_profiles"))
+        } else {
+            None
+        }
+    })
+}
+
 /// Validate a selected feature set for pairwise conflicts.
 ///
 /// `selected` pairs each chosen feature's name with its loaded manifest. Returns
@@ -208,6 +284,8 @@ mod tests {
             extra_debs: vec![],
             conflicts: conflicts.into_iter().map(String::from).collect(),
             requires_media_accel: false,
+            config_fragments: vec![],
+            patch_profiles: vec![],
         }
     }
 

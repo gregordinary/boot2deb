@@ -27,9 +27,9 @@ cargo run -p boot2deb-cli -- list-recipes
 cargo run -p boot2deb-cli -- list-kernels
 cargo run -p boot2deb-cli -- list-features
 cargo run -p boot2deb-cli -- support-matrix
-cargo run -p boot2deb-cli -- resolve turing-rk1-forky
+cargo run -p boot2deb-cli -- resolve turing-rk1/forky
 cargo run -p boot2deb-cli -- resolve turing-rk1 --suite sid --layout split
-cargo run -p boot2deb-cli -- doctor turing-rk1-forky
+cargo run -p boot2deb-cli -- doctor turing-rk1/forky
 ```
 
 - **`list-devices` / `list-recipes`** enumerate the buildable targets; `list-recipes`
@@ -60,7 +60,7 @@ cargo run -p boot2deb-cli -- doctor turing-rk1-forky
 
 ```sh
 # Interactive on a terminal: menus over the valid SoC / boot-method / kernel / feature
-# choices, then writes devices/<name>.toml + recipes/<name>.toml.
+# choices, then writes devices/<name>.toml + recipes/<name>/<suite>.toml.
 cargo run -p boot2deb-cli -- new-device my-board
 
 # Scriptable: take every value from flags (required: --soc), no prompts.
@@ -88,17 +88,17 @@ so verify them before `update`/`build`. See [Adding a board](../contributing/add
 ## update
 
 ```sh
-cargo run -p boot2deb-cli -- update turing-rk1-forky --kernel-ref v7.1.1
+cargo run -p boot2deb-cli -- update turing-rk1/forky --kernel-ref v7.1.1
 ```
 
 Resolves upstream refs to commits and hashes the vendored blobs, writing
-`recipes/<recipe>.lock`. This is the **only** command that consults upstream; `build`
+`recipes/<device>/<leaf>.lock`. This is the **only** command that consults upstream; `build`
 reads only the lock, so a build is reproducible from its committed pins.
 
 ## build
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1-forky
+cargo run -p boot2deb-cli -- build turing-rk1/forky
 ```
 
 Builds the recipe from its lock: compiles the kernel, u-boot, userspace, and ffmpeg,
@@ -126,6 +126,13 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   [Locale, timezone, and keyboard](../localization.md).
 - **`--refresh-rootfs`** forces a clean rootfs bootstrap instead of restoring the
   content cache.
+- **`--rootfs-backend mmdebstrap|provisioner`** selects how the rootfs stage
+  bootstraps. `mmdebstrap` (the default) shells out to `mmdebstrap --mode=unshare`.
+  `provisioner` bootstraps in-process with the ferroday-cage Debian provisioner — no
+  external bootstrap binary, real ownership via a subordinate id-map, an
+  ownership-preserving `export_tar` — and keys its content cache on the native
+  resolved plan rather than a `--simulate` solve. Opt-in until it clears the hardware
+  cross-build parity gate.
 
 The rootfs stage is content-cached: a cheap `mmdebstrap --simulate` solve keys a store,
 so a rebuild whose *solved* package set is unchanged restores the bootstrapped tree
@@ -178,14 +185,14 @@ never clones — it only queries the remotes.
 # Dry-run every locked patch series against its source tree with `git am --3way`,
 # hard-erroring on the first patch that does not apply. Omit the checkouts and each
 # tree is auto-fetched at its pin.
-cargo run -p boot2deb-cli -- verify-patches turing-rk1-forky
+cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky
 
 # Fast path when you already have a local kernel checkout:
-cargo run -p boot2deb-cli -- verify-patches turing-rk1-forky --kernel-src ../linux
+cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky --kernel-src ../linux
 
 # "Would this series survive 7.2?" -- asked against a kernel you have not adopted,
 # reporting every boundary at once rather than stopping at the first.
-cargo run -p boot2deb-cli -- verify-patches turing-rk1-forky \
+cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky \
     --kernel v7.2 --kernel-path ../linux --keep-going
 ```
 
@@ -228,10 +235,10 @@ auto-fetch at the lock's `patches.commit`.
 # Generate the kernel .config (base defconfig + fragments, via merge_config.sh) on the
 # patched kernel tree and report the merge. Omit --kernel-path and the tree is fetched
 # and the kernel patch series applied for you.
-cargo run -p boot2deb-cli -- verify-config turing-rk1-forky
+cargo run -p boot2deb-cli -- verify-config turing-rk1/forky
 
 # Assert byte-identical CONFIG_* parity against a reference config as well:
-cargo run -p boot2deb-cli -- verify-config turing-rk1-forky --reference-config /path/to/.config
+cargo run -p boot2deb-cli -- verify-config turing-rk1/forky --reference-config /path/to/.config
 ```
 
 `--kernel-path` is optional; omitted, the kernel is auto-fetched at its pin and the kernel
@@ -246,7 +253,7 @@ any `CONFIG_*` difference from the reference.
 # upstream and report whether the commit is a durable tag, an ephemeral branch, or
 # ORPHANED (no longer re-fetchable). Read-only: `git ls-remote` plus a bounded ancestry
 # check -- no build, no checkout, no hardware.
-cargo run -p boot2deb-cli -- verify-sources turing-rk1-forky
+cargo run -p boot2deb-cli -- verify-sources turing-rk1/forky
 ```
 
 `verify-sources` answers "will this lock still build a year from now?" An orphaned pin
@@ -271,11 +278,11 @@ cargo run -p boot2deb-cli -- patch import https://patchwork.kernel.org/project/l
 ```sh
 # Explain, offline, whether the next build reuses or rebuilds each compile node's source
 # tree -- and which pinned input changed if it will rebuild.
-cargo run -p boot2deb-cli -- why-rebuild turing-rk1-forky
+cargo run -p boot2deb-cli -- why-rebuild turing-rk1/forky
 
 # Remove a recipe's build scratch to reclaim disk or force a clean rebuild. --dry-run
 # previews; --cache / --sandbox clean only that subtree.
-cargo run -p boot2deb-cli -- clean turing-rk1-forky --dry-run
+cargo run -p boot2deb-cli -- clean turing-rk1/forky --dry-run
 ```
 
 `clean` removes only directories `build` created: every work dir is stamped with a

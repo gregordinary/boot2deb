@@ -8,8 +8,9 @@ the Debian rootfs, and a bootable disk image, all from a single committed lockfi
 
 The image assembly is pure Rust: GPT partitioning, ext4 formatting, and `.xz`
 compression with no C dependencies and no `sudo`. Cross-architecture package builds
-run in a rootless sandbox (`mmdebstrap --mode=unshare` + `bwrap` + `qemu-user`), so
-an x86_64 host builds an arm64 image without root.
+run in a rootless sandbox (`mmdebstrap --mode=unshare`, an in-process
+user-namespace sandbox, and `qemu-user`), so an x86_64 host builds an arm64 image
+without root.
 
 **Not every board needs every stage.** A build compiles a kernel only if the board needs
 one of its own, and builds a bootloader only if the board's firmware is ours to make. The

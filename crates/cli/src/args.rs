@@ -162,6 +162,10 @@ pub(crate) enum StageArg {
     /// board-bring-up loop (edit the `device_dts` source, rebuild, reflash) without a
     /// full kernel build.
     Dtb,
+    /// Only the out-of-tree kernel-module `.deb`s, built against the kernel tree from
+    /// the board's `device_kmods` (e.g. the AIC8800 Wi-Fi driver). Reuses an existing
+    /// kernel tree when one is present, so it need not rebuild the kernel.
+    Kmod,
     /// Only the u-boot boot payloads.
     Uboot,
     /// Only the userspace media-accel `.deb`s (MPP/RGA).
@@ -174,6 +178,17 @@ pub(crate) enum StageArg {
     /// Only the disk image. Uses the rootfs tar from `--stage rootfs` (or
     /// `--rootfs-tar`) plus the u-boot payloads (run `--stage uboot` first).
     Image,
+}
+
+/// Which backend the `rootfs` stage bootstraps the device userland with.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RootfsBackendArg {
+    /// `mmdebstrap --mode=unshare` — the hardware-validated default.
+    Mmdebstrap,
+    /// The in-process ferroday-cage Debian provisioner: no external bootstrap
+    /// binary, real ownership via a subordinate id-map, an ownership-preserving
+    /// `export_tar`. Opt-in until it clears the hardware cross-build parity gate.
+    Provisioner,
 }
 
 /// `build`'s flags: the stage selector, per-tree clone-source overrides, the
@@ -298,6 +313,13 @@ pub(crate) struct BuildArgs {
     /// the manual escape when you want a clean bootstrap regardless.
     #[arg(long)]
     pub(crate) refresh_rootfs: bool,
+    /// Which backend the rootfs stage bootstraps with. `mmdebstrap` is the
+    /// hardware-validated default; `provisioner` selects the in-process
+    /// ferroday-cage Debian provisioner (no external bootstrap binary, real
+    /// ownership via a subordinate id-map), opt-in until it clears the hardware
+    /// cross-build parity gate.
+    #[arg(long, value_enum, default_value_t = RootfsBackendArg::Mmdebstrap)]
+    pub(crate) rootfs_backend: RootfsBackendArg,
     /// Disable the Tier-2 artifact cache: always recompile the kernel /
     /// u-boot / userspace / ffmpeg `.deb`s instead of restoring a stored output on a
     /// signature hit, and do not store this build's outputs. The durable store at
@@ -613,6 +635,10 @@ pub(crate) struct PatchImportArgs {
 pub(crate) struct OverrideArgs {
     #[arg(long)]
     pub(crate) kernel: Option<String>,
+    /// u-boot patch profile (e.g. `rk3576-display`); default: the recipe/device
+    /// `default_uboot_profile`. Must be one of the device's `supported_uboot_profiles`.
+    #[arg(long = "uboot-profile")]
+    pub(crate) uboot_profile: Option<String>,
     #[arg(long)]
     pub(crate) suite: Option<String>,
     #[arg(long, value_parser = parse_layout)]
@@ -654,7 +680,11 @@ pub(crate) struct OverrideArgs {
 impl From<OverrideArgs> for Overrides {
     fn from(a: OverrideArgs) -> Self {
         Overrides {
+            // The deliverable is a recipe property, not a CLI override; a direct device
+            // build is always an image.
+            deliverable: Default::default(),
             kernel: a.kernel,
+            uboot_profile: a.uboot_profile,
             suite: a.suite,
             layout: a.layout,
             boot_method: a.boot_method,

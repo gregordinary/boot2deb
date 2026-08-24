@@ -1,17 +1,17 @@
 # kernels/rk3576-mainline-7.1.toml — mainline 7.1.x for RK3576 boards.
-# The SoC is fully upstream, so the kernel tree is built pristine: HW decode
+# The SoC is fully upstream, so the kernel tree is nearly pristine: HW decode
 # (VDPU383) is native mainline, and encode is absent from mainline (a
-# vendor-kernel dependency, out of scope). The rk3576-loader patch profile
-# carries only u-boot patches (reboot-loader + SARADC download key); its
-# kernel/ffmpeg/userspace series are empty, so the kernel stays unpatched.
+# vendor-kernel dependency, out of scope). The SoC-wide series it carries is
+# `rk3576-fixes` (the GPU power-domain regulator fix; see patches/rk3576/kernel);
+# a board that needs its own series (an out-of-tree driver, say) adds it via the
+# device's `device_patch_profiles`, so one kernel entry serves every RK3576 board.
+# The u-boot variant is a separate axis (the device's `supported_uboot_profiles`,
+# resolved over the `rockchip-rkbin` boot method).
 flavor           = "mainline"
 source           = "linux-stable"        # 7.1.x stable releases live in linux-stable
 track            = "7.1.y"               # resolved to an exact tag/SHA in the lock (v7.1.3)
 base_defconfig   = "defconfig"           # in-tree arm64 base; fragments merge onto it
 config_fragments = ["base/debian-arm64", "soc/rk3576"]
-patch_profile    = "rk3576-loader"       # u-boot-only: reboot-loader + SARADC download key (no kernel patches)
-# Clone URL of the patches repo, so a build with no local checkout auto-fetches
-# the series at the lock-pinned commit. Override with --patches-url, or point
-# --patches-path at a local checkout to co-develop the series.
+patch_profiles   = ["rk3576-fixes"]      # SoC-wide GPU power-domain fix; a board adds its own via device_patch_profiles
 patches_url      = "https://github.com/gregordinary/patches.git"
 supported_socs   = ["rk3576"]

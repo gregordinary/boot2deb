@@ -10,6 +10,6 @@ source           = "linux-stable"          # 7.1.y stable releases live in linux
 track            = "7.1.y"                 # the lock pins the exact tag (update --kernel-ref)
 base_defconfig   = "multi_v7_defconfig"    # in-tree 32-bit multiplatform base; fragments merge onto it
 config_fragments = ["base/debian-armhf", "soc/rk3288"]
-patch_profile    = "rk3288-fixes"
+patch_profiles   = ["rk3288-fixes"]
 patches_url      = "https://github.com/gregordinary/patches.git"
 supported_socs   = ["rk3288"]

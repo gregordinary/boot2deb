@@ -27,25 +27,13 @@ pub fn resolve_device(
     }
     let bm = root.boot_method(boot_method)?;
 
-    // Kernel: override or device default, validated against the device's list
-    // and the kernel's supported SoCs.
-    let kernel_id = overrides
-        .kernel
-        .clone()
-        .unwrap_or_else(|| device.default_kernel.clone());
-    if !device.supported_kernels.contains(&kernel_id) {
-        return Err(ConfigError::UnknownKernelForDevice {
+    let uboot_only = overrides.deliverable == Deliverable::Uboot;
+    // A u-boot-only deliverable only exists where the boot method builds a u-boot of
+    // ours; a depthcharge board's firmware is not ours to emit.
+    if uboot_only && boot_method != BootMethod::RockchipRkbin {
+        return Err(ConfigError::UbootOnlyWithoutBootloader {
             device: device_name.to_string(),
-            kernel: kernel_id,
-            supported: device.supported_kernels.join(", "),
-        });
-    }
-    let kdef = root.kernel(&kernel_id)?;
-    if !kdef.supported_socs().contains(&device.soc) {
-        return Err(ConfigError::SocMismatch {
-            kernel: kernel_id,
-            soc: device.soc.to_string(),
-            supported: join(kdef.supported_socs()),
+            boot_method: boot_method.to_string(),
         });
     }
 
@@ -54,14 +42,21 @@ pub fn resolve_device(
     // builds fine and then finds no DTB at boot. §4.
     validate_device_dts(&device.device_dts, &device.kernel_dtb, device_name)?;
 
+    // Out-of-tree module declarations are shape-checked before any build work: an
+    // escaping subdir would feed `make M=` a foreign tree, an escaping local-patch
+    // path would read a file from outside the config root, and a bad name would
+    // produce an unbuildable `.deb`. The "distro kernel compiles nothing" case is
+    // caught separately in `resolve_kernel`, where the kernel choice is known.
+    validate_device_kmods(&device.device_kmods, device_name)?;
+
     let kernel_cmdline = validate_kernel_cmdline(device.kernel_cmdline.as_deref())?;
 
     let layout = overrides.layout.unwrap_or(device.default_layout);
 
     // The boot method's *own* requirements, enforced only for the method that has
-    // them: rkbin blobs and a `uboot_defconfig` where u-boot is compiled, a board
-    // profile where a signed kernel partition is written. A board is never asked for
-    // a field its boot method would not read.
+    // them: rkbin blobs, a `uboot_defconfig`, and the selected u-boot profile where
+    // u-boot is compiled; a board profile where a signed kernel partition is written.
+    // A board is never asked for a field its boot method would not read.
     let boot = resolve_boot(
         &bm,
         &device,
@@ -70,18 +65,56 @@ pub fn resolve_device(
         layout,
         overrides.board.as_deref(),
         &kernel_cmdline,
+        overrides.uboot_profile.as_deref(),
     )?;
 
-    let kernel = resolve_kernel(kdef, kernel_id, &device, device_name)?;
+    // A u-boot-only build resolves no kernel, suite, features, or rootfs: its sole
+    // deliverable is the bootloader the u-boot node emits, so every image axis is
+    // absent and the lock records only the u-boot pins. The `image_size`/`hostname`
+    // it carries are the device defaults, never read on this path (no image node).
+    if uboot_only {
+        return Ok(ResolvedBuild {
+            device: device_name.to_string(),
+            description: device.description,
+            arch: soc.arch,
+            soc: device.soc,
+            boot_method,
+            kernel: None,
+            suite: None,
+            features: Vec::new(),
+            rootfs_packages: Vec::new(),
+            rootfs_exclude: Vec::new(),
+            layout,
+            image_size: device.image_size,
+            hostname: device.hostname,
+            locale: String::new(),
+            locales_generate: Vec::new(),
+            timezone: String::new(),
+            keymap: None,
+            boot,
+            kernel_dtb: device.kernel_dtb,
+            device_dts: device.device_dts,
+            // A u-boot-only build compiles no kernel, so no module builds; the field
+            // is carried for a uniform struct but the kmod stage never runs on it.
+            device_kmods: device.device_kmods,
+            kernel_cmdline,
+            dt_dir: soc.dt_dir,
+            modules: soc.modules,
+            kernel_arch: arch.kernel_arch,
+            uboot_arch: arch.uboot_arch,
+            cross_compile: arch.cross_compile,
+            kbuild_image: arch.kbuild_image,
+            userspace: None,
+            ffmpeg: None,
+            apt_sources: Vec::new(),
+            extra_debs: Vec::new(),
+        });
+    }
 
-    let suite = overrides
-        .suite
-        .clone()
-        .unwrap_or_else(|| device.default_suite.clone());
-    // A bad suite otherwise fails deep in the bootstrap; reject it here, and
-    // the shape guard also keeps a leading-`-` suite from ever reaching mmdebstrap as
-    // a positional.
-    validate_suite(&suite)?;
+    // Features are resolved before the kernel, because they feed it: a capability
+    // whose driver is out-of-tree contributes the patch profile and kconfig
+    // fragment that build it, and `resolve_kernel` composes those onto the kernel's
+    // and the device's.
     let features = overrides.features.clone().unwrap_or_default();
     // Reject a feature selected twice: its overlay + packages would otherwise apply
     // twice.
@@ -106,6 +139,37 @@ pub fn resolve_device(
     }
     crate::feature::ensure_no_conflicts(&loaded_features)?;
 
+    // Kernel: override or device default, validated against the device's list
+    // and the kernel's supported SoCs.
+    let kernel_id = overrides
+        .kernel
+        .clone()
+        .unwrap_or_else(|| device.default_kernel.clone());
+    if !device.supported_kernels.contains(&kernel_id) {
+        return Err(ConfigError::UnknownKernelForDevice {
+            device: device_name.to_string(),
+            kernel: kernel_id,
+            supported: device.supported_kernels.join(", "),
+        });
+    }
+    let kdef = root.kernel(&kernel_id)?;
+    if !kdef.supported_socs().contains(&device.soc) {
+        return Err(ConfigError::SocMismatch {
+            kernel: kernel_id,
+            soc: device.soc.to_string(),
+            supported: join(kdef.supported_socs()),
+        });
+    }
+    let kernel = resolve_kernel(kdef, kernel_id, &device, device_name, &loaded_features)?;
+
+    let suite = overrides
+        .suite
+        .clone()
+        .unwrap_or_else(|| device.default_suite.clone());
+    // A bad suite otherwise fails deep in the bootstrap; reject it here, and
+    // the shape guard also keeps a leading-`-` suite from ever reaching mmdebstrap as
+    // a positional.
+    validate_suite(&suite)?;
     // A feature that builds the media-accel stack (`requires_media_accel`) needs the
     // SoC to supply the `[userspace]`/`[ffmpeg]` source trees its `.deb`s compile
     // from. Gate here so a bad composition fails at resolve, not deep in the build.
@@ -210,8 +274,8 @@ pub fn resolve_device(
         arch: soc.arch,
         soc: device.soc,
         boot_method,
-        kernel,
-        suite,
+        kernel: Some(kernel),
+        suite: Some(suite),
         features,
         rootfs_packages,
         rootfs_exclude,
@@ -225,6 +289,7 @@ pub fn resolve_device(
         boot,
         kernel_dtb: device.kernel_dtb,
         device_dts: device.device_dts,
+        device_kmods: device.device_kmods,
         kernel_cmdline,
         dt_dir: soc.dt_dir,
         modules: soc.modules,
@@ -249,6 +314,7 @@ pub fn resolve_device(
 /// `depthcharge` compiles no bootloader at all and instead demands a board profile.
 /// Asking every device for every method's fields would make a Chromebook declare a
 /// u-boot defconfig it will never build.
+#[allow(clippy::too_many_arguments)]
 fn resolve_boot(
     bm: &BootMethodLayer,
     device: &DeviceLayer,
@@ -257,6 +323,7 @@ fn resolve_boot(
     layout: Layout,
     board_override: Option<&str>,
     kernel_cmdline: &str,
+    uboot_profile_override: Option<&str>,
 ) -> Result<ResolvedBoot, ConfigError> {
     match bm {
         BootMethodLayer::RockchipRkbin(l) => {
@@ -276,10 +343,15 @@ fn resolve_boot(
             for s in [&l.idbloader_offset, &l.uboot_itb_offset, &l.rootfs_offset] {
                 crate::size::parse_size(s)?;
             }
+            let (uboot_profile, uboot_patches_url, uboot_patches_ref) =
+                resolve_uboot_profile(l, device, device_name, uboot_profile_override)?;
             Ok(ResolvedBoot::RockchipRkbin(ResolvedRkbinBoot {
                 uboot_defconfig,
                 uboot_source: l.uboot_source.clone(),
                 uboot_ref: l.uboot_ref.clone(),
+                uboot_profile,
+                uboot_patches_url,
+                uboot_patches_ref,
                 rkbin,
                 offsets: Offsets {
                     idbloader: l.idbloader_offset.clone(),
@@ -354,6 +426,66 @@ fn resolve_boot(
             }))
         }
     }
+}
+
+/// The resolved u-boot profile plus its paired patches source and ref (profile,
+/// url, ref) — all `Some` together, or all `None` when u-boot ships pristine.
+type UbootProfilePins = (Option<String>, Option<String>, Option<String>);
+
+/// Resolve the u-boot patch profile for a `rockchip-rkbin` build: the CLI/recipe
+/// override, else the device default, validated against the device's
+/// `supported_uboot_profiles`. Returns the profile plus its paired patches source
+/// and ref (all `Some` together, or all `None` when u-boot ships pristine).
+///
+/// A board that declares no profiles ships pristine u-boot (`None`); a board that
+/// declares profiles but no default, with none selected, is a config error. The
+/// [`NO_PATCH_PROFILE`](crate::profile::NO_PATCH_PROFILE) sentinel selects pristine
+/// even on a board that lists profiles. A real profile requires the boot method's
+/// `patches_url`, mirroring a kernel definition's rule.
+fn resolve_uboot_profile(
+    l: &RockchipRkbinLayer,
+    device: &DeviceLayer,
+    device_name: &str,
+    override_profile: Option<&str>,
+) -> Result<UbootProfilePins, ConfigError> {
+    let selected = override_profile
+        .map(str::to_string)
+        .or_else(|| device.default_uboot_profile.clone());
+    let Some(name) = selected else {
+        if !device.supported_uboot_profiles.is_empty() {
+            return Err(ConfigError::MissingDefaultUbootProfile {
+                device: device_name.to_string(),
+            });
+        }
+        return Ok((None, None, None));
+    };
+    // The pristine sentinel is always accepted; a named profile must be one the
+    // device declares.
+    if crate::profile::patch_profile(&name).is_some()
+        && !device.supported_uboot_profiles.contains(&name)
+    {
+        return Err(ConfigError::UnknownUbootProfileForDevice {
+            device: device_name.to_string(),
+            profile: name,
+            supported: device.supported_uboot_profiles.join(", "),
+        });
+    }
+    let Some(profile) = crate::profile::patch_profile(&name).map(str::to_string) else {
+        return Ok((None, None, None));
+    };
+    // A series must name the repo it comes from: the lock records the source beside
+    // the commit, and a commit id means nothing without one.
+    let Some(url) = l.patches_url.clone() else {
+        return Err(ConfigError::MissingUbootPatchesUrl {
+            device: device_name.to_string(),
+            profile,
+        });
+    };
+    let patches_ref = l
+        .patches_ref
+        .clone()
+        .unwrap_or_else(|| crate::model::DEFAULT_PATCHES_REF.to_string());
+    Ok((Some(profile), Some(url), Some(patches_ref)))
 }
 
 /// Validate and normalize a device's extra kernel command-line arguments
@@ -435,41 +567,58 @@ fn validate_depthcharge_cmdline(cmdline: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Resolve the kernel axis, and reject the two device fields a distro-package
-/// kernel could never act on.
+/// Resolve the kernel axis, and reject the inputs a distro-package kernel could
+/// never act on.
 ///
-/// A distro kernel compiles nothing, so a `device_dts` or `device_config_fragments`
-/// on such a build is not merely redundant — it is a board whose device tree will
-/// never be compiled and whose kconfig will never be merged. That reads as
-/// configured and boots as broken, so it is a typed error instead.
+/// A distro kernel compiles nothing, so a `device_dts`, `device_config_fragments`,
+/// `device_patch_profiles`, or `device_kmods` on such a build is not merely redundant —
+/// it is a board whose device tree will never be compiled, whose kconfig will never be
+/// merged, and whose out-of-tree modules have no tree to build against. That reads as
+/// configured and boots as broken, so it is a typed error instead. A selected
+/// feature's kernel contributions are rejected for the same reason, under
+/// [`ConfigError::FeatureNeedsCompiledKernel`].
+///
+/// `features` is the validated selection, in recipe order; its kconfig fragments
+/// and patch profiles compose last, after the kernel's and the device's.
 fn resolve_kernel(
     kdef: KernelDef,
     kernel_id: String,
     device: &DeviceLayer,
     device_name: &str,
+    features: &[(String, crate::feature::Feature)],
 ) -> Result<ResolvedKernel, ConfigError> {
+    let (feature_fragments, feature_profiles) = crate::feature::kernel_contributions(features);
     match kdef {
         KernelDef::Compiled(k) => {
-            // Kernel-owned fragments first, then device fragments (apply order).
+            // Apply order, narrowest last: kernel-owned fragments, then the device's,
+            // then the selected features'. A feature is the opt-in, so it gets the
+            // final say on a symbol the layers below it also set.
             let mut config_fragments = k.config_fragments;
             config_fragments.extend(device.device_config_fragments.iter().cloned());
-            // The `"none"` sentinel becomes a typed absence exactly here; nothing
-            // downstream compares the authored string.
-            let patch_profile =
-                crate::profile::patch_profile(&k.patch_profile).map(str::to_string);
-            // A series must name the repo it comes from: the lock records the source
-            // beside the commit, and a commit id means nothing without one. Caught
-            // here rather than at pin time, so the config is wrong at `resolve`
+            config_fragments.extend(feature_fragments);
+            // The resolved list is the kernel's profiles, then the device's, then the
+            // features', in that order: an empty list is a kernel that applies no
+            // series, and nothing downstream reads the `patches` repo for it. Composing
+            // them (a SoC-wide fix profile from the kernel, an out-of-tree driver
+            // profile from the board or from a capability feature) all ride the one
+            // `patches_url` checkout below — the patch-series analogue of the
+            // `config_fragments` merge just above.
+            let mut patch_profiles = k.patch_profiles;
+            patch_profiles.extend(device.device_patch_profiles.iter().cloned());
+            patch_profiles.extend(feature_profiles);
+            // Named profiles must name the repo they come from: the lock records the
+            // source beside the commit, and a commit id means nothing without one.
+            // Caught here rather than at pin time, so the config is wrong at `resolve`
             // instead of surfacing much later in `update`.
-            if patch_profile.is_some() && k.patches_url.is_none() {
+            if !patch_profiles.is_empty() && k.patches_url.is_none() {
                 return Err(ConfigError::MissingPatchesUrl {
                     kernel: kernel_id,
-                    profile: k.patch_profile,
+                    profiles: patch_profiles.join(", "),
                 });
             }
-            // Paired with the profile so the two are `Some` together — nothing
+            // Paired with the profiles so the two are present together — nothing
             // downstream has to consider a source without a series.
-            let patches_ref = patch_profile.as_ref().map(|_| {
+            let patches_ref = (!patch_profiles.is_empty()).then(|| {
                 k.patches_ref
                     .clone()
                     .unwrap_or_else(|| crate::model::DEFAULT_PATCHES_REF.to_string())
@@ -480,19 +629,35 @@ fn resolve_kernel(
                 source: k.source,
                 track: k.track,
                 base_defconfig: k.base_defconfig,
-                patch_profile,
+                patch_profiles,
                 patches_url: k.patches_url,
                 patches_ref,
                 config_fragments,
             }))
         }
         KernelDef::Distro(k) => {
+            // A feature's kernel contributions fail the same way the device's do, but
+            // name the feature: the fix is to drop the capability from the recipe or
+            // move to a compiled kernel, neither of which is a device-layer edit.
+            if let Some((feature, what)) = crate::feature::first_contributing_kernel_input(features)
+            {
+                return Err(ConfigError::FeatureNeedsCompiledKernel {
+                    feature: feature.to_string(),
+                    kernel: kernel_id,
+                    what,
+                });
+            }
             for (what, declared) in [
                 ("device_dts", !device.device_dts.is_empty()),
                 (
                     "device_config_fragments",
                     !device.device_config_fragments.is_empty(),
                 ),
+                (
+                    "device_patch_profiles",
+                    !device.device_patch_profiles.is_empty(),
+                ),
+                ("device_kmods", !device.device_kmods.is_empty()),
             ] {
                 if declared {
                     return Err(ConfigError::DistroKernelCompilesNothing {
@@ -572,6 +737,121 @@ fn validate_device_dts(
             sources: device_dts.join(", "),
             expected,
         });
+    }
+    Ok(())
+}
+
+/// Validate a device's out-of-tree module declarations (`device_kmods`).
+///
+/// Every entry must be safe to feed the build without escaping the trees it is joined
+/// onto, and must name a well-formed package:
+///  - **name**: unique and dpkg-package-safe — it becomes `<name>-modules-<kver>` and
+///    the `kmod:<name>` build/cache node.
+///  - **git / ref**: non-empty (the exact commit is pinned in the lock).
+///  - **subdir / patch_dir**: relative and `..`-free (the subdir feeds `make M=`).
+///  - **patches**: bare filenames under `patch_dir` (joined as `patch_dir/<name>`).
+///  - **local_patches**: config-root-relative and `..`-free (read along the overlay
+///    search path like a fragment).
+///  - **make_args**: a bare `KEY=VALUE`, no whitespace or shell metacharacters (passed
+///    as argv to `make`, never through a shell).
+///  - **modules**: bare `.ko` basenames.
+///
+/// An empty `device_kmods` imposes no constraint — the board carries no out-of-tree
+/// module.
+fn validate_device_kmods(kmods: &[DeviceKmod], device_name: &str) -> Result<(), ConfigError> {
+    let invalid = |name: &str, why| ConfigError::InvalidDeviceKmod {
+        device: device_name.to_string(),
+        name: name.to_string(),
+        why,
+    };
+    // Relative, non-empty, `..`-free.
+    let contained = |p: &str| -> Result<(), &'static str> {
+        if p.trim().is_empty() {
+            return Err("a path is empty");
+        }
+        let path = std::path::Path::new(p);
+        if path.is_absolute() {
+            return Err("a path is absolute");
+        }
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("a path escapes the tree via '..'");
+        }
+        Ok(())
+    };
+    // A bare filename: non-empty, no separator, not a directory reference.
+    let bare = |p: &str| -> Result<(), &'static str> {
+        if p.trim().is_empty() {
+            return Err("an entry is empty");
+        }
+        if p.contains('/') {
+            return Err("an entry has a path separator (expected a bare filename)");
+        }
+        if p == "." || p == ".." {
+            return Err("an entry is a directory reference");
+        }
+        Ok(())
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for k in kmods {
+        let name_ok = k
+            .name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            && k.name.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '+' | '.')
+            });
+        if !name_ok {
+            return Err(invalid(
+                &k.name,
+                "the name is not dpkg-package-safe (lowercase alphanumeric plus '-', '+', '.', starting alphanumeric)",
+            ));
+        }
+        if !seen.insert(k.name.clone()) {
+            return Err(invalid(&k.name, "the name is declared more than once"));
+        }
+        if k.git.trim().is_empty() {
+            return Err(invalid(&k.name, "the git url is empty"));
+        }
+        if k.git_ref.trim().is_empty() {
+            return Err(invalid(&k.name, "the git ref is empty"));
+        }
+        contained(&k.subdir).map_err(|why| invalid(&k.name, why))?;
+        contained(&k.patch_dir).map_err(|why| invalid(&k.name, why))?;
+        for p in &k.patches {
+            bare(p).map_err(|why| invalid(&k.name, why))?;
+        }
+        for lp in &k.local_patches {
+            contained(lp).map_err(|why| invalid(&k.name, why))?;
+        }
+        for a in &k.make_args {
+            let unsafe_arg = !a.contains('=')
+                || a.chars().any(|c| {
+                    c.is_whitespace()
+                        || matches!(
+                            c,
+                            ';' | '&' | '|' | '$' | '`' | '<' | '>' | '(' | ')' | '\'' | '"' | '\\'
+                        )
+                });
+            if unsafe_arg {
+                return Err(invalid(
+                    &k.name,
+                    "a make_args entry is not a bare KEY=VALUE (no whitespace or shell metacharacters)",
+                ));
+            }
+        }
+        for m in &k.modules {
+            bare(m).map_err(|why| invalid(&k.name, why))?;
+        }
+        if let Some(fw) = &k.firmware {
+            // Both paths are joined under a build/rootfs root, so both must be relative
+            // and `..`-free — the source under the fetched repo, the install under the deb.
+            contained(&fw.subdir).map_err(|why| invalid(&k.name, why))?;
+            contained(&fw.install).map_err(|why| invalid(&k.name, why))?;
+        }
     }
     Ok(())
 }
@@ -717,7 +997,9 @@ pub fn resolve_recipe(
 ) -> Result<ResolvedBuild, ConfigError> {
     let recipe = root.recipe(recipe_name)?;
     let merged = Overrides {
+        deliverable: recipe.deliverable,
         kernel: cli.kernel.clone().or(recipe.kernel),
+        uboot_profile: cli.uboot_profile.clone().or(recipe.uboot_profile),
         suite: cli.suite.clone().or(recipe.suite),
         layout: cli.layout.or(recipe.layout),
         boot_method: cli.boot_method,
@@ -1019,8 +1301,8 @@ mod tests {
         let root = repo_root();
 
         let patched = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
-        let k = patched.kernel.compiled().expect("a compiled kernel");
-        assert_eq!(k.patch_profile.as_deref(), Some("rk3588-accel"));
+        let k = patched.kernel.as_ref().unwrap().compiled().expect("a compiled kernel");
+        assert_eq!(k.patch_profiles, vec!["rk3588-accel".to_string()]);
         assert!(k.patches_url.as_deref().is_some_and(|u| u.contains("patches")));
         // No release tag exists yet, so the branch is the honest ref: it says the pin
         // came from the tip of development rather than implying a release never cut.
@@ -1028,14 +1310,87 @@ mod tests {
 
         // A kernel applying no series pins nothing, so it names neither.
         let unpatched = resolve_recipe(&root, "asus-c201/forky", &Overrides::default()).unwrap();
-        assert_eq!(unpatched.kernel.patch_profile(), None);
-        assert!(unpatched.kernel.compiled().is_none());
+        let uk = unpatched.kernel.as_ref().unwrap();
+        assert!(uk.patch_profiles().is_empty());
+        assert!(uk.compiled().is_none());
+    }
+
+    #[test]
+    fn a_uboot_only_recipe_resolves_no_suite_or_kernel() {
+        // The loader recipe is a pure bootloader deliverable: it resolves no suite and
+        // no kernel, only the u-boot profile, so the whole image axis is absent. It is
+        // a SoC-generic tool homed on the rk3576-generic device (not a board).
+        let root = repo_root();
+        let b = resolve_recipe(&root, "rk3576-generic/loader", &Overrides::default()).unwrap();
+        assert!(b.suite.is_none(), "a u-boot-only build resolves no suite");
+        assert!(b.kernel.is_none(), "a u-boot-only build resolves no kernel");
+        assert!(!b.produces_image());
+        let boot = b.rkbin_boot().expect("a rockchip-rkbin boot");
+        // The u-boot profile lives on its own axis, paired with its patches source.
+        assert_eq!(boot.uboot_profile.as_deref(), Some("rk3576-loader"));
+        assert!(boot.uboot_patches_url.is_some());
+        assert!(boot.uboot_patches_ref.is_some());
+
+        // The image recipe on the same device resolves a suite, a pristine kernel, and
+        // the *display* u-boot profile — the profile is not a kernel field any more.
+        let img = resolve_recipe(&root, "h96-max-m9/forky", &Overrides::default()).unwrap();
+        assert!(img.produces_image());
+        assert_eq!(img.suite.as_deref(), Some("forky"));
+        // The kernel carries only the SoC-wide `rk3576-fixes`. The H96's board-specific
+        // AIC8800 Wi-Fi driver is not a kernel patch profile: it is an out-of-tree module
+        // built from a pinned repo, composed via `device_kmods`.
+        let kprofiles: Vec<&str> = img
+            .kernel
+            .as_ref()
+            .unwrap()
+            .patch_profiles()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(kprofiles, ["rk3576-fixes"]);
+        // The board declares the aic8800 external module, with its firmware sourced from
+        // the same pinned repo.
+        let kmod = img.device_kmods.iter().find(|k| k.name == "aic8800").expect("aic8800 device_kmod");
+        assert_eq!(kmod.modules, ["aic8800_bsp", "aic8800_fdrv"]);
+        assert!(kmod.firmware.is_some(), "the aic8800 kmod ships firmware");
+        assert_eq!(
+            img.rkbin_boot().unwrap().uboot_profile.as_deref(),
+            Some("rk3576-display")
+        );
+    }
+
+    #[test]
+    fn an_unknown_uboot_profile_is_rejected() {
+        // The u-boot profile is validated against the device's set, exactly like the
+        // kernel axis.
+        let root = repo_root();
+        let ov = Overrides {
+            uboot_profile: Some("definitely-not-a-profile".into()),
+            ..Default::default()
+        };
+        let err = resolve_device(&root, "h96-max-m9", &ov).unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownUbootProfileForDevice { .. }));
+    }
+
+    #[test]
+    fn a_uboot_only_deliverable_needs_a_bootloader_board() {
+        // A depthcharge board builds no u-boot, so a u-boot-only deliverable on it has
+        // nothing to emit — rejected at resolve.
+        let root = repo_root();
+        let ov = Overrides {
+            deliverable: Deliverable::Uboot,
+            ..Default::default()
+        };
+        let err = resolve_device(&root, "asus-c201", &ov).unwrap_err();
+        assert!(matches!(err, ConfigError::UbootOnlyWithoutBootloader { .. }));
     }
 
     #[test]
     fn the_none_sentinel_resolves_to_no_patch_profile() {
-        // The `"none"` spelling is config-facing only; resolution turns it into a
-        // typed absence so no downstream code compares against the magic string.
+        // The `"none"` spelling is config-facing only (the u-boot pristine sentinel);
+        // resolution turns it into a typed absence so no downstream code compares
+        // against the magic string. The kernel axis expresses "no series" as an empty
+        // `patch_profiles` list instead, so it does not go through this helper.
         assert_eq!(crate::profile::patch_profile("none"), None);
         assert_eq!(crate::profile::patch_profile("rk3588-accel"), Some("rk3588-accel"));
     }
@@ -1304,7 +1659,7 @@ mod tests {
         assert_eq!(b.arch, Arch::Arm64);
         assert_eq!(b.soc, Soc::Rk3588);
         assert_eq!(b.boot_method, BootMethod::RockchipRkbin);
-        assert_eq!(b.suite, "forky");
+        assert_eq!(b.suite.as_deref(), Some("forky"));
         assert_eq!(b.layout, Layout::Combined);
         // The recipe's single capability feature resolves + passes the SoC/arch
         // gates.
@@ -1319,13 +1674,13 @@ mod tests {
         assert!(b.rootfs_packages.contains(&"openssh-server".to_string()));
         assert!(b.rootfs_packages.contains(&"ffmpeg-rk".to_string()));
         assert_eq!(b.rootfs_exclude, vec!["isc-dhcp-client"]);
-        assert_eq!(b.kernel.id(), "rk3588-mainline-7.1");
+        assert_eq!(b.kernel.as_ref().unwrap().id(), "rk3588-mainline-7.1");
         assert_eq!(b.kernel_dtb, "rockchip/rk3588-turing-rk1.dtb");
         assert!(b.modules.contains(&"rga3".to_string()));
         assert!(b.modules.contains(&"rkvenc".to_string()));
         // kernel fragments precede device fragments in apply order; the generated
         // Debian baseline is first, then the curated rockchip slices.
-        let kernel = b.kernel.compiled().expect("the RK1 compiles its kernel");
+        let kernel = b.kernel.as_ref().unwrap().compiled().expect("the RK1 compiles its kernel");
         assert_eq!(
             kernel.config_fragments,
             vec![
@@ -1356,7 +1711,7 @@ mod tests {
         // / RGA userspace, which installs later from the media-accel debs.
         let root = repo_root();
         let b = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
-        assert_eq!(b.suite, "forky");
+        assert_eq!(b.suite.as_deref(), Some("forky"));
         assert!(b.features.is_empty(), "a base recipe selects no features");
         // No feature sets `requires_media_accel`, so no userspace/ffmpeg source trees
         // are scheduled and no media userspace lands in the rootfs.
@@ -1367,9 +1722,165 @@ mod tests {
         // The kernel is the accel kernel: accel/full is present exactly as on the
         // media-accel build. This split — capability in the kernel, userspace in the
         // feature — is what lets a base image light up transcode later.
-        let kernel = b.kernel.compiled().expect("the RK1 compiles its kernel");
+        let kernel = b.kernel.as_ref().unwrap().compiled().expect("the RK1 compiles its kernel");
         assert!(kernel.config_fragments.contains(&"accel/full".to_string()));
-        assert_eq!(b.kernel.id(), "rk3588-mainline-7.1");
+        assert_eq!(b.kernel.as_ref().unwrap().id(), "rk3588-mainline-7.1");
+    }
+
+    #[test]
+    fn a_capability_feature_contributes_its_kernel_patch_profile_and_fragment() {
+        // The whole point of the feature reaching the kernel: `media-accel-v4l2` needs
+        // an out-of-tree RGA driver, so it carries both the series that adds the source
+        // and the fragment that compiles it. Neither is on the RK3576 kernel or the
+        // board, so a build that does not select the capability gets neither.
+        let root = repo_root();
+        let base = resolve_recipe(&root, "h96-max-m9/forky", &Overrides::default()).unwrap();
+        let base_k = base.kernel.as_ref().unwrap().compiled().unwrap();
+        assert_eq!(base_k.patch_profiles, vec!["rk3576-fixes".to_string()]);
+        assert!(!base_k.config_fragments.contains(&"accel/rk3576-rga".to_string()));
+
+        let accel = resolve_recipe(
+            &root,
+            "h96-max-m9/forky",
+            &Overrides {
+                features: Some(vec!["media-accel-v4l2".into()]),
+                ..Overrides::default()
+            },
+        )
+        .unwrap();
+        let k = accel.kernel.as_ref().unwrap().compiled().unwrap();
+        // Composed last, after the kernel's own profile and the device's fragments.
+        assert_eq!(
+            k.patch_profiles,
+            vec!["rk3576-fixes".to_string(), "rk3576-rga".to_string()]
+        );
+        assert_eq!(
+            k.config_fragments,
+            vec![
+                "base/debian-arm64".to_string(),
+                "soc/rk3576".to_string(),
+                "device/h96-max-m9".to_string(),
+                "accel/rk3576-rga".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_soc_declaring_only_some_userspace_trees_resolves_just_those() {
+        // The SoC's declared trees are its capability statement, and an absent tree is
+        // a fact about the hardware: RK3576 has no vendor `mpp_service` for MPP to bind
+        // and a panfrost GPU that takes Mesa rather than libmali, so it declares
+        // neither — and no graft applies to its ffmpeg either.
+        let root = repo_root();
+        let b = resolve_recipe(
+            &root,
+            "h96-max-m9/forky",
+            &Overrides {
+                features: Some(vec!["media-accel-v4l2".into()]),
+                ..Overrides::default()
+            },
+        )
+        .unwrap();
+        let us = b.userspace.as_ref().expect("the capability builds userspace");
+        assert!(us.mpp.is_none(), "no vendor mpp_service on this SoC");
+        assert!(us.libmali.is_none(), "the GPU userspace is Mesa, from the mirror");
+        assert!(us.librga.is_some(), "RGA is the one vendor tree this SoC builds");
+        let ff = b.ffmpeg.as_ref().expect("the capability builds ffmpeg");
+        assert!(ff.rockchip.is_none(), "the base tree builds unmodified");
+    }
+
+    #[test]
+    fn a_feature_needing_a_compiled_kernel_is_rejected_against_a_distro_one() {
+        // A distro-package kernel merges no kconfig and applies no series, so the
+        // capability's driver would never be built — the feature would install its
+        // userspace against hardware support that is not there. Named for the feature,
+        // since the fix is to drop it or change kernel, not to edit the device.
+        let root = repo_root();
+        let feature = crate::feature::Feature {
+            description: "test".into(),
+            packages: vec![],
+            exclude: vec![],
+            requires_soc: vec![],
+            requires_arch: vec![],
+            apt_sources: vec![],
+            extra_debs: vec![],
+            conflicts: vec![],
+            requires_media_accel: false,
+            config_fragments: vec!["accel/whatever".into()],
+            patch_profiles: vec![],
+        };
+        let selected = [("cap".to_string(), feature)];
+        let (frags, profiles) = crate::feature::kernel_contributions(&selected);
+        assert_eq!(frags, vec!["accel/whatever".to_string()]);
+        assert!(profiles.is_empty());
+        assert_eq!(
+            crate::feature::first_contributing_kernel_input(&selected),
+            Some(("cap", "config_fragments"))
+        );
+        // And the resolve-time rejection, on a synthetic config: a distro kernel plus a
+        // feature that contributes a fragment. The feature carries no SoC gate, so the
+        // failure is unambiguously this one and not an earlier gate.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        for sub in ["arches", "socs", "boot-methods", "devices", "kernels", "features"] {
+            std::fs::create_dir_all(p.join(sub)).unwrap();
+        }
+        std::fs::write(
+            p.join("arches/armv7.toml"),
+            "kernel_arch = \"arm\"\nuboot_arch = \"arm\"\n\
+             kbuild_image = \"arch/arm/boot/zImage\"\ncross_compile = \"\"\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("base.toml"), "packages = []\nexclude = []\n").unwrap();
+        std::fs::write(
+            p.join("socs/rk3288.toml"),
+            "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("boot-methods/depthcharge.toml"),
+            "description = \"dc\"\nkpart_offset = \"12MiB\"\nkpart_size = \"16MiB\"\n\
+             kpart_slots = 2\nrootfs_offset = \"44MiB\"\nkpart_priority = 10\n\
+             kpart_tries = 5\nkpart_successful = true\ncmdline = \"ro\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("kernels/k.toml"),
+            "flavor = \"distro-package\"\npackage = \"linux-image-armmp\"\n\
+             supported_socs = [\"rk3288\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("features/cap.toml"),
+            "description = \"a capability whose driver is out-of-tree\"\n\
+             config_fragments = [\"accel/whatever\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("devices/dev.toml"),
+            "description = \"d\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
+             supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/d.dtb\"\n\
+             device_config_fragments = []\nsupported_kernels = [\"k\"]\n\
+             default_kernel = \"k\"\ndefault_suite = \"forky\"\ndefault_layout = \"combined\"\n\
+             hostname = \"d\"\nimage_size = \"4G\"\n\n[depthcharge]\nboard = \"d\"\n\
+             supported_boards = [\"d\"]\n",
+        )
+        .unwrap();
+        let synthetic = ConfigRoot::new(p);
+        let err = resolve_device(
+            &synthetic,
+            "dev",
+            &Overrides { features: Some(vec!["cap".into()]), ..Overrides::default() },
+        )
+        .unwrap_err();
+        match err {
+            ConfigError::FeatureNeedsCompiledKernel { feature, kernel, what } => {
+                assert_eq!(feature, "cap");
+                assert_eq!(kernel, "k");
+                assert_eq!(what, "config_fragments");
+            }
+            other => panic!("expected FeatureNeedsCompiledKernel, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1381,11 +1892,13 @@ mod tests {
         let root = repo_root();
 
         let base = resolve_recipe(&root, "turing-rk1/trixie", &Overrides::default()).unwrap();
-        assert_eq!(base.suite, "trixie");
+        assert_eq!(base.suite.as_deref(), Some("trixie"));
         assert!(base.features.is_empty());
         assert!(base.userspace.is_none());
         assert!(base
             .kernel
+            .as_ref()
+            .unwrap()
             .compiled()
             .unwrap()
             .config_fragments
@@ -1393,7 +1906,7 @@ mod tests {
 
         let accel =
             resolve_recipe(&root, "turing-rk1/media-accel-trixie", &Overrides::default()).unwrap();
-        assert_eq!(accel.suite, "trixie");
+        assert_eq!(accel.suite.as_deref(), Some("trixie"));
         assert_eq!(accel.features, vec!["media-accel-rockchip"]);
         assert!(accel.userspace.is_some(), "the media-accel variant carries userspace");
         assert!(accel.ffmpeg.is_some());
@@ -1408,7 +1921,7 @@ mod tests {
             ..Default::default()
         };
         let b = resolve_device(&root, "turing-rk1", &ov).unwrap();
-        assert_eq!(b.suite, "sid");
+        assert_eq!(b.suite.as_deref(), Some("sid"));
         assert_eq!(b.layout, Layout::Split);
     }
 
@@ -1420,14 +1933,15 @@ mod tests {
         assert_eq!(b.arch.debian_arch(), "armhf");
         assert_eq!(b.soc, Soc::Rk3288);
         assert_eq!(b.boot_method, BootMethod::Depthcharge);
-        assert_eq!(b.suite, "forky");
+        assert_eq!(b.suite.as_deref(), Some("forky"));
 
         // The kernel is Debian's: no source, no fragments, no patches — and the
         // package joins the rootfs set, which is how it gets installed and pinned.
         assert!(!b.compiles_kernel());
-        assert_eq!(b.kernel.id(), "debian-armmp");
-        assert_eq!(b.kernel.patch_profile(), None);
-        assert!(b.kernel.compiled().is_none());
+        let k = b.kernel.as_ref().unwrap();
+        assert_eq!(k.id(), "debian-armmp");
+        assert!(k.patch_profiles().is_empty());
+        assert!(k.compiled().is_none());
         assert!(b.rootfs_packages.contains(&"linux-image-armmp".to_string()));
 
         // The boot half is the kernel slots, with the bits that make the firmware boot
@@ -1471,8 +1985,8 @@ mod tests {
         // authoring a kernel per release.
         let root = repo_root();
         let b = resolve_recipe(&root, "asus-c201/trixie", &Overrides::default()).unwrap();
-        assert_eq!(b.suite, "trixie");
-        assert_eq!(b.kernel.id(), "debian-armmp");
+        assert_eq!(b.suite.as_deref(), Some("trixie"));
+        assert_eq!(b.kernel.as_ref().unwrap().id(), "debian-armmp");
         assert_eq!(b.device, "asus-c201");
     }
 
@@ -1498,7 +2012,7 @@ mod tests {
             // Debian's kernel, so nothing is compiled and no DTB is built: the board's
             // device tree is already upstream.
             assert!(!b.compiles_kernel());
-            assert_eq!(b.kernel.id(), "debian-armmp");
+            assert_eq!(b.kernel.as_ref().unwrap().id(), "debian-armmp");
             // Same kernel-partition geometry and cmdline — those are the boot method's,
             // not the board's.
             let boot = b.depthcharge_boot().expect("a depthcharge board");
@@ -1869,6 +2383,73 @@ mod tests {
         }
     }
 
+    /// A valid `device_kmods` entry, mutated per case in the rejection tests below.
+    fn valid_kmod() -> DeviceKmod {
+        DeviceKmod {
+            name: "aic8800".into(),
+            git: "https://github.com/radxa-pkg/aic8800.git".into(),
+            git_ref: "main".into(),
+            subdir: "src/SDIO/driver_fw/driver/aic8800".into(),
+            patch_dir: "debian/patches".into(),
+            patches: vec!["fix-sdio-firmware-path.patch".into()],
+            local_patches: vec!["devices/h96-max-m9/kmod-patches/aic8800-sdio-linux-7.1.patch".into()],
+            make_args: vec!["CONFIG_FDRV_NO_REG_SDIO=y".into()],
+            modules: vec!["aic8800_bsp".into(), "aic8800_fdrv".into()],
+            firmware: Some(KmodFirmware {
+                subdir: "src/SDIO/driver_fw/fw/aic8800D80".into(),
+                install: "usr/lib/firmware/aic8800_fw/SDIO/aic8800D80".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn validate_device_kmods_accepts_a_well_formed_entry() {
+        validate_device_kmods(std::slice::from_ref(&valid_kmod()), "h96-max-m9").unwrap();
+        // An empty list is always fine — the board carries no out-of-tree module.
+        validate_device_kmods(&[], "h96-max-m9").unwrap();
+    }
+
+    #[test]
+    fn validate_device_kmods_rejects_malformed_entries() {
+        // Each mutation trips exactly one rule; the error names the offending kmod.
+        let escaping_subdir = DeviceKmod { subdir: "../evil".into(), ..valid_kmod() };
+        let non_bare_patch = DeviceKmod { patches: vec!["sub/dir.patch".into()], ..valid_kmod() };
+        let escaping_local = DeviceKmod { local_patches: vec!["/etc/shadow".into()], ..valid_kmod() };
+        let bad_make_arg = DeviceKmod { make_args: vec!["rm -rf /".into()], ..valid_kmod() };
+        let bad_name = DeviceKmod { name: "Bad_Name".into(), ..valid_kmod() };
+        let escaping_fw = DeviceKmod {
+            firmware: Some(KmodFirmware { subdir: "../fw".into(), install: "usr/lib/firmware".into() }),
+            ..valid_kmod()
+        };
+        let absolute_fw_install = DeviceKmod {
+            firmware: Some(KmodFirmware { subdir: "fw".into(), install: "/usr/lib/firmware".into() }),
+            ..valid_kmod()
+        };
+
+        for kmod in [
+            &escaping_subdir, &non_bare_patch, &escaping_local, &bad_make_arg, &bad_name,
+            &escaping_fw, &absolute_fw_install,
+        ] {
+            match validate_device_kmods(std::slice::from_ref(kmod), "h96-max-m9").unwrap_err() {
+                ConfigError::InvalidDeviceKmod { device, name, .. } => {
+                    assert_eq!(device, "h96-max-m9");
+                    assert_eq!(&name, &kmod.name);
+                }
+                other => panic!("expected InvalidDeviceKmod, got {other:?}"),
+            }
+        }
+
+        // A duplicate name across two entries is rejected.
+        let dup = vec![valid_kmod(), valid_kmod()];
+        match validate_device_kmods(&dup, "h96-max-m9").unwrap_err() {
+            ConfigError::InvalidDeviceKmod { name, why, .. } => {
+                assert_eq!(name, "aic8800");
+                assert!(why.contains("more than once"), "{why}");
+            }
+            other => panic!("expected InvalidDeviceKmod, got {other:?}"),
+        }
+    }
+
     /// A slot count outside `1..=MAX_KPART_SLOTS` is a typed error, not a clamp. Zero
     /// slots would leave the firmware nothing to boot at all; past the cap is a typo,
     /// and the slots run back to back, so a large one would quietly march into the
@@ -1983,6 +2564,8 @@ mod tests {
     /// Build a feature carrying a set of apt sources, for the merge tests.
     fn feat_with_sources(sources: Vec<AptSource>) -> crate::feature::Feature {
         crate::feature::Feature {
+            config_fragments: vec![],
+            patch_profiles: vec![],
             description: "t".into(),
             packages: vec![],
             exclude: vec![],
@@ -2232,7 +2815,7 @@ mod fixture_tests {
                 fs::write(
                     p.join(format!("kernels/{k}.toml")),
                     "flavor = \"mainline\"\nsource = \"linux-stable\"\nbase_defconfig = \"defconfig\"\n\
-                     config_fragments = []\npatch_profile = \"none\"\nsupported_socs = [\"rk3588\"]\n",
+                     config_fragments = []\npatch_profiles = []\nsupported_socs = [\"rk3588\"]\n",
                 )
                 .unwrap();
             }
@@ -2334,8 +2917,8 @@ mod fixture_tests {
             ..Default::default()
         };
         let b = resolve_recipe(&root, "rec", &cli).unwrap();
-        assert_eq!(b.kernel.id(), "k2");
-        assert_eq!(b.suite, "sid");
+        assert_eq!(b.kernel.as_ref().unwrap().id(), "k2");
+        assert_eq!(b.suite.as_deref(), Some("sid"));
         assert_eq!(b.layout, Layout::Split);
         assert_eq!(b.features, vec!["f2"]);
         assert_eq!(b.image_size, "4G");
@@ -2360,8 +2943,8 @@ mod fixture_tests {
         let dir = tree.write();
         let root = ConfigRoot::new(dir.path());
         let b = resolve_recipe(&root, "rec", &Overrides::default()).unwrap();
-        assert_eq!(b.kernel.id(), "k2");
-        assert_eq!(b.suite, "bookworm");
+        assert_eq!(b.kernel.as_ref().unwrap().id(), "k2");
+        assert_eq!(b.suite.as_deref(), Some("bookworm"));
         assert_eq!(b.layout, Layout::Split);
         assert_eq!(b.features, vec!["f1"]);
         assert_eq!(b.image_size, "1G");

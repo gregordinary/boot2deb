@@ -8,7 +8,7 @@ ref = "v7.1.1"
 commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
 
 [patches]
-profile = "rk3588-accel"
+profiles = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
 commit = "a402fd101afad8bb1d5cfe2e99fc78e2bd35b940"
@@ -45,7 +45,7 @@ commit = "f66f2f804627e4464c2d1b10181772b5437bb991"
 
 [rootfs]
 suite = "forky"
-manifest = "turing-rk1-jellyfin.pkgs.lock"
+manifest = "jellyfin.pkgs.lock"
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"

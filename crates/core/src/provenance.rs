@@ -63,6 +63,10 @@ pub struct BuildFacts<'a> {
     /// Whether that checkout had uncommitted changes at build time. Only meaningful
     /// when `builder_commit` is `Some`.
     pub builder_dirty: bool,
+    /// The on-disk contract the rootfs filesystem was formatted to. The engine owns
+    /// it because the values come from the formatter it links, which the pure core
+    /// does not depend on.
+    pub filesystem: FilesystemProvenance,
 }
 
 /// The resolved build point + every pin, joined into one document. Each
@@ -76,6 +80,9 @@ pub struct ProvenanceManifest {
     pub sources: SourcesProvenance,
     /// Rootfs suite + the content-pinned solved-manifest reference.
     pub rootfs: RootfsProvenance,
+    /// The on-disk contract the rootfs filesystem was formatted to — the one
+    /// determinant of the image's bytes that no source pin covers.
+    pub filesystem: FilesystemProvenance,
     /// Verified rkbin blob pins. Absent when the boot method consumes no rkbin blobs
     /// — a depthcharge board's firmware is its own, so there is no ATF or DDR TPL in
     /// its boot chain to record.
@@ -213,12 +220,12 @@ pub struct IdentityKernel {
     /// The exact kernel commit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// The patch profile applied to that kernel. It is the difference between two boards
-    /// running the same kernel version and having different hardware working, so it
-    /// belongs on the device rather than only in the build's records. Absent when the
-    /// kernel applied no series.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub patch_profile: Option<String>,
+    /// The patch profiles applied to that kernel, in order. They are the difference
+    /// between two boards running the same kernel version and having different hardware
+    /// working, so they belong on the device rather than only in the build's records.
+    /// Empty when the kernel applied no series.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub patch_profiles: Vec<String>,
 }
 
 /// The resolved build point (from [`ResolvedBuild`]).
@@ -284,11 +291,12 @@ pub struct SourcesProvenance {
     /// Absent for a compiled kernel.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kernel_package: Option<String>,
-    /// Patch profile name. Absent — along with
-    /// [`patches_commit`](Self::patches_commit) — when the kernel applied no series,
-    /// so the record never implies a `patches` dependency the build did not have.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub patch_profile: Option<String>,
+    /// Patch profile names, in order. Empty — along with
+    /// [`patches_commit`](Self::patches_commit) being absent — when the kernel applied
+    /// no series, so the record never implies a `patches` dependency the build did not
+    /// have.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub patch_profiles: Vec<String>,
     /// `patches` repo commit the series is pinned at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patches_commit: Option<String>,
@@ -312,26 +320,34 @@ pub struct SourcesProvenance {
 /// only when the image compiled the transcode stack.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MediaAccelProvenance {
-    /// MPP ref.
-    pub mpp_ref: String,
-    /// MPP commit.
-    pub mpp_commit: String,
-    /// librga ref.
-    pub librga_ref: String,
-    /// librga commit.
-    pub librga_commit: String,
-    /// libmali ref.
-    pub libmali_ref: String,
-    /// libmali commit.
-    pub libmali_commit: String,
+    /// MPP ref. Absent when the SoC declares no such tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mpp_ref: Option<String>,
+    /// MPP commit. Absent when the SoC declares no such tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mpp_commit: Option<String>,
+    /// librga ref. Absent when the SoC declares no such tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub librga_ref: Option<String>,
+    /// librga commit. Absent when the SoC declares no such tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub librga_commit: Option<String>,
+    /// libmali ref. Absent when the SoC declares no such tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub libmali_ref: Option<String>,
+    /// libmali commit. Absent when the SoC declares no such tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub libmali_commit: Option<String>,
     /// ffmpeg V4L2-base ref.
     pub ffmpeg_base_ref: String,
     /// ffmpeg V4L2-base commit.
     pub ffmpeg_base_commit: String,
-    /// ffmpeg Rockchip provenance-tree ref (graft source).
-    pub ffmpeg_rockchip_ref: String,
-    /// ffmpeg Rockchip provenance-tree commit.
-    pub ffmpeg_rockchip_commit: String,
+    /// ffmpeg Rockchip provenance-tree ref (graft source). Absent when no graft applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ffmpeg_rockchip_ref: Option<String>,
+    /// ffmpeg Rockchip provenance-tree commit. Absent when no graft applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ffmpeg_rockchip_commit: Option<String>,
 }
 
 /// The rootfs suite plus the content-pinned solved-manifest reference.
@@ -345,6 +361,43 @@ pub struct RootfsProvenance {
     pub manifest_sha256: String,
     /// Number of installed packages the manifest pins.
     pub package_count: usize,
+}
+
+/// The rootfs filesystem's on-disk contract: the exact ext4 feature words, block
+/// size, and inode size the rootfs was formatted with.
+///
+/// Every other pin in this manifest answers "which sources went in." This one answers
+/// "what shape were they written into," and it is the only such determinant that moves
+/// independently of the lock: the feature set is a builder constant chosen by the image
+/// stage, not a value resolved from config, so a formatter whose baseline set gains a
+/// feature relays a different on-disk layout for an unchanged lock. Recording the
+/// *resolved* words makes that a visible difference between two builds rather than a
+/// silent one.
+///
+/// Both spellings are kept, and neither is redundant. [`features`](Self::features)
+/// is readable and diffable by a human; the three raw words pin exactly, including a
+/// bit whose name the formatter has changed or that it does not name at all.
+/// [`block_size`](Self::block_size) and [`inode_size`](Self::inode_size) are not
+/// features and appear in no feature word, but change the layout comprehensively — a
+/// record of the feature words alone would not be a pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FilesystemProvenance {
+    /// The filesystem type the words below describe (`ext4`).
+    pub kind: String,
+    /// On-disk feature names, in the formatter's canonical order: `compat`, then
+    /// `incompat`, then `ro_compat`, each ascending by bit.
+    pub features: Vec<String>,
+    /// The raw `compat` feature word, `0x`-prefixed 8-digit hex. Hex rather than a
+    /// decimal integer because it is a bit set, and only hex diffs one bit at a time.
+    pub compat: String,
+    /// The raw `incompat` feature word, in the same form as [`compat`](Self::compat).
+    pub incompat: String,
+    /// The raw `ro_compat` feature word, in the same form as [`compat`](Self::compat).
+    pub ro_compat: String,
+    /// Filesystem block size in bytes.
+    pub block_size: u32,
+    /// Inode size in bytes (`s_inode_size`).
+    pub inode_size: u16,
 }
 
 /// Verified rkbin blob pins (`"<filename>@sha256:<hex>"`).
@@ -414,6 +467,7 @@ pub struct CredentialsProvenance {
 /// solved-manifest digest and per-image password are both produced by the bootstrap it
 /// would have to be written into.
 pub fn system_identity(build: &ResolvedBuild, lock: &Lock) -> SystemIdentity {
+    let kernel = build.kernel.as_ref().expect(IMAGE_ONLY);
     SystemIdentity {
         version: IDENTITY_VERSION,
         image: IdentityImage {
@@ -423,7 +477,7 @@ pub fn system_identity(build: &ResolvedBuild, lock: &Lock) -> SystemIdentity {
             soc: build.soc.to_string(),
             boot_method: build.boot_method.to_string(),
             board: build.depthcharge_boot().map(|b| b.board.clone()),
-            suite: build.suite.clone(),
+            suite: build.suite.clone().expect(IMAGE_ONLY),
             features: build.features.clone(),
             layout: build.layout.to_string(),
             hostname: build.hostname.clone(),
@@ -431,18 +485,27 @@ pub fn system_identity(build: &ResolvedBuild, lock: &Lock) -> SystemIdentity {
         kernel: IdentityKernel {
             // From the resolved build, so they are recorded even for a kernel the lock
             // pins no commit for.
-            id: build.kernel.id().to_string(),
-            flavor: build.kernel.flavor().to_string(),
-            package: match &build.kernel {
+            id: kernel.id().to_string(),
+            flavor: kernel.flavor().to_string(),
+            package: match kernel {
                 crate::model::ResolvedKernel::Distro(k) => Some(k.package.clone()),
                 crate::model::ResolvedKernel::Compiled(_) => None,
             },
             reference: lock.kernel.as_ref().map(|k| k.reference.clone()),
             commit: lock.kernel.as_ref().map(|k| k.commit.clone()),
-            patch_profile: lock.patches.as_ref().map(|p| p.profile.clone()),
+            patch_profiles: lock
+                .patches
+                .as_ref()
+                .map(|p| p.profiles.clone())
+                .unwrap_or_default(),
         },
     }
 }
+
+/// Provenance and the system-identity file are emitted by the image node, which
+/// runs only for an image build — so the kernel, suite, and rootfs pin are present.
+const IMAGE_ONLY: &str =
+    "provenance is emitted only for an image build (kernel, suite, and rootfs pin present)";
 
 impl SystemIdentity {
     /// Serialize to the canonical form: the banner followed by the TOML body.
@@ -458,6 +521,8 @@ impl SystemIdentity {
 /// Join a resolved build, its lock, and the engine's build-time facts into a
 /// [`ProvenanceManifest`]. Pure — no I/O — so the join is unit-testable.
 pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceManifest {
+    let kernel = build.kernel.as_ref().expect(IMAGE_ONLY);
+    let rootfs = lock.rootfs.as_ref().expect(IMAGE_ONLY);
     ProvenanceManifest {
         image: ImageProvenance {
             device: build.device.clone(),
@@ -466,7 +531,7 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             soc: build.soc.to_string(),
             boot_method: build.boot_method.to_string(),
             board: build.depthcharge_boot().map(|b| b.board.clone()),
-            suite: build.suite.clone(),
+            suite: build.suite.clone().expect(IMAGE_ONLY),
             features: build.features.clone(),
             layout: build.layout.to_string(),
             image_size: build.image_size.clone(),
@@ -481,15 +546,19 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
         sources: SourcesProvenance {
             // The id and flavor come from the resolved build, so they are recorded
             // even for a kernel the lock pins no commit for.
-            kernel_id: build.kernel.id().to_string(),
-            kernel_flavor: build.kernel.flavor().to_string(),
+            kernel_id: kernel.id().to_string(),
+            kernel_flavor: kernel.flavor().to_string(),
             kernel_ref: lock.kernel.as_ref().map(|k| k.reference.clone()),
             kernel_commit: lock.kernel.as_ref().map(|k| k.commit.clone()),
-            kernel_package: match &build.kernel {
+            kernel_package: match kernel {
                 crate::model::ResolvedKernel::Distro(k) => Some(k.package.clone()),
                 crate::model::ResolvedKernel::Compiled(_) => None,
             },
-            patch_profile: lock.patches.as_ref().map(|p| p.profile.clone()),
+            patch_profiles: lock
+                .patches
+                .as_ref()
+                .map(|p| p.profiles.clone())
+                .unwrap_or_default(),
             patches_commit: lock.patches.as_ref().map(|p| p.commit.clone()),
             uboot_ref: lock.uboot.as_ref().map(|u| u.reference.clone()),
             uboot_commit: lock.uboot.as_ref().map(|u| u.commit.clone()),
@@ -497,25 +566,26 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             // not at all, so a single `zip` yields the whole block or `None`.
             media_accel: lock.userspace.as_ref().zip(lock.ffmpeg.as_ref()).map(|(us, ff)| {
                 MediaAccelProvenance {
-                    mpp_ref: us.mpp.reference.clone(),
-                    mpp_commit: us.mpp.commit.clone(),
-                    librga_ref: us.librga.reference.clone(),
-                    librga_commit: us.librga.commit.clone(),
-                    libmali_ref: us.libmali.reference.clone(),
-                    libmali_commit: us.libmali.commit.clone(),
+                    mpp_ref: us.mpp.as_ref().map(|p| p.reference.clone()),
+                    mpp_commit: us.mpp.as_ref().map(|p| p.commit.clone()),
+                    librga_ref: us.librga.as_ref().map(|p| p.reference.clone()),
+                    librga_commit: us.librga.as_ref().map(|p| p.commit.clone()),
+                    libmali_ref: us.libmali.as_ref().map(|p| p.reference.clone()),
+                    libmali_commit: us.libmali.as_ref().map(|p| p.commit.clone()),
                     ffmpeg_base_ref: ff.base.reference.clone(),
                     ffmpeg_base_commit: ff.base.commit.clone(),
-                    ffmpeg_rockchip_ref: ff.rockchip.reference.clone(),
-                    ffmpeg_rockchip_commit: ff.rockchip.commit.clone(),
+                    ffmpeg_rockchip_ref: ff.rockchip.as_ref().map(|p| p.reference.clone()),
+                    ffmpeg_rockchip_commit: ff.rockchip.as_ref().map(|p| p.commit.clone()),
                 }
             }),
         },
         rootfs: RootfsProvenance {
-            suite: lock.rootfs.suite.clone(),
-            manifest: lock.rootfs.manifest.clone(),
+            suite: rootfs.suite.clone(),
+            manifest: rootfs.manifest.clone(),
             manifest_sha256: facts.manifest_sha256.to_string(),
             package_count: facts.package_count,
         },
+        filesystem: facts.filesystem.clone(),
         blobs: lock.blobs.as_ref().map(|b| BlobsProvenance {
             atf: b.atf.clone(),
             tpl: b.tpl.clone(),
@@ -559,12 +629,21 @@ fn source_durability_rows(lock: &Lock) -> Vec<SourceDurability> {
         rows.push(source_durability("uboot", &u.reference, &u.commit));
     }
     if let Some(us) = &lock.userspace {
-        rows.push(source_durability("mpp", &us.mpp.reference, &us.mpp.commit));
-        rows.push(source_durability("librga", &us.librga.reference, &us.librga.commit));
-        rows.push(source_durability("libmali", &us.libmali.reference, &us.libmali.commit));
+        // Only the trees the SoC declares: a row for an absent tree would claim a
+        // fetch this build never makes.
+        for (name, pin) in [("mpp", &us.mpp), ("librga", &us.librga), ("libmali", &us.libmali)] {
+            if let Some(p) = pin {
+                rows.push(source_durability(name, &p.reference, &p.commit));
+            }
+        }
     }
     if let Some(ff) = &lock.ffmpeg {
         rows.push(source_durability("ffmpeg-base", &ff.base.reference, &ff.base.commit));
+    }
+    // Each out-of-tree kernel module is fetched from its own pinned repo, so its pin has
+    // the same re-fetch durability question as any other source.
+    for kmod in &lock.kmods {
+        rows.push(source_durability(&format!("kmod:{}", kmod.name), &kmod.reference, &kmod.commit));
     }
     rows
 }
@@ -609,7 +688,7 @@ mod tests {
                 commit: "kc".into(),
             }),
             patches: Some(PatchesPin {
-                profile: "rk3588-accel".into(),
+                profiles: vec!["rk3588-accel".into()],
                 source: "https://example.invalid/patches.git".into(),
                 reference: "main".into(),
                 commit: "pc".into(),
@@ -619,27 +698,46 @@ mod tests {
                 reference: "v2026.04".into(),
                 commit: "uc".into(),
             }),
+            uboot_patches: None,
             userspace: Some(UserspacePins {
-                mpp: git("mainline-cma-fix", "mc"),
-                librga: git("master", "rc"),
-                libmali: git("master", "lc"),
+                mpp: Some(git("mainline-cma-fix", "mc")),
+                librga: Some(git("master", "rc")),
+                libmali: Some(git("master", "lc")),
             }),
             ffmpeg: Some(FfmpegPins {
                 base: git("v4l2-request-n8.1", "fbc"),
-                rockchip: git("8.1", "frc"),
+                rockchip: Some(git("8.1", "frc")),
             }),
-            rootfs: RootfsPin {
+            rootfs: Some(RootfsPin {
                 suite: "forky".into(),
                 manifest: "turing-rk1-media-accel-forky.pkgs.lock".into(),
                 manifest_sha256: Some("mh".into()),
-            },
+            }),
             blobs: Some(BlobsPin {
                 atf: "atf@sha256:0".into(),
                 tpl: "tpl@sha256:1".into(),
                 bl32: None,
             }),
+            kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
+        }
+    }
+
+    /// The filesystem pin as the image stage resolves it — the engine's real values, so
+    /// the join is exercised against the shape that actually ships.
+    fn sample_filesystem() -> FilesystemProvenance {
+        FilesystemProvenance {
+            kind: "ext4".into(),
+            features: ["has_journal", "extent", "metadata_csum_seed"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            compat: "0x0000003c".into(),
+            incompat: "0x000022c2".into(),
+            ro_compat: "0x0000046b".into(),
+            block_size: 4096,
+            inode_size: 256,
         }
     }
 
@@ -702,6 +800,7 @@ mod tests {
             builder_version: "0.0.0-test",
             builder_commit: Some("deadbeef1234"),
             builder_dirty: false,
+            filesystem: sample_filesystem(),
         };
         let manifest = assemble(&sample_build(), &lock, &facts).to_toml_string().unwrap();
         assert!(manifest.contains("Kp7rTx"), "the manifest is the document that has it");
@@ -764,12 +863,13 @@ mod tests {
             builder_version: "0.0.0-test",
             builder_commit: Some("cafef00dbabe"),
             builder_dirty: false,
+            filesystem: sample_filesystem(),
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.sources.kernel_commit.as_deref(), Some("kc"));
         assert_eq!(prov.sources.kernel_flavor, "mainline");
         let media = prov.sources.media_accel.as_ref().expect("media-accel build has sources");
-        assert_eq!(media.ffmpeg_rockchip_ref, "8.1");
+        assert_eq!(media.ffmpeg_rockchip_ref.as_deref(), Some("8.1"));
         assert_eq!(prov.rootfs.manifest_sha256, "abc123");
         assert_eq!(prov.rootfs.package_count, 223);
         assert_eq!(prov.toolchain.host_arch, "x86_64");
@@ -790,6 +890,7 @@ mod tests {
             "[image]",
             "[sources]",
             "[rootfs]",
+            "[filesystem]",
             "[blobs]",
             "[toolchain]",
             "[built_with]",
@@ -810,6 +911,16 @@ mod tests {
         assert_eq!(parsed["built_with"]["version"].as_str(), Some("0.0.0-test"));
         assert_eq!(parsed["built_with"]["commit"].as_str(), Some("cafef00dbabe"));
         assert_eq!(parsed["built_with"]["dirty"].as_bool(), Some(false));
+        // The filesystem pin: the on-disk contract the rootfs was formatted to, which no
+        // source pin covers. Both spellings survive the join and the TOML round-trip —
+        // the raw words as hex strings (a bit set, not a quantity) and the readable names.
+        assert_eq!(parsed["filesystem"]["kind"].as_str(), Some("ext4"));
+        assert_eq!(parsed["filesystem"]["compat"].as_str(), Some("0x0000003c"));
+        assert_eq!(parsed["filesystem"]["incompat"].as_str(), Some("0x000022c2"));
+        assert_eq!(parsed["filesystem"]["ro_compat"].as_str(), Some("0x0000046b"));
+        assert_eq!(parsed["filesystem"]["block_size"].as_integer(), Some(4096));
+        assert_eq!(parsed["filesystem"]["inode_size"].as_integer(), Some(256));
+        assert_eq!(parsed["filesystem"]["features"][0].as_str(), Some("has_journal"));
         // No extra_debs in this build → the array-of-tables is omitted entirely.
         assert!(!text.contains("extra_debs"));
     }
@@ -833,6 +944,7 @@ mod tests {
             builder_version: "0.0.0-test",
             builder_commit: None,
             builder_dirty: false,
+            filesystem: sample_filesystem(),
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.extra_debs.len(), 1);

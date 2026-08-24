@@ -21,12 +21,18 @@ pub(crate) fn run(root: &ConfigRoot, recipe: &str) -> Result<(), Box<dyn std::er
     // to rot, which is a stronger guarantee than "all pins are durable" — so say so
     // rather than reporting on an empty set.
     if axes.is_empty() {
-        println!(
-            "{recipe} fetches nothing from git (its kernel is a distro package and its boot \
-             method builds no bootloader), so no source pin can rot upstream. Its package \
-             versions are pinned by sha256 in {}.",
-            lock.rootfs.manifest
-        );
+        match &lock.rootfs {
+            Some(r) => println!(
+                "{recipe} fetches nothing from git (its kernel is a distro package and its boot \
+                 method builds no bootloader), so no source pin can rot upstream. Its package \
+                 versions are pinned by sha256 in {}.",
+                r.manifest
+            ),
+            None => println!(
+                "{recipe} builds only a bootloader and fetches nothing from git, so it has no \
+                 source pins that can rot upstream."
+            ),
+        }
         return Ok(());
     }
     println!(

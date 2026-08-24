@@ -7,7 +7,7 @@ base_defconfig   = "defconfig"           # in-tree arm64 base; fragments merge o
 # Merge order (base first, device appended by the device layer): the generated
 # Debian-generic baseline, then the curated rockchip SoC + accel slices.
 config_fragments = ["base/debian-arm64", "soc/rk3588", "accel/full"]
-patch_profile    = "rk3588-accel"        # -> patches repo, kernel-version-scoped
+patch_profiles   = ["rk3588-accel"]      # -> patches repo, kernel-version-scoped
 # Clone URL of the patches repo, so a build with no local checkout auto-fetches
 # the series at the lock-pinned commit. Override with --patches-url, or point
 # --patches-path at a local checkout to co-develop the series.

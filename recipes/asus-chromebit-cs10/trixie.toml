@@ -1,4 +1,4 @@
-# recipes/asus-chromebit-cs10-trixie.toml — the ASUS Chromebit CS10 on Debian trixie
+# recipes/asus-chromebit-cs10/trixie.toml — the ASUS Chromebit CS10 on Debian trixie
 # (armhf).
 #
 # The same board on the stable suite, and it gains a whole kernel by it:

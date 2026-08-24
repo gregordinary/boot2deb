@@ -1,0 +1,22 @@
+# recipes/h96-max-m9-npu/forky.toml -- H96 MAX M9 (RK3576) with the NPU (rocket)
+# driver enabled, on mainline 7.1 / Debian forky. Constraints only; the exact
+# resolution is written to the sibling .lock by `boot2deb update h96-max-m9-npu/forky`.
+#
+# EXPERIMENTAL bring-up / reverse-engineering image. It is the base h96-max-m9/forky
+# image plus the RK3576 NPU: the rocket driver binds and exposes the accel uAPI
+# (/dev/accel) so the NPU can be probed and jobs submitted. Inference does NOT run
+# correctly yet (the RK3576 compute datapath is unsolved), so this is not a working
+# accelerator -- see devices/h96-max-m9-npu.toml and the rk3576-npu patch profile.
+device     = "h96-max-m9-npu"
+kernel     = "rk3576-mainline-7.1"
+uboot_profile = "rk3576-display"
+suite      = "forky"
+features   = []
+layout     = "combined"
+image_size = "2G"
+
+# Experimental: the rocket driver binds on RK3576 but the compute datapath does not
+# yet produce correct output. The image is for hardware probing and RE, not use.
+[support]
+status = "experimental"
+date   = "2026-07-24"

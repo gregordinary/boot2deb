@@ -1,4 +1,4 @@
-# recipes/asus-c100p-trixie.toml — the ASUS Chromebook Flip C100P on Debian trixie
+# recipes/asus-c100p/trixie.toml — the ASUS Chromebook Flip C100P on Debian trixie
 # (armhf).
 #
 # The same board on the stable suite, and it gains a whole kernel by it:

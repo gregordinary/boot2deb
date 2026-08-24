@@ -24,7 +24,7 @@ lock is *re-pinned* to include that commit. `patch import` prints these follow-u
 you; the rest of this page is the same steps, with their failure modes.
 
 The running example imports a kernel patch into the `rk3588-accel` profile and builds the
-`turing-rk1-forky` recipe.
+`turing-rk1/forky` recipe.
 
 ## 1. Import the patch
 
@@ -54,14 +54,14 @@ On success it prints exactly what to do next:
 patch import: wrote media-accel/kernel/045-fix-foo.patch (3812 bytes)
 
 !! patch written but NOT verified — it has not been dry-run against a kernel tree.
-   verify it now:   boot2deb verify-patches turing-rk1-forky
+   verify it now:   boot2deb verify-patches turing-rk1/forky
                     (auto-fetches the locked kernel at its pin — no checkout needed)
    next time:        add --verify-tree <kernel-checkout> to verify during import.
 patch import: rk3588-accel/kernel now lists the patch at position 5 of 11
 
 next steps — no build reads the patch until the series is committed and re-pinned:
   1. commit it:      git -C ../patches add -A && git -C ../patches commit
-  2. re-pin locks:   boot2deb update turing-rk1-forky
+  2. re-pin locks:   boot2deb update turing-rk1/forky
 ```
 
 The re-pin line names each recipe whose kernel uses the profile you imported into.
@@ -85,7 +85,7 @@ dirty patches checkout (see [failure modes](#failure-modes)).
 Confirm the series still applies cleanly to the pinned kernel:
 
 ```sh
-cargo run -p boot2deb-cli -- verify-patches turing-rk1-forky
+cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky
 ```
 
 With no `--kernel-path`, `verify-patches` **auto-fetches the locked kernel at its pin** —
@@ -93,7 +93,7 @@ no hand-cloned tree needed. The first run on a cold cache clones linux-stable (l
 you already have a checkout, point `--kernel-src` at it to skip the clone:
 
 ```sh
-cargo run -p boot2deb-cli -- verify-patches turing-rk1-forky --kernel-src ../linux
+cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky --kernel-src ../linux
 ```
 
 You can verify before or after committing — the series on disk is what is checked.
@@ -106,15 +106,15 @@ set.
 `update` re-pins the patches commit (and re-resolves the other refs) into the lock:
 
 ```sh
-cargo run -p boot2deb-cli -- update turing-rk1-forky
+cargo run -p boot2deb-cli -- update turing-rk1/forky
 ```
 
 You do **not** need `--kernel-ref` for a patch-only re-pin: with a lock already present,
 `update` inherits the previous kernel ref and re-pins only what changed. Commit the
-updated `recipes/<recipe>.lock`, then build:
+updated `recipes/<device>/<leaf>.lock`, then build:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1-forky
+cargo run -p boot2deb-cli -- build turing-rk1/forky
 ```
 
 The build reads the series at the pinned commit and applies it with `git am --3way`.
@@ -144,7 +144,7 @@ While iterating on a patch you may not want to commit-and-re-pin on every change
 `build` (and `verify-patches`) at your working checkout instead:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1-forky --patches-path ../patches
+cargo run -p boot2deb-cli -- build turing-rk1/forky --patches-path ../patches
 ```
 
 An explicit `--patches-path` **downgrades a pin mismatch from an error to a loud

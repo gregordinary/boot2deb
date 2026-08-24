@@ -24,10 +24,10 @@ workspace; every axis and layer merge is validated before a build runs.
 Two properties it is built around:
 
 - **Rootless.** Cross-architecture package builds and the Debian bootstrap run in a
-  rootless sandbox (`mmdebstrap --mode=unshare` + `bwrap` + `qemu-user`), and the disk
-  image is assembled with no root and no loop devices: GPT tables and `.xz` compression
-  are pure Rust, and the ext4 filesystem is formatted with `mke2fs -d` inside an
-  unprivileged user namespace. An x86_64 host builds an arm64 image without `sudo`.
+  rootless sandbox (`mmdebstrap --mode=unshare`, an in-process user-namespace sandbox,
+  and `qemu-user`), and the disk image is assembled with no root and no loop devices:
+  GPT tables, `.xz` compression, and the ext4 filesystem are all pure Rust. An x86_64
+  host builds an arm64 image without `sudo`.
 - **Reproducible.** The `.lock` pins every input — source commits, firmware-blob hashes,
   and the solved apt manifest — and each image ships a provenance manifest recording
   exactly what went into it, down to the boot2deb commit that built it. Package churn in
@@ -44,9 +44,9 @@ Two properties it is built around:
 | [ASUS Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
 
 Each board ships one or more *recipes*, a device plus a Debian suite and any optional
-features. The RK1, for example, comes as a base image (`turing-rk1-forky`), a
+features. The RK1, for example, comes as a base image (`turing-rk1/forky`), a
 hardware-transcode image that adds the Rockchip MPP/RGA/ffmpeg userspace
-(`turing-rk1-media-accel-forky`), and a Jellyfin image — each with a `trixie` sibling.
+(`turing-rk1/media-accel-forky`), and a Jellyfin image — each with a `trixie` sibling.
 List them with `cargo run -p boot2deb-cli -- list-recipes`.
 
 ## Quick start
@@ -61,7 +61,7 @@ rootless — no `sudo`.
 
    ```sh
    cd boot2deb
-   cargo run -p boot2deb-cli -- doctor turing-rk1-forky
+   cargo run -p boot2deb-cli -- doctor turing-rk1/forky
    ```
 
    Run the lines it reports, then re-run until every check passes.
@@ -70,12 +70,12 @@ rootless — no `sudo`.
    bootable disk image (tens of minutes cold; cached after):
 
    ```sh
-   cargo run -p boot2deb-cli -- build turing-rk1-forky
+   cargo run -p boot2deb-cli -- build turing-rk1/forky
    ```
 
-   The final lines print the image path under `build/turing-rk1-forky/artifacts/` and a
+   The final lines print the image path under `build/turing-rk1/forky/artifacts/` and a
    unique first-boot password for user `debian` — note it down. For hardware video
-   transcode, build `turing-rk1-media-accel-forky` instead.
+   transcode, build `turing-rk1/media-accel-forky` instead.
 
 4. Flash it. This is board-specific — for the RK1 it is the Turing Pi BMC (`tpi` or the
    web UI), or a removable card. See [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html).

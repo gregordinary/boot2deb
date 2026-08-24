@@ -1,0 +1,15 @@
+[Unit]
+Description=CEC: wake the TV and switch to this input at boot (box drives TV)
+Documentation=man:cec-ctl(1)
+# Shipped disabled -- opt in with `systemctl enable --now cec-tv-on`. The CEC
+# character device is created by the built-in HDMI driver during kernel init, so no
+# ordering against a later target is needed. Enable this together with
+# cec-tv-standby for full box-drives-TV (on at boot, off at shutdown).
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/h96/cec-tv-on
+
+[Install]
+WantedBy=multi-user.target

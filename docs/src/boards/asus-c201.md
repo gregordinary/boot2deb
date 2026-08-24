@@ -1,15 +1,15 @@
 # ASUS Chromebook C201
 
-The `asus-c201-forky` recipe builds a bootable Debian **forky** image for the ASUS
+The `asus-c201/forky` recipe builds a bootable Debian **forky** image for the ASUS
 Chromebook C201/C201PA (`google,veyron-speedy`) — an RK3288 Veyron Chromebook, and the
 first 32-bit Arm board and first ChromeOS-firmware board boot2deb supports.
-`asus-c201-trixie` is the same board on the stable suite.
+`asus-c201/trixie` is the same board on the stable suite.
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-c201-forky
+cargo run -p boot2deb-cli -- build asus-c201/forky
 ```
 
-That produces `build/asus-c201-forky/artifacts/asus-c201.img.xz` — a whole-disk image
+That produces `build/asus-c201/forky/artifacts/asus-c201.img.xz` — a whole-disk image
 carrying a signed kernel partition and the ext4 rootfs, so one write lays down
 everything the firmware needs.
 
@@ -22,7 +22,7 @@ neither a kernel nor a bootloader, and its lock pins nothing from git:
 ```toml
 [rootfs]
 suite = "forky"
-manifest = "asus-c201-forky.pkgs.lock"
+manifest = "forky.pkgs.lock"
 ```
 
 That is the whole lock. Every package in the image — the kernel included — is pinned by
@@ -70,7 +70,7 @@ the panel a few seconds after Ctrl+U instead of after the rootfs mounts.
 Write the image to a microSD card or a USB stick:
 
 ```sh
-xzcat build/asus-c201-forky/artifacts/asus-c201.img.xz \
+xzcat build/asus-c201/forky/artifacts/asus-c201.img.xz \
   | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
 ```
 
@@ -106,7 +106,7 @@ For a unit with another layout, either override at build time or change it on th
 running board (offline, like any Debian system):
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-c201-forky --keymap gb
+cargo run -p boot2deb-cli -- build asus-c201/forky --keymap gb
 sudo dpkg-reconfigure keyboard-configuration && sudo setupcon   # on the board
 ```
 

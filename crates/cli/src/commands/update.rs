@@ -78,32 +78,64 @@ pub(crate) fn run(
     let pick = |flag: Option<String>, prev: Option<String>, default: &str| {
         flag.or(prev).unwrap_or_else(|| default.to_string())
     };
+    // A tree the SoC does not declare is pinned by nobody, so its ref stays empty and
+    // `resolve_lock` never reads it — the same contract as a base build, applied per
+    // tree rather than to the whole stack.
+    let one = |flag: Option<String>,
+               prev: Option<&boot2deb_core::lock::GitPin>,
+               decl: Option<&boot2deb_core::model::GitSource>| {
+        match decl {
+            Some(d) => pick(flag, prev.map(|p| p.reference.clone()), &d.git_ref),
+            None => String::new(),
+        }
+    };
     let (mpp_ref, librga_ref, libmali_ref) = match &build.userspace {
         Some(us) => (
-            pick(args.mpp_ref, prev_us.map(|u| u.mpp.reference.clone()), &us.mpp.git_ref),
-            pick(args.librga_ref, prev_us.map(|u| u.librga.reference.clone()), &us.librga.git_ref),
-            pick(args.libmali_ref, prev_us.map(|u| u.libmali.reference.clone()), &us.libmali.git_ref),
+            one(args.mpp_ref, prev_us.and_then(|u| u.mpp.as_ref()), us.mpp.as_ref()),
+            one(args.librga_ref, prev_us.and_then(|u| u.librga.as_ref()), us.librga.as_ref()),
+            one(args.libmali_ref, prev_us.and_then(|u| u.libmali.as_ref()), us.libmali.as_ref()),
         ),
         None => (String::new(), String::new(), String::new()),
     };
     let (ffmpeg_base_ref, ffmpeg_rockchip_ref) = match &build.ffmpeg {
         Some(ff) => (
             pick(args.ffmpeg_base_ref, prev_ff.map(|f| f.base.reference.clone()), &ff.base.git_ref),
-            pick(
+            one(
                 args.ffmpeg_rockchip_ref,
-                prev_ff.map(|f| f.rockchip.reference.clone()),
-                &ff.rockchip.git_ref,
+                prev_ff.and_then(|f| f.rockchip.as_ref()),
+                ff.rockchip.as_ref(),
             ),
         ),
         None => (String::new(), String::new()),
     };
+    // Out-of-tree module refs: inherit each from the previous lock by name (a stable
+    // pin survives re-runs), else fall back to the device's declared ref. There is no
+    // per-module `--*-ref` flag — a `device_kmods` entry names its own ref.
+    let prev_kmods = prev.as_ref().map(|l| l.kmods.as_slice()).unwrap_or(&[]);
+    let kmod_refs: Vec<(String, String)> = build
+        .device_kmods
+        .iter()
+        .map(|k| {
+            let reference = prev_kmods
+                .iter()
+                .find(|p| p.name == k.name)
+                .map(|p| p.reference.clone())
+                .unwrap_or_else(|| k.git_ref.clone());
+            (k.name.clone(), reference)
+        })
+        .collect();
     let blobs_dir = args.blobs_dir.clone().unwrap_or_else(|| {
         let rel = format!("blobs/{}", build.soc.as_str());
         root.find_asset(&rel).unwrap_or_else(|| root.path().join(rel))
     });
-    let manifest = args
-        .rootfs_manifest
-        .unwrap_or_else(|| format!("{recipe}.pkgs.lock"));
+    let manifest = args.rootfs_manifest.unwrap_or_else(|| {
+        // The manifest is a bare filename living beside the recipe in its device
+        // folder, so it is named for the recipe's leaf, not the slashed reference:
+        // `recipes/turing-rk1/media-accel-forky.pkgs.lock`, filename
+        // `media-accel-forky.pkgs.lock`.
+        let leaf = recipe.rsplit('/').next().unwrap_or(recipe);
+        format!("{leaf}.pkgs.lock")
+    });
     let opts = pins::UpdateOptions {
         kernel_ref: &kernel_ref,
         uboot_ref: &uboot_ref,
@@ -112,6 +144,7 @@ pub(crate) fn run(
         libmali_ref: &libmali_ref,
         ffmpeg_base_ref: &ffmpeg_base_ref,
         ffmpeg_rockchip_ref: &ffmpeg_rockchip_ref,
+        kmod_refs: &kmod_refs,
         blobs_dir: &blobs_dir,
         patches_path: &args.patches_path,
         rootfs_manifest: &manifest,
@@ -133,37 +166,50 @@ pub(crate) fn run(
     println!("wrote {}", path.display());
     // Only the pins this build actually has are printed. A row for an absent one
     // would claim a dependency the lock deliberately does not record.
-    match &lock.kernel {
-        Some(k) => println!("  kernel   {} {} {}", k.id, k.reference, short(&k.commit)),
-        None => println!(
+    match (&lock.kernel, build.kernel.as_ref()) {
+        (Some(k), _) => println!("  kernel   {} {} {}", k.id, k.reference, short(&k.commit)),
+        (None, Some(k)) => println!(
             "  kernel   {} (distro package — version pinned in the package manifest)",
-            build.kernel.id()
+            k.id()
         ),
+        (None, None) => println!("  kernel   (none — u-boot-only build)"),
     }
     match &lock.uboot {
         Some(u) => println!("  u-boot   {} {}", u.reference, short(&u.commit)),
         None => println!("  u-boot   (none — this board's firmware is its own)"),
     }
+    if let Some(p) = &lock.uboot_patches {
+        println!("  u-boot patches {} {}", p.profiles.join(", "), short(&p.commit));
+    }
     // A no-patch kernel has no series to report; printing an empty row would imply
     // one exists.
     match &lock.patches {
-        Some(p) => println!("  patches  {} {}", p.profile, short(&p.commit)),
+        Some(p) => println!("  patches  {} {}", p.profiles.join(", "), short(&p.commit)),
         None => println!("  patches  (none — this kernel applies no series)"),
     }
+    // Only the trees this SoC has. A line reading "none" would suggest something
+    // failed to pin; the absence is the SoC not having that hardware.
     if let Some(us) = &lock.userspace {
-        println!("  mpp      {} {}", us.mpp.reference, short(&us.mpp.commit));
-        println!("  librga   {} {}", us.librga.reference, short(&us.librga.commit));
-        println!("  libmali  {} {}", us.libmali.reference, short(&us.libmali.commit));
+        for (label, pin) in [
+            ("mpp     ", &us.mpp),
+            ("librga  ", &us.librga),
+            ("libmali ", &us.libmali),
+        ] {
+            if let Some(p) = pin {
+                println!("  {label} {} {}", p.reference, short(&p.commit));
+            }
+        }
     }
     if let Some(ff) = &lock.ffmpeg {
         println!("  ffmpeg   {} {}", ff.base.reference, short(&ff.base.commit));
-        println!(
-            "  ff-rk    {} {} (graft provenance)",
-            ff.rockchip.reference,
-            short(&ff.rockchip.commit)
-        );
+        if let Some(rk) = &ff.rockchip {
+            println!("  ff-rk    {} {} (graft provenance)", rk.reference, short(&rk.commit));
+        }
     }
-    println!("  rootfs   {} (manifest {})", lock.rootfs.suite, lock.rootfs.manifest);
+    match &lock.rootfs {
+        Some(r) => println!("  rootfs   {} (manifest {})", r.suite, r.manifest),
+        None => println!("  rootfs   (none — u-boot-only build)"),
+    }
     if let Some(blobs) = &lock.blobs {
         println!("  blob atf {}", blobs.atf);
         println!("  blob tpl {}", blobs.tpl);

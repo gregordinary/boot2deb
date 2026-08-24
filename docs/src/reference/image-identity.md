@@ -84,7 +84,7 @@ bootloader beside it is looking at an expected state, not a fault.
 
 ## It carries no secrets
 
-boot2deb also emits a **provenance manifest** (`<recipe>.provenance.toml`) beside the
+boot2deb also emits a **provenance manifest** (a `.provenance.toml`) beside the
 image, which records every source pin, the toolchain, the solved package manifest's
 digest, and the image's initial first-boot password. That document stays with the build.
 It never ships inside an image, and `image.toml` is a deliberately chosen subset of it

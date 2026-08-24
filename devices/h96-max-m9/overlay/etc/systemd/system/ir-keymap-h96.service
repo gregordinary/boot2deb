@@ -1,0 +1,16 @@
+[Unit]
+Description=Load the H96 IR remote keymap onto the gpio-ir-receiver
+Documentation=man:ir-keytable(1)
+# The gpio-ir-receiver rc device is created during kernel init (the driver is a
+# module autoloaded from the DT node); loading the keymap after modules-load is
+# settled is enough. Shipped enabled -- IR receive is the box's own handset and is
+# passive, so it works out of the box.
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/h96/ir-keymap-load
+
+[Install]
+WantedBy=multi-user.target

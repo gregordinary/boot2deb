@@ -15,9 +15,10 @@
 //! followed by the *generated* config this module produces from the
 //! resolved values (fstab, hostname, apt sources, locale, machine-id).
 //!
-//! This is the `mmdebstrap` backend behind the [`Rootfs`] trait; a `debrepo`
-//! backend (native content-pinned manifest) slots in behind the same trait
-//! later.
+//! This module holds the [`Rootfs`] trait and its `mmdebstrap` implementation, the
+//! hardware-validated default; the in-process ferroday-cage bootstrap — the
+//! `debrepo`-shaped backend with a native content-pinned manifest — is
+//! [`ProvisionerRootfs`], in the `provisioner` submodule.
 //!
 //! The manifest is fully content-pinned — `name + version + arch + sha256` per
 //! package. The sha256 is the hash of the exact `.deb` installed: the bootstrap
@@ -32,6 +33,9 @@
 //! `firmware-misc-nonfree` + `firmware-realtek` in `socs/rk3588.toml`), not
 //! extracted from a linux-firmware tarball — so it is snapshot-pinned like every
 //! other package and needs no separate fetch step.
+
+mod provisioner;
+pub use provisioner::ProvisionerRootfs;
 
 use crate::bootstrap::{StagingRoot, COMPONENTS};
 use crate::error::EngineError;
@@ -189,8 +193,11 @@ pub struct RootfsArtifacts {
 }
 
 /// A rootfs backend: bootstraps the device userland to a tarball plus a
-/// content-pinned manifest. Implemented by [`MmdebstrapRootfs`]; a `debrepo`
-/// backend slots in behind this trait later.
+/// content-pinned manifest. Two implementations sit behind it: [`MmdebstrapRootfs`],
+/// the hardware-validated default, and [`ProvisionerRootfs`], the in-process
+/// ferroday-cage bootstrap (the `debrepo`-shaped backend this trait was designed
+/// for). The build stage selects between them; the image node, cache, and manifest
+/// consumers are agnostic to which ran.
 pub trait Rootfs {
     /// Bootstrap `build`'s rootfs per `opts`, emitting the step's
     /// [`Event`](crate::event::Event)s to `sink`.
@@ -320,7 +327,7 @@ impl Rootfs for MmdebstrapRootfs {
             step.log(format!(
                 "bootstrapping {} {} rootfs ({} packages, {} mirror(s)) at {}",
                 build.arch,
-                build.suite,
+                build.image_suite(),
                 build.rootfs_packages.len(),
                 opts.mirrors.len(),
                 tarball.display()
@@ -431,7 +438,7 @@ fn simulate_argv(
     // read as options even if a value begins with `-` (mmdebstrap documents
     // this terminator explicitly).
     argv.push("--".to_string());
-    argv.push(build.suite.clone());
+    argv.push(build.image_suite().to_string());
     argv.push("/dev/null".to_string());
     argv.extend(opts.mirrors.iter().cloned());
     // Third-party feature repos (signed), so an out-of-mirror app resolves in the
@@ -510,7 +517,7 @@ fn solve_key(
         &overlay_fp,
         &repo_fp,
         &build.arch.to_string(),
-        &build.suite,
+        build.image_suite(),
     );
     step.log(format!(
         "solved {} packages; rootfs cache key {}",
@@ -592,7 +599,7 @@ fn mmdebstrap_argv(
     // read as options even if a value begins with `-` (mmdebstrap documents
     // this terminator explicitly).
     argv.push("--".to_string());
-    argv.push(build.suite.clone());
+    argv.push(build.image_suite().to_string());
     argv.push(tarball.to_string_lossy().into_owned());
     // The resolved mirror list (live, plus a snapshot mirror when activated), then
     // the local repo — apt tries them in order.
@@ -710,7 +717,7 @@ fn stage_overlay(
     write_staged(staging, "etc/fstab", &config::fstab(build, rootfs_partuuid))?;
     write_staged(staging, "etc/hostname", &config::hostname(&build.hostname))?;
     write_staged(staging, "etc/hosts", &config::hosts(&build.hostname))?;
-    write_staged(staging, "etc/apt/sources.list", &config::apt_sources(&build.suite))?;
+    write_staged(staging, "etc/apt/sources.list", &config::apt_sources(build.image_suite()))?;
     write_staged(staging, "etc/kernel-img.conf", &config::kernel_img_conf())?;
     // Board boot params the kernel postinst.d/postrm.d hooks + mk_extlinux source,
     // so the boot-method overlay scripts stay board-agnostic (driven by the
@@ -1096,11 +1103,13 @@ fn tar_member(tarball: &Path, member: &str) -> Result<String, EngineError> {
 }
 
 /// Members every finished rootfs tarball must contain, checked by [`validate_tar`].
-/// `./etc/shadow` is the password splice's appended member, so its presence proves
-/// the archive is readable through to its end (not truncated); `./etc/os-release` and
-/// `./etc/fstab` confirm the archive is a real Debian rootfs rather than an unrelated
-/// or empty tar.
-const REQUIRED_TAR_MEMBERS: &[&str] = &["./etc/os-release", "./etc/fstab", "./etc/shadow"];
+/// `etc/shadow` is present in both backends (the account is created there), so its
+/// presence proves the archive is readable through to its end (not truncated);
+/// `etc/os-release` and `etc/fstab` confirm the archive is a real Debian rootfs
+/// rather than an unrelated or empty tar. Named without a leading `./` and matched
+/// against a normalized listing, so both tar path styles pass: the `mmdebstrap`
+/// backend writes `./etc/…`, the provisioner's `export_tar` writes bare `etc/…`.
+const REQUIRED_TAR_MEMBERS: &[&str] = &["etc/os-release", "etc/fstab", "etc/shadow"];
 
 /// Validate that `tarball` is a complete, readable rootfs archive before the image
 /// stage formats it into ext4. Lists the archive end-to-end (`tar tf`, which
@@ -1128,7 +1137,13 @@ pub fn validate_tar(tarball: &Path) -> Result<(), EngineError> {
         });
     }
     let listing = String::from_utf8_lossy(&out.stdout);
-    let members: std::collections::HashSet<&str> = listing.lines().map(str::trim).collect();
+    // Normalize a leading `./` so both tar path styles compare equal against the
+    // (bare) required members: `mmdebstrap` writes `./etc/os-release`, the
+    // provisioner's `export_tar` writes `etc/os-release`.
+    let members: std::collections::HashSet<&str> = listing
+        .lines()
+        .map(|l| l.trim().trim_start_matches("./"))
+        .collect();
     for required in REQUIRED_TAR_MEMBERS {
         if !members.contains(required) {
             return Err(EngineError::ArtifactMissing {
@@ -1513,14 +1528,16 @@ mod tests {
             kernel: None,
             patches: None,
             uboot: None,
+            uboot_patches: None,
             userspace: None,
             ffmpeg: None,
-            rootfs: boot2deb_core::lock::RootfsPin {
+            rootfs: Some(boot2deb_core::lock::RootfsPin {
                 suite: "forky".into(),
                 manifest: "m.pkgs.lock".into(),
                 manifest_sha256: None,
-            },
+            }),
             blobs: None,
+            kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
         }
@@ -2029,7 +2046,7 @@ mod tests {
         }
         let err = validate_tar(&tarball).unwrap_err();
         assert!(
-            matches!(err, EngineError::ArtifactMissing { what, .. } if what.contains("./etc/shadow")),
+            matches!(err, EngineError::ArtifactMissing { what, .. } if what.contains("etc/shadow")),
             "expected a missing-member error naming shadow"
         );
     }

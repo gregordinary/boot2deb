@@ -17,14 +17,18 @@
 //! `Depends: librga2` only because that deb — and its `shlibs` — is installed in
 //! here ([`BuildSandbox::install_local_debs`]).
 //!
-//! The sandbox is **unprivileged**: the rootfs is bootstrapped with `mmdebstrap
-//! --mode=unshare` (user namespaces, no `sudo`) and entered with `bwrap`. When the
-//! host arch differs from the target's, the target's binaries execute via the host's
-//! `qemu-user` binfmt handler — registered with the `F` (fix-binary) flag, so the
-//! interpreter is preloaded and nothing is copied into the rootfs; when the arches
-//! match they simply run, and `qemu-user` is never consulted. This is deliberately
-//! the same rootless-userland machinery the rootfs assembly is built on: the
-//! bootstrapped tree is the seed of the base-rootfs cache, not a throwaway.
+//! The sandbox is **unprivileged**: the rootfs is bootstrapped and entered entirely
+//! in-process by the pure-Rust [`ferroday_cage`] library — its Debian provisioner
+//! resolves, verifies, and lays out the target suite/arch userland with no `sudo`
+//! and no external bootstrap binary, and each build command then runs in a cage
+//! (fresh namespaces, the rootfs mounted as `/`, the caller mapped to root inside).
+//! When the host arch differs from the target's, the target's binaries execute via the
+//! host's `qemu-user` binfmt handler — registered with the `F` (fix-binary) flag,
+//! so the interpreter is preloaded and nothing is copied into the rootfs; when the
+//! arches match they simply run, and `qemu-user` is never consulted. The
+//! bootstrapped tree is cached and reused across builds — the base-rootfs cache for
+//! the build sandbox — not a per-build throwaway. (The *OS* rootfs that becomes the
+//! image is a separate tree, bootstrapped by [`crate::rootfs`].)
 //!
 //! The sandbox is a rootless *convenience* — a clean, reproducible target-arch
 //! userland — not a hard security boundary against malicious build code: it runs
@@ -32,12 +36,15 @@
 //! stops a malicious build script is that every compiled source is pinned to an
 //! exact commit by the lock, not the namespace around the compiler.
 
-use crate::bootstrap::{StagingRoot, COMPONENTS, DEFAULT_MIRROR};
+use crate::bootstrap::{COMPONENTS, DEFAULT_MIRROR};
 use crate::build;
 use crate::error::EngineError;
-use crate::event::Step;
+use crate::event::{Step, Stream};
+use ferroday_cage::provision::debian::{Debian, DebianEvent, Stream as DebianStream};
+use ferroday_cage::provision::{self, Provisioned};
+use ferroday_cage::{Cage, Network, Observer};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Base packages installed at bootstrap — the minimum to run `dpkg-buildpackage`.
 /// Stage-specific build-deps are added later via [`BuildSandbox::install`].
@@ -83,9 +90,9 @@ pub struct SandboxRun<'a> {
 /// An environment in which target-arch package builds run.
 ///
 /// Implemented by [`RootlessSandbox`] — a userland bootstrapped for the build's
-/// suite and arch via `mmdebstrap` + `bwrap`. A stage drives it through these three
-/// operations and is otherwise agnostic to the backend, so another rootfs provider
-/// can satisfy the same contract.
+/// suite and arch, bootstrapped and entered entirely in-process by [`ferroday_cage`].
+/// A stage drives it through these three operations and is otherwise agnostic to
+/// the backend, so another rootfs provider can satisfy the same contract.
 pub trait BuildSandbox {
     /// Short label for logs (e.g. `native`, `rootless arm64`).
     fn describe(&self) -> String;
@@ -122,12 +129,13 @@ pub trait BuildSandbox {
 /// Rootless sandbox: a Debian userland for the build's suite and arch, bootstrapped
 /// and entered without root.
 ///
-/// The rootfs is created once with `mmdebstrap --mode=unshare` and reused; each
-/// command runs under `bwrap` with the rootfs bound as `/`. On a cross host the
-/// target's binaries execute via the `F`-flagged `qemu-user` binfmt handler with no
-/// interpreter copy; on a matching-arch host they run directly. See the
-/// [module docs](self) for why the package stages always build in here rather than
-/// on the host.
+/// The rootfs is bootstrapped once by [`ferroday_cage`]'s Debian provisioner and
+/// reused; each command runs in a [`ferroday_cage::Cage`] with the rootfs mounted
+/// as `/`. On a cross host the target's binaries execute via the `F`-flagged
+/// `qemu-user` binfmt handler with no interpreter copy; on a matching-arch host they
+/// run directly. See
+/// the [module docs](self) for why the package stages always build in here rather
+/// than on the host.
 pub struct RootlessSandbox {
     /// Target-arch rootfs directory — bootstrapped once, reused across builds (the
     /// seed of the base-rootfs cache).
@@ -161,56 +169,6 @@ impl RootlessSandbox {
             mirror: DEFAULT_MIRROR.to_string(),
             keyring,
         }
-    }
-
-    /// True once the rootfs has been fully bootstrapped. The tarball is extracted
-    /// into a sibling `.partial` dir and renamed into place atomically, so the
-    /// `rootfs` dir only ever exists complete — an interrupted extraction leaves the
-    /// `.partial` behind (cleared on the next run), never a half-populated `rootfs`
-    /// a later build would wrongly reuse.
-    fn is_bootstrapped(&self) -> bool {
-        self.rootfs.join("usr/bin").is_dir()
-    }
-
-    /// Sibling dir the tarball extracts into before the atomic rename into
-    /// [`rootfs`](Self::rootfs).
-    fn partial_rootfs(&self) -> PathBuf {
-        self.rootfs.with_extension("partial")
-    }
-
-    /// Path of the intermediate bootstrap tarball (a sibling of the rootfs dir).
-    /// `mmdebstrap` writes a tarball rather than a directory: in `--mode=unshare`
-    /// it opens the output file as the invoking user *before* unsharing, sidestepping
-    /// the in-namespace mapped-subuid write restriction that blocks a directory
-    /// target under a user-owned parent.
-    fn tarball_path(&self) -> PathBuf {
-        self.rootfs.with_extension("tar")
-    }
-
-    /// `mmdebstrap` argv for the bootstrap — pure, so the (long) invocation is
-    /// testable. `target` is the output tarball; `keyring` is the staged,
-    /// namespace-readable keyring path (if any).
-    fn mmdebstrap_argv(&self, target: &str, keyring: Option<&str>) -> Vec<String> {
-        let mut argv = vec![
-            "--mode=unshare".to_string(),
-            format!("--arch={}", self.arch),
-            "--variant=minbase".to_string(),
-            format!("--components={COMPONENTS}"),
-        ];
-        // Bound apt's per-connection network wait so a stalled mirror fails rather
-        // than hangs.
-        argv.extend(crate::bootstrap::APT_TIMEOUT_OPTS.iter().map(|s| s.to_string()));
-        if let Some(kr) = keyring {
-            argv.push(format!("--keyring={kr}"));
-        }
-        argv.push(format!("--include={}", BASE_DEPS.join(",")));
-        // `--` stops option parsing so the positional suite/target/mirror cannot be
-        // read as options even if a value begins with `-`.
-        argv.push("--".to_string());
-        argv.push(self.suite.clone());
-        argv.push(target.to_string());
-        argv.push(self.mirror.clone());
-        argv
     }
 
     /// Run one `apt-get` invocation inside the sandbox with **direct argv** (no
@@ -258,61 +216,51 @@ impl BuildSandbox for RootlessSandbox {
     }
 
     fn ensure_ready(&self, step: &Step) -> Result<(), EngineError> {
-        if self.is_bootstrapped() {
-            step.log(format!("reusing {} rootfs at {}", self.arch, self.rootfs.display()));
-            return Ok(());
-        }
-        if let Some(parent) = self.rootfs.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| EngineError::io(parent, source))?;
-        }
-        // The keyring is read by `mmdebstrap`'s in-namespace apt, which runs as a
-        // mapped subuid: stage it into a private, world-traversable temp dir since
-        // the work dir's ancestors are typically not traversable by that user. The
-        // staging root is removed when `staged` drops, after the bootstrap.
-        let staged = match self.keyring.as_deref() {
-            Some(kr) => {
-                let root = StagingRoot::new("boot2deb-sandbox-")?;
-                let path = root.stage_file(kr, "keyring.gpg")?;
-                Some((root, path))
-            }
-            None => None,
-        };
-        let keyring_arg = staged.as_ref().map(|(_, p)| p.to_string_lossy().into_owned());
-
-        let tarball = self.tarball_path();
+        // A published rootfs is a plain directory; `provision::ensure` fast-paths on
+        // that and skips the bootstrap, so this is idempotent across builds.
         step.log(format!(
-            "bootstrapping {} {} rootfs at {} (mmdebstrap --mode=unshare)",
+            "ensuring {} {} rootfs at {} (in-process Debian provisioner)",
             self.arch,
             self.suite,
             self.rootfs.display()
         ));
-        let mut cmd = Command::new("mmdebstrap");
-        cmd.args(self.mmdebstrap_argv(&tarball.to_string_lossy(), keyring_arg.as_deref()));
-        build::run(cmd, "mmdebstrap", "bootstrap rootfs", step)?;
-        drop(staged); // remove the temp keyring now that the bootstrap is done
-
-        // Extract into a sibling `.partial` dir, then rename into place: the
-        // `rootfs` dir must only ever appear complete, so an interrupted extraction
-        // cannot leave a half-populated tree that `is_bootstrapped` would trust.
-        // Any leftover `.partial` from a prior interrupted run is cleared
-        // first. Device nodes are excluded (mknod is not permitted unprivileged;
-        // `bwrap` provides `/dev` at run time), so extraction has no privileged step.
-        let partial = self.partial_rootfs();
-        let _ = std::fs::remove_dir_all(&partial);
-        std::fs::create_dir_all(&partial).map_err(|s| EngineError::io(&partial, s))?;
-        let mut tar = Command::new("tar");
-        tar.arg("-C")
-            .arg(&partial)
-            .arg("--exclude=./dev/*")
-            .arg("-xf")
-            .arg(&tarball);
-        build::run(tar, "tar", "extract rootfs tarball", step)?;
-        // Atomic publish: the extracted tree becomes the cache in one rename.
-        std::fs::rename(&partial, &self.rootfs)
-            .map_err(|s| EngineError::io(&self.rootfs, s))?;
-        // The extracted tree is the cache; the tarball is no longer needed.
-        let _ = std::fs::remove_file(&tarball);
-        step.log(format!("{} rootfs ready at {}", self.arch, self.rootfs.display()));
+        // The provisioner resolves the whole install closure — the base system (apt
+        // included) plus `BASE_DEPS` and their dependencies — with its own resolver,
+        // verifies the archive signature against the keyring, lays out and configures
+        // the packages in an unprivileged cage, and writes an apt-usable rootfs (the
+        // keyring, a `signed-by` sources line for every component, and an apt
+        // sandbox-user posture matching the single-identity map). The later
+        // `install`/`install_local_debs` build-time apt runs read those sources.
+        let mut sink = |event: DebianEvent<'_>| forward_bootstrap_event(step, event);
+        let mut builder = Debian::builder(&self.suite)
+            .architecture(&self.arch)
+            .mirror(&self.mirror)
+            .components(COMPONENTS.split(','))
+            .include(BASE_DEPS.iter().copied())
+            .progress(&mut sink);
+        // A vendored keyring makes the bootstrap portable to a non-Debian host;
+        // without one the provisioner falls back to its embedded Debian archive
+        // keyring.
+        if let Some(keyring) = &self.keyring {
+            builder = builder.keyring(keyring);
+        }
+        let mut debian = builder.build().map_err(|source| EngineError::Bootstrap {
+            context: format!("configure the {} {} bootstrap", self.arch, self.suite),
+            message: source.to_string(),
+        })?;
+        let outcome = provision::ensure(&self.rootfs, &mut debian).map_err(|source| {
+            EngineError::Bootstrap {
+                context: format!("bootstrap the {} {} rootfs", self.arch, self.suite),
+                message: source.to_string(),
+            }
+        })?;
+        // `Existing` means a prior build already published this rootfs; anything
+        // else means this call produced it.
+        if outcome == Provisioned::Existing {
+            step.log(format!("reusing {} rootfs at {}", self.arch, self.rootfs.display()));
+        } else {
+            step.log(format!("{} rootfs ready at {}", self.arch, self.rootfs.display()));
+        }
         Ok(())
     }
 
@@ -365,18 +313,80 @@ impl BuildSandbox for RootlessSandbox {
     }
 
     fn run(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
-        let mut cmd = Command::new("bwrap");
-        cmd.args(bwrap_argv(&self.rootfs, spec));
-        build::run(cmd, "bwrap", spec.context, step)
+        let cage = self.cage(spec).build().map_err(|source| EngineError::Sandbox {
+            context: spec.context.to_string(),
+            source,
+        })?;
+        let mut observer = StepObserver::new(step);
+        let status = cage
+            .run_with(&mut observer)
+            .map_err(|source| EngineError::Sandbox {
+                context: spec.context.to_string(),
+                source,
+            })?;
+        observer.flush();
+        if status.success() {
+            Ok(())
+        } else {
+            Err(EngineError::CommandFailed {
+                command: spec.argv[0].clone(),
+                context: spec.context.to_string(),
+                status: status.code(),
+                stderr: observer.stderr_tail(),
+            })
+        }
     }
 }
 
-/// Baseline environment for every sandbox command, set after `--clearenv` so the
-/// host env never leaks in (reproducibility, and it avoids `dpkg`/`perl` reading
-/// the host `HOME`/locale). Per-run `spec.env` entries are appended afterwards and
-/// override these. `TZ=UTC` and `LC_ALL=C.UTF-8` pin timezone and locale so packaged
-/// timestamps/collation do not vary with the build host; the host-side
-/// [`build::run`](crate::build::run) normalizes the same two vars.
+impl RootlessSandbox {
+    /// Build the [`Cage`] that enters [`rootfs`](Self::rootfs) and runs `spec`.
+    ///
+    /// The rootfs is mounted as `/`; the cage's default profile gives the build a
+    /// working `/proc`, minimal `/dev`, and `/tmp`, and the single-identity map
+    /// maps the caller to root inside — `dpkg`/`dpkg-buildpackage` require it,
+    /// matching "root in the chroot" of the proven build. [`Network::Host`] shares
+    /// the host network only when `spec.net` is set (an `apt` run needs it); an
+    /// offline compile keeps the default [`Network::Isolated`] namespace (loopback
+    /// only), shrinking a build step's egress surface. The environment is built
+    /// from scratch and seeded with [`SANDBOX_ENV`] for a clean, reproducible run;
+    /// per-run `spec.env` entries override it on collision. Each read-write `bind`
+    /// and each read-only `ro_bind` is exposed at its host path so artifacts
+    /// written beside a source tree land back on the host while input-only mounts
+    /// stay unwritable.
+    fn cage(&self, spec: &SandboxRun) -> ferroday_cage::CageBuilder {
+        let mut builder = Cage::builder()
+            .rootfs(&self.rootfs)
+            // The stages pass bare tool names (`dpkg-buildpackage`, `make`,
+            // `apt-get`); the cage resolves them against SANDBOX_ENV's `PATH`
+            // inside the rootfs, like a shell.
+            .path_lookup(true)
+            .command(&spec.argv[0])
+            .args(&spec.argv[1..])
+            .network(if spec.net { Network::Host } else { Network::Isolated })
+            .current_dir(spec.work);
+        for (key, value) in SANDBOX_ENV {
+            builder = builder.env(key, value);
+        }
+        for (key, value) in spec.env {
+            builder = builder.env(key, value);
+        }
+        for bind in spec.binds {
+            builder = builder.bind(bind, bind);
+        }
+        for bind in spec.ro_binds {
+            builder = builder.bind_ro(bind, bind);
+        }
+        builder
+    }
+}
+
+/// Baseline environment for every sandbox command, seeded onto the cage's
+/// built-from-scratch environment so the host env never leaks in (reproducibility,
+/// and it avoids `dpkg`/`perl` reading the host `HOME`/locale). Per-run `spec.env`
+/// entries are applied afterwards and override these. `TZ=UTC` and `LC_ALL=C.UTF-8`
+/// pin timezone and locale so packaged timestamps/collation do not vary with the
+/// build host; the host-side [`build::run`](crate::build::run) normalizes the same
+/// two vars.
 const SANDBOX_ENV: &[(&str, &str)] = &[
     ("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"),
     ("HOME", "/root"),
@@ -385,73 +395,143 @@ const SANDBOX_ENV: &[(&str, &str)] = &[
     ("DEBIAN_FRONTEND", "noninteractive"),
 ];
 
-/// Build the `bwrap` argv that enters `rootfs` and runs `spec`. Pure, so the
-/// (long, easy-to-get-wrong) container invocation is unit-testable.
+/// Relay one Debian-provisioner [`DebianEvent`] to a [`Step`]: the fetch/resolve/
+/// download/extract milestones as informational log lines, and a configuring
+/// dpkg wave's raw output on its own stream. The dpkg bytes are not
+/// line-buffered, so each chunk is logged as one lossy line — good enough for a
+/// bootstrap progress channel, which is not the reproducible build output.
+pub(crate) fn forward_bootstrap_event(step: &Step, event: DebianEvent<'_>) {
+    match event {
+        DebianEvent::Fetching { url, .. } => step.log(format!("fetching {url}")),
+        DebianEvent::Resolving => step.log("resolving the package set"),
+        DebianEvent::Downloading { package, index, total, .. } => {
+            step.log(format!("downloading {package} ({index}/{total})"))
+        }
+        DebianEvent::Extracting { package, .. } => step.log(format!("extracting {package}")),
+        DebianEvent::CommandOutput { stream, bytes, .. } => {
+            let text = String::from_utf8_lossy(bytes);
+            let text = text.trim_end_matches(['\n', '\r']);
+            if !text.is_empty() {
+                let stream = match stream {
+                    DebianStream::Stderr => Stream::Stderr,
+                    // Stdout and any future stream default to the stdout tag.
+                    _ => Stream::Stdout,
+                };
+                step.emit(stream, text.to_string());
+            }
+        }
+        // Two levels of openness, and each needs its own escape. The wildcard absorbs a
+        // future *variant*; the `..` in every struct arm above absorbs a future *field*
+        // within a variant already matched here. Both are load-bearing: a milestone this
+        // build has no line for is silently ignored rather than breaking the match.
+        _ => {}
+    }
+}
+
+/// An [`Observer`] that relays a cage command's captured output to a [`Step`],
+/// line by line, matching the host-side [`build::run`](crate::build::run)
+/// behavior: each stdout/stderr line becomes an [`Event::Log`](crate::event::Event)
+/// as it is produced, and the last [`STDERR_TAIL`](crate::build::STDERR_TAIL)
+/// stderr lines are retained for a [`CommandFailed`](EngineError::CommandFailed)
+/// message.
 ///
-/// The rootfs is bound as `/`; `--proc`/`--dev`/`--tmpfs` give the build a working
-/// `/proc`, minimal `/dev`, and `/tmp`; `resolv.conf` is bound read-only so `apt`
-/// resolves DNS. `--unshare-all` makes it rootless; `--share-net` is added only when
-/// `spec.net` is set — an `apt` run needs the network, an offline compile keeps the
-/// fresh (loopback-only) namespace. `--uid 0 --gid 0` maps the caller to
-/// root inside — `dpkg`/`dpkg-buildpackage` require it, matching "root in the chroot"
-/// of the proven build. `--clearenv` plus [`SANDBOX_ENV`] gives a clean, reproducible
-/// environment. Each read-write `bind` and the working dir are exposed at their host
-/// path so artifacts written beside a source tree land back on the host; each
-/// `ro_bind` is exposed read-only (input-only mounts apt reads but must not mutate).
-fn bwrap_argv(rootfs: &Path, spec: &SandboxRun) -> Vec<String> {
-    let mut argv = vec![
-        "--bind".into(),
-        rootfs.to_string_lossy().into_owned(),
-        "/".into(),
-        "--proc".into(),
-        "/proc".into(),
-        "--dev".into(),
-        "/dev".into(),
-        "--tmpfs".into(),
-        "/tmp".into(),
-        "--ro-bind-try".into(),
-        "/etc/resolv.conf".into(),
-        "/etc/resolv.conf".into(),
-        "--unshare-all".into(),
-    ];
-    if spec.net {
-        argv.push("--share-net".into());
+/// The cage delivers raw byte chunks whose boundaries carry no meaning, so this
+/// buffers each stream and splits on newlines; [`flush`](Self::flush) emits any
+/// trailing partial line after the command exits.
+///
+/// Shared with the OS rootfs provisioner backend ([`crate::rootfs::ProvisionerRootfs`]),
+/// whose post-bootstrap customize steps run in cages too.
+pub(crate) struct StepObserver<'a> {
+    step: &'a Step<'a>,
+    stdout_buf: Vec<u8>,
+    stderr_buf: Vec<u8>,
+    stderr_tail: VecDeque<String>,
+}
+
+impl<'a> StepObserver<'a> {
+    /// A fresh observer relaying to `step`.
+    pub(crate) fn new(step: &'a Step<'a>) -> Self {
+        StepObserver {
+            step,
+            stdout_buf: Vec::new(),
+            stderr_buf: Vec::new(),
+            stderr_tail: VecDeque::with_capacity(build::STDERR_TAIL),
+        }
     }
-    argv.extend([
-        "--die-with-parent".into(),
-        "--uid".into(),
-        "0".into(),
-        "--gid".into(),
-        "0".into(),
-        "--clearenv".into(),
-    ]);
-    for (key, value) in SANDBOX_ENV {
-        argv.push("--setenv".into());
-        argv.push((*key).to_string());
-        argv.push((*value).to_string());
+
+    /// Emit one complete line, retaining stderr lines in the tail buffer.
+    fn emit_line(&mut self, stream: Stream, line: String) {
+        if stream == Stream::Stderr {
+            if self.stderr_tail.len() == build::STDERR_TAIL {
+                self.stderr_tail.pop_front();
+            }
+            self.stderr_tail.push_back(line.clone());
+        }
+        self.step.emit(stream, line);
     }
-    for bind in spec.binds {
-        let p = bind.to_string_lossy().into_owned();
-        argv.push("--bind".into());
-        argv.push(p.clone());
-        argv.push(p);
+
+    /// Append `chunk` to `stream`'s buffer and emit every newly complete line.
+    fn ingest(&mut self, stream: Stream, chunk: &[u8]) {
+        match stream {
+            Stream::Stdout => self.stdout_buf.extend_from_slice(chunk),
+            Stream::Stderr => self.stderr_buf.extend_from_slice(chunk),
+        }
+        loop {
+            let newline = {
+                let buf = match stream {
+                    Stream::Stdout => &self.stdout_buf,
+                    Stream::Stderr => &self.stderr_buf,
+                };
+                buf.iter().position(|&b| b == b'\n')
+            };
+            let Some(pos) = newline else { break };
+            let mut line: Vec<u8> = {
+                let buf = match stream {
+                    Stream::Stdout => &mut self.stdout_buf,
+                    Stream::Stderr => &mut self.stderr_buf,
+                };
+                buf.drain(..=pos).collect()
+            };
+            // Strip the trailing newline (and a CR before it, if any).
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+            self.emit_line(stream, String::from_utf8_lossy(&line).into_owned());
+        }
     }
-    for bind in spec.ro_binds {
-        let p = bind.to_string_lossy().into_owned();
-        argv.push("--ro-bind".into());
-        argv.push(p.clone());
-        argv.push(p);
+
+    /// Emit any trailing bytes not terminated by a newline (a command whose last
+    /// line has no final `\n`). Call once after the command exits.
+    pub(crate) fn flush(&mut self) {
+        for stream in [Stream::Stdout, Stream::Stderr] {
+            let mut line = match stream {
+                Stream::Stdout => std::mem::take(&mut self.stdout_buf),
+                Stream::Stderr => std::mem::take(&mut self.stderr_buf),
+            };
+            if line.is_empty() {
+                continue;
+            }
+            while matches!(line.last(), Some(b'\r')) {
+                line.pop();
+            }
+            self.emit_line(stream, String::from_utf8_lossy(&line).into_owned());
+        }
     }
-    argv.push("--chdir".into());
-    argv.push(spec.work.to_string_lossy().into_owned());
-    for (key, value) in spec.env {
-        argv.push("--setenv".into());
-        argv.push(key.clone());
-        argv.push(value.clone());
+
+    /// The retained stderr tail, joined for a failure message.
+    pub(crate) fn stderr_tail(&self) -> String {
+        self.stderr_tail.iter().cloned().collect::<Vec<_>>().join("\n")
     }
-    argv.push("--".into());
-    argv.extend(spec.argv.iter().cloned());
-    argv
+}
+
+impl Observer for StepObserver<'_> {
+    fn stdout(&mut self, chunk: &[u8]) {
+        self.ingest(Stream::Stdout, chunk);
+    }
+
+    fn stderr(&mut self, chunk: &[u8]) {
+        self.ingest(Stream::Stderr, chunk);
+    }
 }
 
 #[cfg(test)]
@@ -459,123 +539,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mmdebstrap_argv_bootstraps_minbase_arm64_with_base_deps() {
-        let sb = RootlessSandbox::new(PathBuf::from("/w/rootfs"), "forky", "arm64", None);
-        let argv = sb.mmdebstrap_argv("/w/rootfs.tar", Some("/tmp/kr.gpg"));
-        assert_eq!(argv[0], "--mode=unshare");
-        assert!(argv.contains(&"--arch=arm64".to_string()));
-        assert!(argv.contains(&"--variant=minbase".to_string()));
-        // non-free is enabled so libfdk-aac-dev (ffmpeg-rk) resolves.
-        assert!(argv
-            .iter()
-            .any(|a| a.starts_with("--components=") && a.contains("non-free")));
-        assert!(argv.contains(&"--keyring=/tmp/kr.gpg".to_string()));
-        // Base deps are one comma-joined --include.
-        assert!(argv
-            .iter()
-            .any(|a| a.starts_with("--include=") && a.contains("build-essential") && a.contains("dpkg-dev")));
-        // `--` terminates options immediately before the positionals.
-        assert_eq!(argv[argv.len() - 4], "--");
-        // Suite, target tarball, mirror are the trailing positionals in order.
-        let tail = &argv[argv.len() - 3..];
-        assert_eq!(tail[0], "forky");
-        assert_eq!(tail[1], "/w/rootfs.tar");
-        assert_eq!(tail[2], DEFAULT_MIRROR);
-        // No --keyring when none is provided.
-        let argv2 = sb.mmdebstrap_argv("/w/rootfs.tar", None);
-        assert!(!argv2.iter().any(|a| a.starts_with("--keyring")));
-    }
+    fn step_observer_splits_lines_and_keeps_a_stderr_tail() {
+        use crate::event::{Event, EventSink};
+        use std::cell::RefCell;
 
-    #[test]
-    fn interrupted_bootstrap_partial_is_never_treated_as_ready() {
-        // Resume-after-interruption: a bootstrap that dies mid
-        // extraction leaves a half-populated `.partial` dir, never a `rootfs` a
-        // later build would trust. `is_bootstrapped` checks the real rootfs, which
-        // only exists after the atomic rename, so the `.partial` can never fool it.
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("arm64-forky");
-        let sb = RootlessSandbox::new(rootfs.clone(), "forky", "arm64", None);
+        // A sink that records every emitted (stream, line) so the observer's line
+        // splitting and stderr-tail retention can be asserted.
+        #[derive(Default)]
+        struct Recorder(RefCell<Vec<(Stream, String)>>);
+        impl EventSink for Recorder {
+            fn emit(&self, event: Event) {
+                if let Event::Log { stream, line, .. } = event {
+                    self.0.borrow_mut().push((stream, line));
+                }
+            }
+        }
 
-        // Nothing yet → not bootstrapped.
-        assert!(!sb.is_bootstrapped());
+        let sink = Recorder::default();
+        let step = Step::start(&sink, "cage");
+        let mut obs = StepObserver::new(&step);
 
-        // Interrupted extraction: `.partial/usr/bin` exists, the real rootfs does not.
-        let partial = sb.partial_rootfs();
-        assert_eq!(partial, tmp.path().join("arm64-forky.partial"));
-        std::fs::create_dir_all(partial.join("usr/bin")).unwrap();
-        assert!(!sb.is_bootstrapped(), "a half-extracted .partial must not read as ready");
+        // Chunks split mid-line: "one\ntw" then "o\n" must yield lines "one","two".
+        obs.stdout(b"one\ntw");
+        obs.stdout(b"o\n");
+        // A stderr line with no trailing newline is emitted by flush().
+        obs.stderr(b"warn: bad\ntrailing-no-newline");
+        obs.flush();
 
-        // Completed rename: the real rootfs now carries usr/bin → ready.
-        std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
-        assert!(sb.is_bootstrapped());
-    }
-
-    #[test]
-    fn bwrap_argv_binds_rootfs_chdir_env_and_command() {
-        let binds = vec![PathBuf::from("/host/src")];
-        let env = vec![("DEB_CFLAGS_APPEND".to_string(), "-Wno-error".to_string())];
-        let argv = vec![
-            "dpkg-buildpackage".to_string(),
-            "-us".to_string(),
-            "-uc".to_string(),
-            "-b".to_string(),
-        ];
-        // An offline compile: no network, output dir bound read-write.
-        let spec = SandboxRun {
-            work: Path::new("/host/src/mpp"),
-            binds: &binds,
-            ro_binds: &[],
-            net: false,
-            env: &env,
-            argv: &argv,
-            context: "build mpp",
-        };
-        let a = bwrap_argv(Path::new("/w/rootfs"), &spec);
-        let joined = a.join(" ");
-        // rootfs is /, the source parent is bound read-write at its host path.
-        assert!(joined.contains("--bind /w/rootfs /"));
-        assert!(joined.contains("--bind /host/src /host/src"));
-        // working dir + env + rootless flags.
-        assert!(joined.contains("--chdir /host/src/mpp"));
-        assert!(joined.contains("--setenv DEB_CFLAGS_APPEND -Wno-error"));
-        // An offline compile gets no network share.
-        assert!(joined.contains("--unshare-all"));
-        assert!(!joined.contains("--share-net"), "offline compile must not share net");
-        // root inside + clean, reproducible env.
-        assert!(joined.contains("--uid 0 --gid 0"));
-        assert!(joined.contains("--clearenv"));
-        assert!(joined.contains("--setenv HOME /root"));
-        // Timezone + locale pinned so packaged timestamps/collation are host-independent.
-        assert!(joined.contains("--setenv TZ UTC"));
-        assert!(joined.contains("--setenv LC_ALL C.UTF-8"));
-        // per-run env comes after --clearenv so it is not wiped.
-        let clearenv = a.iter().position(|x| x == "--clearenv").unwrap();
-        let deb_cflags = a.iter().position(|x| x == "DEB_CFLAGS_APPEND").unwrap();
-        assert!(clearenv < deb_cflags);
-        // command follows the -- separator, in order.
-        let sep = a.iter().position(|x| x == "--").expect("has -- separator");
-        assert_eq!(&a[sep + 1..], argv.as_slice());
-    }
-
-    #[test]
-    fn bwrap_argv_shares_net_and_ro_binds_for_apt() {
-        // An apt-style run: needs the network, and its deb-input dir is read-only so
-        // a maintainer script cannot write back into the host dir.
-        let ro = vec![PathBuf::from("/out/debs")];
-        let argv = vec!["apt-get".to_string(), "update".to_string()];
-        let spec = SandboxRun {
-            work: Path::new("/"),
-            binds: &[],
-            ro_binds: &ro,
-            net: true,
-            env: &[],
-            argv: &argv,
-            context: "apt-get update",
-        };
-        let joined = bwrap_argv(Path::new("/w/rootfs"), &spec).join(" ");
-        assert!(joined.contains("--unshare-all --share-net"), "apt needs the network");
-        assert!(joined.contains("--ro-bind /out/debs /out/debs"), "deb dir is read-only");
-        assert!(!joined.contains("--bind /out/debs"), "the deb dir must not be writable");
+        let events = sink.0.borrow();
+        assert!(events.contains(&(Stream::Stdout, "one".to_string())));
+        assert!(events.contains(&(Stream::Stdout, "two".to_string())));
+        assert!(events.contains(&(Stream::Stderr, "warn: bad".to_string())));
+        assert!(events.contains(&(Stream::Stderr, "trailing-no-newline".to_string())));
+        // The failure tail carries the stderr lines, in order, and no stdout.
+        assert_eq!(obs.stderr_tail(), "warn: bad\ntrailing-no-newline");
     }
 
     #[test]

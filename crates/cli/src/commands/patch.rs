@@ -216,7 +216,13 @@ fn recipes_using_profile(root: &ConfigRoot, profile: &str) -> Vec<String> {
         .into_iter()
         .filter(|name| {
             resolve_recipe(root, name, &Overrides::default())
-                .is_ok_and(|build| build.kernel.patch_profile() == Some(profile))
+                .is_ok_and(|build| {
+                    build
+                        .kernel
+                        .as_ref()
+                        .map(|k| k.patch_profiles().iter().any(|p| p == profile))
+                        .unwrap_or(false)
+                })
         })
         .collect()
 }

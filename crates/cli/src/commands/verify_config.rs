@@ -25,11 +25,11 @@ pub(crate) fn run(
     // There is a kernel config to verify only where a kernel is configured. A distro
     // kernel arrives pre-built from the mirror: Debian owns its `.config`, so there
     // are no fragments to merge and nothing this gate could compare.
-    let kernel = build.kernel.compiled().ok_or_else(|| {
+    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or_else(|| {
         format!(
             "recipe '{recipe}' uses kernel '{}', a distro package built by Debian — its \
              kernel config is not ours to generate, so there is nothing to verify",
-            build.kernel.id()
+            build.kernel.as_ref().map(|k| k.id()).unwrap_or("(none)")
         )
     })?;
     // Fragment names resolve to fragments/<name>.config along the config search
@@ -66,9 +66,16 @@ pub(crate) fn run(
                         root,
                         &sink,
                     )?;
-                    let profile = load_profile(&patches_root, &pin.profile)?;
-                    profile.ensure_applies(&pin.profile, &kernel_pin.reference)?;
-                    Some((patches_root, profile, pin.profile.clone()))
+                    // Load and envelope-gate every composed profile before fetching, so
+                    // a profile that does not cover the locked kernel fails fast; the
+                    // config gate then compiles against the full composed series.
+                    let mut profiles = Vec::with_capacity(pin.profiles.len());
+                    for name in &pin.profiles {
+                        let profile = load_profile(&patches_root, name)?;
+                        profile.ensure_applies(name, &kernel_pin.reference)?;
+                        profiles.push((name.clone(), profile));
+                    }
+                    Some((patches_root, profiles))
                 }
                 None => None,
             };
@@ -86,18 +93,22 @@ pub(crate) fn run(
                 &verify_trees_cache(root),
                 &sink,
             )?;
-            if let Some((patches_root, profile, pin_profile)) = series {
+            if let Some((patches_root, profiles)) = series {
                 let target = format!("{} @ {}", kernel_pin.id, kernel_pin.reference);
                 let step = Step::start(&sink, "apply-patches");
                 // The config gate compiles against what this kernel actually gets, so
-                // the series is narrowed by the locked kernel exactly as a build
-                // narrows it — release-strict, since the lock pins a released tag.
-                let kernel_series = profile.series_for(
-                    boot2deb_core::profile::Scope::Kernel,
-                    &pin_profile,
-                    &kernel_pin.reference,
-                    boot2deb_core::RangeMatch::Release,
-                )?;
+                // every profile's kernel series is concatenated in order and narrowed
+                // by the locked kernel exactly as a build narrows it — release-strict,
+                // since the lock pins a released tag.
+                let mut kernel_series: Vec<&str> = Vec::new();
+                for (name, profile) in &profiles {
+                    kernel_series.extend(profile.series_for(
+                        boot2deb_core::profile::Scope::Kernel,
+                        name,
+                        &kernel_pin.reference,
+                        boot2deb_core::RangeMatch::Release,
+                    )?);
+                }
                 let n = boot2deb_engine::srcfetch::apply_kernel_series(
                     &tree,
                     &kernel_pin.commit,
@@ -119,9 +130,12 @@ pub(crate) fn run(
         base_defconfig: &kernel.base_defconfig,
         fragments: &fragments,
     };
-    let work_dir = args
-        .work_dir
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("boot2deb-{recipe}-kconfig")));
+    let work_dir = args.work_dir.unwrap_or_else(|| {
+        // A slash-free scratch label in the shared temp dir: the full recipe identity
+        // (device included) keeps two boards' verifies from colliding on one dir.
+        let slug = recipe.replace('/', "-");
+        std::env::temp_dir().join(format!("boot2deb-{slug}-kconfig"))
+    });
 
     let result = run_config_gate(&inputs, args.reference_config.as_deref(), &work_dir, recipe, &sink);
     // Restore the shared cache tree to a clean base regardless of the gate's outcome,

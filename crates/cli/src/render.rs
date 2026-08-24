@@ -139,18 +139,29 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     // A kernel prints only what it has: a compiled one is described by its source and
     // config inputs, a distro one by the package that installs it.
     match &b.kernel {
-        ResolvedKernel::Compiled(k) => {
+        Some(ResolvedKernel::Compiled(k)) => {
             println!("kernel       : {} ({}, base {})", k.id, k.flavor, k.base_defconfig);
             println!("  track      : {}", k.track.as_deref().unwrap_or("-"));
-            println!("  profile    : {}", k.patch_profile.as_deref().unwrap_or("none"));
+            println!(
+                "  profiles   : {}",
+                if k.patch_profiles.is_empty() {
+                    "none".to_string()
+                } else {
+                    k.patch_profiles.join(", ")
+                }
+            );
             println!("  fragments  : {}", k.config_fragments.join(", "));
         }
-        ResolvedKernel::Distro(k) => {
+        Some(ResolvedKernel::Distro(k)) => {
             println!("kernel       : {} (distro-package)", k.id);
             println!("  package    : {} (version pinned in the package manifest)", k.package);
         }
+        None => println!("kernel       : (none — u-boot-only build)"),
     }
-    println!("suite        : {}", b.suite);
+    match &b.suite {
+        Some(s) => println!("suite        : {s}"),
+        None => println!("suite        : (none — u-boot-only build)"),
+    }
     println!(
         "features     : {}",
         if b.features.is_empty() { "-".to_string() } else { b.features.join(", ") }
@@ -206,6 +217,10 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     match &b.boot {
         ResolvedBoot::RockchipRkbin(boot) => {
             println!("u-boot       : {} ({})", boot.uboot_ref, boot.uboot_defconfig);
+            println!(
+                "u-boot prof  : {}",
+                boot.uboot_profile.as_deref().unwrap_or("none (pristine)")
+            );
             println!("rkbin atf    : {}", boot.rkbin.atf);
             println!("rkbin tpl    : {}", boot.rkbin.tpl);
             if let Some(bl32) = &boot.rkbin.bl32 {
@@ -237,12 +252,21 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     // build reports it plainly instead of empty source lines.
     match (&b.userspace, &b.ffmpeg) {
         (Some(us), Some(ff)) => {
-            println!(
-                "mpp / librga : {} ({}) / {} ({})",
-                us.mpp.git, us.mpp.git_ref, us.librga.git, us.librga.git_ref
-            );
+            // One line per tree the SoC declares — which trees appear is itself the
+            // useful signal, since it says what this SoC's stack is made of.
+            for (label, src) in [
+                ("mpp          ", &us.mpp),
+                ("librga       ", &us.librga),
+                ("libmali      ", &us.libmali),
+            ] {
+                if let Some(s) = src {
+                    println!("{label}: {} ({})", s.git, s.git_ref);
+                }
+            }
             println!("ffmpeg base  : {} ({})", ff.base.git, ff.base.git_ref);
-            println!("ffmpeg rk    : {} ({})", ff.rockchip.git, ff.rockchip.git_ref);
+            if let Some(rk) = &ff.rockchip {
+                println!("ffmpeg rk    : {} ({})", rk.git, rk.git_ref);
+            }
         }
         _ => println!("media-accel  : none (no feature builds the transcode stack)"),
     }

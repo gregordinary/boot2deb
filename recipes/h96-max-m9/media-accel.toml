@@ -1,0 +1,28 @@
+# recipes/h96-max-m9/media-accel.toml -- the H96 MAX M9 with hardware video
+# decode and the RGA 2D accelerator, on mainline 7.1 / Debian forky. Constraints
+# only; the exact resolution is written to the sibling .lock by
+# `boot2deb update h96-max-m9/media-accel`.
+#
+# The base h96-max-m9/forky image plus the `media-accel-v4l2` capability: an
+# ffmpeg-rk built `--enable-v4l2-request` that decodes H.264/HEVC on the SoC's
+# VDPU383, and the out-of-tree RGA driver with librga2. Decode is the kernel's own
+# stateless V4L2 path -- no vendor MPP is involved, and none exists for this SoC.
+#
+# Encode is software: mainline has no RK3576 encoder driver. Scaling is CPU or GPU,
+# because the rkrga ffmpeg filters require MPP. See features/media-accel-v4l2.toml
+# for the full capability statement.
+device     = "h96-max-m9"
+kernel     = "rk3576-mainline-7.1"
+uboot_profile = "rk3576-display"
+suite      = "forky"
+features   = ["media-accel-v4l2"]
+layout     = "combined"
+image_size = "3G"
+
+# The kernel's GPU fix and the u-boot chain are hardware-validated on this board,
+# and Panfrost + Mesa render first-party at 4K. The decode and RGA paths in this
+# recipe are not yet exercised on hardware, so the recipe as a whole is
+# `experimental` until an image built from it decodes and binds RGA on the box.
+[support]
+status = "experimental"
+date   = "2026-07-25"

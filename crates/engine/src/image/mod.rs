@@ -28,6 +28,8 @@ mod ext4;
 mod geometry;
 mod gpt;
 
+pub use ext4::rootfs_filesystem_pin;
+
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use boot2deb_core::chromeos::MAX_KPART_SLOTS;

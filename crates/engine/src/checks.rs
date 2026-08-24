@@ -9,12 +9,11 @@
 //!
 //! - **Always:** host `git` (`git am --3way`), `make` + the target C
 //!   toolchain (native `cc`, else the `<triple>gcc` cross toolchain), the kernel's
-//!   `bc`/`flex`/`bison`/openssl build deps, `mmdebstrap` (rootfs bootstrap),
-//!   and unprivileged user namespaces (the rootless bootstrap + sandbox).
-//! - **Sandbox package builds** (a build with a media-accel stack): `bwrap`, which
-//!   enters the target-arch sandbox those `.deb`s are built in. Required on *any*
-//!   host — a host whose arch already matches the target builds in the sandbox too,
-//!   since it is the target *suite*, not the arch, that the sandbox provides.
+//!   `bc`/`flex`/`bison`/openssl build deps, `mmdebstrap` (the OS rootfs bootstrap),
+//!   and unprivileged user namespaces. The target-arch *build sandbox* — where the
+//!   media-accel `.deb`s compile — is bootstrapped and entered in-process through
+//!   the ferroday-cage library (no `bwrap`, no `mmdebstrap` of its own), so it adds
+//!   no tool beyond the user namespaces already listed here.
 //! - **Cross-arch only** (host arch ≠ target arch): a `qemu-<arch>` interpreter and
 //!   a registered+enabled binfmt handler for the target. A same-arch host runs the
 //!   target's binaries directly and skips these entirely.
@@ -129,9 +128,8 @@ impl PkgManager {
             Pkg::Bc => "bc".into(),
             Pkg::Flex => "flex".into(),
             Pkg::Bison => "bison".into(),
-            Pkg::Mmdebstrap => "mmdebstrap".into(),
             Pkg::E2fsprogs => "e2fsprogs".into(),
-            Pkg::Bubblewrap => "bubblewrap".into(),
+            Pkg::Mmdebstrap => "mmdebstrap".into(),
             Pkg::Coreutils => "coreutils".into(),
             // Kernel `bindeb-pkg` deps. rsync/cpio/kmod share the name across managers;
             // debhelper is Debian's, and elfutils' dev libs split by distro.
@@ -233,7 +231,6 @@ enum Pkg {
     NativeToolchain,
     CrossToolchain,
     Mmdebstrap,
-    Bubblewrap,
     QemuUser,
     E2fsprogs,
     /// `dpkg-scanpackages` — the local apt repo's `Packages` index.
@@ -324,9 +321,6 @@ pub struct ToolNeeds {
     /// distinct dep set from the kernel's. A board that boots its own firmware compiles
     /// no u-boot and needs none of them.
     pub builds_uboot: bool,
-    /// The build compiles target-arch `.deb`s inside the rootless sandbox (the
-    /// media-accel stack), which is entered with `bwrap`.
-    pub sandbox_builds: bool,
 }
 
 /// Run every host preflight check a build actually needs, in report order.
@@ -389,17 +383,13 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         checks.push(python_module_check(pm, target, "elftools", "python3-pyelftools", "u-boot binman image assembly", Pkg::Pyelftools));
     }
 
-    // Rootfs bootstrap + rootless namespaces — needed on every build.
-    checks.push(exe(pm, target, "mmdebstrap", &["mmdebstrap"], "rootfs bootstrap", true, Pkg::Mmdebstrap));
+    // Rootfs bootstrap + rootless namespaces — needed on every build. `mmdebstrap`
+    // bootstraps the *OS* rootfs that becomes the image ([`crate::rootfs`]); the
+    // target-arch *build sandbox* is bootstrapped in-process by ferroday-cage and
+    // needs no binary of its own. Both, plus the package builds, run under
+    // unprivileged user namespaces ([`userns_check`]).
+    checks.push(exe(pm, target, "mmdebstrap", &["mmdebstrap"], "OS rootfs bootstrap", true, Pkg::Mmdebstrap));
     checks.push(userns_check());
-
-    // `bwrap` enters the sandbox the target-arch package builds run in — needed by
-    // any build that has some, on *any* host. The sandbox is what makes those `.deb`s
-    // belong to the target suite rather than the host's, so a host whose arch already
-    // matches the target uses it too and needs `bwrap` just the same.
-    if needs.sandbox_builds {
-        checks.push(exe(pm, target, "bwrap", &["bwrap"], "rootless sandbox entry", true, Pkg::Bubblewrap));
-    }
 
     // Local apt repo + packaging + content-hash tools the rootfs/package stages
     // shell out to. Missing, `doctor` used to pass and the build then
@@ -522,9 +512,11 @@ fn python_module_check(
     }
 }
 
-/// Unprivileged user namespaces with subuid/subgid ranges — the rootless
-/// `mmdebstrap --mode=unshare` bootstrap and the `bwrap` sandbox both depend on
-/// them.
+/// Unprivileged user namespaces with subuid/subgid ranges — the `mmdebstrap
+/// --mode=unshare` OS-rootfs bootstrap, the ferroday-cage provisioner backend (its
+/// subordinate-mapped bootstrap + `export_tar`, which need the same
+/// `newuidmap`/subuid range), the in-process build sandbox (its dpkg-configure
+/// waves), and the package builds all depend on them.
 ///
 /// Probed **functionally**: actually create one with `unshare --map-root-user
 /// --map-auto true` — the exact invocation the rootless bootstrap uses. A
@@ -682,7 +674,6 @@ mod tests {
             compiles_sources: true,
             compiles_kernel: true,
             builds_uboot: true,
-            sandbox_builds: true,
         }
     }
 
@@ -695,7 +686,6 @@ mod tests {
             compiles_sources: false,
             compiles_kernel: false,
             builds_uboot: false,
-            sandbox_builds: false,
         }
     }
 
@@ -759,16 +749,19 @@ mod tests {
     }
 
     #[test]
-    fn a_sandbox_build_needs_bwrap_on_any_host_but_qemu_only_when_cross() {
-        // The package stages build in the sandbox on *every* host: a host whose arch
-        // already matches the target does not get to skip it, because the sandbox is
-        // what makes the produced `.deb`s belong to the target suite rather than the
-        // host's. So `bwrap` is a hard requirement of any build with sandbox stages,
-        // cross or not — on a matching-arch host this assertion is the whole point.
+    fn the_sandbox_adds_no_external_tool_and_qemu_stays_cross_only() {
+        // The package stages enter their target-arch sandbox through the in-process
+        // ferroday-cage library, not an external sandbox binary, so a sandbox build
+        // asks for no `bwrap`/`bubblewrap` — only the unprivileged user namespaces
+        // that every build already requires.
         let checks = tool_checks(&compiling_build());
         assert!(
-            checks.iter().any(|c| c.name == "bwrap" && c.required),
-            "a sandbox build must require bwrap regardless of the host arch"
+            !checks.iter().any(|c| c.name == "bwrap" || c.name == "bubblewrap"),
+            "the in-process sandbox needs no external sandbox binary"
+        );
+        assert!(
+            checks.iter().any(|c| c.name.contains("user namespace") && c.required),
+            "every build requires unprivileged user namespaces"
         );
         // qemu-user is the genuinely cross-only half: a matching-arch host runs the
         // target's binaries directly and never consults a binfmt handler.
@@ -786,7 +779,7 @@ mod tests {
         // boots its own firmware, so a cross compiler is not merely unused — telling
         // the operator to install one is noise a genuinely missing tool could hide in.
         let checks = tool_checks(&assembling_build());
-        for absent in ["git", "make", "bc", "flex", "bison", "openssl", "bwrap"] {
+        for absent in ["git", "make", "bc", "flex", "bison", "openssl"] {
             assert!(
                 !checks.iter().any(|c| c.name.contains(absent)),
                 "{absent} is not needed by a build that compiles nothing"
@@ -794,9 +787,10 @@ mod tests {
         }
         assert!(!checks.iter().any(|c| c.name.ends_with("gcc")));
 
-        // What it *does* still need: the rootfs is bootstrapped and content-pinned the
-        // same way, and its armhf maintainer scripts still run under qemu — so a missing
-        // binfmt handler is still a blocking failure, and it is the *arm* one, not aarch64.
+        // What it *does* still need: the OS rootfs is bootstrapped and content-pinned
+        // the same way, and its armhf maintainer scripts still run under qemu — so a
+        // missing binfmt handler is still a blocking failure, and it is the *arm* one,
+        // not aarch64.
         for needed in ["mmdebstrap", "dpkg-deb", "sha256sum"] {
             assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
         }

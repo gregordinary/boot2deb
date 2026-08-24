@@ -1,0 +1,23 @@
+#!/bin/sh
+# Load the recovered H96 IR remote keymap onto the gpio-ir-receiver rc device.
+#
+# The vendor kernel drove the IR pin (GPIO0_C4) with its out-of-tree pwm-remotectl
+# block; mainline decodes NEC in rc-core via gpio-ir-receiver, and this installs the
+# keymap recovered from the vendor device tree (etc/rc_keymaps/h96.toml) so the
+# bundled handset's keys produce input events. The map is written to the specific
+# gpio_ir_recv device rather than whatever landed on rc0, so a USB remote on another
+# rc index keeps its own map. With no IR hardware present this is a no-op.
+set -eu
+
+MAP=/etc/rc_keymaps/h96.toml
+
+for dev in /sys/class/rc/rc*; do
+	[ -e "$dev" ] || continue
+	drv=$(readlink -f "$dev/device/driver" 2>/dev/null || true)
+	if [ "${drv##*/}" = "gpio_ir_recv" ]; then
+		exec ir-keytable -s "${dev##*/}" -c -w "$MAP"
+	fi
+done
+
+echo "ir-keymap-h96: no gpio_ir_recv rc device found; IR keymap not loaded" >&2
+exit 0

@@ -120,6 +120,42 @@ pub enum ConfigError {
         supported: String,
     },
 
+    /// The chosen u-boot profile is not in the device's `supported_uboot_profiles`.
+    #[error("device '{device}' does not support u-boot profile '{profile}' (supported: {supported})")]
+    UnknownUbootProfileForDevice {
+        /// The device being resolved.
+        device: String,
+        /// The requested u-boot profile.
+        profile: String,
+        /// Comma-separated list of what the device does support.
+        supported: String,
+    },
+
+    /// A recipe declares `deliverable = "uboot"` on a board whose boot method builds
+    /// no bootloader of ours (e.g. depthcharge, whose firmware is its own) — so there
+    /// is no u-boot-only artifact to emit.
+    #[error(
+        "device '{device}' builds no bootloader under boot method '{boot_method}', \
+         so it has no u-boot-only deliverable"
+    )]
+    UbootOnlyWithoutBootloader {
+        /// The device being resolved.
+        device: String,
+        /// The boot method that builds no bootloader.
+        boot_method: String,
+    },
+
+    /// The device declares `supported_uboot_profiles` but no `default_uboot_profile`,
+    /// and none was selected — so a build has no u-boot profile to resolve.
+    #[error(
+        "device '{device}' lists supported_uboot_profiles but no default_uboot_profile — \
+         set one (or select a profile per recipe / with --uboot-profile)"
+    )]
+    MissingDefaultUbootProfile {
+        /// The device being resolved.
+        device: String,
+    },
+
     /// The chosen kernel does not list the device's SoC in `supported_socs`.
     #[error("kernel '{kernel}' does not support soc '{soc}' (supported: {supported})")]
     SocMismatch {
@@ -243,6 +279,26 @@ pub enum ConfigError {
         what: &'static str,
     },
 
+    /// A selected feature contributes a kernel input — kconfig fragments or a patch
+    /// profile — while the resolved kernel is a distro package that compiles
+    /// nothing. The capability's driver would never be patched in or configured on,
+    /// so the feature would install its userspace against hardware support that is
+    /// not there.
+    #[error(
+        "feature '{feature}' declares `{what}`, but kernel '{kernel}' is a \
+         distro-package kernel that compiles nothing — the feature's driver would \
+         never be built"
+    )]
+    FeatureNeedsCompiledKernel {
+        /// The feature that contributed the kernel input.
+        feature: String,
+        /// The distro-package kernel it was paired with.
+        kernel: String,
+        /// The feature field that would be ignored (`config_fragments` or
+        /// `patch_profiles`).
+        what: &'static str,
+    },
+
     /// An `--overlay` argument does not name an existing directory. An empty path
     /// would resolve assets against the current directory and a mistyped one would
     /// shadow nothing, so both fail before any layer is read.
@@ -289,6 +345,24 @@ pub enum ConfigError {
         expected: String,
     },
 
+    /// A `device_kmods` entry is malformed: a non-package-safe name, a duplicate
+    /// name, or a `subdir`/`patch_dir`/patch/module path that is absolute or escapes
+    /// the tree it is joined onto. The subdir feeds `make M=` and the local patches
+    /// are read from the config root, so an escaping value would build or read a file
+    /// from outside the intended tree.
+    #[error(
+        "device '{device}' has an invalid device_kmods entry '{name}': {why}"
+    )]
+    InvalidDeviceKmod {
+        /// The device being resolved.
+        device: String,
+        /// The offending kmod set's declared name (or the raw value when the name
+        /// itself is what is wrong).
+        name: String,
+        /// What is wrong with it.
+        why: &'static str,
+    },
+
     /// A patch profile's `applies_to_kernel` is not a valid semver requirement.
     #[error("profile '{profile}' has invalid applies_to_kernel '{value}': {source}")]
     InvalidVersionReq {
@@ -319,18 +393,36 @@ pub enum ConfigError {
         source: semver::Error,
     },
 
-    /// A kernel definition names a patch profile but no `patches_url`. The lock
-    /// records the source beside the commit, and a commit id is meaningless outside
-    /// the repo it came from, so a series without a source cannot be pinned honestly.
+    /// A kernel definition names one or more patch profiles but no `patches_url`. The
+    /// lock records the source beside the commit, and a commit id is meaningless
+    /// outside the repo it came from, so a series without a source cannot be pinned
+    /// honestly.
     #[error(
-        "kernel '{kernel}' names patch profile '{profile}' but no patches_url — \
+        "kernel '{kernel}' names patch profiles [{profiles}] but no patches_url — \
          add `patches_url` to kernels/{kernel}.toml (the lock records it beside the \
          pinned commit, which means nothing without the repo it is in)"
     )]
     MissingPatchesUrl {
         /// Kernel definition id.
         kernel: String,
-        /// The profile it names.
+        /// The profiles it names, comma-joined.
+        profiles: String,
+    },
+
+    /// A device selects a u-boot patch profile but its `rockchip-rkbin` boot method
+    /// declares no `patches_url`. The u-boot series has nowhere to be fetched from and
+    /// no source to pin beside its commit, mirroring [`MissingPatchesUrl`].
+    ///
+    /// [`MissingPatchesUrl`]: ConfigError::MissingPatchesUrl
+    #[error(
+        "device '{device}' selects u-boot profile '{profile}' but boot method \
+         'rockchip-rkbin' declares no patches_url — add `patches_url` to \
+         boot-methods/rockchip-rkbin.toml"
+    )]
+    MissingUbootPatchesUrl {
+        /// The device being resolved.
+        device: String,
+        /// The u-boot profile it selects.
         profile: String,
     },
 
@@ -345,6 +437,22 @@ pub enum ConfigError {
         profile: String,
         /// The resolved kernel version that is out of range.
         kernel_version: String,
+        /// The profile's declared range.
+        applies_to: String,
+    },
+
+    /// The resolved u-boot version falls outside the profile's declared
+    /// `applies_to_uboot` range — the u-boot counterpart of
+    /// [`KernelOutsideProfileRange`](ConfigError::KernelOutsideProfileRange).
+    #[error(
+        "profile '{profile}' does not target u-boot {uboot_version} \
+         (applies_to_uboot = '{applies_to}')"
+    )]
+    UbootOutsideProfileRange {
+        /// The patch profile.
+        profile: String,
+        /// The resolved u-boot version that is out of range.
+        uboot_version: String,
         /// The profile's declared range.
         applies_to: String,
     },

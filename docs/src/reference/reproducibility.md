@@ -113,7 +113,7 @@ the result:
    `boot2deb verify-sources <recipe>` reports no `ORPHANED` pins.
 3. **Build from that clean, committed checkout**, so the image's `[built_with]` records a
    real commit with `dirty = false`.
-4. **Publish the image together with its `<recipe>.provenance.toml`.** The manifest names the
+4. **Publish the image together with its `.provenance.toml`.** The manifest names the
    builder that produced it; the committed lock — recoverable at that commit — carries the
    snapshot timestamp and every source pin.
 
@@ -135,4 +135,11 @@ records the image and kernel identity, which a rescue tool reads without the pro
 
 The per-image first-boot password is unique per build by design, so `/etc/shadow` is
 intentionally not byte-reproducible. Everything else in the rootfs is, given the same three
-layers frozen.
+layers frozen. Both rootfs backends clamp every tar member's mtime to `SOURCE_DATE_EPOCH`, so
+a bootstrap's wall-clock stamps do not leak into the image: the `mmdebstrap` backend through
+its environment, and the `--rootfs-backend provisioner` path through its ownership-preserving
+`export_tar`, whose encoder records each mtime as `min(mtime, epoch)` as it writes. The
+encoder is the one place that can apply the ceiling: under the subordinate id-map that gives
+the tree its real ownership, the provisioned files sit at ids the host user cannot set times
+on. The export also emits entries in sorted order — directory children and extended attributes
+by name — so a content-identical tree encodes to a byte-identical archive.

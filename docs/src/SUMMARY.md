@@ -20,6 +20,7 @@
 - [Config model](reference/config-model.md)
 - [CLI](reference/cli.md)
 - [Support matrix](reference/support-matrix.md)
+- [RK3576 u-boot images](reference/rk3576-uboot-images.md)
 - [Overlays](reference/overlays.md)
 - [Image identity](reference/image-identity.md)
 - [The maskrom loader](reference/maskrom-loader.md)

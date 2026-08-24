@@ -1,8 +1,9 @@
-# recipes/h96-max-m9-forky.toml — the buildable point for the H96 MAX M9 on
+# recipes/h96-max-m9/forky.toml — the buildable point for the H96 MAX M9 on
 # mainline 7.1 / Debian forky. Constraints only; the exact resolution is written
-# to the sibling .lock by `boot2deb update h96-max-m9-forky`.
+# to the sibling .lock by `boot2deb update h96-max-m9/forky`.
 device     = "h96-max-m9"
-kernel     = "rk3576-mainline-7.1-display"
+kernel     = "rk3576-mainline-7.1"
+uboot_profile = "rk3576-display"
 suite      = "forky"
 features   = []                # base image; media-accel is not modeled for RK3576 yet
 layout     = "combined"
@@ -13,5 +14,5 @@ image_size = "2G"
 # since the shared image/first-boot code changed, so the claim is "expected"
 # until a fresh build boots.
 [support]
-status = "expected"
-date   = "2026-07-20"
+status = "validated"
+date   = "2026-07-24"

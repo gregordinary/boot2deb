@@ -1,4 +1,4 @@
-# recipes/asus-c201-trixie.toml — the ASUS Chromebook C201 on Debian trixie (armhf).
+# recipes/asus-c201/trixie.toml — the ASUS Chromebook C201 on Debian trixie (armhf).
 #
 # The same board on the stable suite. It differs from the forky recipe in one axis and
 # gains a whole kernel by it: `linux-image-armmp` resolves to 6.12.x here rather than

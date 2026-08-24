@@ -129,7 +129,7 @@ pub fn build_kernel(
 ) -> Result<KernelArtifacts, EngineError> {
     // Narrow the build once: everything below reads the compile inputs — the source,
     // the defconfig, the fragments — which only a compiled kernel has.
-    let kernel = build.kernel.compiled().ok_or(EngineError::StageNotApplicable {
+    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(EngineError::StageNotApplicable {
         stage: "kernel",
         why: "the resolved kernel is a distro package installed from the Debian mirror, \
               so there is no source tree to compile",
@@ -212,6 +212,66 @@ pub fn build_kernel(
     Ok(artifacts)
 }
 
+/// Ensure a fully **built** kernel tree exists at `tree_dir(work_dir)` and return its
+/// path — the prerequisite for building an out-of-tree module against it. `make M=`
+/// against `CONFIG_MODVERSIONS=y` needs the tree's `Module.symvers` (the in-tree symbol
+/// CRCs) and its generated headers, both of which only a completed kernel build produces.
+///
+/// In a normal `--stage all` build the kernel stage has already compiled this tree, so
+/// this is a near-instant reuse: the Tier-1 signature is fresh **and** `Module.symvers`
+/// is present, and the tree is returned as-is. It rebuilds — clone+patch (on a stale or
+/// absent tree), configure, and a full `make bindeb-pkg` — only when the tree is missing
+/// its modules metadata, which happens for `--stage kmod` run in isolation or after a
+/// kernel Tier-2 cache hit restored the `.deb`s without materializing a tree.
+///
+/// Shares `build_kernel`'s clone/configure/compile helpers so "a tree suitable for
+/// external modules" has one definition. A distro-package kernel has no tree and is a
+/// [`EngineError::StageNotApplicable`].
+pub fn ensure_module_tree(
+    build: &ResolvedBuild,
+    lock: &Lock,
+    opts: &KernelOptions,
+    env: &BuildEnv,
+    step: &Step,
+) -> Result<PathBuf, EngineError> {
+    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(EngineError::StageNotApplicable {
+        stage: "kmod",
+        why: "the resolved kernel is a distro package installed from the Debian mirror, \
+              so there is no kernel tree to build an external module against",
+    })?;
+    let tree = tree_dir(opts.work_dir);
+    let series_fp = build::dev_series_fingerprint(opts.patches, PatchScope::Kernel);
+    let patches = build::series_identity(opts.patches, &series_fp);
+    let dts_fp = build::device_dts_fingerprint(opts.device_dts);
+    let man = clone_manifest(lock, patches, &dts_fp)?;
+
+    // Reuse only when the tree is both current (Tier-1 signature) and carries the
+    // modules metadata `make M=` needs. A fresh tree without `Module.symvers` — a
+    // clone that was never compiled — must still build.
+    let modules_built = tree.join("Module.symvers").exists();
+    if crate::signature::is_fresh(&tree, &man) && modules_built {
+        step.log(format!(
+            "reusing built kernel tree at {} for the module build",
+            tree.display()
+        ));
+        return Ok(tree);
+    }
+
+    // Re-materialize the tree if the pins moved (or it is absent), then configure and
+    // run the full build so `Module.symvers` and the generated headers exist.
+    if !crate::signature::is_fresh(&tree, &man) {
+        if tree.exists() {
+            std::fs::remove_dir_all(&tree).map_err(|s| EngineError::io(&tree, s))?;
+        }
+        clone_and_patch(build, lock, opts, &tree, step)?;
+        crate::signature::write_manifest(&tree, &man)?;
+    }
+    configure(build, kernel, opts, env, &tree, step)?;
+    let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
+    compile(build, env, &tree, epoch, step)?;
+    Ok(tree)
+}
+
 /// Rebuild only the board DTB (`make <dt_dir>/<board>.dtb`) in the already-patched
 /// tree, staging it into `out_dir` — the bring-up fast path (§4).
 ///
@@ -229,7 +289,7 @@ pub fn build_dtb(
     env: &BuildEnv,
     sink: &dyn EventSink,
 ) -> Result<PathBuf, EngineError> {
-    let kernel = build.kernel.compiled().ok_or(EngineError::StageNotApplicable {
+    let kernel = build.kernel.as_ref().and_then(|k| k.compiled()).ok_or(EngineError::StageNotApplicable {
         stage: "dtb",
         why: "the resolved kernel is a distro package installed from the Debian mirror, \
               so there is no kernel tree to compile a device tree in",
@@ -391,7 +451,7 @@ fn clone_and_patch(
     };
     let n = build::clone_pinned(&spec, step)?;
     match opts.patches {
-        Some(p) => step.log(format!("applied {n} kernel patches ({})", p.pin.profile)),
+        Some(p) => step.log(format!("applied {n} kernel patches ({})", p.pin.profiles.join(", "))),
         None => step.log("no patch profile: compiling the kernel tree as cloned"),
     }
     install_device_dts(build, opts.device_dts, tree, step)?;
@@ -646,8 +706,9 @@ fn localversion(build: &ResolvedBuild) -> String {
 
 /// The reproducibility + packaging env passed to `make bindeb-pkg`. Pure so the
 /// mapping is testable; `CROSS_COMPILE` is added separately (it is a host/target
-/// fact, not a kbuild constant).
-fn kbuild_env(build: &ResolvedBuild, source_date_epoch: Option<u64>) -> Vec<(String, String)> {
+/// fact, not a kbuild constant). Exposed so the out-of-tree module node builds its
+/// `make M=` against the same `ARCH`/`SOURCE_DATE_EPOCH` as the kernel it links into.
+pub fn kbuild_env(build: &ResolvedBuild, source_date_epoch: Option<u64>) -> Vec<(String, String)> {
     let mut env = vec![
         ("ARCH".to_string(), build.kernel_arch.clone()),
         ("KDEB_CHANGELOG_DIST".to_string(), "stable".to_string()),
@@ -677,12 +738,14 @@ mod tests {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
             kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: kernel_commit.into() }),
-            patches: Some(PatchesPin { profile: "rk3588-accel".into(), source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
+            patches: Some(PatchesPin { profiles: vec!["rk3588-accel".into()], source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
             uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "u".into() }),
-            userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
-            ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
-            rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
+            uboot_patches: None,
+            userspace: Some(UserspacePins { mpp: Some(git("m")), librga: Some(git("r")), libmali: Some(git("l")) }),
+            ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: Some(git("rk")) }),
+            rootfs: Some(RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None }),
             blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
+            kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
         }
@@ -953,7 +1016,7 @@ mod tests {
             toolchain_id: tc.to_string(),
         };
         let sig = |lock: &Lock, env: &BuildEnv| {
-            output_manifest(&build, build.kernel.compiled().unwrap(), lock, &opts, env, PatchSeries::Pinned, &[])
+            output_manifest(&build, build.kernel.as_ref().unwrap().compiled().unwrap(), lock, &opts, env, PatchSeries::Pinned, &[])
                 .unwrap()
                 .signature
         };

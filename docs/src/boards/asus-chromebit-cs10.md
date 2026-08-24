@@ -1,15 +1,15 @@
 # ASUS Chromebit CS10
 
-The `asus-chromebit-cs10-forky` recipe builds a bootable Debian **forky** image for the
+The `asus-chromebit-cs10/forky` recipe builds a bootable Debian **forky** image for the
 ASUS Chromebit CS10 (`google,veyron-mickey`) — an RK3288 Veyron, like the
 [C201](asus-c201.md) and the [C100P](asus-c100p.md), but in an HDMI stick rather than a
-laptop. `asus-chromebit-cs10-trixie` is the same board on the stable suite.
+laptop. `asus-chromebit-cs10/trixie` is the same board on the stable suite.
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-chromebit-cs10-forky
+cargo run -p boot2deb-cli -- build asus-chromebit-cs10/forky
 ```
 
-That produces `build/asus-chromebit-cs10-forky/artifacts/asus-chromebit-cs10.img.xz` — a
+That produces `build/asus-chromebit-cs10/forky/artifacts/asus-chromebit-cs10.img.xz` — a
 whole-disk image carrying two ChromeOS kernel slots and the ext4 rootfs, so one write lays
 down everything the firmware needs. The kernel is in the first slot; the second ships
 empty, and is what lets a later kernel upgrade roll itself back if the new kernel does not
@@ -68,7 +68,7 @@ plus a flash drive on a bus-powered hub is a real brown-out risk.
 Write the image to a USB stick:
 
 ```sh
-xzcat build/asus-chromebit-cs10-forky/artifacts/asus-chromebit-cs10.img.xz \
+xzcat build/asus-chromebit-cs10/forky/artifacts/asus-chromebit-cs10.img.xz \
   | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
 ```
 
@@ -121,7 +121,7 @@ the internal eMMC:
 
 ```sh
 lsblk                       # the eMMC is mmcblk0 — it is the one with mmcblk0boot0 beside it
-xzcat asus-chromebit-cs10-forky.img.xz | sudo dd of=/dev/mmcblk0 bs=4M status=progress conv=fsync
+xzcat asus-chromebit-cs10.img.xz | sudo dd of=/dev/mmcblk0 bs=4M status=progress conv=fsync
 sudo reboot                 # then Ctrl+D to boot the eMMC, or wait out the timeout
 ```
 
@@ -157,7 +157,7 @@ the only way to type at, so a layout means exactly what it means on a laptop; it
 describes a keyboard you bring. The default is `us`.
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-chromebit-cs10-forky --keymap gb
+cargo run -p boot2deb-cli -- build asus-chromebit-cs10/forky --keymap gb
 sudo dpkg-reconfigure keyboard-configuration && sudo setupcon   # or, on the board
 ```
 

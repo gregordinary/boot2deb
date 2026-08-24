@@ -1,4 +1,4 @@
-# recipes/asus-chromebit-cs10-forky.toml — the ASUS Chromebit CS10 on Debian forky
+# recipes/asus-chromebit-cs10/forky.toml — the ASUS Chromebit CS10 on Debian forky
 # (armhf). Constraints only; the exact resolution is written to the sibling .lock.
 device     = "asus-chromebit-cs10"
 kernel     = "debian-armmp"    # Debian's own armhf kernel; forky resolves 7.1.x

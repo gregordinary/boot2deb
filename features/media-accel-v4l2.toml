@@ -1,0 +1,42 @@
+# features/media-accel-v4l2.toml — hardware video decode through the kernel's own
+# stateless V4L2 API, plus the RGA 2D accelerator. A capability feature, named for
+# its provider: the decoder is driven by mainline V4L2 (the `media-accel-rockchip`
+# sibling is the same capability provided by Rockchip's vendor MPP stack instead).
+#
+# What this delivers on RK3576:
+#  - HW decode of H.264 and HEVC to NV12, via the in-kernel VDPU383 driver
+#    (`rockchip_vdec`, enabled on the SoC layer) and an ffmpeg built
+#    `--enable-v4l2-request`. No vendor userspace is involved in the decode path.
+#  - The RGA 2D raster accelerator: the out-of-tree vendor driver and the DT nodes
+#    that bind it (the `rk3576-rga` patch profile + `accel/rk3576-rga` fragment,
+#    both contributed below), and `librga2` for programs that speak its API.
+#
+# What it does not deliver, stated so nobody plans around it:
+#  - No HW *encode*. Mainline has no RK3576 encoder driver; encoding is software.
+#  - No `scale_rkrga` / `vpp_rkrga` ffmpeg filters. Those require `--enable-rkmpp`
+#    and MPP needs the vendor `mpp_service` kernel framework, which is not mainline.
+#    Scaling and format conversion run on CPU or GPU.
+#  - No 10-bit decode: the driver exposes NV12 only.
+#  - RGA colour conversion covers BT.601 limited/full and BT.709. Not BT.2020,
+#    which the RK3588's RGA3 does have.
+#
+# The kernel contributions live here rather than on the kernel layer so an RK3576
+# build that did not ask for this capability does not carry a 19k-line out-of-tree
+# driver it has no consumer for.
+description  = "HW video decode via V4L2 stateless (VDPU383) + RGA 2D, for RK3576"
+packages     = ["ffmpeg-rk", "librga2"]
+requires_soc = ["rk3576"]
+
+# Builds from the SoC's `[userspace]`/`[ffmpeg]` source trees rather than the Debian
+# mirror, so resolution requires the SoC to supply them and the build schedules the
+# userspace + ffmpeg compile nodes.
+requires_media_accel = true
+
+# The RGA driver: the patch series that adds it to the tree, and the kconfig that
+# compiles it. Both are needed — a fragment can only turn on code the tree has.
+patch_profiles   = ["rk3576-rga"]
+config_fragments = ["accel/rk3576-rga"]
+
+# The two media-accel providers are alternatives, not layers: both build an
+# `ffmpeg-rk` deb, and only one `./configure` surface can win.
+conflicts = ["media-accel-rockchip"]

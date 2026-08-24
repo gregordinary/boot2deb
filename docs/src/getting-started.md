@@ -1,12 +1,12 @@
 # Getting started
 
 This gets you from a clone of the repo to a built image. It uses the shipped
-`turing-rk1-forky` recipe as the running example; other boards build the same way
+`turing-rk1/forky` recipe as the running example; other boards build the same way
 with their own recipe name. Flashing and board-specific notes live on each board's
 page — for the RK1, see [Turing RK1](boards/turing-rk1.md).
 
 > **Which track are you on?** This is the **shipped-recipe track** — `doctor` then
-> `build`, for a recipe that already ships a committed lock (like `turing-rk1-forky`).
+> `build`, for a recipe that already ships a committed lock (like `turing-rk1/forky`).
 > Bringing up a *new* board, or authoring a patch, is the longer bring-up track: see
 > [Adding a board](contributing/adding-a-board.md) and
 > [Adding a patch](contributing/adding-a-patch.md).
@@ -36,7 +36,7 @@ Rust, so it is the first thing to run after cloning:
 
 ```sh
 cd boot2deb
-cargo run -p boot2deb-cli -- doctor turing-rk1-forky
+cargo run -p boot2deb-cli -- doctor turing-rk1/forky
 ```
 
 It reports your host arch, whether the build is cross-arch, and one line per
@@ -44,7 +44,7 @@ requirement:
 
 ```
 host arch : x86_64
-target    : turing-rk1-forky (arch arm64)
+target    : turing-rk1/forky (arch arm64)
 cross     : yes — needs qemu-user binfmt for arm64 maintainer scripts/compiles
 
   ok      git                          /usr/bin/git
@@ -69,25 +69,26 @@ For orientation, the checks fall into a few groups:
 | Image assembly | none — the rootfs ext4 is formatted and checksum-verified in pure Rust; `e2fsck` is an optional cross-check when present | optional |
 | Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler (native, or the `<triple>gcc` cross compiler) | only if the recipe compiles a kernel or a bootloader |
 | Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | cross only |
-| Sandbox | `bwrap`, to enter the rootless target-arch build sandbox | the recipe builds target-arch packages (the media-accel stack) — on any host |
 
 **`doctor` asks only for what *your recipe* will actually invoke**, so the table above
-is a superset. `doctor turing-rk1-media-accel-forky` wants the whole list; the base
-`doctor turing-rk1-forky` drops the sandbox row (it builds no target-arch userspace);
-`doctor asus-c201-forky` wants no compiler at all, because that board installs Debian's
-kernel and boots its own firmware. That is deliberate: a requirement you do not need is
-somewhere a requirement you *do* need can hide.
+is a superset. `doctor turing-rk1/media-accel-forky` on an x86_64 host wants the whole
+list — the compile toolchain and cross emulation both; `doctor asus-c201/forky` wants
+no compiler at all, because that board installs Debian's kernel and boots its own
+firmware. That is deliberate: a requirement you do not need is somewhere a requirement
+you *do* need can hide.
 
 The "cross" row applies when your host arch differs from the target — i.e. any x86_64
 host building an arm64 or armhf image. An arm64 host runs the target's binaries directly
 and needs no emulation.
 
-The sandbox row is **not** a cross-only requirement. Packages like `ffmpeg-rk` and
+The target-arch sandbox is **not** a cross-only concern. Packages like `ffmpeg-rk` and
 `librga2` are built inside a userland bootstrapped for the target *suite*, never on your
 host, even when your host arch already matches the target. Their runtime `Depends` are
 derived from the libraries present at build time, so building them against your host's
 libraries would stamp your host's package names and versions into a `.deb` bound for a
-Debian `forky` image. An arm64 host building an arm64 image still needs `bwrap`.
+Debian `forky` image. That sandbox runs entirely in-process through unprivileged user
+namespaces — it needs no external sandbox tool — but it does run on every host, same-arch
+included, so those namespaces are a hard requirement even when nothing is cross.
 
 ### The user-namespace check (common blocker on Ubuntu 24.04)
 
@@ -124,13 +125,13 @@ registers this; `doctor` warns if the flag is missing.
 With `doctor` green:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1-forky
+cargo run -p boot2deb-cli -- build turing-rk1/forky
 ```
 
 This resolves the recipe's committed lockfile and runs the pipeline end to end. For the
 RK1 that is: compile the kernel and u-boot, build the media-accel userspace and ffmpeg,
 bootstrap the Debian rootfs, and assemble a bootable disk image. **A recipe runs only the
-stages it has** — `build asus-c201-forky` compiles nothing at all, so it is a rootfs
+stages it has** — `build asus-c201/forky` compiles nothing at all, so it is a rootfs
 bootstrap and an image assembly and nothing else.
 
 The build reads only the lock, so it consults no network for its pins and is reproducible
@@ -146,19 +147,19 @@ unchanged skips the multi-minute bootstrap. To force a clean rootfs, add
 
 ### What you get
 
-Artifacts land under the recipe's work dir, `build/turing-rk1-forky/artifacts/`:
+Artifacts land under the recipe's work dir, `build/turing-rk1/forky/artifacts/`:
 
 - **`turing-rk1.img.xz`** — the compressed bootable image (the file is named after the
   device, not the recipe).
-- **`turing-rk1-forky.provenance.toml`** — exactly what went into the image: the
+- **`forky.provenance.toml`** — exactly what went into the image: the
   resolved pins, package count, toolchain identity, and the first-boot credential.
 
 The build prints the exact paths on its final lines, including the credential:
 
 ```
-compressed    : .../build/turing-rk1-forky/artifacts/turing-rk1.img.xz
+compressed    : .../build/turing-rk1/forky/artifacts/turing-rk1.img.xz
 first-boot pw : <generated>  (user debian, expired — change at first login)
-provenance    : .../build/turing-rk1-forky/artifacts/turing-rk1-forky.provenance.toml
+provenance    : .../build/turing-rk1/forky/artifacts/forky.provenance.toml
 ```
 
 **Note the first-boot password down.** It is unique per image, shown once here, and

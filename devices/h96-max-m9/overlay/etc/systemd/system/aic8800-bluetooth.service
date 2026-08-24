@@ -1,0 +1,21 @@
+[Unit]
+Description=AIC8800D80 Bluetooth (UART HCI on ttyS4)
+# The AIC8800 is a Wi-Fi/BT combo: the SDIO Wi-Fi driver downloads the BT patch
+# during chip bringup and programs the BT core to speak HCI over UART4 at
+# 1.5 Mbaud with hardware flow control. There is no in-tree serdev driver, so the
+# helper drives the BT_REG_ON / HST_WAK_BT wake lines (the low->high edge after the
+# firmware load is what wakes the sleeping controller) and attaches the H4 line
+# discipline. Bring the adapter up before bluetoothd so it is present when the
+# daemon enumerates.
+Before=bluetooth.service
+Wants=bluetooth.service
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/aic8800/bt-attach
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

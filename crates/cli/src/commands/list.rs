@@ -144,7 +144,11 @@ fn kernel_fields(k: &boot2deb_core::model::KernelDef) -> (String, Option<String>
         KernelDef::Compiled(k) => (
             k.flavor.as_str().to_string(),
             k.track.clone(),
-            k.patch_profile.clone(),
+            if k.patch_profiles.is_empty() {
+                "none".to_string()
+            } else {
+                k.patch_profiles.join(", ")
+            },
         ),
         KernelDef::Distro(k) => (
             k.flavor.as_str().to_string(),

@@ -12,7 +12,7 @@
 //! recipe's [`Support`] claim, which is the only hand-written input here.
 
 use crate::lock::Lock;
-use crate::model::{ResolvedKernel, Support, SupportStatus};
+use crate::model::{Support, SupportStatus};
 use crate::{ConfigError, ConfigRoot};
 
 /// Characters of a commit id shown in the matrix — the project's display
@@ -30,17 +30,21 @@ pub struct MatrixRow {
     pub recipe: String,
     /// Device the recipe builds.
     pub device: String,
-    /// Debian suite.
-    pub suite: String,
-    /// Kernel definition id (e.g. `rk3588-mainline-7.1`).
-    pub kernel: String,
+    /// Debian suite, or [`None`] for a u-boot-only recipe, which resolves no rootfs.
+    pub suite: Option<String>,
+    /// Kernel definition id (e.g. `rk3588-mainline-7.1`), or [`None`] for a
+    /// u-boot-only recipe, which resolves no kernel.
+    pub kernel: Option<String>,
     /// The exact kernel the lock pins (e.g. `v7.1.1`), or [`None`] for a distro
     /// kernel — whose version rides the suite's package set rather than a commit,
-    /// so the lock has none to state.
+    /// so the lock has none to state — or a u-boot-only recipe.
     pub kernel_ref: Option<String>,
-    /// The patch series pinned for this build: profile, ref, and short commit.
+    /// The kernel patch series pinned for this build: profile, ref, and short commit.
     /// [`None`] where the kernel applies no series.
     pub patches: Option<PatchesCell>,
+    /// The u-boot patch series pinned for this build: profile, ref, and short commit.
+    /// [`None`] where the boot method compiles no u-boot, or u-boot ships pristine.
+    pub uboot: Option<PatchesCell>,
     /// The maintainer's claim.
     pub status: SupportStatus,
     /// `YYYY-MM-DD` the claim was last established.
@@ -51,8 +55,8 @@ pub struct MatrixRow {
 /// the human-legible release it came from, and the exact commit under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchesCell {
-    /// Profile name selecting the series.
-    pub profile: String,
+    /// Profile names selecting the series, in apply order (comma-joined for display).
+    pub profiles: Vec<String>,
     /// The release tag or branch the pin was taken at.
     pub reference: String,
     /// The exact commit, truncated for display.
@@ -86,31 +90,31 @@ pub fn matrix(root: &ConfigRoot) -> Result<Matrix, ConfigError> {
         };
         let build = crate::resolve_recipe(root, &recipe, &Default::default())?;
         let lock = root.lock(&recipe)?;
-        out.rows.push(row(recipe, &claim, &build.device, &build.suite, &build.kernel, &lock));
+        out.rows.push(row(recipe, &claim, &build, &lock));
     }
     Ok(out)
 }
 
+/// The profile/ref/short-commit cell for a pinned patch series, or [`None`] when
+/// the lock records no such pin.
+fn patches_cell(pin: Option<&crate::lock::PatchesPin>) -> Option<PatchesCell> {
+    pin.map(|p| PatchesCell {
+        profiles: p.profiles.clone(),
+        reference: p.reference.clone(),
+        commit: p.commit.chars().take(SHORT_COMMIT).collect(),
+    })
+}
+
 /// Assemble one row from a recipe's claim, its resolution, and its lock.
-fn row(
-    recipe: String,
-    claim: &Support,
-    device: &str,
-    suite: &str,
-    kernel: &ResolvedKernel,
-    lock: &Lock,
-) -> MatrixRow {
+fn row(recipe: String, claim: &Support, build: &crate::model::ResolvedBuild, lock: &Lock) -> MatrixRow {
     MatrixRow {
         recipe,
-        device: device.to_string(),
-        suite: suite.to_string(),
-        kernel: kernel.id().to_string(),
+        device: build.device.clone(),
+        suite: build.suite.clone(),
+        kernel: build.kernel.as_ref().map(|k| k.id().to_string()),
         kernel_ref: lock.kernel.as_ref().map(|k| k.reference.clone()),
-        patches: lock.patches.as_ref().map(|p| PatchesCell {
-            profile: p.profile.clone(),
-            reference: p.reference.clone(),
-            commit: p.commit.chars().take(SHORT_COMMIT).collect(),
-        }),
+        patches: patches_cell(lock.patches.as_ref()),
+        uboot: patches_cell(lock.uboot_patches.as_ref()),
         status: claim.status,
         date: claim.date.clone(),
     }
@@ -124,17 +128,35 @@ impl MatrixRow {
     /// Plain text, so the terminal and markdown renderings state the same thing and
     /// only their decoration differs.
     pub fn kernel_cell(&self) -> String {
-        match &self.kernel_ref {
-            Some(r) => format!("{} {r}", self.kernel),
-            None => format!("{} (from the suite)", self.kernel),
+        match (&self.kernel, &self.kernel_ref) {
+            (Some(k), Some(r)) => format!("{k} {r}"),
+            (Some(k), None) => format!("{k} (from the suite)"),
+            (None, _) => "(u-boot only)".to_string(),
         }
     }
 
-    /// The patches cell: profile, release handle, and short commit, or `none` where
-    /// the kernel applies no series. Plain text, like [`kernel_cell`](Self::kernel_cell).
+    /// The suite cell, or an em dash for a u-boot-only recipe with no rootfs.
+    pub fn suite_cell(&self) -> &str {
+        self.suite.as_deref().unwrap_or("—")
+    }
+
+    /// The kernel-patches cell: profile, release handle, and short commit, or `none`
+    /// where the kernel applies no series. Plain text, like
+    /// [`kernel_cell`](Self::kernel_cell).
     pub fn patches_cell(&self) -> String {
-        match &self.patches {
-            Some(p) => format!("{} {} ({})", p.profile, p.reference, p.commit),
+        Self::pin_cell(self.patches.as_ref())
+    }
+
+    /// The u-boot-patches cell, in the same shape as [`patches_cell`](Self::patches_cell).
+    pub fn uboot_cell(&self) -> String {
+        Self::pin_cell(self.uboot.as_ref())
+    }
+
+    /// Render a patch-pin cell as `profiles ref (commit)` (profiles comma-joined), or
+    /// `none` when absent.
+    fn pin_cell(pin: Option<&PatchesCell>) -> String {
+        match pin {
+            Some(p) => format!("{} {} ({})", p.profiles.join(", "), p.reference, p.commit),
             None => "none".to_string(),
         }
     }
@@ -154,16 +176,23 @@ fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
         ("kernel", lock.kernel.as_ref().map(|k| git(&k.reference, &k.commit))),
         ("patches", lock.patches.as_ref().map(|p| git(&p.reference, &p.commit))),
         ("u-boot", lock.uboot.as_ref().map(|u| git(&u.reference, &u.commit))),
-        ("suite", Some(lock.rootfs.suite.clone())),
+        ("u-boot patches", lock.uboot_patches.as_ref().map(|p| git(&p.reference, &p.commit))),
+        ("suite", lock.rootfs.as_ref().map(|r| r.suite.clone())),
     ];
+    // A tree the SoC does not declare has no row at all, rather than a row reading
+    // "none": these axes exist only for a build whose SoC has that hardware.
     if let Some(us) = &lock.userspace {
-        v.push(("mpp", Some(git(&us.mpp.reference, &us.mpp.commit))));
-        v.push(("librga", Some(git(&us.librga.reference, &us.librga.commit))));
-        v.push(("libmali", Some(git(&us.libmali.reference, &us.libmali.commit))));
+        for (axis, pin) in [("mpp", &us.mpp), ("librga", &us.librga), ("libmali", &us.libmali)] {
+            if let Some(p) = pin {
+                v.push((axis, Some(git(&p.reference, &p.commit))));
+            }
+        }
     }
     if let Some(ff) = &lock.ffmpeg {
         v.push(("ffmpeg", Some(git(&ff.base.reference, &ff.base.commit))));
-        v.push(("ffmpeg-rk", Some(git(&ff.rockchip.reference, &ff.rockchip.commit))));
+        if let Some(rk) = &ff.rockchip {
+            v.push(("ffmpeg-rk", Some(git(&rk.reference, &rk.commit))));
+        }
     }
     if let Some(b) = &lock.blobs {
         v.push(("blob atf", Some(b.atf.clone())));
@@ -250,23 +279,38 @@ pub fn render_markdown(matrix: &Matrix) -> String {
     let mut s = String::from(PAGE_BANNER);
     s.push('\n');
     s.push_str(PAGE_INTRO);
-    s.push_str("\n| Recipe | Device | Suite | Kernel | Patches | Status | As of |\n");
-    s.push_str("|---|---|---|---|---|---|---|\n");
+    s.push_str("\n| Recipe | Device | Suite | Kernel | Patches | U-boot | Status | As of |\n");
+    s.push_str("|---|---|---|---|---|---|---|---|\n");
     for r in &matrix.rows {
         // Code spans mark the values a reader would copy — an id, a tag, a commit.
         // The qualifiers around them ("from the suite", "none") are prose about the
         // build, and setting them in code would invite reading them as values.
-        let kernel = match &r.kernel_ref {
-            Some(rf) => format!("`{}` `{rf}`", r.kernel),
-            None => format!("`{}` (from the suite)", r.kernel),
+        let kernel = match (&r.kernel, &r.kernel_ref) {
+            (Some(k), Some(rf)) => format!("`{k}` `{rf}`"),
+            (Some(k), None) => format!("`{k}` (from the suite)"),
+            (None, _) => "(u-boot only)".to_string(),
         };
-        let patches = match &r.patches {
-            Some(p) => format!("`{}` `{}` (`{}`)", p.profile, p.reference, p.commit),
+        let pins = |c: &Option<PatchesCell>| match c {
+            Some(p) => {
+                let profiles = p
+                    .profiles
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{profiles} `{}` (`{}`)", p.reference, p.commit)
+            }
             None => "none".to_string(),
         };
         s.push_str(&format!(
-            "| `{}` | {} | {} | {kernel} | {patches} | `{}` | {} |\n",
-            r.recipe, r.device, r.suite, r.status, r.date,
+            "| `{}` | {} | {} | {kernel} | {} | {} | `{}` | {} |\n",
+            r.recipe,
+            r.device,
+            r.suite_cell(),
+            pins(&r.patches),
+            pins(&r.uboot),
+            r.status,
+            r.date,
         ));
     }
     s
@@ -283,30 +327,53 @@ mod tests {
         let compiled = MatrixRow {
             recipe: "turing-rk1/forky".into(),
             device: "turing-rk1".into(),
-            suite: "forky".into(),
-            kernel: "rk3588-mainline-7.1".into(),
+            suite: Some("forky".into()),
+            kernel: Some("rk3588-mainline-7.1".into()),
             kernel_ref: Some("v7.1.1".into()),
             patches: Some(PatchesCell {
-                profile: "rk3588-accel".into(),
+                profiles: vec!["rk3588-accel".into()],
                 reference: "main".into(),
                 commit: "527d03d54ea6".into(),
             }),
+            uboot: None,
             status: SupportStatus::Validated,
             date: "2026-07-14".into(),
         };
         assert_eq!(compiled.kernel_cell(), "rk3588-mainline-7.1 v7.1.1");
         assert_eq!(compiled.patches_cell(), "rk3588-accel main (527d03d54ea6)");
+        assert_eq!(compiled.uboot_cell(), "none");
 
         // A distro kernel pins no commit — its version comes from the suite — and
         // applies no series. Neither cell may imply a pin the lock does not hold.
         let distro = MatrixRow {
-            kernel: "debian-armmp".into(),
+            kernel: Some("debian-armmp".into()),
             kernel_ref: None,
             patches: None,
             ..compiled
         };
         assert_eq!(distro.kernel_cell(), "debian-armmp (from the suite)");
         assert_eq!(distro.patches_cell(), "none");
+
+        // A u-boot-only recipe has no kernel or suite; its cells say so, and the
+        // u-boot pin carries the series.
+        let uboot_only = MatrixRow {
+            recipe: "rk3576-generic/loader".into(),
+            device: "rk3576-generic".into(),
+            suite: None,
+            kernel: None,
+            kernel_ref: None,
+            patches: None,
+            uboot: Some(PatchesCell {
+                profiles: vec!["rk3576-loader".into()],
+                reference: "main".into(),
+                commit: "e86ef2a00000".into(),
+            }),
+            status: SupportStatus::Expected,
+            date: "2026-07-21".into(),
+        };
+        assert_eq!(uboot_only.kernel_cell(), "(u-boot only)");
+        assert_eq!(uboot_only.suite_cell(), "—");
+        assert_eq!(uboot_only.uboot_cell(), "rk3576-loader main (e86ef2a00000)");
     }
 
     /// The rendered page carries the generated banner and one table row per matrix
@@ -317,10 +384,11 @@ mod tests {
             rows: vec![MatrixRow {
                 recipe: "asus-c201/forky".into(),
                 device: "asus-c201".into(),
-                suite: "forky".into(),
-                kernel: "debian-armmp".into(),
+                suite: Some("forky".into()),
+                kernel: Some("debian-armmp".into()),
                 kernel_ref: None,
                 patches: None,
+                uboot: None,
                 status: SupportStatus::Expected,
                 date: "2026-07-20".into(),
             }],
@@ -355,7 +423,7 @@ ref = \"v7.1.1\"
 commit = \"c9acdc466e9aa96352f658b9276aa8a45b8e817d\"
 
 [patches]
-profile = \"rk3588-accel\"
+profiles = [\"rk3588-accel\"]
 source = \"https://example.invalid/patches.git\"
 ref = \"main\"
 commit = \"527d03d54ea68a375b814ccb3314901530cb8b32\"

@@ -35,7 +35,7 @@ pub(crate) fn run(
         return Ok(());
     };
     // A patch series implies a tree to apply it to, so the lock pins both or neither.
-    let (Some(kernel), Some(kernel_pin)) = (build.kernel.compiled(), lock.kernel.as_ref()) else {
+    let (Some(kernel), Some(kernel_pin)) = (build.kernel.as_ref().and_then(|k| k.compiled()), lock.kernel.as_ref()) else {
         return Err(format!(
             "the lock for '{recipe}' pins a patch series but no kernel to apply it to — \
              re-run `boot2deb update`"
@@ -50,23 +50,30 @@ pub(crate) fn run(
         root,
         &sink,
     )?;
-    let profile = load_profile(&patches_root, &pin.profile)?;
+    // Load every composed profile; the kernel applies them in order, so verify checks
+    // the concatenated series per scope against one tree.
+    let mut profiles = Vec::with_capacity(pin.profiles.len());
+    for name in &pin.profiles {
+        profiles.push((name.clone(), load_profile(&patches_root, name)?));
+    }
 
     // Unreachable entries: ranges that no longer overlap the envelope, so no kernel
-    // this profile admits can select them. A warning rather than an error, because a
+    // that profile admits can select them. A warning rather than an error, because a
     // dead entry breaks nothing — it is only clutter, and a ledger that only grows
     // becomes unreadable. Retiring one is safe: an old lock names an old `patches`
     // commit whose tree still holds the manifest line and the file.
-    for (scope, entry) in profile.unreachable(&pin.profile)? {
-        println!(
-            "warning: {} entry {} is unreachable — its range {} cannot overlap the profile's \
-             {} envelope, so no kernel '{}' admits can select it; retire the entry and its file",
-            scope.as_str(),
-            entry.path(),
-            entry.kernels().unwrap_or("(none)"),
-            profile.applies_to_kernel,
-            pin.profile,
-        );
+    for (name, profile) in &profiles {
+        for (scope, entry) in profile.unreachable(name)? {
+            println!(
+                "warning: {} entry {} is unreachable — its range {} cannot overlap the profile's \
+                 {} envelope, so no kernel '{}' admits can select it; retire the entry and its file",
+                scope.as_str(),
+                entry.path(),
+                entry.kernels().unwrap_or("(none)"),
+                profile.applies_to_kernel.as_deref().unwrap_or("*"),
+                name,
+            );
+        }
     }
 
     // A candidate kernel answers "would this series survive X?" without mutating the
@@ -80,18 +87,21 @@ pub(crate) fn run(
         None => RangeMatch::Release,
     };
 
-    // Declared-intent gate: is the kernel under test in the profile's envelope?
-    if !profile.applies_to_under(&pin.profile, reference, mode)? {
-        return Err(format!(
-            "kernel {reference} is outside profile '{}' (declared {}){}",
-            pin.profile,
-            profile.applies_to_kernel,
-            match candidate {
-                Some(_) => " — widen the envelope first if this candidate should be in range",
-                None => "",
-            }
-        )
-        .into());
+    // Declared-intent gate: is the kernel under test in every composed profile's
+    // envelope? One profile that does not cover it fails the whole set.
+    for (name, profile) in &profiles {
+        if !profile.applies_to_under(name, reference, mode)? {
+            return Err(format!(
+                "kernel {reference} is outside profile '{}' (declared {}){}",
+                name,
+                profile.applies_to_kernel.as_deref().unwrap_or("*"),
+                match candidate {
+                    Some(_) => " — widen the envelope first if this candidate should be in range",
+                    None => "",
+                }
+            )
+            .into());
+        }
     }
     let target = format!("{} @ {reference}", kernel_pin.id);
     let cache_root = verify_trees_cache(root);
@@ -127,13 +137,18 @@ pub(crate) fn run(
             )?
         }
     };
-    // Narrow every scope to the entries the kernel under test selects, once. These
-    // are what get verified and what decide whether a scope needs a tree at all: a
-    // scope whose entries are all out of range contributes nothing to fetch.
-    let series_for = |scope| profile.series_for(scope, &pin.profile, reference, mode);
-    let kernel_series = series_for(Scope::Kernel)?;
-    let ffmpeg_series = series_for(Scope::Ffmpeg)?;
-    let userspace_series = series_for(Scope::Userspace)?;
+    // Narrow every scope to the entries the kernel under test selects, once, composing
+    // each profile's entries in profile order. These are what get verified and what
+    // decide whether a scope needs a tree at all: a scope with no entries from any
+    // profile contributes nothing to fetch.
+    let mut kernel_series: Vec<&str> = Vec::new();
+    let mut ffmpeg_series: Vec<&str> = Vec::new();
+    let mut userspace_series: Vec<&str> = Vec::new();
+    for (name, profile) in &profiles {
+        kernel_series.extend(profile.series_for(Scope::Kernel, name, reference, mode)?);
+        ffmpeg_series.extend(profile.series_for(Scope::Ffmpeg, name, reference, mode)?);
+        userspace_series.extend(profile.series_for(Scope::Userspace, name, reference, mode)?);
+    }
 
     // The ffmpeg/userspace series verify only for a media-accel build, which is the
     // only one carrying those source trees; without them there is nothing to fetch or
@@ -151,13 +166,19 @@ pub(crate) fn run(
         )?,
         _ => None,
     };
-    let userspace_tree = match (&build.userspace, &lock.userspace) {
-        (Some(us), Some(us_pins)) => tree_for_scope(
+    // The `userspace` scope's patches apply to the MPP tree, so verification needs
+    // that tree specifically — a SoC that declares no MPP has no tree to verify
+    // against, and (having no MPP) carries no userspace patches either.
+    let userspace_tree = match (
+        build.userspace.as_ref().and_then(|us| us.mpp.as_ref()),
+        lock.userspace.as_ref().and_then(|p| p.mpp.as_ref()),
+    ) {
+        (Some(mpp), Some(mpp_pin)) => tree_for_scope(
             args.userspace_path,
             &userspace_series,
-            args.mpp_src.as_deref().unwrap_or(&us.mpp.git),
-            &us_pins.mpp.reference,
-            &us_pins.mpp.commit,
+            args.mpp_src.as_deref().unwrap_or(&mpp.git),
+            &mpp_pin.reference,
+            &mpp_pin.commit,
             "mpp",
             &cache_root,
             &sink,

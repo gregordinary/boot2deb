@@ -12,10 +12,10 @@ Rockchip media **userspace** is built in:
 
 | Recipe | Suite | Media userspace |
 | --- | --- | --- |
-| `turing-rk1-forky` | forky | — (base) |
-| `turing-rk1-trixie` | trixie | — (base) |
-| `turing-rk1-media-accel-forky` | forky | ffmpeg-rk + MPP + RGA |
-| `turing-rk1-media-accel-trixie` | trixie | ffmpeg-rk + MPP + RGA |
+| `turing-rk1/forky` | forky | — (base) |
+| `turing-rk1/trixie` | trixie | — (base) |
+| `turing-rk1/media-accel-forky` | forky | ffmpeg-rk + MPP + RGA |
+| `turing-rk1/media-accel-trixie` | trixie | ffmpeg-rk + MPP + RGA |
 
 Every variant carries the **same accel kernel**: the VEPU / VDPU / RGA and NPU drivers
 are present in all of them, because the patches and kconfig live on the kernel axis. A
@@ -28,19 +28,19 @@ installed onto a running base image later. `forky` is the RK1's validated suite.
 Build the base image as in [Getting started](../getting-started.md):
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1-forky
+cargo run -p boot2deb-cli -- build turing-rk1/forky
 ```
 
 or, for a ready hardware-transcode host, the media-accel variant:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1-media-accel-forky
+cargo run -p boot2deb-cli -- build turing-rk1/media-accel-forky
 ```
 
 Either produces `build/<recipe>/artifacts/turing-rk1.img.xz` — a whole-disk image (GPT,
 u-boot in the reserved gap ahead of the first partition, then the ext4 rootfs), so a
 single write lays down everything, bootloader included. The flashing and boot notes
-below use `turing-rk1-forky`; they are identical for any variant (the bootloader and
+below use `turing-rk1/forky`; they are identical for any variant (the bootloader and
 disk layout do not change), so substitute your recipe name in the artifact path.
 
 ## Flash
@@ -58,7 +58,7 @@ decompress and `dd` it — the same image boots from any medium the board scans,
 u-boot discovers its root device at runtime:
 
 ```sh
-xzcat build/turing-rk1-forky/artifacts/turing-rk1.img.xz \
+xzcat build/turing-rk1/forky/artifacts/turing-rk1.img.xz \
   | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync   # confirm /dev/sdX with lsblk
 ```
 
@@ -75,7 +75,7 @@ disk. The builder produces the two pieces for this directly.
 of one:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1-forky --layout split
+cargo run -p boot2deb-cli -- build turing-rk1/forky --layout split
 ```
 
 - `turing-rk1-boot.img` — u-boot only (idbloader + `u-boot.itb` at their offsets, no
@@ -87,7 +87,7 @@ bootloader across nodes) without building a whole OS, the u-boot stage emits it 
 own:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1-forky --stage uboot
+cargo run -p boot2deb-cli -- build turing-rk1/forky --stage uboot
 ```
 
 This writes `turing-rk1-boot.img` (a few MiB, gap-sized) alongside the raw `idbloader.img`
@@ -129,4 +129,4 @@ That is a booted Debian system. The kernel's transcode devices come up on **ever
 variant — check for `/dev/dri` and `/dev/rga`. A **media-accel** image also installs the
 `ffmpeg-rk` userspace, so you can exercise the `rkmpp` / `rkrga` paths directly; on a base
 image the blocks are present but idle until you install the media-accel debs (or build a
-`turing-rk1-media-accel-*` image).
+`turing-rk1/media-accel-*` image).

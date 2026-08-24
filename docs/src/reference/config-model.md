@@ -17,12 +17,14 @@ A build is a single point across the axes a user selects:
   images for a two-medium install); override with `--layout`. Only a boot method that
   *has* a bootloader can split it off; the combination is rejected at resolve for one
   that does not.
-- **features** — a *list* of composable rootfs add-ins stacked onto the base image:
+- **features** — a *list* of composable add-ins stacked onto the base image:
   a **capability** feature that provides a hardware stack (`media-accel-rockchip`, the
   RK35xx HW-transcode userspace) or an **application** feature that installs an app
-  (`jellyfin`). Features are the knob the RK1 recipes differ by over one shared device
-  and kernel: `turing-rk1-forky` (base) selects none, `turing-rk1-media-accel-forky` adds
-  the capability, and `turing-rk1-jellyfin` adds the app on top of it. Override with
+  (`jellyfin`). A capability feature reaches the kernel as well as the rootfs — see
+  [A feature can reach the kernel](#a-feature-can-reach-the-kernel). Features are the
+  knob the RK1 recipes differ by over one shared device
+  and kernel: `turing-rk1/forky` (base) selects none, `turing-rk1/media-accel-forky` adds
+  the capability, and `turing-rk1/jellyfin` adds the app on top of it. Override with
   `--feature` (repeatable; values from `list-features`).
 
 Three more knobs round out a build without being headline axes: `--boot-method` (a
@@ -58,7 +60,7 @@ kernel runs the hardware, using it is the right answer, and the model says so ra
 than pretending otherwise.
 
 One definition then serves every suite, because the suite picks the version:
-`asus-c201-forky` and `asus-c201-trixie` name the same `debian-armmp` kernel and resolve
+`asus-c201/forky` and `asus-c201/trixie` name the same `debian-armmp` kernel and resolve
 7.1.x and 6.12.x respectively.
 
 A distro kernel rejects the two device fields it could never act on — `device_dts` and
@@ -212,17 +214,59 @@ arches/  socs/  boot-methods/  devices/  kernels/  recipes/
 ```
 
 with vendored bootloader blobs under `blobs/<soc>/`, kernel `.config` fragments under
-`fragments/`, and the resolved exact pins in `recipes/<recipe>.lock`.
+`fragments/`, and the resolved exact pins in `recipes/<device>/<leaf>.lock`.
 
 ### Media-accel sources ride the feature, not the SoC
 
 The `[userspace]` (MPP/RGA/Mali) and `[ffmpeg]` source stanzas at the soc layer are
-**optional**. They provide the trees the `media-accel-rockchip` feature compiles, and
-they are copied into a build only when a selected feature declares
-`requires_media_accel`. A recipe that builds no transcode stack carries no such sources
-and skips the userspace/ffmpeg compile nodes entirely; a SoC that never transcodes omits
-the stanzas. Selecting a `requires_media_accel` feature on a SoC that lacks them is a
-resolve-time error, so the coupling is checked, not assumed.
+**optional**. They provide the trees a `requires_media_accel` feature compiles, and they
+are copied into a build only when a selected feature declares it. A recipe that builds no
+transcode stack carries no such sources and skips the userspace/ffmpeg compile nodes
+entirely; a SoC that never transcodes omits the stanzas. Selecting a
+`requires_media_accel` feature on a SoC that lacks them is a resolve-time error, so the
+coupling is checked, not assumed.
+
+Each individual tree is optional too, and an absent one is a statement about the
+hardware rather than an omission. A SoC declares what it has:
+
+| | RK3588 | RK3576 |
+|---|---|---|
+| `[userspace.mpp]` | yes | no — no vendor `mpp_service` in a mainline kernel |
+| `[userspace.librga]` | yes | yes |
+| `[userspace.libmali]` | yes — CSF GPU, no mainline driver | no — panfrost, so Mesa from the mirror |
+| `[ffmpeg.rockchip]` | yes — the rkmpp/rkrga graft | no — the base tree builds unmodified |
+
+That set is the capability statement the build reads, not just provenance: ffmpeg's
+`./configure` surface is **derived** from it, so a SoC declaring no MPP is never asked
+for `--enable-rkmpp` (and never build-depends on a `librockchip-mpp-dev` nothing
+produces). The lock mirrors it one-for-one, omitting the table for any tree the SoC
+does not declare.
+
+### A feature can reach the kernel
+
+A capability is often not purely userspace. A hardware-accel provider whose driver is
+out-of-tree has to patch and configure the kernel for the hardware to exist at all, so
+alongside its packages and overlay a feature may declare:
+
+```toml
+patch_profiles   = ["rk3576-rga"]      # series that add the driver to the tree
+config_fragments = ["accel/rk3576-rga"]  # kconfig that compiles it
+```
+
+Both are needed together — a fragment can only turn on code the tree contains. They
+compose **after** the kernel's own `patch_profiles`/`config_fragments` and the device's
+`device_patch_profiles`/`device_config_fragments`, so a feature gets the last word on a
+symbol the layers below it also set, matching the way its packages stack last in the
+rootfs merge.
+
+Putting them on the feature rather than the kernel layer is what keeps the opt-in and
+the thing opted into in one place: an RK3576 build that did not select
+`media-accel-v4l2` does not carry a large out-of-tree driver it has no consumer for.
+
+Both fields require a **compiled** kernel. A distro-package kernel merges no kconfig and
+applies no series, so selecting such a feature against one is a resolve-time error naming
+the feature — otherwise the capability would install its userspace against hardware
+support that was never built.
 
 ### A board device tree that is not yet upstream
 
@@ -282,11 +326,16 @@ values for you, so the boilerplate is paid by the generator, not the author.
 
 ## Recipes and the lock
 
-A **recipe** (`recipes/<recipe>.toml`) pins one buildable point: it names the device
+A **recipe** (`recipes/<device>/<leaf>.toml`) pins one buildable point: it names the device
 and, optionally, the kernel, suite, features, layout, and image size (each omitted axis
-falls back to the device default). Its **lock** (`recipes/<recipe>.lock`) holds the
+falls back to the device default). Its **lock** (`recipes/<device>/<leaf>.lock`) holds the
 exact resolved pins: for every git source, the repo URL it was pinned from plus the
 ref and commit, blob content hashes, and the solved rootfs manifest digest.
+
+Recipes group under their device's folder, so a board's whole matrix — every suite and
+variant — sits together; the reference you build is that path without the extension
+(`turing-rk1/media-accel-forky`), the leaf dropping the device prefix the folder already
+carries.
 
 **A lock records what the build depends on, and nothing else.** Each table is present
 only when the build actually has that dependency: `[kernel]` when a kernel is compiled,
@@ -299,7 +348,7 @@ installs Debian's kernel and boots its own firmware has a lock with exactly one 
 ```toml
 [rootfs]
 suite = "forky"
-manifest = "asus-c201-forky.pkgs.lock"
+manifest = "forky.pkgs.lock"
 ```
 
 That is the whole truth about what it depends on, and the package manifest beside it

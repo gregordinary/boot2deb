@@ -140,6 +140,14 @@ pub struct Lock {
     /// lock omits the `[uboot]` table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot: Option<UbootPin>,
+    /// Exact u-boot patch-series pin. Present iff the build's boot method compiles
+    /// u-boot **and** the selected u-boot profile names a real series (not the
+    /// pristine sentinel). Symmetric with [`patches`](Self::patches) — the kernel and
+    /// u-boot patch axes pin independently, so a u-boot-only build carries this with
+    /// no `[patches]`, and an image build can carry both — and reuses [`PatchesPin`]
+    /// verbatim. Omitted from the committed lock when u-boot ships pristine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uboot_patches: Option<PatchesPin>,
     /// Exact media-accel userspace source pins (MPP/RGA/Mali). Present iff the
     /// recipe builds the HW transcode stack (a `requires_media_accel` feature is
     /// selected); omitted from the committed lock for a base build, which resolves
@@ -151,8 +159,19 @@ pub struct Lock {
     /// as a unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg: Option<FfmpegPins>,
-    /// Rootfs suite + content-pinned package manifest.
-    pub rootfs: RootfsPin,
+    /// Exact out-of-tree kernel-module source pins — one per device `device_kmods`
+    /// entry, in declared order. Present iff the resolved board declares any; the
+    /// committed lock omits the `[[kmods]]` array entirely when empty, like
+    /// [`extra_debs`](Self::extra_debs). Each is a git pin the `kmod` build node fetches,
+    /// patches, and builds against the kernel tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kmods: Vec<KmodPin>,
+    /// Rootfs suite + content-pinned package manifest. Present iff the build
+    /// produces an image; a u-boot-only build resolves no rootfs, so the committed
+    /// lock omits the `[rootfs]` table (as it already omits `[kernel]` for a build
+    /// that compiles no kernel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs: Option<RootfsPin>,
     /// Verified rkbin blob hashes. Present iff the build's boot method consumes rkbin
     /// blobs (`rockchip-rkbin`, whose u-boot build takes the ATF and DDR TPL as make
     /// inputs). Omitted from the committed lock otherwise.
@@ -206,8 +225,8 @@ pub struct KernelPin {
     pub commit: String,
 }
 
-/// Pinned patch series: the profile, the repo it came from, the ref that was
-/// resolved, and the exact commit.
+/// Pinned patch series: the profiles applied, the repo they came from, the ref that
+/// was resolved, and the exact commit.
 ///
 /// Symmetric with [`KernelPin`] and [`UbootPin`] on purpose. `commit` alone
 /// answers *reproducibility* ("these exact bytes") but nothing else: a bare SHA
@@ -219,8 +238,10 @@ pub struct KernelPin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchesPin {
-    /// Patch profile name.
-    pub profile: String,
+    /// Patch profile names, applied in listed order. The kernel axis composes several
+    /// (a SoC-fix profile plus an out-of-tree driver profile, say); the u-boot axis
+    /// always names exactly one. All come from the one repo, `ref`, and `commit` below.
+    pub profiles: Vec<String>,
     /// Clone URL the commit was pinned from (the kernel definition's
     /// `patches_url`). A commit id means nothing outside its repo, so the pin
     /// records where it came from.
@@ -275,13 +296,43 @@ pub struct GitPin {
 /// build node compiles into `.deb`s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Each tree is pinned only when the SoC declares it — the pins mirror
+/// [`UserspaceSources`](crate::model::UserspaceSources) one-for-one, so an absent
+/// entry here means the SoC has no such tree and the userspace node builds no
+/// `.deb` for it.
 pub struct UserspacePins {
-    /// Rockchip MPP pin (`librockchip-mpp1`).
-    pub mpp: GitPin,
+    /// Rockchip MPP pin (`librockchip-mpp1`). Absent on a part with no vendor
+    /// `mpp_service` in its kernel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpp: Option<GitPin>,
     /// librga pin (`librga2`).
-    pub librga: GitPin,
-    /// libmali pin (built only when requested).
-    pub libmali: GitPin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub librga: Option<GitPin>,
+    /// libmali pin. Absent where the GPU is driven by mainline panfrost and its
+    /// userspace is Mesa from the mirror.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub libmali: Option<GitPin>,
+}
+
+/// Pinned out-of-tree kernel-module source — one per device `device_kmods` entry. A
+/// named git pin; the `subdir`/patch-subset/`make_args` that shape the build are config
+/// (re-resolved each build and folded into the node signature), not pinned here — the
+/// commit already content-addresses the repo's own quilt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KmodPin {
+    /// Matches the `device_kmods` entry name (drift-checked against a fresh resolve).
+    pub name: String,
+    /// Clone URL the commit was pinned from. Compared against a fresh resolve by the
+    /// drift gate.
+    pub source: String,
+    /// The branch/tag/commit that was requested (TOML key `ref`).
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The exact commit the ref pointed at. Deserialization enforces the full-hex-sha
+    /// shape.
+    #[serde(deserialize_with = "de_commit")]
+    pub commit: String,
 }
 
 /// Pinned ffmpeg sources — the V4L2 base plus the Rockchip provenance tree the
@@ -294,7 +345,9 @@ pub struct FfmpegPins {
     /// Base tree pin (V4L2-request decode).
     pub base: GitPin,
     /// Rockchip rkmpp/rkrga provenance-tree pin the graft series was derived from.
-    pub rockchip: GitPin,
+    /// Absent when the SoC applies no graft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rockchip: Option<GitPin>,
 }
 
 /// Pinned rootfs: the suite plus a pointer to the solved package manifest that
@@ -393,7 +446,7 @@ mod tests {
                 commit: "c9acdc466e9aa96352f658b9276aa8a45b8e817d".into(),
             }),
             patches: Some(PatchesPin {
-                profile: "rk3588-accel".into(),
+                profiles: vec!["rk3588-accel".into()],
                 source: "https://example.invalid/patches.git".into(),
                 reference: "main".into(),
                 commit: "f78b240894a29a4c3976ad22935b1c2e16b3c6ad".into(),
@@ -403,22 +456,28 @@ mod tests {
                 reference: "v2026.04".into(),
                 commit: "88dc2788777babfd6322fa655df549a019aa1e69".into(),
             }),
+            uboot_patches: Some(PatchesPin {
+                profiles: vec!["rk3576-display".into()],
+                source: "https://example.invalid/patches.git".into(),
+                reference: "main".into(),
+                commit: "e86ef2a0000000000000000000000000000000ab".into(),
+            }),
             userspace: Some(UserspacePins {
-                mpp: GitPin {
+                mpp: Some(GitPin {
                     source: "https://github.com/example/mpp.git".into(),
                     reference: "mainline-cma-fix".into(),
                     commit: "750e76ec2d9287babfaf08c8bf395ebc5e8778ea".into(),
-                },
-                librga: GitPin {
+                }),
+                librga: Some(GitPin {
                     source: "https://github.com/example/librga.git".into(),
                     reference: "master".into(),
                     commit: "2cffdf6f332c3ddb93eb087841d78e8b487db2a3".into(),
-                },
-                libmali: GitPin {
+                }),
+                libmali: Some(GitPin {
                     source: "https://github.com/example/libmali.git".into(),
                     reference: "master".into(),
                     commit: "bd33ee262f47fd936b831afccaa0759b3ecc2482".into(),
-                },
+                }),
             }),
             ffmpeg: Some(FfmpegPins {
                 base: GitPin {
@@ -426,22 +485,23 @@ mod tests {
                     reference: "v4l2-request-n8.1".into(),
                     commit: "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935".into(),
                 },
-                rockchip: GitPin {
+                rockchip: Some(GitPin {
                     source: "https://github.com/example/ffmpeg-rockchip.git".into(),
                     reference: "8.1".into(),
                     commit: "f66f2f804627e4464c2d1b10181772b5437bb991".into(),
-                },
+                }),
             }),
-            rootfs: RootfsPin {
+            rootfs: Some(RootfsPin {
                 suite: "forky".into(),
                 manifest: "turing-rk1-forky.pkgs.lock".into(),
                 manifest_sha256: Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into()),
-            },
+            }),
             blobs: Some(BlobsPin {
                 atf: "rk3588_bl31_v1.51.elf@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
                 tpl: "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin@sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
                 bl32: None,
             }),
+            kmods: vec![],
             extra_debs: vec![
                 ExtraDeb {
                     url: Some("https://vendor.example/foo_1.2_arm64.deb".into()),
@@ -478,7 +538,7 @@ mod tests {
                 commit: "a".repeat(40),
             }),
             patches: Some(PatchesPin {
-                profile: "rk3588-accel".into(),
+                profiles: vec!["rk3588-accel".into()],
                 source: "https://example.invalid/patches.git".into(),
                 reference: "main".into(),
                 commit: "b".repeat(40),
@@ -488,25 +548,27 @@ mod tests {
                 reference: "v2".into(),
                 commit: "c".repeat(40),
             }),
+            uboot_patches: None,
             userspace: Some(UserspacePins {
-                mpp: GitPin { source: "m://s".into(), reference: "m".into(), commit: "1".repeat(40) },
-                librga: GitPin { source: "r://s".into(), reference: "r".into(), commit: "2".repeat(40) },
-                libmali: GitPin { source: "l://s".into(), reference: "l".into(), commit: "3".repeat(40) },
+                mpp: Some(GitPin { source: "m://s".into(), reference: "m".into(), commit: "1".repeat(40) }),
+                librga: Some(GitPin { source: "r://s".into(), reference: "r".into(), commit: "2".repeat(40) }),
+                libmali: Some(GitPin { source: "l://s".into(), reference: "l".into(), commit: "3".repeat(40) }),
             }),
             ffmpeg: Some(FfmpegPins {
                 base: GitPin { source: "b://s".into(), reference: "b".into(), commit: "4".repeat(40) },
-                rockchip: GitPin { source: "rk://s".into(), reference: "rk".into(), commit: "5".repeat(40) },
+                rockchip: Some(GitPin { source: "rk://s".into(), reference: "rk".into(), commit: "5".repeat(40) }),
             }),
-            rootfs: RootfsPin {
+            rootfs: Some(RootfsPin {
                 suite: "forky".into(),
                 manifest: "rec.pkgs.lock".into(),
                 manifest_sha256: None,
-            },
+            }),
             blobs: Some(BlobsPin {
                 atf: "atf@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
                 tpl: "tpl@sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
                 bl32: None,
             }),
+            kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
         }
@@ -523,14 +585,16 @@ mod tests {
             kernel: None,
             patches: None,
             uboot: None,
+            uboot_patches: None,
             userspace: None,
             ffmpeg: None,
-            rootfs: RootfsPin {
+            rootfs: Some(RootfsPin {
                 suite: "forky".into(),
                 manifest: "asus-c201-forky.pkgs.lock".into(),
                 manifest_sha256: None,
-            },
+            }),
             blobs: None,
+            kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
         };
@@ -563,7 +627,48 @@ mod tests {
         // A lock that does pin a series still writes the table.
         let with = base_lock().to_toml_string().unwrap();
         assert!(with.contains("[patches]"));
-        assert!(with.contains("profile = \"rk3588-accel\""));
+        assert!(with.contains("profiles = [\"rk3588-accel\"]"));
+    }
+
+    #[test]
+    fn kmods_roundtrip_and_omit_the_table_when_empty() {
+        // An empty `kmods` writes no `[[kmods]]` array (skip_serializing_if) and reads
+        // back as an empty vec, not a placeholder.
+        let empty = base_lock().to_toml_string().unwrap();
+        assert!(!empty.contains("[[kmods]]"), "empty kmods must omit the array:\n{empty}");
+        assert!(toml::from_str::<Lock>(&empty).unwrap().kmods.is_empty());
+
+        // A pinned module writes a `[[kmods]]` entry that round-trips exactly, including
+        // the TOML `ref` key mapping onto `reference`.
+        let mut lock = base_lock();
+        lock.kmods = vec![KmodPin {
+            name: "aic8800".into(),
+            source: "https://github.com/radxa-pkg/aic8800.git".into(),
+            reference: "main".into(),
+            commit: "6".repeat(40),
+        }];
+        let text = lock.to_toml_string().unwrap();
+        assert!(text.contains("[[kmods]]"));
+        assert!(text.contains("name = \"aic8800\""));
+        assert!(text.contains("ref = \"main\""));
+        assert_eq!(toml::from_str::<Lock>(&text).unwrap(), lock);
+    }
+
+    #[test]
+    fn a_kmod_pin_with_a_non_sha_commit_is_rejected() {
+        // A `[[kmods]]` commit is shape-checked at parse like every other pin, so a
+        // hand-edited value never reaches the git argv.
+        let mut lock = base_lock();
+        lock.kmods = vec![KmodPin {
+            name: "aic8800".into(),
+            source: "https://github.com/radxa-pkg/aic8800.git".into(),
+            reference: "main".into(),
+            commit: "6".repeat(40),
+        }];
+        let text = lock.to_toml_string().unwrap();
+        let bad = text.replacen(&format!("commit = \"{}\"", "6".repeat(40)), "commit = \"nope\"", 1);
+        assert_ne!(text, bad, "fixture must carry the kmod commit");
+        assert!(toml::from_str::<Lock>(&bad).is_err(), "a non-sha kmod commit must be rejected");
     }
 
     #[test]
@@ -650,7 +755,7 @@ mod tests {
         let back: Lock = toml::from_str(&text).unwrap();
         assert_eq!(back.snapshot, None);
         assert!(back.extra_debs.is_empty());
-        assert_eq!(back.rootfs.manifest_sha256, None);
+        assert_eq!(back.rootfs.as_ref().unwrap().manifest_sha256, None);
         assert_eq!(lock, back);
     }
 

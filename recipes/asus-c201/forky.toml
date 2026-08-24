@@ -1,4 +1,4 @@
-# recipes/asus-c201-forky.toml — the ASUS Chromebook C201 on Debian forky (armhf).
+# recipes/asus-c201/forky.toml — the ASUS Chromebook C201 on Debian forky (armhf).
 # The board's supported suite. What has been taken through hardware is the
 # [support] claim below; `boot2deb support-matrix` shows it against the exact pins.
 # Constraints only; the exact resolution is written to the sibling .lock.

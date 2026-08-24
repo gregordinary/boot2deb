@@ -10,6 +10,31 @@ dt_dir      = "rockchip"                 # arch/arm64/boot/dts/<dt_dir>
 # mainline (VDPU383); a media-accel feature can add its modules later.
 modules = []
 
+# Networking + audio userspace. The H96's Wi-Fi is an AIC8800 (out-of-tree driver +
+# vendored firmware, both on the device layer); these are the host-side packages that
+# make it usable. NetworkManager owns the interfaces -- so the base layer's dhcpcd is
+# dropped rather than running two things that both configure a NIC -- and
+# network-manager-tui is not optional in practice: `nmtui` is how a Wi-Fi network is
+# joined at a bare console, the first thing anyone does. wireless-regdb + iw +
+# wpasupplicant + rfkill are the rest of the Wi-Fi stack. alsa-utils (aplay/alsamixer/
+# speaker-test) drives and validates the board's analog + S/PDIF cards.
+#
+# No `bluez` here: it is board-specific. The AIC8800D80's Bluetooth is UART HCI, not
+# the `depends on BROKEN` SDIO-BT path, and only the H96 carries the chip -- so `bluez`
+# lives on devices/h96-max-m9.toml, not the SoC layer, and the rk3576-evb1-v10
+# validator (no BT transport) stays free of it. These Wi-Fi/audio packages are SoC-wide;
+# the evb1 inherits them benignly -- NetworkManager simply manages its Ethernet.
+packages = [
+    "network-manager",
+    "network-manager-tui",
+    "wpasupplicant",
+    "iw",
+    "wireless-regdb",
+    "rfkill",
+    "alsa-utils",
+]
+exclude = ["dhcpcd"]
+
 # rkbin defaults for RK3576 boards. The DDR loader is Rockchip's unified LP4/LP5
 # blob, which also drives DDR4 boards — there is no separate DDR4 file — so it is
 # the common default and boards rarely override `tpl`.
@@ -25,3 +50,30 @@ modules = []
 [rkbin]
 atf  = "rk3576_bl31_v1.24.elf"
 tpl  = "rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.12.bin"
+
+# Media-accel source trees. The SoC declares what it has, and that set is the
+# capability statement the ffmpeg build reads: librga only, so `./configure` gets
+# `--enable-v4l2-request` and no Rockchip flags at all.
+#
+# No `[userspace.mpp]`. librockchip-mpp talks to the vendor `mpp_service` kernel
+# framework, which is not mainline and is far larger a port than the RGA driver, so
+# there is nothing here for MPP to bind. That also settles ffmpeg: the rkrga filters
+# require `--enable-rkmpp` (they allocate frames as AVRKMPPFramesContext, and
+# ffmpeg's own configure rejects the pair), so this SoC gets librga for programs
+# that speak its API directly, not as an ffmpeg filter. HW decode instead comes
+# from the kernel's own stateless V4L2 decoder (VDPU383, `rockchip_vdec`), which
+# needs no vendor userspace.
+#
+# No `[userspace.libmali]`. The Mali-G52 is a Bifrost part driven by mainline
+# panfrost, so its userspace is Mesa from the Debian mirror -- see the GL packages
+# on devices/h96-max-m9.toml. libmali is for a CSF GPU with no mainline driver.
+[userspace.librga]
+git = "https://github.com/tsukumijima/librga-rockchip.git"
+ref = "master"
+
+# The V4L2-request decode base, unmodified: no `[ffmpeg.rockchip]`, because no
+# graft applies. The rk3576 patch profiles carry an empty `ffmpeg` scope, so the
+# tree builds pristine.
+[ffmpeg.base]
+git = "https://code.ffmpeg.org/Kwiboo/FFmpeg.git"
+ref = "v4l2-request-n8.1"

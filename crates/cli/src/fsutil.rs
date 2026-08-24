@@ -4,8 +4,9 @@
 use std::path::{Path, PathBuf};
 
 /// Make `path` absolute (against the current dir) if it is relative, so it is
-/// safe to hand to `bwrap --bind`/`--chdir` inside the sandbox namespace. Falls
-/// back to the input if the current dir is unreadable.
+/// safe to use as a sandbox bind source and working directory (the cage exposes
+/// each bind at its host path). Falls back to the input if the current dir is
+/// unreadable.
 pub(crate) fn absolutize(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path

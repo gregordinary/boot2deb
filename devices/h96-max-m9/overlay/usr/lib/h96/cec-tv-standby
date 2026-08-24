@@ -1,0 +1,10 @@
+#!/bin/sh
+# Box drives the TV: put a CEC-capable TV into standby. Run at service stop (box
+# shutdown/reboot) when cec-tv-standby.service is enabled. Claim a logical address,
+# then send Standby to the TV (CEC logical address 0). Flags validated on hardware;
+# override CEC_DEV if the adapter is not cec0.
+set -eu
+CEC_DEV=${CEC_DEV:-/dev/cec0}
+
+cec-ctl -d "$CEC_DEV" --playback >/dev/null
+cec-ctl -d "$CEC_DEV" --to 0 --standby

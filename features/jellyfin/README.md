@@ -10,7 +10,7 @@ own. It is named for the app, so it composes with whatever hardware-acceleration
 The use case lives in a recipe, not in this feature's name:
 
 ```toml
-# recipes/turing-rk1-jellyfin.toml
+# recipes/turing-rk1/jellyfin.toml
 device   = "turing-rk1"
 features = ["jellyfin", "media-accel-rockchip"]
 ```

@@ -4,7 +4,7 @@
 //! build, touches no network or hardware.
 
 use crate::args::WhyRebuildArgs;
-use crate::config::device_dts_paths;
+use crate::config::{device_dts_paths, kmod_local_patches};
 use crate::fsutil::absolutize;
 use boot2deb_core::model::Overrides;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
@@ -23,6 +23,9 @@ pub(crate) fn run(
     // reported as a rebuild, not a reuse.
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
     let device_dts = device_dts_paths(root, &build)?;
+    // The kmod tree signatures fold the board's local compat patches, so resolve them
+    // too — an edited shim must be reported as a rebuild, not a reuse.
+    let kmod_local_patches = kmod_local_patches(root, &build)?;
     let work_dir = absolutize(
         args.work_dir
             .unwrap_or_else(|| PathBuf::from("build").join(recipe)),
@@ -36,6 +39,8 @@ pub(crate) fn run(
         patches_root: args.patches_path.as_deref(),
         include_libmali: args.build_libmali,
         device_dts: &device_dts,
+        device_kmods: &build.device_kmods,
+        kmod_local_patches: &kmod_local_patches,
     });
 
     println!("why-rebuild {recipe} (work {})", work_dir.display());

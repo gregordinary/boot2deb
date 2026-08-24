@@ -26,7 +26,7 @@ Each is overridable in a recipe, and on the command line with `--locale`,
 `--locale-gen` (repeatable), `--timezone`, and `--keymap`:
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-c201-forky \
+cargo run -p boot2deb-cli -- build asus-c201/forky \
     --locale de_DE.UTF-8 --timezone Europe/Berlin --keymap de
 ```
 

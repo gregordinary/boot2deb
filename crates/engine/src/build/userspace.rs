@@ -132,30 +132,37 @@ pub fn build_userspace(
         .as_ref()
         .ok_or(EngineError::MissingMediaAccelPins { stage: "userspace" })?;
 
-    let mut packages = vec![
-        Package {
+    // One entry per tree the SoC declares. An absent pin is not a missing input —
+    // it is a SoC that has no such tree (no vendor `mpp_service` to talk to, or a
+    // GPU whose userspace is Mesa from the mirror), so the package simply is not
+    // built and nothing downstream expects its `.deb`.
+    let mut packages = Vec::new();
+    if let Some(pin) = &userspace.mpp {
+        packages.push(Package {
             name: "mpp",
             source: opts.mpp_src,
-            pin: &userspace.mpp,
+            pin,
             deb_prefixes: &[
                 "librockchip-mpp1_",
                 "librockchip-mpp-dev_",
                 "librockchip-vpu0_",
                 "rockchip-mpp-demos_",
             ],
-        },
-        Package {
+        });
+    }
+    if let Some(pin) = &userspace.librga {
+        packages.push(Package {
             name: "librga",
             source: opts.librga_src,
-            pin: &userspace.librga,
+            pin,
             deb_prefixes: &["librga2_", "librga-dev_"],
-        },
-    ];
-    if opts.build_libmali {
+        });
+    }
+    if let (true, Some(pin)) = (opts.build_libmali, &userspace.libmali) {
         packages.push(Package {
             name: "libmali",
             source: opts.libmali_src,
-            pin: &userspace.libmali,
+            pin,
             deb_prefixes: &["libmali-"],
         });
     }
@@ -179,11 +186,18 @@ pub fn build_userspace(
     // fetch pin + patch series (MPP) + build recipe + suite/arch (
     // `package_output_manifest`).
     let store = opts.store.map(crate::artstore::ArtifactStore::open).transpose()?;
+    // The userspace node runs only for a media-accel image build, which pins a rootfs.
+    let suite = lock
+        .rootfs
+        .as_ref()
+        .expect("the userspace node runs only for an image build, which pins a rootfs")
+        .suite
+        .as_str();
     let out_sigs: Vec<String> = packages
         .iter()
         .map(|p| {
             let pi = patch_ctx.inputs_for(p.name);
-            package_output_manifest(p, &lock.rootfs.suite, arch, pi.as_ref())
+            package_output_manifest(p, suite, arch, pi.as_ref())
                 .signature()
                 .as_str()
                 .to_string()
@@ -419,7 +433,7 @@ fn apply_patches(
         step,
     )?;
     if let Some(p) = ctx.patches {
-        step.log(format!("{}: applied {n} userspace patch(es) ({})", pkg.name, p.pin.profile));
+        step.log(format!("{}: applied {n} userspace patch(es) ({})", pkg.name, p.pin.profiles.join(", ")));
     }
     Ok(())
 }
@@ -688,7 +702,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         };
         let mpp = Package { name: "mpp", source: "", pin: &pin, deb_prefixes: &[] };
         let pin_at = |commit: &str| boot2deb_core::lock::PatchesPin {
-            profile: "rk3588-accel".into(),
+            profiles: vec!["rk3588-accel".into()],
             source: "https://example.invalid/patches.git".into(),
             reference: "main".into(),
             commit: commit.into(),
@@ -842,7 +856,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         assert_ne!(base, sig(&mpp(&p1), "forky", "armhf"));
         // A patch series reaches the output signature through the tree dependency.
         let pc1 = boot2deb_core::lock::PatchesPin {
-            profile: "rk3588-accel".into(),
+            profiles: vec!["rk3588-accel".into()],
             source: "https://example.invalid/patches.git".into(),
             reference: "main".into(),
             commit: "pc1".into(),

@@ -93,7 +93,7 @@ pub(crate) fn fragment_paths(
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     // A distro kernel merges no fragments — Debian owns its config — so it resolves
     // to an empty list rather than an error.
-    let Some(kernel) = build.kernel.compiled() else {
+    let Some(kernel) = build.kernel.as_ref().and_then(|k| k.compiled()) else {
         return Ok(Vec::new());
     };
     let mut paths = Vec::new();
@@ -123,6 +123,37 @@ pub(crate) fn device_dts_paths(
         paths.push(path);
     }
     Ok(paths)
+}
+
+/// Resolve each device kmod's boot2deb-side `local_patches` to files along the config
+/// search path, keyed by kmod name, in declared apply order. The entries are already
+/// validated at resolution to be contained, relative paths; an overlay commonly ships
+/// them for the device it adds, and the highest-precedence copy wins as for any other
+/// asset. A kmod with no `local_patches` yields an empty vec — the compat-shim step is
+/// skipped for it. The engine's [`build_kmods`](boot2deb_engine::build::kmod::build_kmods)
+/// consumes this as its `local_patches` input.
+pub(crate) fn kmod_local_patches(
+    root: &ConfigRoot,
+    build: &ResolvedBuild,
+) -> Result<Vec<(String, Vec<PathBuf>)>, Box<dyn std::error::Error>> {
+    let mut out = Vec::with_capacity(build.device_kmods.len());
+    for kmod in &build.device_kmods {
+        let mut paths = Vec::with_capacity(kmod.local_patches.len());
+        for rel in &kmod.local_patches {
+            let path = root.find_asset(rel).ok_or_else(|| {
+                format!(
+                    "kmod '{}' local_patch not found: {rel} (searched the config path)",
+                    kmod.name
+                )
+            })?;
+            // Absolute: the kmod stage applies these with `git -C <driver_tree> apply`,
+            // whose cwd is the driver tree, so a config-root-relative path would resolve
+            // against the wrong directory.
+            paths.push(absolutize(path));
+        }
+        out.push((kmod.name.clone(), paths));
+    }
+    Ok(out)
 }
 
 /// Resolve each declared apt source's signing keyring to a vendored host path,
@@ -281,7 +312,7 @@ pub(crate) fn resolve_patches_source(
     }
     let url = patches_url
         .map(str::to_string)
-        .or_else(|| resolved.kernel.compiled().and_then(|k| k.patches_url.clone()))
+        .or_else(|| resolved.kernel.as_ref().and_then(|k| k.compiled()).and_then(|k| k.patches_url.clone()))
         .ok_or_else(|| EngineError::PatchesNoSource {
             commit: pin.commit.clone(),
         })?;
@@ -297,8 +328,10 @@ pub(crate) fn resolve_patches_source(
 /// against the *configured* URL (never a `--<pkg>-src` override). The ffmpeg
 /// `rockchip` pin is provenance-only (never fetched at build), so it is omitted.
 pub(crate) struct SourceAxis<'a> {
-    /// Human name for the report (`kernel`, `u-boot`, `mpp`, …).
-    pub(crate) name: &'static str,
+    /// Human name for the report (`kernel`, `u-boot`, `mpp`, …). Owned so a per-name
+    /// axis like a kmod (`kmod:aic8800`) can carry a formatted label; the fixed axes
+    /// are cheap borrowed literals.
+    pub(crate) name: std::borrow::Cow<'static, str>,
     /// The configured upstream clone URL.
     pub(crate) url: String,
     /// The pinned ref (tag/branch name, or the bare commit).
@@ -317,9 +350,9 @@ pub(crate) fn source_axes<'a>(
     // report. A distro-package kernel is installed from the mirror and a depthcharge
     // board builds no bootloader, so neither contributes an axis.
     let mut axes = Vec::new();
-    if let (Some(kernel), Some(pin)) = (build.kernel.compiled(), &lock.kernel) {
+    if let (Some(kernel), Some(pin)) = (build.kernel.as_ref().and_then(|k| k.compiled()), &lock.kernel) {
         axes.push(SourceAxis {
-            name: "kernel",
+            name: "kernel".into(),
             url: pins::kernel_source_url(&kernel.source)?,
             reference: &pin.reference,
             commit: &pin.commit,
@@ -327,7 +360,7 @@ pub(crate) fn source_axes<'a>(
     }
     if let (Some(boot), Some(pin)) = (build.rkbin_boot(), &lock.uboot) {
         axes.push(SourceAxis {
-            name: "u-boot",
+            name: "u-boot".into(),
             url: boot.uboot_source.clone(),
             reference: &pin.reference,
             commit: &pin.commit,
@@ -336,29 +369,27 @@ pub(crate) fn source_axes<'a>(
     // The fetched media-accel trees, present only for a build that compiles the
     // transcode stack. URLs come from the resolved build, pins from the lock — both
     // `Some` together.
+    // One axis per tree the SoC declares; a tree it does not have is fetched by
+    // nobody, so listing it would name a source this build never reads.
     if let (Some(us), Some(us_pins)) = (&build.userspace, &lock.userspace) {
-        axes.push(SourceAxis {
-            name: "mpp",
-            url: us.mpp.git.clone(),
-            reference: &us_pins.mpp.reference,
-            commit: &us_pins.mpp.commit,
-        });
-        axes.push(SourceAxis {
-            name: "librga",
-            url: us.librga.git.clone(),
-            reference: &us_pins.librga.reference,
-            commit: &us_pins.librga.commit,
-        });
-        axes.push(SourceAxis {
-            name: "libmali",
-            url: us.libmali.git.clone(),
-            reference: &us_pins.libmali.reference,
-            commit: &us_pins.libmali.commit,
-        });
+        for (name, src, pin) in [
+            ("mpp", &us.mpp, &us_pins.mpp),
+            ("librga", &us.librga, &us_pins.librga),
+            ("libmali", &us.libmali, &us_pins.libmali),
+        ] {
+            if let (Some(s), Some(p)) = (src, pin) {
+                axes.push(SourceAxis {
+                    name: name.into(),
+                    url: s.git.clone(),
+                    reference: &p.reference,
+                    commit: &p.commit,
+                });
+            }
+        }
     }
     if let (Some(ff), Some(ff_pins)) = (&build.ffmpeg, &lock.ffmpeg) {
         axes.push(SourceAxis {
-            name: "ffmpeg-base",
+            name: "ffmpeg-base".into(),
             url: ff.base.git.clone(),
             reference: &ff_pins.base.reference,
             commit: &ff_pins.base.commit,
@@ -372,7 +403,27 @@ pub(crate) fn source_axes<'a>(
     // carried a source.
     if let Some(pin) = &lock.patches {
         axes.push(SourceAxis {
-            name: "patches",
+            name: "patches".into(),
+            url: pin.source.clone(),
+            reference: &pin.reference,
+            commit: &pin.commit,
+        });
+    }
+    // The u-boot patch series shares the kernel patches' durability risk — its commit is
+    // also taken from a local HEAD — so it joins the check the same way.
+    if let Some(pin) = &lock.uboot_patches {
+        axes.push(SourceAxis {
+            name: "u-boot patches".into(),
+            url: pin.source.clone(),
+            reference: &pin.reference,
+            commit: &pin.commit,
+        });
+    }
+    // Each out-of-tree kernel module is fetched from its own pinned repo — a source pin
+    // with the same durability question, probed under a `kmod:<name>` label.
+    for pin in &lock.kmods {
+        axes.push(SourceAxis {
+            name: format!("kmod:{}", pin.name).into(),
             url: pin.source.clone(),
             reference: &pin.reference,
             commit: &pin.commit,
@@ -404,7 +455,7 @@ mod tests {
 
         // A referenced-but-missing kernel fragment is rejected.
         let mut bad_frag = resolved.clone();
-        if let boot2deb_core::model::ResolvedKernel::Compiled(k) = &mut bad_frag.kernel {
+        if let Some(boot2deb_core::model::ResolvedKernel::Compiled(k)) = &mut bad_frag.kernel {
             k.config_fragments.push("definitely-no-such-fragment".to_string());
         }
         let err = preflight_config(&root, &bad_frag).unwrap_err().to_string();
@@ -431,7 +482,7 @@ mod tests {
     fn preflight_accepts_the_shipped_jellyfin_composition() {
         // The jellyfin recipe declares a third-party apt source; its signing
         // keyring is vendored, so the shipped composition passes the same gate
-        // that rejects a missing one — `resolve turing-rk1-jellyfin` stays green.
+        // that rejects a missing one — `resolve turing-rk1/jellyfin` stays green.
         let root = repo_root();
         let resolved = resolve_recipe(&root, "turing-rk1/jellyfin", &Overrides::default()).unwrap();
         assert!(
@@ -470,7 +521,7 @@ mod tests {
             resolve_recipe(&root, "turing-rk1/media-accel-forky", &Overrides::default()).unwrap();
         let lock = root.lock("turing-rk1/media-accel-forky").unwrap();
         let axes = source_axes(&build, &lock).unwrap();
-        let names: Vec<&str> = axes.iter().map(|a| a.name).collect();
+        let names: Vec<&str> = axes.iter().map(|a| a.name.as_ref()).collect();
         assert_eq!(
             names,
             ["kernel", "u-boot", "mpp", "librga", "libmali", "ffmpeg-base", "patches"]

@@ -8,7 +8,7 @@ ref = "v7.1.1"
 commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
 
 [patches]
-profile = "rk3588-accel"
+profiles = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
 commit = "527d03d54ea68a375b814ccb3314901530cb8b32"
@@ -20,7 +20,7 @@ commit = "88dc2788777babfd6322fa655df549a019aa1e69"
 
 [rootfs]
 suite = "forky"
-manifest = "turing-rk1-forky.pkgs.lock"
+manifest = "forky.pkgs.lock"
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"

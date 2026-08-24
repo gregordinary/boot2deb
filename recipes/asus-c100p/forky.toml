@@ -1,4 +1,4 @@
-# recipes/asus-c100p-forky.toml — the ASUS Chromebook Flip C100P on Debian forky
+# recipes/asus-c100p/forky.toml — the ASUS Chromebook Flip C100P on Debian forky
 # (armhf). Constraints only; the exact resolution is written to the sibling .lock.
 device     = "asus-c100p"
 kernel     = "debian-armmp"    # Debian's own armhf kernel; forky resolves 7.1.x

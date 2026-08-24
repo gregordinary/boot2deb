@@ -353,6 +353,9 @@ mod tests {
             uboot_defconfig: "turing-rk1-rk3588_defconfig".into(),
             uboot_source: "https://example/u-boot.git".into(),
             uboot_ref: "v2026.04".into(),
+            uboot_profile: None,
+            uboot_patches_url: None,
+            uboot_patches_ref: None,
             rkbin: Rkbin {
                 atf: "atf.elf".into(),
                 tpl: "tpl.bin".into(),

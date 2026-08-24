@@ -1,0 +1,15 @@
+[Unit]
+Description=CEC: put the TV into standby at shutdown (box drives TV)
+Documentation=man:cec-ctl(1)
+# Shipped disabled -- opt in with `systemctl enable cec-tv-standby`. The work runs
+# at stop (ExecStop), so the TV goes to standby when the box shuts down or reboots.
+# Pair with cec-tv-on for full box-drives-TV.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/lib/h96/cec-tv-standby
+
+[Install]
+WantedBy=multi-user.target

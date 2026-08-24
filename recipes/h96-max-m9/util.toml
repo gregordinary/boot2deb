@@ -1,0 +1,22 @@
+# recipes/h96-max-m9/util.toml — the H96 MAX M9's board-specific recovery
+# u-boot, as a u-boot-only deliverable. It is the SoC-generic util tool plus
+# the H96's GMAC0 ethernet, so a rescue session can pull an image over the
+# network (dhcp/tftp) and ping. Everything else matches the generic util: drd0
+# is the rockusb/ums device port, USB host on drd1, HDMI console, and it never
+# autoboots. The deliverable is the maskrom USB boot images from `--stage uboot`.
+#
+# It differs from recipes/rk3576-generic/util.toml only by its u-boot profile:
+# the board profile h96-max-m9-util carries the ethernet patch with this board's
+# PHY address, reset GPIO, and RGMII TX delay. Being a pure bootloader tool
+# unrelated to any Debian release, it names no suite, kernel, or image — only the
+# u-boot profile.
+device        = "h96-max-m9"
+deliverable   = "uboot"
+uboot_profile = "h96-max-m9-util"
+
+# The ethernet is validated on hardware (dhcp bound a lease, ping replied); the
+# rest of the util tool inherits the generic util's status. Marked "expected"
+# until this exact board recipe is re-streamed and exercised end to end.
+[support]
+status = "expected"
+date   = "2026-07-22"

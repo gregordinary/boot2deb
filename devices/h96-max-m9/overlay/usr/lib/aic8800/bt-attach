@@ -1,0 +1,27 @@
+#!/bin/sh
+# Bring up the AIC8800D80 Bluetooth HCI on UART4 (ttyS4).
+#
+# The AIC8800 is a Wi-Fi/BT combo: the SDIO Wi-Fi driver downloads the BT patch
+# during chip bringup and programs the BT core to speak HCI over UART at 1.5 Mbaud
+# with hardware flow control. There is no in-tree serdev driver, so the H4 line
+# discipline is attached from userspace. The controller comes out of that firmware
+# load in low-power sleep; it is the low->high edge of BT_REG_ON (PWR_BT) and
+# HST_WAK_BT (host-wake-bluetooth) *after* the load -- not a static level -- that
+# wakes it, so these lines are driven here rather than by a device-tree gpio hog.
+#
+# gpioset holds the lines until it is signalled; backgrounding it keeps them
+# asserted for the life of the attach. It lives in this service's cgroup, so
+# systemd reaps it (and releases the lines) when the unit stops, and each restart
+# re-drives the lines from released -> a fresh wake edge.
+set -e
+
+GPIOCHIP=gpiochip1
+BT_REG_ON=23   # gpio1 PC7  -- PWR_BT, BT-core enable
+HST_WAK_BT=28  # gpio1 PD4  -- host-wake-bluetooth (active high)
+TTY=/dev/ttyS4
+BAUD=1500000
+
+gpioset -c "$GPIOCHIP" "$BT_REG_ON"=1 "$HST_WAK_BT"=1 &
+sleep 0.5
+
+exec hciattach -n -s "$BAUD" "$TTY" any "$BAUD" flow nosleep

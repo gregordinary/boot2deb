@@ -87,6 +87,13 @@ pub struct PlanInputs<'a> {
     /// must fold it too or an edited board `.dts` would be reported as "reuse". Empty
     /// for a board whose DTB is upstream. §4.
     pub device_dts: &'a [PathBuf],
+    /// The build's `device_kmods` descriptors — each predicts a `kmod:<name>` tree
+    /// node. Empty for a board with no out-of-tree modules.
+    pub device_kmods: &'a [boot2deb_core::model::DeviceKmod],
+    /// The resolved local compat-patch paths per kmod name (as [`kmod`](crate::build::kmod)
+    /// consumes them). Their content folds into each kmod tree signature, so an edited
+    /// shim is reported as a rebuild; a kmod absent here folds no local patch.
+    pub kmod_local_patches: &'a [(String, Vec<PathBuf>)],
 }
 
 /// Predict the reuse decision for every compile node, in build order. Reads
@@ -101,17 +108,23 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
     // here so the borrowed [`PatchSeries::Dev`] outlives every use below.
     // A lock with no `[patches]` table (a kernel with no patch profile) has no series
     // to fingerprint at all, in either mode.
-    let fingerprint = |scope| match (inputs.patches_root, &lock.patches) {
-        (Some(root), Some(pin)) if inputs.patches_dev => {
-            crate::build::patch_series_fingerprint(root, &pin.profile, scope)
+    // Each scope folds the pin of the axis that patches its tree: the u-boot tree is
+    // patched by `[uboot_patches]`, every other scope by the kernel-side `[patches]`.
+    // Folding the wrong pin for u-boot would predict a shared stamp for distinct u-boot
+    // profiles — exactly the artifact-cache collision `uboot::clone_manifest` guards.
+    let fingerprint = |pin: Option<&boot2deb_core::lock::PatchesPin>, scope| {
+        match (inputs.patches_root, pin) {
+            (Some(root), Some(pin)) if inputs.patches_dev => {
+                crate::build::patch_series_fingerprint(root, &pin.profiles, scope)
+            }
+            _ => Vec::new(),
         }
-        _ => Vec::new(),
     };
     let dev = inputs.patches_dev;
-    let kernel_fp = fingerprint(crate::build::PatchScope::Kernel);
-    let uboot_fp = fingerprint(crate::build::PatchScope::Uboot);
-    let ffmpeg_fp = fingerprint(crate::build::PatchScope::Ffmpeg);
-    let userspace_fp = fingerprint(crate::build::PatchScope::Userspace);
+    let kernel_fp = fingerprint(lock.patches.as_ref(), crate::build::PatchScope::Kernel);
+    let uboot_fp = fingerprint(lock.uboot_patches.as_ref(), crate::build::PatchScope::Uboot);
+    let ffmpeg_fp = fingerprint(lock.patches.as_ref(), crate::build::PatchScope::Ffmpeg);
+    let userspace_fp = fingerprint(lock.patches.as_ref(), crate::build::PatchScope::Userspace);
 
     let dts_fp = crate::build::device_dts_fingerprint(inputs.device_dts);
 
@@ -144,27 +157,27 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
         let us_patches = |name: &str| {
             crate::build::userspace::receives_userspace_patches(name).then_some(&patch_inputs)
         };
-        nodes.push(NodePlan::evaluate(
-            "userspace:mpp",
-            us.join("mpp"),
-            &crate::build::userspace::signature_manifest("mpp", &us_pins.mpp.commit, us_patches("mpp")),
-        ));
-        nodes.push(NodePlan::evaluate(
-            "userspace:librga",
-            us.join("librga"),
-            &crate::build::userspace::signature_manifest(
-                "librga",
-                &us_pins.librga.commit,
-                us_patches("librga"),
-            ),
-        ));
-        if inputs.include_libmali {
+        // One node per tree the lock pins — the same set the userspace stage builds,
+        // so the plan and the build agree on what exists for this SoC.
+        for (node, name, pin) in [
+            ("userspace:mpp", "mpp", &us_pins.mpp),
+            ("userspace:librga", "librga", &us_pins.librga),
+        ] {
+            if let Some(p) = pin {
+                nodes.push(NodePlan::evaluate(
+                    node,
+                    us.join(name),
+                    &crate::build::userspace::signature_manifest(name, &p.commit, us_patches(name)),
+                ));
+            }
+        }
+        if let (true, Some(p)) = (inputs.include_libmali, &us_pins.libmali) {
             nodes.push(NodePlan::evaluate(
                 "userspace:libmali",
                 us.join("libmali"),
                 &crate::build::userspace::signature_manifest(
                     "libmali",
-                    &us_pins.libmali.commit,
+                    &p.commit,
                     us_patches("libmali"),
                 ),
             ));
@@ -179,6 +192,36 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
                 lock.patches.as_ref(),
                 patch_series(dev, &ffmpeg_fp),
             ),
+        ));
+    }
+    // Out-of-tree kernel modules: each predicts a `kmod:<name>` tree at
+    // `<work>/kmod/<name>` whose Tier-1 signature folds the driver commit, its in-repo
+    // quilt, and the local compat-patch content — so an edited shim is reported as a
+    // rebuild, not a reuse. A kmod whose lock pin is missing or whose local patch cannot
+    // be read contributes no node (best-effort offline prediction, like the compile
+    // nodes above whose manifest is a `Result`).
+    for k in inputs.device_kmods {
+        let Some(pin) = lock.kmods.iter().find(|p| p.name == k.name) else {
+            continue;
+        };
+        let locals = inputs
+            .kmod_local_patches
+            .iter()
+            .find(|(n, _)| n == &k.name)
+            .map(|(_, v)| v.as_slice())
+            .unwrap_or(&[]);
+        let Ok(local_fps) = locals
+            .iter()
+            .map(|p| crate::build::file_fingerprint(p))
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            continue;
+        };
+        let man = crate::build::kmod::tree_signature_manifest(k, pin, &local_fps);
+        nodes.push(NodePlan::evaluate(
+            &crate::build::kmod::node_name(&k.name),
+            w.join("kmod").join(&k.name),
+            &man,
         ));
     }
     nodes
@@ -208,16 +251,18 @@ mod tests {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
             kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v7.1.1".into(), commit: kernel_commit.into() }),
-            patches: Some(PatchesPin { profile: "rk3588-accel".into(), source: "ps".into(), reference: "main".into(), commit: "p1".into() }),
+            patches: Some(PatchesPin { profiles: vec!["rk3588-accel".into()], source: "ps".into(), reference: "main".into(), commit: "p1".into() }),
             uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "u1".into() }),
+            uboot_patches: None,
             userspace: Some(UserspacePins {
-                mpp: git(mpp_commit),
-                librga: git("rga1"),
-                libmali: git("mali1"),
+                mpp: Some(git(mpp_commit)),
+                librga: Some(git("rga1")),
+                libmali: Some(git("mali1")),
             }),
-            ffmpeg: Some(FfmpegPins { base: git("b1"), rockchip: git("rk1") }),
-            rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
+            ffmpeg: Some(FfmpegPins { base: git("b1"), rockchip: Some(git("rk1")) }),
+            rootfs: Some(RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None }),
             blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
+            kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
         }
@@ -238,6 +283,8 @@ mod tests {
             patches_root: None,
             include_libmali: false,
             device_dts: &[],
+            device_kmods: &[],
+            kmod_local_patches: &[],
         });
         // No trees on disk yet → every node is a fresh build.
         assert!(plan.iter().all(|n| n.status == NodeStatus::Absent));
@@ -257,6 +304,8 @@ mod tests {
             patches_root: None,
             include_libmali: true,
             device_dts: &[],
+            device_kmods: &[],
+            kmod_local_patches: &[],
         });
         assert!(with.iter().any(|n| n.node == "userspace:libmali"));
     }
@@ -276,6 +325,8 @@ mod tests {
             patches_root: None,
             include_libmali: true,
             device_dts: &[],
+            device_kmods: &[],
+            kmod_local_patches: &[],
         });
         let names: Vec<&str> = plan.iter().map(|n| n.node.as_str()).collect();
         assert_eq!(names, ["kernel", "uboot"]);
@@ -308,7 +359,7 @@ mod tests {
             &mpp,
             &crate::build::userspace::signature_manifest(
                 "mpp",
-                &old.userspace.as_ref().unwrap().mpp.commit,
+                &old.userspace.as_ref().unwrap().mpp.as_ref().unwrap().commit,
                 Some(&old_patches),
             ),
         )
@@ -323,6 +374,8 @@ mod tests {
             patches_root: None,
             include_libmali: false,
             device_dts: &[],
+            device_kmods: &[],
+            kmod_local_patches: &[],
         });
 
         // mpp is unchanged → reuse.
@@ -353,6 +406,8 @@ mod tests {
             patches_root: None,
             include_libmali: false,
             device_dts: &[],
+            device_kmods: &[],
+            kmod_local_patches: &[],
         });
         assert_eq!(status_of(&plan, "kernel"), &NodeStatus::Unstamped);
     }

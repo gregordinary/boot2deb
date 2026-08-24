@@ -196,6 +196,32 @@ pub enum EngineError {
         source: std::io::Error,
     },
 
+    /// A build sandbox ([`crate::sandbox`]) could not configure or launch a
+    /// command. Distinct from [`CommandFailed`](Self::CommandFailed): the
+    /// command never ran — a rejected spec, a namespace/mount setup failure, or
+    /// an exec error — rather than running to a non-zero exit.
+    #[error("sandbox failed ({context}): {source}")]
+    Sandbox {
+        /// What the engine was trying to run inside the sandbox.
+        context: String,
+        /// The underlying ferroday-cage error.
+        #[source]
+        source: ferroday_cage::Error,
+    },
+
+    /// The rootless Debian bootstrap (ferroday-cage's in-process provisioner)
+    /// could not produce the target-arch rootfs — a configuration error, a
+    /// download/verification failure, or a failed in-cage dpkg wave. Carries the
+    /// provisioner's own message: the provision and configuration error types are
+    /// distinct, so it is flattened to text here rather than wrapped.
+    #[error("rootfs bootstrap failed ({context}): {message}")]
+    Bootstrap {
+        /// What the bootstrap was doing (configuring, or fetching/assembling).
+        context: String,
+        /// The provisioner's error, rendered.
+        message: String,
+    },
+
     /// A build subprocess ran but exited non-zero.
     #[error("{command} failed{} ({context}): {stderr}", exit_suffix(*.status))]
     CommandFailed {

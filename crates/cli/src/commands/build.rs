@@ -7,11 +7,13 @@
 //! artifact travels on it as an [`Event::Artifact`], so both modes share one stdout
 //! contract.
 
-use crate::args::{BuildArgs, StageArg};
-use crate::artifacts::{kernel_packages, ledger_debs, record_artifacts};
+use crate::args::{BuildArgs, RootfsBackendArg, StageArg};
+use crate::artifacts::{
+    kernel_packages, kmod_packages, ledger_debs, record_artifacts, scope_repo_to_current_artifacts,
+};
 use crate::config::{
-    apt_source_keyrings, device_dts_paths, extra_debs_store, fragment_paths, overlay_dirs,
-    preflight_config, resolve_patches_source, OverlayStage,
+    apt_source_keyrings, device_dts_paths, extra_debs_store, fragment_paths, kmod_local_patches,
+    overlay_dirs, preflight_config, resolve_patches_source, OverlayStage,
 };
 use crate::fsutil::absolutize;
 use crate::render::{emit_artifact, note, print_event, print_event_json, short};
@@ -19,11 +21,11 @@ use crate::workdir::mark_work_dir;
 use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
 use boot2deb_core::model::{Overrides, ResolvedBoot, ResolvedBuild};
 use boot2deb_core::{resolve_recipe, ConfigRoot};
-use boot2deb_engine::build::{ffmpeg, kernel, uboot, userspace, BuildEnv};
+use boot2deb_engine::build::{ffmpeg, kernel, kmod, uboot, userspace, BuildEnv};
 use boot2deb_engine::debstore::DebStore;
 use boot2deb_engine::event::{Event, Step};
 use boot2deb_engine::image::{self, ImageOutput};
-use boot2deb_engine::rootfs::{self, MmdebstrapRootfs, Rootfs};
+use boot2deb_engine::rootfs::{self, MmdebstrapRootfs, ProvisionerRootfs, Rootfs};
 use boot2deb_engine::sandbox::{BuildSandbox, RootlessSandbox};
 use boot2deb_engine::{extradebs, pins};
 use std::path::PathBuf;
@@ -72,9 +74,9 @@ pub(crate) fn run(
     // Manifest-as-input: if the lock pins a solved-manifest sha256, the
     // committed manifest beside the lock must exist and hash to it, so the pin and
     // the committed artifact never disagree. Skipped when `--save-manifest` re-pins.
-    if !args.save_manifest {
-        if let Some(pinned) = &lock.rootfs.manifest_sha256 {
-            let committed = root.recipe_sibling(recipe, &lock.rootfs.manifest)?;
+    if let (false, Some(rootfs)) = (args.save_manifest, &lock.rootfs) {
+        if let Some(pinned) = &rootfs.manifest_sha256 {
+            let committed = root.recipe_sibling(recipe, &rootfs.manifest)?;
             if !committed.exists() {
                 return Err(format!(
                     "lock pins a manifest sha256 but the committed manifest {} is missing \
@@ -97,9 +99,10 @@ pub(crate) fn run(
         }
     }
 
-    // Absolute paths: the sandbox enters an arm64 rootfs via `bwrap`, whose
-    // `--bind`/`--chdir` require absolute host paths (a relative work dir would
-    // resolve against the wrong root inside the namespace).
+    // Absolute paths: the sandbox binds the work tree into the target-arch rootfs
+    // at its host path and chdirs there, both of which need an absolute host path
+    // (a relative work dir would resolve against the wrong root inside the
+    // namespace).
     let work_dir = absolutize(
         args.work_dir
             .unwrap_or_else(|| PathBuf::from("build").join(recipe)),
@@ -125,7 +128,7 @@ pub(crate) fn run(
     let compiles_kernel = resolved.compiles_kernel();
     let builds_uboot = resolved.rkbin_boot().is_some();
 
-    let kernel_src = match (&args.kernel_src, resolved.kernel.compiled()) {
+    let kernel_src = match (&args.kernel_src, resolved.kernel.as_ref().and_then(|k| k.compiled())) {
         (Some(s), _) => s.clone(),
         (None, Some(k)) => pins::kernel_source_url(&k.source)?,
         // Not fetched: a distro kernel has no source tree.
@@ -209,17 +212,20 @@ pub(crate) fn run(
     // building on the host would link against the host's libraries and stamp the
     // host's package names and versions into Depends. Bootstrapped lazily on first
     // use under WORK_DIR/sandbox, keyed by arch + suite so one host can serve several.
-    let sandbox: Box<dyn BuildSandbox> = {
+    // Only an image build has a suite to bootstrap a sandbox for; the userspace/ffmpeg
+    // stages that use it run only on a media-accel image build. A u-boot-only build
+    // resolves no suite and stands up no sandbox.
+    let sandbox: Option<Box<dyn BuildSandbox>> = resolved.suite.as_ref().map(|suite| {
         let rootfs = work_dir
             .join("sandbox")
-            .join(format!("{}-{}", resolved.arch.debian_arch(), resolved.suite));
+            .join(format!("{}-{}", resolved.arch.debian_arch(), suite));
         Box::new(RootlessSandbox::new(
             rootfs,
-            resolved.suite.clone(),
+            suite.clone(),
             resolved.arch.debian_arch().to_string(),
             keyring.clone(),
-        ))
-    };
+        )) as Box<dyn BuildSandbox>
+    });
 
     // Resolve the patches source only when there is a series to apply: the lock pins
     // one (its kernel names a patch profile) *and* this run includes a stage that
@@ -229,16 +235,24 @@ pub(crate) fn run(
     //
     // The source is an explicit --patches-path co-dev checkout, else the default
     // ../patches if present, else an auto-fetch at the pinned commit.
+    // The kmod stage carries its own quilt for the *driver* tree, but it builds that
+    // module against the *kernel* tree — which `ensure_module_tree` may have to build
+    // from source (a stale or absent tree), and that needs the board's kernel patch
+    // series like any kernel build. So kmod resolves the kernel patches too.
     let stage_applies_patches = matches!(
         args.stage,
         StageArg::All
             | StageArg::Kernel
             | StageArg::Dtb
+            | StageArg::Kmod
             | StageArg::Uboot
             | StageArg::Userspace
             | StageArg::Ffmpeg
     );
-    let checkout = match (&lock.patches, stage_applies_patches) {
+    // The kernel and u-boot patch axes read the same `patches` repo checkout (both pins
+    // sit at the same commit), so resolve it once from whichever pin this build has.
+    let checkout_pin = lock.patches.as_ref().or(lock.uboot_patches.as_ref());
+    let checkout = match (checkout_pin, stage_applies_patches) {
         (Some(pin), true) => Some(resolve_patches_source(
             args.patches_path.as_deref(),
             args.patches_url.as_deref(),
@@ -249,9 +263,9 @@ pub(crate) fn run(
         )?),
         _ => None,
     };
-    // Only a compiled kernel can name a patch profile, so a lock that pins patches
-    // pins a kernel too. Check it rather than assume it: the kernel's version is what
-    // the profile's per-entry ranges are filtered against, and defaulting it would
+    // Only a compiled kernel can name a patch profile, so a lock that pins kernel
+    // patches pins a kernel too. Check it rather than assume it: the kernel's version is
+    // what the profile's per-entry ranges are filtered against, and defaulting it would
     // silently select the wrong series.
     if lock.patches.is_some() && lock.kernel.is_none() {
         return Err(format!(
@@ -260,9 +274,11 @@ pub(crate) fn run(
         )
         .into());
     }
-    // Bind the resolved checkout to the lock's pin, so no stage can be handed a
-    // profile without a checkout to read it from (or vice versa).
-    let patches = checkout
+    // Bind the resolved checkout to each axis's pin, so no stage can be handed a
+    // profile without a checkout to read it from (or vice versa). The kernel-scope
+    // series is narrowed by the kernel version; the u-boot-scope series by the u-boot
+    // version (u-boot is its own axis).
+    let kernel_patches = checkout
         .as_ref()
         .zip(lock.patches.as_ref())
         .zip(lock.kernel.as_ref())
@@ -271,7 +287,19 @@ pub(crate) fn run(
                 root,
                 pin,
                 dev: *dev,
-                kernel_version: &kernel.reference,
+                version: &kernel.reference,
+            },
+        );
+    let uboot_patches = checkout
+        .as_ref()
+        .zip(lock.uboot_patches.as_ref())
+        .zip(lock.uboot.as_ref())
+        .map(
+            |(((root, dev), pin), uboot)| boot2deb_engine::build::PatchSource {
+                root,
+                pin,
+                dev: *dev,
+                version: &uboot.reference,
             },
         );
 
@@ -301,7 +329,7 @@ pub(crate) fn run(
             "recipe '{recipe}' uses kernel '{}', which is a distro package installed from \
              the Debian mirror — there is no kernel tree to compile, so the requested \
              stage has nothing to build",
-            resolved.kernel.id()
+            resolved.kernel.as_ref().map(|k| k.id()).unwrap_or("(none — u-boot-only recipe)")
         )
         .into());
     }
@@ -313,26 +341,45 @@ pub(crate) fn run(
         )
         .into());
     }
+    // A u-boot-only recipe (deliverable = uboot) resolves no rootfs or image, so an
+    // explicit rootfs/image stage has nothing to build — name it rather than skip.
+    if matches!(args.stage, StageArg::Rootfs | StageArg::Image) && !resolved.produces_image() {
+        return Err(format!(
+            "recipe '{recipe}' builds only a bootloader (deliverable = uboot), so it \
+             resolves no rootfs or image — build it with `--stage uboot` (or omit --stage)"
+        )
+        .into());
+    }
+
+    // Kernel-tree inputs, shared by the kernel/dtb stages and the kmod stage (which
+    // builds its modules against the same `<work>/linux` tree). Resolved once when the
+    // build compiles a kernel; a distro kernel resolves none of this and runs none of
+    // these stages. The fragment/dts Vecs are bound first so the borrowed
+    // `KernelOptions` outlives both stage blocks.
+    let kernel_inputs = if compiles_kernel {
+        Some((fragment_paths(root, &resolved)?, device_dts_paths(root, &resolved)?))
+    } else {
+        None
+    };
+    let kernel_opts = kernel_inputs.as_ref().map(|(fragments, device_dts)| kernel::KernelOptions {
+        source: &kernel_src,
+        patches: kernel_patches,
+        fragments,
+        device_dts,
+        work_dir: &work_dir,
+        out_dir: &out_dir,
+        store: artifact_store.as_deref(),
+    });
 
     // The kernel stage and the DTB fast path share every filesystem input; both
-    // prepare the same `<work>/linux` tree, so they resolve their options identically.
+    // prepare the same `<work>/linux` tree.
     if matches!(args.stage, StageArg::All | StageArg::Kernel | StageArg::Dtb) && compiles_kernel {
-        let fragments = fragment_paths(root, &resolved)?;
-        let device_dts = device_dts_paths(root, &resolved)?;
-        let opts = kernel::KernelOptions {
-            source: &kernel_src,
-            patches,
-            fragments: &fragments,
-            device_dts: &device_dts,
-            work_dir: &work_dir,
-            out_dir: &out_dir,
-            store: artifact_store.as_deref(),
-        };
+        let opts = kernel_opts.as_ref().expect("a kernel-compiling build resolved kernel options");
         if matches!(args.stage, StageArg::Dtb) {
-            let dtb = kernel::build_dtb(&resolved, &lock, &opts, &build_env, &sink)?;
+            let dtb = kernel::build_dtb(&resolved, &lock, opts, &build_env, &sink)?;
             emit_artifact(&sink, "dtb", "dtb", &dtb);
         } else {
-            let artifacts = kernel::build_kernel(&resolved, &lock, &opts, &build_env, &sink)?;
+            let artifacts = kernel::build_kernel(&resolved, &lock, opts, &build_env, &sink)?;
             emit_artifact(&sink, "kernel", "image_deb", &artifacts.image_deb);
             emit_artifact(&sink, "kernel", "headers_deb", &artifacts.headers_deb);
             record_artifacts(
@@ -343,10 +390,45 @@ pub(crate) fn run(
         }
     }
 
+    // The kmod stage builds each board `device_kmods` module out-of-tree against the
+    // kernel tree and stages a `<name>-modules-<kver>` `.deb`. It runs only when the
+    // build compiles a kernel and the board declares kmods; a distro-kernel board is
+    // already rejected for any `device_kmods` at resolve. Its `.deb`s join the ledger,
+    // so the rootfs stage installs them from the local repo like the kernel deb.
+    let has_kmods = !resolved.device_kmods.is_empty();
+    if matches!(args.stage, StageArg::Kmod) && !(compiles_kernel && has_kmods) {
+        return Err(format!(
+            "recipe '{recipe}' declares no out-of-tree kernel modules — the requested kmod \
+             stage has nothing to build"
+        )
+        .into());
+    }
+    let mut kmod_debs: Vec<PathBuf> = Vec::new();
+    if matches!(args.stage, StageArg::All | StageArg::Kmod) && compiles_kernel && has_kmods {
+        let kernel = kernel_opts.as_ref().expect("a kernel-compiling build resolved kernel options");
+        // The device's boot2deb-side compat patches (e.g. the SDIO-7.1 shim), resolved
+        // from config-root-relative to absolute along the config search path.
+        let local_patches = kmod_local_patches(root, &resolved)?;
+        let opts = kmod::KmodOptions {
+            kernel,
+            sources: &[],
+            local_patches: &local_patches,
+            work_dir: &work_dir,
+            out_dir: &out_dir,
+            store: artifact_store.as_deref(),
+        };
+        let artifacts = kmod::build_kmods(&resolved, &lock, &opts, &build_env, &sink)?;
+        for deb in &artifacts.debs {
+            emit_artifact(&sink, "kmod", "deb", deb);
+        }
+        record_artifacts(&out_dir, &artifacts.debs)?;
+        kmod_debs = artifacts.debs;
+    }
+
     if matches!(args.stage, StageArg::All | StageArg::Uboot) && builds_uboot {
         let opts = uboot::UbootOptions {
             source: &uboot_src,
-            patches,
+            patches: uboot_patches,
             blobs_dir: &blobs_dir,
             work_dir: &work_dir,
             out_dir: &out_dir,
@@ -368,9 +450,11 @@ pub(crate) fn run(
         record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
         // A uboot-only build also emits a standalone, directly-flashable bootloader
         // image (`<device>-boot.img`) — the eMMC/SPI medium for a split install
-        // whose OS lives on another disk. A full build skips it: the image stage
-        // folds u-boot into the combined image, or emits `-boot.img` for `split`.
-        if matches!(args.stage, StageArg::Uboot) {
+        // whose OS lives on another disk. Emitted for an explicit `--stage uboot`, and
+        // for a u-boot-only recipe's full build (which has no image stage to fold u-boot
+        // into). An image build's `--stage all` skips it: the image stage folds u-boot
+        // into the combined image, or emits `-boot.img` for `split`.
+        if matches!(args.stage, StageArg::Uboot) || !resolved.produces_image() {
             let boot_img = image::build_bootloader_image(
                 &resolved,
                 &artifacts.idbloader,
@@ -397,9 +481,14 @@ pub(crate) fn run(
 
     if matches!(args.stage, StageArg::All | StageArg::Userspace) && media_accel {
         let us = resolved.userspace.as_ref().expect("media-accel build has userspace sources");
-        let mpp_src = args.mpp_src.clone().unwrap_or_else(|| us.mpp.git.clone());
-        let librga_src = args.librga_src.clone().unwrap_or_else(|| us.librga.git.clone());
-        let libmali_src = args.libmali_src.clone().unwrap_or_else(|| us.libmali.git.clone());
+        // A tree the SoC does not declare has no clone source; the userspace stage
+        // skips it, so the empty string is never read.
+        let src = |flag: &Option<String>, decl: &Option<boot2deb_core::model::GitSource>| {
+            flag.clone().or_else(|| decl.as_ref().map(|s| s.git.clone())).unwrap_or_default()
+        };
+        let mpp_src = src(&args.mpp_src, &us.mpp);
+        let librga_src = src(&args.librga_src, &us.librga);
+        let libmali_src = src(&args.libmali_src, &us.libmali);
         let opts = userspace::UserspaceOptions {
             mpp_src: &mpp_src,
             librga_src: &librga_src,
@@ -407,7 +496,7 @@ pub(crate) fn run(
             build_libmali: args.build_libmali,
             work_dir: &work_dir,
             out_dir: &out_dir,
-            patches,
+            patches: kernel_patches,
             store: artifact_store.as_deref(),
         };
         let artifacts = userspace::build_userspace(
@@ -415,7 +504,7 @@ pub(crate) fn run(
             &opts,
             resolved.arch.debian_arch(),
             &build_env,
-            sandbox.as_ref(),
+            sandbox.as_deref().expect("a media-accel build resolves a suite and a sandbox"),
             &sink,
         )?;
         for deb in &artifacts.debs {
@@ -431,7 +520,7 @@ pub(crate) fn run(
         // out_dir by the userspace stage (run it first, or with --stage all).
         let opts = ffmpeg::FfmpegOptions {
             base_src: &ffmpeg_base_src,
-            patches,
+            patches: kernel_patches,
             userspace_debs: &out_dir,
             work_dir: &work_dir,
             out_dir: &out_dir,
@@ -442,14 +531,16 @@ pub(crate) fn run(
             &opts,
             resolved.arch.debian_arch(),
             &build_env,
-            sandbox.as_ref(),
+            sandbox.as_deref().expect("a media-accel build resolves a suite and a sandbox"),
             &sink,
         )?;
         emit_artifact(&sink, "ffmpeg", "deb", &artifacts.deb);
         record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
     }
 
-    if matches!(args.stage, StageArg::All | StageArg::Rootfs) {
+    if matches!(args.stage, StageArg::All | StageArg::Rootfs) && resolved.produces_image() {
+        // The rootfs stage runs only for an image build, which pins a rootfs.
+        let rootfs_pin = lock.rootfs.as_ref().expect("an image build pins a rootfs");
         // Bootstrap the device rootfs: stand up a local apt repo from the
         // built .debs in out_dir, install the merged package set, apply the layered
         // overlay, and emit the tarball the image stage formats into ext4.
@@ -498,11 +589,22 @@ pub(crate) fn run(
             };
             repo_debs.extend(extra);
         }
+        // Scope the local repo to the kernel and modules this build produced. The repo is
+        // `--multiversion` and both rootfs backends resolve a bare package name
+        // highest-version-wins, so a stale higher-versioned deb an earlier build left in
+        // out_dir would outrank the fresh one — and a kernel's `git describe` version
+        // *regresses* when patches are dropped, so a newer build can sort below older
+        // residue. Dropping the stale versions makes the by-name installs below land on
+        // this build's artifacts (and keeps the repo index honest for both backends).
+        scope_repo_to_current_artifacts(&mut repo_debs, &kernel_image_deb, &kmod_debs);
         // The kernel image is a build artifact with a version-specific package
         // name, so install it by the name discovered from the built .deb, on top of
         // the resolved set (the static config can't name a version it hasn't built).
-        let extra_packages = kernel_packages(&kernel_image_deb, &repo_debs)?;
-        let manifest_out = out_dir.join(&lock.rootfs.manifest);
+        // The out-of-tree modules debs join it — same rationale (their name embeds the
+        // kernel release), so they too are installed by discovered name from the ledger.
+        let mut extra_packages = kernel_packages(&kernel_image_deb, &repo_debs)?;
+        extra_packages.extend(kmod_packages(&kmod_debs, &repo_debs)?);
+        let manifest_out = out_dir.join(&rootfs_pin.manifest);
         // The content-addressed rootfs cache lives under the work dir, so it persists
         // across `--stage` invocations and is shared by every build using this
         // work dir.
@@ -538,7 +640,15 @@ pub(crate) fn run(
             // on a rootfs-only build with no kernel tree in this work dir.
             source_date_epoch: kernel::source_date_epoch(&work_dir, &lock),
         };
-        let artifacts = MmdebstrapRootfs.build(&resolved, &opts, &sink)?;
+        // The rootfs backend is selectable: `mmdebstrap` is the hardware-validated
+        // default; `provisioner` is the in-process ferroday-cage path, opt-in until
+        // it clears the hardware cross-build parity gate. Both satisfy the `Rootfs`
+        // trait, so the rest of the stage is agnostic.
+        let backend: &dyn Rootfs = match args.rootfs_backend {
+            RootfsBackendArg::Mmdebstrap => &MmdebstrapRootfs,
+            RootfsBackendArg::Provisioner => &ProvisionerRootfs,
+        };
+        let artifacts = backend.build(&resolved, &opts, &sink)?;
         emit_artifact(&sink, "rootfs", "tar", &artifacts.tar);
         emit_artifact(&sink, "rootfs", "manifest", &artifacts.manifest);
         // Manifest-as-input verification: unless `--save-manifest` re-pins,
@@ -547,7 +657,7 @@ pub(crate) fn run(
         // explicitly allowed.
         let solved_digest = boot2deb_engine::manifest::digest(&artifacts.manifest)?;
         if !args.save_manifest {
-            if let Some(pinned) = &lock.rootfs.manifest_sha256 {
+            if let Some(pinned) = &rootfs_pin.manifest_sha256 {
                 match boot2deb_engine::manifest::verify_reproduced(pinned, &solved_digest) {
                     Ok(()) => note(
                         json,
@@ -567,7 +677,7 @@ pub(crate) fn run(
         rootfs_manifest = Some(artifacts.manifest);
     }
 
-    if matches!(args.stage, StageArg::All | StageArg::Image) {
+    if matches!(args.stage, StageArg::All | StageArg::Image) && resolved.produces_image() {
         // The image node consumes the rootfs tarball plus the u-boot raw-gap
         // payloads staged in out_dir by the earlier stages. The rootfs tar comes
         // from the rootfs stage in this run, else --rootfs-tar, else the
@@ -680,9 +790,16 @@ pub(crate) fn run(
             builder_version: env!("CARGO_PKG_VERSION"),
             builder_commit: option_env!("BOOT2DEB_GIT_COMMIT").filter(|s| !s.is_empty()),
             builder_dirty: matches!(option_env!("BOOT2DEB_GIT_DIRTY"), Some("true")),
+            // Resolved from the image stage's own feature expression, so the manifest
+            // reports the on-disk contract the rootfs actually carries rather than a
+            // declared one.
+            filesystem: boot2deb_engine::image::rootfs_filesystem_pin(),
         };
         let prov = boot2deb_core::provenance::assemble(&resolved, &lock, &facts);
-        let prov_path = out_dir.join(format!("{recipe}.provenance.toml"));
+        // The provenance lands in this recipe's own out_dir; name it for the leaf
+        // (slash-free), matching the committed manifest's leaf-based filename.
+        let leaf = recipe.rsplit('/').next().unwrap_or(recipe);
+        let prov_path = out_dir.join(format!("{leaf}.provenance.toml"));
         std::fs::write(&prov_path, prov.to_toml_string()?)
             .map_err(|e| format!("write provenance {}: {e}", prov_path.display()))?;
         emit_artifact(&sink, "image", "provenance", &prov_path);
@@ -719,10 +836,14 @@ pub(crate) fn run(
             let digest = solved_manifest_digest.as_ref().ok_or(
                 "--save-manifest needs the freshly-solved manifest digest — run --stage all or --stage rootfs",
             )?;
-            let committed = root.recipe_sibling(recipe, &new_lock.rootfs.manifest)?;
+            let rootfs_pin = new_lock
+                .rootfs
+                .as_mut()
+                .expect("--save-manifest requires the rootfs stage, which pins a rootfs");
+            let committed = root.recipe_sibling(recipe, &rootfs_pin.manifest)?;
             std::fs::copy(manifest_path, &committed)
                 .map_err(|e| format!("commit manifest to {}: {e}", committed.display()))?;
-            new_lock.rootfs.manifest_sha256 = Some(digest.clone());
+            rootfs_pin.manifest_sha256 = Some(digest.clone());
             note(
                 json,
                 &sink,

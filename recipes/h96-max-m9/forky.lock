@@ -2,25 +2,37 @@
 # Exact resolved pins for the recipe. `boot2deb build` reads only this;
 # re-run `boot2deb update` to re-resolve within the recipe's constraints.
 [kernel]
-id = "rk3576-mainline-7.1-display"
+id = "rk3576-mainline-7.1"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
 ref = "v7.1.3"
 commit = "199c9959d3a9b53f346c221757fc7ac507fbac50"
 
 [patches]
-profile = "rk3576-display"
+profiles = ["rk3576-fixes"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "2e03cc1d216e8a1f81ce6ce50425956310b46b8d"
+commit = "7fd19b5e76b8fd4809479f90a9f0d6ee45ceddd0"
 
 [uboot]
 source = "https://source.denx.de/u-boot/u-boot.git"
 ref = "v2026.04"
 commit = "88dc2788777babfd6322fa655df549a019aa1e69"
 
+[uboot_patches]
+profiles = ["rk3576-display"]
+source = "https://github.com/gregordinary/patches.git"
+ref = "main"
+commit = "7fd19b5e76b8fd4809479f90a9f0d6ee45ceddd0"
+
+[[kmods]]
+name = "aic8800"
+source = "https://github.com/radxa-pkg/aic8800.git"
+ref = "main"
+commit = "6e076049b719ac2ff7ce5c92786a680407b11cdb"
+
 [rootfs]
 suite = "forky"
-manifest = "h96-max-m9-forky.pkgs.lock"
+manifest = "forky.pkgs.lock"
 
 [blobs]
 atf = "rk3576_bl31_v1.24.elf@sha256:e2cf4e0e920dfe1daa6412c05f49dc7e5c0f9888d3a3e8eecc85fbe1e86a23d1"

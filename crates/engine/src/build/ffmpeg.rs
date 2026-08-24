@@ -65,20 +65,32 @@ const FFMPEG_DEPS: &[&str] = &[
     "libfreetype-dev",
 ];
 
-/// The userspace `.deb` name prefixes ffmpeg build-depends on, in install order —
-/// the runtime libs first, then their `-dev`s. Selected (highest version each)
-/// from the userspace stage's output dir and installed into the sandbox.
-const USERSPACE_DEP_PREFIXES: &[&str] = &[
-    "librockchip-mpp1_",
-    "librockchip-mpp-dev_",
-    "librga2_",
-    "librga-dev_",
-];
+/// The userspace `.deb` name prefixes ffmpeg build-depends on for this build, in
+/// install order — each tree's runtime lib first, then its `-dev`.
+///
+/// Derived from the pins, not fixed: ffmpeg build-depends on a userspace package
+/// exactly when it is configured against that library, so the list must track the
+/// same SoC-declared trees [`configure_flags`] reads. Demanding
+/// `librockchip-mpp-dev` on a SoC that builds no MPP would fail the stage looking
+/// for a `.deb` nothing produces.
+fn userspace_dep_prefixes(userspace: &UserspacePins) -> Vec<&'static str> {
+    let mut prefixes = Vec::new();
+    if userspace.mpp.is_some() {
+        prefixes.extend(["librockchip-mpp1_", "librockchip-mpp-dev_"]);
+    }
+    if userspace.librga.is_some() {
+        prefixes.extend(["librga2_", "librga-dev_"]);
+    }
+    prefixes
+}
 
-/// `./configure` feature flags (the `--prefix` is added separately). Single source
-/// of truth for the hybrid pipeline: V4L2-request decode + rkmpp/rkrga + the codec
-/// set the RK1 media stack needs.
-const CONFIGURE_FLAGS: &[&str] = &[
+/// `./configure` feature flags every build gets, whatever the SoC: the container
+/// and codec set, plus `--enable-v4l2-request`, which needs no vendor userspace at
+/// all — it decodes through the kernel's own stateless V4L2 API.
+///
+/// The Rockchip-specific flags are not here; they are decided per build by
+/// [`configure_flags`] from the userspace trees the SoC actually declares.
+const BASE_CONFIGURE_FLAGS: &[&str] = &[
     "--enable-gpl",
     "--enable-version3",
     "--enable-nonfree",
@@ -87,8 +99,6 @@ const CONFIGURE_FLAGS: &[&str] = &[
     "--enable-libdrm",
     "--enable-libudev",
     "--enable-v4l2-request",
-    "--enable-rkmpp",
-    "--enable-rkrga",
     "--enable-libx264",
     "--enable-libx265",
     "--enable-libfdk-aac",
@@ -96,6 +106,30 @@ const CONFIGURE_FLAGS: &[&str] = &[
     "--enable-libfreetype",
     "--enable-openssl",
 ];
+
+/// The `./configure` flags for this build: [`BASE_CONFIGURE_FLAGS`] plus one flag
+/// per Rockchip userspace tree the SoC declares.
+///
+/// The SoC's declared sources *are* the capability statement, so the configure
+/// surface is derived from them rather than fixed: a part with no vendor
+/// `mpp_service` pins no MPP and must not be asked for `--enable-rkmpp`, since the
+/// library it would link does not exist for that build.
+///
+/// `--enable-rkrga` additionally requires `--enable-rkmpp` — the rkrga filters
+/// allocate their frames as `AVRKMPPFramesContext`, and ffmpeg's own configure
+/// rejects the pair — so librga alone yields no rkrga. On such a SoC librga is still
+/// built and shipped for programs that speak its API directly; it just is not an
+/// ffmpeg filter.
+fn configure_flags(userspace: &UserspacePins) -> Vec<String> {
+    let mut flags: Vec<String> = BASE_CONFIGURE_FLAGS.iter().map(|s| (*s).to_string()).collect();
+    if userspace.mpp.is_some() {
+        flags.push("--enable-rkmpp".to_string());
+        if userspace.librga.is_some() {
+            flags.push("--enable-rkrga".to_string());
+        }
+    }
+    flags
+}
 
 
 /// Filesystem inputs for the ffmpeg stage.
@@ -193,7 +227,7 @@ pub fn build_ffmpeg(
 
     // Fail fast on the build-time dependency (the userspace `.deb`s) before the
     // expensive source fetch, so a forgotten userspace stage errors immediately.
-    let debs = required_userspace_debs(opts.userspace_debs)?;
+    let debs = required_userspace_debs(opts.userspace_debs, userspace)?;
 
     // Tier-1 reuse of the fetched+patched tree: a lock bump (base commit
     // or patch pin) rebuilds it; configure/compile re-run regardless.
@@ -223,7 +257,7 @@ pub fn build_ffmpeg(
         .map(|e| vec![("SOURCE_DATE_EPOCH".to_string(), e.to_string())])
         .unwrap_or_default();
 
-    configure(sandbox, &tree, &binds, &build_env, &step)?;
+    configure(sandbox, &tree, &binds, &build_env, &configure_flags(userspace), &step)?;
     step.progress(55);
     compile(sandbox, env, &tree, &binds, &build_env, &step)?;
     step.progress(85);
@@ -286,36 +320,41 @@ fn output_manifest(
     patches: PatchSeries,
     us_patches: PatchSeries,
 ) -> crate::signature::SignatureManifest {
+    // The ffmpeg node runs only for a media-accel image build, which resolves a suite.
+    let suite = lock
+        .rootfs
+        .as_ref()
+        .expect("the ffmpeg node runs only for an image build, which pins a rootfs")
+        .suite
+        .as_str();
     let tree_sig = clone_manifest(ffmpeg, lock.patches.as_ref(), patches).signature();
     let mpp_inputs = crate::build::userspace::PatchInputs {
         pin: lock.patches.as_ref(),
         patches: us_patches,
     };
-    let mpp_dep = crate::build::userspace::output_manifest_for(
-        "mpp",
-        &userspace.mpp.commit,
-        &lock.rootfs.suite,
-        arch,
-        Some(&mpp_inputs),
-    )
-    .signature();
-    let rga_dep = crate::build::userspace::output_manifest_for(
-        "librga",
-        &userspace.librga.commit,
-        &lock.rootfs.suite,
-        arch,
-        None,
-    )
-    .signature();
+    let flags = configure_flags(userspace);
     let mut b = crate::signature::SignatureBuilder::new("ffmpeg:out", OUTPUT_STAGE_VERSION);
     b.fold_dep(&tree_sig)
-        .fold_ordered("configure_flags", CONFIGURE_FLAGS)
+        .fold_ordered("configure_flags", &flags)
         .fold_scalar("arch", arch)
-        .fold_scalar("suite", &lock.rootfs.suite)
+        .fold_scalar("suite", suite)
         .fold_scalar("base.reference", &ffmpeg.base.reference)
-        .fold_scalar("pkg_name", PKG_NAME)
-        .fold_dep(&mpp_dep)
-        .fold_dep(&rga_dep);
+        .fold_scalar("pkg_name", PKG_NAME);
+    // Fold a dependency only for a tree this build has. Folding the absent ones as
+    // empty would make two SoCs with different hardware hash alike; omitting them
+    // keeps the signature a statement about what was actually linked. `flags` already
+    // records *which* trees those were, so the two cannot disagree.
+    if let Some(mpp) = &userspace.mpp {
+        let dep =
+            crate::build::userspace::output_manifest_for("mpp", &mpp.commit, suite, arch, Some(&mpp_inputs))
+                .signature();
+        b.fold_dep(&dep);
+    }
+    if let Some(rga) = &userspace.librga {
+        let dep = crate::build::userspace::output_manifest_for("librga", &rga.commit, suite, arch, None)
+            .signature();
+        b.fold_dep(&dep);
+    }
     b.manifest()
 }
 
@@ -370,7 +409,7 @@ fn fetch_and_patch(
     };
     let n = build::clone_pinned(&spec, step)?;
     if let Some(p) = opts.patches {
-        step.log(format!("applied {n} ffmpeg patch(es) ({})", p.pin.profile));
+        step.log(format!("applied {n} ffmpeg patch(es) ({})", p.pin.profiles.join(", ")));
     }
     Ok(())
 }
@@ -386,13 +425,14 @@ fn configure(
     tree: &Path,
     binds: &[PathBuf],
     env: &[(String, String)],
+    flags: &[String],
     step: &Step,
 ) -> Result<(), EngineError> {
     let mut argv = vec![
         tree.join("configure").to_string_lossy().into_owned(),
         format!("--prefix={INSTALL_PREFIX}"),
     ];
-    argv.extend(CONFIGURE_FLAGS.iter().map(|s| s.to_string()));
+    argv.extend(flags.iter().cloned());
     let spec = SandboxRun {
         work: tree,
         binds,
@@ -491,7 +531,16 @@ fn package_deb(
 /// Select the userspace `.deb`s ffmpeg build-depends on (highest version each)
 /// from `dir`, in install order, erroring if the dir or any package is absent —
 /// which means the userspace stage was not run first.
-fn required_userspace_debs(dir: &Path) -> Result<Vec<PathBuf>, EngineError> {
+fn required_userspace_debs(
+    dir: &Path,
+    userspace: &UserspacePins,
+) -> Result<Vec<PathBuf>, EngineError> {
+    let prefixes = userspace_dep_prefixes(userspace);
+    // No vendor userspace at all (a decode-only stack): nothing to install, and the
+    // userspace stage may legitimately have produced no output dir.
+    if prefixes.is_empty() {
+        return Ok(Vec::new());
+    }
     if !dir.exists() {
         return Err(EngineError::ArtifactMissing {
             what: "userspace .debs (run the userspace stage first)".into(),
@@ -500,7 +549,7 @@ fn required_userspace_debs(dir: &Path) -> Result<Vec<PathBuf>, EngineError> {
     }
     let names = deb_names(dir)?;
     let mut debs = Vec::new();
-    for prefix in USERSPACE_DEP_PREFIXES {
+    for prefix in prefixes {
         match pick_deb(&names, prefix) {
             Some(name) => debs.push(dir.join(name)),
             None => {
@@ -729,16 +778,83 @@ mod tests {
         BlobsPin, FfmpegPins, GitPin, KernelPin, PatchesPin, RootfsPin, UbootPin, UserspacePins,
     };
 
+    /// A pin set declaring every userspace tree — the RK3588-shaped stack.
+    fn all_trees() -> UserspacePins {
+        let git = |c: &str| {
+            Some(GitPin { source: "s".into(), reference: "r".into(), commit: c.into() })
+        };
+        UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }
+    }
+
+    /// A pin set with librga but no MPP and no libmali — the RK3576-shaped stack,
+    /// where decode is the kernel's own V4L2 path and the GPU runs on Mesa.
+    fn rga_only() -> UserspacePins {
+        UserspacePins {
+            mpp: None,
+            librga: Some(GitPin { source: "s".into(), reference: "r".into(), commit: "r".into() }),
+            libmali: None,
+        }
+    }
+
+    /// The base flags plus nothing: a SoC declaring no vendor userspace at all.
+    fn no_trees() -> UserspacePins {
+        UserspacePins { mpp: None, librga: None, libmali: None }
+    }
+
+    #[test]
+    fn configure_flags_follow_the_socs_declared_trees() {
+        // Everything declared: the full vendor pipeline.
+        let full = configure_flags(&all_trees());
+        assert!(full.contains(&"--enable-rkmpp".to_string()));
+        assert!(full.contains(&"--enable-rkrga".to_string()));
+
+        // librga without MPP yields *neither* rkmpp nor rkrga: ffmpeg's own configure
+        // rejects rkrga without rkmpp, so asking for it would fail the build. librga is
+        // still built and shipped — it just is not an ffmpeg filter.
+        let rga = configure_flags(&rga_only());
+        assert!(!rga.contains(&"--enable-rkmpp".to_string()));
+        assert!(!rga.contains(&"--enable-rkrga".to_string()));
+
+        // v4l2-request is unconditional: it needs no vendor userspace, only the
+        // kernel's stateless decoder, which is the whole point on a mainline SoC.
+        for flags in [&full, &rga, &configure_flags(&no_trees())] {
+            assert!(flags.contains(&"--enable-v4l2-request".to_string()));
+        }
+    }
+
+    #[test]
+    fn the_build_dep_debs_track_the_same_trees_as_the_configure_flags() {
+        // The two must not disagree: ffmpeg build-depends on a userspace package
+        // exactly when it is configured against that library.
+        assert_eq!(
+            userspace_dep_prefixes(&all_trees()),
+            vec!["librockchip-mpp1_", "librockchip-mpp-dev_", "librga2_", "librga-dev_"]
+        );
+        assert_eq!(userspace_dep_prefixes(&rga_only()), vec!["librga2_", "librga-dev_"]);
+        assert!(userspace_dep_prefixes(&no_trees()).is_empty());
+    }
+
+    #[test]
+    fn a_stack_with_no_vendor_userspace_demands_no_debs() {
+        // The userspace stage produces no output dir at all in this shape, so the
+        // dependency check must not treat its absence as a forgotten stage.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("never-created");
+        assert!(required_userspace_debs(&missing, &no_trees()).unwrap().is_empty());
+    }
+
     fn lock_with(base_commit: &str, patches_commit: &str) -> Lock {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
             kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() }),
-            patches: Some(PatchesPin { profile: "rk3588-accel".into(), source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
+            patches: Some(PatchesPin { profiles: vec!["rk3588-accel".into()], source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
             uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "uc".into() }),
-            userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
-            ffmpeg: Some(FfmpegPins { base: git(base_commit), rockchip: git("rk") }),
-            rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
+            uboot_patches: None,
+            userspace: Some(UserspacePins { mpp: Some(git("m")), librga: Some(git("r")), libmali: Some(git("l")) }),
+            ffmpeg: Some(FfmpegPins { base: git(base_commit), rockchip: Some(git("rk")) }),
+            rootfs: Some(RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None }),
             blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
+            kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
         }
@@ -809,7 +925,7 @@ mod tests {
         assert_ne!(base, sig(&lock_with("bc1", "pc1"), "armhf"));
         // The suite stands in for the sandbox toolchain identity, so it splits too.
         let mut sid = lock_with("bc1", "pc1");
-        sid.rootfs.suite = "sid".into();
+        sid.rootfs.as_mut().unwrap().suite = "sid".into();
         assert_ne!(base, sig(&sid, "arm64"));
         // Co-dev mode never shares an output entry with a pinned build.
         let dev_lock = lock_with("bc1", "pc1");
@@ -841,11 +957,11 @@ mod tests {
         let base = sig(&lock_with("bc1", "pc1"));
         // An MPP pin bump (ffmpeg base/patch/suite/arch unchanged) splits the key.
         let mut mpp_bump = lock_with("bc1", "pc1");
-        mpp_bump.userspace.as_mut().unwrap().mpp.commit = "m2".into();
+        mpp_bump.userspace.as_mut().unwrap().mpp.as_mut().unwrap().commit = "m2".into();
         assert_ne!(base, sig(&mpp_bump));
         // An RGA pin bump likewise splits it.
         let mut rga_bump = lock_with("bc1", "pc1");
-        rga_bump.userspace.as_mut().unwrap().librga.commit = "r2".into();
+        rga_bump.userspace.as_mut().unwrap().librga.as_mut().unwrap().commit = "r2".into();
         assert_ne!(base, sig(&rga_bump));
     }
 
@@ -933,7 +1049,7 @@ mod tests {
         ] {
             std::fs::write(dir.join(n), b"x").unwrap();
         }
-        let debs = required_userspace_debs(dir).unwrap();
+        let debs = required_userspace_debs(dir, &all_trees()).unwrap();
         let names: Vec<String> = debs
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -956,14 +1072,14 @@ mod tests {
         // Only the runtime libs, no -dev packages.
         std::fs::write(dir.join("librockchip-mpp1_1_arm64.deb"), b"x").unwrap();
         std::fs::write(dir.join("librga2_2_arm64.deb"), b"x").unwrap();
-        let err = required_userspace_debs(dir).unwrap_err();
+        let err = required_userspace_debs(dir, &all_trees()).unwrap_err();
         match err {
             EngineError::ArtifactMissing { what, .. } => assert!(what.contains("-dev")),
             other => panic!("expected ArtifactMissing, got {other:?}"),
         }
         // A missing dir is also a clear error, not an I/O panic.
         assert!(matches!(
-            required_userspace_debs(&dir.join("nope")).unwrap_err(),
+            required_userspace_debs(&dir.join("nope"), &all_trees()).unwrap_err(),
             EngineError::ArtifactMissing { .. }
         ));
     }

@@ -280,7 +280,11 @@ pub fn clone_manifest(
     let pin = build::uboot_pin(lock)?;
     let mut b = crate::signature::SignatureBuilder::new("uboot", CLONE_STAGE_VERSION);
     b.fold_scalar("uboot.commit", &pin.commit);
-    build::fold_patch_series(&mut b, lock.patches.as_ref(), patches);
+    // The u-boot tree is patched by the *u-boot* profile (`[uboot_patches]`), an
+    // independent axis from the kernel's `[patches]`. Folding the wrong pin here would
+    // make every u-boot profile on one u-boot commit share a signature — the display,
+    // util, and loader builds would collide in the artifact cache.
+    build::fold_patch_series(&mut b, lock.uboot_patches.as_ref(), patches);
     Ok(b.manifest())
 }
 
@@ -309,7 +313,7 @@ fn clone_and_patch(
     };
     let n = build::clone_pinned(&spec, step)?;
     if let (Some(p), 1..) = (opts.patches, n) {
-        step.log(format!("applied {n} u-boot patches ({})", p.pin.profile));
+        step.log(format!("applied {n} u-boot patches ({})", p.pin.profiles.join(", ")));
     }
     Ok(())
 }
@@ -722,16 +726,21 @@ mod tests {
         BlobsPin, FfmpegPins, GitPin, KernelPin, PatchesPin, RootfsPin, UbootPin, UserspacePins,
     };
 
+    // The `patches_commit` names the *u-boot* patch pin, since that is what the u-boot
+    // tree signature tracks. The kernel `[patches]` pin is held fixed so the tests can
+    // also assert the u-boot signature is independent of it.
     fn lock_with(uboot_commit: &str, patches_commit: &str) -> Lock {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
             kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() }),
-            patches: Some(PatchesPin { profile: "rk3588-accel".into(), source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
+            patches: Some(PatchesPin { profiles: vec!["rk3588-accel".into()], source: "ps".into(), reference: "main".into(), commit: "kernel-pc".into() }),
             uboot: Some(UbootPin { source: "us".into(), reference: "v2026.04".into(), commit: uboot_commit.into() }),
-            userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
-            ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
-            rootfs: RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None },
+            uboot_patches: Some(PatchesPin { profiles: vec!["rk3576-util".into()], source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
+            userspace: Some(UserspacePins { mpp: Some(git("m")), librga: Some(git("r")), libmali: Some(git("l")) }),
+            ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: Some(git("rk")) }),
+            rootfs: Some(RootfsPin { suite: "forky".into(), manifest: "m".into(), manifest_sha256: None }),
             blobs: Some(BlobsPin { atf: "a".into(), tpl: "t".into(), bl32: None }),
+            kmods: vec![],
             extra_debs: vec![],
             snapshot: None,
         }
@@ -768,9 +777,24 @@ mod tests {
         let sig = |uc, pc, patches| clone_manifest(&lock_with(uc, pc), patches).unwrap().signature;
         let base = sig("uc1", "pc1", PatchSeries::Pinned);
         assert_eq!(base, sig("uc1", "pc1", PatchSeries::Pinned));
-        // A u-boot bump or a patches-pin bump each invalidate the reused tree.
+        // A u-boot bump or a u-boot-patches-pin bump each invalidate the reused tree.
         assert_ne!(base, sig("uc2", "pc1", PatchSeries::Pinned));
         assert_ne!(base, sig("uc1", "pc2", PatchSeries::Pinned));
+        // The u-boot tree signature tracks `[uboot_patches]`, not the kernel `[patches]`
+        // pin: bumping the kernel patch commit must NOT move it (regression guard —
+        // folding the wrong pin collided every u-boot profile in the artifact cache).
+        let mut kernel_bumped = lock_with("uc1", "pc1");
+        kernel_bumped.patches.as_mut().unwrap().commit = "kernel-pc-2".into();
+        assert_eq!(base, clone_manifest(&kernel_bumped, PatchSeries::Pinned).unwrap().signature);
+        // And two different u-boot profiles at the same commit stay distinct.
+        let mut util = lock_with("uc1", "pc1");
+        util.uboot_patches.as_mut().unwrap().profiles = vec!["rk3576-util".into()];
+        let mut util_net = lock_with("uc1", "pc1");
+        util_net.uboot_patches.as_mut().unwrap().profiles = vec!["rk3576-util-net".into()];
+        assert_ne!(
+            clone_manifest(&util, PatchSeries::Pinned).unwrap().signature,
+            clone_manifest(&util_net, PatchSeries::Pinned).unwrap().signature
+        );
         // Co-dev mode splits the key; a co-dev content change restamps.
         let empty: Vec<String> = vec![];
         assert_ne!(base, sig("uc1", "pc1", PatchSeries::Dev(&empty)));

@@ -1,0 +1,91 @@
+# devices/h96-max-m9-npu.toml -- H96 MAX M9 (RK3576), NPU-enabled experimental variant.
+#
+# NEAR-COPY of devices/h96-max-m9.toml. The config model has no device->device
+# inheritance, and the NPU enable rides a board `.dtsi` that can only enter through
+# device_dts (a device-layer field), so an NPU build needs its own device. This
+# variant is the base board plus the RK3576 NPU (rocket) enable and nothing else --
+# the diff from production is exactly the NPU, which is what an RE image wants. Keep
+# the hardware blocks below (device_kmods, packages, rkbin, u-boot, cmdline) in sync
+# with devices/h96-max-m9.toml; they reference the base device's on-disk assets
+# (kmod-patches/, firmware) by path, so only this TOML duplicates, not the files.
+#
+# EXPERIMENTAL. Binding the rocket driver exposes the accel uAPI (/dev/accel) for
+# register probing and job submission; the RK3576 compute datapath does not yet run
+# inference correctly, so this is a bring-up / reverse-engineering image, not a
+# working accelerator. See the rk3576-npu patch profile in the patches repo.
+description             = "H96 MAX M9 (RK3576) TV box -- NPU experimental"
+soc                     = "rk3576"
+boot_method             = "rockchip-rkbin"
+supported_boot_methods  = ["rockchip-rkbin"]
+
+uboot_defconfig         = "generic-rk3576_defconfig"
+
+# NPU-enabled DTB: rk3576-h96-max-m9-npu.dts #includes the base board and adds the
+# NPU enable. Both sources are listed so the #include resolves in-tree; the wrapper
+# builds the DTB this device boots.
+kernel_dtb              = "rockchip/rk3576-h96-max-m9-npu.dtb"
+device_dts              = [
+    "devices/h96-max-m9/dts/rk3576-h96-max-m9.dts",
+    "devices/h96-max-m9-npu/dts/rk3576-h96-max-m9-npu.dts",
+]
+
+kernel_cmdline          = "cpuidle.off=1"
+
+# Board IR + regdb kconfig deltas, plus the NPU (rocket) enablement fragment
+# (CONFIG_DRM_ACCEL_ROCKET + ROCKCHIP_IOMMU). The fragment composes after the
+# kernel's own config_fragments.
+device_config_fragments = ["device/h96-max-m9", "accel/rk3576-npu"]
+
+# The RK3576 NPU (rocket) kernel series, applied after the kernel's SoC-wide
+# rk3576-fixes profile. Board-opt-in, so it lives on the device, not the kernel.
+device_patch_profiles   = ["rk3576-npu"]
+
+packages                = [
+    "bluez",
+    "gpiod",
+    "ir-keytable",
+    "v4l-utils",
+    "libgl1-mesa-dri",
+    "libegl-mesa0",
+    "libgbm1",
+]
+
+supported_kernels       = ["rk3576-mainline-7.1"]
+default_kernel          = "rk3576-mainline-7.1"
+supported_uboot_profiles = ["rk3576-display", "h96-max-m9-util"]
+default_uboot_profile    = "rk3576-display"
+default_suite           = "forky"
+default_layout          = "combined"
+hostname                = "h96-max-m9-npu"
+image_size              = "2G"
+
+# rkbin (ATF + DDR TPL; no BL32) is inherited from socs/rk3576.toml, same as the
+# base board -- LPDDR4X 2112 MHz is the SoC default loader's native target.
+
+# AIC8800D80 SDIO Wi-Fi, identical to the base board (the on-disk patches and
+# firmware live under devices/h96-max-m9/ and are referenced by path here).
+[[device_kmods]]
+name          = "aic8800"
+git           = "https://github.com/radxa-pkg/aic8800.git"
+ref           = "main"
+subdir        = "src/SDIO/driver_fw/driver/aic8800"
+patches = [
+    "fix-sdio-firmware-path.patch",
+    "fix-sdio-fall-through.patch",
+    "fix-linux-6.1-build.patch",
+    "fix-linux-6.13-build.patch",
+    "fix-linux-6.14-build.patch",
+    "fix-linux-6.15-build.patch",
+    "fix-linux-6.16-build.patch",
+    "fix-linux-6.17-build.patch",
+    "fix-linux-6.19-build.patch",
+    "fix-vmalloc-not-include.patch",
+    "fix-build-on-low-memory-devices.patch",
+]
+local_patches = [
+    "devices/h96-max-m9/kmod-patches/aic8800-sdio-linux-7.1.patch",
+    "devices/h96-max-m9/kmod-patches/aic8800-quiet-bsp-log-level.patch",
+]
+make_args     = ["CONFIG_AIC8800_BTLPM_SUPPORT=n", "CONFIG_FDRV_NO_REG_SDIO=y"]
+modules       = ["aic8800_bsp", "aic8800_fdrv"]
+firmware = { subdir = "src/SDIO/driver_fw/fw/aic8800D80", install = "usr/lib/firmware/aic8800_fw/SDIO/aic8800D80" }

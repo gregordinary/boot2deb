@@ -1,0 +1,16 @@
+[Unit]
+Description=CEC: let the TV remote drive this box (RC passthrough follower)
+Documentation=man:cec-follower(1)
+# Shipped disabled -- opt in with `systemctl enable --now cec-passthrough`. This is
+# the reverse direction from cec-tv-on/standby: instead of the box controlling the
+# TV, the TV's own remote drives the box. Enabling it alongside the box-drives-TV
+# units gives full two-way CEC control.
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/h96/cec-passthrough
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

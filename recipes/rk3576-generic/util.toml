@@ -1,0 +1,24 @@
+# recipes/rk3576-generic/util.toml — the SoC-generic recovery and bring-up
+# u-boot for any RK3576 board, as a u-boot-only deliverable. It is the display
+# u-boot plus a boot menu, the developer commands, and diagnostic/image-
+# verification commands, and it never autoboots; drd0 is the rockusb/ums device
+# port. The deliverable is the maskrom USB boot images (usb471/472) from
+# `--stage uboot`: stream them into RAM via maskrom and drive u-boot with a USB
+# keyboard and stick.
+#
+# It builds from the rk3576-generic control DTB, so the payload is identical on
+# any RK3576 board — hence it is homed on the rk3576-generic tool host. A board
+# that needs board-specific u-boot support (e.g. ethernet) gets its own util
+# recipe with a board profile; see recipes/h96-max-m9/util.toml. Being a pure
+# bootloader tool unrelated to any Debian release, it names no suite, kernel, or
+# image — only the u-boot profile.
+device        = "rk3576-generic"
+deliverable   = "uboot"
+uboot_profile = "rk3576-util"
+
+# A maskrom bring-up and recovery tool: the deliverable is the u-boot USB boot
+# images, not a flashed rootfs. Built clean from mainline u-boot; not yet
+# exercised on hardware in this form, so "expected".
+[support]
+status = "expected"
+date   = "2026-07-21"

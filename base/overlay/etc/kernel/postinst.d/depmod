@@ -1,0 +1,26 @@
+#!/bin/sh -e
+
+# kernel post-install hook: /etc/kernel/postinst.d
+# Regenerate modules.dep and modules.alias for the kernel being installed, so
+# out-of-tree modules staged under /lib/modules/<version>/updates (the board's
+# device_kmods -- e.g. the AIC8800 Wi-Fi driver) are resolvable by modprobe and
+# auto-load by device alias. `make bindeb-pkg` builds a linux-image whose postinst
+# runs these hooks but never runs depmod itself, so without this an in-place
+# kernel-deb install leaves those modules on disk yet invisible
+# ("modprobe: module not found"). Board-agnostic; lives in the base overlay so it
+# ships in every image on every boot method.
+
+version="$1"
+
+# passing the kernel version is required
+if [ -z "${version}" ]; then
+	echo >&2 "E: depmod: ${DPKG_MAINTSCRIPT_PACKAGE:-kernel package} did not pass a version number"
+	exit 2
+fi
+
+# only meaningful once the module tree for this version is on disk
+if [ ! -d "/lib/modules/${version}" ]; then
+	exit 0
+fi
+
+depmod -a "${version}"

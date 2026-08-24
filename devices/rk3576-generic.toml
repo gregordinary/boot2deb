@@ -1,0 +1,38 @@
+# devices/rk3576-generic.toml — the SoC-generic RK3576 u-boot tool host.
+#
+# This "device" is not a board. It exists to home the SoC-generic u-boot
+# tools (the loader and util recipes) that build from the `rk3576-generic`
+# control DTB and are therefore identical on any RK3576 board. A real board
+# (h96-max-m9, rk3576-evb1-v10) still owns its own image recipes and any
+# board-specific u-boot profile; this device owns only the board-neutral
+# u-boot-only tool recipes.
+#
+# The kernel/image fields below are required by the device schema but never
+# exercised: only `deliverable = "uboot"` recipes target this device, so no
+# kernel or rootfs is ever built. They name the EVB's mainline DTB as a valid
+# placeholder.
+description             = "SoC-generic RK3576 u-boot tools (not a board)"
+soc                     = "rk3576"                 # -> arch, dt_dir, modules, rkbin
+boot_method             = "rockchip-rkbin"
+supported_boot_methods  = ["rockchip-rkbin"]
+
+# Validated against u-boot v2026.04: builds idbloader.img + u-boot.itb.
+uboot_defconfig         = "generic-rk3576_defconfig"
+
+# Schema-required, unused (no image recipe targets this device). The EVB's
+# mainline DTB is a valid placeholder; no device_dts, so nothing is compiled.
+kernel_dtb              = "rockchip/rk3576-evb1-v10.dtb"
+device_config_fragments = []
+supported_kernels       = ["rk3576-mainline-7.1"]
+default_kernel          = "rk3576-mainline-7.1"
+
+# The SoC-generic u-boot tools this device hosts. loader = minimal rockusb
+# bring-up; util = the recovery/diagnostic tool. Both are board-neutral.
+supported_uboot_profiles = ["rk3576-loader", "rk3576-util"]
+default_uboot_profile    = "rk3576-loader"
+default_suite           = "forky"
+default_layout          = "combined"
+hostname                = "rk3576-generic"
+image_size              = "2G"
+
+# rkbin (ATF + unified DDR loader; no BL32) is inherited from socs/rk3576.toml.

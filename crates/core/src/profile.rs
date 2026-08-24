@@ -134,10 +134,20 @@ impl PatchEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchProfile {
-    /// Kernel version range the series targets, as a semver requirement
-    /// (e.g. `">=7.0, <7.2"`). Matched against the resolved kernel's release
-    /// version by [`applies_to`](PatchProfile::applies_to).
-    pub applies_to_kernel: String,
+    /// Version range the kernel-family scopes (`kernel`/`ffmpeg`/`userspace`) target,
+    /// as a semver requirement (e.g. `">=7.0, <7.2"`), matched against the resolved
+    /// kernel's release version. `None` (omitted) means those scopes apply to any
+    /// kernel — the shape a profile that patches only u-boot takes, since it makes no
+    /// kernel claim. Gated per build by [`ensure_applies`](Self::ensure_applies).
+    #[serde(default)]
+    pub applies_to_kernel: Option<String>,
+    /// Version range the `uboot` scope targets, matched against the resolved u-boot's
+    /// version (the boot method's `uboot_ref`, e.g. `v2026.04`) rather than the
+    /// kernel's — u-boot is its own axis. `None` means the u-boot series applies to
+    /// any u-boot this profile is built against. Gated by
+    /// [`ensure_applies_uboot`](Self::ensure_applies_uboot).
+    #[serde(default)]
+    pub applies_to_uboot: Option<String>,
     /// Kernel-tree patches, in apply order (may span the `media-accel` and
     /// `rocket` scopes).
     #[serde(default)]
@@ -155,21 +165,39 @@ pub struct PatchProfile {
 }
 
 impl PatchProfile {
-    /// Parse `applies_to_kernel` into a [`VersionReq`].
-    ///
-    /// `profile` names the owner for the error message only.
-    pub fn version_req(&self, profile: &str) -> Result<VersionReq, ConfigError> {
-        VersionReq::parse(&self.applies_to_kernel).map_err(|source| {
-            ConfigError::InvalidVersionReq {
-                profile: profile.to_string(),
-                value: self.applies_to_kernel.clone(),
-                source,
-            }
-        })
+    /// The version-range envelope gating `scope`, if the profile declares one: the
+    /// [`applies_to_kernel`](Self::applies_to_kernel) range for the kernel-family
+    /// scopes, the [`applies_to_uboot`](Self::applies_to_uboot) range for `uboot`.
+    fn envelope(&self, scope: Scope) -> Option<&str> {
+        match scope {
+            Scope::Uboot => self.applies_to_uboot.as_deref(),
+            _ => self.applies_to_kernel.as_deref(),
+        }
     }
 
-    /// True when `kernel_version` falls in this profile's declared envelope,
-    /// matched release-strict ([`RangeMatch::Release`]).
+    /// Parse `scope`'s declared envelope into a [`VersionReq`], or `None` when the
+    /// profile declares none for it (that scope then applies to any version).
+    ///
+    /// `profile` names the owner for the error message only.
+    pub fn version_req(
+        &self,
+        profile: &str,
+        scope: Scope,
+    ) -> Result<Option<VersionReq>, ConfigError> {
+        self.envelope(scope)
+            .map(|req| {
+                VersionReq::parse(req).map_err(|source| ConfigError::InvalidVersionReq {
+                    profile: profile.to_string(),
+                    value: req.to_string(),
+                    source,
+                })
+            })
+            .transpose()
+    }
+
+    /// True when `kernel_version` falls in this profile's kernel envelope, matched
+    /// release-strict ([`RangeMatch::Release`]); always true when the profile
+    /// declares no kernel envelope.
     ///
     /// `kernel_version` may be `v`-prefixed (`v7.1.1`) and may omit the patch
     /// component (`7.1` is read as `7.1.0`).
@@ -186,7 +214,10 @@ impl PatchProfile {
         kernel_version: &str,
         mode: RangeMatch,
     ) -> Result<bool, ConfigError> {
-        matches_range(profile, &self.applies_to_kernel, kernel_version, mode)
+        match self.applies_to_kernel.as_deref() {
+            None => Ok(true),
+            Some(req) => matches_range(profile, req, kernel_version, mode),
+        }
     }
 
     /// The ordered paths of one [`Scope`] that apply to `kernel_version` — the
@@ -215,11 +246,13 @@ impl PatchProfile {
 
     /// Entries the profile can never select, as `(scope, entry)` pairs.
     ///
-    /// An entry is unreachable when its own range shares no version with the
-    /// profile's envelope: no kernel the profile admits can select it, so it is dead
-    /// by construction rather than by judgement. Envelope `">=7.8, <8.0"` with an
+    /// An entry is unreachable when its own range shares no version with its scope's
+    /// envelope: no version the profile admits for that scope can select it, so it is
+    /// dead by construction rather than by judgement. Envelope `">=7.8, <8.0"` with an
     /// entry pinned `"<7.2"` is the shape this catches — typically a patch that was
-    /// upstreamed long enough ago that the envelope has moved past its cap.
+    /// upstreamed long enough ago that the envelope has moved past its cap. A scope
+    /// with no declared envelope admits every version, so none of its entries is
+    /// unreachable.
     ///
     /// Deleting a reported entry (and its file) is safe for the same reason the
     /// commit pin exists: an old lock names an old `patches` commit whose tree still
@@ -228,12 +261,14 @@ impl PatchProfile {
     /// Conservative: an entry whose range or envelope uses an operator this cannot
     /// bound (`^`, `~`, `*`) is never reported, so a finding is always a real one.
     pub fn unreachable(&self, profile: &str) -> Result<Vec<(Scope, &PatchEntry)>, ConfigError> {
-        let envelope = self.version_req(profile)?;
-        let Some(env) = Interval::of(&envelope) else {
-            return Ok(Vec::new());
-        };
         let mut dead = Vec::new();
         for scope in Scope::ALL {
+            let Some(envelope) = self.version_req(profile, scope)? else {
+                continue;
+            };
+            let Some(env) = Interval::of(&envelope) else {
+                continue;
+            };
             for entry in self.scope(scope) {
                 let Some(range) = entry.kernels() else {
                     continue;
@@ -247,19 +282,42 @@ impl PatchProfile {
         Ok(dead)
     }
 
-    /// [`applies_to`](PatchProfile::applies_to) as a hard gate: returns
-    /// [`ConfigError::KernelOutsideProfileRange`] when the kernel is out of
-    /// range, so a mismatched `(kernel, profile)` fails before any patch is
-    /// fetched.
+    /// [`applies_to`](PatchProfile::applies_to) as a hard gate on the kernel-family
+    /// scopes: returns [`ConfigError::KernelOutsideProfileRange`] when the kernel is
+    /// out of range, so a mismatched `(kernel, profile)` fails before any patch is
+    /// fetched. A no-op when the profile declares no kernel envelope.
     pub fn ensure_applies(&self, profile: &str, kernel_version: &str) -> Result<(), ConfigError> {
-        if self.applies_to(profile, kernel_version)? {
-            Ok(())
-        } else {
-            Err(ConfigError::KernelOutsideProfileRange {
-                profile: profile.to_string(),
-                kernel_version: kernel_version.to_string(),
-                applies_to: self.applies_to_kernel.clone(),
-            })
+        match &self.applies_to_kernel {
+            Some(range) if !self.applies_to(profile, kernel_version)? => {
+                Err(ConfigError::KernelOutsideProfileRange {
+                    profile: profile.to_string(),
+                    kernel_version: kernel_version.to_string(),
+                    applies_to: range.clone(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The `uboot` scope's declared-intent gate: returns
+    /// [`ConfigError::UbootOutsideProfileRange`] when `uboot_version` is outside the
+    /// profile's [`applies_to_uboot`](Self::applies_to_uboot) envelope. A no-op when
+    /// the profile declares no u-boot envelope, which is the common case — a u-boot
+    /// series is usually written for the one u-boot generation the board runs.
+    pub fn ensure_applies_uboot(
+        &self,
+        profile: &str,
+        uboot_version: &str,
+    ) -> Result<(), ConfigError> {
+        match &self.applies_to_uboot {
+            Some(range) if !matches_range(profile, range, uboot_version, RangeMatch::Release)? => {
+                Err(ConfigError::UbootOutsideProfileRange {
+                    profile: profile.to_string(),
+                    uboot_version: uboot_version.to_string(),
+                    applies_to: range.clone(),
+                })
+            }
+            _ => Ok(()),
         }
     }
 
@@ -571,7 +629,8 @@ mod tests {
 
     fn profile() -> PatchProfile {
         PatchProfile {
-            applies_to_kernel: ">=7.0, <7.2".into(),
+            applies_to_kernel: Some(">=7.0, <7.2".into()),
+            applies_to_uboot: None,
             kernel: vec![
                 always("media-accel/kernel/040-vdpu381-multicore-v1-curated.patch"),
                 always("rocket/081-rocket-drv-npu-clk.patch"),
@@ -628,7 +687,8 @@ mod tests {
     #[test]
     fn series_for_selects_the_entries_the_kernel_admits() {
         let p = PatchProfile {
-            applies_to_kernel: ">=7.0, <7.4".into(),
+            applies_to_kernel: Some(">=7.0, <7.4".into()),
+            applies_to_uboot: None,
             kernel: vec![
                 always("k/040-always.patch"),
                 ranged("k/050-v14.patch", "<7.2"),
@@ -671,7 +731,8 @@ mod tests {
     #[test]
     fn unreachable_reports_only_entries_the_envelope_cannot_select() {
         let p = PatchProfile {
-            applies_to_kernel: ">=7.8, <8.0".into(),
+            applies_to_kernel: Some(">=7.8, <8.0".into()),
+            applies_to_uboot: None,
             kernel: vec![
                 always("k/040-always.patch"),          // bare: never unreachable
                 ranged("k/084-old.patch", "<7.2"),     // dead: caps below the envelope
@@ -691,7 +752,8 @@ mod tests {
         // `^` is not bounded by Interval::of, so the lint stays silent rather than
         // report a live entry. One-sided by design.
         let p = PatchProfile {
-            applies_to_kernel: ">=7.8, <8.0".into(),
+            applies_to_kernel: Some(">=7.8, <8.0".into()),
+            applies_to_uboot: None,
             kernel: vec![ranged("k/010-x.patch", "^6.1")],
             ffmpeg: vec![],
             userspace: vec![],
@@ -702,13 +764,15 @@ mod tests {
 
     #[test]
     fn unreachable_covers_every_scope() {
-        // Scope::ALL is what keeps a newly added scope from escaping the lint.
+        // Scope::ALL is what keeps a newly added scope from escaping the lint. Each
+        // scope is judged against its own envelope, so the u-boot scope gets one too.
         let p = PatchProfile {
-            applies_to_kernel: ">=7.8, <8.0".into(),
+            applies_to_kernel: Some(">=7.8, <8.0".into()),
+            applies_to_uboot: Some(">=2026, <2027".into()),
             kernel: vec![],
             ffmpeg: vec![ranged("f/010-x.patch", "<7.0")],
             userspace: vec![ranged("u/010-y.patch", "<7.0")],
-            uboot: vec![ranged("b/010-z.patch", "<7.0")],
+            uboot: vec![ranged("b/010-z.patch", "<2020")],
         };
         assert_eq!(p.unreachable("t").unwrap().len(), 3);
     }
@@ -750,7 +814,7 @@ mod tests {
     #[test]
     fn invalid_range_is_typed_error() {
         let mut p = profile();
-        p.applies_to_kernel = "not a range".into();
+        p.applies_to_kernel = Some("not a range".into());
         let err = p.applies_to("rk3588-accel", "7.1.1").unwrap_err();
         assert!(matches!(err, ConfigError::InvalidVersionReq { .. }));
     }
