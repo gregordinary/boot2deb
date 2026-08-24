@@ -44,6 +44,15 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
+      # Ubuntu 23.10 and later restrict unprivileged user namespaces through
+      # AppArmor, and the runner image is Ubuntu. Under the restriction `unshare`
+      # still succeeds, so nothing fails until the sandbox performs the first
+      # privileged step inside the new namespace — writing `deny` to
+      # `/proc/self/setgroups` — which returns `EPERM`. Every sandboxed test then
+      # fails at rootfs bootstrap. `--ignore` because the sysctl is absent on a
+      # non-AppArmor host, which is not an error.
+      - name: Permit unprivileged user namespaces
+        run: sudo sysctl --ignore --write kernel.apparmor_restrict_unprivileged_userns=0
       # Engine tests that shell out to an absent host tool skip themselves rather
       # than fail, so an unavailable dependency silently costs coverage. The tools
       # they exercise (git, tar, xz, openssl, e2fsprogs, util-linux) are already on
@@ -53,10 +62,10 @@ jobs:
       #
       # `BOOT2DEB_REQUIRE_HOST_TOOLS` turns a self-skip into a panic. The end-to-end
       # tests skip themselves on a dev host that lacks a prerequisite; this runner has
-      # all of them — the tools above, unprivileged user namespaces, and a reachable
-      # Debian mirror for the packaging root — and therefore claims they are present,
-      # so a skip here is a coverage regression (a changed runner image, a network
-      # policy) and must fail rather than pass quietly. It has happened before.
+      # all of them — the tools above, the user namespaces the step above unblocks, and
+      # a reachable Debian mirror for the packaging root — and therefore claims they are
+      # present, so a skip here is a coverage regression (a changed runner image, a
+      # network policy) and must fail rather than pass quietly. It has happened before.
       - name: Run tests
         run: cargo test --workspace
         env:
