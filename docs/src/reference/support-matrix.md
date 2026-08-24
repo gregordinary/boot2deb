@@ -23,19 +23,19 @@ the evidence the claim rested on.
 | `asus-c100p/forky` | asus-c100p | forky | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
 | `asus-c100p/trixie` | asus-c100p | trixie | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
 | `asus-c201/forky` | asus-c201 | forky | `debian-armmp` (from the suite) | none | none | `validated` | 2026-07-14 |
-| `asus-c201/mainline-forky` | asus-c201 | forky | `rk3288-mainline-7.1` `v7.1.3` | `rk3288-fixes` `main` (`cf650c5f994a`) | none | `validated` | 2026-07-16 |
+| `asus-c201/mainline-forky` | asus-c201 | forky | `rk3288-mainline-7.1` `v7.1.3` | `rk3288-fixes` `main` (`e56368aa9a73`) | none | `validated` | 2026-07-16 |
 | `asus-c201/trixie` | asus-c201 | trixie | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
 | `asus-chromebit-cs10/forky` | asus-chromebit-cs10 | forky | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
 | `asus-chromebit-cs10/trixie` | asus-chromebit-cs10 | trixie | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
 | `h96-max-m9-npu/forky` | h96-max-m9-npu | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes`, `rk3576-npu` `main` (`e56368aa9a73`) | `rk3576-display` `main` (`e56368aa9a73`) | `experimental` | 2026-07-24 |
-| `h96-max-m9/forky` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes` `main` (`7fd19b5e76b8`) | `rk3576-display` `main` (`7fd19b5e76b8`) | `validated` | 2026-07-24 |
-| `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes`, `rk3576-rga` `main` (`087989e66142`) | `rk3576-display` `main` (`087989e66142`) | `experimental` | 2026-07-25 |
+| `h96-max-m9/forky` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes` `main` (`e56368aa9a73`) | `rk3576-display` `main` (`e56368aa9a73`) | `validated` | 2026-07-24 |
+| `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes`, `rk3576-rga` `main` (`e56368aa9a73`) | `rk3576-display` `main` (`e56368aa9a73`) | `experimental` | 2026-07-25 |
 | `h96-max-m9/util` | h96-max-m9 | — | (u-boot only) | none | `h96-max-m9-util` `main` (`a86051e87f5c`) | `expected` | 2026-07-22 |
-| `rk3576-evb1-v10/forky` | rk3576-evb1-v10 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes` `main` (`7fd19b5e76b8`) | `rk3576-loader` `main` (`7fd19b5e76b8`) | `expected` | 2026-07-20 |
+| `rk3576-evb1-v10/forky` | rk3576-evb1-v10 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes` `main` (`e56368aa9a73`) | `rk3576-loader` `main` (`e56368aa9a73`) | `expected` | 2026-07-20 |
 | `rk3576-generic/loader` | rk3576-generic | — | (u-boot only) | none | `rk3576-loader` `main` (`7b3bcb9d5904`) | `expected` | 2026-07-21 |
 | `rk3576-generic/util` | rk3576-generic | — | (u-boot only) | none | `rk3576-util` `main` (`a86051e87f5c`) | `expected` | 2026-07-21 |
-| `turing-rk1/forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`527d03d54ea6`) | none | `validated` | 2026-07-16 |
-| `turing-rk1/jellyfin` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`a402fd101afa`) | none | `experimental` | 2026-07-20 |
-| `turing-rk1/media-accel-forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`527d03d54ea6`) | none | `expected` | 2026-07-20 |
-| `turing-rk1/media-accel-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`527d03d54ea6`) | none | `expected` | 2026-07-20 |
-| `turing-rk1/trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`527d03d54ea6`) | none | `expected` | 2026-07-20 |
+| `turing-rk1/forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`e56368aa9a73`) | none | `validated` | 2026-07-16 |
+| `turing-rk1/jellyfin` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`e56368aa9a73`) | none | `experimental` | 2026-07-20 |
+| `turing-rk1/media-accel-forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`e56368aa9a73`) | none | `expected` | 2026-07-20 |
+| `turing-rk1/media-accel-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`e56368aa9a73`) | none | `expected` | 2026-07-20 |
+| `turing-rk1/trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`e56368aa9a73`) | none | `expected` | 2026-07-20 |

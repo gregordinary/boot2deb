@@ -39,14 +39,22 @@ Two properties it is built around:
 | Board | SoC | Arch | Status |
 | --- | --- | --- | --- |
 | [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html) | RK3588 | arm64 | Boots; hardware video transcode validated |
+| [H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html) | RK3576 | arm64 | Boots to an HDMI login; Wi-Fi, audio, and suspend/resume validated |
 | [ASUS Chromebook C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html) | RK3288 | armhf | Boots to login + Wi-Fi (forky & trixie) |
 | [ASUS Chromebook Flip C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
 | [ASUS Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 | armhf | Image builds; hardware boot not yet confirmed |
+| [Rockchip RK3576 EVB1 v10](https://gregordinary.github.io/boot2deb/boards/rk3576-evb1-v10.html) | RK3576 | arm64 | Image builds; hardware boot not yet confirmed |
+
+The full picture — every shipped recipe, the exact pins it resolves, and what each
+claim rests on — is the
+[support matrix](https://gregordinary.github.io/boot2deb/reference/support-matrix.html).
 
 Each board ships one or more *recipes*, a device plus a Debian suite and any optional
 features. The RK1, for example, comes as a base image (`turing-rk1/forky`), a
 hardware-transcode image that adds the Rockchip MPP/RGA/ffmpeg userspace
-(`turing-rk1/media-accel-forky`), and a Jellyfin image — each with a `trixie` sibling.
+(`turing-rk1/media-accel-forky`) — both with a `trixie` sibling — and a Jellyfin image
+(`turing-rk1/jellyfin`). A recipe need not build an image at all: an RK3576 board also
+ships u-boot-only recipes whose deliverable is a maskrom-streamable bootloader.
 List them with `cargo run -p boot2deb-cli -- list-recipes`.
 
 ## Quick start
@@ -86,7 +94,8 @@ Full walkthrough: [Getting started](https://gregordinary.github.io/boot2deb/gett
 
 - **Config model** — a build is a point across device × kernel × suite × features ×
   layout, resolved by merging TOML layers (`arches/ socs/ boot-methods/ devices/`, with
-  the kernel as an orthogonal axis). [Config model](https://gregordinary.github.io/boot2deb/reference/config-model.html).
+  the kernel, out-of-tree modules (`kmods/`), and rootfs features (`features/`) as
+  orthogonal axes). [Config model](https://gregordinary.github.io/boot2deb/reference/config-model.html).
 - **Recipes and locks** — a *recipe* pins a build point by name; `update` writes a
   sibling `.lock` with the exact resolved pins, and `build` reads only that lock.
 - **Kernel patches** — version-coupled patch series and kconfig fragments live on the
@@ -107,11 +116,14 @@ sources live in [`docs/`](docs/); build them locally with `mdbook serve docs`. C
 - [Upgrading the kernel](https://gregordinary.github.io/boot2deb/kernel-upgrades.html)
 - [Locale, timezone, and keyboard](https://gregordinary.github.io/boot2deb/localization.html)
 - Boards — [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html),
+  [H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html),
+  [RK3576 EVB1 v10](https://gregordinary.github.io/boot2deb/boards/rk3576-evb1-v10.html),
   [ASUS C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html),
   [ASUS C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html),
   [ASUS Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html)
 - Reference — [Config model](https://gregordinary.github.io/boot2deb/reference/config-model.html),
   [CLI](https://gregordinary.github.io/boot2deb/reference/cli.html),
+  [Support matrix](https://gregordinary.github.io/boot2deb/reference/support-matrix.html),
   [Overlays](https://gregordinary.github.io/boot2deb/reference/overlays.html),
   [Image identity](https://gregordinary.github.io/boot2deb/reference/image-identity.html),
   [Reproducibility](https://gregordinary.github.io/boot2deb/reference/reproducibility.html)
@@ -128,8 +140,9 @@ crates/engine   Linux side effects: git shell-outs, lock resolver, patch verify 
                 and the host preflight behind `doctor`
 crates/cli      the boot2deb binary
 
-arches/ socs/ boot-methods/ devices/ kernels/ recipes/   config layers (TOML)
-blobs/ fragments/                                         vendored blobs, kconfig
+arches/ socs/ boot-methods/ devices/ kernels/ kmods/ features/ recipes/
+                                                config layers (TOML)
+blobs/ fragments/                               vendored blobs, kconfig
 docs/                                                     the mdBook
 ```
 

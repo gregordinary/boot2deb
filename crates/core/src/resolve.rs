@@ -74,6 +74,12 @@ pub fn resolve_device(
     // absent and the lock records only the u-boot pins. The `image_size`/`hostname`
     // it carries are the device defaults, never read on this path (no image node).
     if uboot_only {
+        // Every rootfs-axis override is rejected before the early return rather than
+        // dropped with it. This path skips feature loading, `resolve_l10n`, and the
+        // `image_size` parse, so a value that is a hard error on every other path
+        // — a misspelled `--feature`, an `--image-size 1M` — would otherwise be
+        // accepted in silence and exit 0.
+        reject_rootfs_overrides(device_name, overrides)?;
         return Ok(ResolvedBuild {
             device: device_name.to_string(),
             device_lineage,
@@ -392,6 +398,11 @@ fn resolve_boot(
                     supported: dc.supported_boards.join(", "),
                 });
             }
+            // Membership says the profile is one the device offers; this says the string
+            // is one the rootfs stage can carry. Both are needed: `supported_boards` is
+            // itself config, so a device file could offer a profile whose *name* is
+            // hostile.
+            validate_board_profile(&board)?;
             for s in [&l.kpart_offset, &l.kpart_size, &l.rootfs_offset] {
                 crate::size::parse_size(s)?;
             }
@@ -802,8 +813,9 @@ fn resolve_kmods(
 ///  - **repo_patches**: bare filenames under `patch_dir` (joined as `patch_dir/<file>`).
 ///  - **local_patches**: bare filenames under `kmods/<name>/patches/` (read along the
 ///    overlay search path like a fragment).
-///  - **make_args**: a bare `KEY=VALUE`, no whitespace or shell metacharacters (passed
-///    as argv to `make`, never through a shell).
+///  - **make_args**: a bare `KEY=VALUE` — no leading `-`, whitespace, or shell
+///    metacharacters. The entry becomes one `make` argv word, and make reads a leading
+///    `-` as an option (`-C`, `-f` would redirect the build at another tree).
 ///  - **modules**: bare `.ko` basenames.
 fn validate_kmod(k: &KmodLayer, name: &str) -> Result<(), ConfigError> {
     let invalid = |why| ConfigError::InvalidKmod {
@@ -868,8 +880,15 @@ fn validate_kmod(k: &KmodLayer, name: &str) -> Result<(), ConfigError> {
     for lp in &k.local_patches {
         bare(lp).map_err(invalid)?;
     }
+    // Each entry goes into `make`'s argv verbatim, so it must read as a variable
+    // assignment and nothing else. A leading `-` is refused for the same reason a
+    // defconfig name is (see `reject_unsafe_make_target` in the engine): make parses
+    // it as an option, and `-C`/`-f` redirect the build at another tree or makefile.
+    // The shell metacharacters are refused because the value is also folded into
+    // shell-quoted build scripts.
     for a in &k.make_args {
         let unsafe_arg = !a.contains('=')
+            || a.starts_with('-')
             || a.chars().any(|c| {
                 c.is_whitespace()
                     || matches!(
@@ -879,7 +898,7 @@ fn validate_kmod(k: &KmodLayer, name: &str) -> Result<(), ConfigError> {
             });
         if unsafe_arg {
             return Err(invalid(
-                "a make_args entry is not a bare KEY=VALUE (no whitespace or shell metacharacters)",
+                "a make_args entry is not a bare KEY=VALUE (no leading '-', whitespace, or shell metacharacters)",
             ));
         }
     }
@@ -1080,6 +1099,35 @@ fn join<T: std::fmt::Display>(items: &[T]) -> String {
         .join(", ")
 }
 
+/// Reject any override that names an axis a u-boot-only deliverable does not have.
+///
+/// The bootloader is the whole artifact: no kernel is compiled, no suite is
+/// bootstrapped, no image is assembled. So the kernel, rootfs, and image axes have
+/// nothing to act on, and accepting one would be indistinguishable from acting on it.
+/// The axes that *do* survive — `layout`, `boot_method`, `uboot_profile` — reach
+/// [`resolve_boot`] and are validated there like any other build's.
+///
+/// Checked in flag order so the first-reported error is stable.
+fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(), ConfigError> {
+    let inapplicable: [(&'static str, bool); 8] = [
+        ("--kernel", overrides.kernel.is_some()),
+        ("--suite", overrides.suite.is_some()),
+        ("--feature", overrides.features.is_some()),
+        ("--image-size", overrides.image_size.is_some()),
+        ("--locale", overrides.locale.is_some()),
+        ("--locale-gen", overrides.locales_generate.is_some()),
+        ("--timezone", overrides.timezone.is_some()),
+        ("--keymap", overrides.keymap.is_some()),
+    ];
+    match inapplicable.iter().find(|(_, set)| *set) {
+        Some((flag, _)) => Err(ConfigError::OverrideNotApplicable {
+            device: device_name.to_string(),
+            flag,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Reject a suite that is not a well-formed Debian codename. The
 /// suite becomes an apt `sources.list` pocket (`<suite>-updates`, `<suite>-security`)
 /// and the archive path the bootstrap fetches under, so it must be a bare token
@@ -1227,6 +1275,33 @@ fn validate_timezone(tz: &str) -> Result<(), ConfigError> {
         }
     }
     Ok(())
+}
+
+/// Reject a depthcharge board profile name the rootfs stage cannot carry.
+///
+/// The value is written into `/etc/depthcharge-tools/config` — through a **quoted
+/// heredoc** in the customize script, so it is not shell-expanded, but a line reading
+/// `B2D_EOF` would close the heredoc early and leave the rest of the profile name
+/// running as script. It is also a key in an INI file `depthchargectl` parses and a
+/// filename component it looks the board's `.conf` up by.
+///
+/// Real profile names are bare identifiers (`speedy`, `speedy-libreboot`), so the safe
+/// set is also the complete one: `[A-Za-z0-9_.-]`, non-empty, not a directory
+/// reference.
+fn validate_board_profile(board: &str) -> Result<(), ConfigError> {
+    let ok = !board.is_empty()
+        && board != "."
+        && board != ".."
+        && board
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidBoardProfile {
+            board: board.to_string(),
+        })
+    }
 }
 
 /// Reject a keymap value `/etc/default/keyboard` cannot hold.
@@ -1471,6 +1546,71 @@ mod tests {
             err,
             ConfigError::UbootOnlyWithoutBootloader { .. }
         ));
+    }
+
+    #[test]
+    fn a_uboot_only_build_rejects_the_axes_it_does_not_have() {
+        // A u-boot-only build skips feature loading, `resolve_l10n`, and the
+        // `image_size` parse, so every rootfs-axis override would otherwise be accepted
+        // and dropped in silence — including values that are hard errors on every other
+        // path. A misspelled `--feature` exiting 0 is the case that matters.
+        let root = repo_root();
+        for (flag, ov) in [
+            (
+                "--feature",
+                Overrides {
+                    features: Some(vec!["no-such-feature".into()]),
+                    ..Default::default()
+                },
+            ),
+            (
+                "--image-size",
+                Overrides {
+                    image_size: Some("1M".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "--suite",
+                Overrides {
+                    suite: Some("trixie".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "--locale",
+                Overrides {
+                    locale: Some("nonsense".into()),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let err = resolve_recipe(&root, "rk3576-generic/loader", &ov).unwrap_err();
+            match err {
+                ConfigError::OverrideNotApplicable { flag: got, .. } => assert_eq!(got, flag),
+                other => panic!("expected {flag} to be rejected, got {other}"),
+            }
+        }
+        // The axes a bootloader *does* have still resolve: the u-boot profile picks the
+        // series, and the layout decides whether it is emitted standalone.
+        let ov = Overrides {
+            uboot_profile: Some("rk3576-util".into()),
+            layout: Some(Layout::Split),
+            ..Default::default()
+        };
+        let b = resolve_recipe(&root, "rk3576-generic/loader", &ov).unwrap();
+        assert_eq!(
+            b.rkbin_boot().unwrap().uboot_profile.as_deref(),
+            Some("rk3576-util")
+        );
+        assert_eq!(b.layout, Layout::Split);
+        // And the same overrides are accepted on an image recipe of the same SoC, so
+        // the rejection is about the deliverable, not about the values.
+        let ov = Overrides {
+            suite: Some("trixie".into()),
+            ..Default::default()
+        };
+        assert!(resolve_recipe(&root, "h96-max-m9/forky", &ov).is_ok());
     }
 
     #[test]
@@ -1751,6 +1891,39 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn validate_board_profile_rejects_what_a_heredoc_cannot_hold() {
+        // The shipped profiles — the shapes this has to keep accepting.
+        for ok in ["speedy", "speedy-libreboot", "veyron_speedy", "jerry.v2"] {
+            validate_board_profile(ok).unwrap();
+        }
+        // A newline is the whole risk: the value is written through a quoted heredoc, so
+        // it is not expanded, but a line reading `B2D_EOF` ends the heredoc early and
+        // what follows becomes script.
+        for bad in [
+            "speedy\nB2D_EOF\nrm -rf /",
+            "speedy; id",
+            "speedy $(id)",
+            "../../etc/passwd",
+            "",
+            "..",
+        ] {
+            assert!(
+                matches!(
+                    validate_board_profile(bad),
+                    Err(ConfigError::InvalidBoardProfile { .. })
+                ),
+                "accepted {bad:?}"
+            );
+        }
+        // Every shipped depthcharge board resolves, so the rule is not narrower than
+        // the config it has to admit.
+        let root = repo_root();
+        for device in ["asus-c201", "asus-c100p", "asus-chromebit-cs10"] {
+            resolve_device(&root, device, &Overrides::default()).unwrap();
+        }
     }
 
     #[test]
@@ -2634,6 +2807,13 @@ mod tests {
             make_args: vec!["rm -rf /".into()],
             ..valid_kmod()
         };
+        // An option-shaped entry is refused for the same reason a defconfig name is:
+        // make parses it as an option rather than as a variable assignment, and `-f`
+        // would point the build at a makefile of the author's choosing.
+        let option_make_arg = KmodLayer {
+            make_args: vec!["-f/tmp/evil.mk=1".into()],
+            ..valid_kmod()
+        };
         let escaping_fw = KmodLayer {
             firmware: Some(KmodFirmware {
                 subdir: "../fw".into(),
@@ -2654,6 +2834,7 @@ mod tests {
             &non_bare_patch,
             &escaping_local,
             &bad_make_arg,
+            &option_make_arg,
             &escaping_fw,
             &absolute_fw_install,
         ] {

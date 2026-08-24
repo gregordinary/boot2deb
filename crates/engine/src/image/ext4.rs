@@ -83,6 +83,9 @@ const DEV_PREFIX: &[u8] = b"/dev/";
 /// they take the newest source mtime, which the rootfs export has already clamped to the
 /// lock's `SOURCE_DATE_EPOCH`. The per-image first-boot password is still unique per
 /// build, so the image as a whole is not byte-for-byte reproducible.
+///
+/// Returns the checks the filesystem passed, in order, for the provenance manifest's
+/// `[verification]` — see [`verify_clean`], where one of them is host-dependent.
 pub(crate) fn build_rootfs_ext4(
     dest: &Path,
     size: u64,
@@ -91,7 +94,7 @@ pub(crate) fn build_rootfs_ext4(
     uuid: Uuid,
     first_boot: FirstBoot,
     step: &Step,
-) -> Result<(), EngineError> {
+) -> Result<Vec<String>, EngineError> {
     assert!(
         size.is_multiple_of(EXT4_BLOCK),
         "ext4 size must be block-aligned (geometry guarantees this)"
@@ -310,7 +313,14 @@ impl Source for Entries {
 /// A checksum failure means the formatter wrote an image its own reader rejects; an
 /// `e2fsck` correction means the formatter and an independent checker disagree about the
 /// layout. Either fails the build — a disagreement that must never ship inside an image.
-fn verify_clean(dest: &Path, step: &Step) -> Result<(), EngineError> {
+///
+/// The reader check is compiled in and always runs; the `e2fsck` cross-check runs only
+/// where the host carries `e2fsprogs`, which makes verification *depth* host-dependent.
+/// That is a difference in strength, not a hole — but it is one the build host decides,
+/// so the checks that ran are returned and recorded in the image's provenance
+/// (`[verification]`) rather than left to a log line. `doctor` lists `e2fsck` as an
+/// optional tool for the same reason.
+fn verify_clean(dest: &Path, step: &Step) -> Result<Vec<String>, EngineError> {
     step.log("verifying ext4 image (ferrosys reader: every metadata checksum)");
     let file = std::fs::File::open(dest).map_err(|s| EngineError::io(dest, s))?;
     let mut reader = Reader::open(file).map_err(|e| EngineError::Ext4Format {
@@ -321,16 +331,21 @@ fn verify_clean(dest: &Path, step: &Step) -> Result<(), EngineError> {
         .map_err(|e| EngineError::Ext4Format {
             detail: format!("metadata checksum verification failed: {e}"),
         })?;
+    let mut ran = vec!["ferrosys-reader".to_string()];
 
     if have_tool("e2fsck") {
         step.log("cross-checking with e2fsck -fn (any correction fails the build)");
         let mut cmd = Command::new("e2fsck");
         cmd.arg("-fn").arg(dest);
         build::run(cmd, "e2fsck", "e2fsck -fn (verify formatted rootfs)", step)?;
+        ran.push("e2fsck".to_string());
     } else {
-        step.log("e2fsck not found; skipping the external cross-check (ferrosys reader verified)");
+        step.log(
+            "e2fsck not found; skipping the external cross-check (ferrosys reader verified) \
+             — the image's provenance records which checks ran",
+        );
     }
-    Ok(())
+    Ok(ran)
 }
 
 /// True when a host tool is runnable (a missing binary fails to spawn).

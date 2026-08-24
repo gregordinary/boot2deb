@@ -466,15 +466,14 @@ fn kill_group(pgid: i32) {
 
 /// A placeholder failing exit status for the unreachable-in-practice case where
 /// `wait` itself errors after a kill.
+///
+/// Constructed from the raw wait status rather than by running a failing command: this
+/// is the error path of a probe that has already lost its child, and it must not
+/// depend on being able to spawn one more process to say so. `1 << 8` is the wait
+/// encoding of "exited normally with code 1" — the low byte holds the terminating
+/// signal, the next the exit code.
 fn exit_placeholder() -> std::process::ExitStatus {
-    // A non-zero exit via a trivially-failing command; only used if `wait` errors.
-    Command::new("false").status().unwrap_or_else(|_| {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg("exit 1")
-            .status()
-            .expect("shell exits")
-    })
+    std::os::unix::process::ExitStatusExt::from_raw(1 << 8)
 }
 
 #[cfg(test)]
@@ -614,6 +613,21 @@ abc1230000000000000000000000000000000000\trefs/heads/master\n";
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "should not wait for the full sleep"
+        );
+    }
+
+    #[test]
+    fn the_exit_placeholder_is_a_plain_failure() {
+        // It stands in for a status `wait` could not report, so it must read as an
+        // ordinary non-zero exit — not a signal death, which callers classify
+        // differently — and it must be computed, not spawned: this is the path where
+        // the probe has already lost a child.
+        let status = exit_placeholder();
+        assert!(!status.success());
+        assert_eq!(status.code(), Some(1));
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            None::<i32>
         );
     }
 

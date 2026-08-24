@@ -11,7 +11,7 @@ commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
 profiles = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "a402fd101afad8bb1d5cfe2e99fc78e2bd35b940"
+commit = "e56368aa9a73f74fe682f88590797f4013a5ef45"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -41,7 +41,7 @@ commit = "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935"
 [ffmpeg.rockchip]
 source = "https://github.com/nyanmisaka/ffmpeg-rockchip.git"
 ref = "8.1"
-commit = "f66f2f804627e4464c2d1b10181772b5437bb991"
+commit = "388741a3544b92cf525f1cb3746ba9fb8f301d9a"
 
 [rootfs]
 suite = "forky"

@@ -192,6 +192,61 @@ fetched, nothing is applied, `verify-patches` reports there is nothing to verify
 the lock **omits its `[patches]` block entirely** rather than pinning a commit the build
 never consumes. Such a board builds on a machine with no `patches` checkout.
 
+## The bootloader is its own axis
+
+A board's u-boot is not one thing. The same silicon support can be packaged as a
+minimal image that only flashes the board over USB, as the bootloader an OS image
+ships with, or as a recovery tool with a boot menu and diagnostics. Those differ by a
+patch series over the same u-boot tag — so the bootloader gets **its own axis**, sitting
+beside the kernel rather than under it:
+
+```toml
+# devices/<board>.toml
+supported_uboot_profiles = ["rk3576-display", "h96-max-m9-util"]
+default_uboot_profile    = "rk3576-display"
+```
+
+A profile is a patch profile in the same `patches` repo the kernel series lives in,
+selected per recipe (`uboot_profile = "..."`) or per invocation (`--uboot-profile`),
+and validated against the device's supported set exactly as the kernel axis is. The
+repo it is fetched from is the boot method's `patches_url`/`patches_ref`, and the
+resolved commit lands in the lock's `[uboot_patches]` block — a full pin like every
+other fetched source, graded by `verify-sources` and recorded in each image's
+provenance manifest.
+
+A board whose u-boot ships pristine simply declares no profiles — the RK1 does — or,
+if it lists some and wants none for this build, selects `"none"`, the same sentinel
+the kernel axis spells as `patch_profile = "none"`. Either way the build fetches
+nothing and the lock omits `[uboot_patches]` entirely. Declaring profiles but no
+default, with none selected, is a config error rather than a silent fallback to
+pristine.
+
+### A recipe whose deliverable is the bootloader
+
+Because the axis is independent, a recipe can name a bootloader and *nothing else*:
+
+```toml
+# recipes/rk3576-generic/util.toml
+device        = "rk3576-generic"
+deliverable   = "uboot"
+uboot_profile = "rk3576-util"
+```
+
+`deliverable = "uboot"` means the artifact is the bootloader alone. Such a build
+resolves no kernel, no suite, no features, and no rootfs, and its lock records only the
+u-boot pins. Setting a rootfs axis on one — `--suite`, `--feature`, `--image-size`, a
+locale — is an **error**, not a value quietly dropped: there is nothing for it to
+change, and accepting it would be indistinguishable from acting on it.
+
+The deliverable only exists where the boot method builds a bootloader of ours. A
+depthcharge board's firmware is its own, so `deliverable = "uboot"` on one is rejected
+at resolution.
+
+A device may exist purely to home such recipes. `rk3576-generic` is not a board: the
+SoC-generic u-boot images build from a control DTB that is identical on every RK3576
+board, so they live on a tool host rather than being duplicated per board. See
+[RK3576 u-boot images](rk3576-uboot-images.md) for the worked example.
+
 ## Out-of-tree modules are their own layer
 
 Some hardware is driven by a module that lives in nobody's kernel tree — a Wi-Fi part

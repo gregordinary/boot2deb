@@ -7,7 +7,7 @@
 //! ephemeral/unadvertised pin is flagged (advisory — it never blocks the write).
 
 use crate::args::UpdateArgs;
-use crate::config::{extra_debs_store, preflight_config, source_axes};
+use crate::config::{default_patches_checkout, extra_debs_store, preflight_config, source_axes};
 use crate::render::{print_event, short};
 use boot2deb_core::model::Overrides;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
@@ -151,6 +151,13 @@ pub(crate) fn run(
         root.find_asset(&rel)
             .unwrap_or_else(|| root.path().join(rel))
     });
+    // The `patches` checkout whose HEAD pins the series: the explicit flag, else the
+    // config root's sibling — anchored to `--root` so the same tree is read whichever
+    // directory `update` runs from.
+    let patches_path = args
+        .patches_path
+        .clone()
+        .unwrap_or_else(|| default_patches_checkout(root));
     let manifest = args.rootfs_manifest.unwrap_or_else(|| {
         // The manifest is a bare filename living beside the recipe in its device
         // folder, so it is named for the recipe's leaf, not the slashed reference:
@@ -169,7 +176,7 @@ pub(crate) fn run(
         ffmpeg_rockchip_ref: &ffmpeg_rockchip_ref,
         kmod_refs: &kmod_refs,
         blobs_dir: &blobs_dir,
-        patches_path: &args.patches_path,
+        patches_path: &patches_path,
         rootfs_manifest: &manifest,
     };
     let lock = pins::resolve_lock(&build, &opts)?;

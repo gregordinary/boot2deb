@@ -170,6 +170,27 @@ pub enum ConfigError {
         boot_method: String,
     },
 
+    /// An override was set on an axis the resolved deliverable does not have — a
+    /// rootfs axis (`--suite`, `--feature`, `--locale`, …) on a `deliverable = "uboot"`
+    /// recipe, which resolves no kernel, no suite, and no rootfs.
+    ///
+    /// Named rather than dropped: an inapplicable *stage* is already a user error worth
+    /// naming rather than a silent skip, and an inapplicable *axis* is the same mistake
+    /// one level up. Silently discarding it would accept a misspelled feature name, or
+    /// an `--image-size` that is a hard error on every other path, and exit 0.
+    #[error(
+        "{flag} does not apply to a u-boot-only build of '{device}': the deliverable is \
+         the bootloader alone, so it resolves no kernel, suite, or rootfs for that axis \
+         to change — drop the flag (or the recipe key that sets it), or build an image \
+         recipe"
+    )]
+    OverrideNotApplicable {
+        /// The device being resolved.
+        device: String,
+        /// The offending axis as its flag spells it (e.g. `--suite`, `--image-size`).
+        flag: &'static str,
+    },
+
     /// The device declares `supported_uboot_profiles` but no `default_uboot_profile`,
     /// and none was selected — so a build has no u-boot profile to resolve.
     #[error(
@@ -241,6 +262,20 @@ pub enum ConfigError {
         board: String,
         /// Comma-separated profiles the device does support.
         supported: String,
+    },
+
+    /// The depthcharge board profile name is not a bare identifier. Separate from
+    /// [`UnknownBoardProfile`](Self::UnknownBoardProfile): that one asks whether the
+    /// device offers the profile, this one whether the string is safe to carry. The
+    /// value is written into `/etc/depthcharge-tools/config` through a quoted heredoc,
+    /// so a line reading `B2D_EOF` in it would end the heredoc early.
+    #[error(
+        "board profile '{board}' is not a bare identifier ([A-Za-z0-9_.-]) — the name is \
+         written into /etc/depthcharge-tools/config and read back by depthchargectl"
+    )]
+    InvalidBoardProfile {
+        /// The offending profile name.
+        board: String,
     },
 
     /// The requested image layout has no meaning under the resolved boot method.

@@ -99,11 +99,20 @@ pub(crate) fn run(
         }
     }
 
-    let work_dir = crate::workdir::work_dir_for(recipe, args.work_dir);
+    let work_dir = crate::workdir::work_dir_for(root, recipe, args.work_dir);
     // Stamp the scratch tree as boot2deb-owned before anything writes into it:
     // `clean` removes only stamped work dirs.
     mark_work_dir(&work_dir)?;
     let out_dir = absolutize(args.out_dir.unwrap_or_else(|| work_dir.join("artifacts")));
+    // The content-addressed caches — provisioner downloads and finished rootfs trees —
+    // live under the work dir, so they persist across `--stage` invocations and are
+    // shared by every build using this work dir.
+    let cache_dir = work_dir.join("cache");
+    // Downloaded `.deb`s, shared by the build sandbox's base and the image's rootfs.
+    // Both provision the same suite and architecture, so their package sets overlap
+    // heavily and each cached entry is content-addressed and digest-verified before
+    // reuse — one cache is a smaller download, not a collision.
+    let deb_cache = cache_dir.join("provisioner-debs");
     // Sweep stale `.partial` staging temps a hard-killed prior run may have left in the
     // artifact dir before the compile stages publish into it. No-op when the
     // dir does not exist yet.
@@ -146,17 +155,23 @@ pub(crate) fn run(
     let cross_compile = pf.cross.then(|| resolved.cross_compile.clone());
     // The Tier-2 artifact store, unless disabled: a durable content-addressed
     // cache of the compile nodes' output `.deb`s under <root>/cache/artifacts, keyed
-    // by each node's output signature. The host toolchain identity is folded into the
-    // kernel/u-boot output signatures, so probe it once here (skipped when the cache
-    // is off — its value then keys nothing).
+    // by each node's output signature.
     let artifact_store: Option<PathBuf> =
         (!args.no_artifact_cache).then(|| absolutize(root.path().join("cache").join("artifacts")));
+    // The host tools that produce this build's compiled bytes, probed once. Two
+    // consumers: the output signatures (so an artifact is never restored across a
+    // toolchain change) and the provenance manifest (so an image can answer which
+    // compiler built its kernel). Probed unconditionally — the manifest states it
+    // whether or not the cache is on, and it is three `--version` calls.
+    let toolchain = boot2deb_engine::toolchain::HostToolchain::probe(
+        cross_compile.as_deref(),
+        pf.cross.then(|| resolved.arch.qemu_arch()),
+    );
     let build_env = BuildEnv {
-        toolchain_id: if artifact_store.is_some() {
-            boot2deb_engine::toolchain::host_cc_identity(cross_compile.as_deref())
-        } else {
-            String::new()
-        },
+        toolchain_id: toolchain.compiler_identity(),
+        // What the sandbox's own compiler is: the userland it bootstraps from, plus
+        // the interpreter that runs it.
+        sandbox_id: boot2deb_engine::build::sandbox_identity(&mirrors, &toolchain),
         cross_compile,
         jobs: args.jobs,
     };
@@ -213,15 +228,28 @@ pub(crate) fn run(
     // stages that use it run only on a media-accel image build. A u-boot-only build
     // resolves no suite and stands up no sandbox.
     let sandbox: Option<Box<dyn BuildSandbox>> = resolved.suite.as_ref().map(|suite| {
-        let rootfs =
-            work_dir
-                .join("sandbox")
-                .join(format!("{}-{}", resolved.arch.debian_arch(), suite));
+        // The mirror list is in the path as well as in the sandbox, because
+        // `ensure_ready` reuses an existing tree without re-checking its origin — see
+        // `sandbox_rootfs_dir`.
+        let rootfs = boot2deb_engine::sandbox::sandbox_rootfs_dir(
+            &work_dir,
+            resolved.arch.debian_arch(),
+            suite,
+            &mirrors,
+        );
         Box::new(RootlessSandbox::new(
             rootfs,
+            // The same directory `doctor`'s overlay check probes, so a build root is
+            // established where the host was cleared to establish one.
+            boot2deb_engine::sandbox::build_root_uppers(&work_dir),
             suite.clone(),
             resolved.arch.debian_arch().to_string(),
+            // The build's own mirror list, not the default: under `--snapshot pin` the
+            // compiler that produces the target `.deb`s must come from the same
+            // point-in-time archive their runtime does.
+            mirrors.clone(),
             keyring.clone(),
+            Some(deb_cache.clone()),
         )) as Box<dyn BuildSandbox>
     });
 
@@ -310,6 +338,10 @@ pub(crate) fn run(
     // The per-image first-boot password, captured when this run assembles the image
     // (the image stage owns it, splicing it into the staged rootfs).
     let mut first_boot_password: Option<String> = None;
+    // Which checks the image stage ran over the finished rootfs filesystem — reported
+    // by that stage rather than re-probed here, since one of them depends on a host
+    // tool being present. Recorded in the provenance manifest.
+    let mut rootfs_verified_with: Vec<String> = Vec::new();
     // The freshly-solved manifest's sha256, set by the rootfs stage — verified
     // against the committed pin and recorded into the lock by `--save-manifest`.
     let mut solved_manifest_digest: Option<String> = None;
@@ -633,10 +665,6 @@ pub(crate) fn run(
         let mut extra_packages = kernel_packages(&kernel_image_deb, &repo_debs)?;
         extra_packages.extend(kmod_packages(&kmod_debs, &repo_debs)?);
         let manifest_out = out_dir.join(&rootfs_pin.manifest);
-        // The content-addressed rootfs cache lives under the work dir, so it persists
-        // across `--stage` invocations and is shared by every build using this
-        // work dir.
-        let cache_dir = work_dir.join("cache");
         // Resolve each feature apt source's signing keyring to the vendored host
         // path the bootstrap verifies the repo against. Existence was already gated at
         // preflight; this stage-time resolution is the backstop for a keyring
@@ -647,6 +675,10 @@ pub(crate) fn run(
         // manifest below because it has to exist *before* the rootfs is bootstrapped —
         // it ships inside the tree the bootstrap produces.
         let system_identity = boot2deb_core::provenance::system_identity(&resolved, &lock);
+        // The interpreter that will run the tree's maintainer scripts, from the
+        // toolchain probed above — `None` on a native build, where nothing is
+        // interpreted. Bound here so the borrow outlives `opts`.
+        let interpreter_id = toolchain.qemu_identity();
         let opts = rootfs::RootfsOptions {
             repo_debs: &repo_debs,
             overlay_dirs: &overlay_dirs,
@@ -655,7 +687,11 @@ pub(crate) fn run(
             image_identity: &system_identity,
             rootfs_partuuid: identity.rootfs_partuuid,
             out_dir: &out_dir,
+            // The build's own scratch tree: the provisioned userland is multi-GB and
+            // carries xattrs, so it must not land on whatever `TMPDIR` names.
+            scratch_dir: &work_dir,
             keyring: keyring.as_deref(),
+            interpreter_id: interpreter_id.as_deref(),
             manifest_out: &manifest_out,
             mirrors: &mirrors,
             extra_packages: &extra_packages,
@@ -783,6 +819,7 @@ pub(crate) fn run(
             ),
         );
         first_boot_password = Some(artifacts.password);
+        rootfs_verified_with = artifacts.rootfs_verified_with;
     }
 
     // The solved manifest describing the rootfs inside the image this run assembled:
@@ -807,10 +844,7 @@ pub(crate) fn run(
     // It joins the lock's pins, the resolved build point, the solved-manifest digest,
     // the blob hashes, the toolchain identity, and the first-boot credential into
     // one "exactly what went into this image" document for support/security.
-    let prov_path = out_dir.join(format!(
-        "{}.provenance.toml",
-        recipe.rsplit('/').next().unwrap_or(recipe)
-    ));
+    let prov_path = out_dir.join(format!("{}.provenance.toml", leaf_of(recipe)));
     if first_boot_password.is_some() && image_manifest.is_none() {
         // An image was built and no manifest describes it. Any document here belongs to
         // an earlier image; removing it beats leaving one that reads as authoritative.
@@ -837,6 +871,44 @@ pub(crate) fn run(
             .lines()
             .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
             .count();
+        // The sandbox base compiled this build's target `.deb`s, and its manifest lives
+        // in the work dir beside the tree it describes. Publish a copy beside the image
+        // so the record travels with what it describes, rather than staying behind in a
+        // scratch tree `clean` removes.
+        let build_sandbox = match (
+            resolved.suite.as_ref(),
+            sandbox.as_ref().and_then(|s| s.base_manifest()),
+        ) {
+            // Paired, not defaulted: the sandbox is bootstrapped *for* the resolved
+            // suite, so a base without one is not a state this can reach.
+            (Some(suite), Some(base_manifest)) => {
+                let name = format!("{}.sandbox.pkgs", leaf_of(recipe));
+                let published = out_dir.join(&name);
+                std::fs::copy(&base_manifest, &published).map_err(|e| {
+                    format!(
+                        "publish the sandbox base manifest {} to {}: {e}",
+                        base_manifest.display(),
+                        published.display()
+                    )
+                })?;
+                emit_artifact(&sink, "image", "sandbox-manifest", &published);
+                let bytes = std::fs::read(&published)
+                    .map_err(|e| format!("read {}: {e}", published.display()))?;
+                Some(boot2deb_core::provenance::BuildSandboxProvenance {
+                    suite: suite.clone(),
+                    architecture: resolved.arch.debian_arch().to_string(),
+                    manifest: name,
+                    manifest_sha256: boot2deb_engine::blobs::sha256_hex(&bytes),
+                    package_count: String::from_utf8_lossy(&bytes)
+                        .lines()
+                        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+                        .count(),
+                })
+            }
+            // No sandbox was stood up: this build compiled no target `.deb`s, so there
+            // is no compiling toolchain to record.
+            _ => None,
+        };
         let facts = boot2deb_core::provenance::BuildFacts {
             host_arch: pf.host.arch,
             cross: pf.cross,
@@ -853,10 +925,25 @@ pub(crate) fn run(
             // reports the on-disk contract the rootfs actually carries rather than a
             // declared one.
             filesystem: boot2deb_engine::image::rootfs_filesystem_pin(),
+            // Reported by the image stage that ran them: the external cross-check is
+            // present only where the host carries e2fsprogs, so verification depth is
+            // host-determined and belongs in the record.
+            rootfs_verified_with: &rootfs_verified_with,
+            // The concrete host tools behind the arch selection above — the compiler
+            // is the largest host input to the kernel bytes, and no source pin covers
+            // it. Absent per tool when a build compiles nothing that needs it.
+            cc: toolchain.cc(),
+            assembler: toolchain.assembler(),
+            linker: toolchain.linker(),
+            qemu: toolchain.qemu(),
+            jobs: build_env.jobs(),
             // Resolved from the sandbox's own profile, likewise: the environment and
             // mounts every build command ran under, which no source pin covers and
             // which the sandbox library is free to change between releases.
             sandbox: boot2deb_engine::sandbox::resolved_inputs()?,
+            // The package set behind that profile: the environment above says what a
+            // compile ran in, this says what it compiled against.
+            build_sandbox,
         };
         let prov = boot2deb_core::provenance::assemble(&resolved, &lock, &facts);
         // The provenance lands in this recipe's own out_dir, named for the leaf
@@ -942,4 +1029,14 @@ pub(crate) fn run(
 /// lived with by hand ("never insert both cards at once") and this removes.
 fn image_identity(recipe: &str, build: &ResolvedBuild) -> image::ImageIdentity {
     image::ImageIdentity::derive(recipe, &build.device)
+}
+
+/// A recipe's leaf name — the stem every artifact this build publishes is named for.
+///
+/// Recipes nest under a device directory (`turing-rk1/media-accel-forky`), and the
+/// artifacts all land in one flat directory, so the separator has to go. Taking the
+/// leaf rather than flattening the whole path keeps the names short and matches the
+/// solved manifest's, which the lock already carries as a leaf.
+fn leaf_of(recipe: &str) -> &str {
+    recipe.rsplit('/').next().unwrap_or(recipe)
 }

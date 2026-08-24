@@ -65,13 +65,50 @@ pub enum RangeMatch {
 ///   { path = "rocket/084-rocket-drv-fix-bo-mm-uaf.patch", kernels = "<7.3" },
 /// ]
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchEntry {
     /// A bare path: applies to every kernel the profile's envelope admits.
     Always(String),
     /// A path narrowed to its own kernel range, intersected with the envelope.
     Ranged(RangedPatch),
+}
+
+// Manual `Deserialize` rather than `#[serde(untagged)]`, as for `KernelSource` and
+// `Keymap`: an untagged enum ignores unknown fields regardless of
+// `deny_unknown_fields`, and a table that matches no variant gives an opaque "did not
+// match any variant" rather than naming the offending key. `profile.toml` lives in the
+// `patches` repo and is hand-authored, so it is exactly the file that earns a precise
+// error. Dispatching on the TOML value kind — string → `Always`, table → the
+// `deny_unknown_fields` `RangedPatch` — makes a typo (`{ path, kernel }`) say so.
+impl<'de> Deserialize<'de> for PatchEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EntryVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EntryVisitor {
+            type Value = PatchEntry;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a patch entry: a path string or a { path, kernels } table")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<PatchEntry, E> {
+                Ok(PatchEntry::Always(v.to_string()))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<PatchEntry, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                RangedPatch::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(PatchEntry::Ranged)
+            }
+        }
+
+        deserializer.deserialize_any(EntryVisitor)
+    }
 }
 
 /// A [`PatchEntry`] carrying its own kernel range.
@@ -674,14 +711,42 @@ mod tests {
     }
 
     #[test]
-    fn a_ranged_entry_with_an_unknown_key_is_rejected() {
-        // Guards the untagged enum: a typo must not silently fall through to some
-        // other variant, it must fail the parse.
+    fn a_ranged_entry_with_an_unknown_key_is_rejected_by_name() {
+        // A typo must not silently fall through to another shape — and the message must
+        // name the offending key. `profile.toml` is hand-authored in the `patches` repo,
+        // and an untagged enum's "data did not match any variant" says nothing about
+        // which key is wrong or what the right one is.
         let text = r#"
             applies_to_kernel = ">=7.0"
             kernel = [{ path = "k/010-x.patch", kernel = "<7.2" }]
         "#;
-        assert!(toml::from_str::<PatchProfile>(text).is_err());
+        let err = toml::from_str::<PatchProfile>(text)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kernel"), "{err}");
+        assert!(err.contains("unknown field"), "{err}");
+        // A table missing `kernels` entirely is likewise named, not silently read as
+        // some other variant.
+        let missing = r#"
+            applies_to_kernel = ">=7.0"
+            kernel = [{ path = "k/010-x.patch" }]
+        "#;
+        let err = toml::from_str::<PatchProfile>(missing)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kernels"), "{err}");
+        // And a value that is neither a string nor a table says what was expected.
+        let wrong_kind = r#"
+            applies_to_kernel = ">=7.0"
+            kernel = [42]
+        "#;
+        let err = toml::from_str::<PatchProfile>(wrong_kind)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("a path string or a { path, kernels } table"),
+            "{err}"
+        );
     }
 
     #[test]

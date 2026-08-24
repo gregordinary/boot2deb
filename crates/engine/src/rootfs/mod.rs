@@ -30,7 +30,7 @@
 //! other package and needs no separate fetch step.
 
 mod provisioner;
-pub use provisioner::build_rootfs;
+pub use provisioner::{build_rootfs, sweep_provisioned};
 
 use crate::error::EngineError;
 use crate::event::Step;
@@ -95,9 +95,41 @@ pub struct RootfsOptions<'a> {
     pub rootfs_partuuid: uuid::Uuid,
     /// Directory the rootfs tarball is written to.
     pub out_dir: &'a Path,
+    /// The build's scratch tree — where this node stages the overlays and provisions
+    /// the rootfs before exporting it.
+    ///
+    /// Deliberately **not** `TMPDIR`, for the same reason as
+    /// [`build_root_uppers`](crate::sandbox::build_root_uppers). The provisioned tree
+    /// is the whole target userland (multiple GB) carrying `security.capability`
+    /// xattrs and subordinate-mapped ownership, and on most desktop distros `/tmp` is a
+    /// RAM-backed `tmpfs` sized to a fraction of physical memory — so `TMPDIR` would
+    /// make whether the build succeeds a property of the host's mount table, and a
+    /// `nodev`/`nosuid` `TMPDIR` would change what the tree can hold. The work dir is
+    /// where the build's other large intermediates already live, and it is the
+    /// directory [`doctor`](crate::checks) probes, so its capabilities are a *checked*
+    /// host requirement rather than an inherited one.
+    pub scratch_dir: &'a Path,
     /// Debian archive keyring verifying the suite's `Release` (as the sandbox);
     /// `None` uses the host apt trust store (Debian host only).
     pub keyring: Option<&'a Path>,
+    /// Identity of the `qemu-user` interpreter that executes the target's maintainer
+    /// scripts
+    /// ([`qemu_identity`](crate::toolchain::HostToolchain::qemu_identity)), or `None`
+    /// on a native host, where target binaries run directly and nothing is interpreted.
+    ///
+    /// An input to the *tree*, not merely a fact about the host: on a cross host every
+    /// maintainer script runs under it, and so does everything they invoke —
+    /// `update-initramfs` writing the initrd this image boots, `ldconfig`,
+    /// `locale-gen`, and on a depthcharge board the kernel signing. So it is folded
+    /// into the rootfs cache key ([`crate::rootcache::CacheKeyInputs`]) and a tree
+    /// configured under one interpreter is never restored for a build using another.
+    ///
+    /// One residual: the binfmt handler is registered `F`-flagged, so the kernel pins
+    /// an fd to the interpreter when the handler is registered, while this identity is
+    /// probed from `PATH`. Debian's `qemu-user-static` re-registers as it upgrades, so
+    /// the two agree; a host that registers its handler by hand has a window where they
+    /// do not.
+    pub interpreter_id: Option<&'a str>,
     /// Where the solved package manifest is written (the lock's `[rootfs].manifest`
     /// points at it).
     pub manifest_out: &'a Path,
@@ -186,7 +218,16 @@ pub struct RootfsArtifacts {
 }
 
 /// Copy the layer overlay trees into `staging` (each existing dir, in order, via
-/// `cp -a` so symlinks + modes are preserved). Later layers win.
+/// `cp -a` so symlinks and the executable bit survive). Later layers win. The
+/// caller normalizes the merged tree's modes with [`normalize_overlay_modes`].
+///
+/// `--remove-destination` is what makes "later layers win" hold for every file a
+/// layer may legitimately ship. `cp` opens an existing destination for writing, so
+/// overriding a file an earlier layer shipped without the owner-write bit — a key, a
+/// `sudoers.d` drop-in — would fail with `Permission denied` instead of replacing it;
+/// unlinking first sidesteps the destination's mode entirely. The customize copy
+/// downstream passes the same flag, for the adjacent case of replacing a base file
+/// through a dangling symlink.
 fn copy_overlay_trees(
     staging: &Path,
     overlay_dirs: &[PathBuf],
@@ -198,10 +239,62 @@ fn copy_overlay_trees(
         if dir.exists() {
             let mut cmd = Command::new("cp");
             cmd.arg("-a")
+                .arg("--remove-destination")
                 .arg(format!("{}/.", dir.display()))
                 .arg(staging);
             crate::build::run(cmd, "cp", &format!("stage overlay {}", dir.display()), step)?;
         }
+    }
+    Ok(())
+}
+
+/// Force every mode in a staged overlay tree to the mode the image must ship, so the
+/// build host's umask cannot reach the rootfs: each directory to `0755`, each file to
+/// `0755` if any execute bit is set and `0644` otherwise, symlinks left alone.
+///
+/// The rule is **git's own file model**, and that is what makes it lossless here. Git
+/// records exactly two file modes (`100644` and `100755`) and records directory modes
+/// not at all, so an overlay tree's checked-out modes are not authored data — they are
+/// the developer's umask applied to git's two bits. Restating those bits is therefore
+/// the identity function on everything the repository actually expresses, while
+/// discarding the one thing it does not: under a `002` umask a checkout materializes
+/// `0664`/`0775` files and `0775` directories, and `cp -a` into the staging tree
+/// followed by `cp --preserve=mode` into the rootfs would stamp a group-writable
+/// `/etc`, `/usr`, and `/boot` into every image. Under `077` it would stamp `0700`
+/// `/etc` and the image would not work at all.
+///
+/// It also covers the generated config: [`write_staged`] sets each file's own mode but
+/// creates parent directories through `create_dir_all`, which applies the umask.
+///
+/// An overlay that needs a mode outside git's two — a `0440` sudoers drop-in, a `0700`
+/// home — cannot express it in a git tree in the first place, and so belongs in the
+/// customize script, which runs as root inside the cage. Applying this after the
+/// merge is what keeps that boundary honest rather than accidental.
+fn normalize_overlay_modes(root: &Path) -> Result<(), EngineError> {
+    let meta = std::fs::symlink_metadata(root).map_err(|s| EngineError::io(root, s))?;
+    if meta.file_type().is_symlink() {
+        // A symlink's own mode is not consulted by the kernel, and `chmod` would
+        // follow it and rewrite the target instead.
+        return Ok(());
+    }
+    if meta.is_dir() {
+        set_mode(root, 0o755)?;
+        let mut children: Vec<PathBuf> = std::fs::read_dir(root)
+            .map_err(|s| EngineError::io(root, s))?
+            .map(|e| e.map(|e| e.path()).map_err(|s| EngineError::io(root, s)))
+            .collect::<Result<_, _>>()?;
+        // Deterministic recursion order (cosmetic; modes are order-independent).
+        children.sort();
+        for child in children {
+            normalize_overlay_modes(&child)?;
+        }
+    } else {
+        use std::os::unix::fs::PermissionsExt;
+        // Any execute bit means git recorded `100755` — the hooks and first-boot
+        // scripts, whose `+x` is load-bearing (the runner refuses a non-executable
+        // hook). Everything else is `100644`.
+        let exec = meta.permissions().mode() & 0o111 != 0;
+        set_mode(root, if exec { 0o755 } else { 0o644 })?;
     }
     Ok(())
 }
@@ -274,6 +367,7 @@ fn stage_preinstall_overlay(
         write_staged(staging, "etc/default/keyboard", &config::keyboard(keymap))?;
     }
 
+    normalize_overlay_modes(staging)?;
     step.log(format!(
         "staged pre-install overlay at {} (laid in before any package)",
         staging.display()
@@ -282,8 +376,9 @@ fn stage_preinstall_overlay(
 }
 
 /// Merge the layer `overlay/` trees into `staging` (each existing dir, in order,
-/// via `cp -a` so symlinks + modes are preserved), then write the *generated*
-/// config into it. Later layers and the generated config win.
+/// via `cp -a` so symlinks and the executable bit survive), then write the
+/// *generated* config into it and normalize every mode
+/// ([`normalize_overlay_modes`]). Later layers and the generated config win.
 fn stage_overlay(
     staging: &Path,
     overlay_dirs: &[PathBuf],
@@ -338,6 +433,7 @@ fn stage_overlay(
     // The sudoers drop-in is written by the customize-hook directly into the chroot,
     // not staged here: at mode 0440 it would be unreadable to the hook's mapped uid
     // when it copies the overlay in.
+    normalize_overlay_modes(staging)?;
     step.log(format!(
         "staged overlay + generated config at {}",
         staging.display()
@@ -347,7 +443,10 @@ fn stage_overlay(
 
 /// Write `content` to `staging/<rel>` at mode `0644`, creating parent dirs. The
 /// explicit mode keeps generated `/etc` config reproducible regardless of the
-/// build host's umask (a `002` umask would otherwise leave it group-writable).
+/// build host's umask (a `002` umask would otherwise leave it group-writable);
+/// the parent directories `create_dir_all` makes are covered by the staging
+/// tree's closing [`normalize_overlay_modes`] pass, which the umask reaches the
+/// same way.
 fn write_staged(staging: &Path, rel: &str, content: &str) -> Result<(), EngineError> {
     let path = staging.join(rel);
     if let Some(parent) = path.parent() {
@@ -748,10 +847,97 @@ mod tests {
         boot2deb_core::provenance::system_identity(build, &empty_lock())
     }
 
+    /// The staged tree's modes are the image's modes, and they must not depend on the
+    /// umask the build ran under.
+    ///
+    /// Built at a `002` umask — the Ubuntu/Pop!_OS default, where a git checkout
+    /// materializes `0664` files and `0775` directories — the tree normalizes to the
+    /// two modes git can express, with the executable bit and the symlink intact. The
+    /// `077` case is the one that would ship an unusable image (`/etc` at `0700`, so
+    /// no non-root process could read `/etc/passwd`), so it is asserted too.
+    #[test]
+    fn staged_modes_do_not_follow_the_build_host_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("overlay");
+        std::fs::create_dir_all(root.join("etc/boot2deb/first-boot.d")).unwrap();
+        // Group-writable throughout, as `cp -a` from a umask-002 checkout leaves it.
+        let plain = root.join("etc/hostname");
+        std::fs::write(&plain, "board\n").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let hook = root.join("etc/boot2deb/first-boot.d/20-network");
+        std::fs::write(&hook, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let link = root.join("etc/localtime");
+        std::os::unix::fs::symlink("/usr/share/zoneinfo/UTC", &link).unwrap();
+        for dir in ["etc", "etc/boot2deb", "etc/boot2deb/first-boot.d"] {
+            std::fs::set_permissions(root.join(dir), std::fs::Permissions::from_mode(0o775))
+                .unwrap();
+        }
+        // The `077` shape, on one directory: `/etc` unreadable to every non-root process.
+        std::fs::create_dir(root.join("usr")).unwrap();
+        std::fs::set_permissions(root.join("usr"), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        normalize_overlay_modes(&root).unwrap();
+
+        let mode = |p: &Path| p.symlink_metadata().unwrap().permissions().mode() & 0o7777;
+        for dir in [
+            "",
+            "etc",
+            "etc/boot2deb",
+            "etc/boot2deb/first-boot.d",
+            "usr",
+        ] {
+            assert_eq!(mode(&root.join(dir)), 0o755, "directory {dir:?}");
+        }
+        assert_eq!(mode(&plain), 0o644, "a non-executable file is 0644");
+        assert_eq!(mode(&hook), 0o755, "an executable hook keeps its +x");
+        // The link's own mode is untouched, and it still points where it did — a
+        // `chmod` through the link would have rewritten its target instead.
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("/usr/share/zoneinfo/UTC")
+        );
+    }
+
+    /// "Later layers win" has to hold for every file a layer may legitimately ship,
+    /// including one with no owner-write bit — a key, a `sudoers.d` drop-in. `cp` opens
+    /// an existing destination for writing, so without `--remove-destination` a device
+    /// overriding such a file from its SoC layer fails the whole build with
+    /// `Permission denied`, and the layering contract silently has an exception in it.
+    #[test]
+    fn a_later_layer_overrides_a_read_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        let device = tmp.path().join("device");
+        std::fs::create_dir_all(base.join("etc/ssh")).unwrap();
+        std::fs::create_dir_all(device.join("etc/ssh")).unwrap();
+        let key = base.join("etc/ssh/ssh_host_ed25519_key");
+        std::fs::write(&key, "base key\n").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o400)).unwrap();
+        std::fs::write(device.join("etc/ssh/ssh_host_ed25519_key"), "device key\n").unwrap();
+
+        let staging = tmp.path().join("staging");
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "overlay");
+        copy_overlay_trees(&staging, &[base, device], &step).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(staging.join("etc/ssh/ssh_host_ed25519_key")).unwrap(),
+            "device key\n"
+        );
+    }
+
     /// Every first-boot hook any layer ships must be executable.
     ///
-    /// The overlay trees are copied with `cp -a`, so a hook's mode in the repo is its
-    /// mode in the image, and [the runner](../../../base/overlay/usr/lib/boot2deb/first-boot)
+    /// The overlay trees are copied with `cp -a` and normalized by git's two file modes
+    /// ([`normalize_overlay_modes`]), so a hook's executable bit in the repo is its
+    /// executable bit in the image, and
+    /// [the runner](../../../base/overlay/usr/lib/boot2deb/first-boot)
     /// refuses to run a non-executable one. The hooks are load-bearing — depthcharge's
     /// re-signs the kernel partition against the UUID first-boot has just changed — so a
     /// lost `+x` bit is the difference between a board that boots and one that boots

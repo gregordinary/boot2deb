@@ -50,8 +50,15 @@ jobs:
       # openssl, e2fsprogs, util-linux) are already on the image.
       - name: Install host tools the engine tests exercise
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fakeroot
+      # `BOOT2DEB_REQUIRE_HOST_TOOLS` turns a self-skip into a panic. The end-to-end
+      # image tests skip themselves on a tool-minimal dev host; this job installs the
+      # tools above and therefore claims they are present, so a skip here is a
+      # coverage regression (a changed runner image) and must fail rather than pass
+      # quietly. It has happened before.
       - name: Run tests
         run: cargo test --workspace
+        env:
+          BOOT2DEB_REQUIRE_HOST_TOOLS: "1"
       # `--all-targets` so test and example code is linted too, not just the libs.
       # The toolchain is not pinned, so a new stable can add a lint and fail this on
       # an unrelated change; fix the lint or add a scoped `#[allow]` with a reason.

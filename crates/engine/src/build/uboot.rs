@@ -33,7 +33,9 @@ const CLONE_STAGE_VERSION: u32 = 1;
 /// different `.config` — and payloads — than v1 did.
 /// v3: maskrom boards additionally stage the merged RKBOOT loader
 /// ([`MASKROM_LOADER`]), so the output set grew.
-const OUTPUT_STAGE_VERSION: u32 = 3;
+/// v4: the `.deb` states its compressor rather than inheriting the host `dpkg`
+/// default, so a v3 entry may be a `zstd` archive where this build states `xz`.
+const OUTPUT_STAGE_VERSION: u32 = 4;
 
 /// Filesystem inputs for the u-boot stage.
 pub struct UbootOptions<'a> {
@@ -567,11 +569,9 @@ fn package_name(device: &str) -> String {
 /// bootloader lives in a raw gap outside any filesystem, so flashing is the image
 /// build's job (or a documented manual step), never an `apt` side effect that
 /// could brick a board by writing to the wrong device. Built host-side
-/// with `fakeroot dpkg-deb` — a data-only archive needs no target-arch sandbox.
-///
-/// `source_date_epoch` (the locked commit's committer date) is exported so
-/// `dpkg-deb` clamps every archive member's mtime to it, making the `.deb`
-/// byte-reproducible rather than stamped with the build clock.
+/// with [`build::dpkg_deb_build`] — a data-only archive needs no target-arch sandbox,
+/// and that helper is what makes the archive byte-identical across build hosts
+/// (stated compressor, `source_date_epoch` mtime ceiling).
 #[allow(clippy::too_many_arguments)]
 fn package_deb(
     build: &ResolvedBuild,
@@ -600,13 +600,7 @@ fn package_deb(
 
     let deb_name = format!("{pkg}_{version}_{arch}.deb");
     let deb_in_stage = opts.work_dir.join(&deb_name);
-    let mut cmd = Command::new("fakeroot");
-    cmd.args(["dpkg-deb", "--build"])
-        .arg(&pkg_stage)
-        .arg(&deb_in_stage);
-    if let Some(epoch) = source_date_epoch {
-        cmd.env("SOURCE_DATE_EPOCH", epoch.to_string());
-    }
+    let cmd = build::dpkg_deb_build(&pkg_stage, &deb_in_stage, source_date_epoch);
     build::run(cmd, "fakeroot", "dpkg-deb --build u-boot", step)?;
 
     let deb = stage_artifact(opts.out_dir, &deb_in_stage)?;
@@ -912,6 +906,7 @@ mod tests {
             cross_compile: None,
             jobs: None,
             toolchain_id: tc.to_string(),
+            sandbox_id: String::new(),
         };
         let boot = build.rkbin_boot().unwrap();
         let man = |lock: &Lock, env: &BuildEnv, patches| {

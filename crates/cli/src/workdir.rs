@@ -6,20 +6,28 @@
 //! `clean` refuses to remove an unstamped one unless forced.
 
 use crate::fsutil::absolutize;
+use boot2deb_core::ConfigRoot;
 use std::path::{Path, PathBuf};
 
 /// The scratch tree a build of `recipe` uses: `explicit` when `--work-dir` names one,
-/// else `build/<recipe>`.
+/// else `<root>/build/<recipe>`.
+///
+/// The default is anchored to the config root, not the process CWD, so every durable
+/// location a run touches lives in one tree: the artifact, patches, extra-deb, and
+/// verify-tree caches are all `<root>/cache/...`, and a `--root` run from elsewhere
+/// must not split its state between the config root and wherever it was invoked. An
+/// explicit `--work-dir` is the operator naming a path, so it keeps the ordinary
+/// CWD-relative meaning.
 ///
 /// Always absolute. The sandbox binds the work tree into the target-arch rootfs at its
 /// host path and chdirs there, and a relative path would resolve against the wrong root
 /// inside the namespace.
 ///
-/// Shared with `doctor`, whose overlay check probes the filesystem the uppers land on —
-/// an answer that is only right if it is asked about the same directory the build will
-/// use.
-pub(crate) fn work_dir_for(recipe: &str, explicit: Option<PathBuf>) -> PathBuf {
-    absolutize(explicit.unwrap_or_else(|| PathBuf::from("build").join(recipe)))
+/// Shared by `build`, `why-rebuild`, `clean`, and `doctor` — the prediction, the
+/// removal, and the overlay probe are all only right if they name the same directory
+/// the build will use.
+pub(crate) fn work_dir_for(root: &ConfigRoot, recipe: &str, explicit: Option<PathBuf>) -> PathBuf {
+    absolutize(explicit.unwrap_or_else(|| root.path().join("build").join(recipe)))
 }
 
 /// The marker file [`mark_work_dir`] stamps into every work dir `build` creates
@@ -62,6 +70,25 @@ pub(crate) fn check_work_dir_removable(work_dir: &Path, force: bool) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_work_dir_follows_the_config_root() {
+        // The failure this guards is a split state tree: every durable cache is
+        // `<root>/cache/...`, so a CWD-relative scratch default would make `build`
+        // start a fresh compile beside the cached one, and `why-rebuild`/`clean`
+        // report an existing tree absent.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ConfigRoot::new(tmp.path());
+        assert_eq!(
+            work_dir_for(&root, "turing-rk1/forky", None),
+            tmp.path().join("build/turing-rk1/forky")
+        );
+        // An explicit --work-dir is the operator naming a path, so it keeps the
+        // ordinary CWD-relative meaning — and comes out absolute either way.
+        let explicit = work_dir_for(&root, "turing-rk1/forky", Some(PathBuf::from("scratch")));
+        assert!(explicit.is_absolute());
+        assert_eq!(explicit, std::env::current_dir().unwrap().join("scratch"));
+    }
 
     #[test]
     fn clean_guard_requires_the_ownership_stamp() {

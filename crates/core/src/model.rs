@@ -59,6 +59,22 @@ impl Arch {
             Arch::Riscv64 => "riscv64",
         }
     }
+
+    /// The `qemu-user` token for this ISA — the `<token>` in `qemu-<token>`, naming
+    /// both the interpreter binary and its `binfmt_misc` handler.
+    ///
+    /// A property of the ISA rather than of any layer, hence here and not in config:
+    /// qemu names 32-bit Arm `arm` and 64-bit Arm `aarch64`, matching neither
+    /// [`as_str`](Arch::as_str) nor [`debian_arch`](Arch::debian_arch). On a cross host
+    /// this interpreter executes every target binary a package build runs, so it is a
+    /// build input as much as the compiler is.
+    pub fn qemu_arch(&self) -> &'static str {
+        match self {
+            Arch::Arm64 => "aarch64",
+            Arch::Armv7 => "arm",
+            Arch::Riscv64 => "riscv64",
+        }
+    }
 }
 
 /// System-on-chip. Selects the shared SoC layer (`socs/<soc>.toml`) that in turn

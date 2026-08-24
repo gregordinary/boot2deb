@@ -64,6 +64,13 @@ userland). Capture a timestamp with `--save-snapshot`; activate a mode with `--s
 fallback|pin`. A `fallback`/`pin` with no captured timestamp is refused rather than
 silently downgraded.
 
+The mirror list a mode resolves to is used **twice**: for the image's own userland, and
+for the target-arch sandbox the media-accel packages compile inside. That sandbox holds
+the `gcc` those `.deb`s are built with, so pinning one without the other would fix the
+runtime and leave the compiler free to move. The sandbox identity is folded into those
+packages' artifact-cache keys too, so a snapshot-pinned build never restores a
+live-mirror build's `.deb`s.
+
 This is why forky's churn is **not** at odds with the model: the tool to freeze against it
 exists; a frozen build turns it on.
 
@@ -97,6 +104,75 @@ in the future and unknowable at build time — even a bugfix can be output-affec
 stamp says *when the build worked*, never *when it will break*. A reproduce flow reads it
 to **advise** — "built with X; you are on Y, newer, likely fine; here is how to get X" —
 never to enforce.
+
+## The build host
+
+The three layers above are inputs you choose. The build *host* is not — it is whatever
+machine you happened to run on — so the rule for it is different: **a host setting either
+does not reach the image, or it is recorded.** Nothing in between.
+
+What is kept out:
+
+- **Your umask.** Git records two file modes and no directory modes at all, so a checked-out
+  overlay tree's modes are your umask, not authored data. The staged tree is normalized back
+  to git's own model — directories `0755`, files `0644` or `0755` by the executable bit —
+  before it is laid into the rootfs. Without it a `002` umask (the Ubuntu/Pop!\_OS default)
+  ships a group-writable `/etc`, `/usr`, and `/boot`, and a `077` umask ships an image whose
+  `/etc` no non-root process can read.
+- **Your git configuration.** Every `git` the build runs, and the pure-Rust clone beside it,
+  is isolated from `/etc/gitconfig`, `~/.gitconfig`, and `/etc/gitattributes`. The setting
+  that decides this is `url.<base>.insteadOf`: it rewrites a remote URL, so a host carrying
+  one would fetch a pinned commit from a remote the lock does not name — the exact input the
+  lock exists to fix. `core.hooksPath`, `am.threeWay`, `apply.whitespace`, and a system
+  `gitattributes` are the same class. Transport settings are the cost: express a proxy or
+  credentials through the environment (`http_proxy`, `https_proxy`), which git still reads.
+- **Your distro's `dpkg` defaults.** The host-built `.deb`s state their compressor (`xz`,
+  level 6) rather than inheriting it, so the same recipe at the same lock produces the same
+  archive on a Debian host and an Ubuntu-derived one — the latter defaults `dpkg-deb` to
+  `zstd`.
+- **Your `TMPDIR`.** The provisioned rootfs — the whole target userland, carrying xattrs
+  and mapped ownership — is staged in the build's work dir. On `/tmp` it would land on a
+  RAM-backed `tmpfs` on most desktops, making "does the build fit" a property of your
+  mount table.
+- **Your shell environment.** Every build command runs with `TZ=UTC` and `LC_ALL=C.UTF-8`,
+  and with `KCFLAGS`/`KAFLAGS`/`KCPPFLAGS`/`MAKEFLAGS` cleared, so a flag exported in your
+  shell cannot shape kernel bytes that a lock-keyed cache entry claims to reproduce.
+- **Your `openssl`.** The image's first-boot `/etc/shadow` entry is hashed in-process. No
+  host binary sits on the credential path.
+
+What is recorded, because it genuinely does reach the image:
+
+- **`[toolchain]`** — beyond the host/target arch and cross prefix, the version lines of the
+  `gcc`, `as`, and `ld` that compiled the kernel, u-boot, and out-of-tree modules, and the
+  `qemu-user` that, on a cross host, executed the target compiler for the sandbox-built
+  packages *and* every maintainer script that configured the rootfs. The compiler
+  is the largest host input to the kernel bytes and no source pin covers it, so an image's
+  provenance can answer "which gcc built this". Each is absent when the build compiles
+  nothing that needs it. `jobs` records the parallelism: it is recorded but deliberately not
+  keyed, since a build whose output depends on its job count has a bug, and keying it would
+  fragment the artifact cache by machine size.
+- **`[verification]`** — which checks the finished rootfs filesystem passed. The built-in
+  reader check (every metadata checksum) always runs; the independent `e2fsck -fn`
+  cross-check runs only where the host carries `e2fsprogs`. That makes verification *depth*
+  host-determined, so it is stated rather than left to a log line, and a release build can
+  be gated on it.
+- **`[build_sandbox]`** — the package set of the sandbox base that compiled the build's
+  target `.deb`s (the media-accel packages). `[rootfs]` records what the image *carries*;
+  this records what *produced* the parts of it boot2deb compiled — a second Debian tree,
+  resolved from the same mirrors, that no source pin covers. It names a
+  `<recipe>.sandbox.pkgs` manifest published beside the image, sha256-pinned per package
+  exactly as the rootfs manifest is, and is absent from a build that compiles no target
+  `.deb`s and therefore stands up no sandbox. It is a record, not a contract: nothing pins
+  it in the lock and no later build is verified against it.
+- **`[sandbox_env]` and `[[sandbox_mounts]]`** — the environment and the complete mount
+  profile every sandboxed build command runs under, as the sandbox library resolves them.
+  Both sit outside that library's compatibility promise, so they are recorded rather than
+  inferred from its version, and the mounts have no other accessor at all — down to the
+  `/dev` device nodes and symlinks.
+
+These identities also key the caches, so a `.deb` built with one toolchain is never
+restored for a build using another — and neither is a rootfs whose packages were configured
+under a different `qemu-user`.
 
 ## Two audiences
 

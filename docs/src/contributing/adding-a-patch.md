@@ -60,11 +60,14 @@ patch import: wrote media-accel/kernel/045-fix-foo.patch (3812 bytes)
 patch import: rk3588-accel/kernel now lists the patch at position 5 of 11
 
 next steps — no build reads the patch until the series is committed and re-pinned:
-  1. commit it:      git -C ../patches add -A && git -C ../patches commit
+  1. commit it:      git -C /home/you/dev/patches add -A && git -C /home/you/dev/patches commit
   2. re-pin locks:   boot2deb update turing-rk1/forky
 ```
 
-The re-pin line names each recipe whose kernel uses the profile you imported into.
+The re-pin line names each recipe whose kernel uses the profile you imported into. The
+checkout path it prints is the one it wrote to: `--patches-path` when you passed one,
+else the config root's sibling `../patches` — anchored to `--root`, not to the
+directory you ran from.
 
 ## 2. Commit in the patches repo
 

@@ -17,9 +17,10 @@
 //! - **Cross-arch only** (host arch ≠ target arch): a `qemu-<arch>` interpreter and
 //!   a registered+enabled binfmt handler for the target. A same-arch host runs the
 //!   target's binaries directly and skips these entirely.
-//! - **Image path:** none required — the rootfs ext4 is formatted and every metadata
-//!   checksum verified in-process by the pure-Rust `ferrosys` formatter. `e2fsck`, when
-//!   present, runs as an optional cross-check.
+//! - **Image path:** `tar` and `cp`, the two POSIX tools the rootfs and image stages
+//!   invoke directly. No filesystem tooling — the rootfs ext4 is formatted and every
+//!   metadata checksum verified in-process by the pure-Rust `ferrosys` formatter;
+//!   `e2fsck`, when present, runs as an optional cross-check.
 //!
 //! Detection is a side effect (PATH scan, `/proc` + `/etc/os-release` reads,
 //! `pkg-config` shell-out), so it lives in the engine, not `core`.
@@ -119,7 +120,7 @@ impl PkgManager {
     }
 
     /// Concrete package name for a canonical [`Pkg`] on this manager.
-    fn package(self, pkg: Pkg, target: Arch) -> String {
+    fn package(self, pkg: Pkg) -> String {
         use PkgManager::*;
         match pkg {
             // Same name across managers.
@@ -129,6 +130,8 @@ impl PkgManager {
             Pkg::Flex => "flex".into(),
             Pkg::Bison => "bison".into(),
             Pkg::E2fsprogs => "e2fsprogs".into(),
+            Pkg::Tar => "tar".into(),
+            Pkg::Coreutils => "coreutils".into(),
             Pkg::Fakeroot => "fakeroot".into(),
             // Kernel `bindeb-pkg` deps. rsync/cpio/kmod share the name across managers;
             // debhelper is Debian's, and elfutils' dev libs split by distro.
@@ -187,15 +190,6 @@ impl PkgManager {
                 Brew => "gcc".into(),
                 Unknown => "gcc".into(),
             },
-            Pkg::CrossToolchain => {
-                let triple = cross_triple(target);
-                match self {
-                    Apt => format!("gcc-{triple}"),
-                    Dnf => format!("gcc-{}-linux-gnu", target_gnu(target)),
-                    Pacman => format!("{triple}-gcc (AUR)"),
-                    _ => format!("gcc-{triple}"),
-                }
-            }
             Pkg::QemuUser => match self {
                 Pacman => "qemu-user-static-binfmt (AUR)".into(),
                 _ => "qemu-user-static".into(),
@@ -204,8 +198,29 @@ impl PkgManager {
     }
 
     /// A one-line remediation for a missing [`Pkg`].
-    fn remedy(self, pkg: Pkg, target: Arch) -> String {
-        format!("{} {}", self.install_cmd(), self.package(pkg, target))
+    fn remedy(self, pkg: Pkg) -> String {
+        format!("{} {}", self.install_cmd(), self.package(pkg))
+    }
+
+    /// A one-line remediation for the missing cross C toolchain, named from `triple`.
+    ///
+    /// Separate from [`package`](Self::package) because its package name is the only
+    /// one derived from *config* rather than fixed here: `triple` comes from the arch
+    /// layer's `cross_compile`, which is also what the build passes as `CROSS_COMPILE`.
+    /// A second table of triples in this file would let `doctor` suggest installing a
+    /// toolchain the build then does not use.
+    fn cross_toolchain_remedy(self, triple: &str) -> String {
+        use PkgManager::*;
+        let pkg = match self {
+            // Fedora names the package by the bare arch token, not the full triple.
+            Dnf => format!(
+                "gcc-{}-linux-gnu",
+                triple.split('-').next().unwrap_or(triple)
+            ),
+            Pacman => format!("{triple}-gcc (AUR)"),
+            _ => format!("gcc-{triple}"),
+        };
+        format!("{} {pkg}", self.install_cmd())
     }
 }
 
@@ -219,7 +234,6 @@ enum Pkg {
     Bison,
     Openssl,
     NativeToolchain,
-    CrossToolchain,
     QemuUser,
     E2fsprogs,
     /// `dpkg-deb` — host-side `.deb` packaging (the u-boot and kmod debs).
@@ -246,33 +260,10 @@ enum Pkg {
     Python3Setuptools,
     /// `python3-pyelftools` — u-boot `binman` ELF parsing.
     Pyelftools,
-}
-
-/// GNU triple for a cross toolchain targeting `arch` (the `<triple>gcc` prefix).
-fn cross_triple(arch: Arch) -> &'static str {
-    match arch {
-        Arch::Arm64 => "aarch64-linux-gnu",
-        Arch::Armv7 => "arm-linux-gnueabihf",
-        Arch::Riscv64 => "riscv64-linux-gnu",
-    }
-}
-
-/// The arch token Fedora uses in its cross-gcc package names.
-fn target_gnu(arch: Arch) -> &'static str {
-    match arch {
-        Arch::Arm64 => "aarch64",
-        Arch::Armv7 => "arm",
-        Arch::Riscv64 => "riscv64",
-    }
-}
-
-/// The qemu-user interpreter arch token for a target (`qemu-<token>`).
-fn qemu_arch(arch: Arch) -> &'static str {
-    match arch {
-        Arch::Arm64 => "aarch64",
-        Arch::Armv7 => "arm",
-        Arch::Riscv64 => "riscv64",
-    }
+    /// `tar` — unpacking and verifying the rootfs tarball and a signed kernel partition.
+    Tar,
+    /// `coreutils` (`cp`) — staging the layer overlay trees into the rootfs.
+    Coreutils,
 }
 
 /// What a *particular build* needs from the host — the input to [`tool_checks`].
@@ -312,6 +303,12 @@ pub struct ToolNeeds {
     /// them. `None` for a build that stands up no build root — one that compiles no
     /// packages in the target-arch sandbox — which needs no overlay at all.
     pub build_root_uppers: Option<PathBuf>,
+    /// The build assembles a rootfs and a disk image, so it shells out to the two
+    /// POSIX tools the image path uses directly: `cp` stages the layer overlay trees
+    /// and lays the customize tree into the provisioned rootfs, and `tar` verifies the
+    /// rootfs tarball (and, on a depthcharge board, extracts the signed kernel
+    /// partition). A u-boot-only deliverable assembles neither and needs neither.
+    pub assembles_image: bool,
 }
 
 /// Run every host preflight check a build actually needs, in report order.
@@ -328,7 +325,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         checks.extend([
             exe(
                 pm,
-                target,
                 "git",
                 &["git"],
                 "fetch pinned sources + git am the patch series",
@@ -337,25 +333,15 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
             ),
             exe(
                 pm,
-                target,
                 "make",
                 &["make"],
                 "kernel/u-boot compile",
                 true,
                 Pkg::Make,
             ),
+            exe(pm, "bc", &["bc"], "kernel build dependency", true, Pkg::Bc),
             exe(
                 pm,
-                target,
-                "bc",
-                &["bc"],
-                "kernel build dependency",
-                true,
-                Pkg::Bc,
-            ),
-            exe(
-                pm,
-                target,
                 "flex",
                 &["flex"],
                 "kernel build dependency",
@@ -364,31 +350,32 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
             ),
             exe(
                 pm,
-                target,
                 "bison",
                 &["bison"],
                 "kernel build dependency",
                 true,
                 Pkg::Bison,
             ),
-            openssl_check(pm, target),
+            openssl_check(pm),
         ]);
         // Target C toolchain: native cc when host arch = target, else the cross gcc.
         if cross {
+            // Both the probed binary and the suggested package come from the arch
+            // layer's `cross_compile` — the same value the build exports as
+            // `CROSS_COMPILE` — so `doctor` can never name a toolchain the build then
+            // does not invoke.
             let cc = format!("{}gcc", needs.cross_compile);
-            checks.push(exe(
-                pm,
-                target,
+            let triple = needs.cross_compile.trim_end_matches('-');
+            checks.push(exe_with_remedy(
                 &cc,
                 &[&cc],
                 "cross C toolchain for the target",
                 true,
-                Pkg::CrossToolchain,
+                pm.cross_toolchain_remedy(triple),
             ));
         } else {
             checks.push(exe(
                 pm,
-                target,
                 "cc",
                 &["cc", "gcc"],
                 "native C toolchain for the target",
@@ -407,7 +394,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     if needs.compiles_kernel {
         checks.push(exe(
             pm,
-            target,
             "dh",
             &["dh"],
             "kernel .deb build (debhelper)",
@@ -416,7 +402,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         ));
         checks.push(pkgconfig_check(
             pm,
-            target,
             "libelf",
             "libelf",
             "objtool/BTF — kernel .deb build",
@@ -424,7 +409,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         ));
         checks.push(pkgconfig_check(
             pm,
-            target,
             "libdw",
             "libdw",
             "objtool — kernel .deb build",
@@ -432,7 +416,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         ));
         checks.push(exe(
             pm,
-            target,
             "rsync",
             &["rsync"],
             "kernel .deb build dependency",
@@ -441,7 +424,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         ));
         checks.push(exe(
             pm,
-            target,
             "cpio",
             &["cpio"],
             "kernel .deb build dependency",
@@ -450,7 +432,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         ));
         checks.push(exe(
             pm,
-            target,
             "depmod",
             &["depmod"],
             "kernel module tooling (kmod)",
@@ -466,7 +447,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     if needs.builds_uboot {
         checks.push(exe(
             pm,
-            target,
             "swig",
             &["swig"],
             "u-boot pylibfdt bindings",
@@ -475,7 +455,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         ));
         checks.push(pkgconfig_check(
             pm,
-            target,
             "python3",
             "python3-dev",
             "u-boot pylibfdt extension headers",
@@ -483,7 +462,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         ));
         checks.push(python_module_check(
             pm,
-            target,
             "setuptools",
             "python3-setuptools",
             "u-boot pylibfdt build",
@@ -491,7 +469,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         ));
         checks.push(python_module_check(
             pm,
-            target,
             "elftools",
             "python3-pyelftools",
             "u-boot binman image assembly",
@@ -522,7 +499,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     // pass and the build then die mid-package on a non-Debian host.
     checks.push(exe(
         pm,
-        target,
         "fakeroot",
         &["fakeroot"],
         "root-owned staging for the u-boot and kmod .debs",
@@ -531,7 +507,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     ));
     checks.push(exe(
         pm,
-        target,
         "dpkg-deb",
         &["dpkg-deb"],
         "assemble the u-boot and kmod .debs",
@@ -539,24 +514,47 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         Pkg::Dpkg,
     ));
 
+    // The two POSIX tools the image path invokes directly. Both are effectively
+    // universal, which is exactly why they are easy to leave off a list built from
+    // "what did I have to install" — but `doctor`'s contract is what this build will
+    // invoke, not what is usually there, and a container image trimmed past coreutils
+    // would otherwise fail mid-rootfs rather than here.
+    if needs.assembles_image {
+        checks.push(exe(
+            pm,
+            "tar",
+            &["tar"],
+            "verify the rootfs tarball / extract the signed kernel partition",
+            true,
+            Pkg::Tar,
+        ));
+        checks.push(exe(
+            pm,
+            "cp",
+            &["cp"],
+            "stage the layer overlay trees into the rootfs",
+            true,
+            Pkg::Coreutils,
+        ));
+    }
+
     // Cross-arch: the target's maintainer scripts and compiles run under the host's
     // qemu-user binfmt handler — during the rootfs bootstrap whatever else the build
     // does, so this is needed even by a board that compiles nothing. A host whose arch
     // already matches the target runs them directly and needs no qemu at all.
     if cross {
-        let qa = qemu_arch(target);
+        let qa = target.qemu_arch();
         let qnames = [format!("qemu-{qa}-static"), format!("qemu-{qa}")];
         let qrefs: Vec<&str> = qnames.iter().map(String::as_str).collect();
         checks.push(exe(
             pm,
-            target,
             &format!("qemu-{qa}-static"),
             &qrefs,
             "run target binaries under binfmt",
             true,
             Pkg::QemuUser,
         ));
-        checks.push(binfmt_check(pm, target, qa));
+        checks.push(binfmt_check(pm, qa));
     }
 
     // Image assembly is pure Rust (ferrosys): the rootfs ext4 is formatted and every
@@ -564,7 +562,6 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     // `e2fsck` is an optional `-fn` cross-check the image stage runs only when present.
     checks.push(exe(
         pm,
-        target,
         "e2fsck",
         &["e2fsck"],
         "optional cross-check of the formatted rootfs ext4 image",
@@ -575,19 +572,31 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     checks
 }
 
-/// Check for an executable by scanning `PATH` for any of `candidates`.
+/// Check for an executable by scanning `PATH` for any of `candidates`, mapping a miss
+/// to `pkg`'s name on this host's package manager.
 fn exe(
     pm: PkgManager,
-    target: Arch,
     name: &str,
     candidates: &[&str],
     purpose: &'static str,
     required: bool,
     pkg: Pkg,
 ) -> Check {
+    exe_with_remedy(name, candidates, purpose, required, pm.remedy(pkg))
+}
+
+/// [`exe`] with the remediation supplied directly, for the one check whose package
+/// name is derived from config rather than from a [`Pkg`] table: the cross toolchain.
+fn exe_with_remedy(
+    name: &str,
+    candidates: &[&str],
+    purpose: &'static str,
+    required: bool,
+    remedy: String,
+) -> Check {
     let status = match candidates.iter().find_map(|c| which(c)) {
         Some(path) => CheckStatus::Present(path.display().to_string()),
-        None => CheckStatus::Missing(pm.remedy(pkg, target)),
+        None => CheckStatus::Missing(remedy),
     };
     Check {
         name: name.to_string(),
@@ -598,10 +607,9 @@ fn exe(
 }
 
 /// openssl headers, probed via `pkg-config` (a dev lib, not an executable).
-fn openssl_check(pm: PkgManager, target: Arch) -> Check {
+fn openssl_check(pm: PkgManager) -> Check {
     pkgconfig_check(
         pm,
-        target,
         "openssl",
         "libssl (openssl)",
         "kernel/u-boot certificate + TLS build dep",
@@ -617,7 +625,6 @@ fn openssl_check(pm: PkgManager, target: Arch) -> Check {
 /// `pkg-config` rides in as a dependency of the toolchain check).
 fn pkgconfig_check(
     pm: PkgManager,
-    target: Arch,
     module: &str,
     name: &str,
     purpose: &'static str,
@@ -632,7 +639,7 @@ fn pkgconfig_check(
     let status = if present {
         CheckStatus::Present(format!("pkg-config {module}"))
     } else {
-        CheckStatus::Missing(pm.remedy(pkg, target))
+        CheckStatus::Missing(pm.remedy(pkg))
     };
     Check {
         name: name.to_string(),
@@ -649,7 +656,6 @@ fn pkgconfig_check(
 /// reads as missing.
 fn python_module_check(
     pm: PkgManager,
-    target: Arch,
     module: &str,
     name: &str,
     purpose: &'static str,
@@ -664,7 +670,7 @@ fn python_module_check(
     let status = if present {
         CheckStatus::Present(format!("python3 import {module}"))
     } else {
-        CheckStatus::Missing(pm.remedy(pkg, target))
+        CheckStatus::Missing(pm.remedy(pkg))
     };
     Check {
         name: name.to_string(),
@@ -686,24 +692,22 @@ fn python_module_check(
 /// `apparmor_restrict_unprivileged_userns=1` and `user.max_user_namespaces=0` —
 /// and a plain `--map-root-user` probe misses absent `/etc/subuid` ranges, so
 /// the actual syscall + mapping is the authoritative check.
+///
+/// The probe answers *whether*; [`userns_blocker_detail`] answers *why*.
 fn userns_check() -> Check {
-    let works = Command::new("unshare")
+    let status = match Command::new("unshare")
         .args(["--map-root-user", "--map-auto", "true"])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    let status = if works {
-        CheckStatus::Present("unshare --map-root-user --map-auto works".into())
-    } else {
-        CheckStatus::Missing(
-            "cannot create an unprivileged user namespace with subuid mapping; enable \
-             namespaces — Debian: `sudo sysctl -w kernel.unprivileged_userns_clone=1`; \
-             Ubuntu 24.04+: `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`; \
-             ensure `sysctl kernel.max_user_namespaces` (or `user.max_user_namespaces`) > 0; \
-             and give this user a subuid/subgid range (`sudo usermod --add-subuids \
-             100000-165535 --add-subgids 100000-165535 $USER`)"
-                .into(),
-        )
+    {
+        Ok(out) if out.status.success() => {
+            CheckStatus::Present("unshare --map-root-user --map-auto works".into())
+        }
+        Ok(_) => CheckStatus::Missing(userns_blocker_detail()),
+        // `unshare` is util-linux, so its absence is a different problem from a host
+        // that forbids namespaces — and one no blocker classifier will explain.
+        Err(_) => CheckStatus::Missing(
+            "could not run `unshare` to probe user namespaces — install util-linux".into(),
+        ),
     };
     Check {
         name: "unprivileged user namespaces".into(),
@@ -711,6 +715,43 @@ fn userns_check() -> Check {
         required: true,
         status,
     }
+}
+
+/// Why the user-namespace probe failed, asked of the sandbox library rather than
+/// guessed — the same delegation [`overlay_check`] makes, and for the same reason: the
+/// library owns these conditions, so only it can keep an answer current.
+///
+/// Two independent things must hold, and they fail for unrelated reasons, so both are
+/// consulted in the order the kernel needs them:
+///
+///  1. **The namespace can be created at all** — three sysctls, one of them
+///     Ubuntu-specific ([`userns_blocker`](ferroday_cage::host::userns_blocker)).
+///  2. **A subordinate *range* can be mapped into it**
+///     ([`range_map_blocker`](ferroday_cage::host::range_map_blocker)). An
+///     unprivileged process may write exactly one uid_map entry — itself to root —
+///     so the range the rootfs's real ownership needs comes from the shadow suite's
+///     setuid `newuidmap`/`newgidmap`. A host can therefore have a perfectly good
+///     `/etc/subuid` allocation and still fail here because those helpers are not
+///     installed, which is what a Debian image without the `uidmap` package looks
+///     like — and a remedy that only talked about sysctls and `usermod --add-subuids`
+///     would send the operator to fix four things that are already correct.
+///
+/// A blocker states its own remedy, including the per-distro package name, so this
+/// adds none of its own. The fallback covers a refusal neither classifier recognizes
+/// — a seccomp filter or an LSM policy can deny the syscall with nothing in the host
+/// configuration to read.
+fn userns_blocker_detail() -> String {
+    if let Some(blocker) = ferroday_cage::host::userns_blocker() {
+        return blocker.to_string();
+    }
+    if let Some(blocker) = ferroday_cage::host::range_map_blocker() {
+        return blocker.to_string();
+    }
+    "cannot create an unprivileged user namespace with a subordinate id map, and no \
+     known host condition explains it — a seccomp filter or an LSM policy may be \
+     denying the syscall; run `unshare --map-root-user --map-auto true` to see the \
+     kernel's own error"
+        .to_string()
 }
 
 /// Whether an unprivileged overlay can be established with its upper layer on the
@@ -759,7 +800,7 @@ fn nearest_existing(path: &Path) -> Option<PathBuf> {
 /// A registered *and enabled* `qemu-<arch>` binfmt handler. Reads
 /// `/proc/sys/fs/binfmt_misc/qemu-<arch>`; reports the handler flags and notes
 /// when the `F` (fix-binary) flag the rootless sandbox relies on is absent.
-fn binfmt_check(pm: PkgManager, target: Arch, qemu_arch: &str) -> Check {
+fn binfmt_check(pm: PkgManager, qemu_arch: &str) -> Check {
     let path = format!("/proc/sys/fs/binfmt_misc/qemu-{qemu_arch}");
     let name = format!("{qemu_arch} binfmt handler");
     let status = match std::fs::read_to_string(&path) {
@@ -777,11 +818,11 @@ fn binfmt_check(pm: PkgManager, target: Arch, qemu_arch: &str) -> Check {
         }
         Ok(_) => CheckStatus::Missing(format!(
             "handler present but disabled — run: {}",
-            pm.remedy(Pkg::QemuUser, target)
+            pm.remedy(Pkg::QemuUser)
         )),
         Err(_) => CheckStatus::Missing(format!(
             "not registered — install {} and register binfmt (needs root, one-time)",
-            pm.package(Pkg::QemuUser, target)
+            pm.package(Pkg::QemuUser)
         )),
     };
     Check {
@@ -869,56 +910,124 @@ mod tests {
     }
 
     #[test]
-    fn remedy_is_manager_and_arch_specific() {
+    fn remedy_is_manager_specific() {
         assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Openssl, Arch::Arm64),
+            PkgManager::Apt.remedy(Pkg::Openssl),
             "sudo apt install libssl-dev"
         );
         assert_eq!(
-            PkgManager::Dnf.remedy(Pkg::Openssl, Arch::Arm64),
+            PkgManager::Dnf.remedy(Pkg::Openssl),
             "sudo dnf install openssl-devel"
         );
         assert_eq!(
-            PkgManager::Apt.remedy(Pkg::CrossToolchain, Arch::Arm64),
-            "sudo apt install gcc-aarch64-linux-gnu"
-        );
-        assert_eq!(
-            PkgManager::Dnf.remedy(Pkg::CrossToolchain, Arch::Arm64),
-            "sudo dnf install gcc-aarch64-linux-gnu"
-        );
-        assert_eq!(
-            PkgManager::Pacman.remedy(Pkg::NativeToolchain, Arch::Arm64),
+            PkgManager::Pacman.remedy(Pkg::NativeToolchain),
             "sudo pacman -S base-devel"
         );
         // Kernel bindeb-pkg deps: the exact package a user installs on a miss.
         assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Debhelper, Arch::Arm64),
+            PkgManager::Apt.remedy(Pkg::Debhelper),
             "sudo apt install debhelper"
         );
         assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Libelf, Arch::Arm64),
+            PkgManager::Apt.remedy(Pkg::Libelf),
             "sudo apt install libelf-dev"
         );
         assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Libdw, Arch::Arm64),
+            PkgManager::Apt.remedy(Pkg::Libdw),
             "sudo apt install libdw-dev"
         );
         assert_eq!(
-            PkgManager::Dnf.remedy(Pkg::Libelf, Arch::Arm64),
+            PkgManager::Dnf.remedy(Pkg::Libelf),
             "sudo dnf install elfutils-libelf-devel"
         );
         // u-boot pylibfdt/binman deps.
+        assert_eq!(PkgManager::Apt.remedy(Pkg::Swig), "sudo apt install swig");
         assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Swig, Arch::Arm64),
-            "sudo apt install swig"
-        );
-        assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Python3Setuptools, Arch::Arm64),
+            PkgManager::Apt.remedy(Pkg::Python3Setuptools),
             "sudo apt install python3-setuptools"
         );
         assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Pyelftools, Arch::Arm64),
+            PkgManager::Apt.remedy(Pkg::Pyelftools),
             "sudo apt install python3-pyelftools"
+        );
+    }
+
+    /// The user-namespace remedy is a diagnosis, not a list of guesses.
+    ///
+    /// It used to be a constant naming three sysctls and `usermod --add-subuids`. On a
+    /// Debian host with a perfectly good `/etc/subuid` allocation but no `uidmap`
+    /// package, every one of those four was already correct and the one missing thing
+    /// went unnamed — so the operator fixed nothing and the check still failed. The
+    /// text must now come from whichever classifier recognizes the host, and this
+    /// asserts the two ends of that: a host that *can* map says so and does not block,
+    /// and a host that cannot gets a non-empty explanation rather than a blank line.
+    ///
+    /// Host-dependent by nature, so it asserts the invariant on whichever branch this
+    /// machine falls into — both are exercised across the project's build hosts.
+    #[test]
+    fn the_userns_remedy_explains_this_host() {
+        assert!(
+            !userns_blocker_detail().trim().is_empty(),
+            "an unexplained refusal must still produce an actionable line"
+        );
+        let check = userns_check();
+        match &check.status {
+            CheckStatus::Present(detail) => {
+                assert!(!check.is_blocking(), "a host that can map must not block");
+                assert!(detail.contains("unshare"), "names the probe: {detail}");
+            }
+            CheckStatus::Missing(remedy) => {
+                assert!(check.is_blocking(), "a host that cannot map must block");
+                assert!(!remedy.trim().is_empty(), "a bare refusal helps nobody");
+            }
+        }
+    }
+
+    /// `doctor` suggests the toolchain the build will actually invoke.
+    ///
+    /// The suggested package is derived from the arch layer's `cross_compile` — the
+    /// same value the build exports as `CROSS_COMPILE` — so the two cannot drift.
+    /// Asserted through [`tool_checks`], not just the formatter, because the point is
+    /// that the *check* reads the config: a second triple table here would pass a
+    /// formatter test and still tell the user to install the wrong package.
+    #[test]
+    fn the_cross_toolchain_hint_follows_the_configured_prefix() {
+        // Whichever target is cross-arch for this host — the check only exists then.
+        let target = [Arch::Arm64, Arch::Armv7, Arch::Riscv64]
+            .into_iter()
+            .find(|a| crate::preflight(*a).cross)
+            .expect("at least two of the three targets differ from any one host arch");
+        // A deliberately unusual prefix: a hardcoded triple table would answer with the
+        // arch's conventional triple and pass, which is exactly what must not happen.
+        let needs = ToolNeeds {
+            target,
+            cross_compile: "boot2deb-probe-linux-gnu-".into(),
+            compiles_sources: true,
+            compiles_kernel: false,
+            builds_uboot: false,
+            build_root_uppers: None,
+            assembles_image: true,
+        };
+        let check = tool_checks(&needs)
+            .into_iter()
+            .find(|c| c.purpose == "cross C toolchain for the target")
+            .expect("a cross build asks for a cross toolchain");
+        assert_eq!(check.name, "boot2deb-probe-linux-gnu-gcc");
+        match check.status {
+            CheckStatus::Missing(remedy) => assert!(
+                remedy.ends_with("gcc-boot2deb-probe-linux-gnu"),
+                "the hint must name the configured triple, got {remedy:?}"
+            ),
+            CheckStatus::Present(p) => panic!("no such toolchain exists to be found: {p}"),
+        }
+        // Fedora spells the same toolchain by the bare arch token, not the full triple.
+        assert_eq!(
+            PkgManager::Dnf.cross_toolchain_remedy("aarch64-linux-gnu"),
+            "sudo dnf install gcc-aarch64-linux-gnu"
+        );
+        assert_eq!(
+            PkgManager::Apt.cross_toolchain_remedy("aarch64-linux-gnu"),
+            "sudo apt install gcc-aarch64-linux-gnu"
         );
     }
 
@@ -932,6 +1041,7 @@ mod tests {
             compiles_kernel: true,
             builds_uboot: true,
             build_root_uppers: Some(std::env::temp_dir()),
+            assembles_image: true,
         }
     }
 
@@ -945,6 +1055,7 @@ mod tests {
             compiles_kernel: false,
             builds_uboot: false,
             build_root_uppers: None,
+            assembles_image: true,
         }
     }
 
@@ -991,6 +1102,32 @@ mod tests {
             assert!(
                 !tool_checks(&no_kernel).iter().any(|c| c.name == absent),
                 "{absent} is a kernel-deb dep; a kernel-less build should not ask for it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_image_build_asks_for_the_two_tools_the_image_path_shells_out_to() {
+        // `doctor`'s contract is what *this build* will invoke, not what a Linux host
+        // usually has. Both are effectively universal, which is why they are the two
+        // easiest to omit — and a trimmed container image without coreutils would
+        // otherwise pass preflight and fail mid-rootfs.
+        let checks = tool_checks(&assembling_build());
+        for needed in ["tar", "cp"] {
+            assert!(
+                checks.iter().any(|c| c.name == needed && c.required),
+                "an image build must require {needed}"
+            );
+        }
+        // A u-boot-only deliverable assembles no rootfs and stages no overlay.
+        let uboot_only = ToolNeeds {
+            assembles_image: false,
+            ..compiling_build()
+        };
+        for absent in ["tar", "cp"] {
+            assert!(
+                !tool_checks(&uboot_only).iter().any(|c| c.name == absent),
+                "{absent} is an image-path tool; a u-boot-only build should not ask for it"
             );
         }
     }

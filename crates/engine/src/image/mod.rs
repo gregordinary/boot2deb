@@ -193,6 +193,12 @@ pub struct ImageArtifacts {
     /// login. The caller surfaces it and records it in the provenance manifest; it
     /// is written to no committed file.
     pub password: String,
+    /// The checks the rootfs filesystem passed before it shipped, in the order they
+    /// ran. Reported rather than re-probed by the caller: one of them is present only
+    /// where the build host carries `e2fsprogs`, so the record has to come from the
+    /// node that actually ran it. Recorded in the provenance manifest's
+    /// `[verification]`.
+    pub rootfs_verified_with: Vec<String>,
 }
 
 /// Validate the resolved build's image geometry (offsets, size, GPT/rootfs fit)
@@ -278,7 +284,7 @@ pub fn build_image(
 
     // The ext4 rootfs partition is identical across layouts — build it once.
     let ext4 = opts.work_dir.join("rootfs.ext4");
-    ext4::build_rootfs_ext4(
+    let rootfs_verified_with = ext4::build_rootfs_ext4(
         &ext4,
         geom.rootfs_bytes,
         opts.rootfs_tar,
@@ -361,6 +367,7 @@ pub fn build_image(
         compressed,
         raw_removed,
         password,
+        rootfs_verified_with,
     })
 }
 
@@ -667,7 +674,7 @@ mod tests {
     }
 
     /// True when a host tool is runnable — the image path is Linux-only, so tests
-    /// that need a host fixture helper (`tar`, `openssl`) skip cleanly where it is absent.
+    /// that need a host fixture helper (`tar`) skip cleanly where it is absent.
     ///
     /// Presence is detected by whether the probe **spawns** (a missing binary fails to
     /// exec with `ENOENT`), not by its exit status: a present tool that rejects
@@ -679,7 +686,7 @@ mod tests {
 
     /// Whether the end-to-end image path can run: every tool in `tools` is runnable.
     /// The ext4 format itself is pure Rust and needs no host tool; `tools` covers only
-    /// the fixture and credential helpers the test drives (`tar`, `openssl`). When
+    /// the fixture helper the test drives (`tar`). When
     /// something is missing the behavior depends on `BOOT2DEB_REQUIRE_HOST_TOOLS`: a CI
     /// job that guarantees the tools sets it, and a miss then **panics** so the most
     /// important image assertions cannot silently drop out of the run; unset (a
@@ -826,7 +833,7 @@ mod tests {
     #[test]
     fn combined_image_has_gpt_rootfs_and_bootloader_at_offsets() {
         // End-to-end (Linux only): ferrosys ext4 format + GPT + splices.
-        if !require_host_tools(&["tar", "openssl"]) {
+        if !require_host_tools(&["tar"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -919,7 +926,7 @@ mod tests {
     fn compression_deletes_the_raw_image_unless_kept() {
         // End-to-end (Linux only): compress, then confirm the raw is dropped and
         // only the .xz remains, and that --keep-raw retains it.
-        if !require_host_tools(&["tar", "openssl"]) {
+        if !require_host_tools(&["tar"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -972,7 +979,7 @@ mod tests {
 
     #[test]
     fn split_layout_emits_bootloader_and_rootfs_images() {
-        if !require_host_tools(&["tar", "openssl"]) {
+        if !require_host_tools(&["tar"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();

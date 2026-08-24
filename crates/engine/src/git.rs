@@ -4,14 +4,41 @@
 //! it, so these wrap the system `git`. Output parsing that has real logic
 //! — peeling an annotated tag to its commit — is factored into a pure function
 //! (`pick_commit`) so it is unit-testable without a network.
+//!
+//! Every `git` this crate runs is constructed by one `command` helper, which
+//! neutralizes the build host's git configuration. See it for why.
 
 use crate::error::{EngineError, PinRelation};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// A `git` command, optionally rooted in `repo` via `-C`.
-fn base(repo: Option<&Path>) -> Command {
+/// A `git` command with the build host's git configuration neutralized: no
+/// `/etc/gitconfig`, no `~/.gitconfig`, no `$XDG_CONFIG_HOME/git/config`, and no
+/// `/etc/gitattributes`.
+///
+/// **Every** `git` the engine runs comes from here, because host config is build
+/// input. The one that decides it is `url.<base>.insteadOf`: it silently rewrites a
+/// remote URL, so a host carrying one would fetch the pinned commit from a *different
+/// remote than the lock names* — the precise input the lock exists to fix, redirected
+/// with nothing in the build to report it. `core.hooksPath` (arbitrary code on
+/// `clone`/`checkout`), `am.threeWay` and `apply.whitespace` (which decide whether a
+/// patch applies and how), `core.attributesFile` and a system `gitattributes` (which
+/// can rewrite line endings in a checked-out kernel tree), and `safe.directory` are the
+/// same class. This mirrors the build sandbox's `base_env(false)` posture — the
+/// environment a build runs in is declared here, not inherited — and the pure-Rust
+/// clone in [`crate::patchfetch`] isolates `gix` for the same reason.
+///
+/// Transport settings are the deliberate cost. A host whose `~/.gitconfig` carries
+/// `http.proxy` must express it as `http_proxy`/`https_proxy` in the environment,
+/// which git still reads; credentials for a private source likewise. Config that
+/// changes *what is fetched* cannot be honored without giving up the guarantee.
+///
+/// `repo` roots the command in a checkout via `-C`.
+pub(crate) fn command(repo: Option<&Path>) -> Command {
     let mut cmd = Command::new("git");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1");
     if let Some(r) = repo {
         cmd.arg("-C").arg(r);
     }
@@ -20,7 +47,7 @@ fn base(repo: Option<&Path>) -> Command {
 
 /// Run `git` and return its raw [`Output`]; does not check the exit status.
 fn run(repo: Option<&Path>, args: &[&str], context: &str) -> Result<Output, EngineError> {
-    base(repo)
+    command(repo)
         .args(args)
         .output()
         .map_err(|source| EngineError::GitSpawn {
@@ -58,18 +85,30 @@ pub fn rev_parse_head(repo: &Path) -> Result<String, EngineError> {
 /// modifications and no untracked files) *and* no `git am`/rebase is in progress —
 /// safe to apply and reset around.
 ///
-/// A leftover `.git/rebase-apply` from a failed `am --abort` is **not** reported by
+/// A leftover `rebase-apply` from a failed `am --abort` is **not** reported by
 /// `status --porcelain`, so it is checked directly: without this, the next apply
 /// would fail deep inside `git am` far from the real cause.
+///
+/// The state dirs are looked up under `git rev-parse --absolute-git-dir` rather than
+/// `<repo>/.git`, because in a linked worktree or a submodule `.git` is a *file*
+/// pointing at the real gitdir. Joining onto it would name a path that never exists,
+/// and the in-progress check would answer "clean" for every such checkout — the
+/// silent half of a check whose whole point is to be loud. A `patches` checkout kept
+/// as a worktree is an ordinary way to co-develop two series at once.
 pub(crate) fn is_clean(repo: &Path) -> Result<bool, EngineError> {
     let ctx = format!("status in {}", repo.display());
     let out = checked(Some(repo), &["status", "--porcelain"], &ctx)?;
     if !out.stdout.is_empty() {
         return Ok(false);
     }
+    let ctx = format!("rev-parse --absolute-git-dir in {}", repo.display());
+    let git_dir = PathBuf::from(stdout_of(checked(
+        Some(repo),
+        &["rev-parse", "--absolute-git-dir"],
+        &ctx,
+    )?));
     // An in-progress `git am` (`rebase-apply`) or rebase (`rebase-merge`) leaves
     // these state dirs behind; either means the tree is not safe to apply onto.
-    let git_dir = repo.join(".git");
     let in_progress =
         git_dir.join("rebase-apply").exists() || git_dir.join("rebase-merge").exists();
     Ok(!in_progress)
@@ -142,7 +181,7 @@ pub fn resolve_ref(url: &str, reference: &str) -> Result<String, EngineError> {
 /// identity is supplied inline (`git am` refuses without one) without touching
 /// the repo config.
 pub(crate) fn am_3way(repo: &Path, patch: &Path) -> Result<Output, EngineError> {
-    base(Some(repo))
+    command(Some(repo))
         .args([
             "-c",
             "user.email=build@boot2deb",
@@ -300,6 +339,86 @@ c9acdc466e9aa96352f658b9276aa8a45b8e817d\trefs/tags/v7.1.1^{}\n";
         // A pin the local object store does not hold cannot be classified.
         let absent = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(pin_relation(repo, absent, &child), PinRelation::Unknown);
+    }
+
+    /// The build's `git` must not read the host's git configuration.
+    ///
+    /// Asserted against `url.<base>.insteadOf`, the setting that decides this: it
+    /// rewrites a remote URL, so a host carrying one would fetch a pinned commit from a
+    /// remote the lock does not name. A bare `git` is probed first as the positive
+    /// control — without it the assertion below could pass because the fixture never
+    /// took effect, not because [`command`] excluded it.
+    #[test]
+    fn the_host_git_config_does_not_reach_the_build() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".gitconfig"),
+            "[url \"https://example.invalid/\"]\n\tinsteadOf = https://github.com/\n",
+        )
+        .unwrap();
+        // A HOME with nothing else in it, and no XDG global config to confuse the
+        // reading: whether the key is visible then depends only on the command.
+        let probe = |mut cmd: Command| {
+            cmd.env("HOME", home.path())
+                .env_remove("XDG_CONFIG_HOME")
+                .args(["config", "--get", "url.https://example.invalid/.insteadOf"])
+                .output()
+                .expect("spawn git")
+        };
+        assert!(
+            probe(Command::new("git")).status.success(),
+            "the fixture ~/.gitconfig was not read at all — the check below would be vacuous"
+        );
+        assert!(
+            !probe(command(None)).status.success(),
+            "the engine's git read the host's ~/.gitconfig; a `url.insteadOf` there would \
+             redirect a locked source URL with nothing in the build to report it"
+        );
+    }
+
+    /// The in-progress check has to survive a linked worktree, where `.git` is a file
+    /// pointing at the real gitdir rather than a directory. Under the naive
+    /// `<repo>/.git/rebase-apply` join it silently answers "clean" there, which is the
+    /// one answer this check exists to prevent.
+    #[test]
+    fn an_in_progress_am_is_seen_in_a_linked_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = command(Some(dir))
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+                .output()
+                .expect("spawn git");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&main, &["init", "-q", "-b", "main", "."]);
+        std::fs::write(main.join("f"), "one\n").unwrap();
+        git(&main, &["add", "f"]);
+        git(&main, &["commit", "-qm", "one"]);
+
+        let linked = tmp.path().join("linked");
+        git(&main, &["worktree", "add", "-q", "-b", "side", "../linked"]);
+        assert!(linked.join(".git").is_file(), "a worktree's .git is a file");
+        assert!(is_clean(&linked).unwrap());
+
+        // The state dir a failed `git am` leaves behind, in the worktree's *real*
+        // gitdir — which is under the main repo, not at `linked/.git/`.
+        let git_dir = tmp.path().join("main/.git/worktrees/linked");
+        std::fs::create_dir_all(git_dir.join("rebase-apply")).unwrap();
+        assert!(
+            !is_clean(&linked).unwrap(),
+            "an in-progress am in a linked worktree must not read as clean"
+        );
+
+        // And the ordinary checkout still works the same way.
+        assert!(is_clean(&main).unwrap());
+        std::fs::create_dir_all(main.join(".git/rebase-merge")).unwrap();
+        assert!(!is_clean(&main).unwrap());
     }
 
     #[test]

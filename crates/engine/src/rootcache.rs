@@ -20,6 +20,21 @@
 //! build by design, so it is applied *after* restore (the rootfs node splices it
 //! into `/etc/shadow`, [`splice_shadow`]), keeping the cached tree reusable.
 //!
+//! **The tree is not only its packages.** Two further inputs shape it without moving
+//! any package version, so both are folded. The **interpreter**: on a cross host every
+//! maintainer script runs under the host's `qemu-user`, and so does everything they
+//! invoke — `update-initramfs` writing the initrd the image boots, `ldconfig`,
+//! `locale-gen`, a depthcharge board's kernel signing — so those bytes are the
+//! interpreter's as much as the package's. The **feature apt repositories**: the
+//! provisioner writes each one's `sources.list.d` entry and its keyring into the tree,
+//! so a re-pointed URI or a rotated key changes the image while the solve stands still.
+//!
+//! Both fold only when present, and an absent fold contributes nothing rather than an
+//! empty record — so a native build can never key alike with a cross build whose
+//! interpreter is merely missing, and a build with no feature repository folds no such
+//! record at all. Labels and values are length-prefixed
+//! ([`SignatureBuilder`]), so an absent fold cannot be forged by a present one.
+//!
 //! Pure except [`dir_fingerprints`] / [`file_fingerprints`] (which hash files) and
 //! [`RootfsStore`] (the on-disk store); the parse, key, and splice are deterministic
 //! and unit-tested.
@@ -49,28 +64,64 @@ use std::path::{Path, PathBuf};
 /// v7: the node bootstraps in-process under the subordinate identity map, so its
 /// trees carry real system ownership. Entries stored by any earlier version were
 /// produced differently and must not be served to it.
+///
+/// The provisioner library counts as the node's logic: ferroday-cage decides the
+/// bootstrapped tree's dpkg state, apt configuration, and configure ordering, so a
+/// dependency bump that changes the emitted tree for unchanged inputs is a bump here
+/// too.
 const ROOTFS_STAGE_VERSION: u32 = 7;
 
-/// The rootfs cache key: a [`Signature`] over the solved package set, the
-/// assembled overlay's content, the local-repo `.deb`s' content, and the target
-/// `arch`/`suite`. Everything that determines the produced tree *except* the
-/// per-image password (applied on restore). Pure.
+/// Everything that determines the produced rootfs tree *except* the per-image
+/// password (applied on restore) — the inputs [`cache_key`] hashes.
 ///
-/// The solved set is `name version arch` per package, from the resolved
-/// [`Plan`](ferroday_cage::provision::debian::Plan).
-pub fn cache_key(
-    solved: &[String],
-    overlay: &[String],
-    repo_debs: &[String],
-    arch: &str,
-    suite: &str,
-) -> Signature {
+/// A struct rather than positional arguments because most of these are
+/// `&[String]`/`&str` shaped: a swapped pair would silently change every key rather
+/// than fail to compile, and a silent key change is the one failure mode a cache
+/// cannot recover from on its own.
+#[derive(Debug, Clone, Copy)]
+pub struct CacheKeyInputs<'a> {
+    /// The solved package set, `name version arch` per package, from the resolved
+    /// [`Plan`](ferroday_cage::provision::debian::Plan). Order-insensitive: apt reaches
+    /// the same set either way.
+    pub solved: &'a [String],
+    /// Content fingerprints of the assembled overlay trees ([`dir_fingerprints`]),
+    /// including the config the node generates into them.
+    pub overlay: &'a [String],
+    /// Content hashes of the build's local-repo `.deb`s ([`file_fingerprints`]) — the
+    /// non-archive packages whose version carries no immutability guarantee.
+    pub repo_debs: &'a [String],
+    /// One opaque record per feature apt repository: its identity and the content of
+    /// the keyring it is verified against, both of which the provisioner writes into
+    /// the tree. Empty when the build's features contribute no repository, and an
+    /// empty set folds nothing at all.
+    pub apt_sources: &'a [String],
+    /// Target Debian architecture.
+    pub arch: &'a str,
+    /// Target Debian suite.
+    pub suite: &'a str,
+    /// Identity of the interpreter that executes the target's maintainer scripts
+    /// ([`RootfsOptions::interpreter_id`](crate::rootfs::RootfsOptions::interpreter_id)),
+    /// or `None` on a native host, where nothing is interpreted and no such input
+    /// exists.
+    pub interpreter: Option<&'a str>,
+}
+
+/// The rootfs cache key: a [`Signature`] over [`CacheKeyInputs`]. Pure.
+pub fn cache_key(inputs: &CacheKeyInputs) -> Signature {
     let mut b = SignatureBuilder::new("rootfs", ROOTFS_STAGE_VERSION);
-    b.fold_scalar("arch", arch);
-    b.fold_scalar("suite", suite);
-    b.fold_set("solved", solved);
-    b.fold_set("overlay", overlay);
-    b.fold_set("repo_debs", repo_debs);
+    b.fold_scalar("arch", inputs.arch);
+    b.fold_scalar("suite", inputs.suite);
+    b.fold_set("solved", inputs.solved);
+    b.fold_set("overlay", inputs.overlay);
+    b.fold_set("repo_debs", inputs.repo_debs);
+    // Order-insensitive: each repository writes its own distinct pair of files, so
+    // their order is not a property of the tree.
+    if !inputs.apt_sources.is_empty() {
+        b.fold_set("apt_sources", inputs.apt_sources);
+    }
+    if let Some(interpreter) = inputs.interpreter {
+        b.fold_scalar("interpreter", interpreter);
+    }
     b.finish()
 }
 
@@ -312,52 +363,159 @@ mod tests {
         assert!(leftovers.is_empty(), "temps left behind: {leftovers:?}");
     }
 
+    /// The inputs the key tests vary one field of at a time (`..base`).
+    fn inputs<'a>(
+        solved: &'a [String],
+        overlay: &'a [String],
+        repo_debs: &'a [String],
+    ) -> CacheKeyInputs<'a> {
+        CacheKeyInputs {
+            solved,
+            overlay,
+            repo_debs,
+            apt_sources: &[],
+            arch: "arm64",
+            suite: "forky",
+            interpreter: None,
+        }
+    }
+
     #[test]
     fn cache_key_reacts_to_every_folded_input_but_not_order() {
         let solved = vec![
             "libc6 2.41-2 arm64".to_string(),
             "bash 5.2-1 arm64".to_string(),
         ];
-        let base = cache_key(&solved, &["ov1".into()], &["deb1".into()], "arm64", "forky");
+        let overlay = vec!["ov1".to_string()];
+        let debs = vec!["deb1".to_string()];
+        let base = inputs(&solved, &overlay, &debs);
+        let key = cache_key(&base);
         // Order-insensitive in the solved set (apt resolves the same set either way).
         let reordered = vec![
             "bash 5.2-1 arm64".to_string(),
             "libc6 2.41-2 arm64".to_string(),
         ];
         assert_eq!(
-            base,
-            cache_key(
-                &reordered,
-                &["ov1".into()],
-                &["deb1".into()],
-                "arm64",
-                "forky"
-            )
+            key,
+            cache_key(&CacheKeyInputs {
+                solved: &reordered,
+                ..base
+            })
         );
         // A different solved version, overlay, repo deb, arch, or suite each moves it.
         let bumped = vec![
             "libc6 2.41-3 arm64".to_string(),
             "bash 5.2-1 arm64".to_string(),
         ];
+        let other_overlay = vec!["ov2".to_string()];
+        let other_deb = vec!["deb2".to_string()];
         assert_ne!(
-            base,
-            cache_key(&bumped, &["ov1".into()], &["deb1".into()], "arm64", "forky")
+            key,
+            cache_key(&CacheKeyInputs {
+                solved: &bumped,
+                ..base
+            })
         );
         assert_ne!(
-            base,
-            cache_key(&solved, &["ov2".into()], &["deb1".into()], "arm64", "forky")
+            key,
+            cache_key(&CacheKeyInputs {
+                overlay: &other_overlay,
+                ..base
+            })
         );
         assert_ne!(
-            base,
-            cache_key(&solved, &["ov1".into()], &["deb2".into()], "arm64", "forky")
+            key,
+            cache_key(&CacheKeyInputs {
+                repo_debs: &other_deb,
+                ..base
+            })
         );
         assert_ne!(
-            base,
-            cache_key(&solved, &["ov1".into()], &["deb1".into()], "amd64", "forky")
+            key,
+            cache_key(&CacheKeyInputs {
+                arch: "amd64",
+                ..base
+            })
         );
         assert_ne!(
-            base,
-            cache_key(&solved, &["ov1".into()], &["deb1".into()], "arm64", "sid")
+            key,
+            cache_key(&CacheKeyInputs {
+                suite: "sid",
+                ..base
+            })
+        );
+    }
+
+    #[test]
+    fn the_interpreter_and_feature_repositories_key_only_when_present() {
+        let solved = vec!["libc6 2.41-2 arm64".to_string()];
+        let overlay = vec!["ov1".to_string()];
+        let debs = vec!["deb1".to_string()];
+        let base = inputs(&solved, &overlay, &debs);
+        let native = cache_key(&base);
+
+        // The interpreter that configures the tree is an input: a cross host keys apart
+        // from a native one, and a qemu upgrade keys apart from the version before it —
+        // a tree configured under one interpreter is never restored for the other.
+        let cross = cache_key(&CacheKeyInputs {
+            interpreter: Some("qemu-aarch64 version 9.2.0"),
+            ..base
+        });
+        let upgraded = cache_key(&CacheKeyInputs {
+            interpreter: Some("qemu-aarch64 version 9.3.0"),
+            ..base
+        });
+        assert_ne!(native, cross, "a cross build's interpreter must key");
+        assert_ne!(cross, upgraded, "a qemu upgrade must key");
+
+        // Feature repositories reach the image as a sources entry and a keyring, so
+        // their content moves the key — including a rotated key at an unchanged URI.
+        let one = vec!["jellyfin\0https://repo.jellyfin.org/debian\0trixie\0main\0aaa".to_string()];
+        let rotated =
+            vec!["jellyfin\0https://repo.jellyfin.org/debian\0trixie\0main\0bbb".to_string()];
+        let with_one = cache_key(&CacheKeyInputs {
+            apt_sources: &one,
+            ..base
+        });
+        assert_ne!(native, with_one, "a feature repository must key");
+        assert_ne!(
+            with_one,
+            cache_key(&CacheKeyInputs {
+                apt_sources: &rotated,
+                ..base
+            }),
+            "a rotated keyring must key"
+        );
+
+        // Their order is not a property of the tree — each writes its own files.
+        let second = "extra\0https://example.invalid/debian\0forky\0main\0ccc".to_string();
+        let ab = vec![one[0].clone(), second.clone()];
+        let ba = vec![second, one[0].clone()];
+        assert_eq!(
+            cache_key(&CacheKeyInputs {
+                apt_sources: &ab,
+                ..base
+            }),
+            cache_key(&CacheKeyInputs {
+                apt_sources: &ba,
+                ..base
+            })
+        );
+    }
+
+    #[test]
+    fn the_key_is_stable_for_a_fixed_input_set() {
+        // A golden key, and the guard on the rule above: an absent optional fold must
+        // contribute *nothing*, so a build with neither an interpreter nor a feature
+        // repository keys on exactly these bytes however many optional inputs are added
+        // later. This hash may only move with a deliberate ROOTFS_STAGE_VERSION bump —
+        // any other change to it orphans every stored rootfs on every host.
+        let solved = vec!["libc6 2.41-2 arm64".to_string()];
+        let overlay = vec!["etc/hostname\x00644\0abc".to_string()];
+        let debs = vec!["def".to_string()];
+        assert_eq!(
+            cache_key(&inputs(&solved, &overlay, &debs)).as_str(),
+            "980530abb57b9f28c9313a6f66207673f9591539187fc5c07370504139539389"
         );
     }
 
@@ -425,7 +583,8 @@ mod tests {
     fn store_round_trips_and_publishes_atomically() {
         let tmp = tempfile::tempdir().unwrap();
         let store = RootfsStore::new(tmp.path());
-        let key = cache_key(&["libc6 2.41-2 arm64".into()], &[], &[], "arm64", "forky");
+        let solved = vec!["libc6 2.41-2 arm64".to_string()];
+        let key = cache_key(&inputs(&solved, &[], &[]));
         // Miss before anything is stored.
         assert!(store.get(&key).is_none());
         // Put a (tar, manifest) pair.
@@ -450,7 +609,8 @@ mod tests {
             .join(format!("{}.partial", key.as_str()))
             .exists());
         // A different key is still a miss.
-        let other = cache_key(&["bash 5.2-1 arm64".into()], &[], &[], "arm64", "forky");
+        let other_solved = vec!["bash 5.2-1 arm64".to_string()];
+        let other = cache_key(&inputs(&other_solved, &[], &[]));
         assert!(store.get(&other).is_none());
     }
 
@@ -458,7 +618,8 @@ mod tests {
     fn store_get_requires_both_tar_and_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let store = RootfsStore::new(tmp.path());
-        let key = cache_key(&["libc6 2.41-2 arm64".into()], &[], &[], "arm64", "forky");
+        let solved = vec!["libc6 2.41-2 arm64".to_string()];
+        let key = cache_key(&inputs(&solved, &[], &[]));
         // Only the tarball present (a torn write) → miss, never a partial hit.
         let entry = tmp.path().join("rootfs").join(key.as_str());
         std::fs::create_dir_all(&entry).unwrap();

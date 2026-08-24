@@ -58,10 +58,13 @@ pub(crate) fn run(
         // sandbox, so they are the only stages that acquire a build root. Probe the
         // filesystem the build would actually put its overlay uppers on, which is the
         // work dir's — not `/tmp`'s, which can answer differently.
-        build_root_uppers: build
-            .userspace
-            .is_some()
-            .then(|| boot2deb_engine::sandbox::build_root_uppers(&work_dir_for(&target, work_dir))),
+        // `cp` and `tar` are only invoked on the image path — the overlay staging and
+        // the rootfs-tar verification. A u-boot-only deliverable emits payloads and
+        // asks for neither.
+        assembles_image: build.produces_image(),
+        build_root_uppers: build.userspace.is_some().then(|| {
+            boot2deb_engine::sandbox::build_root_uppers(&work_dir_for(root, &target, work_dir))
+        }),
     };
     let checks = boot2deb_engine::checks::tool_checks(&needs);
     let mut blocking = 0usize;

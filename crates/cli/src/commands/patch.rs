@@ -13,6 +13,7 @@
 //! as a build-time pin mismatch.
 
 use crate::args::PatchImportArgs;
+use crate::config::default_patches_checkout;
 use boot2deb_core::mbox::{self, ImportMeta};
 use boot2deb_core::model::Overrides;
 use boot2deb_core::profile::derive_prefix;
@@ -25,14 +26,18 @@ pub(crate) fn import(
     source: &str,
     args: PatchImportArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let patches_path = args
+        .patches_path
+        .clone()
+        .unwrap_or_else(|| default_patches_checkout(root));
     // `patch import` writes into a local clone (the patch file + the profile
     // edit), so a missing checkout is a setup error with a remedy — unlike
     // `build`, which auto-fetches pinned commits and needs no checkout.
-    if !args.patches_path.join(".git").exists() {
+    if !patches_path.join(".git").exists() {
         return Err(format!(
             "no patches checkout at {}: `patch import` writes into a local clone of \
              the patches repo; clone it there or point --patches-path at one",
-            args.patches_path.display()
+            patches_path.display()
         )
         .into());
     }
@@ -55,7 +60,7 @@ pub(crate) fn import(
     let normalized = mbox::normalize(&text, &meta)?;
 
     // The current scope list fixes the insertion index and the derived prefix.
-    let profile = load_profile(&args.patches_path, &args.profile)?;
+    let profile = load_profile(&patches_path, &args.profile)?;
     // `patch import` reasons about the list as paths: it derives a filename prefix
     // that reads near its neighbours, and verifies the spliced series. A range on a
     // neighbour changes neither, and the imported entry is written bare (= always).
@@ -81,7 +86,7 @@ pub(crate) fn import(
     };
     patchimport::safe_label(&label)?;
 
-    let dest_path = args.patches_path.join(&label);
+    let dest_path = patches_path.join(&label);
     if dest_path.exists() && !args.force {
         return Err(EngineError::PatchImportExists {
             path: dest_path.display().to_string(),
@@ -118,7 +123,7 @@ pub(crate) fn import(
             spliced.insert(index, label.as_str());
             let target = format!("{} ({})", args.profile, tree.display());
             match patches::verify_tree(
-                &args.patches_path,
+                &patches_path,
                 &spliced,
                 tree,
                 args.scope.as_str(),
@@ -157,8 +162,7 @@ pub(crate) fn import(
 
     // Slot the label into the profile manifest, preserving its comments/layout. If
     // this fails, roll back the written patch so no partial import survives.
-    let profile_path = args
-        .patches_path
+    let profile_path = patches_path
         .join("profiles")
         .join(&args.profile)
         .join("profile.toml");
@@ -177,7 +181,7 @@ pub(crate) fn import(
     // The two follow-ups without which the import never reaches a build: the
     // series is read at the lock's pinned patches commit, so an uncommitted or
     // unpinned import surfaces later as a build-time pin mismatch.
-    let patches = args.patches_path.display();
+    let patches = patches_path.display();
     println!(
         "\nnext steps — no build reads the patch until the series is committed and re-pinned:"
     );

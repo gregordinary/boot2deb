@@ -66,7 +66,7 @@ For orientation, the checks fall into a few groups:
 | --- | --- | --- |
 | Rootfs bootstrap | unprivileged user namespaces with a subuid/subgid range — the bootstrap itself is in-process | always |
 | Packaging | `fakeroot` + `dpkg-deb` (the u-boot and kmod `.deb`s) | always |
-| Image assembly | none — the rootfs ext4 is formatted and checksum-verified in pure Rust; `e2fsck` is an optional cross-check when present | optional |
+| Image assembly | none — the rootfs ext4 is formatted and checksum-verified in pure Rust; `e2fsck` is an optional independent cross-check when present, and the image's provenance records whether it ran | optional |
 | Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler (native, or the `<triple>gcc` cross compiler) | only if the recipe compiles a kernel or a bootloader |
 | Build roots | an unprivileged overlay whose upper layer sits on the work dir's filesystem | only if the recipe compiles the media-accel packages |
 | Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | cross only |
@@ -155,13 +155,13 @@ bootstrap and an image assembly and nothing else.
 
 The build reads only the lock, so it consults no network for its pins and is reproducible
 from what is committed. The patch series, where a recipe has one, is fetched automatically
-at its pinned commit if a `../patches` checkout is not already present — you do not need
-to clone it separately.
+at its pinned commit if the config root's sibling `../patches` checkout is not already
+present — you do not need to clone it separately.
 
 The rootfs bootstrap is content-cached, so a rebuild whose solved package set is
 unchanged skips the multi-minute bootstrap. To force a clean rootfs, add
 `--refresh-rootfs`. To build a single stage, pass `--stage`
-(`kernel`, `dtb`, `uboot`, `userspace`, `ffmpeg`, `rootfs`, `image`) — see the
+(`kernel`, `dtb`, `kmod`, `uboot`, `userspace`, `ffmpeg`, `rootfs`, `image`) — see the
 [CLI reference](reference/cli.md).
 
 ### What you get

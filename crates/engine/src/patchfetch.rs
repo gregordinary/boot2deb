@@ -129,7 +129,20 @@ fn clone_at_commit_inner(
 ) -> Result<(), String> {
     // Fetch the pack + refs but leave the worktree untouched — `main_worktree`
     // would check out the remote's default HEAD, not our pinned commit.
-    let mut prepare = gix::prepare_clone(url, dir).map_err(|e| format!("clone setup: {e}"))?;
+    //
+    // Isolated, not `gix::prepare_clone`: that convenience reads the host's git
+    // installation config, and `url.<base>.insteadOf` there would rewrite `url` —
+    // fetching the pinned commit from a remote the lock does not name. The shell-git
+    // path neutralizes the same config ([`crate::git::command`]); this is the other
+    // clone path, held to the same rule.
+    let mut prepare = gix::clone::PrepareFetch::new(
+        url,
+        dir,
+        gix::create::Kind::WithWorktree,
+        gix::create::Options::default(),
+        gix::open::Options::isolated(),
+    )
+    .map_err(|e| format!("clone setup: {e}"))?;
     let (repo, _outcome) = prepare
         .fetch_only(gix::progress::Discard, interrupt)
         .map_err(|e| format!("fetch: {e}"))?;

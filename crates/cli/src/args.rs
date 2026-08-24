@@ -81,7 +81,7 @@ pub(crate) enum Command {
     Doctor {
         /// Optional device/recipe to report cross-arch status against.
         target: Option<String>,
-        /// Scratch dir the target would build in; default: `build/<target>`. Only the
+        /// Scratch dir the target would build in; default: `<root>/build/<target>`. Only the
         /// overlay check reads it — it probes the filesystem that dir lands on, so
         /// checking a build you will run with `--work-dir` needs the same path here.
         #[arg(long)]
@@ -220,17 +220,19 @@ pub(crate) struct BuildArgs {
     /// Also build the Mali userspace (off by default — unused on a headless box).
     #[arg(long)]
     pub(crate) build_libmali: bool,
-    /// `patches` repo checkout the series is read from. Omit to use `../patches`
-    /// (if present, with the lock's `patches.commit` enforced), else auto-fetch the
-    /// series at the pinned commit from `--patches-url`/the kernel's `patches_url`.
-    /// Pass an explicit path to co-develop the series from a working checkout,
-    /// which downgrades a pin mismatch to a loud warning.
+    /// `patches` repo checkout the series is read from. Omit to use the config
+    /// root's sibling `../patches` (if present, with the lock's `patches.commit`
+    /// enforced), else auto-fetch the series at the pinned commit from
+    /// `--patches-url`/the kernel's `patches_url`. Pass an explicit path to
+    /// co-develop the series from a working checkout, which downgrades a pin
+    /// mismatch to a loud warning.
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
     /// Clone URL for auto-fetching the `patches` series when no local checkout is
     /// present; default: the kernel definition's `patches_url`. The series is
     /// fetched at the lock's `patches.commit` into a durable cache and its pin
-    /// enforced. Ignored when `--patches-path` or `../patches` supplies a checkout.
+    /// enforced. Ignored when `--patches-path` or the sibling `../patches` supplies a
+    /// checkout.
     #[arg(long)]
     pub(crate) patches_url: Option<String>,
     /// Vendored rkbin blob directory (default: blobs/SOC under the config root).
@@ -246,7 +248,7 @@ pub(crate) struct BuildArgs {
     /// trust-anchor swap; this opts into the overlay's copy explicitly.
     #[arg(long)]
     pub(crate) unsafe_overlay_keyring: bool,
-    /// Scratch dir for clones + builds (default: build/RECIPE).
+    /// Scratch dir for clones + builds (default: `<root>/build/RECIPE`).
     #[arg(long)]
     pub(crate) work_dir: Option<PathBuf>,
     /// Where produced artifacts are staged (default: WORK_DIR/artifacts).
@@ -322,7 +324,7 @@ pub(crate) struct BuildArgs {
 /// knobs that change what the prediction should assume.
 #[derive(Args)]
 pub(crate) struct WhyRebuildArgs {
-    /// Build scratch dir to inspect (default: build/RECIPE) — must match the dir the
+    /// Build scratch dir to inspect (default: `<root>/build/RECIPE`) — must match the dir the
     /// build used, since the stamps live there.
     #[arg(long)]
     pub(crate) work_dir: Option<PathBuf>,
@@ -341,7 +343,7 @@ pub(crate) struct WhyRebuildArgs {
 /// (`--dry-run` preview, `--force` past the ownership stamp).
 #[derive(Args)]
 pub(crate) struct CleanArgs {
-    /// Build scratch dir to clean (default: build/RECIPE).
+    /// Build scratch dir to clean (default: `<root>/build/RECIPE`).
     #[arg(long)]
     pub(crate) work_dir: Option<PathBuf>,
     /// Remove only the rootfs early-cutoff cache (WORK_DIR/cache), keeping the
@@ -443,12 +445,12 @@ pub(crate) struct UpdateArgs {
     /// `ffmpeg.rockchip`). Recorded as the graft's provenance; not fetched.
     #[arg(long)]
     pub(crate) ffmpeg_rockchip_ref: Option<String>,
-    /// `patches` repo checkout whose HEAD pins the series. `update` requires this
-    /// local clone when the kernel names a patch profile — the pin *is* its HEAD —
-    /// unlike `build`, which auto-fetches the already-pinned commit and needs no
-    /// checkout.
-    #[arg(long, default_value = "../patches")]
-    pub(crate) patches_path: PathBuf,
+    /// `patches` repo checkout whose HEAD pins the series (default: the config
+    /// root's sibling `../patches`). `update` requires this local clone when the
+    /// kernel names a patch profile — the pin *is* its HEAD — unlike `build`, which
+    /// auto-fetches the already-pinned commit and needs no checkout.
+    #[arg(long)]
+    pub(crate) patches_path: Option<PathBuf>,
     /// Vendored rkbin blob directory (default: blobs/SOC under the config root).
     #[arg(long)]
     pub(crate) blobs_dir: Option<PathBuf>,
@@ -494,9 +496,9 @@ pub(crate) struct VerifyArgs {
     /// the fetch near-instant. Ignored with `--userspace-path`.
     #[arg(long)]
     pub(crate) mpp_src: Option<String>,
-    /// `patches` repo checkout the profile + patches are read from. Omit to use
-    /// `../patches` if present, else auto-fetch the series at the lock's
-    /// `patches.commit`.
+    /// `patches` repo checkout the profile + patches are read from. Omit to use the
+    /// config root's sibling `../patches` if present, else auto-fetch the series at
+    /// the lock's `patches.commit`.
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
     /// Clone URL for auto-fetching the `patches` series when no local checkout is
@@ -545,7 +547,8 @@ pub(crate) struct ConfigArgs {
     pub(crate) kernel_src: Option<String>,
     /// `patches` repo checkout the kernel series is read from when auto-fetching the
     /// tree (ignored with `--kernel-path`, which is assumed already patched). Omit to
-    /// use `../patches` if present, else auto-fetch at the lock's `patches.commit`.
+    /// use the config root's sibling `../patches` if present, else auto-fetch at the
+    /// lock's `patches.commit`.
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
     /// Clone URL for auto-fetching the `patches` series; default: the kernel
@@ -606,11 +609,12 @@ pub(crate) struct PatchImportArgs {
     /// DEP-3 `Origin:` provenance trailer to add to the commit message.
     #[arg(long)]
     pub(crate) origin: Option<String>,
-    /// `patches` repo checkout to write into (default: `../patches`). `patch
-    /// import` requires this local clone — it writes the patch file and edits the
-    /// profile there — unlike `build`, which auto-fetches pinned commits.
-    #[arg(long, default_value = "../patches")]
-    pub(crate) patches_path: PathBuf,
+    /// `patches` repo checkout to write into (default: the config root's sibling
+    /// `../patches`). `patch import` requires this local clone — it writes the patch
+    /// file and edits the profile there — unlike `build`, which auto-fetches pinned
+    /// commits.
+    #[arg(long)]
+    pub(crate) patches_path: Option<PathBuf>,
     /// Source checkout to dry-run `git am`-verify the spliced series against.
     /// Omit to import without verifying (a warning is printed).
     #[arg(long)]
@@ -623,16 +627,28 @@ pub(crate) struct PatchImportArgs {
 /// The axis overrides `resolve` and `doctor` accept, mapped onto [`Overrides`].
 #[derive(Args, Default)]
 pub(crate) struct OverrideArgs {
+    /// Kernel definition id (`list-kernels` shows the valid values); default: the
+    /// recipe/device `default_kernel`. Must be one of the device's
+    /// `supported_kernels`.
     #[arg(long)]
     pub(crate) kernel: Option<String>,
     /// u-boot patch profile (e.g. `rk3576-display`); default: the recipe/device
     /// `default_uboot_profile`. Must be one of the device's `supported_uboot_profiles`.
     #[arg(long = "uboot-profile")]
     pub(crate) uboot_profile: Option<String>,
+    /// Debian suite the image is built for (e.g. `forky`, `trixie`); default: the
+    /// recipe/device `default_suite`. Re-pinning it for a build is `update`'s job —
+    /// here it resolves a different build point.
     #[arg(long)]
     pub(crate) suite: Option<String>,
+    /// Image packaging: `combined` (one whole-disk image) or `split` (a
+    /// bootloader-only image plus a separate rootfs image, for a two-medium install);
+    /// default: the recipe/device `default_layout`.
     #[arg(long, value_parser = parse_layout)]
     pub(crate) layout: Option<Layout>,
+    /// How the board boots: `rockchip-rkbin` (u-boot compiled into a raw gap) or
+    /// `depthcharge` (a signed ChromeOS kernel partition); default: the device's own.
+    /// Must be one of the device's `supported_boot_methods`.
     #[arg(long = "boot-method", value_parser = parse_boot_method)]
     pub(crate) boot_method: Option<BootMethod>,
     /// Depthcharge board profile (e.g. `speedy-libreboot`). A profile describes the
@@ -645,6 +661,9 @@ pub(crate) struct OverrideArgs {
     /// any is given, replaces the recipe's feature list.
     #[arg(long = "feature")]
     pub(crate) features: Vec<String>,
+    /// Total image size (e.g. `4G`); default: the recipe/device `image_size`. The
+    /// rootfs grows to fill its medium on first boot, so this bounds the *artifact*,
+    /// not the installed system.
     #[arg(long = "image-size")]
     pub(crate) image_size: Option<String>,
     /// System locale — the image's `LANG` (e.g. `de_DE.UTF-8`); default: the

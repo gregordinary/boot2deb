@@ -11,6 +11,8 @@
 # Boards
 
 - [Turing RK1](boards/turing-rk1.md)
+- [H96 MAX M9](boards/h96-max-m9.md)
+- [Rockchip RK3576 EVB1 v10](boards/rk3576-evb1-v10.md)
 - [ASUS Chromebook C201](boards/asus-c201.md)
 - [ASUS Chromebook Flip C100P](boards/asus-c100p.md)
 - [ASUS Chromebit CS10](boards/asus-chromebit-cs10.md)

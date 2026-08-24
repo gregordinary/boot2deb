@@ -220,6 +220,18 @@ pub enum EngineError {
         message: String,
     },
 
+    /// A [`SandboxRun`](crate::sandbox::SandboxRun) carried an empty `argv`, so there
+    /// is no program to run. The field's contract states it is non-empty and every
+    /// in-tree call site honours it; this makes the invariant structural rather than
+    /// conventional, since the alternative at the indexing site is a panic — and
+    /// [`BuildRoot::run`](crate::sandbox::BuildRoot::run) is public API an out-of-tree
+    /// caller can hand a spec to.
+    #[error("no command to run in the sandbox ({context}): the argv is empty")]
+    EmptyArgv {
+        /// What the engine was trying to run inside the sandbox.
+        context: String,
+    },
+
     /// A build subprocess ran but exited non-zero.
     #[error("{command} failed{} ({context}): {stderr}", exit_suffix(*.status))]
     CommandFailed {
@@ -612,6 +624,18 @@ pub enum EngineError {
     Ext4Format {
         /// The formatter's own error, rendered.
         detail: String,
+    },
+
+    /// Producing the image's first-boot credential failed inside the in-process
+    /// hasher. Like [`Ext4Format`](Self::Ext4Format) this is a typed failure raised
+    /// from within the build rather than a host tool's nonzero exit — the credential
+    /// path shells out to nothing.
+    #[error("{context} failed: {message}")]
+    Secret {
+        /// What was being produced.
+        context: String,
+        /// The hasher's own error, rendered.
+        message: String,
     },
 
     /// A filesystem operation failed.

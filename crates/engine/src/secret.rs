@@ -7,12 +7,16 @@
 //! rather than the pure core. A fresh secret per build deliberately places the
 //! rootfs `/etc/shadow` outside the byte-reproducibility claim; the package
 //! content-pin is unaffected.
+//!
+//! Both the draw and the hash are in-process: nothing on the credential path shells
+//! out to a host binary, so what lands in the image's `/etc/shadow` does not depend
+//! on which host built it.
 
 use crate::error::EngineError;
+use sha_crypt::{PasswordHasher, ShaCrypt};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::process::Command;
 
 /// Password alphabet: mixed case + digits with the visually ambiguous characters
 /// (`0`/`O`/`o`, `1`/`l`/`I`) removed, so the one-time secret transcribes cleanly
@@ -22,6 +26,18 @@ const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ234567
 /// Generated password length. 20 symbols over the 56-symbol alphabet is ~116 bits
 /// of entropy — unguessable within the first-boot window, and well beyond it.
 const LEN: usize = 20;
+/// Raw salt bytes drawn per hash. `sha512crypt` encodes the salt in its 6-bit crypt
+/// alphabet, so 12 bytes become the 16 salt characters the format allows at most.
+const SALT_BYTES: usize = 12;
+
+/// Fill `buf` from the kernel CSPRNG. Fails only if `/dev/urandom` cannot be read,
+/// which on Linux means something is wrong that no fallback should paper over.
+fn fill_random(buf: &mut [u8]) -> Result<(), EngineError> {
+    let path = Path::new("/dev/urandom");
+    File::open(path)
+        .and_then(|mut f| f.read_exact(buf))
+        .map_err(|s| EngineError::io(path, s))
+}
 
 /// Generate a fresh per-image password from `/dev/urandom`.
 ///
@@ -33,13 +49,10 @@ pub fn generate_password() -> Result<String, EngineError> {
     let n = ALPHABET.len();
     // Reject bytes >= this so `byte % n` is unbiased (each symbol equally likely).
     let limit = (256 / n) * n;
-    let path = Path::new("/dev/urandom");
-    let mut rng = File::open(path).map_err(|s| EngineError::io(path, s))?;
     let mut out = String::with_capacity(LEN);
     let mut buf = [0u8; 64];
     while out.len() < LEN {
-        rng.read_exact(&mut buf)
-            .map_err(|s| EngineError::io(path, s))?;
+        fill_random(&mut buf)?;
         for &b in &buf {
             if out.len() == LEN {
                 break;
@@ -53,53 +66,38 @@ pub fn generate_password() -> Result<String, EngineError> {
     Ok(out)
 }
 
-/// Hash `pass` into a `sha512crypt` (`$6$`) entry for `/etc/shadow`, via
-/// `openssl passwd -6` (a random salt per call, so the same password hashes
-/// differently each time). The image stage splices the result into the default
-/// account's shadow line; the plaintext is surfaced to the operator once and
-/// committed nowhere.
+/// Hash `pass` into a `sha512crypt` (`$6$`) entry for `/etc/shadow`, over a fresh
+/// random salt — so the same password hashes differently each time.
+///
+/// Computed in-process by the pure-Rust `sha-crypt` implementation at the format's
+/// standard 5000 rounds. The alternative, `openssl passwd -6`, would put a host
+/// binary on the one security-relevant path in an otherwise in-process pipeline, and
+/// it is not portable: LibreSSL's `openssl passwd` has no `-6`, so a macOS host would
+/// fail here at image assembly with the whole build already done.
+///
+/// The emitted string states its round count (`$6$rounds=5000$…`) rather than leaving
+/// it implied. glibc, musl, and `libxcrypt` all read that form and it is what the
+/// account's own hash records — an explicit parameter beats a defaulted one in a file
+/// that outlives the tool that wrote it.
+///
+/// The image stage splices the result into the default account's shadow line; the
+/// plaintext is surfaced to the operator once and committed nowhere.
 pub(crate) fn crypt_password(pass: &str) -> Result<String, EngineError> {
-    use std::io::Write;
-    use std::process::Stdio;
-    let mut child = Command::new("openssl")
-        .args(["passwd", "-6", "-stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| EngineError::CommandSpawn {
-            command: "openssl".into(),
-            context: "hash first-boot password".into(),
-            source,
+    let mut salt = [0u8; SALT_BYTES];
+    fill_random(&mut salt)?;
+    let hash = ShaCrypt::SHA512
+        .hash_password_with_salt(pass.as_bytes(), &salt)
+        .map_err(|e| EngineError::Secret {
+            context: "hash the first-boot password".into(),
+            message: e.to_string(),
         })?;
-    child
-        .stdin
-        .take()
-        .expect("stdin was piped")
-        .write_all(format!("{pass}\n").as_bytes())
-        .map_err(|s| EngineError::io(Path::new("openssl-stdin"), s))?;
-    let out = child
-        .wait_with_output()
-        .map_err(|source| EngineError::CommandSpawn {
-            command: "openssl".into(),
-            context: "hash first-boot password".into(),
-            source,
-        })?;
-    if !out.status.success() {
-        return Err(EngineError::CommandFailed {
-            command: "openssl".into(),
-            context: "hash first-boot password".into(),
-            status: out.status.code(),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    let hash = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let hash = hash.as_str().to_string();
+    // The prefix is the one thing `/etc/shadow` reads to pick the algorithm, so a
+    // string that is not `$6$` would silently install as something else entirely.
     if !hash.starts_with("$6$") {
-        return Err(EngineError::CommandFailed {
-            command: "openssl".into(),
-            context: "hash first-boot password".into(),
-            status: None,
-            stderr: format!("unexpected crypt output: {hash}"),
+        return Err(EngineError::Secret {
+            context: "hash the first-boot password".into(),
+            message: format!("expected a sha512crypt ($6$) hash, got {hash}"),
         });
     }
     Ok(hash)
@@ -129,22 +127,70 @@ mod tests {
         assert_ne!(generate_password().unwrap(), generate_password().unwrap());
     }
 
+    /// The hash the image's `/etc/shadow` carries: `sha512crypt`, salted per call,
+    /// and computed with no host tool involved (so this test cannot skip).
     #[test]
     fn crypt_password_produces_a_sha512crypt_hash() {
-        // openssl is a checked host dep (doctor); skip if absent.
-        if Command::new("openssl")
-            .arg("version")
-            .output()
-            .map(|o| !o.status.success())
-            .unwrap_or(true)
-        {
-            eprintln!("skipping: openssl unavailable");
-            return;
-        }
         let hash = crypt_password("Example116BitSecret").unwrap();
         assert!(hash.starts_with("$6$"), "sha512crypt hash, got {hash}");
-        // Same password, different salt each call (openssl randomizes) — not reused.
+        // Same password, fresh salt each call — two accounts never share a hash.
         let again = crypt_password("Example116BitSecret").unwrap();
         assert_ne!(hash, again);
+        // The shape `/etc/shadow` and every crypt(3) reader parse:
+        // `$6$rounds=5000$<salt>$<checksum>`, salt and checksum in the crypt alphabet.
+        let fields: Vec<&str> = hash.split('$').collect();
+        assert_eq!(fields.len(), 5, "five `$`-separated fields, got {hash}");
+        assert_eq!(fields[1], "6");
+        assert_eq!(fields[2], "rounds=5000");
+        assert_eq!(fields[3].len(), 16, "the format's maximum salt length");
+        assert_eq!(fields[4].len(), 86, "a base64 sha512 checksum");
+        for field in [fields[3], fields[4]] {
+            assert!(
+                field
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'/'),
+                "outside the crypt(3) alphabet: {field}"
+            );
+        }
+    }
+
+    /// The hash a board's `login` recomputes must be the one this build wrote.
+    ///
+    /// Shape alone proves nothing: an implementation that emitted *a* well-formed
+    /// `$6$` string over the wrong digest would lock every image out of its own
+    /// console, with a build that reported success. Two properties are asserted:
+    ///
+    ///  1. **Known answer.** The reference vector from Ulrich Drepper's sha512crypt
+    ///     specification — the algorithm glibc, musl, and `libxcrypt` implement —
+    ///     verifies. That fixes the digest, the round count, and the base64 ordering
+    ///     against something outside this codebase.
+    ///  2. **Round trip.** A hash this module produces verifies for its own password
+    ///     and not for another, which is exactly what `login` does on the board.
+    #[test]
+    fn the_hash_is_the_one_a_board_will_check_against() {
+        use sha_crypt::{PasswordHashRef, PasswordVerifier, ShaCrypt};
+
+        let reference = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIF\
+                         NjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
+        let parsed = PasswordHashRef::new(reference).expect("the spec vector parses");
+        ShaCrypt::SHA512
+            .verify_password(b"Hello world!", parsed)
+            .expect("the spec vector's own password verifies");
+        assert!(
+            ShaCrypt::SHA512
+                .verify_password(b"Hello world", parsed)
+                .is_err(),
+            "a different password must not verify"
+        );
+
+        let mine = crypt_password("Example116BitSecret").unwrap();
+        let mine = PasswordHashRef::new(&mine).expect("what we write parses as crypt(3)");
+        ShaCrypt::SHA512
+            .verify_password(b"Example116BitSecret", mine)
+            .expect("the account's own password opens the account");
+        assert!(
+            ShaCrypt::SHA512.verify_password(b"wrong", mine).is_err(),
+            "another password must not open it"
+        );
     }
 }

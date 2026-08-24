@@ -91,6 +91,16 @@ impl LocalDistsRepo {
     /// The `file://` mirror URL for this repo — the base the provisioner fetches
     /// `dists/<suite>/…` and each package's pool `Filename` under. Built for a
     /// [`ferroday_cage`](crate::sandbox) `Repository::builder(...).mirror(...)`.
+    ///
+    /// The path is carried **verbatim, not percent-encoded**. The mirror base is
+    /// concatenated with a pool-relative suffix and the result is handed to
+    /// `HttpFetch`, which strips the `file://` scheme and opens what remains as a
+    /// filesystem path — it does no percent-decoding, so an encoded byte would be
+    /// looked up literally and a build under `/home/me/My Projects/…` would fail to
+    /// find its own `.deb`s. The repo dir is boot2deb's own (`<cache>/…`), never
+    /// attacker-supplied, and nothing downstream parses a query or fragment out of
+    /// it. `unencoded_paths_reach_the_provisioners_fetcher` holds this to the
+    /// fetcher's actual behavior rather than to an assumption about URL syntax.
     pub fn file_url(&self) -> String {
         format!("file://{}", self.dir.display())
     }
@@ -184,5 +194,43 @@ mod tests {
         assert!(release.contains("Architectures: arm64"));
         assert!(release.contains("SHA256:"));
         assert!(release.contains("main/binary-arm64/Packages"));
+    }
+
+    #[test]
+    fn unencoded_paths_reach_the_provisioners_fetcher() {
+        // The work dir — and so the repo dir under it — is a user-chosen path, and a
+        // space or a `#` in it is ordinary on a desktop. This asserts the whole join
+        // through the *real* consumer: the URL is concatenated with a pool-relative
+        // suffix and handed to the provisioner's fetcher, which strips `file://` and
+        // opens the remainder as a path. Percent-encoding the base would turn a
+        // working path into a literal `%20` lookup, so this is what stops that from
+        // ever looking like a fix.
+        use ferroday_cage::provision::debian::{Fetch, FetchRequest, HttpFetch};
+        if !have("dpkg-deb") {
+            eprintln!(
+                "skipping unencoded_paths_reach_the_provisioners_fetcher: dpkg-deb unavailable"
+            );
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let deb = make_deb(tmp.path(), "ffmpeg-rk", "3e53143");
+        let repo_dir = tmp.path().join("My Projects/build #1/localdists");
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "repo");
+        let repo = LocalDistsRepo::assemble(&repo_dir, &[deb], "forky", "arm64", &step).unwrap();
+        assert!(repo.file_url().contains("My Projects/build #1"));
+
+        let mut fetch = HttpFetch::new();
+        for suffix in [
+            "/dists/forky/Release",
+            "/pool/main/f/ffmpeg-rk/ffmpeg-rk_3e53143_arm64.deb",
+        ] {
+            let url = format!("{}{suffix}", repo.file_url());
+            let mut body = Vec::new();
+            fetch
+                .fetch(&FetchRequest::new(&url), &mut body)
+                .unwrap_or_else(|e| panic!("fetching {url}: {e}"));
+            assert!(!body.is_empty(), "empty body for {url}");
+        }
     }
 }

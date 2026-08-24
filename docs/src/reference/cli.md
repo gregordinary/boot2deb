@@ -7,6 +7,14 @@ Three global flags apply to every command: `--root <dir>` (the config root),
 `--overlay <dir>` (an out-of-tree config overlay, repeatable — see
 [Overlays](overlays.md)), and `--json` (machine-readable output).
 
+`--root` moves everything, not just where config is read from. A run's durable
+state is anchored to the config root: the build scratch (`<root>/build/<recipe>`),
+the artifact, patches, extra-deb, and verify-tree caches (`<root>/cache/...`), and
+the default `patches` checkout (the root's sibling `../patches`). So `--root
+boot2deb why-rebuild turing-rk1/forky` from the parent directory inspects the same
+trees a run from inside `boot2deb/` builds into. An explicit `--work-dir` or
+`--patches-path` is taken as given, relative to the current directory.
+
 Under `--json`, the `list-*` commands print one JSON array (unreadable entries
 become `{"name", "error"}` objects), `resolve` prints the fully resolved build as
 one JSON document, and `build` streams NDJSON — one JSON object per line, tagged
@@ -110,8 +118,12 @@ cargo run -p boot2deb-cli -- build turing-rk1/forky
 Builds the recipe from its lock: compiles the kernel, u-boot, userspace, and ffmpeg,
 bootstraps the rootfs, and writes the bootable disk image. Notable flags:
 
-- **`--stage <node>`** runs a single node — `kernel`, `dtb`, `uboot`, `userspace`,
-  `ffmpeg`, `rootfs`, or `image`; the default builds everything. A `--stage uboot` run
+- **`--stage <node>`** runs a single node — `kernel`, `dtb`, `kmod`, `uboot`,
+  `userspace`, `ffmpeg`, `rootfs`, or `image`; the default builds everything. `kmod`
+  builds the board's out-of-tree module `.deb`s (its
+  [`device_kmods`](config-model.md#out-of-tree-modules-are-their-own-layer))
+  against an existing kernel tree, so a
+  driver bump need not rebuild the kernel. A `--stage uboot` run
   also emits a standalone, directly-flashable `<device>-boot.img` (see below). Asking for
   a node this recipe does not *have* — `--stage kernel` on a board that installs Debian's
   kernel — is an error naming why, not a silent no-op.

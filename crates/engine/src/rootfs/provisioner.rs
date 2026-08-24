@@ -61,6 +61,11 @@ use std::process::Command;
 /// are meant to persist for on-device updates.
 const LOCAL_REPO_NAME: &str = "boot2deb-local";
 
+/// Header line of the solved rootfs manifest — the lock's `[rootfs].manifest`, whose
+/// sha256 covers this line too, so it is part of the pinned identity.
+const ROOTFS_MANIFEST_HEADER: &str =
+    "Solved rootfs package manifest: installed name version arch sha256.";
+
 /// Bootstrap `build`'s rootfs per `opts`, emitting the step's
 /// [`Event`](crate::event::Event)s to `sink`: the `tar` archive the image node
 /// formats and the content-pinned package manifest beside it.
@@ -83,10 +88,14 @@ pub fn build_rootfs(
     // caller's own ownership suffices: the provisioner's acquire runs in-process
     // as the caller, not under a separate mapped `_apt` uid, so nothing here has
     // to be traversable by another identity. Removed on drop.
+    //
+    // Rooted in the build's scratch tree rather than `TMPDIR` — see
+    // [`RootfsOptions::scratch_dir`] for why this node keeps off it.
+    std::fs::create_dir_all(opts.scratch_dir).map_err(|s| EngineError::io(opts.scratch_dir, s))?;
     let work = tempfile::Builder::new()
         .prefix("boot2deb-prov-")
-        .tempdir()
-        .map_err(|s| EngineError::io(&std::env::temp_dir(), s))?;
+        .tempdir_in(opts.scratch_dir)
+        .map_err(|s| EngineError::io(opts.scratch_dir, s))?;
 
     // 1. Overlays: the pre-install tree (laid before maintainer scripts run,
     //    via the provisioner's pre-configure hook) and the customize tree
@@ -203,10 +212,18 @@ pub fn build_rootfs(
         // A transient provisioned tree carrying subordinate-mapped ownership
         // the caller cannot unlink; the guard removes it through the map. Kept
         // out of `work` so its TempDir drop is not asked to remove ids it
-        // cannot. `provision::ensure` requires a non-existent destination.
-        let rootfs_dir =
-            std::env::temp_dir().join(format!("boot2deb-prov-rootfs-{}", std::process::id()));
-        let _ = provision::remove(&rootfs_dir);
+        // cannot, and out of `TMPDIR` because it is the whole target userland —
+        // see [`RootfsOptions::scratch_dir`]. `provision::ensure` requires a
+        // non-existent destination.
+        //
+        // Per-pid so two concurrent builds of one recipe do not collide, and swept
+        // by prefix first: a hard-killed run leaves a tree only `provision::remove`
+        // can reclaim, and it sits in the work dir a later `clean` will try to
+        // delete as the caller.
+        let rootfs_dir = opts
+            .scratch_dir
+            .join(format!("{PROVISIONED_PREFIX}{}", std::process::id()));
+        sweep_provisioned(opts.scratch_dir);
         // The bootstrap resolves the install closure a second time, for itself,
         // and installs *that* result — the plan above was resolved earlier and
         // only keys the cache. `DebianEvent::Resolved` carries the bootstrap's
@@ -290,6 +307,40 @@ struct ProvisionedRoot(PathBuf);
 impl Drop for ProvisionedRoot {
     fn drop(&mut self) {
         let _ = provision::remove(&self.0);
+    }
+}
+
+/// Name prefix of a transient provisioned rootfs under the build's scratch tree.
+///
+/// Public through [`sweep_provisioned`] because such a tree is the one thing in the
+/// work dir the calling user **cannot** delete: the provisioner gives it real
+/// ownership through a subordinate id-map, so its files belong to subuids outside the
+/// caller's own. Only `provision::remove` — which re-enters that map — can reclaim it.
+/// A run that completes removes its own through [`ProvisionedRoot`]; one that is
+/// hard-killed does not, and a later `clean` would then fail on a directory it has no
+/// permission to unlink.
+const PROVISIONED_PREFIX: &str = "prov-rootfs-";
+
+/// Reclaim every provisioned rootfs left in `scratch_dir` by an earlier run, through
+/// the id-map that owns them (those named `prov-rootfs-*`).
+///
+/// Best-effort and quiet: a tree that resists removal is not a reason to fail the
+/// operation that called this, and a live concurrent build's own tree is skipped
+/// naturally — `provision::remove` on a directory another process still holds fails,
+/// leaving it alone. Called at the start of the rootfs node and by `clean`, so the
+/// user-facing rule is simply that the work dir is always removable.
+pub fn sweep_provisioned(scratch_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(scratch_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(PROVISIONED_PREFIX)
+        {
+            let _ = provision::remove(entry.path());
+        }
     }
 }
 
@@ -428,7 +479,8 @@ fn sanitize_repo_name(name: &str) -> String {
 }
 
 /// The rootfs cache key: the plan's solved set plus the two staged overlay trees'
-/// content and the local-repo `.deb`s' content. Keying on the *solved* set is what
+/// content, the local-repo `.deb`s' content, the feature repositories, and the
+/// interpreter that configures the tree. Keying on the *solved* set is what
 /// makes a hit safe — a moved mirror resolves a different plan, hence a different
 /// key, and rebuilds.
 fn rootfs_key(
@@ -448,13 +500,48 @@ fn rootfs_key(
         );
     }
     let repo_fp = rootcache::file_fingerprints(opts.repo_debs)?;
-    Ok(rootcache::cache_key(
-        &solved,
-        &overlay_fp,
-        &repo_fp,
-        &build.arch.to_string(),
-        build.image_suite(),
-    ))
+    let apt_fp = apt_source_records(opts.apt_sources)?;
+    let arch = build.arch.to_string();
+    Ok(rootcache::cache_key(&rootcache::CacheKeyInputs {
+        solved: &solved,
+        overlay: &overlay_fp,
+        repo_debs: &repo_fp,
+        apt_sources: &apt_fp,
+        arch: &arch,
+        suite: build.image_suite(),
+        interpreter: opts.interpreter_id,
+    }))
+}
+
+/// One cache-key record per feature apt repository: the source's identity plus the
+/// *content* of the keyring it is verified against.
+///
+/// Both halves reach the image directly — [`feature_repositories`] hands each to the
+/// provisioner, which writes its `sources.list.d` entry and its keyring into the
+/// finished tree — so a re-pointed URI or a rotated key changes what the image carries
+/// without moving a single package version. Fields are NUL-separated for the same
+/// reason [`rootcache::dir_fingerprints`] does it: no value can forge a field boundary.
+///
+/// A keyring that cannot be read is an error, not a skipped record: the CLI resolved
+/// and existence-checked the path, so a failure here means the build is about to
+/// verify a repository against a keyring it does not have.
+fn apt_source_records(sources: &[AptRepo]) -> Result<Vec<String>, EngineError> {
+    sources
+        .iter()
+        .map(|repo| {
+            let bytes =
+                std::fs::read(&repo.keyring).map_err(|s| EngineError::io(&repo.keyring, s))?;
+            let source = repo.source;
+            Ok(format!(
+                "{}\0{}\0{}\0{}\0{}",
+                source.name,
+                source.uri,
+                source.suite,
+                source.components.join(" "),
+                crate::blobs::sha256_hex(&bytes),
+            ))
+        })
+        .collect()
 }
 
 /// The plan's packages as `name version arch` lines — the solved set folded into
@@ -466,49 +553,15 @@ fn plan_solved(plan: &Plan) -> Vec<String> {
         .collect()
 }
 
-/// Write the content-pinned manifest from the resolved plan (`name version arch
-/// sha256`, sorted by name), the lock's `[rootfs].manifest`. The plan carries each
-/// `.deb`'s archive-recorded sha256, so no dpkg-status parse or in-bootstrap hash
-/// hook is needed: the plan *is* the installed set, resolved through the same path
-/// the provisioner installs.
+/// Write the content-pinned manifest from the resolved plan, the lock's
+/// `[rootfs].manifest`.
 fn write_plan_manifest(plan: &Plan, out: &Path, step: &Step) -> Result<(), EngineError> {
-    let rows: Vec<(String, String, String, String)> = plan
-        .packages
-        .iter()
-        .map(|p| {
-            (
-                p.name.clone(),
-                p.version.clone(),
-                p.architecture.clone(),
-                p.sha256.clone(),
-            )
-        })
-        .collect();
-    let body = render_plan_manifest(&rows);
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent).map_err(|s| EngineError::io(parent, s))?;
-    }
-    std::fs::write(out, &body).map_err(|s| EngineError::io(out, s))?;
+    let count = crate::manifest::write(ROOTFS_MANIFEST_HEADER, plan, out)?;
     step.log(format!(
-        "wrote solved manifest ({} packages, sha256-pinned from the plan) to {}",
-        rows.len(),
+        "wrote solved manifest ({count} packages, sha256-pinned from the plan) to {}",
         out.display()
     ));
     Ok(())
-}
-
-/// Render the manifest text from plan rows: a header then one sorted `name version
-/// arch sha256` line per package. Pure, so the derivation is testable without a
-/// bootstrap. Sorted by the full row (name first), so it is deterministic.
-fn render_plan_manifest(rows: &[(String, String, String, String)]) -> String {
-    let mut rows: Vec<&(String, String, String, String)> = rows.iter().collect();
-    rows.sort();
-    let mut body =
-        String::from("# Solved rootfs package manifest: installed name version arch sha256.\n");
-    for (name, version, arch, sha) in rows {
-        let _ = writeln!(body, "{name} {version} {arch} {sha}");
-    }
-    body
 }
 
 /// Customize the provisioned tree: lay the post-install overlay in, then run the
@@ -751,6 +804,7 @@ fn export_rootfs_tar(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boot2deb_core::model::AptSource;
     use boot2deb_core::{resolve_recipe, ConfigRoot, Overrides};
 
     fn repo_root() -> ConfigRoot {
@@ -779,36 +833,68 @@ mod tests {
     }
 
     #[test]
-    fn render_plan_manifest_is_sorted_and_pinned() {
-        let rows = vec![
-            (
-                "libc6".into(),
-                "2.41-1".into(),
-                "arm64".into(),
-                "aaaa".into(),
-            ),
-            (
-                "ffmpeg-rk".into(),
-                "3e53143".into(),
-                "arm64".into(),
-                "cccc".into(),
-            ),
-        ];
-        let body = render_plan_manifest(&rows);
-        let lines: Vec<&str> = body.lines().filter(|l| !l.starts_with('#')).collect();
-        // Sorted by name, each carrying its archive-recorded sha256.
-        assert_eq!(
-            lines,
-            vec!["ffmpeg-rk 3e53143 arm64 cccc", "libc6 2.41-1 arm64 aaaa"]
-        );
-    }
-
-    #[test]
     fn sanitize_repo_name_yields_a_portable_stem() {
         assert_eq!(sanitize_repo_name("jellyfin"), "jellyfin");
         assert_eq!(sanitize_repo_name("my repo/x"), "my-repo-x");
         assert_eq!(sanitize_repo_name(".."), "feature");
         assert_eq!(sanitize_repo_name(""), "feature");
+    }
+
+    #[test]
+    fn an_apt_source_record_covers_its_identity_and_its_keyring_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keyring = tmp.path().join("jellyfin.gpg");
+        std::fs::write(&keyring, b"KEY-ONE").unwrap();
+        let source = AptSource {
+            name: "jellyfin".into(),
+            uri: "https://repo.jellyfin.org/debian".into(),
+            suite: "trixie".into(),
+            components: vec!["main".into()],
+            signed_by: "jellyfin.gpg".into(),
+        };
+        let record = |source: &AptSource| {
+            apt_source_records(&[AptRepo {
+                source,
+                keyring: keyring.clone(),
+            }])
+            .unwrap()
+        };
+        let base = record(&source);
+
+        // Every field of the source's identity reaches the tree's sources entry, so
+        // each one moves the record.
+        for changed in [
+            AptSource {
+                name: "jellyfin-unstable".into(),
+                ..source.clone()
+            },
+            AptSource {
+                uri: "https://mirror.invalid/jellyfin".into(),
+                ..source.clone()
+            },
+            AptSource {
+                suite: "forky".into(),
+                ..source.clone()
+            },
+            AptSource {
+                components: vec!["main".into(), "unstable".into()],
+                ..source.clone()
+            },
+        ] {
+            assert_ne!(base, record(&changed), "{changed:?} must move the record");
+        }
+
+        // And the keyring is folded by content, not by path: a rotated key at the same
+        // filename is a different image.
+        std::fs::write(&keyring, b"KEY-TWO").unwrap();
+        assert_ne!(
+            base,
+            record(&source),
+            "a rotated keyring must move the record"
+        );
+
+        // A build whose features contribute no repository folds nothing at all.
+        assert!(apt_source_records(&[]).unwrap().is_empty());
     }
 
     /// The customize script is built by string formatting and handed to `sh` ~10

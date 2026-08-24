@@ -11,7 +11,7 @@ commit = "199c9959d3a9b53f346c221757fc7ac507fbac50"
 profiles = ["rk3576-fixes"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "7fd19b5e76b8fd4809479f90a9f0d6ee45ceddd0"
+commit = "e56368aa9a73f74fe682f88590797f4013a5ef45"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,7 +22,7 @@ commit = "88dc2788777babfd6322fa655df549a019aa1e69"
 profiles = ["rk3576-loader"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "7fd19b5e76b8fd4809479f90a9f0d6ee45ceddd0"
+commit = "e56368aa9a73f74fe682f88590797f4013a5ef45"
 
 [rootfs]
 suite = "forky"

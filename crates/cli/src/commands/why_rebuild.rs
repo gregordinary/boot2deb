@@ -5,11 +5,10 @@
 
 use crate::args::WhyRebuildArgs;
 use crate::config::{device_dts_paths, kmod_local_patches};
-use crate::fsutil::absolutize;
+use crate::workdir::work_dir_for;
 use boot2deb_core::model::Overrides;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
 use boot2deb_engine::plan;
-use std::path::PathBuf;
 
 /// Run `why-rebuild <recipe>`.
 pub(crate) fn run(
@@ -26,10 +25,7 @@ pub(crate) fn run(
     // The kmod tree signatures fold the board's local compat patches, so resolve them
     // too — an edited shim must be reported as a rebuild, not a reuse.
     let kmod_local_patches = kmod_local_patches(root, &build)?;
-    let work_dir = absolutize(
-        args.work_dir
-            .unwrap_or_else(|| PathBuf::from("build").join(recipe)),
-    );
+    let work_dir = work_dir_for(root, recipe, args.work_dir);
     let nodes = plan::plan_nodes(&plan::PlanInputs {
         lock: &lock,
         work_dir: &work_dir,

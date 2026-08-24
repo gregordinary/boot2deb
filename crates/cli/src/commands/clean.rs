@@ -8,7 +8,7 @@
 use crate::args::CleanArgs;
 use crate::fsutil::{absolutize, dir_size};
 use crate::render::human_size;
-use crate::workdir::check_work_dir_removable;
+use crate::workdir::{check_work_dir_removable, work_dir_for};
 use boot2deb_core::ConfigRoot;
 use std::path::PathBuf;
 
@@ -21,10 +21,7 @@ pub(crate) fn run(
     // Validate the recipe-name shape (reject `..`/absolute/separators) before it is
     // joined into a filesystem path, consistent with the config write paths.
     root.lock_path(recipe)?;
-    let work_dir = absolutize(
-        args.work_dir
-            .unwrap_or_else(|| PathBuf::from("build").join(recipe)),
-    );
+    let work_dir = work_dir_for(root, recipe, args.work_dir);
     // The whole-tree default and the cache/sandbox selectors all remove within the
     // caller-supplied work dir, so they require the ownership stamp. The
     // artifacts selector is exempt: its target lives under the config root's own
@@ -62,6 +59,11 @@ pub(crate) fn run(
         if args.dry_run {
             println!("  would remove {} ({size})", target.display());
         } else {
+            // A hard-killed build can leave a provisioned rootfs here whose files
+            // belong to subordinate uids — `remove_dir_all` runs as the caller and
+            // cannot unlink those. Reclaim them through the id-map that owns them
+            // first, so `clean` is not defeated by the one tree it cannot delete.
+            boot2deb_engine::rootfs::sweep_provisioned(target);
             std::fs::remove_dir_all(target)
                 .map_err(|e| format!("failed to remove {}: {e}", target.display()))?;
             println!("  removed {} ({size})", target.display());

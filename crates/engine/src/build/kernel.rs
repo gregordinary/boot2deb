@@ -48,7 +48,9 @@ const KERNEL_DEB_PREFIXES: &[&str] = &["linux-image-", "linux-headers-", "linux-
 /// the folded inputs do not already capture (e.g. a changed `make` invocation).
 /// v2: the config is now generated with `CROSS_COMPILE`, so the same fragments
 /// resolve a different `.config` (the cross-toolchain-probed symbols) than under v1.
-const OUTPUT_STAGE_VERSION: u32 = 2;
+/// v3: the `.deb`s state their compressor through `KDEB_COMPRESS`, so a v2 entry may
+/// be a `zstd` archive where this build states `xz`.
+const OUTPUT_STAGE_VERSION: u32 = 3;
 
 /// Filesystem inputs for the kernel stage (the lock and resolved build carry the
 /// pins and axes; these are the on-disk locations).
@@ -722,6 +724,18 @@ pub fn kbuild_env(build: &ResolvedBuild, source_date_epoch: Option<u64>) -> Vec<
     let mut env = vec![
         ("ARCH".to_string(), build.kernel_arch.clone()),
         ("KDEB_CHANGELOG_DIST".to_string(), "stable".to_string()),
+        // The kernel packages itself, so it needs the compressor stated the same way
+        // [`dpkg_deb_build`](crate::build::dpkg_deb_build) states it. Left unset, the
+        // kernel's `debian/rules` expands `-Z$(KDEB_COMPRESS)` to nothing and
+        // `dh_builddeb` falls through to whatever the host distro patched into its
+        // `dpkg` default — `xz` on Debian, `zstd` on Ubuntu-derived. These are the
+        // largest `.deb`s in the image, so it is where inheriting would leak furthest.
+        // The type alone suffices: `dpkg-deb`'s own default level for `xz` is 6, which
+        // is [`DEB_COMPRESS_LEVEL`](crate::build::DEB_COMPRESS_LEVEL).
+        (
+            "KDEB_COMPRESS".to_string(),
+            crate::build::DEB_COMPRESSOR.to_string(),
+        ),
         ("KBUILD_BUILD_USER".to_string(), "boot2deb".to_string()),
         ("KBUILD_BUILD_HOST".to_string(), "boot2deb".to_string()),
         (
@@ -936,6 +950,7 @@ mod tests {
                 cross_compile: None,
                 jobs: None,
                 toolchain_id: String::new(),
+                sandbox_id: String::new(),
             },
             tree,
             &step,
@@ -1105,6 +1120,7 @@ mod tests {
             cross_compile: None,
             jobs: None,
             toolchain_id: tc.to_string(),
+            sandbox_id: String::new(),
         };
         let sig = |lock: &Lock, env: &BuildEnv| {
             output_manifest(
@@ -1149,5 +1165,24 @@ mod tests {
         assert!(!env.iter().any(|(k, _)| k == "SOURCE_DATE_EPOCH"));
         // CROSS_COMPILE is never in the kbuild env (added from BuildEnv).
         assert!(!env.iter().any(|(k, _)| k == "CROSS_COMPILE"));
+    }
+
+    /// The kernel `.deb`s state their compressor rather than inheriting the host
+    /// distro's `dpkg` default, matching the host-side packaging in
+    /// [`crate::build::dpkg_deb_build`].
+    ///
+    /// The kernel packages itself through its own `debian/rules`, which never sees
+    /// that function — so this env var is the whole of the guarantee for the two
+    /// largest `.deb`s in the image. Asserted against the shared constant rather than
+    /// a literal, so the kernel path cannot drift from the u-boot and kmod paths.
+    #[test]
+    fn the_kernel_debs_state_their_compressor() {
+        let env = kbuild_env(&rk1_build(), None);
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "KDEB_COMPRESS")
+                .map(|(_, v)| v.as_str()),
+            Some(crate::build::DEB_COMPRESSOR)
+        );
     }
 }

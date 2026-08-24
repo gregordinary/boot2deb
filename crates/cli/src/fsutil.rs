@@ -1,7 +1,8 @@
-//! Filesystem helpers shared by the command handlers: path absolutization, the
-//! guarded scaffold write, and directory-size accounting for `clean`.
+//! Filesystem helpers shared by the command handlers: path absolutization and
+//! lexical normalization, the guarded scaffold write, and directory-size accounting
+//! for `clean`.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Make `path` absolute (against the current dir) if it is relative, so it is
 /// safe to use as a sandbox bind source and working directory (the cage exposes
@@ -15,6 +16,41 @@ pub(crate) fn absolutize(path: PathBuf) -> PathBuf {
             .map(|cwd| cwd.join(&path))
             .unwrap_or(path)
     }
+}
+
+/// Lexically normalize `path`: drop `.` components and cancel each `..` against the
+/// component before it, without touching the filesystem.
+///
+/// For paths built by joining onto `--root` (whose default is the literal `.`), the
+/// unnormalized form is correct but unreadable — `<cwd>/./../patches` names the right
+/// directory and tells an operator nothing. Every such path is shown in an error
+/// message or a next-step hint, so it is normalized before it is used.
+///
+/// Lexical, so a `..` that crosses a symlinked component resolves to the parent of
+/// the *link*, not of its target. That is the intended meaning here ("the sibling of
+/// the config root"), and it needs no existing path to compute.
+pub(crate) fn normalize(path: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // A leading `..`, or one following another, has nothing to cancel
+                // against and is kept — dropping it would name a different directory.
+                Some(Component::ParentDir) | None => out.push(component),
+                // The root's parent is the root, so `/..` collapses to `/`.
+                Some(_) => {}
+            },
+            other => out.push(other),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
 }
 
 /// Write a scaffolded file, creating its parent directory. Refuses to clobber an
@@ -76,6 +112,23 @@ mod tests {
         // With --force it is overwritten.
         write_scaffold_file(&path, "second\n", true).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second\n");
+    }
+
+    #[test]
+    fn normalize_cancels_dot_and_parent_components() {
+        let n = |s: &str| normalize(PathBuf::from(s)).display().to_string();
+        // The shape this exists for: `--root .` joined with `../patches`.
+        assert_eq!(n("/home/dev/boot2deb/./../patches"), "/home/dev/patches");
+        assert_eq!(n("/a/b/../c"), "/a/c");
+        assert_eq!(n("./a/b"), "a/b");
+        // A `..` with nothing to cancel against is kept: dropping it would name a
+        // different directory.
+        assert_eq!(n("../../a"), "../../a");
+        assert_eq!(n("a/../../b"), "../b");
+        // The root has no parent.
+        assert_eq!(n("/../a"), "/a");
+        // A path that cancels to nothing is the current directory, not the empty path.
+        assert_eq!(n("a/.."), ".");
     }
 
     #[test]

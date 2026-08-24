@@ -5,7 +5,7 @@
 //!
 //! Everything here reads config; the side effects belong to the commands that call it.
 
-use crate::fsutil::absolutize;
+use crate::fsutil::{absolutize, normalize};
 use boot2deb_core::model::{Overrides, ResolvedBuild};
 use boot2deb_core::{resolve_device, resolve_recipe, ConfigRoot};
 use boot2deb_engine::event::Step;
@@ -293,12 +293,29 @@ pub(crate) fn extra_debs_store(root: &ConfigRoot) -> PathBuf {
     root.path().join("cache").join("extra-debs")
 }
 
+/// The default `patches` repo checkout: the config root's sibling `patches/`
+/// directory, the side-by-side layout the two repos are developed in.
+///
+/// Anchored to `--root` rather than the process CWD, because which checkout is
+/// "co-located" is a property of where the config tree lives. The divergence this
+/// prevents is silent in the case where silence matters most: when the default misses,
+/// `build` does not fail — it takes a *different* series source (auto-fetch at the
+/// pinned commit), so a run with `--root` from elsewhere would read patches the
+/// operator did not stage.
+///
+/// Normalized, since the value is shown in `update`'s and `patch import`'s
+/// missing-checkout errors and in the latter's next-step hints.
+pub(crate) fn default_patches_checkout(root: &ConfigRoot) -> PathBuf {
+    normalize(absolutize(root.path().to_path_buf()).join("../patches"))
+}
+
 /// Resolve the patches source for a build, returning the checkout path and
 /// whether it is a co-development checkout (a pin mismatch is downgraded to a
 /// warning rather than a hard error). Precedence:
 ///
 /// 1. An explicit `--patches-path <dir>` — co-development from a working checkout.
-/// 2. The default `../patches` if it is a git checkout — the pin is enforced.
+/// 2. The [default sibling checkout](default_patches_checkout) if it is a git
+///    checkout — the pin is enforced.
 /// 3. Auto-fetch the series at the lock's `patches.commit` from `--patches-url` or
 ///    the kernel definition's `patches_url`, into a durable commit-addressed cache
 ///    (`<root>/cache/patches/<commit>`), so a build with no local checkout resolves
@@ -316,7 +333,7 @@ pub(crate) fn resolve_patches_source(
     if let Some(path) = patches_path {
         return Ok((path.to_path_buf(), true));
     }
-    let default_local = PathBuf::from("../patches");
+    let default_local = default_patches_checkout(root);
     if default_local.join(".git").exists() {
         return Ok((default_local, false));
     }
@@ -516,6 +533,27 @@ mod tests {
             "the jellyfin feature declares its apt source"
         );
         preflight_config(&root, &resolved).unwrap();
+    }
+
+    #[test]
+    fn the_default_patches_checkout_is_the_config_roots_sibling() {
+        // Anchored to --root, not the CWD: when this default misses, `build` does not
+        // fail — it auto-fetches a different series — so a run with --root from
+        // elsewhere would silently read patches the operator did not stage.
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("work/boot2deb");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            default_patches_checkout(&ConfigRoot::new(&nested)),
+            tmp.path().join("work/patches")
+        );
+        // The shipped default `--root .` normalizes rather than showing `./../patches`
+        // to the operator in a missing-checkout error.
+        let shown = default_patches_checkout(&ConfigRoot::new("."))
+            .display()
+            .to_string();
+        assert!(shown.ends_with("/patches"), "{shown}");
+        assert!(!shown.contains("/./") && !shown.contains(".."), "{shown}");
     }
 
     #[test]

@@ -44,19 +44,63 @@ pub struct BuildEnv {
     pub cross_compile: Option<String>,
     /// `make -j` parallelism; `None` lets the stage default to the host's
     /// available parallelism.
+    ///
+    /// Deliberately **not** in any signature. It reaches two outputs — `make -j` and
+    /// the `DEB_BUILD_OPTIONS=parallel=` a `dpkg-buildpackage` sees — but a build
+    /// system whose output depends on its job count is a build system with a bug, so
+    /// folding it would fragment the artifact cache by machine size to key something
+    /// that is supposed to be invariant. It is recorded in the provenance manifest
+    /// instead, where a difference between two images from one lock can be seen
+    /// without being paid for on every cache lookup.
     pub jobs: Option<usize>,
-    /// Identity of the host cross toolchain
-    /// ([`toolchain::host_cc_identity`](crate::toolchain::host_cc_identity)), folded
-    /// into the kernel/u-boot Tier-2 output signatures so an artifact built
-    /// with one compiler is not restored for a build using another. Empty when the
-    /// artifact cache is disabled (its value then never keys anything).
+    /// Identity of the host cross toolchain that compiles **on the host**
+    /// ([`HostToolchain::compiler_identity`](crate::toolchain::HostToolchain::compiler_identity)),
+    /// folded into the kernel, u-boot, and kmod Tier-2 output signatures so an
+    /// artifact built with one compiler is not restored for a build using another.
     pub toolchain_id: String,
+    /// Identity of everything host-side that shapes a **sandbox-built** `.deb` — the
+    /// userspace and ffmpeg nodes — folded into their output signatures.
+    ///
+    /// Two inputs, because two things outside the source pins decide those bytes:
+    ///
+    ///  - The **userland the sandbox bootstraps from** (its ordered mirror list). The
+    ///    sandbox's `gcc` is the compiler for these packages, and the suite alone does
+    ///    not identify it — a testing suite's toolchain moves under a fixed suite
+    ///    name. What pins it is the mirror: under `--snapshot pin` the sandbox
+    ///    bootstraps from a point-in-time archive, so two builds at different
+    ///    snapshots key differently. Against a *live* mirror the compiler can still
+    ///    move under an unchanged key; that residual is what the snapshot exists to
+    ///    close, and it cannot be closed from here.
+    ///  - The **`qemu-user` interpreter**, on a cross host, which executes that
+    ///    compiler
+    ///    ([`qemu_identity`](crate::toolchain::HostToolchain::qemu_identity)). A
+    ///    native build folds no interpreter segment at all rather than an empty one,
+    ///    so it can never key alike with a cross build whose qemu is merely missing.
+    pub sandbox_id: String,
+}
+
+/// Compose a [`BuildEnv::sandbox_id`] from the sandbox's ordered mirror list and the
+/// probed host toolchain.
+///
+/// Lives here, beside the field it fills, rather than at the one call site: it decides
+/// when two sandbox-built `.deb`s may be restored for each other, and that is a
+/// property of the signature, not of the CLI. A native build contributes no
+/// interpreter segment at all — not an empty one — so it can never key alike with a
+/// cross build whose `qemu-user` is merely missing.
+pub fn sandbox_identity(mirrors: &[String], toolchain: &crate::toolchain::HostToolchain) -> String {
+    let userland = mirrors.join(" ");
+    match toolchain.qemu_identity() {
+        Some(qemu) => format!("{userland} | {qemu}"),
+        None => userland,
+    }
 }
 
 impl BuildEnv {
     /// Resolved job count: the configured value or the host's available
-    /// parallelism (falling back to 1).
-    fn jobs(&self) -> usize {
+    /// parallelism (falling back to 1). Public because the provenance manifest
+    /// records the number the build actually ran at, which is only knowable here
+    /// when [`jobs`](Self::jobs) is `None`.
+    pub fn jobs(&self) -> usize {
         self.jobs.unwrap_or_else(|| {
             std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -199,10 +243,11 @@ const GIT_STALL_SECS: &str = "60";
 
 /// Apply git's http low-speed stall abort to a network-facing git `Command` — the
 /// clone/fetch operations that talk to a remote. Must be called on a fresh
-/// `Command::new("git")` before the subcommand args, since `-c` config is only
-/// honored ahead of the subcommand. Set both as `-c` config (git's own transport)
-/// and via `GIT_HTTP_LOW_SPEED_*` env (read by the `git-remote-https` helper). Local
-/// git ops (init/checkout/rev-parse/cat-file) touch no remote and are left unbounded.
+/// [`git::command`](crate::git::command) before the subcommand args, since `-c` config
+/// is only honored ahead of the subcommand. Set both as `-c` config (git's own
+/// transport) and via `GIT_HTTP_LOW_SPEED_*` env (read by the `git-remote-https`
+/// helper). Local git ops (init/checkout/rev-parse/cat-file) touch no remote and are
+/// left unbounded.
 pub(crate) fn bound_git_network(cmd: &mut Command) {
     cmd.args([
         "-c",
@@ -237,7 +282,7 @@ pub fn clone_shallow(
     reject_optionlike("ref", reference)?;
     let ctx = format!("clone {source} @ {reference}");
     for attempt in 1..=CLONE_ATTEMPTS {
-        let mut clone = Command::new("git");
+        let mut clone = crate::git::command(None);
         bound_git_network(&mut clone);
         clone
             // `--end-of-options` stops a `source`/`tree` beginning with `-` from
@@ -386,7 +431,7 @@ fn fetch_commit_inner(
     // A local source given as a relative path must be absolutized: `git -C <dir>`
     // resolves it relative to `<dir>`, not our CWD. A URL is left untouched.
     let resolved = resolve_local_source(source);
-    let mut init = Command::new("git");
+    let mut init = crate::git::command(None);
     init.arg("-C").arg(dir).args(["init", "-q"]);
     run(init, "git", &format!("init {}", dir.display()), step)?;
 
@@ -395,7 +440,7 @@ fn fetch_commit_inner(
     // reaches the locked commit. A shallow fetch-by-sha works for a local
     // source, an advertised ref tip, or a server honoring SHA1-in-want.
     if try_fetch_commit(dir, &resolved, commit) {
-        let mut checkout = Command::new("git");
+        let mut checkout = crate::git::command(None);
         // `git checkout --detach <commit>` takes a revision, not a pathspec, so it
         // must NOT be given `--end-of-options`: in detach mode git classifies
         // everything after that marker as a pathspec and rejects it ("--detach does
@@ -417,7 +462,7 @@ fn fetch_commit_inner(
         // checkout; `--<pkg>-src <checkout>` takes the shallow path above instead.
         // (Mirrors the gix patch-fetch, which also fetches full history for the same
         // reason,.)
-        let mut fetch = Command::new("git");
+        let mut fetch = crate::git::command(None);
         bound_git_network(&mut fetch);
         // `--end-of-options` keeps the source/refspec positionals from being read as
         // flags (defence in depth over the value guards above).
@@ -456,7 +501,7 @@ fn fetch_commit_inner(
                 });
             }
         }
-        let mut checkout = Command::new("git");
+        let mut checkout = crate::git::command(None);
         checkout
             .arg("-C")
             .arg(dir)
@@ -511,7 +556,7 @@ pub(crate) enum ObjectProbe {
 /// so object-presence is equivalent to commit-presence here; a spawn failure is also
 /// `Errored`.
 pub(crate) fn probe_object(dir: &Path, commit: &str) -> ObjectProbe {
-    match Command::new("git")
+    match crate::git::command(None)
         .arg("-C")
         .arg(dir)
         .args(["cat-file", "-e", commit])
@@ -538,7 +583,7 @@ pub(crate) fn probe_object(dir: &Path, commit: &str) -> ObjectProbe {
 /// Quiet by design — a failure is an expected fallback (a server may forbid
 /// fetch-by-sha), not an error to stream, so the reference path can take over.
 fn try_fetch_commit(dir: &Path, source: &str, commit: &str) -> bool {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::git::command(None);
     bound_git_network(&mut cmd);
     cmd.arg("-C")
         .arg(dir)
@@ -1216,6 +1261,80 @@ pub(crate) fn set_mode(path: &Path, mode: u32) -> Result<(), EngineError> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .map_err(|s| EngineError::io(path, s))
+}
+
+/// The compressor every host-side `.deb` is built with, stated rather than inherited.
+///
+/// `dpkg-deb`'s default is a *distro* choice, not a `dpkg` constant: Debian's dpkg
+/// defaults to `xz`, Ubuntu-derived dpkg to `zstd`. Inheriting it would make the same
+/// recipe at the same lock produce a structurally different archive depending on which
+/// host ran the build, undoing the [`normalize_data_tree`] + `SOURCE_DATE_EPOCH` work
+/// these packages do specifically to be byte-identical across hosts. `xz` is also the
+/// compressor every dpkg since 1.15.6 can read, so a stated `xz` is the portable choice
+/// as well as the reproducible one.
+const DEB_COMPRESSOR: &str = "xz";
+/// Compression level for [`DEB_COMPRESSOR`]. Stated for the same reason as the
+/// compressor: it is a `dpkg-deb` default, and a default is a thing that can move.
+const DEB_COMPRESS_LEVEL: &str = "6";
+
+/// A `fakeroot dpkg-deb --build <pkg_stage> <deb_out>` command for a host-side `.deb`,
+/// with the compressor and level stated and `source_date_epoch` exported when known.
+///
+/// `fakeroot` is what makes the staged tree package as `root:root` without the build
+/// running as root. `SOURCE_DATE_EPOCH` (a locked commit's committer date) makes
+/// `dpkg-deb` clamp every archive member's mtime to it, so the `.deb` carries the
+/// lock's timestamp rather than the build clock. Together with [`normalize_data_tree`]
+/// and [`DEB_COMPRESSOR`] that is every input to the archive bytes that is not the
+/// staged content itself.
+///
+/// The kernel's own `.deb` does not come through here — `make bindeb-pkg` runs
+/// `dpkg-buildpackage` inside the kernel tree — and neither does the ffmpeg deb, which
+/// is built by the sandbox's own `dpkg`.
+pub(crate) fn dpkg_deb_build(
+    pkg_stage: &Path,
+    deb_out: &Path,
+    source_date_epoch: Option<u64>,
+) -> Command {
+    let mut cmd = Command::new("fakeroot");
+    cmd.args([
+        "dpkg-deb",
+        "--build",
+        "-Z",
+        DEB_COMPRESSOR,
+        "-z",
+        DEB_COMPRESS_LEVEL,
+    ])
+    .arg(pkg_stage)
+    .arg(deb_out);
+    if let Some(epoch) = source_date_epoch {
+        cmd.env("SOURCE_DATE_EPOCH", epoch.to_string());
+    }
+    cmd
+}
+
+/// The umask every boot2deb build runs under, declared rather than inherited.
+///
+/// The umask is the one build-host setting no environment variable covers: it is a
+/// process attribute, so it passes through `base_env(false)`, through the cage, and
+/// into every `mkdir` a build makes. Left inherited it reaches the image. `mkdir -p`
+/// asks for `0777`, so a `002` umask (the Ubuntu/Pop!_OS default) creates `0775`
+/// directories — which is how a `make install` staging tree comes to ship
+/// group-writable directories inside a `.deb`, and how `dpkg`'s own state files come
+/// to be group-writable in the rootfs. `022` is Debian's default and the mode every
+/// such directory is meant to have.
+///
+/// This covers modes created *during* the build.
+/// [`normalize_overlay_modes`](crate::rootfs) covers the other half — modes that
+/// already exist on disk, because a git checkout materializes an overlay tree at the
+/// developer's umask before boot2deb runs at all. Neither subsumes the other.
+///
+/// Called once from the CLI entry point: it mutates process-global state, so it
+/// belongs at the top of a program rather than inside a library call that a caller
+/// with its own threads did not ask to be reconfigured.
+pub fn declare_umask() {
+    // Safety: `umask` is always successful, returns the previous mask, and touches no
+    // memory. Called before any build thread exists.
+    unsafe { libc::umask(0o022) };
 }
 
 /// Normalize every mode in a staged package tree so the host umask does not leak into
@@ -1977,6 +2096,64 @@ mod tests {
         assert_eq!(deb_version_cmp("a-9-b", "a-10-b"), Ordering::Less);
         assert_eq!(deb_version_cmp("a-2-b", "a-2-b"), Ordering::Equal);
         assert_eq!(deb_version_cmp("b", "a"), Ordering::Greater);
+    }
+
+    /// The sandbox identity separates what must not share an artifact-cache entry.
+    ///
+    /// A native build folds no interpreter segment at all, so it can never collide
+    /// with a cross build whose `qemu-user` is simply absent — the two produce
+    /// genuinely different `.deb`s and a shared key would restore the wrong one.
+    #[test]
+    fn the_sandbox_identity_separates_userland_and_interpreter() {
+        use crate::toolchain::HostToolchain;
+        let live = vec!["http://deb.debian.org/debian".to_string()];
+        let snapshot = vec!["https://snapshot.debian.org/archive/debian/20260628T083000Z/".into()];
+        // A cross build whose interpreter cannot be run still folds a fallback naming
+        // it; a native build folds nothing, so the two are never equal.
+        let cross = HostToolchain::probe(None, Some("boot2deb-no-such-arch"));
+        let native = HostToolchain::probe(None, None);
+        assert_ne!(
+            sandbox_identity(&live, &cross),
+            sandbox_identity(&live, &native)
+        );
+        assert_eq!(sandbox_identity(&live, &native), live[0]);
+        // A snapshot-pinned userland is a different compiler than the live mirror's.
+        assert_ne!(
+            sandbox_identity(&live, &cross),
+            sandbox_identity(&snapshot, &cross)
+        );
+        // A fallback list is neither of the two single-mirror identities.
+        let fallback = [live.clone(), snapshot.clone()].concat();
+        for one in [&live, &snapshot] {
+            assert_ne!(
+                sandbox_identity(&fallback, &cross),
+                sandbox_identity(one, &cross)
+            );
+        }
+    }
+
+    /// The declared umask is what keeps a directory the *build itself* creates at
+    /// `0755`, whatever the host's own umask is.
+    ///
+    /// Asserted through the consequence rather than the mask value, because the
+    /// consequence is the defect: `mkdir` asks for `0777` and takes what the umask
+    /// leaves, so under a `002` host umask a `make install` staging tree lands `0775`
+    /// directories in the shipped `.deb` and no per-file mode in the packaging touches
+    /// them.
+    #[test]
+    fn the_declared_umask_keeps_a_build_made_directory_at_0755() {
+        use std::os::unix::fs::PermissionsExt;
+
+        declare_umask();
+        let tmp = tempfile::tempdir().unwrap();
+        // `std::fs::create_dir` requests 0o777, exactly as `mkdir -p` does.
+        let dir = tmp.path().join("made-by-the-build");
+        std::fs::create_dir(&dir).unwrap();
+        assert_eq!(
+            dir.metadata().unwrap().permissions().mode() & 0o7777,
+            0o755,
+            "a directory the build created followed the host umask into the image"
+        );
     }
 
     #[test]

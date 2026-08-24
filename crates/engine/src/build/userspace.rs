@@ -18,7 +18,7 @@ use crate::build::{
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
-use crate::sandbox::{BuildSandbox, SandboxRun};
+use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, SandboxRun};
 use boot2deb_core::lock::{GitPin, Lock};
 use std::path::{Path, PathBuf};
 
@@ -202,7 +202,7 @@ pub fn build_userspace(
         .iter()
         .map(|p| {
             let pi = patch_ctx.inputs_for(p.name);
-            package_output_manifest(p, suite, arch, pi.as_ref())
+            package_output_manifest(p, suite, arch, &env.sandbox_id, pi.as_ref())
                 .signature()
                 .as_str()
                 .to_string()
@@ -216,8 +216,13 @@ pub fn build_userspace(
     let all_cached = store.is_some() && cached.iter().all(|&c| c);
 
     step.log(format!("sandbox: {}", sandbox.describe()));
-    if all_cached {
+    // The build root is acquired only where a compile happens. A fully-cached stage
+    // restores every `.deb` from the artifact store and never enters the sandbox, so it
+    // neither bootstraps the base nor stages an increment — which is also why the
+    // layered shape costs a warm rebuild nothing.
+    let root = if all_cached {
         step.log("all userspace packages cached — skipping sandbox setup");
+        None
     } else {
         sandbox.ensure_ready(&step)?;
         step.progress(15);
@@ -225,8 +230,18 @@ pub fn build_userspace(
         if opts.build_libmali {
             deps.extend_from_slice(LIBMALI_DEPS);
         }
-        sandbox.install(&deps, &step)?;
-    }
+        Some(sandbox.build_root(
+            &BuildRootSpec {
+                packages: &deps,
+                // The userspace packages build against the suite alone: they are the
+                // first stage to compile, so there is nothing of this build's own for
+                // them to depend on.
+                pool: None,
+                stage: "userspace",
+            },
+            &step,
+        )?)
+    };
     step.progress(25);
 
     // Build (or restore) each package, spreading coarse progress across 25..90.
@@ -248,7 +263,13 @@ pub fn build_userspace(
             false
         };
         if !restored {
-            build_one(pkg, &stage_root, env, sandbox, &patch_ctx, &step)?;
+            // `build_one` is reached only on a miss, a miss implies `!all_cached`, and
+            // that is exactly the branch that acquired the root — so a compile always
+            // has one and a fully-cached stage never stages one.
+            let root = root
+                .as_ref()
+                .expect("a cache miss implies the branch that acquires the build root");
+            build_one(pkg, &stage_root, env, root, &patch_ctx, &step)?;
             if let Some(s) = store.as_ref() {
                 store_package(s, pkg, &node_name(pkg), &out_sigs[i], &stage_root, &step)?;
             }
@@ -262,13 +283,17 @@ pub fn build_userspace(
     Ok(artifacts)
 }
 
-/// Fetch (if needed), apply the package's patch scope, and build one package,
+/// Fetch (if needed), apply the package's patch scope, and build one package in `root`,
 /// leaving its `.deb`s in `stage_root`.
+///
+/// `root` is the stage's build root — the sandbox base plus the userspace build-deps —
+/// so `dpkg-buildpackage` sees exactly the packages this stage declared and nothing an
+/// earlier build left behind.
 fn build_one(
     pkg: &Package,
     stage_root: &Path,
     env: &BuildEnv,
-    sandbox: &dyn BuildSandbox,
+    root: &BuildRoot,
     patches: &UserspacePatchCtx,
     step: &Step,
 ) -> Result<(), EngineError> {
@@ -326,13 +351,11 @@ fn build_one(
     let spec = SandboxRun {
         work: &tree,
         binds: &binds,
-        ro_binds: &[],
-        net: false,
         env: &dpkg_env,
         argv: &argv,
         context: &context,
     };
-    sandbox.run(&spec, step)?;
+    root.run(&spec, step)?;
     step.log(format!("{}: built", pkg.name));
     Ok(())
 }
@@ -492,13 +515,15 @@ fn node_name(pkg: &Package) -> String {
 /// The Tier-2 output signature manifest of a userspace package's `.deb`s from
 /// primitives. It folds the Tier-1 fetch signature ([`signature_manifest`], the
 /// commit + MPP patch series) as a dependency, then the build recipe: the
-/// gcc-14 warning relaxation, the target arch, and the **suite** — the package
-/// compiles inside the target-arch sandbox, whose toolchain is the suite's `gcc`, so
-/// the suite stands in for that toolchain identity (its bounded within-suite drift is
-/// acceptable; these accel debs are not byte-gated). Libmali also folds its
-/// variant filter. On a signature hit the store restores this package's `.deb`s
-/// rather than rebuilding; a patch change reaches this output signature through the
-/// folded tree dependency.
+/// gcc-14 warning relaxation, the target arch, the **suite**, and `sandbox` — the
+/// package compiles inside the target-arch sandbox, so what produced it is that
+/// sandbox's toolchain. The suite names the userland; `sandbox`
+/// ([`BuildEnv::sandbox_id`](crate::build::BuildEnv::sandbox_id)) identifies the
+/// *instance* of it — which mirror it was bootstrapped from, and which `qemu-user`
+/// executes its compiler — so a snapshot-pinned build and a live-mirror build never
+/// restore each other's `.deb`s. Libmali also folds its variant filter. On a
+/// signature hit the store restores this package's `.deb`s rather than rebuilding; a
+/// patch change reaches this output signature through the folded tree dependency.
 ///
 /// Public and keyed by primitives (not a `Package`) so the ffmpeg stage recomputes
 /// the mpp/librga dependency signatures from the lock and folds them into its own
@@ -509,6 +534,7 @@ pub fn output_manifest_for(
     commit: &str,
     suite: &str,
     arch: &str,
+    sandbox_id: &str,
     patches: Option<&PatchInputs>,
 ) -> crate::signature::SignatureManifest {
     let tree_sig = signature_manifest(name, commit, patches).signature();
@@ -519,7 +545,8 @@ pub fn output_manifest_for(
     b.fold_dep(&tree_sig)
         .fold_scalar("relax_cflags", RELAX_CFLAGS)
         .fold_scalar("suite", suite)
-        .fold_scalar("arch", arch);
+        .fold_scalar("arch", arch)
+        .fold_scalar("sandbox", sandbox_id);
     if name == "libmali" {
         b.fold_scalar("libmali_variant", LIBMALI_VARIANT);
     }
@@ -532,9 +559,10 @@ fn package_output_manifest(
     pkg: &Package,
     suite: &str,
     arch: &str,
+    sandbox_id: &str,
     patches: Option<&PatchInputs>,
 ) -> crate::signature::SignatureManifest {
-    output_manifest_for(pkg.name, &pkg.pin.commit, suite, arch, patches)
+    output_manifest_for(pkg.name, &pkg.pin.commit, suite, arch, sandbox_id, patches)
 }
 
 /// Store the package's freshly-built `.deb`s (selected from `stage_root` by its name
@@ -943,6 +971,10 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         assert!(arts.debs.iter().all(|p| p.exists()));
     }
 
+    /// A stand-in for [`BuildEnv::sandbox_id`] in the signature tests: whatever it
+    /// says, the same value must key the same and a different one must not.
+    const SANDBOX: &str = "http://deb.debian.org/debian | qemu-aarch64 version 9.2.0";
+
     #[test]
     fn package_output_manifest_covers_commit_suite_and_arch() {
         fn mpp(p: &GitPin) -> Package<'_> {
@@ -960,7 +992,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         };
         let p1 = pin("c1");
         let sig = |pkg: &Package, suite: &str, arch: &str| {
-            package_output_manifest(pkg, suite, arch, None).signature
+            package_output_manifest(pkg, suite, arch, SANDBOX, None).signature
         };
         let base = sig(&mpp(&p1), "forky", "arm64");
         // Stable under identical inputs.
@@ -984,7 +1016,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         };
         assert_ne!(
             base,
-            package_output_manifest(&mpp(&p1), "forky", "arm64", Some(&patches)).signature
+            package_output_manifest(&mpp(&p1), "forky", "arm64", SANDBOX, Some(&patches)).signature
         );
         // Distinct packages never share an output entry (their node names differ).
         let rga = Package {
@@ -994,5 +1026,37 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
             deb_prefixes: &["librga2_"],
         };
         assert_ne!(base, sig(&rga, "forky", "arm64"));
+    }
+
+    /// The sandbox that compiled a package is part of that package's identity.
+    ///
+    /// The suite names the userland but does not identify the instance of it: a
+    /// snapshot-pinned sandbox and a live-mirror one carry the same suite and can
+    /// carry different compilers, and on a cross host the `qemu-user` that executes
+    /// that compiler is an input too. Both travel in the one `sandbox` scalar, so it
+    /// is asserted as one: change it, and the store must not restore the other
+    /// sandbox's `.deb`s.
+    #[test]
+    fn the_sandbox_that_compiled_a_package_splits_its_output_key() {
+        let pin = GitPin {
+            source: "s".into(),
+            reference: "r".into(),
+            commit: "c1".into(),
+        };
+        let sig = |sandbox: &str| {
+            output_manifest_for("mpp", &pin.commit, "forky", "arm64", sandbox, None).signature
+        };
+        let base = sig(SANDBOX);
+        assert_eq!(base, sig(SANDBOX), "stable under an identical sandbox");
+        // A snapshot-pinned userland is a different compiler than the live mirror's.
+        assert_ne!(
+            base,
+            sig("https://snapshot.debian.org/archive/debian/20260628T083000Z/")
+        );
+        // So is the same userland under a different interpreter.
+        assert_ne!(
+            base,
+            sig("http://deb.debian.org/debian | qemu-aarch64 version 10.0.0")
+        );
     }
 }

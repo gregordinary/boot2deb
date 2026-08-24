@@ -14,9 +14,11 @@
 //! `.deb` installing to `/opt/ffmpeg-rk` so it coexists with any system FFmpeg.
 //!
 //! ffmpeg build-depends on the userspace `-dev` packages (`librockchip-mpp-dev` +
-//! `librga-dev`) and runtime-depends on `librockchip-mpp1` + `librga2`, so
-//! the stage installs the userspace `.deb`s (from a prior [`userspace`] run) into
-//! the sandbox before building.
+//! `librga-dev`) and runtime-depends on `librockchip-mpp1` + `librga2`. Those packages
+//! are this build's own output, so the stage publishes the `.deb`s a prior
+//! [`userspace`] run produced as a trusted `file://` pool and layers them into its
+//! build root from there — resolved like any other package, with their transitive
+//! dependencies, rather than pushed into the tree behind the resolver's back.
 //!
 //! [`userspace`]: crate::build::userspace
 
@@ -27,7 +29,8 @@ use crate::build::{
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::git;
-use crate::sandbox::{BuildSandbox, SandboxRun};
+use crate::repo::LocalDistsRepo;
+use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, SandboxRun};
 use boot2deb_core::lock::{FfmpegPins, Lock, UserspacePins};
 use std::path::{Path, PathBuf};
 
@@ -47,11 +50,11 @@ const OUTPUT_STAGE_VERSION: u32 = 1;
 /// Debian package name.
 const PKG_NAME: &str = "ffmpeg-rk";
 
-/// ffmpeg build-deps installed into the sandbox. The base tooling
+/// ffmpeg build-deps layered into its build root. The base tooling
 /// (`build-essential`, `pkg-config`) is already in the sandbox base set; these are
-/// the codec/format libraries `./configure` probes. `librockchip-mpp-dev` /
-/// `librga-dev` are *not* here — they come from the userspace `.deb`s
-/// ([`install_local_debs`](crate::sandbox::BuildSandbox::install_local_debs)).
+/// the codec/format libraries `./configure` probes, and they come from the suite.
+/// `librockchip-mpp-dev` / `librga-dev` are *not* here — they are this build's own
+/// output, added per SoC by [`userspace_dev_packages`] and resolved from the pool.
 const FFMPEG_DEPS: &[&str] = &[
     "nasm",
     "yasm",
@@ -82,6 +85,87 @@ fn userspace_dep_prefixes(userspace: &UserspacePins) -> Vec<&'static str> {
         prefixes.extend(["librga2_", "librga-dev_"]);
     }
     prefixes
+}
+
+/// The userspace packages ffmpeg's build root layers in — **each tree's runtime library
+/// and its `-dev`**, one pair per userspace tree the SoC declares. The layered
+/// counterpart of [`userspace_dep_prefixes`], and deliberately the same set.
+///
+/// Names, not file paths: they are resolved from the build pool like any other package,
+/// with their transitive dependencies, rather than pushed into the tree behind the
+/// resolver's back.
+///
+/// **Both halves are named explicitly because the vendor packaging does not relate
+/// them.** `librockchip-mpp-dev` declares `Depends: librockchip-mpp1`, but `librga-dev`
+/// declares no dependencies at all — so asking only for the `-dev` packages yields a
+/// build root with librga's headers and `librga.pc` but no `librga.so`, and ffmpeg's
+/// `./configure` fails its link probe with "librga not found using pkg-config". The
+/// runtime library is also what carries the `shlibs` `dpkg-shlibdeps` reads, so naming
+/// it is what makes the produced deb's `Depends` resolvable at all.
+///
+/// Derived from the pins for the same reason the prefixes are: asking for
+/// `librockchip-mpp-dev` on a SoC that builds no MPP would fail the resolution on a
+/// package the pool cannot hold.
+fn userspace_layer_packages(userspace: &UserspacePins) -> Vec<&'static str> {
+    let mut packages = Vec::new();
+    if userspace.mpp.is_some() {
+        packages.extend(["librockchip-mpp1", "librockchip-mpp-dev"]);
+    }
+    if userspace.librga.is_some() {
+        packages.extend(["librga2", "librga-dev"]);
+    }
+    packages
+}
+
+/// The runtime packages the produced `.deb` must depend on — one per userspace tree the
+/// SoC declares, the libraries ffmpeg links against from this build's own output.
+fn required_runtime_depends(userspace: &UserspacePins) -> Vec<&'static str> {
+    let mut packages = Vec::new();
+    if userspace.mpp.is_some() {
+        packages.push("librockchip-mpp1");
+    }
+    if userspace.librga.is_some() {
+        packages.push("librga2");
+    }
+    packages
+}
+
+/// Refuse a `depends` that omits a userspace library this build linked against.
+///
+/// `dpkg-shlibdeps` maps each `NEEDED` soname to the package whose `shlibs` claims it.
+/// When that package is absent from the build root it **does not fail** — with
+/// `--ignore-missing-info` it warns, and for a soname no package owns it errors, but a
+/// package present without usable `shlibs` metadata simply contributes nothing. The
+/// result is an `ffmpeg-rk` deb with no `Depends: librga2` that installs cleanly and
+/// breaks at runtime on the board, which no exit status reports.
+///
+/// So the resolved text is checked rather than the run's status. This is the exact string
+/// [`control_text`] writes as `Depends:`, checked before the `.deb` is built, so a
+/// dropped dependency stops the stage instead of shipping.
+fn assert_userspace_depends(depends: &str, userspace: &UserspacePins) -> Result<(), EngineError> {
+    // Field-split rather than substring-match: `librga2` must not be satisfied by
+    // `librga2-dev`, and a version relation (`librga2 (>= 1.2)`) is the package plus a
+    // constraint, so the name is the first token of a comma-separated field.
+    let named: Vec<&str> = depends
+        .split(',')
+        .filter_map(|d| d.split_whitespace().next())
+        .collect();
+    let missing: Vec<&str> = required_runtime_depends(userspace)
+        .into_iter()
+        .filter(|want| !named.contains(want))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(EngineError::ArtifactMissing {
+        what: format!(
+            "runtime Depends on {} in the ffmpeg-rk control file — dpkg-shlibdeps \
+             resolved `{depends}`, so the build root did not carry the shlibs of the \
+             userspace package(s) this build links against",
+            missing.join(", ")
+        ),
+        location: "debian/substvars (shlibs:Depends)".into(),
+    })
 }
 
 /// `./configure` feature flags every build gets, whatever the SoC: the container
@@ -211,7 +295,15 @@ pub fn build_ffmpeg(
     // qemu build). Checked before the userspace-deb dependency: a cached ffmpeg
     // needs neither the sandbox nor the userspace `.deb`s (the userspace dep identity
     // in the key is recomputed from the lock, not read from the built debs).
-    let out_man = output_manifest(lock, ffmpeg, userspace, arch, ffmpeg_patches, us_patches);
+    let out_man = output_manifest(
+        lock,
+        ffmpeg,
+        userspace,
+        arch,
+        &env.sandbox_id,
+        ffmpeg_patches,
+        us_patches,
+    );
     if let Some([deb]) = build::restore_stage_outputs(
         opts.store,
         "ffmpeg",
@@ -230,6 +322,14 @@ pub fn build_ffmpeg(
     // Fail fast on the build-time dependency (the userspace `.deb`s) before the
     // expensive source fetch, so a forgotten userspace stage errors immediately.
     let debs = required_userspace_debs(opts.userspace_debs, userspace)?;
+    // The ffmpeg node runs only for a media-accel image build, which resolves a suite;
+    // the pool and the layer are both stamped with it.
+    let suite = lock
+        .rootfs
+        .as_ref()
+        .expect("the ffmpeg node runs only for an image build, which pins a rootfs")
+        .suite
+        .as_str();
 
     // Tier-1 reuse of the fetched+patched tree: a lock bump (base commit
     // or patch pin) rebuilds it; configure/compile re-run regardless.
@@ -241,8 +341,24 @@ pub fn build_ffmpeg(
 
     step.log(format!("sandbox: {}", sandbox.describe()));
     sandbox.ensure_ready(&step)?;
-    sandbox.install(FFMPEG_DEPS, &step)?;
-    sandbox.install_local_debs(&debs, &step)?;
+    // The build's own userspace `.deb`s as a trusted `file://` pool, so ffmpeg's layer
+    // resolves them the way it resolves anything else — the package *and* its transitive
+    // dependencies, in one resolution. This is ffmpeg's own pool, assembled from the
+    // packages it build-depends on: the rootfs node's pool is a per-build snapshot of the
+    // whole artifact ledger that it clears and rewrites after every stage, so it cannot
+    // carry anything forward.
+    let pool_dir = stage_root.join("build-pool");
+    let pool = LocalDistsRepo::assemble(&pool_dir, &debs, suite, arch, &step)?;
+    let mut packages: Vec<&str> = FFMPEG_DEPS.to_vec();
+    packages.extend(userspace_layer_packages(userspace));
+    let root = sandbox.build_root(
+        &BuildRootSpec {
+            packages: &packages,
+            pool: Some(&pool.file_url()),
+            stage: "ffmpeg",
+        },
+        &step,
+    )?;
     step.progress(45);
 
     // Bind the ffmpeg stage root so the build tree, pkg-stage, and produced .deb
@@ -260,7 +376,7 @@ pub fn build_ffmpeg(
         .unwrap_or_default();
 
     configure(
-        sandbox,
+        &root,
         &tree,
         &binds,
         &build_env,
@@ -268,15 +384,19 @@ pub fn build_ffmpeg(
         &step,
     )?;
     step.progress(55);
-    compile(sandbox, env, &tree, &binds, &build_env, &step)?;
+    compile(&root, env, &tree, &binds, &build_env, &step)?;
     step.progress(85);
-    install_to_stage(sandbox, &tree, &pkg_stage, &binds, &step)?;
+    install_to_stage(&root, &tree, &pkg_stage, &binds, &step)?;
     step.progress(88);
 
     // Derive the runtime Depends from what the built binaries actually link
     // (`dpkg-shlibdeps`), rather than a hand-maintained soname list — so the deb
     // tracks whatever library versions the target suite currently ships.
-    let depends = resolve_depends(sandbox, &stage_root, &pkg_stage, arch, &binds, &step)?;
+    let depends = resolve_depends(&root, &stage_root, &pkg_stage, arch, &binds, &step)?;
+    // A missing `shlibs` entry does not fail `dpkg-shlibdeps`; it silently drops the
+    // dependency. So the run's exit status proves nothing about the one thing the pool
+    // exists to deliver, and the resolved text is checked instead.
+    assert_userspace_depends(&depends, userspace)?;
     step.progress(90);
 
     let version = deb_version(&ffmpeg.base.reference, &ffmpeg.base.commit);
@@ -284,14 +404,7 @@ pub fn build_ffmpeg(
     write_control(&pkg_stage, &control)?;
     let deb_name = format!("{PKG_NAME}_{version}_{arch}.deb");
     let deb_in_stage = stage_root.join(&deb_name);
-    package_deb(
-        sandbox,
-        &pkg_stage,
-        &deb_in_stage,
-        &build_env,
-        &binds,
-        &step,
-    )?;
+    package_deb(&root, &pkg_stage, &deb_in_stage, &build_env, &binds, &step)?;
 
     let deb = stage_artifact(opts.out_dir, &deb_in_stage)?;
     step.log(format!("staged {deb_name}"));
@@ -333,6 +446,7 @@ fn output_manifest(
     ffmpeg: &FfmpegPins,
     userspace: &UserspacePins,
     arch: &str,
+    sandbox_id: &str,
     patches: PatchSeries,
     us_patches: PatchSeries,
 ) -> crate::signature::SignatureManifest {
@@ -354,6 +468,10 @@ fn output_manifest(
         .fold_ordered("configure_flags", &flags)
         .fold_scalar("arch", arch)
         .fold_scalar("suite", suite)
+        // The sandbox instance that compiles this deb — which mirror its userland came
+        // from, and which `qemu-user` runs its compiler. See
+        // [`BuildEnv::sandbox_id`](crate::build::BuildEnv::sandbox_id).
+        .fold_scalar("sandbox", sandbox_id)
         .fold_scalar("base.reference", &ffmpeg.base.reference)
         .fold_scalar("pkg_name", PKG_NAME);
     // Fold a dependency only for a tree this build has. Folding the absent ones as
@@ -366,15 +484,22 @@ fn output_manifest(
             &mpp.commit,
             suite,
             arch,
+            sandbox_id,
             Some(&mpp_inputs),
         )
         .signature();
         b.fold_dep(&dep);
     }
     if let Some(rga) = &userspace.librga {
-        let dep =
-            crate::build::userspace::output_manifest_for("librga", &rga.commit, suite, arch, None)
-                .signature();
+        let dep = crate::build::userspace::output_manifest_for(
+            "librga",
+            &rga.commit,
+            suite,
+            arch,
+            sandbox_id,
+            None,
+        )
+        .signature();
         b.fold_dep(&dep);
     }
     b.manifest()
@@ -446,7 +571,7 @@ fn fetch_and_patch(
 /// program path is resolved against the *parent* process's cwd, not the run's
 /// working dir, so it would misfire on the native path.
 fn configure(
-    sandbox: &dyn BuildSandbox,
+    root: &BuildRoot,
     tree: &Path,
     binds: &[PathBuf],
     env: &[(String, String)],
@@ -461,20 +586,18 @@ fn configure(
     let spec = SandboxRun {
         work: tree,
         binds,
-        ro_binds: &[],
-        net: false,
         env,
         argv: &argv,
         context: "ffmpeg ./configure",
     };
-    sandbox.run(&spec, step)
+    root.run(&spec, step)
 }
 
 /// Run `make -j` inside the sandbox. The build is target-native there (the sandbox
 /// is a target-arch userland, reached via qemu-user on a cross host), so no
 /// `CROSS_COMPILE` — unlike the host-cross-compiled kernel/u-boot nodes.
 fn compile(
-    sandbox: &dyn BuildSandbox,
+    root: &BuildRoot,
     env: &BuildEnv,
     tree: &Path,
     binds: &[PathBuf],
@@ -485,19 +608,17 @@ fn compile(
     let spec = SandboxRun {
         work: tree,
         binds,
-        ro_binds: &[],
-        net: false,
         env: run_env,
         argv: &argv,
         context: "ffmpeg make",
     };
-    sandbox.run(&spec, step)
+    root.run(&spec, step)
 }
 
 /// Run `make install DESTDIR=<pkg_stage>` inside the sandbox, staging the install
 /// tree under the prefix for packaging.
 fn install_to_stage(
-    sandbox: &dyn BuildSandbox,
+    root: &BuildRoot,
     tree: &Path,
     pkg_stage: &Path,
     binds: &[PathBuf],
@@ -511,13 +632,11 @@ fn install_to_stage(
     let spec = SandboxRun {
         work: tree,
         binds,
-        ro_binds: &[],
-        net: false,
         env: &[],
         argv: &argv,
         context: "ffmpeg make install",
     };
-    sandbox.run(&spec, step)
+    root.run(&spec, step)
 }
 
 /// Build the `.deb` from the staged install tree with `fakeroot dpkg-deb`, run in
@@ -527,7 +646,7 @@ fn install_to_stage(
 /// date), so `dpkg-deb` clamps every archive member's mtime to it — the `.deb`
 /// is byte-reproducible rather than stamped with the build clock.
 fn package_deb(
-    sandbox: &dyn BuildSandbox,
+    root: &BuildRoot,
     pkg_stage: &Path,
     deb_out: &Path,
     build_env: &[(String, String)],
@@ -544,13 +663,11 @@ fn package_deb(
     let spec = SandboxRun {
         work: pkg_stage,
         binds,
-        ro_binds: &[],
-        net: false,
         env: build_env,
         argv: &argv,
         context: "dpkg-deb --build ffmpeg-rk",
     };
-    sandbox.run(&spec, step)
+    root.run(&spec, step)
 }
 
 /// Select the userspace `.deb`s ffmpeg build-depends on (highest version each)
@@ -591,8 +708,9 @@ fn required_userspace_debs(
 }
 
 /// Compute the runtime `Depends:` from the built binaries with `dpkg-shlibdeps`,
-/// run inside the sandbox so it reads the target-arch ELFs against the target's
-/// dpkg/shlibs data.
+/// run inside the build root so it reads the target-arch ELFs against the target's
+/// dpkg/shlibs data — including the `shlibs` of the userspace packages the root
+/// layered in from this build's own pool.
 ///
 /// `dpkg-shlibdeps` scans the installed executables and private shared libraries,
 /// maps each `NEEDED` soname to the package + minimum version providing it (system
@@ -606,7 +724,7 @@ fn required_userspace_debs(
 /// hard error (no `--ignore-missing-info`): a missing dep must fail loud, not ship
 /// broken.
 fn resolve_depends(
-    sandbox: &dyn BuildSandbox,
+    root: &BuildRoot,
     stage_root: &Path,
     pkg_stage: &Path,
     arch: &str,
@@ -647,13 +765,11 @@ fn resolve_depends(
     let spec = SandboxRun {
         work: &work,
         binds,
-        ro_binds: &[],
-        net: false,
         env: &[],
         argv: &argv,
         context: "dpkg-shlibdeps ffmpeg-rk",
     };
-    sandbox.run(&spec, step)?;
+    root.run(&spec, step)?;
 
     let vars = std::fs::read_to_string(&substvars).map_err(|s| EngineError::io(&substvars, s))?;
     let depends = parse_shlibs_depends(&vars).ok_or_else(|| EngineError::ArtifactMissing {
@@ -887,6 +1003,92 @@ mod tests {
         assert!(userspace_dep_prefixes(&no_trees()).is_empty());
     }
 
+    /// The packages the build root layers in track the same trees the configure flags
+    /// and the deb prefixes do — the three must not disagree about which userspace this
+    /// build has — and each tree contributes **both** its runtime library and its `-dev`.
+    ///
+    /// Naming only the `-dev` half is the shape that fails: `librga-dev` declares no
+    /// dependencies, so nothing would pull `librga2` in, and `./configure` would fail
+    /// its link probe on a build root holding the headers without the library.
+    #[test]
+    fn the_layered_packages_track_the_socs_declared_trees() {
+        assert_eq!(
+            userspace_layer_packages(&all_trees()),
+            vec![
+                "librockchip-mpp1",
+                "librockchip-mpp-dev",
+                "librga2",
+                "librga-dev"
+            ]
+        );
+        assert_eq!(
+            userspace_layer_packages(&rga_only()),
+            vec!["librga2", "librga-dev"]
+        );
+        assert!(userspace_layer_packages(&no_trees()).is_empty());
+        // The set the layer installs is the set the old path installed by path, so the
+        // two cannot disagree about what a build root holds.
+        assert_eq!(
+            userspace_layer_packages(&all_trees()).len(),
+            userspace_dep_prefixes(&all_trees()).len()
+        );
+        // The runtime half, which the produced deb must depend on.
+        assert_eq!(
+            required_runtime_depends(&all_trees()),
+            vec!["librockchip-mpp1", "librga2"]
+        );
+        assert_eq!(required_runtime_depends(&rga_only()), vec!["librga2"]);
+        assert!(required_runtime_depends(&no_trees()).is_empty());
+    }
+
+    /// A dropped userspace dependency fails the stage rather than shipping.
+    ///
+    /// This is the regression the layered build root could introduce and that no exit
+    /// status would report: the packages arrive through the pool's resolution instead of
+    /// `apt-get install /path/to.deb`, and if their `shlibs` are not where
+    /// `dpkg-shlibdeps` looks it emits a `Depends` without them, producing a deb that
+    /// installs cleanly and breaks on the board.
+    #[test]
+    fn a_depends_missing_a_userspace_lib_is_refused() {
+        // The real resolved value from a good build.
+        let good = "libass9 (>= 1:0.15.0), libc6 (>= 2.38), librga2, librockchip-mpp1, \
+                    libx265-216 (>= 4.2)";
+        assert!(assert_userspace_depends(good, &all_trees()).is_ok());
+        // Order is irrelevant, and a version relation still names its package.
+        assert!(assert_userspace_depends(
+            "librockchip-mpp1 (>= 1.5.0), libc6, librga2 (>= 2.2.0)",
+            &all_trees()
+        )
+        .is_ok());
+
+        // rkrga dropped: the exact silent failure correction 3 describes.
+        let dropped = "libass9 (>= 1:0.15.0), libc6 (>= 2.38), librockchip-mpp1";
+        let err = assert_userspace_depends(dropped, &all_trees()).unwrap_err();
+        match &err {
+            EngineError::ArtifactMissing { what, .. } => {
+                assert!(what.contains("librga2"), "{what}");
+                // The error carries what was resolved, so the failure is diagnosable
+                // without re-running the build.
+                assert!(what.contains(dropped), "{what}");
+            }
+            other => panic!("expected ArtifactMissing, got {other:?}"),
+        }
+
+        // A prefix must not satisfy the requirement: `librga2-dev` is not `librga2`.
+        assert!(
+            assert_userspace_depends("libc6, librga2-dev, librockchip-mpp1", &all_trees()).is_err()
+        );
+        // An empty Depends fails rather than passing vacuously.
+        assert!(assert_userspace_depends("", &all_trees()).is_err());
+
+        // A SoC that builds no vendor userspace requires none of it, so any Depends
+        // satisfies the check — including one naming no userspace package at all.
+        assert!(assert_userspace_depends("libc6 (>= 2.38)", &no_trees()).is_ok());
+        // And an RGA-only stack demands only librga2.
+        assert!(assert_userspace_depends("libc6, librga2", &rga_only()).is_ok());
+        assert!(assert_userspace_depends("libc6, librockchip-mpp1", &rga_only()).is_err());
+    }
+
     #[test]
     fn a_stack_with_no_vendor_userspace_demands_no_debs() {
         // The userspace stage produces no output dir at all in this shape, so the
@@ -996,14 +1198,26 @@ mod tests {
         );
     }
 
+    /// A stand-in for [`BuildEnv::sandbox_id`](crate::build::BuildEnv::sandbox_id) in
+    /// the signature tests.
+    const SANDBOX: &str = "http://deb.debian.org/debian | qemu-aarch64 version 9.2.0";
+
     #[test]
     fn output_manifest_covers_tree_arch_and_suite() {
         let sig = |lock: &Lock, arch: &str| {
             let ff = lock.ffmpeg.as_ref().unwrap();
             let us = lock.userspace.as_ref().unwrap();
-            output_manifest(lock, ff, us, arch, PatchSeries::Pinned, PatchSeries::Pinned)
-                .signature
-                .clone()
+            output_manifest(
+                lock,
+                ff,
+                us,
+                arch,
+                SANDBOX,
+                PatchSeries::Pinned,
+                PatchSeries::Pinned,
+            )
+            .signature
+            .clone()
         };
         let base = sig(&lock_with("bc1", "pc1"), "arm64");
         // Stable under identical inputs.
@@ -1013,10 +1227,26 @@ mod tests {
         assert_ne!(base, sig(&lock_with("bc1", "pc2"), "arm64"));
         // Arch splits the key (a hit must not restore a foreign-arch deb).
         assert_ne!(base, sig(&lock_with("bc1", "pc1"), "armhf"));
-        // The suite stands in for the sandbox toolchain identity, so it splits too.
+        // The suite names the sandbox's userland, so it splits the key...
         let mut sid = lock_with("bc1", "pc1");
         sid.rootfs.as_mut().unwrap().suite = "sid".into();
         assert_ne!(base, sig(&sid, "arm64"));
+        // ...and so does the sandbox instance within one suite: a snapshot-pinned
+        // userland compiles this deb with a different gcc than the live mirror's.
+        let lock = lock_with("bc1", "pc1");
+        assert_ne!(
+            base,
+            output_manifest(
+                &lock,
+                lock.ffmpeg.as_ref().unwrap(),
+                lock.userspace.as_ref().unwrap(),
+                "arm64",
+                "https://snapshot.debian.org/archive/debian/20260628T083000Z/",
+                PatchSeries::Pinned,
+                PatchSeries::Pinned,
+            )
+            .signature
+        );
         // Co-dev mode never shares an output entry with a pinned build.
         let dev_lock = lock_with("bc1", "pc1");
         assert_ne!(
@@ -1026,6 +1256,7 @@ mod tests {
                 dev_lock.ffmpeg.as_ref().unwrap(),
                 dev_lock.userspace.as_ref().unwrap(),
                 "arm64",
+                SANDBOX,
                 PatchSeries::Dev(&[]),
                 PatchSeries::Dev(&[]),
             )
@@ -1045,6 +1276,7 @@ mod tests {
                 ff,
                 us,
                 "arm64",
+                SANDBOX,
                 PatchSeries::Pinned,
                 PatchSeries::Pinned,
             )

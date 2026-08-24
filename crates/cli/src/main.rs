@@ -1,13 +1,15 @@
 //! boot2deb CLI — a thin client over the config core and the engine.
 //!
 //! Subcommands: `list-devices`, `list-recipes`, `list-kernels`, `list-features`,
-//! `list-kmods`, `resolve`, and `doctor` (config inspection + host preflight); `new-device`
-//! (scaffold a new device + recipe from the typed model); `update` (resolve upstream
-//! refs into the lock); `verify-patches`, `verify-config`, and `verify-sources` (the
-//! patch, kernel-config, and source-durability gates); `patch import` (fetch +
-//! normalize + slot a patch into a profile); `build` (drive the compile / rootfs /
-//! image pipeline from the lock); `why-rebuild` (explain, offline, which compile nodes
-//! the next build reuses vs. rebuilds); and `clean` (remove a recipe's build scratch).
+//! `list-kmods`, `resolve`, and `doctor` (config inspection + host preflight);
+//! `support-matrix` (each shipped recipe's support claim joined to its lock's pins);
+//! `new-device` (scaffold a new device + recipe from the typed model); `update`
+//! (resolve upstream refs into the lock); `verify-patches`, `verify-config`, and
+//! `verify-sources` (the patch, kernel-config, and source-durability gates); `patch
+//! import` (fetch + normalize + slot a patch into a profile); `build` (drive the
+//! compile / rootfs / image pipeline from the lock); `why-rebuild` (explain, offline,
+//! which compile nodes the next build reuses vs. rebuilds); and `clean` (remove a
+//! recipe's build scratch).
 //!
 //! This module is the entry point only: it parses the argument tree ([`crate::args`]),
 //! composes the config root, and dispatches to the handler in [`crate::commands`] that
@@ -31,6 +33,10 @@ use config::ensure_config_root;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // Before anything creates a file: the umask is a process attribute, so it is the
+    // one build-host setting that reaches the image through no environment variable at
+    // all. Declared here rather than inherited.
+    boot2deb_engine::build::declare_umask();
     let cli = Cli::parse();
     // Every overlay must name an existing directory; a bad `--overlay` fails here
     // rather than silently composing a search path the operator did not intend.

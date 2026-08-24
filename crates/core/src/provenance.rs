@@ -69,10 +69,62 @@ pub struct BuildFacts<'a> {
     /// it because the values come from the formatter it links, which the pure core
     /// does not depend on.
     pub filesystem: FilesystemProvenance,
+    /// The checks the image node ran over the finished rootfs filesystem, in order —
+    /// reported by the node that ran them rather than re-probed here, so the record
+    /// cannot disagree with what happened. See [`VerificationProvenance`].
+    pub rootfs_verified_with: &'a [String],
+    /// `<cross>gcc`'s version line, `None` when the tool could not be run.
+    pub cc: Option<&'a str>,
+    /// `<cross>as`'s version line, `None` as for [`cc`](Self::cc).
+    pub assembler: Option<&'a str>,
+    /// `<cross>ld`'s version line, `None` as for [`cc`](Self::cc).
+    pub linker: Option<&'a str>,
+    /// The `qemu-user` version line, `None` on a native build (nothing is interpreted)
+    /// or where the interpreter could not be run.
+    pub qemu: Option<&'a str>,
+    /// The parallelism the build ran at. See [`ToolchainProvenance::jobs`].
+    pub jobs: usize,
     /// The environment and mounts every sandboxed build command ran under. The engine
     /// owns it for the same reason as [`filesystem`](Self::filesystem): the values are
     /// resolved by the sandbox library it links.
     pub sandbox: SandboxProvenance,
+    /// The package set of the build sandbox's base — the toolchain that compiled this
+    /// build's target `.deb`s. `None` when the build stood up no sandbox, which is
+    /// every build with no media-accel packages to compile. Engine-owned, as
+    /// [`sandbox`](Self::sandbox) is.
+    pub build_sandbox: Option<BuildSandboxProvenance>,
+}
+
+/// The build sandbox base's identity and package set: what compiled this build's
+/// target `.deb`s.
+///
+/// The `[rootfs]` block records what the image *carries*; this records what *produced*
+/// the parts of it boot2deb compiled. The two are different Debian trees resolved from
+/// the same mirrors, and no source pin covers the second — the base is a package set
+/// solved at bootstrap time, so without this the compiler behind every `.deb` in the
+/// image is unstated.
+///
+/// The package list itself lives in the referenced manifest rather than inline: it runs
+/// to a few hundred entries, which as an array-of-tables would be the bulk of a document
+/// meant to be read. Recorded the same way `[rootfs]` records its own, and for the same
+/// reason.
+///
+/// Unlike the rootfs manifest, this one is a record and not a contract: nothing pins it
+/// in the lock and no later build is verified against it. A base is discarded and
+/// re-bootstrapped whenever its manifest is absent, so the two never disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuildSandboxProvenance {
+    /// Debian suite the base was bootstrapped for — the build's own, so the `.deb`s it
+    /// produces carry `Depends` resolved against the suite they install into.
+    pub suite: String,
+    /// Debian architecture of the base, which is the target's rather than the host's.
+    pub architecture: String,
+    /// Manifest filename, beside this document in the artifact directory.
+    pub manifest: String,
+    /// Lowercase-hex sha256 of that manifest file.
+    pub manifest_sha256: String,
+    /// Number of packages the manifest records.
+    pub package_count: usize,
 }
 
 /// The environment and mounts every sandboxed build command runs under, as the
@@ -149,9 +201,15 @@ pub struct ProvenanceManifest {
     pub sources: SourcesProvenance,
     /// Rootfs suite + the content-pinned solved-manifest reference.
     pub rootfs: RootfsProvenance,
+    /// The build sandbox base that compiled this build's target `.deb`s. Absent when
+    /// the build compiled none, so no sandbox was stood up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_sandbox: Option<BuildSandboxProvenance>,
     /// The on-disk contract the rootfs filesystem was formatted to — the one
     /// determinant of the image's bytes that no source pin covers.
     pub filesystem: FilesystemProvenance,
+    /// Which checks the finished rootfs filesystem passed before it shipped.
+    pub verification: VerificationProvenance,
     /// Verified rkbin blob pins. Absent when the boot method consumes no rkbin blobs
     /// — a depthcharge board's firmware is its own, so there is no ATF or DDR TPL in
     /// its boot chain to record.
@@ -492,9 +550,30 @@ pub struct BlobsProvenance {
     pub bl32: Option<String>,
 }
 
-/// Build host / toolchain identity — the toolchain *selection* (host+target arch
-/// and the cross prefix). Capturing concrete compiler/assembler versions is a
-/// follow-up; the selection is what is deterministically known here.
+/// Which checks the finished rootfs filesystem passed before it shipped.
+///
+/// The built-in reader check always runs — it is compiled in. The external `e2fsck`
+/// cross-check runs only where that tool exists, which makes verification *depth* a
+/// property of the build host, and a host property that shapes what shipped is
+/// exactly what this manifest exists to state. Without the record, two images from one
+/// lock could have been checked to different standards with nothing but a log line to
+/// say so; with it, a release build can be gated on the list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerificationProvenance {
+    /// Every check the rootfs filesystem passed, in the order it ran. `ferrosys-reader`
+    /// is the in-process re-read of every metadata checksum; `e2fsck` is the
+    /// independent `-fn` cross-check, present only when the host carried the tool.
+    pub rootfs: Vec<String>,
+}
+
+/// Build host / toolchain identity: which toolchain was *selected* (host+target arch
+/// and the cross prefix), and which concrete tools that selection resolved to.
+///
+/// The compiler is the single largest host input to the kernel's bytes and no source
+/// pin covers it, so the versions are recorded rather than left to be inferred from
+/// the host. Each version field is absent when its tool could not be run — the honest
+/// report for a build that compiles nothing from source (a distro kernel on a board
+/// whose firmware is its own), which needs no compiler and should not claim one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolchainProvenance {
     /// Build-host architecture.
@@ -505,6 +584,32 @@ pub struct ToolchainProvenance {
     pub cross: bool,
     /// `CROSS_COMPILE` prefix (empty on a native build).
     pub cross_compile: String,
+    /// `<cross>gcc`'s version line — the compiler that produced the kernel, u-boot,
+    /// and out-of-tree module `.deb`s.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc: Option<String>,
+    /// `<cross>as`'s version line. Recorded beside the compiler because the emitted
+    /// bytes come from the assembler as much as from `gcc`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assembler: Option<String>,
+    /// `<cross>ld`'s version line, recorded for the same reason as
+    /// [`assembler`](Self::assembler).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linker: Option<String>,
+    /// The `qemu-user` version line. On a cross build this interpreter executes the
+    /// target-arch compiler for every sandbox-built package, so it is an input to
+    /// those `.deb`s. Absent on a native build, where nothing is interpreted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qemu: Option<String>,
+    /// The parallelism the build ran at — `make -j` and the `parallel=` a
+    /// `dpkg-buildpackage` saw.
+    ///
+    /// Recorded but deliberately **not** part of any cache key: a build system whose
+    /// output depends on its job count has a bug, so keying on it would fragment the
+    /// artifact cache by machine size to protect an invariant. Recording it costs
+    /// nothing and is what makes that bug diagnosable if it ever appears — two images
+    /// from one lock that differ can be compared on it.
+    pub jobs: usize,
 }
 
 /// Which boot2deb built the image — the builder axis of "exactly what went into this
@@ -667,7 +772,11 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             manifest_sha256: facts.manifest_sha256.to_string(),
             package_count: facts.package_count,
         },
+        build_sandbox: facts.build_sandbox.clone(),
         filesystem: facts.filesystem.clone(),
+        verification: VerificationProvenance {
+            rootfs: facts.rootfs_verified_with.to_vec(),
+        },
         blobs: lock.blobs.as_ref().map(|b| BlobsProvenance {
             atf: b.atf.clone(),
             tpl: b.tpl.clone(),
@@ -678,6 +787,11 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             target_arch: build.arch.to_string(),
             cross: facts.cross,
             cross_compile: build.cross_compile.clone(),
+            cc: facts.cc.map(str::to_string),
+            assembler: facts.assembler.map(str::to_string),
+            linker: facts.linker.map(str::to_string),
+            qemu: facts.qemu.map(str::to_string),
+            jobs: facts.jobs,
         },
         built_with: BuiltWithProvenance {
             version: facts.builder_version.to_string(),
@@ -704,8 +818,11 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
 }
 
 /// The `[[source_durability]]` rows for a lock — one per source the build fetches
-/// from git: the kernel and u-boot when they are compiled, plus the four media-accel
-/// trees (mpp/librga/libmali/ffmpeg-base) when the transcode stack is built.
+/// from git: the kernel and u-boot when they are compiled, the four media-accel trees
+/// (mpp/librga/libmali/ffmpeg-base) when the transcode stack is built, the kernel and
+/// u-boot patch series, and each out-of-tree module.
+///
+/// The same set `verify-sources` probes online, classified here offline by pin form.
 fn source_durability_rows(lock: &Lock) -> Vec<SourceDurability> {
     let mut rows = Vec::new();
     if let Some(k) = &lock.kernel {
@@ -733,6 +850,20 @@ fn source_durability_rows(lock: &Lock) -> Vec<SourceDurability> {
             &ff.base.reference,
             &ff.base.commit,
         ));
+    }
+    // The two patch axes need this row more than any other. Both commits come from a
+    // local checkout's HEAD rather than a resolved remote ref, so they are the pins
+    // likeliest to name something that exists nowhere else — a series committed
+    // locally and never pushed pins fine and is unfetchable for everyone else. This
+    // manifest is the offline half of that story, shipped inside the image; omitting
+    // them would leave the half a reader cannot re-run silent about the riskiest pin.
+    for (name, pin) in [
+        ("patches", &lock.patches),
+        ("uboot-patches", &lock.uboot_patches),
+    ] {
+        if let Some(p) = pin {
+            rows.push(source_durability(name, &p.reference, &p.commit));
+        }
     }
     // Each out-of-tree kernel module is fetched from its own pinned repo, so its pin has
     // the same re-fetch durability question as any other source.
@@ -822,6 +953,12 @@ mod tests {
             extra_debs: vec![],
             snapshot: None,
         }
+    }
+
+    /// The checks a build on a host carrying `e2fsprogs` runs — both of them, so the
+    /// join is exercised against the fuller of the two shapes it can be handed.
+    fn sample_verified_with() -> Vec<String> {
+        vec!["ferrosys-reader".to_string(), "e2fsck".to_string()]
     }
 
     /// The filesystem pin as the image stage resolves it — the engine's real values, so
@@ -958,7 +1095,14 @@ mod tests {
             builder_commit: Some("deadbeef1234"),
             builder_dirty: false,
             filesystem: sample_filesystem(),
+            rootfs_verified_with: &sample_verified_with(),
+            cc: Some("aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"),
+            assembler: Some("GNU assembler (GNU Binutils for Debian) 2.44"),
+            linker: Some("GNU ld (GNU Binutils for Debian) 2.44"),
+            qemu: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)"),
+            jobs: 8,
             sandbox: sample_sandbox(),
+            build_sandbox: None,
         };
         let manifest = assemble(&sample_build(), &lock, &facts)
             .to_toml_string()
@@ -1032,7 +1176,14 @@ mod tests {
             builder_commit: Some("cafef00dbabe"),
             builder_dirty: false,
             filesystem: sample_filesystem(),
+            rootfs_verified_with: &sample_verified_with(),
+            cc: Some("aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"),
+            assembler: Some("GNU assembler (GNU Binutils for Debian) 2.44"),
+            linker: Some("GNU ld (GNU Binutils for Debian) 2.44"),
+            qemu: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)"),
+            jobs: 8,
             sandbox: sample_sandbox(),
+            build_sandbox: None,
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.sources.kernel_commit.as_deref(), Some("kc"));
@@ -1050,11 +1201,22 @@ mod tests {
         assert_eq!(prov.credentials.password, "Kp7rTx");
         // Per-source durability form is recorded offline: the sample pins all
         // use named refs (a ref that is not the bare commit), so every one is named-ref.
-        assert_eq!(prov.source_durability.len(), 6);
-        assert!(prov
-            .source_durability
-            .iter()
-            .any(|s| s.source == "mpp" && s.form == "named-ref"));
+        assert_eq!(
+            prov.source_durability
+                .iter()
+                .map(|s| s.source.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "kernel",
+                "uboot",
+                "mpp",
+                "librga",
+                "libmali",
+                "ffmpeg-base",
+                "patches"
+            ]
+        );
+        assert!(prov.source_durability.iter().all(|s| s.form == "named-ref"));
 
         let text = prov.to_toml_string().unwrap();
         assert!(text.starts_with("# boot2deb provenance manifest"));
@@ -1119,6 +1281,35 @@ mod tests {
         assert!(!text.contains("extra_debs"));
     }
 
+    /// Both patch axes take their commit from a local checkout's HEAD, so they are the
+    /// pins likeliest to be unfetchable — and the manifest is the only place an
+    /// image's own reader can see that. The rest of the durability story
+    /// (`verify-sources`) needs a network; this half must not omit what that half
+    /// calls the axis needing the check most.
+    #[test]
+    fn both_patch_axes_get_a_durability_row() {
+        let mut lock = sample_lock();
+        lock.uboot_patches = Some(PatchesPin {
+            profiles: vec!["rk3576-display".into()],
+            source: "https://example.invalid/patches.git".into(),
+            // A bare commit as its own reference is the unfetchable form, and this is
+            // the axis it happens to: it is graded, not silently dropped.
+            reference: "0123456789abcdef0123456789abcdef01234567".into(),
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        });
+        let rows = source_durability_rows(&lock);
+        let kernel_patches = rows.iter().find(|r| r.source == "patches").unwrap();
+        assert_eq!(kernel_patches.form, "named-ref");
+        let uboot_patches = rows.iter().find(|r| r.source == "uboot-patches").unwrap();
+        assert_eq!(uboot_patches.form, "bare-commit");
+        // A build with neither axis contributes neither row, like every other pin.
+        lock.patches = None;
+        lock.uboot_patches = None;
+        assert!(!source_durability_rows(&lock)
+            .iter()
+            .any(|r| r.source.contains("patches")));
+    }
+
     #[test]
     fn extra_debs_are_joined_and_serialize_after_the_tables() {
         let build = sample_build();
@@ -1139,7 +1330,14 @@ mod tests {
             builder_commit: None,
             builder_dirty: false,
             filesystem: sample_filesystem(),
+            rootfs_verified_with: &sample_verified_with(),
+            cc: Some("aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"),
+            assembler: Some("GNU assembler (GNU Binutils for Debian) 2.44"),
+            linker: Some("GNU ld (GNU Binutils for Debian) 2.44"),
+            qemu: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)"),
+            jobs: 8,
             sandbox: sample_sandbox(),
+            build_sandbox: None,
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.extra_debs.len(), 1);
@@ -1156,7 +1354,7 @@ mod tests {
             64
         );
         // The durability list carries every fetched source axis.
-        assert_eq!(parsed["source_durability"].as_array().unwrap().len(), 6);
+        assert_eq!(parsed["source_durability"].as_array().unwrap().len(), 7);
         // A build outside a git checkout stamps its version but omits the commit
         // entirely (not an empty string a reader would have to special-case).
         assert_eq!(parsed["built_with"]["version"].as_str(), Some("0.0.0-test"));
@@ -1182,7 +1380,14 @@ mod tests {
             builder_commit: None,
             builder_dirty: false,
             filesystem: sample_filesystem(),
+            rootfs_verified_with: &sample_verified_with(),
+            cc: Some("aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"),
+            assembler: Some("GNU assembler (GNU Binutils for Debian) 2.44"),
+            linker: Some("GNU ld (GNU Binutils for Debian) 2.44"),
+            qemu: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)"),
+            jobs: 8,
             sandbox: sample_sandbox(),
+            build_sandbox: None,
         };
         let text = assemble(&sample_build(), &sample_lock(), &facts)
             .to_toml_string()
@@ -1228,5 +1433,72 @@ mod tests {
             mounts[0].get("options").is_none(),
             "procfs passes no data string"
         );
+    }
+
+    /// The compiling toolchain is recorded beside the compiled result, and only where
+    /// there was one: a build that compiles no target `.deb`s stands up no sandbox, and
+    /// an empty section would claim a base that never existed.
+    #[test]
+    fn the_build_sandbox_is_recorded_when_one_compiled_the_build() {
+        let facts = |build_sandbox| BuildFacts {
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc",
+            package_count: 1,
+            user: "debian",
+            password: "pw",
+            builder_version: "0.0.0-test",
+            builder_commit: None,
+            builder_dirty: false,
+            filesystem: sample_filesystem(),
+            rootfs_verified_with: &[],
+            cc: None,
+            assembler: None,
+            linker: None,
+            qemu: None,
+            jobs: 8,
+            sandbox: sample_sandbox(),
+            build_sandbox,
+        };
+        let render = |bs| {
+            assemble(&sample_build(), &sample_lock(), &facts(bs))
+                .to_toml_string()
+                .unwrap()
+        };
+
+        let text = render(Some(BuildSandboxProvenance {
+            suite: "forky".into(),
+            architecture: "arm64".into(),
+            manifest: "media-accel-forky.sandbox.pkgs".into(),
+            manifest_sha256: "f00d".into(),
+            package_count: 312,
+        }));
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        let bs = parsed["build_sandbox"].as_table().unwrap();
+        // The base is bootstrapped for the *target's* arch, not the host's: it compiles
+        // the `.deb`s the image installs.
+        assert_eq!(bs["architecture"].as_str(), Some("arm64"));
+        assert_eq!(bs["package_count"].as_integer(), Some(312));
+        assert_eq!(
+            bs["manifest"].as_str(),
+            Some("media-accel-forky.sandbox.pkgs")
+        );
+
+        // A table, so it must precede every array-of-tables — and it is distinct from
+        // `[rootfs]`, which records what the image carries rather than what built it.
+        let section = text.find("[build_sandbox]").expect("the section");
+        assert!(section < text.find("[[").expect("an array-of-tables"));
+        assert_ne!(
+            bs["manifest"].as_str(),
+            parsed["rootfs"]["manifest"].as_str()
+        );
+
+        // Absent, not empty, where no sandbox was stood up.
+        let none = render(None);
+        assert!(!none.contains("[build_sandbox]"), "{none}");
+        assert!(toml::from_str::<toml::Value>(&none)
+            .unwrap()
+            .get("build_sandbox")
+            .is_none());
     }
 }

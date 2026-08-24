@@ -53,6 +53,21 @@ Fragments, blobs, and per-feature/-layer rootfs trees (both `overlay/` and
 shipped one, while rootfs trees present in both roots stack (shipped first, overlay
 last).
 
+## File modes in a rootfs `overlay/` tree
+
+A per-layer `overlay/` or `overlay-pre/` tree is copied into the image, and its modes are
+normalized to **git's own file model** on the way in: directories become `0755`, and a file
+becomes `0755` if its executable bit is set and `0644` otherwise. Symlinks are untouched.
+
+That is the identity function on everything a git tree can express — git records exactly
+`100644` and `100755`, and no directory mode at all — and it discards the one thing it
+cannot: your umask at checkout time. Set the executable bit on a hook and it stays
+executable in the image; everything else about the mode is not yours to choose here.
+
+If a file needs a mode outside those two — a `0440` sudoers drop-in, a `0700` home — an
+overlay tree is the wrong place for it, because a git checkout cannot carry that mode to
+begin with. Ship it from a first-boot hook, which runs as root on the board.
+
 ## Locks land in the owning overlay
 
 `update` writes a recipe's lock, and `build --save-manifest` writes its solved manifest,

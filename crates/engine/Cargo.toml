@@ -67,6 +67,12 @@ gix = { version = "0.85", default-features = false, features = [
 # huge-history repo. Already in the tree transitively; the engine is Linux-only,
 # so the Unix `killpg` is idiomatic here.
 libc = "0.2"
+# Pure-Rust `sha512crypt` for the image's first-boot `/etc/shadow` entry (see the
+# engine's secret module), replacing a shell-out to the host `openssl passwd -6`.
+# Same RustCrypto family as sha2/sha1, and portable: LibreSSL's `openssl passwd`
+# has no `-6`, so the host tool was also the one thing keeping image assembly off a
+# macOS host. The salt comes from `/dev/urandom` here, so no `getrandom` feature.
+sha-crypt = "0.6"
 
 [dev-dependencies]
 # NDJSON wire-shape tests for the --json event stream (event.rs).

@@ -30,11 +30,15 @@ const TREE_STAGE_VERSION: u32 = 1;
 /// Stage-recipe version for a kmod **output** signature (Tier-2 `.deb`): bump when the
 /// build/package logic changes the produced `.deb` in a way the folded inputs do not
 /// already capture.
-const OUTPUT_STAGE_VERSION: u32 = 1;
+/// v2: the `.deb` states its compressor rather than inheriting the host `dpkg`
+/// default, so a v1 entry may be a `zstd` archive where this build states `xz`.
+const OUTPUT_STAGE_VERSION: u32 = 2;
 
 /// Stage-recipe version for a kmod **firmware** signature (Tier-2 `<name>-firmware.deb`):
 /// bump when the firmware collect/package logic changes the produced `.deb`.
-const FIRMWARE_STAGE_VERSION: u32 = 1;
+/// v2: the `.deb` states its compressor, as [`OUTPUT_STAGE_VERSION`]'s v2 does and
+/// for the same reason — both archives come from [`build::dpkg_deb_build`].
+const FIRMWARE_STAGE_VERSION: u32 = 2;
 
 /// Filesystem inputs for the kmod stage. The resolved build carries the descriptors
 /// (`subdir`/patches/`make_args`/modules) and the lock the git pins; these are the
@@ -529,8 +533,8 @@ fn prune_empty_dirs(root: &Path) -> Result<(), EngineError> {
 /// Package the staged module tree as `<name>-modules-<kver>_<version>_<arch>.deb`: a
 /// `Depends: linux-image-<kver>` so apt configures the kernel first, and `postinst`/
 /// `postrm` that `depmod -a <kver>` so `modprobe` and SDIO modalias autoprobe resolve
-/// the `updates/` module. `fakeroot dpkg-deb` clamps member mtimes to the driver
-/// commit's date via `SOURCE_DATE_EPOCH`.
+/// the `updates/` module. Packaged by [`build::dpkg_deb_build`], which clamps member
+/// mtimes to the driver commit's date and states the compressor.
 #[allow(clippy::too_many_arguments)]
 fn package_deb(
     k: &ResolvedKmod,
@@ -568,13 +572,7 @@ fn package_deb(
 
     let deb_name = format!("{pkg}_{version}_{arch}.deb");
     let deb_out = stage_root.join(&deb_name);
-    let mut cmd = Command::new("fakeroot");
-    cmd.args(["dpkg-deb", "--build"])
-        .arg(pkg_stage)
-        .arg(&deb_out);
-    if let Some(e) = epoch {
-        cmd.env("SOURCE_DATE_EPOCH", e.to_string());
-    }
+    let cmd = build::dpkg_deb_build(pkg_stage, &deb_out, epoch);
     build::run(cmd, "fakeroot", &format!("dpkg-deb --build {pkg}"), step)?;
     Ok(deb_out)
 }
@@ -641,13 +639,7 @@ fn package_firmware_deb(
 
     let deb_name = format!("{pkg}_{version}_all.deb");
     let deb_out = stage_root.join(&deb_name);
-    let mut cmd = Command::new("fakeroot");
-    cmd.args(["dpkg-deb", "--build"])
-        .arg(&pkg_stage)
-        .arg(&deb_out);
-    if let Some(e) = epoch {
-        cmd.env("SOURCE_DATE_EPOCH", e.to_string());
-    }
+    let cmd = build::dpkg_deb_build(&pkg_stage, &deb_out, epoch);
     build::run(cmd, "fakeroot", &format!("dpkg-deb --build {pkg}"), step)?;
     Ok(deb_out)
 }

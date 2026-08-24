@@ -139,10 +139,20 @@ pub(crate) fn human_size(bytes: u64) -> String {
 /// Render a [`ResolvedBuild`] as the `resolve` command's human report: every axis
 /// of the build point, in the order a reader checks them (device, hardware, kernel,
 /// rootfs, image, sources).
+///
+/// A u-boot-only build reports the axes it does not have once, in words, and then
+/// omits their lines entirely. Resolution carries device defaults in those fields
+/// that no node ever reads, so printing them would show an image size and a hostname
+/// for an artifact that has neither — and a blank locale line reads as a bug rather
+/// than as an axis that does not exist here.
 pub(crate) fn print_build(b: &ResolvedBuild) {
+    let image = b.produces_image();
     println!("device       : {} — {}", b.device, b.description);
     println!("arch / soc   : {} / {}", b.arch, b.soc);
     println!("boot method  : {}", b.boot_method);
+    if !image {
+        println!("deliverable  : u-boot only — no kernel, suite, rootfs, or image");
+    }
     // A kernel prints only what it has: a compiled one is described by its source and
     // config inputs, a distro one by the package that installs it.
     match &b.kernel {
@@ -169,21 +179,23 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
                 k.package
             );
         }
-        None => println!("kernel       : (none — u-boot-only build)"),
+        // Stated once above; a second "(none)" here would be noise.
+        None => {}
     }
-    match &b.suite {
-        Some(s) => println!("suite        : {s}"),
-        None => println!("suite        : (none — u-boot-only build)"),
+    if let Some(s) = &b.suite {
+        println!("suite        : {s}");
     }
-    println!(
-        "features     : {}",
-        if b.features.is_empty() {
-            "-".to_string()
-        } else {
-            b.features.join(", ")
-        }
-    );
-    println!("rootfs pkgs  : {}", b.rootfs_packages.join(", "));
+    if image {
+        println!(
+            "features     : {}",
+            if b.features.is_empty() {
+                "-".to_string()
+            } else {
+                b.features.join(", ")
+            }
+        );
+        println!("rootfs pkgs  : {}", b.rootfs_packages.join(", "));
+    }
     if !b.apt_sources.is_empty() {
         println!(
             "apt sources  : {}",
@@ -204,33 +216,38 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
                 .join(", ")
         );
     }
+    // The layout is read on both paths: it decides whether the bootloader is written
+    // into the image's raw gap or emitted as its own file.
     println!("layout       : {}", b.layout);
-    println!("image size   : {}", b.image_size);
-    println!("hostname     : {}", b.hostname);
-    println!(
-        "locale       : {} (generated: {})",
-        b.locale,
-        b.locales_generate.join(", ")
-    );
-    println!("timezone     : {}", b.timezone);
-    // A headless board has no keymap and prints none — an empty line would suggest the
-    // knob exists and was left blank, when in fact Debian's default is what ships.
-    if let Some(k) = &b.keymap {
-        let mut km = k.layout.clone();
-        if !k.variant.is_empty() {
-            km.push_str(&format!(" ({})", k.variant));
+    if image {
+        println!("image size   : {}", b.image_size);
+        println!("hostname     : {}", b.hostname);
+        println!(
+            "locale       : {} (generated: {})",
+            b.locale,
+            b.locales_generate.join(", ")
+        );
+        println!("timezone     : {}", b.timezone);
+        // A headless board has no keymap and prints none — an empty line would suggest
+        // the knob exists and was left blank, when in fact Debian's default is what
+        // ships.
+        if let Some(k) = &b.keymap {
+            let mut km = k.layout.clone();
+            if !k.variant.is_empty() {
+                km.push_str(&format!(" ({})", k.variant));
+            }
+            println!("keymap       : {km} [{}]", k.model);
         }
-        println!("keymap       : {km} [{}]", k.model);
-    }
-    println!("dtb          : {}", b.kernel_dtb);
-    // Only a board carrying its own (not-yet-upstream) device tree has sources to
-    // show; an upstream-DTB board would print an empty line for nothing.
-    if !b.device_dts.is_empty() {
-        println!("device dts   : {}", b.device_dts.join(", "));
-    }
-    // Extra kernel arguments only where the board declares them.
-    if !b.kernel_cmdline.is_empty() {
-        println!("cmdline extra: {}", b.kernel_cmdline);
+        println!("dtb          : {}", b.kernel_dtb);
+        // Only a board carrying its own (not-yet-upstream) device tree has sources to
+        // show; an upstream-DTB board would print an empty line for nothing.
+        if !b.device_dts.is_empty() {
+            println!("device dts   : {}", b.device_dts.join(", "));
+        }
+        // Extra kernel arguments only where the board declares them.
+        if !b.kernel_cmdline.is_empty() {
+            println!("cmdline extra: {}", b.kernel_cmdline);
+        }
     }
     // The boot section is the boot method's, and the two methods have nothing in
     // common to print: one compiles a bootloader out of blobs and writes it into a raw
@@ -270,8 +287,15 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             println!("offsets      : rootfs {}", boot.rootfs_offset);
         }
     }
-    println!("modules      : {}", b.modules.join(", "));
+    // The SoC's initramfs module list is a kernel-axis value, so it has no meaning
+    // for a build that compiles no kernel.
+    if image {
+        println!("modules      : {}", b.modules.join(", "));
+    }
     println!("cross-compile: {}", b.cross_compile);
+    if !image {
+        return;
+    }
     // Media-accel source trees print only when the build compiles the stack; a base
     // build reports it plainly instead of empty source lines.
     match (&b.userspace, &b.ffmpeg) {
