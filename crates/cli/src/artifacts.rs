@@ -108,7 +108,7 @@ fn deb_version(deb: impl AsRef<Path>) -> Option<String> {
 /// *different* version than the one built this run.
 ///
 /// The local apt repo is `--multiversion`, and both rootfs backends resolve a bare
-/// package name highest-version-wins (apt for mmdebstrap; the provisioner's index
+/// package name highest-version-wins (the provisioner's index
 /// likewise). So a stale higher-versioned deb an earlier build left in `out_dir` would
 /// outrank the one this build just compiled — a silent wrong-kernel install and, against
 /// an out-of-tree kmod, a modversions-CRC-mismatched `.ko` that will not load. This is

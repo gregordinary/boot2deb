@@ -4,7 +4,8 @@
 //!
 //! Pure: a deterministic join of values the [`Lock`] and [`ResolvedBuild`] already
 //! hold, plus the build-time facts the engine supplies ([`BuildFacts`] — the
-//! solved manifest's content hash + package count, the host/cross identity, and
+//! solved manifest's content hash + package count, the host/cross identity, the
+//! filesystem contract, the sandbox profile every build command ran under, and
 //! the per-image first-boot credential). So the assembly and its canonical TOML
 //! form are unit-testable without a build. It is a join of pins the build already
 //! computes, not new tracking; license/SBOM data rides on the Debian packages
@@ -13,6 +14,7 @@
 use crate::lock::Lock;
 use crate::model::ResolvedBuild;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// Banner prepended to a serialized provenance manifest.
 const BANNER: &str = "\
@@ -67,6 +69,73 @@ pub struct BuildFacts<'a> {
     /// it because the values come from the formatter it links, which the pure core
     /// does not depend on.
     pub filesystem: FilesystemProvenance,
+    /// The environment and mounts every sandboxed build command ran under. The engine
+    /// owns it for the same reason as [`filesystem`](Self::filesystem): the values are
+    /// resolved by the sandbox library it links.
+    pub sandbox: SandboxProvenance,
+}
+
+/// The environment and mounts every sandboxed build command runs under, as the
+/// sandbox library resolves them.
+///
+/// What a compiled package contains depends on the environment its build ran in and
+/// the filesystem that build saw. Neither is stated by a source pin, and neither is
+/// stable across sandbox-library releases — the base environment and the mount profile
+/// are both outside that library's compatibility promise — so the values are recorded
+/// rather than inferred from a version. Two images built from one lock that differ can
+/// then be compared on the inputs that could explain it.
+///
+/// This is the profile every command *starts from*: what the sandbox establishes before
+/// a run adds anything of its own. A run appends its own working and artifact directories
+/// as binds, and an `apt` run additionally shares the host network, which binds the host's
+/// `/etc/resolv.conf` read-only — both are per-run and host-specific, so neither is part
+/// of the record.
+///
+/// Carried through [`BuildFacts`] as one value because it is one fact, and split across
+/// two manifest keys — [`sandbox_env`](ProvenanceManifest::sandbox_env) and
+/// [`sandbox_mounts`](ProvenanceManifest::sandbox_mounts) — because TOML requires every
+/// array-of-tables after every table. It is therefore not a section of its own, and
+/// carries no `Serialize` of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxProvenance {
+    /// The command's complete environment, keyed by variable name.
+    pub env: BTreeMap<String, String>,
+    /// Every mount the sandbox establishes, in the order it establishes them.
+    pub mounts: Vec<SandboxMount>,
+}
+
+/// One mount a sandboxed build command runs under, for the manifest's
+/// `[[sandbox_mounts]]` list.
+///
+/// One flat shape covers every kind, so the list diffs a line at a time; a field the
+/// kind does not have is absent rather than empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SandboxMount {
+    /// What the mount is: `tmpfs`, `procfs`, `devpts`, `bind`, `symlink`, or `raw`.
+    pub kind: String,
+    /// Where it is established, as an absolute path **inside** the sandbox. For a
+    /// symlink this is the link itself, not what it points at.
+    pub target: String,
+    /// What is exposed at [`target`](Self::target): the host path a bind takes, or the
+    /// path a symlink points at. Absent for a kind that has neither.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The filesystem type, where the mount names one. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fstype: Option<String>,
+    /// The kernel's `MS_*` flag word, `0x`-prefixed 8-digit hex. Hex rather than a
+    /// decimal integer because it is a bit set, and only hex diffs one bit at a time.
+    /// Absent for a kind that passes no flags at all; `0x00000000` where it passes an
+    /// empty word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flags: Option<String>,
+    /// The filesystem data string the kernel receives (`mode=1777`). Absent where the
+    /// mount carries none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<String>,
+    /// Whether a bind is remounted read-only. Absent for every other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
 /// The resolved build point + every pin, joined into one document. Each
@@ -94,6 +163,12 @@ pub struct ProvenanceManifest {
     pub built_with: BuiltWithProvenance,
     /// First-boot credential — the per-image secret.
     pub credentials: CredentialsProvenance,
+    /// The environment every sandboxed build command carries, variable name to value.
+    /// boot2deb declares it in full rather than composing over the sandbox library's
+    /// base, so this is the whole of what a compile sees. Declared after the last
+    /// `[section]` struct and before the arrays-of-tables, since it serializes as a
+    /// table itself. See [`SandboxProvenance`] for what the pair of keys records.
+    pub sandbox_env: BTreeMap<String, String>,
     /// Pre-built `extra_debs` pulled from outside the Debian mirror,
     /// each content-pinned by sha256 — part of "exactly what went into this image."
     /// Omitted when none. Declared before the durability list so both arrays-of-tables
@@ -104,9 +179,14 @@ pub struct ProvenanceManifest {
     /// source's `(reference, commit)` — the offline half of "what went into this
     /// image": which pins rest on a durable named ref versus an undurable bare
     /// commit, visible without a network round-trip. The authoritative
-    /// reachability check is the `verify-sources` probe. Declared last so its
-    /// array-of-tables serializes after every `[section]` table.
+    /// reachability check is the `verify-sources` probe. Declared with the other
+    /// arrays-of-tables so it serializes after every `[section]` table.
     pub source_durability: Vec<SourceDurability>,
+    /// Every mount a sandboxed build command runs under, in the order the sandbox
+    /// establishes them — the half of the sandbox profile no other accessor reports,
+    /// down to the `/dev` device nodes and symlinks. Declared last, with the other
+    /// arrays-of-tables. See [`SandboxProvenance`].
+    pub sandbox_mounts: Vec<SandboxMount>,
 }
 
 /// The offline durability *form* of one pinned source, for the manifest's
@@ -607,6 +687,9 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             password: facts.password.to_string(),
             note: "expired at first login (passwd -e); unique per built image".to_string(),
         },
+        // The one fact the engine hands over as a unit, split here because its two
+        // halves sit on opposite sides of the table/array-of-tables boundary.
+        sandbox_env: facts.sandbox.env.clone(),
         extra_debs: lock.extra_debs.clone(),
         // Every source axis the build actually *fetches*, classified offline by pin
         // form. A source the build never fetches has no re-fetch durability to report,
@@ -614,6 +697,7 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
         // u-boot both drop out here, as does the ffmpeg `rockchip` pin (provenance
         // only — the graft ships as patches, so that tree is never cloned).
         source_durability: source_durability_rows(lock),
+        sandbox_mounts: facts.sandbox.mounts.clone(),
     }
 }
 
@@ -741,6 +825,51 @@ mod tests {
         }
     }
 
+    /// The sandbox profile as the engine resolves it, trimmed to the entries that
+    /// exercise every optional field — a bind with a host source, a symlink whose
+    /// source is its content, a flagged tmpfs with a data string, and a mount with
+    /// neither. The real profile is longer; the shape is the same.
+    fn sample_sandbox() -> SandboxProvenance {
+        let mount = |kind: &str, target: &str| SandboxMount {
+            kind: kind.into(),
+            target: target.into(),
+            source: None,
+            fstype: None,
+            flags: None,
+            options: None,
+            read_only: None,
+        };
+        SandboxProvenance {
+            env: [
+                ("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"),
+                ("HOME", "/root"),
+                ("LC_ALL", "C.UTF-8"),
+                ("TZ", "UTC"),
+                ("DEBIAN_FRONTEND", "noninteractive"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+            mounts: vec![
+                mount("procfs", "/proc"),
+                SandboxMount {
+                    flags: Some("0x00000002".into()),
+                    options: Some("mode=0755".into()),
+                    ..mount("tmpfs", "/dev")
+                },
+                SandboxMount {
+                    source: Some("/dev/null".into()),
+                    read_only: Some(false),
+                    ..mount("bind", "/dev/null")
+                },
+                SandboxMount {
+                    source: Some("pts/ptmx".into()),
+                    ..mount("symlink", "/dev/ptmx")
+                },
+            ],
+        }
+    }
+
     fn config_root() -> crate::ConfigRoot {
         crate::ConfigRoot::new(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -801,6 +930,7 @@ mod tests {
             builder_commit: Some("deadbeef1234"),
             builder_dirty: false,
             filesystem: sample_filesystem(),
+            sandbox: sample_sandbox(),
         };
         let manifest = assemble(&sample_build(), &lock, &facts).to_toml_string().unwrap();
         assert!(manifest.contains("Kp7rTx"), "the manifest is the document that has it");
@@ -864,6 +994,7 @@ mod tests {
             builder_commit: Some("cafef00dbabe"),
             builder_dirty: false,
             filesystem: sample_filesystem(),
+            sandbox: sample_sandbox(),
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.sources.kernel_commit.as_deref(), Some("kc"));
@@ -945,6 +1076,7 @@ mod tests {
             builder_commit: None,
             builder_dirty: false,
             filesystem: sample_filesystem(),
+            sandbox: sample_sandbox(),
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.extra_debs.len(), 1);
@@ -963,6 +1095,59 @@ mod tests {
         // entirely (not an empty string a reader would have to special-case).
         assert_eq!(parsed["built_with"]["version"].as_str(), Some("0.0.0-test"));
         assert!(parsed["built_with"].get("commit").is_none(), "no commit for a non-git build");
+    }
+
+    /// The sandbox profile is one fact split across the table/array-of-tables boundary,
+    /// so both halves have to land, in the right order, with every mount kind's optional
+    /// fields present or absent as the kind dictates.
+    #[test]
+    fn the_sandbox_profile_is_recorded_on_both_sides_of_the_table_boundary() {
+        let facts = BuildFacts {
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc",
+            package_count: 1,
+            user: "debian",
+            password: "pw",
+            builder_version: "0.0.0-test",
+            builder_commit: None,
+            builder_dirty: false,
+            filesystem: sample_filesystem(),
+            sandbox: sample_sandbox(),
+        };
+        let text = assemble(&sample_build(), &sample_lock(), &facts).to_toml_string().unwrap();
+
+        // `[sandbox_env]` is a table, so it must precede every array-of-tables or the
+        // rows that follow would land inside it.
+        let env_table = text.find("[sandbox_env]").expect("the env table");
+        assert!(env_table < text.find("[[").expect("an array-of-tables"));
+
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        // The environment is the whole of what a compile sees, declared by boot2deb
+        // rather than composed over the sandbox library's base.
+        let env = parsed["sandbox_env"].as_table().unwrap();
+        assert_eq!(env.len(), 5);
+        assert_eq!(env["LC_ALL"].as_str(), Some("C.UTF-8"));
+        assert_eq!(env["PATH"].as_str(), Some("/usr/sbin:/usr/bin:/sbin:/bin"));
+
+        // The mounts keep the order the sandbox establishes them in — a set would lose
+        // the fact that `/dev` is a tmpfs the device nodes are then bound into.
+        let mounts = parsed["sandbox_mounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 4);
+        assert_eq!(mounts[0]["kind"].as_str(), Some("procfs"));
+        assert_eq!(mounts[1]["target"].as_str(), Some("/dev"));
+        assert_eq!(mounts[1]["flags"].as_str(), Some("0x00000002"));
+        assert_eq!(mounts[1]["options"].as_str(), Some("mode=0755"));
+        // A bind names its host source and its read-only posture; a symlink names what
+        // it points at and has no posture at all.
+        assert_eq!(mounts[2]["source"].as_str(), Some("/dev/null"));
+        assert_eq!(mounts[2]["read_only"].as_bool(), Some(false));
+        assert_eq!(mounts[3]["source"].as_str(), Some("pts/ptmx"));
+        assert!(mounts[3].get("read_only").is_none(), "a symlink is not remounted");
+        // A field the kind does not have is absent, not empty — so a reader never has to
+        // tell "no flags" apart from "flags 0".
+        assert!(mounts[0].get("flags").is_none(), "procfs passes no flag word");
+        assert!(mounts[0].get("options").is_none(), "procfs passes no data string");
     }
 }
 

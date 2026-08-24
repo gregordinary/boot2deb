@@ -6,6 +6,7 @@
 //! tools are a non-zero exit, so it doubles as a CI gate.
 
 use crate::config::resolve;
+use crate::workdir::work_dir_for;
 use boot2deb_core::model::Overrides;
 use boot2deb_core::ConfigRoot;
 use boot2deb_engine::checks::CheckStatus;
@@ -14,6 +15,7 @@ use boot2deb_engine::checks::CheckStatus;
 pub(crate) fn run(
     root: &ConfigRoot,
     target: Option<String>,
+    work_dir: Option<std::path::PathBuf>,
     overrides: Overrides,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let host = boot2deb_core::HostInfo::detect();
@@ -49,6 +51,14 @@ pub(crate) fn run(
         compiles_sources: build.compiles_kernel() || build.rkbin_boot().is_some(),
         compiles_kernel: build.compiles_kernel(),
         builds_uboot: build.rkbin_boot().is_some(),
+        // The media-accel `.deb`s are the only packages compiled in the target-arch
+        // sandbox, so they are the only stages that acquire a build root. Probe the
+        // filesystem the build would actually put its overlay uppers on, which is the
+        // work dir's — not `/tmp`'s, which can answer differently.
+        build_root_uppers: build
+            .userspace
+            .is_some()
+            .then(|| boot2deb_engine::sandbox::build_root_uppers(&work_dir_for(&target, work_dir))),
     };
     let checks = boot2deb_engine::checks::tool_checks(&needs);
     let mut blocking = 0usize;

@@ -452,7 +452,7 @@ mod tests {
                 commit: "f78b240894a29a4c3976ad22935b1c2e16b3c6ad".into(),
             }),
             uboot: Some(UbootPin {
-                source: "https://source.denx.de/u-boot/u-boot.git".into(),
+                source: "https://git.u-boot-project.org/u-boot/u-boot.git".into(),
                 reference: "v2026.04".into(),
                 commit: "88dc2788777babfd6322fa655df549a019aa1e69".into(),
             }),

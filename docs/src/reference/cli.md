@@ -26,6 +26,7 @@ cargo run -p boot2deb-cli -- list-devices
 cargo run -p boot2deb-cli -- list-recipes
 cargo run -p boot2deb-cli -- list-kernels
 cargo run -p boot2deb-cli -- list-features
+cargo run -p boot2deb-cli -- list-kmods
 cargo run -p boot2deb-cli -- support-matrix
 cargo run -p boot2deb-cli -- resolve turing-rk1/forky
 cargo run -p boot2deb-cli -- resolve turing-rk1 --suite sid --layout split
@@ -43,6 +44,11 @@ cargo run -p boot2deb-cli -- doctor turing-rk1/forky
 - **`list-kernels` / `list-features`** enumerate the valid values for the `--kernel`
   and `--feature` overrides — name, version/compatibility, and (for kernels) the patch
   profile — so the override knobs are discoverable without reading the TOML tree.
+- **`list-kmods`** enumerates the out-of-tree kernel-module sets a device's
+  `device_kmods` may name, with the driver ref each tracks and the modules it ships.
+  Unlike the two above this is not an override: it is what a new board consults to find
+  out whether the driver for its Wi-Fi part is already declared, before writing a second
+  declaration of it.
 - **`resolve`** prints the fully merged build point without building, and runs the same
   local `preflight_config` coherence check the build does (geometry, fragment-file
   existence, feature compatibility, apt keyrings). Selectable axes (`--kernel`,
@@ -126,15 +132,8 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   [Locale, timezone, and keyboard](../localization.md).
 - **`--refresh-rootfs`** forces a clean rootfs bootstrap instead of restoring the
   content cache.
-- **`--rootfs-backend mmdebstrap|provisioner`** selects how the rootfs stage
-  bootstraps. `mmdebstrap` (the default) shells out to `mmdebstrap --mode=unshare`.
-  `provisioner` bootstraps in-process with the ferroday-cage Debian provisioner — no
-  external bootstrap binary, real ownership via a subordinate id-map, an
-  ownership-preserving `export_tar` — and keys its content cache on the native
-  resolved plan rather than a `--simulate` solve. Opt-in until it clears the hardware
-  cross-build parity gate.
 
-The rootfs stage is content-cached: a cheap `mmdebstrap --simulate` solve keys a store,
+The rootfs stage is content-cached: the resolved package plan keys a store,
 so a rebuild whose *solved* package set is unchanged restores the bootstrapped tree
 instead of re-running the multi-minute bootstrap. Because the key is the solved set, a
 moved mirror resolves new versions and rebuilds automatically — a cache hit is never

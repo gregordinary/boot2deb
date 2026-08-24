@@ -7,7 +7,7 @@
 //! artifact travels on it as an [`Event::Artifact`], so both modes share one stdout
 //! contract.
 
-use crate::args::{BuildArgs, RootfsBackendArg, StageArg};
+use crate::args::{BuildArgs, StageArg};
 use crate::artifacts::{
     kernel_packages, kmod_packages, ledger_debs, record_artifacts, scope_repo_to_current_artifacts,
 };
@@ -25,7 +25,7 @@ use boot2deb_engine::build::{ffmpeg, kernel, kmod, uboot, userspace, BuildEnv};
 use boot2deb_engine::debstore::DebStore;
 use boot2deb_engine::event::{Event, Step};
 use boot2deb_engine::image::{self, ImageOutput};
-use boot2deb_engine::rootfs::{self, MmdebstrapRootfs, ProvisionerRootfs, Rootfs};
+use boot2deb_engine::rootfs;
 use boot2deb_engine::sandbox::{BuildSandbox, RootlessSandbox};
 use boot2deb_engine::{extradebs, pins};
 use std::path::PathBuf;
@@ -99,14 +99,7 @@ pub(crate) fn run(
         }
     }
 
-    // Absolute paths: the sandbox binds the work tree into the target-arch rootfs
-    // at its host path and chdirs there, both of which need an absolute host path
-    // (a relative work dir would resolve against the wrong root inside the
-    // namespace).
-    let work_dir = absolutize(
-        args.work_dir
-            .unwrap_or_else(|| PathBuf::from("build").join(recipe)),
-    );
+    let work_dir = crate::workdir::work_dir_for(recipe, args.work_dir);
     // Stamp the scratch tree as boot2deb-owned before anything writes into it:
     // `clean` removes only stamped work dirs.
     mark_work_dir(&work_dir)?;
@@ -182,8 +175,8 @@ pub(crate) fn run(
         ),
     );
 
-    // Debian archive keyring for mmdebstrap — the cross sandbox and the rootfs
-    // bootstrap: the explicit flag, else the vendored keyring resolved as a
+    // Debian archive keyring for both bootstraps — the cross sandbox and the rootfs:
+    // the explicit flag, else the vendored keyring resolved as a
     // non-overlayable trust anchor (an overlay copy is a fail-closed swap),
     // else None (the host apt trust store, only viable on a Debian host).
     //
@@ -610,7 +603,7 @@ pub(crate) fn run(
         // work dir.
         let cache_dir = work_dir.join("cache");
         // Resolve each feature apt source's signing keyring to the vendored host
-        // path mmdebstrap verifies the repo against. Existence was already gated at
+        // path the bootstrap verifies the repo against. Existence was already gated at
         // preflight; this stage-time resolution is the backstop for a keyring
         // removed since.
         let apt_repos = apt_source_keyrings(root, &resolved.apt_sources)?;
@@ -640,15 +633,7 @@ pub(crate) fn run(
             // on a rootfs-only build with no kernel tree in this work dir.
             source_date_epoch: kernel::source_date_epoch(&work_dir, &lock),
         };
-        // The rootfs backend is selectable: `mmdebstrap` is the hardware-validated
-        // default; `provisioner` is the in-process ferroday-cage path, opt-in until
-        // it clears the hardware cross-build parity gate. Both satisfy the `Rootfs`
-        // trait, so the rest of the stage is agnostic.
-        let backend: &dyn Rootfs = match args.rootfs_backend {
-            RootfsBackendArg::Mmdebstrap => &MmdebstrapRootfs,
-            RootfsBackendArg::Provisioner => &ProvisionerRootfs,
-        };
-        let artifacts = backend.build(&resolved, &opts, &sink)?;
+        let artifacts = rootfs::build_rootfs(&resolved, &opts, &sink)?;
         emit_artifact(&sink, "rootfs", "tar", &artifacts.tar);
         emit_artifact(&sink, "rootfs", "manifest", &artifacts.manifest);
         // Manifest-as-input verification: unless `--save-manifest` re-pins,
@@ -765,12 +750,51 @@ pub(crate) fn run(
         first_boot_password = Some(artifacts.password);
     }
 
-    // Emit the provenance manifest when this run built both the rootfs and the image
-    // — the point at which the solved manifest and the per-image password both exist.
+    // The solved manifest describing the rootfs inside the image this run assembled:
+    // from this run's own rootfs stage, else the one the rootfs stage left in `out_dir`
+    // beside the tar — the same auto-discovery the tar itself gets, and correct for the
+    // same reason, since one rootfs run writes both. An explicit `--rootfs-tar` names a
+    // tree from outside this directory, whose manifest is not knowable here.
+    let image_manifest: Option<PathBuf> = rootfs_manifest.clone().or_else(|| {
+        if args.rootfs_tar.is_some() {
+            return None;
+        }
+        lock.rootfs
+            .as_ref()
+            .map(|r| out_dir.join(&r.manifest))
+            .filter(|p| p.exists())
+    });
+
+    // The provenance manifest describes the image beside it, so it is emitted by every
+    // run that assembles one — including an image-only run, whose freshly generated
+    // first-boot password would otherwise leave the previous run's document standing
+    // over a different image, misstating the one credential it exists to record.
     // It joins the lock's pins, the resolved build point, the solved-manifest digest,
     // the blob hashes, the toolchain identity, and the first-boot credential into
     // one "exactly what went into this image" document for support/security.
-    if let (Some(manifest_path), Some(password)) = (&rootfs_manifest, &first_boot_password) {
+    let prov_path = out_dir.join(format!(
+        "{}.provenance.toml",
+        recipe.rsplit('/').next().unwrap_or(recipe)
+    ));
+    if first_boot_password.is_some() && image_manifest.is_none() {
+        // An image was built and no manifest describes it. Any document here belongs to
+        // an earlier image; removing it beats leaving one that reads as authoritative.
+        if prov_path.exists() {
+            std::fs::remove_file(&prov_path)
+                .map_err(|e| format!("remove stale provenance {}: {e}", prov_path.display()))?;
+            note(
+                json,
+                &sink,
+                "image",
+                format!(
+                    "removed {} — it described an earlier image, and this run has no \
+                     solved manifest to write a new one from",
+                    prov_path.display()
+                ),
+            );
+        }
+    }
+    if let (Some(manifest_path), Some(password)) = (&image_manifest, &first_boot_password) {
         let manifest_bytes = std::fs::read(manifest_path)
             .map_err(|e| format!("read solved manifest {}: {e}", manifest_path.display()))?;
         let manifest_sha256 = boot2deb_engine::blobs::sha256_hex(&manifest_bytes);
@@ -794,12 +818,14 @@ pub(crate) fn run(
             // reports the on-disk contract the rootfs actually carries rather than a
             // declared one.
             filesystem: boot2deb_engine::image::rootfs_filesystem_pin(),
+            // Resolved from the sandbox's own profile, likewise: the environment and
+            // mounts every build command ran under, which no source pin covers and
+            // which the sandbox library is free to change between releases.
+            sandbox: boot2deb_engine::sandbox::resolved_inputs()?,
         };
         let prov = boot2deb_core::provenance::assemble(&resolved, &lock, &facts);
-        // The provenance lands in this recipe's own out_dir; name it for the leaf
+        // The provenance lands in this recipe's own out_dir, named for the leaf
         // (slash-free), matching the committed manifest's leaf-based filename.
-        let leaf = recipe.rsplit('/').next().unwrap_or(recipe);
-        let prov_path = out_dir.join(format!("{leaf}.provenance.toml"));
         std::fs::write(&prov_path, prov.to_toml_string()?)
             .map_err(|e| format!("write provenance {}: {e}", prov_path.display()))?;
         emit_artifact(&sink, "image", "provenance", &prov_path);

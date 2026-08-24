@@ -5,7 +5,22 @@
 //! the user's home. `build` stamps every work dir it creates with a marker file;
 //! `clean` refuses to remove an unstamped one unless forced.
 
-use std::path::Path;
+use crate::fsutil::absolutize;
+use std::path::{Path, PathBuf};
+
+/// The scratch tree a build of `recipe` uses: `explicit` when `--work-dir` names one,
+/// else `build/<recipe>`.
+///
+/// Always absolute. The sandbox binds the work tree into the target-arch rootfs at its
+/// host path and chdirs there, and a relative path would resolve against the wrong root
+/// inside the namespace.
+///
+/// Shared with `doctor`, whose overlay check probes the filesystem the uppers land on —
+/// an answer that is only right if it is asked about the same directory the build will
+/// use.
+pub(crate) fn work_dir_for(recipe: &str, explicit: Option<PathBuf>) -> PathBuf {
+    absolutize(explicit.unwrap_or_else(|| PathBuf::from("build").join(recipe)))
+}
 
 /// The marker file [`mark_work_dir`] stamps into every work dir `build` creates
 /// and [`check_work_dir_removable`] requires before `clean` removes one.

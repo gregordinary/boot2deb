@@ -110,7 +110,24 @@ move it up instead.
      `fragments/device/my-board.config` to exist — a missing file fails `resolve`. A board
      with no board-specific kconfig deltas uses `device_config_fragments = []` to add none.
      Do not name a fragment you have not written.
-5. **kernel** (`kernels/<kernel>.toml`) — the orthogonal kernel axis. **Ask first whether
+   - **A variant of a board already here uses `extends`.** If your board is another one
+     with one difference — a block enabled for bring-up, a different DTB or DRAM fitting
+     — write `extends = "<other-device>"` and state only the deltas. It inherits that
+     device's keys *and* its `overlay/` tree, so the parent board's driver tuning, units,
+     and keymaps reach your image and any file of them can be overridden by shipping your
+     own copy at the same path. Do not hand-copy the other device's file: arrays replace
+     rather than append across the merge, so restate any list you extend, and see
+     [A variant board extends another](../reference/config-model.md#a-variant-board-extends-another).
+5. **kmod** (`kmods/<name>.toml`) — only if the board carries hardware whose driver is in
+   nobody's kernel tree. Run `boot2deb list-kmods` first: if a kmod for the chip already
+   exists, your board needs one line, `device_kmods = ["<name>"]`, and nothing else. If
+   not, write the layer — the vendor repo, its `ref`, the `subdir` `make M=` builds in,
+   the modules to ship — and put any patch of your own under `kmods/<name>/patches/`.
+   Everything in that file is a property of the *driver*, so state nothing board-specific
+   there; a device cannot override a kmod's fields, and a board needing different build
+   flags is a second kmod, not an override. See
+   [Out-of-tree modules are their own layer](../reference/config-model.md#out-of-tree-modules-are-their-own-layer).
+6. **kernel** (`kernels/<kernel>.toml`) — the orthogonal kernel axis. **Ask first whether
    the board needs a kernel of yours at all.**
    - If Debian's own kernel already runs the hardware — which it does for any SoC and
      board that are fully upstream — write a `flavor = "distro-package"` definition
@@ -123,9 +140,10 @@ move it up instead.
      file. A compiled kernel that applies no series writes `patch_profile = "none"` and
      then never reads the `patches` repo.
 
-   Note that a distro kernel and the two compile-only device fields (`device_dts`,
-   `device_config_fragments`) are mutually exclusive, and resolution says so: nothing
-   would ever build the DTB or merge the fragments.
+   Note that a distro kernel and the compile-only device fields (`device_dts`,
+   `device_config_fragments`, `device_patch_profiles`, `device_kmods`) are mutually
+   exclusive, and resolution says so: nothing would ever build the DTB, merge the
+   fragments, apply the series, or give the modules a tree to build against.
 
 ## Two overlay stages
 

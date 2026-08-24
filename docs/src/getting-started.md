@@ -48,7 +48,7 @@ target    : turing-rk1/forky (arch arm64)
 cross     : yes — needs qemu-user binfmt for arm64 maintainer scripts/compiles
 
   ok      git                          /usr/bin/git
-  MISSING mmdebstrap                   rootfs bootstrap — sudo apt install mmdebstrap
+  ok      unprivileged user namespaces unshare --map-root-user --map-auto works
   MISSING qemu-aarch64-static          run target binaries under binfmt — sudo apt install qemu-user-static
   ...
 
@@ -64,10 +64,11 @@ For orientation, the checks fall into a few groups:
 
 | Group | What it covers | When |
 | --- | --- | --- |
-| Rootfs bootstrap | `mmdebstrap` + unprivileged user namespaces | always |
-| Packaging / apt repo | `dpkg-deb`, `dpkg-scanpackages`, `apt-ftparchive`, `sha256sum` | always |
+| Rootfs bootstrap | unprivileged user namespaces with a subuid/subgid range — the bootstrap itself is in-process | always |
+| Packaging | `fakeroot` + `dpkg-deb` (the u-boot and kmod `.deb`s) | always |
 | Image assembly | none — the rootfs ext4 is formatted and checksum-verified in pure Rust; `e2fsck` is an optional cross-check when present | optional |
 | Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler (native, or the `<triple>gcc` cross compiler) | only if the recipe compiles a kernel or a bootloader |
+| Build roots | an unprivileged overlay whose upper layer sits on the work dir's filesystem | only if the recipe compiles the media-accel packages |
 | Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | cross only |
 
 **`doctor` asks only for what *your recipe* will actually invoke**, so the table above
@@ -119,6 +120,24 @@ On a cross build `doctor` also checks that the `qemu-<arch>` **binfmt handler is
 registered and enabled with the `F` (fix-binary) flag** — the sandbox relies on it.
 Installing `qemu-user-static` (with `binfmt-support` / systemd's binfmt) normally
 registers this; `doctor` warns if the flag is missing.
+
+### The overlay check
+
+A recipe that compiles the media-accel packages gives each component a **build root**:
+the shared sandbox base plus that component's own packages, layered on with an
+unprivileged overlay and discarded afterwards. `doctor` probes whether your host can
+establish one, and prints the directory it probed.
+
+The probe is pointed at the **work dir's** filesystem, not at `/tmp`, because that is
+where the overlay's upper layer goes and the two can answer differently. An unprivileged
+overlay records its whiteouts in `user.*` extended attributes: every on-disk filesystem
+(ext4, xfs, btrfs) holds them, but tmpfs only gained them in Linux 6.6. So a host with a
+tmpfs `/tmp` on an older kernel would fail a `/tmp` probe and still build fine with its
+work dir on disk. If you build with `--work-dir`, pass the same path to `doctor` so it
+asks about the filesystem you will actually use.
+
+The mount itself needs Linux 5.11 or later, which is where overlay in a user namespace
+arrived.
 
 ## Build
 

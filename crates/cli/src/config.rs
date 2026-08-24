@@ -78,7 +78,7 @@ pub(crate) fn preflight_config(
     // after the kernel has cloned and patched.
     device_dts_paths(root, build)?;
     // Resolve each keyring purely to assert it exists; the rootfs stage re-resolves
-    // the paths it hands to mmdebstrap.
+    // the paths it verifies each feature repository against.
     apt_source_keyrings(root, &build.apt_sources)?;
     Ok(())
 }
@@ -125,13 +125,14 @@ pub(crate) fn device_dts_paths(
     Ok(paths)
 }
 
-/// Resolve each device kmod's boot2deb-side `local_patches` to files along the config
-/// search path, keyed by kmod name, in declared apply order. The entries are already
-/// validated at resolution to be contained, relative paths; an overlay commonly ships
-/// them for the device it adds, and the highest-precedence copy wins as for any other
-/// asset. A kmod with no `local_patches` yields an empty vec — the compat-shim step is
-/// skipped for it. The engine's [`build_kmods`](boot2deb_engine::build::kmod::build_kmods)
-/// consumes this as its `local_patches` input.
+/// Resolve each kmod's boot2deb-side `local_patches` to files along the config search
+/// path, keyed by kmod name, in declared apply order. Each entry is a bare filename
+/// (guaranteed by resolution) taken from `kmods/<name>/patches/`, so it lives beside the
+/// driver that needs it and an overlay shipping the same path replaces it — the
+/// highest-precedence copy wins, as for any other asset. A kmod with no `local_patches`
+/// yields an empty vec — the compat-shim step is skipped for it. The engine's
+/// [`build_kmods`](boot2deb_engine::build::kmod::build_kmods) consumes this as its
+/// `local_patches` input.
 pub(crate) fn kmod_local_patches(
     root: &ConfigRoot,
     build: &ResolvedBuild,
@@ -139,8 +140,9 @@ pub(crate) fn kmod_local_patches(
     let mut out = Vec::with_capacity(build.device_kmods.len());
     for kmod in &build.device_kmods {
         let mut paths = Vec::with_capacity(kmod.local_patches.len());
-        for rel in &kmod.local_patches {
-            let path = root.find_asset(rel).ok_or_else(|| {
+        for file in &kmod.local_patches {
+            let rel = format!("kmods/{}/patches/{file}", kmod.name);
+            let path = root.find_asset(&rel).ok_or_else(|| {
                 format!(
                     "kmod '{}' local_patch not found: {rel} (searched the config path)",
                     kmod.name
@@ -184,11 +186,17 @@ pub(crate) fn apt_source_keyrings<'a>(
 }
 
 /// Overlay directories for a build's rootfs, in merge order:
-/// base → soc → boot-method → device → each feature. Each logical layer is
+/// base → soc → boot-method → device lineage → each feature. Each logical layer is
 /// expanded along the config search path (shipped copy first, then any overlay's
 /// copy of the same tree), so an overlay's overlay-tree stacks right after — and
 /// thus wins over — the shipped one, matching the layer merge semantics. Absent
 /// dirs contribute nothing.
+///
+/// The device contributes one tree per entry in its
+/// [`device_lineage`](ResolvedBuild::device_lineage), base-most first, so a variant
+/// board inherits the runtime config of what it extends and overrides any file of it
+/// — the same relationship its TOML keys have. A device that extends nothing
+/// contributes exactly one tree.
 ///
 /// `stage` selects *when* the tree is laid into the rootfs, which is a different
 /// question from what is in it (see [`OverlayStage`]).
@@ -202,8 +210,10 @@ pub(crate) fn overlay_dirs(
         format!("base/{dir}"),
         format!("socs/{}/{dir}", b.soc.as_str()),
         format!("boot-methods/{}/{dir}", b.boot_method.as_str()),
-        format!("devices/{}/{dir}", b.device),
     ];
+    for device in &b.device_lineage {
+        rels.push(format!("devices/{device}/{dir}"));
+    }
     for feature in &b.features {
         rels.push(format!("features/{feature}/{dir}"));
     }
@@ -533,5 +543,92 @@ mod tests {
         let patches = axes.iter().find(|a| a.name == "patches").unwrap();
         assert!(patches.url.contains("patches"));
         assert_eq!(patches.reference, "main");
+    }
+
+    #[test]
+    fn a_variant_board_lays_in_the_overlay_of_what_it_extends() {
+        // The failure this guards is silent and total: a device's overlay tree is found
+        // by its *name*, so a variant that ships no tree of its own would get none at
+        // all -- no driver tuning, no services, no keymaps -- and still build a
+        // plausible image. The H96 NPU variant is exactly that shape: it owns a `.dts`
+        // and nothing else, and every runtime file it needs belongs to the board it
+        // extends.
+        let root = repo_root();
+        let variant =
+            resolve_device(&root, "h96-max-m9-npu", &Overrides::default()).unwrap();
+        assert_eq!(variant.device_lineage, ["h96-max-m9", "h96-max-m9-npu"]);
+
+        let dirs = overlay_dirs(&root, &variant, OverlayStage::Customize);
+        let base_tree = root
+            .find_asset("devices/h96-max-m9/overlay")
+            .expect("the extended board ships an overlay tree");
+        assert!(
+            dirs.contains(&base_tree),
+            "the extended board's overlay tree is missing from {dirs:?}"
+        );
+
+        // The tree carries the files whose absence produced a verbose console and a
+        // dead 5 GHz band on this variant; name one so the assertion is about reaching
+        // real config, not about a directory existing.
+        assert!(base_tree.join("etc/modprobe.d/aic8800.conf").is_file());
+
+        // Ordering is the whole contract: what a device extends comes *before* it, so a
+        // variant can override a file rather than lose to it. The parent ships the only
+        // tree here, so the check is that it precedes where the variant's would sit.
+        let parent_at = dirs.iter().position(|d| d == &base_tree).unwrap();
+        assert!(
+            dirs[..parent_at].iter().all(|d| !d.ends_with("devices/h96-max-m9-npu/overlay")),
+            "the variant's own tree must not precede what it extends"
+        );
+
+        // And a device that extends nothing still contributes exactly its own tree, so
+        // the no-inheritance case is not a special case.
+        let base = resolve_device(&root, "h96-max-m9", &Overrides::default()).unwrap();
+        assert_eq!(base.device_lineage, ["h96-max-m9"]);
+        let base_dirs = overlay_dirs(&root, &base, OverlayStage::Customize);
+        assert!(base_dirs.contains(&base_tree));
+        assert!(
+            !base_dirs.iter().any(|d| d.ends_with("devices/h96-max-m9-npu/overlay")),
+            "a board must not pick up its variant's tree"
+        );
+    }
+
+    #[test]
+    fn a_variant_board_inherits_the_kmods_of_what_it_extends() {
+        // The same failure shape as the overlay tree, one layer over: the NPU variant
+        // states only its `.dts`, its fragment, and its patch profile, so its Wi-Fi has
+        // to arrive through `extends`. If it did not, the variant would build a
+        // plausible image with no wlan0 at all and nothing would say so.
+        let root = repo_root();
+        let base = resolve_device(&root, "h96-max-m9", &Overrides::default()).unwrap();
+        let variant = resolve_device(&root, "h96-max-m9-npu", &Overrides::default()).unwrap();
+        assert_eq!(
+            base.device_kmods, variant.device_kmods,
+            "the NPU variant's kmods must be exactly what it extends"
+        );
+        assert_eq!(
+            base.device_kmods.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+            ["aic8800"]
+        );
+    }
+
+    #[test]
+    fn kmod_local_patches_resolve_under_the_kmods_tree_in_apply_order() {
+        // A local patch is a bare filename resolved against the *kmod's* directory, not
+        // the device's — so a second board naming the same kmod reads the same shims
+        // rather than reaching into another board's folder. The paths must come out
+        // absolute: the kmod stage applies them with `git -C <driver_tree> apply`.
+        let root = repo_root();
+        let build = resolve_device(&root, "h96-max-m9", &Overrides::default()).unwrap();
+        let resolved = kmod_local_patches(&root, &build).unwrap();
+        let (name, paths) = resolved.first().expect("the H96 carries one kmod");
+        assert_eq!(name, "aic8800");
+        let names: Vec<&str> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, ["0001-sdio-linux-7.1.patch", "0002-quiet-log-level.patch"]);
+        assert!(paths.iter().all(|p| p.is_absolute() && p.is_file()));
+        assert!(paths.iter().all(|p| p.parent().unwrap().ends_with("kmods/aic8800/patches")));
     }
 }

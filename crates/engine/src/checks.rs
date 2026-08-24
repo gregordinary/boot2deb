@@ -9,11 +9,11 @@
 //!
 //! - **Always:** host `git` (`git am --3way`), `make` + the target C
 //!   toolchain (native `cc`, else the `<triple>gcc` cross toolchain), the kernel's
-//!   `bc`/`flex`/`bison`/openssl build deps, `mmdebstrap` (the OS rootfs bootstrap),
-//!   and unprivileged user namespaces. The target-arch *build sandbox* — where the
-//!   media-accel `.deb`s compile — is bootstrapped and entered in-process through
-//!   the ferroday-cage library (no `bwrap`, no `mmdebstrap` of its own), so it adds
-//!   no tool beyond the user namespaces already listed here.
+//!   `bc`/`flex`/`bison`/openssl build deps, and unprivileged user namespaces. Both
+//!   the OS rootfs and the target-arch *build sandbox* — where the media-accel
+//!   `.deb`s compile — are bootstrapped and entered in-process through the
+//!   ferroday-cage library, so neither adds a tool beyond the user namespaces
+//!   already listed here.
 //! - **Cross-arch only** (host arch ≠ target arch): a `qemu-<arch>` interpreter and
 //!   a registered+enabled binfmt handler for the target. A same-arch host runs the
 //!   target's binaries directly and skips these entirely.
@@ -24,7 +24,7 @@
 //! Detection is a side effect (PATH scan, `/proc` + `/etc/os-release` reads,
 //! `pkg-config` shell-out), so it lives in the engine, not `core`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use boot2deb_core::host::HostInfo;
@@ -129,8 +129,7 @@ impl PkgManager {
             Pkg::Flex => "flex".into(),
             Pkg::Bison => "bison".into(),
             Pkg::E2fsprogs => "e2fsprogs".into(),
-            Pkg::Mmdebstrap => "mmdebstrap".into(),
-            Pkg::Coreutils => "coreutils".into(),
+            Pkg::Fakeroot => "fakeroot".into(),
             // Kernel `bindeb-pkg` deps. rsync/cpio/kmod share the name across managers;
             // debhelper is Debian's, and elfutils' dev libs split by distro.
             Pkg::Rsync => "rsync".into(),
@@ -170,17 +169,8 @@ impl PkgManager {
                 Pacman | Brew => "elfutils".into(),
                 _ => "libdw-dev".into(),
             },
-            // dpkg / dpkg-dev / apt-utils are Debian's own tools; on non-Debian
-            // hosts they come from the distro's dpkg/apt ports (or AUR).
-            Pkg::DpkgDev => match self {
-                Pacman => "dpkg (AUR)".into(),
-                _ => "dpkg-dev".into(),
-            },
-            Pkg::AptUtils => match self {
-                Apt => "apt-utils".into(),
-                Pacman => "apt (AUR)".into(),
-                _ => "apt".into(),
-            },
+            // dpkg is Debian's own tool; on non-Debian hosts it comes from the
+            // distro's dpkg port (or AUR).
             Pkg::Dpkg => match self {
                 Pacman => "dpkg (AUR)".into(),
                 _ => "dpkg".into(),
@@ -230,17 +220,12 @@ enum Pkg {
     Openssl,
     NativeToolchain,
     CrossToolchain,
-    Mmdebstrap,
     QemuUser,
     E2fsprogs,
-    /// `dpkg-scanpackages` — the local apt repo's `Packages` index.
-    DpkgDev,
-    /// `apt-ftparchive` — the local apt repo's `Release`.
-    AptUtils,
-    /// `dpkg-deb` — host-side `.deb` packaging (u-boot/ffmpeg debs).
+    /// `dpkg-deb` — host-side `.deb` packaging (the u-boot and kmod debs).
     Dpkg,
-    /// `sha256sum` — the rootfs `.deb` content-hash capture hook.
-    Coreutils,
+    /// `fakeroot` — the root-owned staging `dpkg-deb` packages those debs from.
+    Fakeroot,
     /// `debhelper` (`dh`) — the kernel `make bindeb-pkg` `dpkg-buildpackage` dep.
     Debhelper,
     /// `libelf-dev` — kernel objtool/BTF build dep (`pkg-config libelf`).
@@ -321,6 +306,12 @@ pub struct ToolNeeds {
     /// distinct dep set from the kernel's. A board that boots its own firmware compiles
     /// no u-boot and needs none of them.
     pub builds_uboot: bool,
+    /// Where this build's disposable build roots put their overlay upper layers
+    /// ([`build_root_uppers`](crate::sandbox::build_root_uppers)), for the host's
+    /// overlay capability to be probed on the filesystem that will actually carry
+    /// them. `None` for a build that stands up no build root — one that compiles no
+    /// packages in the target-arch sandbox — which needs no overlay at all.
+    pub build_root_uppers: Option<PathBuf>,
 }
 
 /// Run every host preflight check a build actually needs, in report order.
@@ -383,21 +374,29 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         checks.push(python_module_check(pm, target, "elftools", "python3-pyelftools", "u-boot binman image assembly", Pkg::Pyelftools));
     }
 
-    // Rootfs bootstrap + rootless namespaces — needed on every build. `mmdebstrap`
-    // bootstraps the *OS* rootfs that becomes the image ([`crate::rootfs`]); the
-    // target-arch *build sandbox* is bootstrapped in-process by ferroday-cage and
-    // needs no binary of its own. Both, plus the package builds, run under
-    // unprivileged user namespaces ([`userns_check`]).
-    checks.push(exe(pm, target, "mmdebstrap", &["mmdebstrap"], "OS rootfs bootstrap", true, Pkg::Mmdebstrap));
+    // Rootless namespaces — needed on every build. Both bootstraps (the *OS* rootfs
+    // that becomes the image, [`crate::rootfs`], and the target-arch *build sandbox*)
+    // run in-process through ferroday-cage, so neither needs a binary of its own;
+    // what they do need, along with the package builds, is unprivileged user
+    // namespaces ([`userns_check`]).
     checks.push(userns_check());
 
-    // Local apt repo + packaging + content-hash tools the rootfs/package stages
-    // shell out to. Missing, `doctor` used to pass and the build then
-    // died mid-rootfs on a non-Debian host.
-    checks.push(exe(pm, target, "dpkg-deb", &["dpkg-deb"], "read each fetched .deb for the content pin", true, Pkg::Dpkg));
-    checks.push(exe(pm, target, "dpkg-scanpackages", &["dpkg-scanpackages"], "local apt repo Packages index", true, Pkg::DpkgDev));
-    checks.push(exe(pm, target, "apt-ftparchive", &["apt-ftparchive"], "local apt repo Release", true, Pkg::AptUtils));
-    checks.push(exe(pm, target, "sha256sum", &["sha256sum"], "rootfs .deb content-hash capture", true, Pkg::Coreutils));
+    // A build that compiles packages in the target-arch sandbox roots each component's
+    // build on an unprivileged overlay, which not every host can establish — so the
+    // capability is preflighted like a tool. A build that compiles no such packages
+    // stands up no build root and is unaffected.
+    if let Some(uppers) = &needs.build_root_uppers {
+        checks.push(overlay_check(uppers));
+    }
+
+    // Host-side `.deb` packaging: the u-boot and kmod `.deb`s are assembled with
+    // `fakeroot dpkg-deb`. Both halves are checked, because the failure modes differ
+    // and only one of them is loud — a missing `dpkg-deb` fails to spawn, while
+    // `fakeroot` is what makes the staged tree package as `root:root`, so without it
+    // the debs would carry the build user's ownership. Missing either, `doctor` would
+    // pass and the build then die mid-package on a non-Debian host.
+    checks.push(exe(pm, target, "fakeroot", &["fakeroot"], "root-owned staging for the u-boot and kmod .debs", true, Pkg::Fakeroot));
+    checks.push(exe(pm, target, "dpkg-deb", &["dpkg-deb"], "assemble the u-boot and kmod .debs", true, Pkg::Dpkg));
 
     // Cross-arch: the target's maintainer scripts and compiles run under the host's
     // qemu-user binfmt handler — during the rootfs bootstrap whatever else the build
@@ -512,9 +511,8 @@ fn python_module_check(
     }
 }
 
-/// Unprivileged user namespaces with subuid/subgid ranges — the `mmdebstrap
-/// --mode=unshare` OS-rootfs bootstrap, the ferroday-cage provisioner backend (its
-/// subordinate-mapped bootstrap + `export_tar`, which need the same
+/// Unprivileged user namespaces with subuid/subgid ranges — the OS-rootfs
+/// bootstrap (its subordinate-mapped provision + `export_tar`, which need a
 /// `newuidmap`/subuid range), the in-process build sandbox (its dpkg-configure
 /// waves), and the package builds all depend on them.
 ///
@@ -550,6 +548,49 @@ fn userns_check() -> Check {
         required: true,
         status,
     }
+}
+
+/// Whether an unprivileged overlay can be established with its upper layer on the
+/// filesystem hosting `uppers` — what a build root is rooted on.
+///
+/// Two host properties gate it and the probe reports the first that fails: the
+/// filesystem must hold `user.*` extended attributes, which is where an unprivileged
+/// overlay records its whiteouts, and the kernel must accept the mount from inside a
+/// user namespace.
+///
+/// **The filesystem is the subject, not the directory.** Which one the uppers land on
+/// is decided by the work dir, and `/tmp` may well answer differently — a tmpfs `/tmp`
+/// on a pre-6.6 kernel cannot hold the xattrs while the ext4 work dir beside it can. So
+/// the probe is pointed at the real location, and since that directory does not exist
+/// until the first build creates it, it walks up to the nearest existing ancestor:
+/// capability is a property of the filesystem, which an ancestor shares.
+pub fn overlay_check(uppers: &Path) -> Check {
+    let status = match nearest_existing(uppers) {
+        None => CheckStatus::Missing(format!(
+            "no existing directory above {} to probe; create the work dir's parent",
+            uppers.display()
+        )),
+        Some(dir) => match ferroday_cage::host::overlay_blocker(&dir) {
+            None => CheckStatus::Present(format!("upper on {} works", dir.display())),
+            // The blocker names its own remedy; the probed directory is what tells the
+            // operator which filesystem to move or upgrade.
+            Some(blocker) => CheckStatus::Missing(format!("{blocker} (probed {})", dir.display())),
+        },
+    };
+    Check {
+        name: "unprivileged overlay".into(),
+        purpose: "disposable per-component build roots",
+        required: true,
+        status,
+    }
+}
+
+/// The nearest ancestor of `path` — `path` itself first — that exists as a directory.
+///
+/// `None` only when nothing up to the root is one, which on an absolute path means the
+/// filesystem cannot be reached at all.
+fn nearest_existing(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find(|p| p.is_dir()).map(Path::to_path_buf)
 }
 
 /// A registered *and enabled* `qemu-<arch>` binfmt handler. Reads
@@ -616,6 +657,32 @@ fn is_executable(p: &std::path::Path) -> bool {
 mod tests {
     use super::*;
 
+    /// The overlay check answers about a directory the first build has not created yet,
+    /// and its report has to name the directory it actually asked about — an operator
+    /// whose work dir is on another volume has no other way to see that the probe went
+    /// somewhere else.
+    #[test]
+    fn the_overlay_check_probes_the_nearest_existing_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uppers = tmp.path().join("sandbox").join("layers");
+
+        // Nothing below the scratch root exists, so the scratch root answers for it:
+        // overlay capability belongs to the filesystem, which the ancestor shares.
+        assert_eq!(nearest_existing(&uppers).as_deref(), Some(tmp.path()));
+        // Once the directory itself exists it is its own answer.
+        std::fs::create_dir_all(&uppers).unwrap();
+        assert_eq!(nearest_existing(&uppers).as_deref(), Some(uppers.as_path()));
+
+        // Either verdict names the probed directory. Which verdict it is depends on the
+        // host, which is the point of the check — so the assertion is on the report.
+        let check = overlay_check(&uppers);
+        assert!(check.required, "a build root cannot be established without it");
+        let detail = match &check.status {
+            CheckStatus::Present(d) | CheckStatus::Missing(d) => d,
+        };
+        assert!(detail.contains(&uppers.display().to_string()), "{detail}");
+    }
+
     #[test]
     fn os_release_maps_to_package_manager() {
         assert_eq!(
@@ -674,6 +741,7 @@ mod tests {
             compiles_sources: true,
             compiles_kernel: true,
             builds_uboot: true,
+            build_root_uppers: Some(std::env::temp_dir()),
         }
     }
 
@@ -686,13 +754,14 @@ mod tests {
             compiles_sources: false,
             compiles_kernel: false,
             builds_uboot: false,
+            build_root_uppers: None,
         }
     }
 
     #[test]
     fn a_compiling_build_asks_for_the_toolchain() {
         let checks = tool_checks(&compiling_build());
-        for needed in ["git", "make", "bc", "flex", "bison", "mmdebstrap", "dpkg-deb"] {
+        for needed in ["git", "make", "bc", "flex", "bison", "fakeroot", "dpkg-deb"] {
             assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
         }
         // Image assembly needs no host filesystem tool now; `e2fsck` rides along as the
@@ -763,6 +832,17 @@ mod tests {
             checks.iter().any(|c| c.name.contains("user namespace") && c.required),
             "every build requires unprivileged user namespaces"
         );
+        // The overlay behind each component's build root is the sandbox's one host
+        // requirement beyond those namespaces, and it is asked for only by a build that
+        // compiles packages in there.
+        assert!(
+            checks.iter().any(|c| c.name == "unprivileged overlay" && c.required),
+            "a sandbox build requires an unprivileged overlay"
+        );
+        assert!(
+            !tool_checks(&assembling_build()).iter().any(|c| c.name == "unprivileged overlay"),
+            "a build that compiles no packages stands up no build root"
+        );
         // qemu-user is the genuinely cross-only half: a matching-arch host runs the
         // target's binaries directly and never consults a binfmt handler.
         let host = HostInfo::detect();
@@ -791,7 +871,7 @@ mod tests {
         // the same way, and its armhf maintainer scripts still run under qemu — so a
         // missing binfmt handler is still a blocking failure, and it is the *arm* one,
         // not aarch64.
-        for needed in ["mmdebstrap", "dpkg-deb", "sha256sum"] {
+        for needed in ["fakeroot", "dpkg-deb"] {
             assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
         }
         let host = HostInfo::detect();

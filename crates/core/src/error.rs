@@ -34,6 +34,29 @@ pub enum ConfigError {
         name: String,
     },
 
+    /// A device's `extends` chain closes on itself, so there is no base-most device
+    /// to start the merge from. Reported with the whole walk, base-most last, because
+    /// the offending edge is rarely in the device that was asked for.
+    #[error("device '{device}' extends itself through {chain}")]
+    DeviceExtendsCycle {
+        /// The device whose resolution was requested.
+        device: String,
+        /// The walk that closed, joined with `-> `.
+        chain: String,
+    },
+
+    /// A device's `extends` is present but not a string, so it names no parent
+    /// device. Caught while walking the chain — before deserialization, which is
+    /// where the key's own type would otherwise be checked — so the message names
+    /// the device rather than a merged value's field.
+    #[error("device '{device}': extends must be a device name (a string), found {found}")]
+    InvalidDeviceExtends {
+        /// The device whose file carries the bad value.
+        device: String,
+        /// The TOML type that was found instead.
+        found: &'static str,
+    },
+
     /// A recipe reference (a CLI argument or config cross-reference) is not a valid
     /// `<device>/<leaf>` — or bare `<leaf>` — path. Recipes are the one layer that
     /// nests one level under a device folder, so a reference may carry a *single*
@@ -345,22 +368,29 @@ pub enum ConfigError {
         expected: String,
     },
 
-    /// A `device_kmods` entry is malformed: a non-package-safe name, a duplicate
-    /// name, or a `subdir`/`patch_dir`/patch/module path that is absolute or escapes
-    /// the tree it is joined onto. The subdir feeds `make M=` and the local patches
-    /// are read from the config root, so an escaping value would build or read a file
-    /// from outside the intended tree.
-    #[error(
-        "device '{device}' has an invalid device_kmods entry '{name}': {why}"
-    )]
-    InvalidDeviceKmod {
-        /// The device being resolved.
-        device: String,
-        /// The offending kmod set's declared name (or the raw value when the name
-        /// itself is what is wrong).
-        name: String,
+    /// A `kmods/<name>.toml` layer is malformed: a non-package-safe name, or a
+    /// `subdir`/`patch_dir`/patch/module path that is absolute or escapes the tree it is
+    /// joined onto. The subdir feeds `make M=` and the local patches are read from the
+    /// config root, so an escaping value would build or read a file from outside the
+    /// intended tree.
+    #[error("kmod '{kmod}' is invalid (kmods/{kmod}.toml): {why}")]
+    InvalidKmod {
+        /// The kmod file stem — the offending value itself when the name is what is
+        /// wrong.
+        kmod: String,
         /// What is wrong with it.
         why: &'static str,
+    },
+
+    /// A device's `device_kmods` names the same kmod twice. One kmod is one build node,
+    /// one deb, and one lock pin, so a repeat is a config mistake with no meaning rather
+    /// than a request to build it twice.
+    #[error("device '{device}' names kmod '{kmod}' more than once")]
+    DuplicateKmod {
+        /// The device being resolved.
+        device: String,
+        /// The repeated kmod name.
+        kmod: String,
     },
 
     /// A patch profile's `applies_to_kernel` is not a valid semver requirement.
@@ -552,9 +582,8 @@ pub enum ConfigError {
     /// The resolved suite (device `default_suite` or a `--suite` override) is not a
     /// well-formed Debian codename: it must be a bare token starting with an
     /// alphanumeric and drawn from `[A-Za-z0-9._-]`. Rejected at resolve so an
-    /// invalid suite fails immediately instead of deep in `mmdebstrap`, and so a
-    /// leading `-` can never reach the bootstrap as a positional (pairing with the
-    /// `--` option terminator in the bootstrap argv).
+    /// invalid suite fails immediately instead of deep in the bootstrap, where it
+    /// would surface as an opaque archive fetch failure.
     #[error("invalid suite '{value}': must be a Debian codename (a bare token in [A-Za-z0-9._-] starting with an alphanumeric)")]
     InvalidSuite {
         /// The offending suite string.

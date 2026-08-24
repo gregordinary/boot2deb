@@ -2,12 +2,13 @@
 //! `tar` archive the [image node](crate::image) formats into ext4, plus a
 //! content-pinned solved package manifest.
 //!
-//! One `mmdebstrap --mode=unshare` invocation does the whole job, rootless (no
-//! `sudo`, no persistent chroot): it installs the merged rootfs package set
-//! ([`ResolvedBuild::rootfs_packages`]) from the build's own [`LocalRepo`]
-//! plus the suite mirror — so apt resolves each `.deb`'s dependencies — and a
-//! `--customize-hook` lays the staged overlay in, runs the target-chroot
-//! config (user account, ssh first-boot, group membership), and re-runs the
+//! The bootstrap is in-process and rootless — no `sudo`, no persistent chroot, no
+//! external bootstrap binary. [`build_rootfs`] drives ferroday-cage's Debian
+//! provisioner: it installs the merged rootfs package set
+//! ([`ResolvedBuild::rootfs_packages`]) from the build's own
+//! [`LocalDistsRepo`](crate::repo::LocalDistsRepo) plus the suite mirror — so each
+//! `.deb`'s dependencies resolve together — lays the staged overlay in, runs the
+//! target config (user account, ssh first-boot, group membership), and re-runs the
 //! kernel `postinst.d` hooks so `/boot` gains the initrd, board dtb, and
 //! `extlinux.conf` u-boot loads (the kernel configured before the overlay's
 //! hooks existed, so its own postinst produced none of them). The overlay is the
@@ -15,18 +16,12 @@
 //! followed by the *generated* config this module produces from the
 //! resolved values (fstab, hostname, apt sources, locale, machine-id).
 //!
-//! This module holds the [`Rootfs`] trait and its `mmdebstrap` implementation, the
-//! hardware-validated default; the in-process ferroday-cage bootstrap — the
-//! `debrepo`-shaped backend with a native content-pinned manifest — is
-//! [`ProvisionerRootfs`], in the `provisioner` submodule.
+//! This module owns the node's inputs, the two staged overlay trees, and the
+//! generated config; the bootstrap itself is the `provisioner` submodule.
 //!
 //! The manifest is fully content-pinned — `name + version + arch + sha256` per
-//! package. The sha256 is the hash of the exact `.deb` installed: the bootstrap
-//! keeps every fetched `.deb` in the apt cache through the customize stage
-//! (`--skip=essential/unlink` plus `APT::Keep-Downloaded-Packages`), a hook
-//! hashes them there, and the manifest writer joins those hashes onto the
-//! installed set from dpkg status. mmdebstrap's own cleanup still empties the
-//! cache afterward, so the tarball stays lean.
+//! package — from the archive-recorded digests in the resolved plan, so each row
+//! names the exact `.deb` the image carries.
 //!
 //! Board firmware (rockchip display, panthor Mali, Realtek NIC) is staged as
 //! Debian `non-free-firmware` packages declared on the SoC layer (for RK3588:
@@ -35,16 +30,11 @@
 //! other package and needs no separate fetch step.
 
 mod provisioner;
-pub use provisioner::ProvisionerRootfs;
+pub use provisioner::build_rootfs;
 
-use crate::bootstrap::{StagingRoot, COMPONENTS};
 use crate::error::EngineError;
-use crate::event::{EventSink, Step};
-use crate::repo::LocalRepo;
-use crate::rootcache::{self, RootfsStore};
+use crate::event::Step;
 use boot2deb_core::model::{AptSource, ResolvedBuild};
-use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -58,7 +48,8 @@ pub const DEFAULT_USER: &str = "debian";
 /// Filesystem inputs for the rootfs node.
 pub struct RootfsOptions<'a> {
     /// The build's `.deb`s (kernel, u-boot, MPP/RGA, ffmpeg-rk, …) — assembled
-    /// into a [`LocalRepo`] the bootstrap installs the accel packages from.
+    /// into a [`LocalDistsRepo`](crate::repo::LocalDistsRepo) the bootstrap
+    /// installs the accel packages from.
     pub repo_debs: &'a [PathBuf],
     /// Layer `overlay/` directories to lay into the rootfs **after** every package,
     /// in merge order (base → soc → boot-method → device → features). Non-existent
@@ -90,7 +81,7 @@ pub struct RootfsOptions<'a> {
     /// learn it except by being told here.
     ///
     /// Written as part of the staged overlay, so it folds into the rootfs cache key with
-    /// every other generated file ([`rootcache::dir_fingerprints`]) and a cached tree can
+    /// every other generated file ([`crate::rootcache::dir_fingerprints`]) and a cached tree can
     /// never be reused under an identity that disagrees with it.
     pub image_identity: &'a boot2deb_core::provenance::SystemIdentity,
     /// The rootfs partition's PARTUUID, as the image node will write it.
@@ -121,9 +112,11 @@ pub struct RootfsOptions<'a> {
     /// static config, above all the freshly built kernel image.
     pub extra_packages: &'a [String],
     /// Root of the content-addressed rootfs cache. `Some(dir)` enables the
-    /// early-cutoff cache: a cheap `mmdebstrap --simulate` solve keys a store under
-    /// `<dir>/rootfs/`, and an unchanged solved set restores a stored tree instead
-    /// of re-bootstrapping ([`crate::rootcache`]). `None` always bootstraps.
+    /// early-cutoff cache: the resolved plan keys a store under `<dir>/rootfs/`,
+    /// and an unchanged solved set restores a stored tree instead of
+    /// re-bootstrapping ([`crate::rootcache`]). It also roots the persistent
+    /// `.deb` download cache the provisioner reuses across builds. `None` always
+    /// bootstraps.
     pub cache_dir: Option<&'a Path>,
     /// Ignore a cache hit and re-bootstrap, refreshing the stored entry
     /// (`--refresh-rootfs`). The solve still runs and the fresh tree is re-stored.
@@ -137,10 +130,10 @@ pub struct RootfsOptions<'a> {
     /// Deterministic build timestamp (`SOURCE_DATE_EPOCH`, the locked kernel commit's
     /// committer date — the same lock-derived seed the image identifiers use), or
     /// `None` when the kernel tree is not available to read it (a partial rootfs-only
-    /// build). When set it is exported into the mmdebstrap environment so the tarball's
-    /// member mtimes are clamped to it, and stamped onto the password-splice's appended
-    /// `./etc/shadow` member, so only the deliberate per-image secret — not incidental
-    /// build-time mtimes — varies between builds of one lock.
+    /// build). When set it is the ceiling the tar export clamps every member's mtime
+    /// to, and it is stamped onto the password-splice's appended `./etc/shadow`
+    /// member, so only the deliberate per-image secret — not incidental build-time
+    /// mtimes — varies between builds of one lock.
     pub source_date_epoch: Option<u64>,
 }
 
@@ -170,9 +163,9 @@ pub enum BootConfig<'a> {
 /// A resolved third-party apt repository activated during the rootfs bootstrap solve:
 /// a feature's [`AptSource`] paired with the host path its `signed_by`
 /// keyring resolved to. The CLI resolves and existence-checks the keyring (a vendored
-/// build-host prerequisite); the rootfs stage renders the pair into an
-/// mmdebstrap positional `deb [signed-by=…]` line so the repo's `Release` signature is
-/// verified during the solve rather than trusted blindly.
+/// build-host prerequisite); the rootfs stage turns the pair into a signed provisioner
+/// repository, so the repo's `Release` signature is verified against that keyring
+/// during the solve rather than trusted blindly.
 pub struct AptRepo<'a> {
     /// The resolved feature source (uri / suite / components / name / signed_by).
     pub source: &'a AptSource,
@@ -180,7 +173,7 @@ pub struct AptRepo<'a> {
     pub keyring: PathBuf,
 }
 
-/// What [`Rootfs::build`] produced.
+/// What [`build_rootfs`] produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootfsArtifacts {
     /// The rootfs `tar` archive (device nodes excluded), consumed by the image
@@ -190,425 +183,6 @@ pub struct RootfsArtifacts {
     pub tar: PathBuf,
     /// The solved package manifest (`name version arch sha256` per line).
     pub manifest: PathBuf,
-}
-
-/// A rootfs backend: bootstraps the device userland to a tarball plus a
-/// content-pinned manifest. Two implementations sit behind it: [`MmdebstrapRootfs`],
-/// the hardware-validated default, and [`ProvisionerRootfs`], the in-process
-/// ferroday-cage bootstrap (the `debrepo`-shaped backend this trait was designed
-/// for). The build stage selects between them; the image node, cache, and manifest
-/// consumers are agnostic to which ran.
-pub trait Rootfs {
-    /// Bootstrap `build`'s rootfs per `opts`, emitting the step's
-    /// [`Event`](crate::event::Event)s to `sink`.
-    fn build(
-        &self,
-        build: &ResolvedBuild,
-        opts: &RootfsOptions,
-        sink: &dyn EventSink,
-    ) -> Result<RootfsArtifacts, EngineError>;
-}
-
-/// The `mmdebstrap` rootfs backend — rootless bootstrap in one invocation.
-pub struct MmdebstrapRootfs;
-
-impl Rootfs for MmdebstrapRootfs {
-    fn build(
-        &self,
-        build: &ResolvedBuild,
-        opts: &RootfsOptions,
-        sink: &dyn EventSink,
-    ) -> Result<RootfsArtifacts, EngineError> {
-        let step = Step::start(sink, "rootfs");
-        std::fs::create_dir_all(opts.out_dir).map_err(|s| EngineError::io(opts.out_dir, s))?;
-
-        // Everything `mmdebstrap --mode=unshare` reads under an unprivileged mapped
-        // uid — the local apt repo and keyring (apt's acquire phase) and the
-        // customize-hook script plus the overlay tree it copies from (the hook runs
-        // under a mapped uid too) — must sit on a world-traversable path: those uids
-        // cannot traverse a build dir under a `0750` home. All of it stages under the
-        // system temp dir; removed when `staging` drops.
-        let staging = BootstrapStaging::new()?;
-
-        // 1. The build's debs → a trusted local apt repo.
-        let repo = LocalRepo::assemble(&staging.repo_dir(), opts.repo_debs, &step)?;
-        let keyring = opts.keyring.map(|kr| staging.stage_keyring(kr)).transpose()?;
-
-        // 2. Merge the layer overlays into two staged trees, by *when* they are laid
-        //    in. The pre-install tree goes down before any package is configured, so a
-        //    package's maintainer scripts see it while they run; the customize tree
-        //    goes down after every package, so it wins over what they shipped.
-        let preinstall = staging.preinstall_overlay_dir();
-        stage_preinstall_overlay(
-            &preinstall,
-            opts.preinstall_overlay_dirs,
-            build,
-            opts.boot_config,
-            &step,
-        )?;
-        let overlay = staging.overlay_dir();
-        stage_overlay(
-            &overlay,
-            opts.overlay_dirs,
-            build,
-            opts.rootfs_partuuid,
-            opts.image_identity,
-            &step,
-        )?;
-
-        // 3. The hooks: (a) essential — lay the pre-install overlay in before any
-        //    package is configured; (b) customize — capture each fetched `.deb`'s
-        //    sha256 while the apt cache is still populated, then lay the overlay in,
-        //    run the chroot config, and finalize the boot payload. The account is
-        //    created **locked** — the unique per-image password is
-        //    non-reproducible, so it is *not* baked into the cacheable tree; it is
-        //    spliced into the staged tree at image assembly, keeping a stored tree
-        //    reusable across builds.
-        let essential_hook = staging.essential_hook_path();
-        std::fs::write(&essential_hook, essential_hook_script(&preinstall))
-            .map_err(|s| EngineError::io(&essential_hook, s))?;
-        let deb_hashes = staging.deb_hashes_path();
-        let hash_hook = staging.hash_hook_path();
-        std::fs::write(&hash_hook, capture_hashes_hook_script(&deb_hashes))
-            .map_err(|s| EngineError::io(&hash_hook, s))?;
-        let hook = staging.hook_path();
-        std::fs::write(
-            &hook,
-            customize_hook_script(&overlay, DEFAULT_USER, build, opts.boot_config),
-        )
-        .map_err(|s| EngineError::io(&hook, s))?;
-
-        let repo_source = repo.source_line();
-        let tarball = opts.out_dir.join(format!("{}-rootfs.tar", build.device));
-
-        // 4. Early-cutoff cache: a cheap `mmdebstrap --simulate` solve learns
-        //    the versions the current mirror resolves and keys a store of
-        //    password-free rootfs trees. A hit skips the ~250 s bootstrap; because the
-        //    key is the *solved* set (not the input names), a moved mirror resolves a
-        //    different key and rebuilds — a hit is never stale. A solve failure just
-        //    disables the cache for this run (fail-safe: a spurious miss only wastes
-        //    time), so the bootstrap still surfaces any real error.
-        let cache = match opts.cache_dir {
-            Some(dir) => match solve_key(
-                build,
-                opts,
-                keyring.as_deref(),
-                &repo_source,
-                &[("overlay", overlay.as_path()), ("overlay-pre", preinstall.as_path())],
-                &step,
-            ) {
-                Ok(key) => Some((RootfsStore::new(dir), key)),
-                Err(e) => {
-                    step.log(format!("rootfs cache disabled this run ({e})"));
-                    None
-                }
-            },
-            None => None,
-        };
-        let hit = match &cache {
-            Some((store, key)) if !opts.refresh => store.get(key),
-            _ => None,
-        };
-
-        // 5. Materialize the password-free tarball + its content-pinned manifest,
-        //    from the cache or by bootstrapping.
-        if let Some(hit) = hit {
-            let key = &cache.as_ref().expect("hit implies a cache").1;
-            step.log(format!(
-                "rootfs cache hit {} — restoring, skipping bootstrap",
-                key.short()
-            ));
-            std::fs::copy(&hit.tar, &tarball).map_err(|s| EngineError::io(&hit.tar, s))?;
-            std::fs::copy(&hit.manifest, opts.manifest_out)
-                .map_err(|s| EngineError::io(&hit.manifest, s))?;
-            step.progress(75);
-        } else {
-            step.progress(20);
-            step.log(format!(
-                "bootstrapping {} {} rootfs ({} packages, {} mirror(s)) at {}",
-                build.arch,
-                build.image_suite(),
-                build.rootfs_packages.len(),
-                opts.mirrors.len(),
-                tarball.display()
-            ));
-            let mut cmd = Command::new("mmdebstrap");
-            cmd.args(mmdebstrap_argv(
-                build,
-                opts,
-                keyring.as_deref(),
-                &repo_source,
-                &tarball,
-                &essential_hook,
-                &hook,
-                &hash_hook,
-            ));
-            // Clamp every tar member mtime to the lock-derived epoch so build-time
-            // mtimes do not leak into the tarball. mmdebstrap reduces any mtime
-            // newer than SOURCE_DATE_EPOCH down to it; the generated config and the
-            // overlay (hook-copied without preserving timestamps) are stamped "now", so
-            // they all clamp to the epoch, while pinned package files keep their fixed
-            // (older) mtimes. The solve above needs no epoch — it builds no tar.
-            if let Some(epoch) = opts.source_date_epoch {
-                cmd.env("SOURCE_DATE_EPOCH", epoch.to_string());
-            }
-            crate::build::run(cmd, "mmdebstrap", "bootstrap rootfs", &step)?;
-            step.progress(70);
-            // Reconstruct the solved manifest from the rootfs's dpkg status,
-            // content-pinned with the per-`.deb` sha256s the hook captured.
-            let hashes = read_deb_hashes(&deb_hashes)?;
-            write_manifest(&tarball, opts.manifest_out, &hashes, &step)?;
-            // Store the password-free tree + manifest for next time.
-            if let Some((store, key)) = &cache {
-                store.put(key, &tarball, opts.manifest_out, &step)?;
-            }
-            step.progress(75);
-        }
-
-        // The account stays locked in this shared, cacheable tarball. The unique
-        // per-image first-boot password is spliced into the staged tree at
-        // image assembly (the image node's ext4 stage), not into the tar — so a
-        // stored tree is reusable across builds and no fragile in-archive member
-        // surgery on the (PAX) tarball is needed.
-        step.progress(100);
-        step.finish();
-        Ok(RootfsArtifacts {
-            tar: tarball,
-            manifest: opts.manifest_out.to_path_buf(),
-        })
-    }
-}
-
-/// The `--include` argument shared by the real bootstrap and the `--simulate` solve:
-/// the merged rootfs package set plus the build's `extra_packages`, with the base
-/// excludes riding along as apt deselections (`pkgname-`) since mmdebstrap has no
-/// `--exclude` flag (that is a debootstrap-ism). `None` when nothing is included.
-fn include_arg(build: &ResolvedBuild, opts: &RootfsOptions) -> Option<String> {
-    let mut includes = build.rootfs_packages.clone();
-    includes.extend(opts.extra_packages.iter().cloned());
-    includes.extend(build.rootfs_exclude.iter().map(|p| format!("{p}-")));
-    (!includes.is_empty()).then(|| format!("--include={}", includes.join(",")))
-}
-
-/// Render a resolved feature apt repository as an mmdebstrap positional
-/// `deb [signed-by=<keyring>] <uri> <suite> <components…>` line. The
-/// `signed-by` points at the host keyring path the source's `signed_by` resolved to,
-/// so apt verifies the repo's `Release` signature during the solve rather than
-/// trusting it blindly — unlike the local repo's `[trusted=yes]`, which is our own
-/// freshly-built output. Pure, so the line format is unit-testable.
-fn apt_source_line(repo: &AptRepo) -> String {
-    format!(
-        "deb [signed-by={}] {} {} {}",
-        repo.keyring.display(),
-        repo.source.uri,
-        repo.source.suite,
-        repo.source.components.join(" ")
-    )
-}
-
-/// `mmdebstrap --simulate` argv for the early-cutoff solve. Mirrors
-/// [`mmdebstrap_argv`]'s package selection, mirrors, and local repo, but adds
-/// `--simulate --verbose` (run apt's solver, print the resolved set, install
-/// nothing) and drops the hooks and cache-retention flags — no rootfs is built, so
-/// the target is `/dev/null`. Pure, so the invocation is unit-testable.
-fn simulate_argv(
-    build: &ResolvedBuild,
-    opts: &RootfsOptions,
-    keyring: Option<&Path>,
-    repo_source: &str,
-) -> Vec<String> {
-    let mut argv = vec![
-        "--mode=unshare".to_string(),
-        format!("--arch={}", build.arch.debian_arch()),
-        "--variant=important".to_string(),
-        format!("--components={COMPONENTS}"),
-        "--simulate".to_string(),
-        "--verbose".to_string(),
-    ];
-    // Bound apt's per-connection network wait so a stalled mirror fails rather than
-    // hangs.
-    argv.extend(crate::bootstrap::APT_TIMEOUT_OPTS.iter().map(|s| s.to_string()));
-    if let Some(kr) = keyring {
-        argv.push(format!("--keyring={}", kr.display()));
-    }
-    if let Some(include) = include_arg(build, opts) {
-        argv.push(include);
-    }
-    // `--` stops option parsing so the positional suite/target/mirrors cannot be
-    // read as options even if a value begins with `-` (mmdebstrap documents
-    // this terminator explicitly).
-    argv.push("--".to_string());
-    argv.push(build.image_suite().to_string());
-    argv.push("/dev/null".to_string());
-    argv.extend(opts.mirrors.iter().cloned());
-    // Third-party feature repos (signed), so an out-of-mirror app resolves in the
-    // solve; the local repo (our own built debs) stays last.
-    argv.extend(opts.apt_sources.iter().map(apt_source_line));
-    argv.push(repo_source.to_string());
-    argv
-}
-
-/// Run the cheap `--simulate` solve and fold its result into the rootfs cache key:
-/// the solved package set (from [`simulate_argv`]) plus the assembled
-/// overlay's content and the local-repo `.deb`s' content ([`rootcache::cache_key`]).
-/// A non-zero exit or an empty solve is an error the caller downgrades to "cache
-/// disabled this run" — fail-safe, since the real bootstrap then surfaces the cause.
-fn solve_key(
-    build: &ResolvedBuild,
-    opts: &RootfsOptions,
-    keyring: Option<&Path>,
-    repo_source: &str,
-    overlays: &[(&str, &Path)],
-    step: &Step,
-) -> Result<crate::signature::Signature, EngineError> {
-    step.log("solving package set (mmdebstrap --simulate) for the rootfs cache key");
-    let out = Command::new("mmdebstrap")
-        .args(simulate_argv(build, opts, keyring, repo_source))
-        .output()
-        .map_err(|source| EngineError::CommandSpawn {
-            command: "mmdebstrap".into(),
-            context: "simulate solve".into(),
-            source,
-        })?;
-    if !out.status.success() {
-        let s = String::from_utf8_lossy(&out.stderr);
-        let lines: Vec<&str> = s.lines().collect();
-        let tail = lines[lines.len().saturating_sub(10)..].join("\n");
-        return Err(EngineError::CommandFailed {
-            command: "mmdebstrap".into(),
-            context: "simulate solve".into(),
-            status: out.status.code(),
-            stderr: tail,
-        });
-    }
-    // apt's `Conf` lines land on stdout; combine with stderr defensively.
-    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&out.stderr));
-    let solved = rootcache::parse_solved(&combined);
-    if solved.is_empty() {
-        return Err(EngineError::CommandFailed {
-            command: "mmdebstrap".into(),
-            context: "simulate solve".into(),
-            status: out.status.code(),
-            stderr: "solve produced no packages".into(),
-        });
-    }
-    // Both staged trees are folded by content — including the *generated* config in
-    // them, since they are fingerprinted after generation. That is what makes an
-    // engine-written value like the rootfs PARTUUID part of the key for free: a cached
-    // tree can never come back carrying an fstab that points at a different partition
-    // than the table this build is about to write.
-    //
-    // Each tree's records are tagged with the stage they belong to, so two files at
-    // the same path in the two trees stay distinguishable — a file *moving* between
-    // the pre-install and customize trees changes when it is laid down, which is a
-    // real difference in the resulting rootfs.
-    let mut overlay_fp = Vec::new();
-    for (stage, overlay) in overlays {
-        overlay_fp.extend(
-            rootcache::dir_fingerprints(overlay)?
-                .into_iter()
-                .map(|record| format!("{stage}\0{record}")),
-        );
-    }
-    let repo_fp = rootcache::file_fingerprints(opts.repo_debs)?;
-    let key = rootcache::cache_key(
-        &solved,
-        &overlay_fp,
-        &repo_fp,
-        &build.arch.to_string(),
-        build.image_suite(),
-    );
-    step.log(format!(
-        "solved {} packages; rootfs cache key {}",
-        solved.len(),
-        key.short()
-    ));
-    Ok(key)
-}
-
-/// `mmdebstrap` argv for the rootfs bootstrap. Pure, so the (long, easy-to-get-
-/// wrong) invocation is unit-testable.
-///
-/// Emits a `--mode=unshare` bootstrap of the `important` variant (a full base
-/// system, unlike the build sandbox's `minbase`) with the merged package set as
-/// `--include`, and the positional mirrors: the resolved Debian mirror list
-/// ([`RootfsOptions::mirrors`] — the live mirror, plus a snapshot mirror when
-/// activated) followed by the local repo's `deb [trusted=yes] copy://…`
-/// line, so apt resolves our accel `.deb`s and their mirror deps together. The
-/// base excludes ride in the same `--include` list as apt deselections
-/// (`pkgname-`) — mmdebstrap has no `--exclude` flag (that is a debootstrap-ism).
-///
-/// Two flags keep every fetched `.deb` in `/var/cache/apt/archives` through the
-/// customize stage so `hash_hook` can content-pin them: `--skip=essential/
-/// unlink` stops the essential stage from unlinking the base debs it just
-/// installed, and `APT::Keep-Downloaded-Packages "true"` stops apt from deleting
-/// the rest after install. mmdebstrap's own `cleanup` still empties the cache
-/// afterward, so the tarball is unaffected.
-///
-/// Three hooks run with the rootfs dir as `$1`. `essential_hook` runs **before any
-/// package is configured** — it lays in the pre-install overlay, so a package's own
-/// maintainer scripts see that config while they run. Then, after install, `hash_hook`
-/// (hash the still-populated apt cache) and `hook` (lay the overlay in, chroot config,
-/// finalize the boot payload).
-#[allow(clippy::too_many_arguments)]
-fn mmdebstrap_argv(
-    build: &ResolvedBuild,
-    opts: &RootfsOptions,
-    keyring: Option<&Path>,
-    repo_source: &str,
-    tarball: &Path,
-    essential_hook: &Path,
-    hook: &Path,
-    hash_hook: &Path,
-) -> Vec<String> {
-    let mut argv = vec![
-        "--mode=unshare".to_string(),
-        format!("--arch={}", build.arch.debian_arch()),
-        "--variant=important".to_string(),
-        format!("--components={COMPONENTS}"),
-        // Retain the fetched `.deb`s through the customize stage so the sha256
-        // capture hook can hash them (both removals happen before that stage
-        // otherwise): the essential stage's unlink, and apt's post-install delete.
-        "--skip=essential/unlink".to_string(),
-        "--aptopt=APT::Keep-Downloaded-Packages \"true\"".to_string(),
-    ];
-    // Bound apt's per-connection network wait so a stalled mirror fails rather than
-    // hangs.
-    argv.extend(crate::bootstrap::APT_TIMEOUT_OPTS.iter().map(|s| s.to_string()));
-    if let Some(kr) = keyring {
-        argv.push(format!("--keyring={}", kr.display()));
-    }
-    if let Some(include) = include_arg(build, opts) {
-        argv.push(include);
-    }
-    // mmdebstrap runs each hook via `sh -c '<value>' sh <rootfs>`, so "$1" is the
-    // rootfs dir. The hash hook runs first (cache still populated), then the
-    // config hook does the copy-in and chroot config.
-    //
-    // The essential hook runs at the end of the essential stage — after the base system
-    // is unpacked (so `/etc` exists to write into) but before `--include` installs and
-    // configures anything, which is exactly the window the pre-install overlay needs.
-    argv.push(format!(
-        "--essential-hook=sh {} \"$1\"",
-        essential_hook.display()
-    ));
-    argv.push(format!("--customize-hook=sh {} \"$1\"", hash_hook.display()));
-    argv.push(format!("--customize-hook=sh {} \"$1\"", hook.display()));
-    // `--` stops option parsing so the positional suite/target/mirrors cannot be
-    // read as options even if a value begins with `-` (mmdebstrap documents
-    // this terminator explicitly).
-    argv.push("--".to_string());
-    argv.push(build.image_suite().to_string());
-    argv.push(tarball.to_string_lossy().into_owned());
-    // The resolved mirror list (live, plus a snapshot mirror when activated), then
-    // the local repo — apt tries them in order.
-    argv.extend(opts.mirrors.iter().cloned());
-    // Third-party feature repos (signed), so an out-of-mirror app resolves in the
-    // solve; the local repo (our own built debs) stays last.
-    argv.extend(opts.apt_sources.iter().map(apt_source_line));
-    argv.push(repo_source.to_string());
-    argv
 }
 
 /// Copy the layer overlay trees into `staging` (each existing dir, in order, via
@@ -719,6 +293,18 @@ fn stage_overlay(
     write_staged(staging, "etc/hosts", &config::hosts(&build.hostname))?;
     write_staged(staging, "etc/apt/sources.list", &config::apt_sources(build.image_suite()))?;
     write_staged(staging, "etc/kernel-img.conf", &config::kernel_img_conf())?;
+    // Two files that exist because the build host is not the board. `dhcpcd` cannot
+    // start without a `/etc/resolv.conf` to bind, and `update-initramfs` — running here,
+    // against a disk that does not exist yet — otherwise resolves its resume device and
+    // its fsck helper by probing this host. See each generator for what goes wrong.
+    write_staged(staging, "etc/resolv.conf", &config::resolv_conf())?;
+    write_staged(
+        staging,
+        "etc/initramfs-tools/conf.d/boot2deb.conf",
+        // From the formatter's own resolved contract, so the helper the initramfs
+        // carries is the one the filesystem the image node writes actually needs.
+        &config::initramfs_conf(&crate::image::rootfs_filesystem_pin().kind),
+    )?;
     // Board boot params the kernel postinst.d/postrm.d hooks + mk_extlinux source,
     // so the boot-method overlay scripts stay board-agnostic (driven by the
     // device's kernel_dtb) rather than hardcoding one board's dtb name.
@@ -762,7 +348,7 @@ fn write_staged(staging: &Path, rel: &str, content: &str) -> Result<(), EngineEr
 ///
 /// The overlay copy preserves symlinks (`cp -dR`), so the link — not a copy of what it
 /// points at — is what lands in the rootfs; the cache key fingerprints it by its target
-/// ([`rootcache::dir_fingerprints`]), so re-pointing it rebuilds.
+/// ([`crate::rootcache::dir_fingerprints`]), so re-pointing it rebuilds.
 fn symlink_staged(staging: &Path, rel: &str, target: &str) -> Result<(), EngineError> {
     let path = staging.join(rel);
     if let Some(parent) = path.parent() {
@@ -778,262 +364,6 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), EngineError> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .map_err(|s| EngineError::io(path, s))
-}
-
-/// World-traversable staging for the bootstrap's acquire-phase inputs.
-///
-/// `mmdebstrap --mode=unshare` runs apt's acquire methods under an unprivileged
-/// mapped uid (apt's `_apt` sandbox user, which is *not* the invoking user), so it
-/// cannot traverse a build dir under a `0750` home. The local repo apt installs
-/// from (`copy://`) and the archive keyring it verifies the mirror with must
-/// therefore live on a path that uid can traverse. This wraps a randomly-named,
-/// private [`StagingRoot`] with its `1777` drop dir materialized for the
-/// capture hook; the tree is removed when it drops.
-struct BootstrapStaging {
-    /// The randomly-named, `0o711` staging root (removed on drop).
-    root: StagingRoot,
-}
-
-impl BootstrapStaging {
-    /// Create a fresh staging root with its capture-hook drop dir ready.
-    fn new() -> Result<Self, EngineError> {
-        let root = StagingRoot::new("boot2deb-rootfs-")?;
-        // The capture hook writes its results into the sticky drop dir.
-        root.drop_dir()?;
-        Ok(Self { root })
-    }
-
-    /// Where the local apt repo is assembled — inside the traversable staging dir.
-    fn repo_dir(&self) -> PathBuf {
-        self.root.join("localrepo")
-    }
-
-    /// Where the merged overlay tree is staged — inside the traversable staging dir,
-    /// so the customize-hook's mapped uid can read it when it copies the tree in.
-    fn overlay_dir(&self) -> PathBuf {
-        self.root.join("overlay")
-    }
-
-    /// Where the merged **pre-install** overlay tree is staged, for the essential hook.
-    fn preinstall_overlay_dir(&self) -> PathBuf {
-        self.root.join("overlay-pre")
-    }
-
-    /// The customize-hook script path — inside the traversable staging dir, so the
-    /// mapped uid running it can read the script.
-    fn hook_path(&self) -> PathBuf {
-        self.root.join("customize-hook.sh")
-    }
-
-    /// The essential-hook script path — the pre-install overlay's installer.
-    fn essential_hook_path(&self) -> PathBuf {
-        self.root.join("essential-hook.sh")
-    }
-
-    /// The sha256-capture hook script path — inside the traversable staging dir.
-    fn hash_hook_path(&self) -> PathBuf {
-        self.root.join("capture-hashes.sh")
-    }
-
-    /// Where the capture hook writes the `name version arch sha256` lines — inside
-    /// the world-writable `drop` dir, the only place the in-namespace hook can
-    /// create a file. The hook `chmod`s it `0644` so the host can read it back
-    /// regardless of the namespace's umask.
-    fn deb_hashes_path(&self) -> PathBuf {
-        self.root.join("drop/deb-sha256sums")
-    }
-
-    /// Copy `keyring` into the staging dir world-readable and return its new path.
-    fn stage_keyring(&self, keyring: &Path) -> Result<PathBuf, EngineError> {
-        self.root.stage_file(keyring, "keyring.gpg")
-    }
-}
-
-/// The `--customize-hook` script: lay the staged overlay into the rootfs, then run
-/// the target-chroot config that can only happen after install (the account and its
-/// group membership + sudoers, and clearing the ssh host keys so they regenerate on
-/// first boot).
-///
-/// It finishes by re-running the kernel `postinst.d` hooks (`run-parts`) for the
-/// installed kernel: the overlay supplies the dtb-copy and `extlinux.conf`
-/// (`mk_extlinux`) hooks and initramfs-tools supplies the initrd hook, but the kernel
-/// package configured *before* the overlay was laid in, so its own postinst found an
-/// empty hook dir. Re-running them here — with the overlay, initramfs-tools, and the
-/// `PARTUUID=`-rooted `/etc/fstab` all in place — is what populates `/boot` with the
-/// initrd, board dtb, and `extlinux/extlinux.conf` that u-boot's extlinux bootflow
-/// loads; without it the image has a kernel but nothing to boot it.
-///
-/// The account is created **locked** (no `chpasswd` here): the per-image first-boot
-/// password is non-reproducible, so baking it in would make the
-/// produced tree unfit for the content-addressed cache. Everything this hook
-/// does *is* reproducible, so the tree it yields is cacheable; the image node
-/// splices the unique password into the staged `/etc/shadow` at assembly time
-/// (see [`crate::image`]).
-///
-/// `staging`/`user` are baked in, so the script is self-contained. Target binaries
-/// (`useradd`, `usermod`, …) run under the host's `qemu-user` binfmt when cross-arch,
-/// transparently — the same mechanism the build sandbox uses.
-fn customize_hook_script(
-    staging: &Path,
-    user: &str,
-    build: &ResolvedBuild,
-    boot: Option<BootConfig>,
-) -> String {
-    let finalize = match boot {
-        Some(BootConfig::Depthcharge { board, .. }) => depthcharge_finalize(board),
-        None => String::new(),
-    };
-    let l10n = l10n_asserts(build);
-    let body = format!(
-        "#!/bin/sh\n\
-         set -eu\n\
-         rootfs=\"$1\"\n\
-         # lay the staged overlay (layer overlays + generated config) into the rootfs.\n\
-         # --remove-destination so our files replace base ones even when the base\n\
-         # left a (possibly dangling) symlink there, e.g. /etc/default/locale.\n\
-         # -dR + --preserve=mode (not owner, not timestamps): the staged tree is owned\n\
-         # by the build user, which maps to `nobody` in the hook namespace; copying\n\
-         # without preserving owner lands the files root-owned, as /etc config must be.\n\
-         # Timestamps are dropped so overlay files take a fresh mtime that mmdebstrap's\n\
-         # SOURCE_DATE_EPOCH clamp then pins to the epoch, rather than carrying a\n\
-         # checkout-time mtime that could sit below the epoch and escape the clamp.\n\
-         cp -dR --remove-destination --preserve=mode \"{staging}/.\" \"$rootfs/\"\n\
-         # default account, created locked; the per-image password is spliced in later\n\
-         chroot \"$rootfs\" useradd -m -s /bin/bash \"{user}\"\n\
-         chroot \"$rootfs\" usermod -aG video,render \"{user}\"\n\
-         # passwordless sudo for the default account (0440, as visudo expects), and\n\
-         # the ssh host-key reset, run INSIDE the chroot: an overlay could plant a\n\
-         # symlink at /etc/sudoers.d or /etc/ssh, and doing these writes/removals from\n\
-         # outside would follow it out of the rootfs. Inside the chroot a\n\
-         # symlink resolves against the rootfs root, so the mutation stays contained.\n\
-         chroot \"$rootfs\" mkdir -p /etc/sudoers.d\n\
-         chroot \"$rootfs\" sh -c 'printf \"%s ALL=(ALL) NOPASSWD: ALL\\n\" \"{user}\" > /etc/sudoers.d/{user}'\n\
-         chroot \"$rootfs\" chmod 0440 /etc/sudoers.d/{user}\n\
-         # regenerate ssh host keys on first boot\n\
-         chroot \"$rootfs\" sh -c 'rm -f /etc/ssh/ssh_host_*'\n\
-         # Generate the boot artifacts u-boot's extlinux bootflow loads. The overlay\n\
-         # (laid in above) and initramfs-tools ship the /etc/kernel/postinst.d hooks\n\
-         # that build the initrd, copy the board dtb into /boot, and write\n\
-         # /boot/extlinux/extlinux.conf (root=PARTUUID=... from the generated fstab). The\n\
-         # kernel package was configured before the overlay existed, so its own\n\
-         # postinst run-parts found an empty hook dir and produced none of them;\n\
-         # re-run the hooks now, with everything in place. --exit-on-error fails the\n\
-         # build loudly rather than shipping a kernel with nothing to boot it.\n\
-         chroot \"$rootfs\" sh -c 'kver=\"$(linux-version list | linux-version sort --reverse | head -n1)\"; run-parts --exit-on-error --arg=\"$kver\" /etc/kernel/postinst.d'\n",
-        staging = staging.display(),
-    );
-    format!("{body}{l10n}{finalize}")
-}
-
-/// The localization tail of the customize hook: prove the two things resolution could
-/// not.
-///
-/// Both failures are **silent on the board**. A timezone that is not in the target's
-/// `tzdata` leaves `/etc/localtime` dangling and glibc quietly falls back to UTC — the
-/// clock is simply wrong, and nothing says so. A `locales` package that installed but
-/// generated nothing leaves `LANG` naming a locale the image does not have, and the
-/// only symptom is `Setting locale failed` on someone's next login. Resolution can
-/// check the *shape* of a zone name but not whether this suite's `tzdata` ships it, and
-/// it cannot know whether `locale-gen` ran at all; the chroot can, so it is checked
-/// here, against what actually landed.
-fn l10n_asserts(build: &ResolvedBuild) -> String {
-    let mut s = format!(
-        "# --- localization: assert the config took ---\n\
-         [ -e \"$rootfs/usr/share/zoneinfo/{tz}\" ] || {{ echo \"timezone '{tz}' is not in this suite's tzdata\" >&2; exit 1; }}\n",
-        tz = build.timezone,
-    );
-    // `locale-gen` compiles into this archive. It is absent on an image that generates
-    // nothing -- which is also what a base system looks like -- so the check only means
-    // something when locales were asked for.
-    if !build.locales_generate.is_empty() {
-        let _ = writeln!(
-            s,
-            "[ -s \"$rootfs/usr/lib/locale/locale-archive\" ] || \
-             {{ echo 'locale-gen produced no locale-archive: LANG would name an ungenerated locale' >&2; exit 1; }}"
-        );
-    }
-    s
-}
-
-/// The depthcharge tail of the customize hook: build the signed kernel partition
-/// inside the rootfs, prove it is bootable, and arm the on-device kernel hooks.
-///
-/// Every check here guards a failure that is **silent on the hardware**. The board has
-/// no serial console, so an image with a missing module, an unsigned payload, or a
-/// cmdline that roots on the wrong partition does not report anything — it powers up,
-/// finds no root, and reboots. Each of those is turned into a build failure instead.
-///
-/// The payload is built *here*, by `depthchargectl`, rather than by the image node,
-/// because this is the same tool — reading the same `/etc/fstab` — that re-signs and
-/// re-writes the kernel partition on the running board when `apt` upgrades the kernel.
-/// Building the shipped image's payload any other way would mean the image and the
-/// installed system disagreed the first time that happened.
-fn depthcharge_finalize(board: &str) -> String {
-    format!(
-        "# --- depthcharge: build and verify the signed kernel partition ---\n\
-         kver=\"$(chroot \"$rootfs\" sh -c 'linux-version list | linux-version sort --reverse | head -n1')\"\n\
-         # Assert every module in the initramfs list actually exists for this kernel.\n\
-         # MODULES=list silently DROPS a name it cannot resolve and mkinitramfs only\n\
-         # warns, so a typo here would ship an initramfs missing (say) the PMIC driver\n\
-         # the SD card's power rails hang off — and the board would just sit at a white\n\
-         # screen. Fail the build instead.\n\
-         #\n\
-         # Every list in modules.d/ is checked, not one named file: the lists are what\n\
-         # the layers contributed, and Debian ships none of its own there. `</dev/null`\n\
-         # on the inner command so it cannot consume the list the loop is reading.\n\
-         for list in \"$rootfs\"/usr/share/initramfs-tools/modules.d/*; do\n\
-         \x20 [ -f \"$list\" ] || continue\n\
-         \x20 while read -r mod; do\n\
-         \x20   case \"$mod\" in ''|\\#*) continue ;; esac\n\
-         \x20   chroot \"$rootfs\" modprobe --set-version \"$kver\" --show-depends \"$mod\" </dev/null >/dev/null 2>&1 || {{\n\
-         \x20     echo \"initramfs module '$mod' does not exist in kernel $kver (from $(basename \"$list\"))\" >&2\n\
-         \x20     exit 1\n\
-         \x20   }}\n\
-         \x20 done < \"$list\"\n\
-         done\n\
-         # Build the signed payload. Board profile and cmdline come from the\n\
-         # pre-install overlay's /etc/depthcharge-tools/config + /etc/kernel/cmdline;\n\
-         # root= is derived from /etc/fstab by depthchargectl itself.\n\
-         chroot \"$rootfs\" depthchargectl build --verbose\n\
-         kpart=\"$(ls \"$rootfs\"/boot/depthcharge/*.img 2>/dev/null | head -n1)\"\n\
-         [ -n \"$kpart\" ] || {{ echo 'depthchargectl build produced no image' >&2; exit 1; }}\n\
-         # The firmware will not boot an image whose signature it cannot verify, and it\n\
-         # will not say why. Check it here, with the same tool the firmware uses.\n\
-         chroot \"$rootfs\" futility vbutil_kernel --verify \"/boot/depthcharge/$(basename \"$kpart\")\"\n\
-         # The initramfs is inside the signature now, so this is the last chance to\n\
-         # confirm the modules that must be in it actually are.\n\
-         initrd_list=\"$(chroot \"$rootfs\" lsinitramfs \"/boot/initrd.img-$kver\")\"\n\
-         for need in {REQUIRED_INITRD_MODULES}; do\n\
-         \x20 case \"$initrd_list\" in *\"$need\"*) ;; *)\n\
-         \x20   echo \"the built initramfs is missing $need — MODULES=list did not take\" >&2\n\
-         \x20   exit 1 ;;\n\
-         \x20 esac\n\
-         done\n\
-         # Arm the package's kernel hooks for the *shipped* system: from here on, an\n\
-         # apt kernel upgrade on the running board re-signs the kernel and writes it to\n\
-         # the slot it is not booted from, itself. They were off during the build so they\n\
-         # could not go looking for a ChromeOS kernel partition on the build host's disks.\n\
-         cat > \"$rootfs/etc/depthcharge-tools/config\" <<'B2D_EOF'\n\
-         {enabled_config}B2D_EOF\n\
-         grep -q '^enable-system-hooks = True$' \"$rootfs/etc/depthcharge-tools/config\"\n\
-         # And assert the other half of the upgrade protocol is armed: depthcharge-tools\n\
-         # .service runs `depthchargectl bless` once a boot completes, which is what turns\n\
-         # a freshly-written slot from \"on trial, one try left\" into \"known good\".\n\
-         #\n\
-         # Without it every kernel upgrade quietly self-destructs: `write` leaves the new\n\
-         # slot at tries=1/successful=0, the firmware spends that try booting it, and with\n\
-         # nothing to set successful the *next* boot finds it exhausted and falls back —\n\
-         # so a working upgrade would be rolled back one reboot after it landed. The\n\
-         # package's own postinst enables the unit; nothing else in this build does, and a\n\
-         # silently-not-enabled unit is invisible until the board is in front of you.\n\
-         chroot \"$rootfs\" systemctl is-enabled depthcharge-tools.service >/dev/null || {{\n\
-         \x20 echo 'depthcharge-tools.service is not enabled: a kernel upgrade would be' >&2\n\
-         \x20 echo 'rolled back one reboot after it succeeded (nothing would bless it)' >&2\n\
-         \x20 exit 1\n\
-         }}\n",
-        enabled_config = config::depthcharge_config(board, true),
-        REQUIRED_INITRD_MODULES = REQUIRED_INITRD_MODULES.join(" "),
-    )
 }
 
 /// Modules that must end up **inside the built initramfs** of a depthcharge board,
@@ -1056,59 +386,13 @@ const REQUIRED_INITRD_MODULES: &[&str] = &[
     "spi-rockchip",
 ];
 
-/// The `--essential-hook` script: lay the pre-install overlay into the rootfs before
-/// any package is configured.
-///
-/// It runs at the end of mmdebstrap's essential stage — the base system is unpacked,
-/// so `/etc` exists to write into, but nothing from `--include` has installed yet.
-/// That is the only window in which a package's own maintainer scripts can be made to
-/// see our config *as they run*, which two things on a depthcharge board require (see
-/// [`stage_preinstall_overlay`]).
-fn essential_hook_script(staging: &Path) -> String {
-    format!(
-        "#!/bin/sh\n\
-         set -eu\n\
-         rootfs=\"$1\"\n\
-         # Same copy semantics as the customize hook: replace destinations (even\n\
-         # dangling symlinks), keep modes, drop owner + timestamps so files land\n\
-         # root-owned with a fresh mtime the SOURCE_DATE_EPOCH clamp can pin.\n\
-         cp -dR --remove-destination --preserve=mode \"{staging}/.\" \"$rootfs/\"\n",
-        staging = staging.display(),
-    )
-}
-
-/// Extract a single `member` from `tarball` to a string (`tar xOf`). Used by the
-/// manifest reader (and tests); mmdebstrap tarballs store `./`-prefixed paths, so
-/// pass e.g. `./var/lib/dpkg/status`.
-fn tar_member(tarball: &Path, member: &str) -> Result<String, EngineError> {
-    let out = Command::new("tar")
-        .args(["xOf"])
-        .arg(tarball)
-        .arg(member)
-        .output()
-        .map_err(|source| EngineError::CommandSpawn {
-            command: "tar".into(),
-            context: format!("read {member} from rootfs tarball"),
-            source,
-        })?;
-    if !out.status.success() {
-        return Err(EngineError::CommandFailed {
-            command: "tar".into(),
-            context: format!("read {member} from rootfs tarball"),
-            status: out.status.code(),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 /// Members every finished rootfs tarball must contain, checked by [`validate_tar`].
-/// `etc/shadow` is present in both backends (the account is created there), so its
-/// presence proves the archive is readable through to its end (not truncated);
+/// `etc/shadow` is written late (the account is created there), so its presence
+/// proves the archive is readable through to its end (not truncated);
 /// `etc/os-release` and `etc/fstab` confirm the archive is a real Debian rootfs
 /// rather than an unrelated or empty tar. Named without a leading `./` and matched
-/// against a normalized listing, so both tar path styles pass: the `mmdebstrap`
-/// backend writes `./etc/…`, the provisioner's `export_tar` writes bare `etc/…`.
+/// against a listing normalized the same way, so the check states the paths as the
+/// rootfs sees them rather than as one tar writer happens to spell them.
 const REQUIRED_TAR_MEMBERS: &[&str] = &["etc/os-release", "etc/fstab", "etc/shadow"];
 
 /// Validate that `tarball` is a complete, readable rootfs archive before the image
@@ -1137,9 +421,9 @@ pub fn validate_tar(tarball: &Path) -> Result<(), EngineError> {
         });
     }
     let listing = String::from_utf8_lossy(&out.stdout);
-    // Normalize a leading `./` so both tar path styles compare equal against the
-    // (bare) required members: `mmdebstrap` writes `./etc/os-release`, the
-    // provisioner's `export_tar` writes `etc/os-release`.
+    // The export writes `./`-prefixed members (`./etc/os-release`); strip that prefix
+    // so the comparison is against the path the rootfs sees, whatever the archive's
+    // spelling.
     let members: std::collections::HashSet<&str> = listing
         .lines()
         .map(|l| l.trim().trim_start_matches("./"))
@@ -1155,159 +439,10 @@ pub fn validate_tar(tarball: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// The sha256-capture `--customize-hook` script: hash every `.deb` still in the
-/// rootfs's apt cache (kept alive by [`mmdebstrap_argv`]'s two flags) and write
-/// `name version arch sha256` lines to `out`.
-///
-/// It runs on the host as ns-root with the rootfs as `$1`, so `dpkg-deb` (for the
-/// exact control identity — the join key against dpkg status) and `sha256sum`
-/// (for the content hash) are host binaries, not qemu-emulated. `${sum%% *}`
-/// takes just the digest from `sha256sum`'s `<digest>  <file>` output. The glob
-/// guard tolerates an empty cache (writes an empty file rather than failing).
-fn capture_hashes_hook_script(out: &Path) -> String {
-    format!(
-        "#!/bin/sh\n\
-         set -eu\n\
-         rootfs=\"$1\"\n\
-         out=\"{out}\"\n\
-         : > \"$out\"\n\
-         for deb in \"$rootfs\"/var/cache/apt/archives/*.deb; do\n\
-         \t[ -e \"$deb\" ] || continue\n\
-         \tident=$(dpkg-deb --show --showformat='${{Package}} ${{Version}} ${{Architecture}}' \"$deb\")\n\
-         \tsum=$(sha256sum \"$deb\")\n\
-         \tprintf '%s %s\\n' \"$ident\" \"${{sum%% *}}\" >> \"$out\"\n\
-         done\n\
-         # the file is owned by a subuid outside the namespace; 0644 lets the host read it back.\n\
-         chmod 0644 \"$out\"\n",
-        out = out.display(),
-    )
-}
-
-/// Read the capture hook's `name version arch sha256` lines into a lookup keyed
-/// by `(name, version, arch)`. Absent-but-successful is empty (the hook always
-/// creates the file); a read failure is an error.
-fn read_deb_hashes(path: &Path) -> Result<HashMap<(String, String, String), String>, EngineError> {
-    let text = std::fs::read_to_string(path).map_err(|s| EngineError::io(path, s))?;
-    let mut map = HashMap::new();
-    for line in text.lines() {
-        let mut f = line.split_whitespace();
-        if let (Some(name), Some(ver), Some(arch), Some(sha)) =
-            (f.next(), f.next(), f.next(), f.next())
-        {
-            map.insert(
-                (name.to_string(), ver.to_string(), arch.to_string()),
-                sha.to_string(),
-            );
-        }
-    }
-    Ok(map)
-}
-
-/// Extract the rootfs's dpkg status from `tarball` and write the solved manifest
-/// (installed `name version arch sha256`, sorted by name) to `manifest_out`, the
-/// content-pinned reproducibility artifact the lock's `[rootfs].manifest` points
-/// at. The sha256 for each installed package is joined from `hashes`
-/// (the capture hook's per-`.deb` digests); a package with no captured hash is a
-/// [`ManifestIncomplete`](EngineError::ManifestIncomplete) error, never a
-/// silently unpinned row.
-fn write_manifest(
-    tarball: &Path,
-    manifest_out: &Path,
-    hashes: &HashMap<(String, String, String), String>,
-    step: &Step,
-) -> Result<(), EngineError> {
-    // mmdebstrap tarballs store paths `./`-prefixed (as the sandbox extract shows).
-    let status = tar_member(tarball, "./var/lib/dpkg/status")?;
-    let entries = parse_dpkg_status(&status);
-    let body = render_manifest(&entries, hashes)?;
-    if let Some(parent) = manifest_out.parent() {
-        std::fs::create_dir_all(parent).map_err(|s| EngineError::io(parent, s))?;
-    }
-    std::fs::write(manifest_out, &body).map_err(|s| EngineError::io(manifest_out, s))?;
-    step.log(format!(
-        "wrote solved manifest ({} packages, sha256-pinned) to {}",
-        entries.len(),
-        manifest_out.display()
-    ));
-    Ok(())
-}
-
-/// Render the solved-manifest text: one sorted `name version arch sha256` line
-/// per installed package, joining each package's sha256 from `hashes`. Pure, so
-/// the join and the completeness check are testable without a bootstrap. An
-/// installed package with no captured hash yields
-/// [`ManifestIncomplete`](EngineError::ManifestIncomplete) naming a bounded
-/// sample — the pin is all-or-nothing.
-fn render_manifest(
-    entries: &[PkgEntry],
-    hashes: &HashMap<(String, String, String), String>,
-) -> Result<String, EngineError> {
-    let mut body = String::from(
-        "# Solved rootfs package manifest: installed name version arch sha256.\n",
-    );
-    let mut missing = Vec::new();
-    for e in entries {
-        let key = (e.name.clone(), e.version.clone(), e.arch.clone());
-        match hashes.get(&key) {
-            Some(sha) => body.push_str(&format!("{} {} {} {}\n", e.name, e.version, e.arch, sha)),
-            None => missing.push(format!("{} {} {}", e.name, e.version, e.arch)),
-        }
-    }
-    if !missing.is_empty() {
-        const SAMPLE: usize = 8;
-        let sample = missing.iter().take(SAMPLE).cloned().collect::<Vec<_>>().join(", ");
-        return Err(EngineError::ManifestIncomplete {
-            count: missing.len(),
-            sample: if missing.len() > SAMPLE {
-                format!("{sample}, …")
-            } else {
-                sample
-            },
-        });
-    }
-    Ok(body)
-}
-
-/// One installed package in the solved manifest.
-struct PkgEntry {
-    /// Package name.
-    name: String,
-    /// Exact installed version.
-    version: String,
-    /// Package architecture.
-    arch: String,
-}
-
-/// Parse a dpkg `status` file into the installed packages, sorted by name. Only
-/// stanzas whose `Status:` is `install ok installed` count. Pure, so the manifest
-/// derivation is testable without a bootstrap.
-fn parse_dpkg_status(text: &str) -> Vec<PkgEntry> {
-    let mut entries = Vec::new();
-    for stanza in text.split("\n\n") {
-        let (mut name, mut version, mut arch, mut installed) = (None, None, None, false);
-        for line in stanza.lines() {
-            if let Some(v) = line.strip_prefix("Package: ") {
-                name = Some(v.trim().to_string());
-            } else if let Some(v) = line.strip_prefix("Version: ") {
-                version = Some(v.trim().to_string());
-            } else if let Some(v) = line.strip_prefix("Architecture: ") {
-                arch = Some(v.trim().to_string());
-            } else if let Some(v) = line.strip_prefix("Status: ") {
-                installed = v.trim() == "install ok installed";
-            }
-        }
-        if let (true, Some(name), Some(version), Some(arch)) = (installed, name, version, arch) {
-            entries.push(PkgEntry { name, version, arch });
-        }
-    }
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    entries
-}
-
 /// Generated rootfs config files, rendered from resolved values. Pure —
 /// each returns the exact file content — so the config is unit-testable.
 mod config {
-    use boot2deb_core::model::{Keymap, ResolvedBoot, ResolvedBuild};
+    use boot2deb_core::model::{Keymap, ResolvedBoot, ResolvedBuild, CONSOLE_LOGLEVEL_ARG};
     use std::fmt::Write;
     use uuid::Uuid;
 
@@ -1470,6 +605,49 @@ mod config {
         "link_in_boot = 1\ndo_symlinks = 0\n".to_string()
     }
 
+    /// `/etc/resolv.conf` — the file `dhcpcd` rewrites once it holds a lease.
+    ///
+    /// It carries no nameserver, because the network the board will join is not a thing
+    /// the build host knows. What the image needs is that the **path exists**: Debian's
+    /// `dhcpcd.service` runs under `ProtectSystem=strict` and names `/etc/resolv.conf`
+    /// among its `ReadWritePaths=`, and systemd refuses to set up a mount namespace for
+    /// a path that is not there. Without this file DHCP fails at `226/NAMESPACE` before
+    /// `dhcpcd` runs at all, and the board comes up with no network.
+    ///
+    /// Nothing else in the image would create it: no Debian package ships
+    /// `/etc/resolv.conf`, and the image installs neither `resolvconf` nor
+    /// `systemd-resolved`, so `dhcpcd`'s own hook is the sole writer. That hook
+    /// truncates and rewrites this path in place, which is what makes a file staged
+    /// here — rather than a symlink into `/run` — the shape that works under the unit's
+    /// read-write bind.
+    pub fn resolv_conf() -> String {
+        "# Rewritten by dhcpcd from the DHCP lease.\n\
+         # Fixed entries belong in /etc/resolv.conf.head or /etc/resolv.conf.tail,\n\
+         # which dhcpcd preserves across that rewrite.\n"
+            .to_string()
+    }
+
+    /// `/etc/initramfs-tools/conf.d/boot2deb.conf` — the two initramfs settings an image
+    /// has to state outright, because `update-initramfs` runs on the build host while
+    /// the hardware it is building for is absent, and both defaults resolve by probing
+    /// whatever is in front of them.
+    ///
+    /// `RESUME=none`: the image is one ext4 root partition with no swap, so there is
+    /// nothing to resume from. Left unset, the resume hook auto-detects a swap device and
+    /// finds the **build host's**, writing that host's device path into the image; the
+    /// board then retries it for about thirty seconds every boot before giving up.
+    ///
+    /// `FSTYPE`: the fsck hook reads `FSTYPE=auto` as an instruction to resolve the root
+    /// device named in `/etc/fstab` and probe it for its type — and that is a `PARTUUID`
+    /// belonging to a disk the image has not been written to yet, so the probe finds
+    /// nothing and the initramfs ships with no `fsck` at all, leaving the root filesystem
+    /// unchecked on every boot. Naming the type skips the probe. It selects which helper
+    /// is installed and nothing more: at boot the root filesystem's type is read from the
+    /// device itself.
+    pub fn initramfs_conf(fstype: &str) -> String {
+        format!("RESUME=none\nFSTYPE={fstype}\n")
+    }
+
     /// `/etc/boot2deb/board.conf` — board boot parameters the boot-method overlay
     /// scripts (`/etc/kernel/postinst.d` + `postrm.d` hooks and `/boot/mk_extlinux`)
     /// source, so those stay board-agnostic instead of hardcoding one board's dtb.
@@ -1477,25 +655,28 @@ mod config {
     /// DT output dir) locates the dtb inside the installed `linux-image` package,
     /// and `DTB_NAME` (its basename) names the copy placed in `/boot`.
     ///
-    /// A board with extra kernel arguments ([`ResolvedBuild::kernel_cmdline`])
-    /// additionally gets `EXTL_CMD_LINE="rootwait <extra>"`, overriding
-    /// `mk_extlinux`'s own `rootwait` default (the file is sourced after that
-    /// default, so the assignment must carry `rootwait` itself). A board with none
-    /// gets no assignment at all and the script default stands — the file is
-    /// byte-identical to what it was before the knob existed. Resolution guarantees
-    /// the value is safe to embed in this double-quoted, shell-sourced assignment.
+    /// `EXTL_CMD_LINE` carries the arguments `mk_extlinux` writes into the boot
+    /// entry: `rootwait`, then the base console gate
+    /// ([`CONSOLE_LOGLEVEL_ARG`]), then any extra arguments the board asked for
+    /// ([`ResolvedBuild::kernel_cmdline`]). It overrides `mk_extlinux`'s own
+    /// `rootwait` default — board.conf is sourced after that default, so the
+    /// assignment must carry `rootwait` itself. The board's arguments come last so a
+    /// board can override the gate. Resolution guarantees the value is safe to embed
+    /// in this double-quoted, shell-sourced assignment.
     pub fn board_conf(kernel_dtb: &str, kernel_cmdline: &str) -> String {
         let name = kernel_dtb.rsplit('/').next().unwrap_or(kernel_dtb);
-        let mut conf = format!(
+        let mut args = format!("rootwait {CONSOLE_LOGLEVEL_ARG}");
+        if !kernel_cmdline.is_empty() {
+            args.push(' ');
+            args.push_str(kernel_cmdline);
+        }
+        format!(
             "# Generated by boot2deb -- board boot parameters. Do not edit.\n\
              # Sourced by /etc/kernel/{{postinst,postrm}}.d hooks and /boot/mk_extlinux.\n\
              DTB_PATH=\"{kernel_dtb}\"\n\
-             DTB_NAME=\"{name}\"\n"
-        );
-        if !kernel_cmdline.is_empty() {
-            conf.push_str(&format!("EXTL_CMD_LINE=\"rootwait {kernel_cmdline}\"\n"));
-        }
-        conf
+             DTB_NAME=\"{name}\"\n\
+             EXTL_CMD_LINE=\"{args}\"\n"
+        )
     }
 }
 
@@ -1635,19 +816,23 @@ mod tests {
     }
 
     #[test]
-    fn board_conf_emits_cmdline_only_when_present() {
-        // No extra arguments: no EXTL_CMD_LINE line at all, so mk_extlinux's own
-        // default stands and a pre-knob board's file is byte-identical.
+    fn board_conf_gates_the_console_on_every_board_and_lets_one_override_it() {
+        // Every board gets the assignment, because every board gets the console gate.
+        // It re-states the script's `rootwait` default, which it replaces (board.conf
+        // is sourced after it).
         let plain = config::board_conf("rockchip/rk3588-turing-rk1.dtb", "");
-        assert!(!plain.contains("EXTL_CMD_LINE"));
+        assert!(plain.contains("EXTL_CMD_LINE=\"rootwait loglevel=4\"\n"));
 
-        // Extra arguments ride a full assignment that re-states the script's
-        // `rootwait` default (board.conf is sourced after it and replaces it).
+        // A board's own arguments are appended *after* the gate, so a board that wants
+        // a louder console can say so and the kernel takes its last `loglevel=`.
         let extra = config::board_conf(
             "rockchip/rk3576-h96-max-m9.dtb",
             "video=HDMI-A-1:d cpuidle.off=1",
         );
-        assert!(extra.contains("EXTL_CMD_LINE=\"rootwait video=HDMI-A-1:d cpuidle.off=1\"\n"));
+        assert!(extra
+            .contains("EXTL_CMD_LINE=\"rootwait loglevel=4 video=HDMI-A-1:d cpuidle.off=1\"\n"));
+        let louder = config::board_conf("rockchip/rk3576-h96-max-m9.dtb", "loglevel=7");
+        assert!(louder.contains("EXTL_CMD_LINE=\"rootwait loglevel=4 loglevel=7\"\n"));
     }
 
     /// The rootfs PARTUUID the image node will write — a fixed value for the tests.
@@ -1695,78 +880,6 @@ mod tests {
     }
 
     #[test]
-    fn every_generated_hook_script_is_valid_shell() {
-        // These scripts are built by string formatting and then handed to `sh` inside
-        // mmdebstrap, ~10 minutes into a build. A syntax error there is discovered at
-        // the worst possible moment, so parse them here instead: `sh -n` checks syntax
-        // without running anything.
-        let boot = Some(BootConfig::Depthcharge {
-            board: "speedy",
-            cmdline: "console=tty1 rootwait ro panic=30",
-        });
-        let scripts = [
-            ("essential", essential_hook_script(Path::new("/w/overlay-pre"))),
-            ("capture-hashes", capture_hashes_hook_script(Path::new("/w/drop/sums"))),
-            ("customize (rkbin)", customize_hook_script(Path::new("/w/overlay"), DEFAULT_USER, &rk1(), None)),
-            ("customize (depthcharge)", customize_hook_script(Path::new("/w/overlay"), DEFAULT_USER, &c201(), boot)),
-        ];
-        for (name, script) in scripts {
-            let mut child = Command::new("sh")
-                .arg("-n")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .expect("sh is available on any unix test host");
-            std::io::Write::write_all(child.stdin.as_mut().unwrap(), script.as_bytes()).unwrap();
-            drop(child.stdin.take());
-            let out = child.wait_with_output().unwrap();
-            assert!(
-                out.status.success(),
-                "the {name} hook is not valid shell:\n{}\n--- script ---\n{script}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-    }
-
-    #[test]
-    fn the_depthcharge_customize_tail_verifies_before_it_ships() {
-        // Every check in the tail guards a failure that is *silent* on this board.
-        let script = customize_hook_script(
-            Path::new("/w/overlay"),
-            DEFAULT_USER,
-            &c201(),
-            Some(BootConfig::Depthcharge {
-                board: "speedy",
-                cmdline: "console=tty1 ro",
-            }),
-        );
-        assert!(script.contains("depthchargectl build"), "builds the signed payload");
-        assert!(script.contains("vbutil_kernel --verify"), "proves the firmware will take it");
-        assert!(script.contains("lsinitramfs"), "proves the initramfs has what it needs");
-        for module in REQUIRED_INITRD_MODULES {
-            assert!(script.contains(module), "asserts {module} into the initramfs");
-        }
-        assert!(script.contains("--show-depends"), "asserts the module list resolves");
-        assert!(
-            script.contains("enable-system-hooks = True"),
-            "arms on-device kernel upgrades before shipping"
-        );
-        // The other half of the upgrade protocol. `write` leaves a new slot on trial
-        // (tries=1, successful=0); this unit is what marks it good once it has actually
-        // booted. Un-enabled, a *successful* kernel upgrade is rolled back one reboot
-        // later, when the firmware finds the slot's single try spent and nothing saying
-        // it worked — a failure that shows up only on the hardware, a reboot too late.
-        assert!(
-            script.contains("systemctl is-enabled depthcharge-tools.service"),
-            "asserts the unit that blesses a booted kernel slot is enabled"
-        );
-        // A raw-gap board gets none of it — the tail is the depthcharge method's.
-        let rkbin = customize_hook_script(Path::new("/w/overlay"), DEFAULT_USER, &rk1(), None);
-        assert!(!rkbin.contains("depthchargectl"));
-    }
-
-    #[test]
     fn apt_sources_has_suite_pockets_and_components() {
         let s = config::apt_sources("forky");
         assert!(s.contains("deb http://deb.debian.org/debian forky main contrib non-free non-free-firmware"));
@@ -1779,241 +892,9 @@ mod tests {
         assert!(config::hosts("turing-rk1").contains("127.0.1.1\tturing-rk1"));
     }
 
-    #[test]
-    fn mmdebstrap_argv_includes_packages_repo_and_hook() {
-        let build = rk1();
-        let extra = vec!["linux-image-7.1.1-1-arm64".to_string()];
-        // A fallback snapshot: live mirror then the snapshot mirror, so both reach
-        // the trailing positionals ahead of the local repo.
-        let mirrors = vec![
-            crate::DEFAULT_MIRROR.to_string(),
-            "https://snapshot.debian.org/archive/debian/20260628T083000Z/".to_string(),
-        ];
-        let identity = ident(&build);
-        let opts = RootfsOptions {
-            repo_debs: &[],
-            overlay_dirs: &[],
-            preinstall_overlay_dirs: &[],
-            boot_config: None,
-            image_identity: &identity,
-            rootfs_partuuid: PARTUUID,
-            out_dir: Path::new("/w/out"),
-            keyring: Some(Path::new("/kr.gpg")),
-            manifest_out: Path::new("/w/m.pkgs.lock"),
-            mirrors: &mirrors,
-            extra_packages: &extra,
-            cache_dir: None,
-            refresh: false,
-            apt_sources: &[],
-            source_date_epoch: None,
-        };
-        let argv = mmdebstrap_argv(
-            &build,
-            &opts,
-            Some(Path::new("/kr.gpg")),
-            "deb [trusted=yes] copy:///w/localrepo ./",
-            Path::new("/w/out/turing-rk1-rootfs.tar"),
-            Path::new("/w/essential-hook.sh"),
-            Path::new("/w/hook.sh"),
-            Path::new("/w/capture-hashes.sh"),
-        );
-        // The pre-install overlay is laid in by an essential hook — before any package
-        // is configured, which is the only window in which a package's own maintainer
-        // scripts can see it.
-        assert!(argv.contains(&"--essential-hook=sh /w/essential-hook.sh \"$1\"".to_string()));
-        assert!(argv.contains(&"--mode=unshare".to_string()));
-        assert!(argv.contains(&"--arch=arm64".to_string()));
-        assert!(argv.contains(&"--variant=important".to_string()));
-        assert!(argv.contains(&"--keyring=/kr.gpg".to_string()));
-        // The two flags that keep every fetched .deb in the apt cache through the
-        // customize stage, so the capture hook can hash them.
-        assert!(argv.contains(&"--skip=essential/unlink".to_string()));
-        assert!(argv.contains(&"--aptopt=APT::Keep-Downloaded-Packages \"true\"".to_string()));
-        // The merged package set + base excludes (as `pkgname-` deselections) all
-        // ride in the single --include; mmdebstrap has no --exclude flag.
-        assert!(argv.iter().any(|a| a.starts_with("--include=")
-            && a.contains("ffmpeg-rk")
-            && a.contains("openssh-server")
-            && a.contains("linux-image-7.1.1-1-arm64")
-            && a.contains("isc-dhcp-client-")));
-        assert!(!argv.iter().any(|a| a.starts_with("--exclude=")));
-        // `--` terminates options immediately before the positionals.
-        assert_eq!(argv[argv.len() - 6], "--");
-        // Suite, tarball, both mirrors (in order), and the local repo source are the
-        // trailing args.
-        let tail = &argv[argv.len() - 5..];
-        assert_eq!(tail[0], "forky");
-        assert_eq!(tail[1], "/w/out/turing-rk1-rootfs.tar");
-        assert_eq!(tail[2], crate::DEFAULT_MIRROR);
-        assert_eq!(
-            tail[3],
-            "https://snapshot.debian.org/archive/debian/20260628T083000Z/"
-        );
-        assert_eq!(tail[4], "deb [trusted=yes] copy:///w/localrepo ./");
-        // Both customize-hooks run against the rootfs: the hash capture first,
-        // then the overlay/config hook.
-        let hooks: Vec<&String> = argv
-            .iter()
-            .filter(|a| a.starts_with("--customize-hook="))
-            .collect();
-        assert_eq!(hooks.len(), 2);
-        assert!(hooks[0].starts_with("--customize-hook=sh /w/capture-hashes.sh"));
-        assert!(hooks[1].starts_with("--customize-hook=sh /w/hook.sh"));
-    }
-
-    #[test]
-    fn hook_creates_locked_account_and_lays_overlay() {
-        let script = customize_hook_script(Path::new("/w/rootfs-overlay"), "debian", &rk1(), None);
-        // Timestamps are not preserved, so overlay files take a fresh mtime that
-        // mmdebstrap's SOURCE_DATE_EPOCH clamp pins to the epoch.
-        assert!(script.contains(
-            "cp -dR --remove-destination --preserve=mode \"/w/rootfs-overlay/.\" \"$rootfs/\""
-        ));
-        assert!(!script.contains("--preserve=mode,timestamps"));
-        assert!(script.contains("chroot \"$rootfs\" useradd -m -s /bin/bash \"debian\""));
-        // The account is created locked; the per-image password is spliced into the
-        // finished tar afterward, NOT baked here — that keeps the tree cacheable.
-        assert!(!script.contains("chpasswd"));
-        assert!(!script.contains("passwd -e"));
-        assert!(script.contains("usermod -aG video,render"));
-        // Sudoers write, chmod, and the ssh host-key reset all run inside the chroot
-        // so an overlay symlink cannot redirect them out of the rootfs.
-        assert!(script.contains(
-            "chroot \"$rootfs\" sh -c 'printf \"%s ALL=(ALL) NOPASSWD: ALL\\n\" \"debian\" > /etc/sudoers.d/debian'"
-        ));
-        assert!(script.contains("chroot \"$rootfs\" chmod 0440 /etc/sudoers.d/debian"));
-        assert!(script.contains("chroot \"$rootfs\" sh -c 'rm -f /etc/ssh/ssh_host_*'"));
-        // None of these mutations touch a "$rootfs/..." path from outside the chroot.
-        assert!(!script.contains("> \"$rootfs/etc/sudoers.d"));
-        assert!(!script.contains("rm -f \"$rootfs\"/etc/ssh"));
-        // Boot artifacts: the kernel postinst.d hooks are re-run for the installed
-        // kernel (they were absent when the kernel package configured), so /boot gains
-        // the initrd, dtb, and extlinux.conf u-boot loads. Run inside the chroot,
-        // --exit-on-error so a failed hook fails the build rather than shipping an
-        // unbootable image.
-        assert!(script.contains(
-            "kver=\"$(linux-version list | linux-version sort --reverse | head -n1)\"; run-parts --exit-on-error --arg=\"$kver\" /etc/kernel/postinst.d"
-        ));
-    }
-
-    #[test]
-    fn simulate_argv_mirrors_the_bootstrap_selection() {
-        let build = rk1();
-        let extra = vec!["linux-image-7.1.1-1-arm64".to_string()];
-        let mirrors = vec![crate::DEFAULT_MIRROR.to_string()];
-        let identity = ident(&build);
-        let opts = RootfsOptions {
-            repo_debs: &[],
-            overlay_dirs: &[],
-            preinstall_overlay_dirs: &[],
-            boot_config: None,
-            image_identity: &identity,
-            rootfs_partuuid: PARTUUID,
-            out_dir: Path::new("/w/out"),
-            keyring: Some(Path::new("/kr.gpg")),
-            manifest_out: Path::new("/w/m.pkgs.lock"),
-            mirrors: &mirrors,
-            extra_packages: &extra,
-            cache_dir: None,
-            refresh: false,
-            apt_sources: &[],
-            source_date_epoch: None,
-        };
-        let argv = simulate_argv(
-            &build,
-            &opts,
-            Some(Path::new("/kr.gpg")),
-            "deb [trusted=yes] copy:///w/localrepo ./",
-        );
-        // Solve-only: no install, no rootfs written.
-        assert!(argv.contains(&"--simulate".to_string()));
-        assert!(argv.contains(&"--verbose".to_string()));
-        // The same package selection the real bootstrap would install.
-        assert!(argv.iter().any(|a| a.starts_with("--include=")
-            && a.contains("ffmpeg-rk")
-            && a.contains("linux-image-7.1.1-1-arm64")
-            && a.contains("isc-dhcp-client-")));
-        // No hooks / cache-retention flags on the solve path.
-        assert!(!argv.iter().any(|a| a.starts_with("--customize-hook=")));
-        assert!(!argv.iter().any(|a| a.starts_with("--skip=")));
-        // `--` terminates options immediately before the positionals.
-        assert_eq!(argv[argv.len() - 5], "--");
-        // Suite, /dev/null target, mirror, and the local repo are the trailing args.
-        let tail = &argv[argv.len() - 4..];
-        assert_eq!(tail[0], "forky");
-        assert_eq!(tail[1], "/dev/null");
-        assert_eq!(tail[2], crate::DEFAULT_MIRROR);
-        assert_eq!(tail[3], "deb [trusted=yes] copy:///w/localrepo ./");
-    }
-
-    #[test]
-    fn feature_apt_sources_become_signed_deb_positionals_before_the_local_repo() {
-        // A resolved feature repo (e.g. Jellyfin) must reach the solve as a
-        // signed `deb` positional so apt can resolve its out-of-mirror package.
-        let build = rk1();
-        let mirrors = vec![crate::DEFAULT_MIRROR.to_string()];
-        let jellyfin = AptSource {
-            name: "jellyfin".into(),
-            uri: "https://repo.jellyfin.org/debian".into(),
-            suite: "trixie".into(),
-            components: vec!["main".into()],
-            signed_by: "jellyfin.gpg".into(),
-        };
-        let repos = vec![AptRepo {
-            source: &jellyfin,
-            keyring: PathBuf::from("/kr/jellyfin.gpg"),
-        }];
-        // The rendered line carries signed-by, uri, suite, and components.
-        assert_eq!(
-            apt_source_line(&repos[0]),
-            "deb [signed-by=/kr/jellyfin.gpg] https://repo.jellyfin.org/debian trixie main"
-        );
-        let identity = ident(&build);
-        let opts = RootfsOptions {
-            repo_debs: &[],
-            overlay_dirs: &[],
-            preinstall_overlay_dirs: &[],
-            boot_config: None,
-            image_identity: &identity,
-            rootfs_partuuid: PARTUUID,
-            out_dir: Path::new("/w/out"),
-            keyring: Some(Path::new("/kr.gpg")),
-            manifest_out: Path::new("/w/m.pkgs.lock"),
-            mirrors: &mirrors,
-            extra_packages: &[],
-            cache_dir: None,
-            refresh: false,
-            apt_sources: &repos,
-            source_date_epoch: None,
-        };
-        // Both the solve and the bootstrap carry the repo, ordered after the mirror
-        // and before the trailing local repo.
-        for argv in [
-            simulate_argv(&build, &opts, None, "deb [trusted=yes] copy:///w/localrepo ./"),
-            mmdebstrap_argv(
-                &build,
-                &opts,
-                None,
-                "deb [trusted=yes] copy:///w/localrepo ./",
-                Path::new("/w/out/turing-rk1-rootfs.tar"),
-                Path::new("/w/essential-hook.sh"),
-                Path::new("/w/hook.sh"),
-                Path::new("/w/capture-hashes.sh"),
-            ),
-        ] {
-            let jf = argv
-                .iter()
-                .position(|a| a.contains("repo.jellyfin.org"))
-                .expect("jellyfin repo positional present");
-            let mirror = argv.iter().position(|a| a == crate::DEFAULT_MIRROR).unwrap();
-            let local = argv.iter().position(|a| a.contains("copy:///w/localrepo")).unwrap();
-            assert!(mirror < jf && jf < local, "order: mirror < feature repo < local repo");
-        }
-    }
-
-    /// Build a small mmdebstrap-shaped tarball (`./`-prefixed) at `tarball` from the
-    /// given `members` (`archive-path`, `contents`). Returns false if `tar` is
-    /// unavailable so the caller can skip.
+    /// Build a small rootfs-shaped tarball (`./`-prefixed, as the export writes) at
+    /// `tarball` from the given `members` (`archive-path`, `contents`). Returns false
+    /// if `tar` is unavailable so the caller can skip.
     #[cfg(test)]
     fn build_test_tar(tarball: &Path, root: &Path, members: &[(&str, &str)]) -> bool {
         for (path, contents) in members {
@@ -2137,6 +1018,38 @@ mod tests {
         assert!(!rk_text.contains("board ="));
     }
 
+    /// The two files the image needs because it is built on a machine that is not the
+    /// board. Both failures are silent at build time and only surface on hardware: a
+    /// `dhcpcd` that cannot start, and an initramfs that waits for the *builder's* swap
+    /// and then skips the root filesystem check.
+    #[test]
+    fn the_staged_overlay_states_what_the_build_host_would_otherwise_answer() {
+        let build = rk1();
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "test");
+        stage_overlay(tmp.path(), &[], &build, uuid::Uuid::nil(), &ident(&build), &step).unwrap();
+
+        // `dhcpcd.service` lists /etc/resolv.conf in its ReadWritePaths under
+        // ProtectSystem=strict, and systemd refuses the namespace if the path is absent
+        // — so the file existing is the whole requirement. No package ships one.
+        let resolv = tmp.path().join("etc/resolv.conf");
+        assert!(resolv.is_file(), "dhcpcd cannot start without this path");
+
+        let conf =
+            std::fs::read_to_string(tmp.path().join("etc/initramfs-tools/conf.d/boot2deb.conf"))
+                .expect("the initramfs drop-in is staged");
+        // Unset, the resume hook bakes the build host's swap device into every image.
+        assert!(conf.contains("RESUME=none"), "{conf}");
+        // Unset, the fsck hook probes a PARTUUID that no disk carries yet, finds nothing,
+        // and ships an initramfs with no fsck — so root goes unchecked at every boot.
+        // The type is the formatter's, not a literal, so the helper matches the image.
+        assert!(
+            conf.contains(&format!("FSTYPE={}", crate::image::rootfs_filesystem_pin().kind)),
+            "{conf}"
+        );
+    }
+
     #[test]
     fn the_timezone_is_the_localtime_symlink_and_nothing_else() {
         // forky's tzdata *deletes* /etc/timezone on configure ("Removing now unused
@@ -2184,18 +1097,6 @@ mod tests {
     }
 
     #[test]
-    fn the_customize_hook_asserts_the_l10n_config_actually_took() {
-        // Both guarded failures are silent on the board: a zone that is not in the
-        // target's tzdata leaves /etc/localtime dangling and the clock quietly wrong,
-        // and a `locales` package that generated nothing leaves LANG naming a locale
-        // the image does not have.
-        let script = customize_hook_script(Path::new("/w/overlay"), DEFAULT_USER, &rk1(), None);
-        assert!(script.contains("/usr/share/zoneinfo/UTC"));
-        assert!(script.contains("is not in this suite's tzdata"));
-        assert!(script.contains("/usr/lib/locale/locale-archive"));
-    }
-
-    #[test]
     fn write_staged_forces_0644_regardless_of_umask() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
@@ -2208,89 +1109,4 @@ mod tests {
         assert_eq!(mode, 0o644);
     }
 
-    #[test]
-    fn parse_dpkg_status_keeps_only_installed() {
-        let text = "Package: libc6\nStatus: install ok installed\nVersion: 2.41-1\nArchitecture: arm64\n\
-                    \n\
-                    Package: half-installed\nStatus: install ok unpacked\nVersion: 1.0\nArchitecture: arm64\n\
-                    \n\
-                    Package: ffmpeg-rk\nStatus: install ok installed\nVersion: 3e53143\nArchitecture: arm64\n";
-        let entries = parse_dpkg_status(text);
-        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
-        // Only installed packages, sorted; the unpacked-but-not-configured one is out.
-        assert_eq!(names, vec!["ffmpeg-rk", "libc6"]);
-        assert_eq!(entries[0].version, "3e53143");
-        assert_eq!(entries[1].arch, "arm64");
-    }
-
-    #[test]
-    fn capture_hook_hashes_the_apt_cache() {
-        let script = capture_hashes_hook_script(Path::new("/w/deb-sha256sums"));
-        // Writes to the staged output, iterating the rootfs's apt archive.
-        assert!(script.contains("out=\"/w/deb-sha256sums\""));
-        assert!(script.contains("\"$rootfs\"/var/cache/apt/archives/*.deb"));
-        // Identity via dpkg-deb (the join key), content hash via sha256sum, and the
-        // glob guard for an empty cache.
-        assert!(script.contains(
-            "dpkg-deb --show --showformat='${Package} ${Version} ${Architecture}'"
-        ));
-        assert!(script.contains("sha256sum"));
-        assert!(script.contains("[ -e \"$deb\" ] || continue"));
-        assert!(script.contains("${sum%% *}"));
-        // The output is chmod'd so the host can read the subuid-owned file back.
-        assert!(script.contains("chmod 0644 \"$out\""));
-    }
-
-    #[test]
-    fn read_deb_hashes_keys_by_name_version_arch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let f = tmp.path().join("deb-sha256sums");
-        std::fs::write(
-            &f,
-            "libc6 2.41-1 arm64 aaaa\ntzdata 2025b-1 all bbbb\nffmpeg-rk 3e53143 arm64 cccc\n",
-        )
-        .unwrap();
-        let map = read_deb_hashes(&f).unwrap();
-        assert_eq!(map.len(), 3);
-        assert_eq!(
-            map.get(&("libc6".into(), "2.41-1".into(), "arm64".into())),
-            Some(&"aaaa".to_string())
-        );
-        assert_eq!(
-            map.get(&("tzdata".into(), "2025b-1".into(), "all".into())),
-            Some(&"bbbb".to_string())
-        );
-    }
-
-    #[test]
-    fn render_manifest_joins_sha256_sorted() {
-        let entries = vec![
-            PkgEntry { name: "libc6".into(), version: "2.41-1".into(), arch: "arm64".into() },
-            PkgEntry { name: "ffmpeg-rk".into(), version: "3e53143".into(), arch: "arm64".into() },
-        ];
-        let mut hashes = HashMap::new();
-        hashes.insert(("libc6".into(), "2.41-1".into(), "arm64".into()), "aaaa".into());
-        hashes.insert(("ffmpeg-rk".into(), "3e53143".into(), "arm64".into()), "cccc".into());
-        let body = render_manifest(&entries, &hashes).unwrap();
-        let lines: Vec<&str> = body.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(lines, vec!["libc6 2.41-1 arm64 aaaa", "ffmpeg-rk 3e53143 arm64 cccc"]);
-    }
-
-    #[test]
-    fn render_manifest_errors_on_unpinned_package() {
-        let entries = vec![
-            PkgEntry { name: "libc6".into(), version: "2.41-1".into(), arch: "arm64".into() },
-            PkgEntry { name: "orphan".into(), version: "1.0".into(), arch: "arm64".into() },
-        ];
-        let mut hashes = HashMap::new();
-        hashes.insert(("libc6".into(), "2.41-1".into(), "arm64".into()), "aaaa".into());
-        let err = render_manifest(&entries, &hashes).unwrap_err();
-        match err {
-            EngineError::ManifestIncomplete { count, sample } => {
-                assert_eq!(count, 1);
-                assert!(sample.contains("orphan 1.0 arm64"));
-            }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
-        }
-    }
 }

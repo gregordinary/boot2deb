@@ -1,4 +1,4 @@
-//! The four `list-*` commands: the discovery surface over the config search path.
+//! The five `list-*` commands: the discovery surface over the config search path.
 //!
 //! Each renders one row per entry (or a JSON array under `--json`) and collects the
 //! entries that failed to parse, so a corrupt layer file is reported rather than
@@ -198,6 +198,46 @@ pub(crate) fn features(root: &ConfigRoot, json: bool) -> Result {
     finish_listing(json, rows, "feature", &broken)
 }
 
+/// `list-kmods`: the out-of-tree kernel-module sets a device's `device_kmods` may name,
+/// with the driver ref they track and the modules they ship — the two things that decide
+/// whether an existing kmod already covers a new board's chip.
+pub(crate) fn kmods(root: &ConfigRoot, json: bool) -> Result {
+    let mut broken = Vec::new();
+    let mut rows = Vec::new();
+    for name in root.list("kmods")? {
+        match root.kmod(&name) {
+            Ok(k) if json => {
+                rows.push(serde_json::json!({
+                    "name": name,
+                    "git": k.git,
+                    "ref": k.git_ref,
+                    "modules": k.modules,
+                    "description": k.description,
+                }));
+            }
+            Ok(k) => {
+                let modules = if k.modules.is_empty() {
+                    "all".to_string()
+                } else {
+                    k.modules.join(",")
+                };
+                println!(
+                    "{name:<16} ref={:<12} modules={modules:<28}  {}",
+                    k.git_ref, k.description
+                );
+            }
+            Err(e) if json => {
+                rows.push(serde_json::json!({"name": name, "error": e.to_string()}));
+            }
+            Err(e) => {
+                println!("{name:<16} (unreadable)");
+                broken.push((name, e.to_string()));
+            }
+        }
+    }
+    finish_listing(json, rows, "kmod", &broken)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::testsupport::repo_root;
@@ -209,7 +249,7 @@ mod tests {
         let root = repo_root();
         // The flat layers scan a single directory; recipes nest one level under their
         // device folder, so they have their own recursive lister.
-        for kind in ["devices", "kernels", "features"] {
+        for kind in ["devices", "kernels", "features", "kmods"] {
             let names = root.list(kind).unwrap();
             assert!(!names.is_empty(), "{kind} lists nothing");
         }
@@ -218,5 +258,6 @@ mod tests {
         assert!(root.list_recipes().unwrap().iter().all(|n| root.recipe(n).is_ok()));
         assert!(root.list("kernels").unwrap().iter().all(|n| root.kernel(n).is_ok()));
         assert!(root.list("features").unwrap().iter().all(|n| root.feature(n).is_ok()));
+        assert!(root.list("kmods").unwrap().iter().all(|n| root.kmod(n).is_ok()));
     }
 }

@@ -1,5 +1,5 @@
-//! Out-of-tree kernel-module build stage: for each board `device_kmods` entry, fetch
-//! the pinned driver repo, apply its own quilt (plus any boot2deb-authored compat
+//! Out-of-tree kernel-module build stage: for each kmod the board named, fetch the
+//! pinned driver repo, apply its own quilt (plus any boot2deb-authored compat
 //! patches), build the module against the freshly built kernel tree with `make M=`, and
 //! package the resulting `.ko`s as a `<name>-modules-<kver>` `.deb` that installs them
 //! into `/lib/modules/<kver>/updates/` and runs `depmod` on configure.
@@ -18,7 +18,7 @@ use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::signature::{Signature, SignatureBuilder, SignatureManifest};
 use boot2deb_core::lock::{KmodPin, Lock};
-use boot2deb_core::model::{DeviceKmod, KmodFirmware};
+use boot2deb_core::model::{ResolvedKmod, KmodFirmware};
 use boot2deb_core::ResolvedBuild;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -47,8 +47,8 @@ pub struct KmodOptions<'a> {
     /// Per-name clone-source overrides (`(name, url-or-path)`) for co-development; a
     /// name absent here uses that kmod's locked `source`.
     pub sources: &'a [(String, String)],
-    /// Per-name resolved local-patch paths (`(name, [abs path, …])`) — the device's
-    /// `local_patches`, expanded from config-root-relative to absolute by the CLI, in
+    /// Per-name resolved local-patch paths (`(name, [abs path, …])`) — each kmod's
+    /// `local_patches`, expanded from bare filenames to absolute paths by the CLI, in
     /// apply order. A name absent here applies no local patch.
     pub local_patches: &'a [(String, Vec<PathBuf>)],
     /// Scratch dir; each fetched+patched driver tree is `<work>/kmod/<name>` and the
@@ -120,7 +120,7 @@ fn build_one(
     opts: &KmodOptions,
     env: &BuildEnv,
     stage_root: &Path,
-    k: &DeviceKmod,
+    k: &ResolvedKmod,
     pin: &KmodPin,
     local_patches: &[PathBuf],
     kernel_sig: &Signature,
@@ -211,13 +211,13 @@ fn build_one(
 fn fetch_and_patch(
     source: &str,
     pin: &KmodPin,
-    k: &DeviceKmod,
+    k: &ResolvedKmod,
     local_patches: &[PathBuf],
     tree: &Path,
     step: &Step,
 ) -> Result<(), EngineError> {
     build::fetch_commit(source, &pin.reference, &pin.commit, &format!("kmod {}", k.name), tree, step)?;
-    for name in &k.patches {
+    for name in &k.repo_patches {
         let patch = tree.join(&k.patch_dir).join(name);
         git_apply(tree, &patch, step)?;
     }
@@ -249,7 +249,7 @@ fn compile_module(
     env: &BuildEnv,
     ktree: &Path,
     subdir: &Path,
-    k: &DeviceKmod,
+    k: &ResolvedKmod,
     epoch: Option<u64>,
     step: &Step,
 ) -> Result<(), EngineError> {
@@ -288,7 +288,7 @@ fn install_modules(
     env: &BuildEnv,
     ktree: &Path,
     subdir: &Path,
-    k: &DeviceKmod,
+    k: &ResolvedKmod,
     kver: &str,
     pkg_stage: &Path,
     step: &Step,
@@ -340,7 +340,7 @@ fn install_modules(
 /// lands at `updates/<subdir>/<name>.ko` (e.g. `updates/aic8800_bsp/aic8800_bsp.ko`),
 /// not flat under `updates/`. The `.ko` set is therefore collected recursively, matched
 /// by basename; pruning an unlisted module also removes any subdirectory it emptied.
-fn prune_and_verify_modules(updates: &Path, k: &DeviceKmod, step: &Step) -> Result<(), EngineError> {
+fn prune_and_verify_modules(updates: &Path, k: &ResolvedKmod, step: &Step) -> Result<(), EngineError> {
     if k.modules.is_empty() {
         return Ok(());
     }
@@ -413,7 +413,7 @@ fn prune_empty_dirs(root: &Path) -> Result<(), EngineError> {
 /// commit's date via `SOURCE_DATE_EPOCH`.
 #[allow(clippy::too_many_arguments)]
 fn package_deb(
-    k: &DeviceKmod,
+    k: &ResolvedKmod,
     pin: &KmodPin,
     kver: &str,
     arch: &str,
@@ -460,7 +460,7 @@ fn package_deb(
 /// All regular files directly under `<driver_tree>/<subdir>` are staged at the declared
 /// `install` path; subdirectories are not descended.
 fn package_firmware_deb(
-    k: &DeviceKmod,
+    k: &ResolvedKmod,
     fw: &KmodFirmware,
     pin: &KmodPin,
     driver_tree: &Path,
@@ -603,11 +603,11 @@ fn maintainer_script(kver: &str) -> String {
 /// and its own quilt) plus the applied in-repo patch list, patch dir, and local-patch
 /// fingerprints. The subdir/make_args do not shape the *tree*, only the build, so they
 /// live in the output signature.
-pub fn tree_signature_manifest(k: &DeviceKmod, pin: &KmodPin, local_fps: &[String]) -> SignatureManifest {
+pub fn tree_signature_manifest(k: &ResolvedKmod, pin: &KmodPin, local_fps: &[String]) -> SignatureManifest {
     let mut b = SignatureBuilder::new(&node_name(&k.name), TREE_STAGE_VERSION);
     b.fold_scalar("commit", &pin.commit);
     b.fold_scalar("patch_dir", &k.patch_dir);
-    b.fold_ordered("patches", &k.patches);
+    b.fold_ordered("patches", &k.repo_patches);
     b.fold_ordered("local_patches", local_fps);
     b.manifest()
 }
@@ -617,7 +617,7 @@ pub fn tree_signature_manifest(k: &DeviceKmod, pin: &KmodPin, local_fps: &[Strin
 /// applied patches, the subdir, the make args, the module list, arch, and toolchain id —
 /// every input that changes the produced `.ko`s.
 pub fn output_manifest(
-    k: &DeviceKmod,
+    k: &ResolvedKmod,
     pin: &KmodPin,
     local_fps: &[String],
     kernel_sig: &Signature,
@@ -629,7 +629,7 @@ pub fn output_manifest(
     b.fold_scalar("commit", &pin.commit);
     b.fold_scalar("subdir", &k.subdir);
     b.fold_scalar("patch_dir", &k.patch_dir);
-    b.fold_ordered("patches", &k.patches);
+    b.fold_ordered("patches", &k.repo_patches);
     b.fold_ordered("local_patches", local_fps);
     b.fold_ordered("make_args", &k.make_args);
     b.fold_ordered("modules", &k.modules);
@@ -654,7 +654,7 @@ pub fn firmware_node_name(name: &str) -> String {
 /// firmware dir), and the firmware source/install paths. No arch or toolchain: the
 /// package is `Architecture: all` and nothing is compiled.
 pub fn firmware_output_manifest(
-    k: &DeviceKmod,
+    k: &ResolvedKmod,
     fw: &KmodFirmware,
     pin: &KmodPin,
     local_fps: &[String],
@@ -662,7 +662,7 @@ pub fn firmware_output_manifest(
     let mut b = SignatureBuilder::new(&firmware_node_name(&k.name), FIRMWARE_STAGE_VERSION);
     b.fold_scalar("commit", &pin.commit);
     b.fold_scalar("patch_dir", &k.patch_dir);
-    b.fold_ordered("patches", &k.patches);
+    b.fold_ordered("patches", &k.repo_patches);
     b.fold_ordered("local_patches", local_fps);
     b.fold_scalar("fw_subdir", &fw.subdir);
     b.fold_scalar("fw_install", &fw.install);
@@ -711,14 +711,15 @@ mod tests {
     use super::*;
     use crate::signature::SignatureBuilder;
 
-    fn kmod() -> DeviceKmod {
-        DeviceKmod {
+    fn kmod() -> ResolvedKmod {
+        ResolvedKmod {
             name: "aic8800".into(),
+            description: "AIC8800 SDIO Wi-Fi".into(),
             git: "https://github.com/radxa-pkg/aic8800.git".into(),
             git_ref: "main".into(),
             subdir: "src/SDIO/driver_fw/driver/aic8800".into(),
             patch_dir: "debian/patches".into(),
-            patches: vec!["fix-sdio-firmware-path.patch".into()],
+            repo_patches: vec!["fix-sdio-firmware-path.patch".into()],
             local_patches: vec![],
             make_args: vec!["CONFIG_FDRV_NO_REG_SDIO=y".into()],
             modules: vec!["aic8800_bsp".into(), "aic8800_fdrv".into()],
@@ -781,7 +782,7 @@ mod tests {
 
     #[test]
     fn firmware_signature_folds_the_fw_paths_and_driver_commit() {
-        let k = DeviceKmod {
+        let k = ResolvedKmod {
             firmware: Some(KmodFirmware {
                 subdir: "src/SDIO/driver_fw/fw/aic8800D80".into(),
                 install: "usr/lib/firmware/aic8800_fw/SDIO/aic8800D80".into(),
@@ -821,7 +822,7 @@ mod tests {
 
         // The subdir/make_args shape the build, not the tree, so they live in the output
         // signature only.
-        let other_subdir = DeviceKmod { subdir: "src/USB/driver".into(), ..kmod() };
+        let other_subdir = ResolvedKmod { subdir: "src/USB/driver".into(), ..kmod() };
         assert_eq!(
             base_tree,
             tree_signature_manifest(&other_subdir, &p, &[]).signature(),
@@ -834,7 +835,7 @@ mod tests {
         );
 
         // The applied in-repo patch list shapes the tree, so it moves both signatures.
-        let other_patches = DeviceKmod { patches: vec!["fix-other.patch".into()], ..kmod() };
+        let other_patches = ResolvedKmod { repo_patches: vec!["fix-other.patch".into()], ..kmod() };
         assert_ne!(base_tree, tree_signature_manifest(&other_patches, &p, &[]).signature());
         assert_ne!(
             base_out,
@@ -883,7 +884,7 @@ mod tests {
         let updates = dir.path().join("updates");
         std::fs::create_dir_all(&updates).unwrap();
         std::fs::write(updates.join("whatever.ko"), b"ko").unwrap();
-        let all = DeviceKmod { modules: vec![], ..kmod() };
+        let all = ResolvedKmod { modules: vec![], ..kmod() };
         prune_and_verify_modules(&updates, &all, &step).unwrap();
         assert!(updates.join("whatever.ko").exists(), "empty module set ships all");
     }

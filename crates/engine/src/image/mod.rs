@@ -708,7 +708,7 @@ mod tests {
         )
         .unwrap();
         let out = std::fs::File::create(path).unwrap();
-        // Record root ownership like the real rootfs tar (mmdebstrap emits uid 0); the
+        // Record root ownership like the real rootfs tar (which emits uid 0); the
         // formatter reads each entry's ownership straight from the tar headers.
         let status = Command::new("tar")
             .args(["--owner=0", "--group=0", "--numeric-owner", "-C"])

@@ -1,0 +1,45 @@
+aic8800: lower the default debug log level to errors only
+
+Both AIC8800 modules ship a debug mask that enables every level. The BSP's
+aicwf_dbg_level_bsp logs each step of chip power-on and firmware download; the
+FullMAC driver's aicwf_dbg_level additionally enables LOGFW, which relays the
+firmware's own log. Together they emit enough to fill a console faster than a
+login can be typed. Lower both to LOGERROR.
+
+The level must be compiled in rather than set from modprobe.d. The BSP's is not a
+module_param at all, and while the FullMAC driver's is, a module_param is only
+applied by a configuration file that reaches the image -- so a device that does
+not carry etc/modprobe.d/aic8800.conf would boot verbose. Compiling the default
+makes quietness a property of the module itself, and leaves the module_param as
+the knob for raising the level again (aicwf_dbg_level=0x40f re-enables the
+firmware log).
+
+These are the two SDIO hunks of radxa's fix-Lower-the-debugging-log-level.patch
+(Feng Zhang <feng@radxa.com>), carried here because the full patch also touches
+the PCIE and USB trees this board does not build, and `git apply` is
+all-or-nothing.
+
+diff --git a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_main.c b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_main.c
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_main.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_bsp/aic_bsp_main.c
+@@ -15,7 +15,7 @@
+ #define DRV_AUTHOR            "AICSemi"
+ #define DRV_VERS_MOD          "1.0"
+
+-int aicwf_dbg_level_bsp = LOGERROR|LOGINFO|LOGDEBUG|LOGTRACE;
++int aicwf_dbg_level_bsp = LOGERROR;
+
+ struct semaphore aicbsp_probe_semaphore;
+
+diff --git a/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_main.c b/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_main.c
+--- a/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_main.c
++++ b/src/SDIO/driver_fw/driver/aic8800/aic8800_fdrv/rwnx_main.c
+@@ -535,7 +535,7 @@ static const int rwnx_hwq2uapsd[NL80211_NUM_ACS] = {
+
+
+ extern uint8_t scanning;
+-int aicwf_dbg_level = LOGERROR|LOGINFO|LOGDEBUG|LOGTRACE|LOGFW;
++int aicwf_dbg_level = LOGERROR;
+ module_param(aicwf_dbg_level, int, 0660);
+ #ifdef CONFIG_DYNAMIC_PWR
+ int dynamic_pwr = 1;

@@ -7,16 +7,22 @@
 //! from the (PAX) headers, and writes those owner ids directly into the inodes. That
 //! removes the reason the old path needed a user namespace: nothing is extracted to a
 //! staging tree whose multi-uid ownership an unprivileged process cannot set, so the
-//! whole step runs as the plain build user.
+//! whole step runs as the plain build user. Only the headers are read up front: each
+//! file's bytes stay in the archive until that file is placed, so a multi-gigabyte
+//! rootfs costs the largest single file in it rather than the sum.
 //!
 //! The image is resize-safe by construction: [`GrowReservation::Max`] sizes the
 //! reserved group-descriptor-table blocks to the most the format can address (~8 TiB
 //! under this feature set, at a cost of ~4 MiB), so first boot grows the mounted root
-//! onto a larger NVMe with `resize2fs` and no descriptor-table relocation. The feature
-//! set is chosen here rather than left to the formatter's default, but it is expressed
-//! relative to that default and so still moves with it: what the image was formatted to
-//! is recorded by [`rootfs_filesystem_pin`] and pinned by test, not guaranteed by this
-//! module. `metadata_csum_seed` stores the checksum seed in the superblock, decoupled
+//! onto a larger NVMe with `resize2fs` and no descriptor-table relocation. (`Max` never
+//! spends more than a sixty-fourth of the filesystem on headroom, so a filesystem below
+//! 256 MiB reserves proportionally less; every shipped image is well past that knee.)
+//! The feature set is chosen here rather than left to the formatter's default, and it is
+//! expressed relative to that default, which is itself a fixed set — so the on-disk
+//! contract is stable across formatter releases. It is recorded rather than assumed
+//! either way: [`rootfs_filesystem_pin`] writes what the image was formatted to into the
+//! provenance manifest, and a test pins it.
+//! `metadata_csum_seed` stores the checksum seed in the superblock, decoupled
 //! from the UUID, so an operator's `tune2fs -U` (rescue, cloning hygiene) never has to
 //! rewrite every metadata checksum.
 //!
@@ -41,8 +47,8 @@ use crate::image::geometry::EXT4_BLOCK;
 use boot2deb_core::provenance::FilesystemProvenance;
 use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
-    ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FormatOptions, GrowReservation, InodeCount,
-    Reader, ReservedRatio, Source, SourceEntry, format_to,
+    ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions,
+    GrowReservation, InodeCount, Reader, ReservedRatio, Source, SourceEntry, format_to,
 };
 use sha2::{Digest, Sha256};
 use std::num::NonZeroU64;
@@ -74,7 +80,7 @@ const DEV_PREFIX: &[u8] = b"/dev/";
 /// rootfs's `/etc/shadow` before the filesystem is written.
 ///
 /// Unlike the old `mke2fs` path, the superblock's format times are deterministic too:
-/// they take the newest source mtime, which `mmdebstrap` has already clamped to the
+/// they take the newest source mtime, which the rootfs export has already clamped to the
 /// lock's `SOURCE_DATE_EPOCH`. The per-image first-boot password is still unique per
 /// build, so the image as a whole is not byte-for-byte reproducible.
 pub(crate) fn build_rootfs_ext4(
@@ -98,8 +104,14 @@ pub(crate) fn build_rootfs_ext4(
     // 1. Parse the rootfs tar into an entry list in-process. `ArchiveSource` reads
     //    ownership, mode, times, xattrs, ACLs, and device nodes straight from the
     //    (PAX) headers — no privileged extraction, so no user namespace.
-    let file = std::fs::File::open(tarball).map_err(|s| EngineError::io(tarball, s))?;
-    let mut entries = ArchiveSource::from_reader(std::io::BufReader::new(file))
+    //
+    //    `from_path` leaves each member's bytes in the archive and reads them as that
+    //    file is placed, so peak memory is the largest single file in the rootfs rather
+    //    than the sum of them all — for a media-accel rootfs, megabytes instead of
+    //    gigabytes. It holds the archive open for the whole format, so `tarball` must
+    //    not be rewritten in place until this returns — the rootfs node finishes writing
+    //    it before the image node runs, so nothing holds it open for writing here.
+    let mut entries = ArchiveSource::from_path(tarball)
         .map_err(|e| EngineError::Ext4Format {
             detail: format!("parsing rootfs tar {}: {e}", tarball.display()),
         })?
@@ -146,10 +158,11 @@ pub(crate) struct FirstBoot<'a> {
 /// The options a format is a function of: identity (UUID, deterministic times, hash
 /// seed), the pinned feature set, and the size-independent tunables.
 fn format_options(uuid: Uuid, label: &str, entries: &[SourceEntry]) -> FormatOptions {
-    // A deterministic creation time: the newest source mtime, which mmdebstrap has
-    // already clamped to the lock's SOURCE_DATE_EPOCH — so the superblock's format
-    // times are a function of the lock, not the wall clock mke2fs stamped. Clamped to
-    // the superblock's 32-bit range for safety; real rootfs mtimes are well inside it.
+    // A deterministic creation time: the newest source mtime, which the rootfs node's
+    // tar export has already clamped to the lock's SOURCE_DATE_EPOCH — so the
+    // superblock's format times are a function of the lock, not of the wall clock.
+    // Clamped to the superblock's 32-bit range for safety; real rootfs mtimes are well
+    // inside it.
     let time_secs = entries
         .iter()
         .map(|e| e.meta.mtime.secs)
@@ -179,13 +192,17 @@ fn format_options(uuid: Uuid, label: &str, entries: &[SourceEntry]) -> FormatOpt
 /// `metadata_csum` + `metadata_csum_seed` with the checksum seed stored independent of
 /// the UUID, extents, `64bit`, `dir_index`, `has_journal` — and `orphan_file` off.
 ///
-/// It is expressed as [`FeatureSet::DEFAULT`] minus one feature, which makes the set
-/// **library-dependent**: `DEFAULT` is documented as the formatter's current good ext4
-/// configuration and is free to grow, so a feature added there lands in every image
-/// with no change here and no compile error. That is what [`rootfs_filesystem_pin`]
-/// records into the provenance manifest and what
-/// `the_pinned_feature_set_is_exactly_these_words` fails on, so the drift is caught in
-/// CI rather than discovered in an image.
+/// It is expressed as [`FeatureSet::DEFAULT`] minus one feature. `DEFAULT` is the
+/// formatter's *fixed* set — it names one exact set of words and sizes and keeps naming
+/// them across releases, which is what makes it safe to base an on-disk contract on.
+/// (Its counterpart `LATEST` tracks whatever `mke2fs` currently writes and may move in
+/// any release; an image's layout must not, so it is not used here.)
+///
+/// The set is still recorded rather than trusted: [`rootfs_filesystem_pin`] projects
+/// what this resolves to into the provenance manifest, and
+/// `the_pinned_feature_set_is_exactly_these_words` fails on any change to it, so drift
+/// — whether from this expression or from the baseline underneath it — is caught in CI
+/// rather than discovered in an image.
 fn feature_set() -> FeatureSet {
     FeatureSet::DEFAULT
         .with_feature("orphan_file", false)
@@ -258,7 +275,12 @@ fn splice_first_boot_password(
             detail: "/etc/shadow in the rootfs tar is not a regular file".into(),
         });
     };
-    let current = std::str::from_utf8(content).map_err(|_| EngineError::Ext4Format {
+    // The entry's contents are a range of the still-open archive, so reading them is a
+    // seek and a read rather than a buffer already in hand.
+    let bytes = content.read().map_err(|s| EngineError::Ext4Format {
+        detail: format!("reading /etc/shadow from the rootfs tar: {s}"),
+    })?;
+    let current = std::str::from_utf8(&bytes).map_err(|_| EngineError::Ext4Format {
         detail: "/etc/shadow in the rootfs tar is not valid UTF-8".into(),
     })?;
     let spliced =
@@ -267,7 +289,9 @@ fn splice_first_boot_password(
                 what: format!("{} account in /etc/shadow", first_boot.user),
                 location: "rootfs tar".into(),
             })?;
-    shadow.kind = EntryKind::File(spliced.into_bytes());
+    // The one entry whose bytes this build computes rather than reads: owned, not a
+    // range, so it replaces the archive's own /etc/shadow when the file is placed.
+    shadow.kind = EntryKind::File(FileContent::Owned(spliced.into_bytes()));
     Ok(())
 }
 
@@ -345,7 +369,7 @@ mod tests {
     fn shadow_entry(content: &[u8], mtime: Timestamp) -> SourceEntry {
         SourceEntry {
             path: b"/etc/shadow".to_vec(),
-            kind: EntryKind::File(content.to_vec()),
+            kind: EntryKind::File(FileContent::Owned(content.to_vec())),
             meta: Metadata::new(0o640, mtime),
             xattrs: Vec::new(),
         }
@@ -385,7 +409,13 @@ mod tests {
 
         let img = tmp.path().join("rootfs.ext4");
         let uuid = Uuid::from_bytes([0x5a; 16]);
-        let size: u64 = 64 * 1024 * 1024;
+        // 512 MiB, not the smallest filesystem that would exercise the code: the grow
+        // reservation is `min(map ceiling, descriptor ceiling, blocks / 64)`, so only at
+        // 256 MiB and above does the map's 1024 blocks become the binding term. A real
+        // rootfs is always in that regime, and this is the regime the assertion below
+        // describes; a smaller fixture would pin the proportional share instead and say
+        // nothing about what a shipped image gets.
+        let size: u64 = 512 * 1024 * 1024;
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "image");
         let first_boot = FirstBoot {
@@ -417,7 +447,9 @@ mod tests {
         assert_eq!(sb_u16(&bytes, 0x3c), 2, "errors must be remount-ro");
         // s_reserved_gdt_blocks at 0xCE: the online-resize headroom reaches the format
         // ceiling — 1024 GDT blocks (8 TiB) under this feature set, one of which this
-        // small filesystem already uses, so at least 1023 are reserved.
+        // filesystem already uses, so at least 1023 are reserved. This is what lets a
+        // small image grow onto a large disk at first boot without relocating its
+        // descriptor table.
         assert!(
             sb_u16(&bytes, 0xCE) >= 1023,
             "reserved GDT blocks must reach the resize ceiling, got {}",
@@ -435,7 +467,7 @@ mod tests {
             ),
             SourceEntry {
                 path: b"/etc/hostname".to_vec(),
-                kind: EntryKind::File(b"turing-rk1\n".to_vec()),
+                kind: EntryKind::File(FileContent::Owned(b"turing-rk1\n".to_vec())),
                 meta: Metadata::new(0o644, mtime),
                 xattrs: Vec::new(),
             },
@@ -449,7 +481,8 @@ mod tests {
         let EntryKind::File(content) = &entries[0].kind else {
             panic!("shadow is a file");
         };
-        let out = std::str::from_utf8(content).unwrap();
+        let bytes = content.read().unwrap();
+        let out = std::str::from_utf8(&bytes).unwrap();
         // The debian line carries the hash and is expired (field 3 = 0); root is untouched.
         assert!(
             out.contains("debian:$6$saltsalt$hashhashhash:0:0:99999:7:::"),
@@ -479,7 +512,7 @@ mod tests {
     fn splice_first_boot_password_errors_when_shadow_is_absent() {
         let mut entries = vec![SourceEntry {
             path: b"/etc/hostname".to_vec(),
-            kind: EntryKind::File(b"turing-rk1\n".to_vec()),
+            kind: EntryKind::File(FileContent::Owned(b"turing-rk1\n".to_vec())),
             meta: Metadata::new(0o644, Timestamp::from_secs(1)),
             xattrs: Vec::new(),
         }];
@@ -569,22 +602,18 @@ mod tests {
     /// human reads. This checks they agree by round-tripping the names back to bits.
     #[test]
     fn the_pinned_names_and_raw_words_describe_the_same_set() {
-        use ferrosys::ext::{Compat, Incompat, RoCompat};
         let pin = rootfs_filesystem_pin();
         // Start from no features at all, so the result is what the names say and
-        // nothing the formatter's baseline contributed.
-        let empty = FeatureSet {
-            compat: Compat::from_bits(0),
-            incompat: Incompat::from_bits(0),
-            ro_compat: RoCompat::from_bits(0),
-            block_size: pin.block_size,
-            inode_size: pin.inode_size,
-        };
+        // nothing the formatter's baseline contributed. `EMPTY` carries the formatter's
+        // default block and inode sizes, which the recorded pin must agree with — the
+        // names alone say nothing about either.
+        assert_eq!(FeatureSet::EMPTY.block_size, pin.block_size, "block size matches the baseline");
+        assert_eq!(FeatureSet::EMPTY.inode_size, pin.inode_size, "inode size matches the baseline");
         // Every recorded name is one the formatter still knows...
         let rebuilt = pin
             .features
             .iter()
-            .try_fold(empty, |acc, name| acc.with_feature(name, true))
+            .try_fold(FeatureSet::EMPTY, |acc, name| acc.with_feature(name, true))
             .expect("every pinned feature name is known to the formatter");
         // ...and the set they name is the set the words pin.
         assert_eq!(format!("{:#010x}", rebuilt.compat.bits()), pin.compat);

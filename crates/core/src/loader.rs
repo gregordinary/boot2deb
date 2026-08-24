@@ -1,6 +1,6 @@
 //! Reads typed config layers from a boot2deb config root (the repo directory
-//! holding `devices/`, `socs/`, `arches/`, `boot-methods/`, `kernels/`,
-//! `recipes/`).
+//! holding `devices/`, `socs/`, `arches/`, `boot-methods/`, `kernels/`, `kmods/`,
+//! `features/`, `recipes/`).
 //!
 //! **Layer search path & overlays.** A [`ConfigRoot`] holds an *ordered*
 //! search path: the shipped root first, then zero or more out-of-tree overlay
@@ -14,6 +14,14 @@
 //! unchanged and the authored structs stay untouched. This lets a user retune one
 //! device's `image_size` or add a `supported_kernel` — or drop in a whole new
 //! device/soc/kernel — without forking the vendored config.
+//!
+//! **Device variants.** A device may also name another device as its parent
+//! ([`extends`](DeviceLayer::extends)), which is merged by the same rules along a
+//! second axis: the `extends` chain is flattened base-most-first, then the search
+//! path merges over the result. So a variant board states only its deltas, and an
+//! overlay can still retune either the variant or what it extends. See
+//! [`device_with_lineage`](ConfigRoot::device_with_lineage) for the asset ordering
+//! that falls out of it.
 
 use crate::error::ConfigError;
 use crate::model::*;
@@ -242,9 +250,80 @@ impl ConfigRoot {
         Ok((value, top_path.unwrap_or(last_path)))
     }
 
-    /// Load `devices/<name>.toml`.
+    /// Load `devices/<name>.toml`, resolving its [`extends`](DeviceLayer::extends)
+    /// chain.
     pub fn device(&self, name: &str) -> Result<DeviceLayer, ConfigError> {
-        self.load("device", "devices", name)
+        Ok(self.device_with_lineage(name)?.0)
+    }
+
+    /// Load a device together with its lineage — the device and its
+    /// [`extends`](DeviceLayer::extends) ancestors, **base-most first**, ending with
+    /// `name` itself. A device that extends nothing has a one-entry lineage.
+    ///
+    /// The lineage is the order the devices' assets stack in, which is why it is
+    /// returned rather than recomputed: the merged [`DeviceLayer`] cannot express it
+    /// (a merge collapses the chain to one value), and the overlay trees of every
+    /// device in it are laid into the rootfs in this order, so a variant's files win
+    /// over the parent's.
+    pub fn device_with_lineage(
+        &self,
+        name: &str,
+    ) -> Result<(DeviceLayer, Vec<String>), ConfigError> {
+        // Walk child -> base-most, collecting each device's own merged value. The
+        // chain is bounded by the cycle check: every step either finds a device not
+        // yet seen or fails.
+        let mut lineage = Vec::new();
+        let mut chain: Vec<(toml::Value, PathBuf)> = Vec::new();
+        let mut current = name.to_string();
+        loop {
+            validate_name("device", &current)?;
+            if lineage.contains(&current) {
+                lineage.push(current);
+                return Err(ConfigError::DeviceExtendsCycle {
+                    device: name.to_string(),
+                    chain: lineage.join(" -> "),
+                });
+            }
+            let rel = format!("devices/{current}.toml");
+            let (mut value, path) = self.merge_value("device", &current, &rel)?;
+            // `extends` is read here, before deserialization, so the chain can be
+            // walked at all; a non-string is named against the file that holds it
+            // rather than surfacing as a type error on a merged value.
+            let parent = match value.get("extends") {
+                None => None,
+                Some(toml::Value::String(p)) => Some(p.clone()),
+                Some(other) => {
+                    return Err(ConfigError::InvalidDeviceExtends {
+                        device: current,
+                        found: other.type_str(),
+                    })
+                }
+            };
+            // Only the named device's own `extends` should survive the merge, so an
+            // ancestor's does not read as this device's parent.
+            if !chain.is_empty() {
+                if let toml::Value::Table(t) = &mut value {
+                    t.remove("extends");
+                }
+            }
+            lineage.push(current);
+            chain.push((value, path));
+            match parent {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+
+        // Merge base-most -> child, so a variant wins over what it extends. Errors are
+        // attributed to the named device's file: it is the one the operator authored,
+        // and after the merge a bad value cannot be traced to an ancestor anyway.
+        let (mut merged, mut top_path) = chain.pop().expect("the walk pushes at least once");
+        while let Some((value, path)) = chain.pop() {
+            merge_toml(&mut merged, value);
+            top_path = path;
+        }
+        lineage.reverse();
+        Ok((deserialize_at(merged, &top_path)?, lineage))
     }
     /// Load the SoC layer for `soc` (`socs/<soc>.toml`).
     pub fn soc(&self, soc: Soc) -> Result<SocLayer, ConfigError> {
@@ -315,6 +394,13 @@ impl ConfigRoot {
     /// Load `features/<name>.toml` — a composable rootfs feature.
     pub fn feature(&self, name: &str) -> Result<crate::feature::Feature, ConfigError> {
         self.load("feature", "features", name)
+    }
+
+    /// Load `kmods/<name>.toml` — one out-of-tree kernel-module set a device selects by
+    /// name. The stem *is* the kmod's identity (the layer carries no `name` field), so
+    /// the caller pairs the two into a [`ResolvedKmod`].
+    pub fn kmod(&self, name: &str) -> Result<KmodLayer, ConfigError> {
+        self.load("kmod", "kmods", name)
     }
 
     /// Load `base.toml` — the distro-generic rootfs substrate. Unlike the
@@ -795,6 +881,164 @@ mod tests {
         assert!(root.recipe_sibling("ov", "../m").is_err());
     }
 
+    /// A device file, plus whatever `extra` appends. `image_size` is deliberately not
+    /// among the fixed keys: it is the key these tests use to watch inheritance, so a
+    /// base-most device states it in `extra` and a variant leaves it to be inherited.
+    fn device_toml(name: &str, extra: &str) -> String {
+        format!(
+            "description = \"{name}\"\nsoc = \"rk3288\"\nboot_method = \"depthcharge\"\n\
+             supported_boot_methods = [\"depthcharge\"]\nkernel_dtb = \"rockchip/{name}.dtb\"\n\
+             device_config_fragments = []\nsupported_kernels = [\"k\"]\n\
+             default_kernel = \"k\"\ndefault_suite = \"forky\"\ndefault_layout = \"combined\"\n\
+             hostname = \"{name}\"\n{extra}"
+        )
+    }
+
+    /// A config root holding just `devices/`, for the `extends` walk.
+    fn device_root(files: &[(&str, String)]) -> (tempfile::TempDir, ConfigRoot) {
+        let p = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(p.path().join("devices")).unwrap();
+        for (name, text) in files {
+            std::fs::write(p.path().join(format!("devices/{name}.toml")), text).unwrap();
+        }
+        let root = ConfigRoot::new(p.path().to_path_buf());
+        (p, root)
+    }
+
+    #[test]
+    fn extends_merges_a_parent_under_a_variant_and_reports_the_lineage() {
+        let (_tmp, root) = device_root(&[
+            ("base", device_toml("base", "packages = [\"a\", \"b\"]\nimage_size = \"2G\"\n")),
+            (
+                "variant",
+                // No image_size: it is inherited. An explicit hostname and packages: one
+                // scalar and one array the variant does state, to watch both merge rules.
+                device_toml("variant", "extends = \"base\"\npackages = [\"c\"]\n"),
+            ),
+        ]);
+
+        let (d, lineage) = root.device_with_lineage("variant").unwrap();
+        // Base-most first: this is the order the devices' assets stack in.
+        assert_eq!(lineage, ["base", "variant"]);
+        // A key the variant does not state comes from the parent...
+        assert_eq!(d.image_size, "2G");
+        // ...a key it does state wins...
+        assert_eq!(d.hostname, "variant");
+        // ...and an array is replaced wholesale, not concatenated, matching how the
+        // overlay search path merges. A variant restates what it wants to keep.
+        assert_eq!(d.packages, ["c"]);
+        assert_eq!(d.extends.as_deref(), Some("base"));
+
+        // The parent still resolves on its own, unaffected by having a variant.
+        let (base, base_lineage) = root.device_with_lineage("base").unwrap();
+        assert_eq!(base_lineage, ["base"]);
+        assert_eq!(base.packages, ["a", "b"]);
+        assert!(base.extends.is_none());
+    }
+
+    #[test]
+    fn extends_walks_a_chain_and_hides_an_ancestors_parent() {
+        let (_tmp, root) = device_root(&[
+            ("a", device_toml("a", "image_size = \"1G\"\n")),
+            ("b", device_toml("b", "extends = \"a\"\n")),
+            ("c", device_toml("c", "extends = \"b\"\n")),
+        ]);
+
+        let (d, lineage) = root.device_with_lineage("c").unwrap();
+        assert_eq!(lineage, ["a", "b", "c"]);
+        // Inherited across two hops.
+        assert_eq!(d.image_size, "1G");
+        // Only the named device's own parent survives the merge: `c` extends `b`, and
+        // `b`'s own `extends = "a"` must not read as `c`'s parent.
+        assert_eq!(d.extends.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn an_extends_cycle_is_named_rather_than_looping() {
+        let (_tmp, root) = device_root(&[
+            ("x", device_toml("x", "extends = \"y\"\n")),
+            ("y", device_toml("y", "extends = \"x\"\n")),
+        ]);
+        match root.device_with_lineage("x").unwrap_err() {
+            ConfigError::DeviceExtendsCycle { device, chain } => {
+                assert_eq!(device, "x");
+                assert_eq!(chain, "x -> y -> x", "the whole walk, so the bad edge is visible");
+            }
+            other => panic!("expected DeviceExtendsCycle, got {other:?}"),
+        }
+        // A device that extends itself is the same failure, not a no-op merge.
+        let (_tmp, root) = device_root(&[("s", device_toml("s", "extends = \"s\"\n"))]);
+        assert!(matches!(
+            root.device_with_lineage("s"),
+            Err(ConfigError::DeviceExtendsCycle { .. })
+        ));
+    }
+
+    #[test]
+    fn a_bad_extends_value_or_missing_parent_is_a_named_error() {
+        // Not a device name: caught while walking, so the message names the file that
+        // holds the value rather than a field on a merged value.
+        let (_tmp, root) = device_root(&[("n", device_toml("n", "extends = 3\n"))]);
+        match root.device_with_lineage("n").unwrap_err() {
+            ConfigError::InvalidDeviceExtends { device, found } => {
+                assert_eq!(device, "n");
+                assert_eq!(found, "integer");
+            }
+            other => panic!("expected InvalidDeviceExtends, got {other:?}"),
+        }
+
+        // A parent that does not exist is the ordinary not-found, naming the parent.
+        let (_tmp, root) = device_root(&[("m", device_toml("m", "extends = \"nope\"\n"))]);
+        match root.device_with_lineage("m").unwrap_err() {
+            ConfigError::NotFound { kind, name, .. } => {
+                assert_eq!((kind, name.as_str()), ("device", "nope"));
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        // A parent name that could traverse out of `devices/` is rejected before it is
+        // joined into a path — the chain walk is a second place a name enters one.
+        let (_tmp, root) = device_root(&[("t", device_toml("t", "extends = \"../../etc/x\"\n"))]);
+        assert!(matches!(
+            root.device_with_lineage("t"),
+            Err(ConfigError::InvalidName { kind: "device", .. })
+        ));
+    }
+
+    #[test]
+    fn an_overlay_retunes_a_variant_and_what_it_extends() {
+        // Both merge axes compose: the `extends` chain is flattened first, then the
+        // search path merges over the result. So an overlay can retune the parent (and
+        // have it reach the variant) or the variant alone.
+        let p = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(p.path().join("devices")).unwrap();
+        std::fs::write(
+            p.path().join("devices/base.toml"),
+            device_toml("base", "image_size = \"4G\"\n"),
+        )
+        .unwrap();
+        // The variant states no size, so what it reports is whatever it inherited.
+        std::fs::write(
+            p.path().join("devices/variant.toml"),
+            device_toml("variant", "extends = \"base\"\n"),
+        )
+        .unwrap();
+
+        let o = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(o.path().join("devices")).unwrap();
+        // Retune the *parent* only.
+        std::fs::write(o.path().join("devices/base.toml"), "image_size = \"9G\"\n").unwrap();
+
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+        assert_eq!(root.device("base").unwrap().image_size, "9G");
+        assert_eq!(
+            root.device("variant").unwrap().image_size,
+            "9G",
+            "an overlay on the parent reaches what extends it"
+        );
+    }
+
     /// A minimal parseable lock whose kernel commit is 40 x `commit_char`, for
     /// telling two on-disk locks apart.
     fn lock_toml(commit_char: char) -> String {
@@ -910,5 +1154,48 @@ mod tests {
             .starts_with(o.path()));
         // Absent everywhere → None (caller falls back to the host trust store).
         assert!(root.find_trust_anchor("absent.gpg", false).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_kmod_loads_from_its_own_layer_and_merges_across_the_search_path() {
+        let p = tempfile::tempdir().unwrap();
+        let o = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(p.path().join("kmods")).unwrap();
+        std::fs::create_dir_all(o.path().join("kmods")).unwrap();
+        std::fs::write(
+            p.path().join("kmods/aic8800.toml"),
+            "description = \"wifi\"\ngit = \"https://example.invalid/d.git\"\n\
+             ref = \"main\"\nsubdir = \"src\"\nmodules = [\"a\"]\n",
+        )
+        .unwrap();
+        let shipped = ConfigRoot::new(p.path().to_path_buf());
+        let k = shipped.kmod("aic8800").unwrap();
+        assert_eq!(k.git_ref, "main");
+        assert_eq!(k.modules, ["a"]);
+        // The layer carries no `name`: the stem is the identity, so the file and the
+        // thing it declares cannot disagree.
+        assert_eq!(k.patch_dir, "debian/patches", "patch_dir defaults");
+
+        // A kmod is a layer like any other, so an overlay retunes one key of it without
+        // forking the file — here, pinning the driver at a ref of the operator's own.
+        std::fs::write(o.path().join("kmods/aic8800.toml"), "ref = \"my-fork\"\n").unwrap();
+        let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+        let merged = root.kmod("aic8800").unwrap();
+        assert_eq!(merged.git_ref, "my-fork");
+        assert_eq!(merged.modules, ["a"], "unstated keys survive the merge");
+
+        // A missing kmod names the kmod, not the device that asked for it...
+        match shipped.kmod("absent").unwrap_err() {
+            ConfigError::NotFound { kind, name, .. } => {
+                assert_eq!(kind, "kmod");
+                assert_eq!(name, "absent");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        // ...and a traversing name never reaches a path join.
+        assert!(matches!(
+            shipped.kmod("../devices/h96-max-m9"),
+            Err(ConfigError::InvalidName { kind: "kmod", .. })
+        ));
     }
 }

@@ -108,7 +108,7 @@ pub(crate) fn blob_pins(lock: &Lock) -> Result<&boot2deb_core::lock::BlobsPin, E
 /// `context` describes the invocation.
 ///
 /// This is the single host-side command choke point (native compiles, kernel/u-boot
-/// `make`, `git`, the rootfs `mmdebstrap` bootstrap, `tar`, `dpkg-deb`), so it
+/// `make`, `git`, `tar`, `dpkg-deb`), so it
 /// normalizes the determinism-relevant environment here — `TZ=UTC` and
 /// `LC_ALL=C.UTF-8`, matching the cross sandbox's built-from-scratch `SANDBOX_ENV`
 /// discipline so a host's timezone/locale cannot leak into packaged output,
@@ -210,15 +210,14 @@ const CLONE_ATTEMPTS: u32 = 4;
 /// Shallow-clone `source` at `reference` into `tree`, retrying transient failures.
 ///
 /// Git hosts flake — a shallow clone can die mid-transfer on an HTTP 5xx, an RPC
-/// desync, or a dropped connection (e.g. the RK1's u-boot upstream at denx.de).
-/// A *transient* failure is retried (up to a small fixed attempt count) with an
-/// increasing backoff; a *non-transient* one (an unknown ref, auth failure, a
-/// missing `git`) fails immediately without wasting retries. Because a failed
-/// clone leaves a partial checkout that would make the next `git clone` refuse a
-/// non-empty target, the partial `tree` is removed between attempts — safe
-/// because callers only clone into a fresh path (an existing tree is reused, not
-/// re-cloned). On the final failure the underlying [`EngineError`] is returned
-/// unchanged, so the real cause is still surfaced.
+/// desync, or a dropped connection. A *transient* failure is retried (up to a small
+/// fixed attempt count) with an increasing backoff; a *non-transient* one (an unknown
+/// ref, auth failure, a missing `git`) fails immediately without wasting retries.
+/// Because a failed clone leaves a partial checkout that would make the next
+/// `git clone` refuse a non-empty target, the partial `tree` is removed between
+/// attempts — safe because callers only clone into a fresh path (an existing tree is
+/// reused, not re-cloned). On the final failure the underlying [`EngineError`] is
+/// returned unchanged, so the real cause is still surfaced.
 pub fn clone_shallow(
     source: &str,
     reference: &str,
@@ -1315,7 +1314,7 @@ mod tests {
 
     #[test]
     fn transient_clone_errors_are_retried() {
-        // The exact failures the flaky denx.de clone produced.
+        // The stderr a mid-transfer clone failure actually leaves behind.
         assert!(is_transient_clone_error(&clone_failure(
             "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502"
         )));
@@ -1839,7 +1838,9 @@ mod tests {
     #[test]
     fn reject_optionlike_guards_git_positionals() {
         // A benign URL/path/ref passes.
-        assert!(reject_optionlike("source", "https://git.denx.de/u-boot.git").is_ok());
+        assert!(
+            reject_optionlike("source", "https://git.u-boot-project.org/u-boot/u-boot.git").is_ok()
+        );
         assert!(reject_optionlike("source", "../linux").is_ok());
         assert!(reject_optionlike("ref", "v7.1.1").is_ok());
         // An option-looking source/ref is refused (the --upload-pack RCE vector).

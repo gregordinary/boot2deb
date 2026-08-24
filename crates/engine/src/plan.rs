@@ -13,7 +13,7 @@
 //! things are deliberately out of scope because neither is a static, lock-only
 //! prediction: the *compile* step of each node always re-runs (only the clone+patch
 //! tree is cached), and the rootfs node's cache is keyed on the live package
-//! solve (`mmdebstrap --simulate`), which needs the mirror.
+//! solve, which needs the mirror.
 
 use crate::signature::{self, RecordChange, SignatureManifest};
 use boot2deb_core::lock::Lock;
@@ -89,7 +89,7 @@ pub struct PlanInputs<'a> {
     pub device_dts: &'a [PathBuf],
     /// The build's `device_kmods` descriptors — each predicts a `kmod:<name>` tree
     /// node. Empty for a board with no out-of-tree modules.
-    pub device_kmods: &'a [boot2deb_core::model::DeviceKmod],
+    pub device_kmods: &'a [boot2deb_core::model::ResolvedKmod],
     /// The resolved local compat-patch paths per kmod name (as [`kmod`](crate::build::kmod)
     /// consumes them). Their content folds into each kmod tree signature, so an edited
     /// shim is reported as a rebuild; a kmod absent here folds no local patch.

@@ -1,0 +1,64 @@
+# kmods/aic8800.toml -- AICSemi AIC8800 SDIO Wi-Fi, tracked at radxa's packaging repo.
+#
+# A device opts in with `device_kmods = ["aic8800"]`. Everything below is a property of
+# the driver, not of any board, so a second board carrying the chip names this kmod
+# rather than restating it -- and cannot retune it, since the deb (`aic8800-modules-
+# <kver>`) and the artifact-cache node (`kmod:aic8800`) are keyed on the name alone.
+#
+# The build fetches the repo at the locked commit, applies `repo_patches` (radxa's own
+# quilt) then `local_patches` (ours, from kmods/aic8800/patches/), builds `aic8800_bsp`
+# and `aic8800_fdrv` against the board's freshly built kernel, and ships them as
+# `aic8800-modules-<kver>`.
+
+description = "AICSemi AIC8800 SDIO Wi-Fi (radxa-pkg tracking fork)"
+
+git    = "https://github.com/radxa-pkg/aic8800.git"
+ref    = "main"
+subdir = "src/SDIO/driver_fw/driver/aic8800"
+
+# The subset of radxa's `debian/patches/series` the SDIO build needs, in series order
+# (firmware path, the SDIO fall-through fix, the cumulative per-kernel build guards
+# through 6.19, and the low-memory/vmalloc fixes). The PCIE/USB/Allwinner/BT entries
+# radxa also ships are irrelevant to an SDIO arm64 build and are omitted.
+repo_patches = [
+    "fix-sdio-firmware-path.patch",
+    "fix-sdio-fall-through.patch",
+    "fix-linux-6.1-build.patch",
+    "fix-linux-6.13-build.patch",
+    "fix-linux-6.14-build.patch",
+    "fix-linux-6.15-build.patch",
+    "fix-linux-6.16-build.patch",
+    "fix-linux-6.17-build.patch",
+    "fix-linux-6.19-build.patch",
+    "fix-vmalloc-not-include.patch",
+    "fix-build-on-low-memory-devices.patch",
+]
+
+# Ours, from kmods/aic8800/patches/, applied after radxa's. Both are the SDIO subsets of
+# radxa patches whose full form touches the PCIE/USB trees an SDIO build does not build.
+#
+#  - 0001: radxa's 7.1 build fix touches only the USB tree, so the SDIO cfg80211 ops
+#    (add_key/get_key/.../tdls) still carry the pre-7.1 `net_device *` signature and will
+#    not compile on 7.1. This ports radxa's USB fix onto the SDIO `rwnx_main.c`/
+#    `rwnx_tdls.c`; its guard is `>=7.1.0`, so it also covers 7.2+. Carried until radxa
+#    merges the equivalent SDIO fix upstream.
+#  - 0002: lowers both modules' compiled-in debug default to errors only, so a quiet
+#    console does not depend on a modprobe.d file reaching the image.
+local_patches = [
+    "0001-sdio-linux-7.1.patch",
+    "0002-quiet-log-level.patch",
+]
+
+# `CONFIG_FDRV_NO_REG_SDIO=y` takes the driver's direct-probe SDIO path (the registered-
+# bus bind is rejected -EBUSY on a 7.1 kernel, so wlan0 is never created otherwise);
+# `CONFIG_AIC8800_BTLPM_SUPPORT=n` drops the BT low-power module, which needs the removed
+# `of_gpio.h` and is out of scope (BT is a separate UART path).
+make_args = ["CONFIG_AIC8800_BTLPM_SUPPORT=n", "CONFIG_FDRV_NO_REG_SDIO=y"]
+modules   = ["aic8800_bsp", "aic8800_fdrv"]
+
+# The driver loads its firmware from the same pinned repo (byte-matched to the driver
+# revision), so boot2deb ships it from there rather than vendoring the license-unstated
+# blobs in-tree. It becomes its own `Architecture: all` `aic8800-firmware` deb -- kept out
+# of the per-kernel modules deb so two coexisting kernels never collide over the firmware
+# path. `install` is the path fix-sdio-firmware-path.patch compiles into the BSP loader.
+firmware = { subdir = "src/SDIO/driver_fw/fw/aic8800D80", install = "usr/lib/firmware/aic8800_fw/SDIO/aic8800D80" }

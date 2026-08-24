@@ -1,7 +1,7 @@
 //! boot2deb CLI — a thin client over the config core and the engine.
 //!
 //! Subcommands: `list-devices`, `list-recipes`, `list-kernels`, `list-features`,
-//! `resolve`, and `doctor` (config inspection + host preflight); `new-device`
+//! `list-kmods`, `resolve`, and `doctor` (config inspection + host preflight); `new-device`
 //! (scaffold a new device + recipe from the typed model); `update` (resolve upstream
 //! refs into the lock); `verify-patches`, `verify-config`, and `verify-sources` (the
 //! patch, kernel-config, and source-durability gates); `patch import` (fetch +
@@ -71,13 +71,14 @@ fn run(root: &ConfigRoot, command: Command, json: bool) -> Result<(), Box<dyn st
         Command::ListRecipes => commands::list::recipes(root, json),
         Command::ListKernels => commands::list::kernels(root, json),
         Command::ListFeatures => commands::list::features(root, json),
+        Command::ListKmods => commands::list::kmods(root, json),
         Command::SupportMatrix { markdown } => commands::support_matrix::run(root, markdown),
         Command::NewDevice { name, args } => commands::new_device::run(root, &name, args),
         Command::Resolve { target, overrides } => {
             commands::resolve::run(root, &target, overrides.into(), json)
         }
-        Command::Doctor { target, overrides } => {
-            commands::doctor::run(root, target, overrides.into())
+        Command::Doctor { target, work_dir, overrides } => {
+            commands::doctor::run(root, target, work_dir, overrides.into())
         }
         Command::Update { recipe, args } => commands::update::run(root, &recipe, args),
         Command::VerifyPatches { recipe, args } => {

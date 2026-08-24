@@ -3,9 +3,8 @@
 //! pinned in `RootfsPin.manifest_sha256` — a later build verifies that a fresh
 //! solve reproduces it.
 //!
-//! The `mmdebstrap` backend cannot feed the manifest to apt as solver input (that
-//! is `debrepo`'s native path), so it verifies *after* the solve: hash the
-//! freshly written manifest and compare it to the committed pin. A mismatch means
+//! Verification happens *after* the solve: hash the freshly written manifest and
+//! compare it to the committed pin. A mismatch means
 //! the live mirror moved off the pinned package set — a real reproducibility
 //! failure, so it is a hard error by default ([`ManifestDrift`](EngineError::ManifestDrift)),
 //! with the captured snapshot (`--snapshot pin`) or an explicit

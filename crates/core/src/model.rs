@@ -12,6 +12,25 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+/// Console log level every build boots with: show `KERN_ERR` and worse, keep the
+/// rest in the kernel ring buffer.
+///
+/// A console at the kernel's default level shows everything down to `KERN_INFO`,
+/// which lets a single chatty driver print faster than a login can be typed — the
+/// console becomes unusable exactly when a first boot needs it. Out-of-tree vendor
+/// drivers are the usual source: a bare `printk()` carries no severity, so it lands
+/// at `CONFIG_MESSAGE_LOGLEVEL_DEFAULT` (`KERN_WARNING`) no matter how trivial the
+/// message, and such calls are often ungated by any of the driver's own debug knobs.
+/// Gating the *console* bounds that noise for every driver at once, including the
+/// ones whose verbosity nothing else can reach.
+///
+/// Nothing is lost: suppressed lines still reach the ring buffer and the journal, so
+/// `dmesg` and `journalctl -k` show the full boot. A board that needs a louder
+/// console appends its own `loglevel=` to
+/// [`kernel_cmdline`](DeviceLayer::kernel_cmdline) — device arguments are appended
+/// after this one and the kernel takes the last value.
+pub const CONSOLE_LOGLEVEL_ARG: &str = "loglevel=4";
+
 /// Instruction-set architecture of a target.
 ///
 /// Serialized in kebab-case (`arm64`, `armv7`, `riscv64`), which is also the
@@ -29,7 +48,7 @@ pub enum Arch {
 }
 
 impl Arch {
-    /// The Debian architecture name for this ISA — what `dpkg`, `mmdebstrap`, and
+    /// The Debian architecture name for this ISA — what `dpkg`, the archive, and
     /// deb `Architecture:` fields expect. This differs from [`as_str`](Arch::as_str)
     /// for 32-bit Arm, whose Debian architecture is `armhf` (hard-float), not the
     /// `armv7` ISA spelling used for the config file stem and kbuild `ARCH`.
@@ -214,27 +233,34 @@ pub struct UserspaceSources {
     pub libmali: Option<GitSource>,
 }
 
-/// Default in-repo directory a [`DeviceKmod`]'s quilt patches live in.
+/// Default in-repo directory a [`KmodLayer`]'s quilt patches live in.
 fn default_kmod_patch_dir() -> String {
     "debian/patches".to_string()
 }
 
-/// One out-of-tree kernel-module set a board carries: a pinned git repo, the in-repo
-/// subdirectory the `make M=` build runs in, the patches to apply first, and the
-/// module objects to ship. Board-specific, so it lives on the device layer beside
-/// [`device_patch_profiles`](DeviceLayer::device_patch_profiles) — a driver only one
-/// board carries never rides its siblings. The kmod build node fetches the repo at the
-/// locked commit, applies [`patches`](Self::patches) (from the repo's own quilt) then
+/// One out-of-tree kernel-module set, as authored in `kmods/<name>.toml`: a pinned git
+/// repo, the in-repo subdirectory the `make M=` build runs in, the patches to apply
+/// first, and the module objects to ship.
+///
+/// Its own config layer rather than a block on the device, because every field here is
+/// a property of the *driver*, not of the board — two boards carrying the same chip name
+/// the same kmod instead of copying its declaration. A device selects one by name
+/// ([`device_kmods`](DeviceLayer::device_kmods)) and cannot override any field: the deb
+/// is `<name>-modules-<kver>` and the artifact-cache node is `kmod:<name>`, so two boards
+/// tuning one name differently would put different content behind the same key. A board
+/// needing different `make_args` authors its own `kmods/<name>.toml`.
+///
+/// The kmod build node fetches the repo at the locked commit, applies
+/// [`repo_patches`](Self::repo_patches) (from the repo's own quilt) then
 /// [`local_patches`](Self::local_patches) (boot2deb-authored, e.g. a per-kernel compat
 /// shim), builds the module against the freshly built kernel tree, and stages the
-/// resulting `.ko`s into `/lib/modules/<kver>/updates/`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// resulting `.ko`s into `/lib/modules/<kver>/updates/`. §4.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceKmod {
-    /// Module-set name — the deb becomes `<name>-modules-<kver>` and the build/cache
-    /// node is `kmod:<name>`. Must be a dpkg-package-name-safe token (lowercase
-    /// alphanumeric plus `-`/`+`/`.`, starting alphanumeric) and unique per device.
-    pub name: String,
+pub struct KmodLayer {
+    /// One-line description, shown by `list-kmods` — what chip or subsystem the driver
+    /// serves, since the name alone is usually a part number.
+    pub description: String,
     /// Clone URL; the exact commit is pinned in the lock like a [`GitSource`].
     pub git: String,
     /// Default branch/tag/commit; the exact commit is pinned in the lock (`ref` in
@@ -245,17 +271,19 @@ pub struct DeviceKmod {
     /// `src/SDIO/driver_fw/driver/aic8800`). Resolution guarantees it is relative and
     /// `..`-free.
     pub subdir: String,
-    /// In-repo directory holding [`patches`](Self::patches) (default `debian/patches`).
+    /// In-repo directory holding [`repo_patches`](Self::repo_patches) (default
+    /// `debian/patches`).
     #[serde(default = "default_kmod_patch_dir")]
     pub patch_dir: String,
-    /// Ordered subset of [`patch_dir`](Self::patch_dir)'s patches to `git apply -p1`,
-    /// in apply order. Each is a bare filename (no path separator). Empty builds the
-    /// repo as fetched.
+    /// Ordered subset of the *fetched repo's own* quilt under
+    /// [`patch_dir`](Self::patch_dir) to `git apply -p1`, in apply order. Each is a bare
+    /// filename (no path separator). Empty builds the repo as fetched.
     #[serde(default)]
-    pub patches: Vec<String>,
-    /// Ordered boot2deb-authored patches applied *after* the in-repo ones, as
-    /// config-root-relative paths (resolved along the overlay search path like a
-    /// fragment). This is where a per-kernel compat shim we maintain — and intend to
+    pub repo_patches: Vec<String>,
+    /// Ordered boot2deb-authored patches applied *after* the repo's own, each a bare
+    /// filename under `kmods/<name>/patches/` (resolved along the overlay search path
+    /// like a fragment, so an out-of-tree overlay can replace a shim without forking the
+    /// kmod). This is where a per-kernel compat shim we maintain — and intend to
     /// upstream — lives until the tracked fork carries it.
     #[serde(default)]
     pub local_patches: Vec<String>,
@@ -277,7 +305,43 @@ pub struct DeviceKmod {
     pub firmware: Option<KmodFirmware>,
 }
 
-/// Firmware a [`DeviceKmod`] ships from its own pinned repo. Kept out of the per-kernel
+/// A [`KmodLayer`] with the name resolution took it from — the `kmods/<name>.toml` stem,
+/// which is the whole identity of a kmod (the deb is `<name>-modules-<kver>`, the cache
+/// node `kmod:<name>`, the lock pin keyed on it). Carrying the name only here, and not in
+/// the authored layer, keeps a file and the thing it declares from disagreeing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedKmod {
+    /// The `kmods/<name>.toml` stem. Resolution guarantees it is dpkg-package-name-safe
+    /// (lowercase alphanumeric plus `-`/`+`/`.`, starting alphanumeric).
+    pub name: String,
+    /// One-line description of the driver, carried so a resolved build reads as what it
+    /// builds rather than a list of part numbers.
+    pub description: String,
+    /// Clone URL; the exact commit is pinned in the lock.
+    pub git: String,
+    /// Default branch/tag/commit the lock pins a commit from.
+    pub git_ref: String,
+    /// `make M=<subdir>` path. Resolution guarantees it is relative and `..`-free.
+    pub subdir: String,
+    /// In-repo directory holding [`repo_patches`](Self::repo_patches). Resolution
+    /// guarantees it is relative and `..`-free.
+    pub patch_dir: String,
+    /// The fetched repo's own quilt entries to apply, in order; each a bare filename.
+    pub repo_patches: Vec<String>,
+    /// boot2deb-authored patches applied after the repo's own, in order; each a bare
+    /// filename the CLI resolves to `kmods/<name>/patches/<file>` along the search path.
+    pub local_patches: Vec<String>,
+    /// Extra `make` variables. Resolution guarantees each is a bare `KEY=VALUE` with no
+    /// whitespace or shell metacharacters.
+    pub make_args: Vec<String>,
+    /// `.ko` basenames to ship; each a bare name. Empty ships everything built.
+    pub modules: Vec<String>,
+    /// Firmware from the same pin, or `None`. Resolution guarantees both its paths are
+    /// relative and `..`-free.
+    pub firmware: Option<KmodFirmware>,
+}
+
+/// Firmware a [`KmodLayer`] ships from its own pinned repo. Kept out of the per-kernel
 /// modules deb deliberately: firmware is not kernel-version-specific, and two coexisting
 /// kernels (A/B slots, an in-progress upgrade) would each own the same firmware path and
 /// collide in dpkg. So it becomes its own `Architecture: all` `<name>-firmware` deb with
@@ -762,6 +826,23 @@ pub struct DeviceDepthcharge {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceLayer {
+    /// Another device this one is a variant of, by name.
+    ///
+    /// A variant board — the same hardware with one block enabled, a different DTB, a
+    /// different memory fitting — states only its deltas, exactly as a device states
+    /// only its deltas from its soc/arch/boot-method layers. The parent's file is
+    /// merged under this one with the same last-wins rules the overlay search path
+    /// uses: tables merge key-by-key, and a scalar or array is replaced wholesale.
+    /// Chains are walked to the base-most device, and a cycle is
+    /// [`crate::error::ConfigError::DeviceExtendsCycle`].
+    ///
+    /// The parent's *assets* come too: its `overlay/` tree is laid in before this
+    /// device's, so a variant inherits the parent's runtime config and can override
+    /// any file of it. This is the half a hand-copied variant cannot express, and the
+    /// reason a variant extends rather than duplicates — a board's driver tuning,
+    /// services, and keymaps are as much a part of it as its TOML keys.
+    #[serde(default)]
+    pub extends: Option<String>,
     /// Human-readable board name.
     pub description: String,
     /// The SoC this board uses; resolves arch, DT dir, and module list.
@@ -815,14 +896,19 @@ pub struct DeviceLayer {
     /// Empty/absent for a board that adds no series of its own.
     #[serde(default)]
     pub device_patch_profiles: Vec<String>,
-    /// Out-of-tree kernel-module sets this board builds against its own kernel and
-    /// stages into `/lib/modules/<kver>/updates/` (each a fetched git repo, not a
-    /// series in the `patches` repo). Board-specific like
-    /// [`device_patch_profiles`](Self::device_patch_profiles); a distro-package kernel
-    /// compiles nothing, so naming any here is a typed error. Empty/absent for a board
-    /// that carries no out-of-tree module.
+    /// Names of the out-of-tree kernel-module sets this board builds against its own
+    /// kernel and stages into `/lib/modules/<kver>/updates/`, each resolved from
+    /// `kmods/<name>.toml` ([`KmodLayer`]). Board opt-in like
+    /// [`device_patch_profiles`](Self::device_patch_profiles) — a driver only one board
+    /// carries never rides its siblings — while the driver's own declaration is shared,
+    /// so a second board with the same chip names it rather than copying it. A
+    /// distro-package kernel compiles nothing, so naming any here is a typed error.
+    /// Empty/absent for a board that carries no out-of-tree module.
+    ///
+    /// Arrays replace wholesale across [`extends`](Self::extends), so a variant that
+    /// wants its parent's drivers plus one more restates the whole list.
     #[serde(default)]
-    pub device_kmods: Vec<DeviceKmod>,
+    pub device_kmods: Vec<String>,
     /// Kernel definitions valid for this board; an override must be one of these.
     pub supported_kernels: Vec<String>,
     /// Kernel used when none is specified.
@@ -1702,6 +1788,16 @@ pub struct ResolvedDepthchargeBoot {
 pub struct ResolvedBuild {
     /// Device name that was resolved.
     pub device: String,
+    /// The resolved device and everything it extends, base-most first, ending with
+    /// [`device`](Self::device).
+    ///
+    /// Carried because the merged layers no longer show the chain, and the engine
+    /// needs it: a device's `overlay/` tree is found by its *name*, so laying in only
+    /// the resolved device's would silently drop the parent's runtime config from a
+    /// variant image. Laid in lineage order, so a variant's copy of a file wins. A
+    /// device that extends nothing has a one-entry lineage, which makes the
+    /// no-inheritance case the same code path rather than a special case.
+    pub device_lineage: Vec<String>,
     /// Device description.
     pub description: String,
     /// Target architecture (from the SoC layer).
@@ -1769,12 +1865,14 @@ pub struct ResolvedBuild {
     /// `..`), names a `.dts`/`.dtsi`, and that [`kernel_dtb`](Self::kernel_dtb) is
     /// compiled from one of them. §4.
     pub device_dts: Vec<String>,
-    /// Out-of-tree kernel-module sets (from the device), each built against this
-    /// build's kernel tree and staged into `/lib/modules/<kver>/updates/`. Empty for a
-    /// board that carries none. Resolution guarantees each `subdir`/`patch_dir` is
-    /// contained, each patch/module entry is a bare name, and — since the modules need
-    /// a tree to build against — that the kernel is compiled, not a distro package.
-    pub device_kmods: Vec<DeviceKmod>,
+    /// Out-of-tree kernel-module sets, in the order the device named them: each
+    /// `kmods/<name>.toml` loaded and validated, built against this build's kernel tree
+    /// and staged into `/lib/modules/<kver>/updates/`. Empty for a board that carries
+    /// none. Resolution guarantees each name is unique and dpkg-safe, each
+    /// `subdir`/`patch_dir` is contained, each patch/module entry is a bare name, and —
+    /// since the modules need a tree to build against — that the kernel is compiled, not
+    /// a distro package.
+    pub device_kmods: Vec<ResolvedKmod>,
     /// Extra kernel command-line arguments (from the device), space-separated and
     /// trimmed; empty when the board declares none. Resolution guarantees the value
     /// is a single line of plain arguments, safe to embed in the sourced

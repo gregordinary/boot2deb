@@ -1,30 +1,25 @@
-//! Rootfs node — the ferroday-cage provisioner backend, an in-process
-//! `Debian` bootstrap that drops `mmdebstrap` from the OS rootfs path.
+//! The rootfs bootstrap — an in-process `Debian` provisioner run, no external
+//! bootstrap binary.
 //!
-//! This is the `debrepo`-shaped backend the [`Rootfs`](super::Rootfs) trait was
-//! designed for. Where [`MmdebstrapRootfs`](super::MmdebstrapRootfs) shells out to
-//! one `mmdebstrap --mode=unshare`, this resolves and materializes the same rootfs
-//! with [`ferroday_cage`]'s pure-Rust Debian provisioner — the same library the
-//! build sandbox uses ([`crate::sandbox`]) — talking to the archive directly, no
-//! external bootstrap binary.
+//! [`build_rootfs`] resolves and materializes the device userland with
+//! [`ferroday_cage`]'s pure-Rust Debian provisioner — the same library the build
+//! sandbox uses ([`crate::sandbox`]) — talking to the archive directly.
 //!
 //! The image is a **deployed product**, so its files carry real system ownership
 //! (`root:shadow` on `/etc/shadow`, `_apt`, `systemd-journald`, the setgid `dbus`
 //! and `ssh` helpers). The provisioner therefore runs under ferroday-cage's
 //! **subordinate** identity map (real ids, via the `subid` feature's
-//! `newuidmap`/`newgidmap` — the same mechanism `mmdebstrap --mode=unshare` uses),
-//! and the finished tree is emitted with [`provision::export_tar`], which re-enters
-//! that map so the on-host offset ids (`100000 + n`) round-trip to the ids the
-//! rootfs intends; a plain host-side `tar` would record the offset ids and miss the
-//! `security.*` xattrs a setcap'd binary carries. Device nodes are excluded, as the
-//! runtime provides its own.
+//! `newuidmap`/`newgidmap`), and the finished tree is emitted with [`Export`],
+//! which re-enters that map so the on-host offset ids (`100000 + n`) round-trip to
+//! the ids the rootfs intends; a plain host-side `tar` would record the offset ids
+//! and miss the `security.*` xattrs a setcap'd binary carries. Device nodes are
+//! excluded, as the runtime provides its own.
 //!
 //! The pipeline, keyed by the resolved [`Plan`](ferroday_cage::provision::debian::Plan):
 //!
 //! 1. **Resolve** the plan (`Debian::resolve`) — the exact install set with each
 //!    `.deb`'s archive-recorded sha256, without downloading. This one call keys the
-//!    early-cutoff cache *and* becomes the content-pinned manifest, replacing both
-//!    the `mmdebstrap --simulate` solve and the in-bootstrap hash-capture hook.
+//!    early-cutoff cache *and* becomes the content-pinned manifest.
 //! 2. On a cache miss, **provision** packages into a staging tree
 //!    (`provision::ensure`), with the build's own `.deb`s as a local trusted
 //!    `dists/` mirror, the feature repositories, and the pre-install overlay laid in
@@ -38,11 +33,10 @@
 //!    both in the shared [`RootfsStore`].
 //!
 //! The account is created **locked**; the unique per-image first-boot password is
-//! spliced into `/etc/shadow` at image assembly, keeping the cached tree reusable —
-//! exactly as the `mmdebstrap` backend does.
+//! spliced into `/etc/shadow` at image assembly, keeping the cached tree reusable.
 
 use super::{
-    config, stage_overlay, stage_preinstall_overlay, AptRepo, BootConfig, Rootfs, RootfsArtifacts,
+    config, stage_overlay, stage_preinstall_overlay, AptRepo, BootConfig, RootfsArtifacts,
     RootfsOptions, DEFAULT_USER, REQUIRED_INITRD_MODULES,
 };
 use crate::bootstrap::COMPONENTS;
@@ -53,8 +47,8 @@ use crate::rootcache::{self, RootfsStore};
 use crate::sandbox::{forward_bootstrap_event, StepObserver};
 use boot2deb_core::model::ResolvedBuild;
 use ferroday_cage::provision::debian::{Debian, DebianEvent, Plan, Priority, Repository};
-use ferroday_cage::provision;
-use ferroday_cage::{Cage, IdentityMap, Network};
+use ferroday_cage::provision::{self, Export};
+use ferroday_cage::{IdentityMap, Network};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,173 +61,215 @@ use std::process::Command;
 /// are meant to persist for on-device updates.
 const LOCAL_REPO_NAME: &str = "boot2deb-local";
 
-/// The ferroday-cage provisioner rootfs backend. A unit struct — every input
-/// arrives through [`Rootfs::build`]'s [`RootfsOptions`].
-pub struct ProvisionerRootfs;
+/// Bootstrap `build`'s rootfs per `opts`, emitting the step's
+/// [`Event`](crate::event::Event)s to `sink`: the `tar` archive the image node
+/// formats and the content-pinned package manifest beside it.
+pub fn build_rootfs(
+    build: &ResolvedBuild,
+    opts: &RootfsOptions,
+    sink: &dyn EventSink,
+) -> Result<RootfsArtifacts, EngineError> {
+    let step = Step::start(sink, "rootfs");
+    std::fs::create_dir_all(opts.out_dir).map_err(|s| EngineError::io(opts.out_dir, s))?;
+    if opts.mirrors.is_empty() {
+        return Err(EngineError::Bootstrap {
+            context: "configure the rootfs bootstrap".into(),
+            message: "no Debian mirror was resolved".into(),
+        });
+    }
+    let arch = build.arch.debian_arch();
 
-impl Rootfs for ProvisionerRootfs {
-    fn build(
-        &self,
-        build: &ResolvedBuild,
-        opts: &RootfsOptions,
-        sink: &dyn EventSink,
-    ) -> Result<RootfsArtifacts, EngineError> {
-        let step = Step::start(sink, "rootfs");
-        std::fs::create_dir_all(opts.out_dir).map_err(|s| EngineError::io(opts.out_dir, s))?;
-        if opts.mirrors.is_empty() {
-            return Err(EngineError::Bootstrap {
-                context: "configure the rootfs bootstrap".into(),
-                message: "no Debian mirror was resolved".into(),
-            });
-        }
-        let arch = build.arch.debian_arch();
+    // Caller-owned staging (overlays + local repo). A private temp under the
+    // caller's own ownership suffices: the provisioner's acquire runs in-process
+    // as the caller, not under a separate mapped `_apt` uid, so nothing here has
+    // to be traversable by another identity. Removed on drop.
+    let work = tempfile::Builder::new()
+        .prefix("boot2deb-prov-")
+        .tempdir()
+        .map_err(|s| EngineError::io(&std::env::temp_dir(), s))?;
 
-        // Caller-owned staging (overlays + local repo). Unlike the mmdebstrap
-        // backend this needs no world-traversable `0711` dance: the provisioner's
-        // acquire runs in-process as the caller, not under a separate mapped
-        // `_apt` uid, so a private temp under the caller's own ownership is read
-        // fine. Removed on drop — all of it is caller-owned.
-        let work = tempfile::Builder::new()
-            .prefix("boot2deb-prov-")
-            .tempdir()
-            .map_err(|s| EngineError::io(&std::env::temp_dir(), s))?;
+    // 1. Overlays: the pre-install tree (laid before maintainer scripts run,
+    //    via the provisioner's pre-configure hook) and the customize tree
+    //    (laid after, so it wins). Both merge the layer overlays plus this
+    //    node's generated config.
+    let preinstall = work.path().join("overlay-pre");
+    stage_preinstall_overlay(
+        &preinstall,
+        opts.preinstall_overlay_dirs,
+        build,
+        opts.boot_config,
+        &step,
+    )?;
+    let overlay = work.path().join("overlay");
+    stage_overlay(
+        &overlay,
+        opts.overlay_dirs,
+        build,
+        opts.rootfs_partuuid,
+        opts.image_identity,
+        &step,
+    )?;
 
-        // 1. Overlays: the pre-install tree (laid before maintainer scripts run,
-        //    via the provisioner's pre-configure hook) and the customize tree
-        //    (laid after, so it wins). Both merge the layer overlays plus this
-        //    node's generated config, exactly as the mmdebstrap backend stages them.
-        let preinstall = work.path().join("overlay-pre");
-        stage_preinstall_overlay(
-            &preinstall,
-            opts.preinstall_overlay_dirs,
-            build,
-            opts.boot_config,
-            &step,
-        )?;
-        let overlay = work.path().join("overlay");
-        stage_overlay(
-            &overlay,
-            opts.overlay_dirs,
-            build,
-            opts.rootfs_partuuid,
-            opts.image_identity,
-            &step,
-        )?;
+    // 2. The persistent download cache (content-addressed, reused across
+    //    builds), beside boot2deb's own rootfs cache when one is configured.
+    let deb_cache = match opts.cache_dir {
+        Some(dir) => dir.join("provisioner-debs"),
+        None => work.path().join("debs"),
+    };
 
-        // 2. The build's own `.deb`s as a trusted `dists/` local mirror, and the
-        //    feature repositories, both merged into the provisioner's resolution.
-        let localrepo =
-            LocalDistsRepo::assemble(&work.path().join("localrepo"), opts.repo_debs, build.image_suite(), arch, &step)?;
+    // 3. The build's own `.deb`s as a trusted `dists/` local mirror, and the
+    //    feature repositories, both merged into the provisioner's resolution.
+    //
+    //    The pool sits beside the download cache rather than in `work`, so it lands
+    //    on the volume sized for build artifacts instead of `TMPDIR`, and on a
+    //    filesystem that can share extents with the build tree it holds each `.deb`
+    //    as a reflink rather than a second copy. It is named per-build because
+    //    [`LocalDistsRepo::assemble`] clears the directory first: two builds sharing
+    //    one cache directory would otherwise wipe each other's pool, which is a
+    //    collision no lock inside `Pool` can resolve. The guard removes it when the
+    //    node returns.
+    let pool_dir = match opts.cache_dir {
+        Some(dir) => dir.join(format!("provisioner-pool-{}", std::process::id())),
+        None => work.path().join("localrepo"),
+    };
+    let _pool = PoolDir(pool_dir.clone());
+    let localrepo =
+        LocalDistsRepo::assemble(&pool_dir, opts.repo_debs, build.image_suite(), arch, &step)?;
 
-        // 3. The persistent download cache (content-addressed, reused across
-        //    builds), beside boot2deb's own rootfs cache when one is configured.
-        let deb_cache = match opts.cache_dir {
-            Some(dir) => dir.join("provisioner-debs"),
-            None => work.path().join("debs"),
-        };
+    let tarball = opts.out_dir.join(format!("{}-rootfs.tar", build.device));
 
-        let tarball = opts.out_dir.join(format!("{}-rootfs.tar", build.device));
-
-        // 4. Build the provisioner and resolve the plan. The plan is both the
-        //    cache key and the manifest, so it is taken up front, before the
-        //    cache is even consulted. The progress sink borrows `step`
-        //    immutably for the provisioner's whole life, which coexists with the
-        //    logging below.
-        let mut sink_fn = |event: DebianEvent<'_>| forward_bootstrap_event(&step, event);
-        let mut debian = build_debian(
-            build,
-            opts,
-            &localrepo.file_url(),
-            feature_repositories(opts.apt_sources)?,
-            &deb_cache,
-            &preinstall,
-            &mut sink_fn,
-        )?;
-        step.log("resolving the rootfs package plan (ferroday-cage provisioner)");
-        let plan = debian.resolve().map_err(|e| EngineError::Bootstrap {
+    // 4. Build the provisioner and resolve the plan. The plan is both the
+    //    cache key and the manifest, so it is taken up front, before the
+    //    cache is even consulted. The progress sink is bound per call, so
+    //    its borrow of `step` lasts one run and never outlives the
+    //    provisioner into the logging below.
+    let mut sink_fn = |event: DebianEvent<'_>| forward_bootstrap_event(&step, event);
+    let mut debian = build_debian(
+        build,
+        opts,
+        &localrepo.file_url(),
+        feature_repositories(opts.apt_sources)?,
+        &deb_cache,
+        &preinstall,
+    )?;
+    step.log("resolving the rootfs package plan (ferroday-cage provisioner)");
+    let plan = debian
+        .observe(&mut sink_fn)
+        .resolve()
+        .map_err(|e| EngineError::Bootstrap {
             context: "resolve the rootfs plan".into(),
             message: e.to_string(),
         })?;
+    step.log(format!(
+        "resolved {} packages ({} mirror(s), {} local .deb(s))",
+        plan.packages.len(),
+        opts.mirrors.len(),
+        opts.repo_debs.len()
+    ));
+
+    // 5. Early-cutoff cache, keyed by the plan's solved set plus the overlay
+    //    and local-repo content: a moved mirror resolves a different plan, so a
+    //    hit can never be stale.
+    let cache = match opts.cache_dir {
+        Some(dir) => {
+            let key = rootfs_key(build, opts, &plan, &preinstall, &overlay)?;
+            step.log(format!("rootfs cache key {}", key.short()));
+            Some((RootfsStore::new(dir), key))
+        }
+        None => None,
+    };
+    let hit = match &cache {
+        Some((store, key)) if !opts.refresh => store.get(key),
+        _ => None,
+    };
+
+    if let Some(hit) = hit {
+        let key = &cache.as_ref().expect("hit implies a cache").1;
         step.log(format!(
-            "resolved {} packages ({} mirror(s), {} local .deb(s))",
-            plan.packages.len(),
-            opts.mirrors.len(),
-            opts.repo_debs.len()
+            "rootfs cache hit {} — restoring, skipping bootstrap",
+            key.short()
         ));
-
-        // 5. Early-cutoff cache, keyed by the plan's solved set plus the overlay
-        //    and local-repo content — the same structure the mmdebstrap backend
-        //    keys on, in a distinct signature domain so the two never share a tree.
-        let cache = match opts.cache_dir {
-            Some(dir) => {
-                let key = provisioner_key(build, opts, &plan, &preinstall, &overlay)?;
-                step.log(format!("rootfs cache key {}", key.short()));
-                Some((RootfsStore::new(dir), key))
+        std::fs::copy(&hit.tar, &tarball).map_err(|s| EngineError::io(&hit.tar, s))?;
+        std::fs::copy(&hit.manifest, opts.manifest_out)
+            .map_err(|s| EngineError::io(&hit.manifest, s))?;
+        step.progress(75);
+    } else {
+        step.progress(20);
+        step.log(format!(
+            "bootstrapping {} {} rootfs into a staging tree (subordinate id-map, real ownership)",
+            build.arch, build.image_suite(),
+        ));
+        // A transient provisioned tree carrying subordinate-mapped ownership
+        // the caller cannot unlink; the guard removes it through the map. Kept
+        // out of `work` so its TempDir drop is not asked to remove ids it
+        // cannot. `provision::ensure` requires a non-existent destination.
+        let rootfs_dir = std::env::temp_dir()
+            .join(format!("boot2deb-prov-rootfs-{}", std::process::id()));
+        let _ = provision::remove(&rootfs_dir);
+        // The bootstrap resolves the install closure a second time, for itself,
+        // and installs *that* result — the plan above was resolved earlier and
+        // only keys the cache. `DebianEvent::Resolved` carries the bootstrap's
+        // own resolution, so capturing it here is what lets the manifest describe
+        // the packages the image actually carries: between the two resolutions
+        // the archive can publish, and a manifest resolved before the install is
+        // then a claim about a set that was never installed.
+        let mut installed: Option<Plan> = None;
+        let mut bootstrap_sink = |event: DebianEvent<'_>| {
+            if let DebianEvent::Resolved { plan, .. } = &event {
+                installed = Some((*plan).clone());
             }
-            None => None,
+            forward_bootstrap_event(&step, event);
         };
-        let hit = match &cache {
-            Some((store, key)) if !opts.refresh => store.get(key),
-            _ => None,
-        };
-
-        if let Some(hit) = hit {
-            // The provisioner is done — release its borrow of `step` (the progress
-            // sink holds it) so the completion can move `step` at the end.
-            drop(debian);
-            let key = &cache.as_ref().expect("hit implies a cache").1;
-            step.log(format!(
-                "rootfs cache hit {} — restoring, skipping bootstrap",
-                key.short()
-            ));
-            std::fs::copy(&hit.tar, &tarball).map_err(|s| EngineError::io(&hit.tar, s))?;
-            std::fs::copy(&hit.manifest, opts.manifest_out)
-                .map_err(|s| EngineError::io(&hit.manifest, s))?;
-            step.progress(75);
-        } else {
-            step.progress(20);
-            step.log(format!(
-                "bootstrapping {} {} rootfs into a staging tree (subordinate id-map, real ownership)",
-                build.arch, build.image_suite(),
-            ));
-            // A transient provisioned tree carrying subordinate-mapped ownership
-            // the caller cannot unlink; the guard removes it through the map. Kept
-            // out of `work` so its TempDir drop is not asked to remove ids it
-            // cannot. `provision::ensure` requires a non-existent destination.
-            let rootfs_dir = std::env::temp_dir()
-                .join(format!("boot2deb-prov-rootfs-{}", std::process::id()));
-            let _ = provision::remove(&rootfs_dir);
-            provision::ensure(&rootfs_dir, &mut debian).map_err(|e| EngineError::Bootstrap {
+        provision::ensure(&rootfs_dir, &mut debian.observe(&mut bootstrap_sink)).map_err(
+            |e| EngineError::Bootstrap {
                 context: "provision the rootfs".into(),
                 message: e.to_string(),
-            })?;
-            // Release the provisioner's borrow of `step` so the customize cages and
-            // the completion below own it cleanly.
-            drop(debian);
-            let _provisioned = ProvisionedRoot(rootfs_dir.clone());
-            step.progress(55);
-
-            customize(&rootfs_dir, &overlay, build, opts.boot_config, DEFAULT_USER, &step)?;
-            step.progress(65);
-
-            export_rootfs_tar(&rootfs_dir, &tarball, opts.source_date_epoch, &step)?;
-            write_plan_manifest(&plan, opts.manifest_out, &step)?;
-            step.progress(70);
-
-            if let Some((store, key)) = &cache {
-                store.put(key, &tarball, opts.manifest_out, &step)?;
+            },
+        )?;
+        let _provisioned = ProvisionedRoot(rootfs_dir.clone());
+        // The two resolutions agreeing is the ordinary case; a divergence means
+        // the archive moved mid-build, which is worth seeing rather than
+        // silently absorbing — the cached entry is keyed on the earlier plan
+        // while its tar and manifest describe the later one.
+        let installed = match installed {
+            Some(installed) => {
+                if installed != plan {
+                    step.log(format!(
+                        "note: the bootstrap resolved {} packages, not the {} the cache key \
+                         was taken from — the archive published mid-build; the manifest \
+                         describes what was installed",
+                        installed.packages.len(),
+                        plan.packages.len()
+                    ));
+                }
+                installed
             }
-            step.progress(75);
-            // `_provisioned` drops here: the staging tree is removed through the map.
-        }
+            // The bootstrap always reports its plan; falling back to the
+            // cache-key resolution keeps a manifest written either way.
+            None => plan.clone(),
+        };
+        step.progress(55);
 
-        step.progress(100);
-        step.finish();
-        Ok(RootfsArtifacts {
-            tar: tarball,
-            manifest: opts.manifest_out.to_path_buf(),
-        })
+        customize(&rootfs_dir, &overlay, build, opts.boot_config, DEFAULT_USER, &step)?;
+        step.progress(65);
+
+        export_rootfs_tar(&rootfs_dir, &tarball, opts.source_date_epoch, &step)?;
+        write_plan_manifest(&installed, opts.manifest_out, &step)?;
+        step.progress(70);
+
+        if let Some((store, key)) = &cache {
+            store.put(key, &tarball, opts.manifest_out, &step)?;
+        }
+        step.progress(75);
+        // `_provisioned` drops here: the staging tree is removed through the map.
     }
+
+    step.progress(100);
+    step.finish();
+    Ok(RootfsArtifacts {
+        tar: tarball,
+        manifest: opts.manifest_out.to_path_buf(),
+    })
 }
 
 /// Removes a provisioned staging tree through the subordinate map on drop, so a
@@ -249,26 +285,42 @@ impl Drop for ProvisionedRoot {
     }
 }
 
+/// Removes the build's local `.deb` pool on drop. The pool lives beside the download
+/// cache rather than under the node's `TempDir`, so nothing else would reclaim it.
+/// Every file in it is the pool's own — `Pool::publish` gives each package its own
+/// inode rather than aliasing the build's — so a plain recursive delete cannot reach a
+/// build artifact. Best-effort, as a destructor has nothing to do with a failure.
+struct PoolDir(PathBuf);
+
+impl Drop for PoolDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Assemble the [`Debian`] provisioner from the resolved build and options.
 ///
 /// The primary mirror (plus any `snapshot.debian.org` backstop, which relaxes
 /// freshness) is configured on the builder; the local trusted `dists/` pool and the
 /// feature repositories are merged in as additional [`Repository`] sources. The
-/// base seeds the `important` variant (parity with `mmdebstrap --variant=important`),
+/// base seeds the `important` variant — a full base system, unlike the build
+/// sandbox's minimal one —
 /// the resolved package set and the build's `extra_packages` are the includes, the
 /// resolved excludes are dropped, and the subordinate map gives the tree real
 /// ownership. The pre-install overlay is handed to the provisioner's pre-configure
 /// hook, and the download cache is content-addressed for reuse.
-#[allow(clippy::too_many_arguments)]
-fn build_debian<'a>(
+///
+/// The provisioner borrows nothing from the caller — its progress sink is bound
+/// per call by [`Debian::observe`] — so it is a `Debian<'static>` that outlives
+/// every observed run.
+fn build_debian(
     build: &ResolvedBuild,
     opts: &RootfsOptions,
     local_url: &str,
     feature_repos: Vec<Repository>,
     deb_cache: &Path,
     preinstall: &Path,
-    sink: &'a mut dyn FnMut(DebianEvent<'_>),
-) -> Result<Debian<'a>, EngineError> {
+) -> Result<Debian<'static>, EngineError> {
     let arch = build.arch.debian_arch();
     let (primary, fallbacks) = opts
         .mirrors
@@ -314,7 +366,7 @@ fn build_debian<'a>(
         b = b.repository(repo);
     }
 
-    b.progress(sink).build().map_err(|e| EngineError::Bootstrap {
+    b.build().map_err(|e| EngineError::Bootstrap {
         context: format!("configure the {} {} bootstrap", build.arch, build.image_suite()),
         message: e.to_string(),
     })
@@ -363,12 +415,11 @@ fn sanitize_repo_name(name: &str) -> String {
     }
 }
 
-/// The provisioner cache key: the plan's solved set plus the two staged overlay
-/// trees' content and the local-repo `.deb`s' content, in the provisioner's own
-/// signature domain. Mirrors the mmdebstrap backend's key structure — a moved
-/// mirror resolves a different plan and rebuilds — but the solved set comes from
-/// the native plan, not a `--simulate` solve.
-fn provisioner_key(
+/// The rootfs cache key: the plan's solved set plus the two staged overlay trees'
+/// content and the local-repo `.deb`s' content. Keying on the *solved* set is what
+/// makes a hit safe — a moved mirror resolves a different plan, hence a different
+/// key, and rebuilds.
+fn rootfs_key(
     build: &ResolvedBuild,
     opts: &RootfsOptions,
     plan: &Plan,
@@ -385,7 +436,7 @@ fn provisioner_key(
         );
     }
     let repo_fp = rootcache::file_fingerprints(opts.repo_debs)?;
-    Ok(rootcache::provisioner_cache_key(
+    Ok(rootcache::cache_key(
         &solved,
         &overlay_fp,
         &repo_fp,
@@ -484,20 +535,19 @@ fn customize(
 
 /// Run one `sh -c` script in a subordinate-mapped cage rooted at `rootfs`,
 /// streaming output to `step`. Customize needs no network.
+///
+/// It runs under the same [`baseline`](crate::sandbox::baseline) profile as the package
+/// stages, and adds only the subordinate map its ownership-preserving tree needs. The
+/// maintainer scripts this runs are sensitive to `LC_ALL`, `TZ`, and `DEBIAN_FRONTEND`,
+/// and the profile declares all three — so what they see is the environment the image's
+/// provenance records.
 fn run_customize_cage(rootfs: &Path, script: &str, step: &Step) -> Result<(), EngineError> {
-    let cage = Cage::builder()
-        .rootfs(rootfs)
+    let cage = crate::sandbox::baseline(rootfs)
         .identity_map(IdentityMap::Subordinate)
-        .path_lookup(true)
         .command("sh")
         .args(["-c", script])
         .network(Network::Isolated)
         .current_dir("/")
-        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-        .env("HOME", "/root")
-        .env("LC_ALL", "C.UTF-8")
-        .env("TZ", "UTC")
-        .env("DEBIAN_FRONTEND", "noninteractive")
         .build()
         .map_err(|source| EngineError::Sandbox {
             context: "customize the rootfs".into(),
@@ -523,9 +573,8 @@ fn run_customize_cage(rootfs: &Path, script: &str, step: &Step) -> Result<(), En
     }
 }
 
-/// The customize script, run in a cage where the rootfs is `/` (so no `chroot`,
-/// no `$rootfs` prefix — the cage-native counterpart of the mmdebstrap backend's
-/// `--customize-hook`).
+/// The customize script, run in a cage where the rootfs is `/` — so it needs no
+/// `chroot` and no `$rootfs` prefix.
 ///
 /// It creates the default account **locked** (the per-image password is spliced in
 /// at image assembly, so the tree stays cacheable), grants group access, sets
@@ -589,9 +638,7 @@ fn l10n_asserts(build: &ResolvedBuild) -> String {
 
 /// The depthcharge tail: build the signed kernel partition, prove it is bootable,
 /// and arm the on-device kernel hooks — every check guarding a failure that is
-/// silent on the serial-console-less hardware. Cage-native counterpart of the
-/// mmdebstrap backend's [`depthcharge_finalize`](super::depthcharge_finalize):
-/// the same guards, run where the rootfs is `/`.
+/// silent on the serial-console-less hardware. Cage-native: the rootfs is `/`.
 fn depthcharge_finalize(board: &str) -> String {
     let mut s = String::new();
     // Assert every module the initramfs lists actually exists for this kernel:
@@ -661,8 +708,8 @@ fn depthcharge_finalize(board: &str) -> String {
 ///
 /// `source_date_epoch` is the `SOURCE_DATE_EPOCH` ceiling: each member's mtime is
 /// recorded as `min(mtime, epoch)`, pulling the bootstrap's wall-clock stamps down
-/// to the epoch so — as with the mmdebstrap backend — only the deliberate per-image
-/// secret varies between builds of one lock. `None` (a rootfs-only build with no
+/// to the epoch so only the deliberate per-image secret varies between builds of
+/// one lock. `None` (a rootfs-only build with no
 /// kernel tree to date) records the real times.
 fn export_rootfs_tar(
     rootfs: &Path,
@@ -676,15 +723,16 @@ fn export_rootfs_tar(
     ));
     let file = std::fs::File::create(tarball).map_err(|s| EngineError::io(tarball, s))?;
     let writer = std::io::BufWriter::new(file);
+    let mut export = Export::new(rootfs).map(IdentityMap::Subordinate);
     // The tar encoder applies the clamp as it writes: under the subordinate map the
     // provisioned files sit at ids the host user cannot set times on, so the encoder
     // is the one place that can pull an mtime down to the epoch.
-    let clamp_mtime = source_date_epoch.map(|epoch| epoch as i64);
-    provision::export_tar(rootfs, writer, &IdentityMap::Subordinate, clamp_mtime).map_err(|e| {
-        EngineError::Bootstrap {
-            context: "export the rootfs tar".into(),
-            message: e.to_string(),
-        }
+    if let Some(epoch) = source_date_epoch {
+        export = export.clamp_mtime(epoch as i64);
+    }
+    export.write_to(writer).map_err(|e| EngineError::Bootstrap {
+        context: "export the rootfs tar".into(),
+        message: e.to_string(),
     })
 }
 
@@ -787,7 +835,6 @@ mod tests {
 
     #[test]
     fn the_depthcharge_customize_tail_verifies_before_it_ships() {
-        // The same guards the mmdebstrap backend asserts, run cage-native.
         let script = customize_script(
             DEFAULT_USER,
             &c201(),

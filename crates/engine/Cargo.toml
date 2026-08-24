@@ -31,17 +31,20 @@ lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "x
 # Pure-Rust ext2/3/4 formatter (see the engine's image::ext4): builds the resize-safe
 # rootfs filesystem directly from the rootfs tar, replacing host mke2fs/e2fsprogs and
 # the userns staging they required. The `tar` feature carries the archive source that
-# reads the rootfs tarball's ownership, xattrs, ACLs, and device nodes.
-ferrosys = { version = "0.1", features = ["tar"] }
+# reads the rootfs tarball's ownership, xattrs, ACLs, and device nodes, and reads each
+# member's bytes out of the archive as that file is placed rather than buffering the
+# whole rootfs. A path dependency while 0.2.0 is unreleased; it becomes a version pin
+# once the crate is published.
+ferrosys = { path = "../../../ferrosys/crates/ferrosys", features = ["tar"] }
 # Pure-Rust build sandbox (see the engine's sandbox module): enters the
 # target-arch rootfs and runs each package-build command in fresh namespaces
 # with the caller mapped to root, replacing the external `bwrap` binary. The
 # `debian` feature adds the in-process archive provisioner that bootstraps the
-# target suite/arch rootfs, replacing `mmdebstrap` + `tar` (pure Rust: tar
-# extraction + OpenPGP release verification, no external binary, no C dep).
+# target suite/arch rootfs (pure Rust: tar extraction + OpenPGP release
+# verification, no external binary, no C dep).
 ferroday-cage = { path = "../../../ferroday-cage/crates/ferroday-cage", features = ["debian", "subid"] }
-# Randomly-named, fail-if-exists staging dirs for the rootless bootstraps,
-# so a local user cannot pre-create and own the acquire-phase inputs.
+# Randomly-named, fail-if-exists staging dirs for the build's intermediate trees,
+# so a local user cannot pre-create and own one.
 tempfile.workspace = true
 # HTTP(S) fetch of pre-built `extra_debs` from a vendor URL. Pure-Rust
 # TLS via rustls with bundled roots (no system OpenSSL / cert store), aligning with

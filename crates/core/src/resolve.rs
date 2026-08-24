@@ -12,7 +12,7 @@ pub fn resolve_device(
     device_name: &str,
     overrides: &Overrides,
 ) -> Result<ResolvedBuild, ConfigError> {
-    let device = root.device(device_name)?;
+    let (device, device_lineage) = root.device_with_lineage(device_name)?;
     let soc = root.soc(device.soc)?;
     let arch = root.arch(soc.arch)?;
 
@@ -42,12 +42,13 @@ pub fn resolve_device(
     // builds fine and then finds no DTB at boot. §4.
     validate_device_dts(&device.device_dts, &device.kernel_dtb, device_name)?;
 
-    // Out-of-tree module declarations are shape-checked before any build work: an
-    // escaping subdir would feed `make M=` a foreign tree, an escaping local-patch
-    // path would read a file from outside the config root, and a bad name would
-    // produce an unbuildable `.deb`. The "distro kernel compiles nothing" case is
-    // caught separately in `resolve_kernel`, where the kernel choice is known.
-    validate_device_kmods(&device.device_kmods, device_name)?;
+    // Out-of-tree modules: each name the board opted into loads its own `kmods/` layer
+    // and is shape-checked before any build work — an escaping subdir would feed
+    // `make M=` a foreign tree, an escaping local-patch path would read a file from
+    // outside the config root, and a bad name would produce an unbuildable `.deb`. The
+    // "distro kernel compiles nothing" case is caught separately in `resolve_kernel`,
+    // where the kernel choice is known.
+    let device_kmods = resolve_kmods(root, &device.device_kmods, device_name)?;
 
     let kernel_cmdline = validate_kernel_cmdline(device.kernel_cmdline.as_deref())?;
 
@@ -75,6 +76,7 @@ pub fn resolve_device(
     if uboot_only {
         return Ok(ResolvedBuild {
             device: device_name.to_string(),
+            device_lineage,
             description: device.description,
             arch: soc.arch,
             soc: device.soc,
@@ -96,7 +98,7 @@ pub fn resolve_device(
             device_dts: device.device_dts,
             // A u-boot-only build compiles no kernel, so no module builds; the field
             // is carried for a uniform struct but the kmod stage never runs on it.
-            device_kmods: device.device_kmods,
+            device_kmods,
             kernel_cmdline,
             dt_dir: soc.dt_dir,
             modules: soc.modules,
@@ -167,7 +169,7 @@ pub fn resolve_device(
         .clone()
         .unwrap_or_else(|| device.default_suite.clone());
     // A bad suite otherwise fails deep in the bootstrap; reject it here, and
-    // the shape guard also keeps a leading-`-` suite from ever reaching mmdebstrap as
+    // the shape guard also keeps a leading-`-` suite from ever reaching the archive as
     // a positional.
     validate_suite(&suite)?;
     // A feature that builds the media-accel stack (`requires_media_accel`) needs the
@@ -270,6 +272,7 @@ pub fn resolve_device(
 
     Ok(ResolvedBuild {
         device: device_name.to_string(),
+        device_lineage,
         description: device.description,
         arch: soc.arch,
         soc: device.soc,
@@ -289,7 +292,7 @@ pub fn resolve_device(
         boot,
         kernel_dtb: device.kernel_dtb,
         device_dts: device.device_dts,
-        device_kmods: device.device_kmods,
+        device_kmods,
         kernel_cmdline,
         dt_dir: soc.dt_dir,
         modules: soc.modules,
@@ -392,14 +395,15 @@ fn resolve_boot(
             for s in [&l.kpart_offset, &l.kpart_size, &l.rootfs_offset] {
                 crate::size::parse_size(s)?;
             }
-            // The signing cmdline is the boot method's with the device's extra
-            // arguments appended; the merged value must pass the same rules (a
-            // device-authored `root=` is caught by validate_kernel_cmdline, but a
-            // `%` is only rejected here, where depthchargectl is in the path).
+            // The signing cmdline is the boot method's, then the base console gate,
+            // then the device's extra arguments; the merged value must pass the same
+            // rules (a device-authored `root=` is caught by validate_kernel_cmdline,
+            // but a `%` is only rejected here, where depthchargectl is in the path).
+            // The device's arguments come last so a board can override the gate.
             let cmdline = if kernel_cmdline.is_empty() {
-                l.cmdline.clone()
+                format!("{} {CONSOLE_LOGLEVEL_ARG}", l.cmdline)
             } else {
-                format!("{} {}", l.cmdline, kernel_cmdline)
+                format!("{} {CONSOLE_LOGLEVEL_ARG} {kernel_cmdline}", l.cmdline)
             };
             validate_depthcharge_cmdline(&cmdline)?;
             if l.kpart_slots == 0 || l.kpart_slots > crate::chromeos::MAX_KPART_SLOTS {
@@ -741,27 +745,63 @@ fn validate_device_dts(
     Ok(())
 }
 
-/// Validate a device's out-of-tree module declarations (`device_kmods`).
+/// Load and validate each kmod a device named, in declared order.
 ///
-/// Every entry must be safe to feed the build without escaping the trees it is joined
-/// onto, and must name a well-formed package:
-///  - **name**: unique and dpkg-package-safe — it becomes `<name>-modules-<kver>` and
-///    the `kmod:<name>` build/cache node.
+/// The name list is the device's; everything else comes from `kmods/<name>.toml`, so a
+/// second board carrying the same chip names it instead of copying its declaration. A
+/// repeat in the list is rejected: one kmod is one build node, one deb, and one lock pin.
+///
+/// An empty list imposes no constraint — the board carries no out-of-tree module.
+fn resolve_kmods(
+    root: &ConfigRoot,
+    names: &[String],
+    device_name: &str,
+) -> Result<Vec<ResolvedKmod>, ConfigError> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut resolved = Vec::with_capacity(names.len());
+    for name in names {
+        if !seen.insert(name.as_str()) {
+            return Err(ConfigError::DuplicateKmod {
+                device: device_name.to_string(),
+                kmod: name.clone(),
+            });
+        }
+        let k = root.kmod(name)?;
+        validate_kmod(&k, name)?;
+        resolved.push(ResolvedKmod {
+            name: name.clone(),
+            description: k.description,
+            git: k.git,
+            git_ref: k.git_ref,
+            subdir: k.subdir,
+            patch_dir: k.patch_dir,
+            repo_patches: k.repo_patches,
+            local_patches: k.local_patches,
+            make_args: k.make_args,
+            modules: k.modules,
+            firmware: k.firmware,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Validate one out-of-tree module declaration (`kmods/<name>.toml`).
+///
+/// Every field must be safe to feed the build without escaping the trees it is joined
+/// onto, and the kmod must name a well-formed package:
+///  - **name**: dpkg-package-safe — it becomes `<name>-modules-<kver>` and the
+///    `kmod:<name>` build/cache node.
 ///  - **git / ref**: non-empty (the exact commit is pinned in the lock).
 ///  - **subdir / patch_dir**: relative and `..`-free (the subdir feeds `make M=`).
-///  - **patches**: bare filenames under `patch_dir` (joined as `patch_dir/<name>`).
-///  - **local_patches**: config-root-relative and `..`-free (read along the overlay
-///    search path like a fragment).
+///  - **repo_patches**: bare filenames under `patch_dir` (joined as `patch_dir/<file>`).
+///  - **local_patches**: bare filenames under `kmods/<name>/patches/` (read along the
+///    overlay search path like a fragment).
 ///  - **make_args**: a bare `KEY=VALUE`, no whitespace or shell metacharacters (passed
 ///    as argv to `make`, never through a shell).
 ///  - **modules**: bare `.ko` basenames.
-///
-/// An empty `device_kmods` imposes no constraint — the board carries no out-of-tree
-/// module.
-fn validate_device_kmods(kmods: &[DeviceKmod], device_name: &str) -> Result<(), ConfigError> {
-    let invalid = |name: &str, why| ConfigError::InvalidDeviceKmod {
-        device: device_name.to_string(),
-        name: name.to_string(),
+fn validate_kmod(k: &KmodLayer, name: &str) -> Result<(), ConfigError> {
+    let invalid = |why| ConfigError::InvalidKmod {
+        kmod: name.to_string(),
         why,
     };
     // Relative, non-empty, `..`-free.
@@ -794,64 +834,54 @@ fn validate_device_kmods(kmods: &[DeviceKmod], device_name: &str) -> Result<(), 
         }
         Ok(())
     };
-    let mut seen = std::collections::BTreeSet::new();
-    for k in kmods {
-        let name_ok = k
-            .name
+    let name_ok = name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
             .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
-            && k.name.chars().all(|c| {
-                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '+' | '.')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '+' | '.'));
+    if !name_ok {
+        return Err(invalid(
+            "the name is not dpkg-package-safe (lowercase alphanumeric plus '-', '+', '.', starting alphanumeric)",
+        ));
+    }
+    if k.git.trim().is_empty() {
+        return Err(invalid("the git url is empty"));
+    }
+    if k.git_ref.trim().is_empty() {
+        return Err(invalid("the git ref is empty"));
+    }
+    contained(&k.subdir).map_err(invalid)?;
+    contained(&k.patch_dir).map_err(invalid)?;
+    for p in &k.repo_patches {
+        bare(p).map_err(invalid)?;
+    }
+    // Bare like the repo's own: a local patch is looked up at `kmods/<name>/patches/<p>`,
+    // so a separator would reach outside the kmod's own directory.
+    for lp in &k.local_patches {
+        bare(lp).map_err(invalid)?;
+    }
+    for a in &k.make_args {
+        let unsafe_arg = !a.contains('=')
+            || a.chars().any(|c| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        ';' | '&' | '|' | '$' | '`' | '<' | '>' | '(' | ')' | '\'' | '"' | '\\'
+                    )
             });
-        if !name_ok {
+        if unsafe_arg {
             return Err(invalid(
-                &k.name,
-                "the name is not dpkg-package-safe (lowercase alphanumeric plus '-', '+', '.', starting alphanumeric)",
+                "a make_args entry is not a bare KEY=VALUE (no whitespace or shell metacharacters)",
             ));
         }
-        if !seen.insert(k.name.clone()) {
-            return Err(invalid(&k.name, "the name is declared more than once"));
-        }
-        if k.git.trim().is_empty() {
-            return Err(invalid(&k.name, "the git url is empty"));
-        }
-        if k.git_ref.trim().is_empty() {
-            return Err(invalid(&k.name, "the git ref is empty"));
-        }
-        contained(&k.subdir).map_err(|why| invalid(&k.name, why))?;
-        contained(&k.patch_dir).map_err(|why| invalid(&k.name, why))?;
-        for p in &k.patches {
-            bare(p).map_err(|why| invalid(&k.name, why))?;
-        }
-        for lp in &k.local_patches {
-            contained(lp).map_err(|why| invalid(&k.name, why))?;
-        }
-        for a in &k.make_args {
-            let unsafe_arg = !a.contains('=')
-                || a.chars().any(|c| {
-                    c.is_whitespace()
-                        || matches!(
-                            c,
-                            ';' | '&' | '|' | '$' | '`' | '<' | '>' | '(' | ')' | '\'' | '"' | '\\'
-                        )
-                });
-            if unsafe_arg {
-                return Err(invalid(
-                    &k.name,
-                    "a make_args entry is not a bare KEY=VALUE (no whitespace or shell metacharacters)",
-                ));
-            }
-        }
-        for m in &k.modules {
-            bare(m).map_err(|why| invalid(&k.name, why))?;
-        }
-        if let Some(fw) = &k.firmware {
-            // Both paths are joined under a build/rootfs root, so both must be relative
-            // and `..`-free — the source under the fetched repo, the install under the deb.
-            contained(&fw.subdir).map_err(|why| invalid(&k.name, why))?;
-            contained(&fw.install).map_err(|why| invalid(&k.name, why))?;
-        }
+    }
+    for m in &k.modules {
+        bare(m).map_err(invalid)?;
+    }
+    if let Some(fw) = &k.firmware {
+        // Both paths are joined under a build/rootfs root, so both must be relative
+        // and `..`-free — the source under the fetched repo, the install under the deb.
+        contained(&fw.subdir).map_err(invalid)?;
+        contained(&fw.install).map_err(invalid)?;
     }
     Ok(())
 }
@@ -1037,10 +1067,9 @@ fn join<T: std::fmt::Display>(items: &[T]) -> String {
 
 /// Reject a suite that is not a well-formed Debian codename. The
 /// suite becomes an apt `sources.list` pocket (`<suite>-updates`, `<suite>-security`)
-/// and an mmdebstrap positional, so it must be a bare token starting with an
-/// alphanumeric and drawn from `[A-Za-z0-9._-]`. Requiring an alphanumeric first
-/// character also means a suite can never be read as a `-`-prefixed option by the
-/// bootstrap, backstopping the `--` option terminator. Pure, so it is unit-testable.
+/// and the archive path the bootstrap fetches under, so it must be a bare token
+/// starting with an alphanumeric and drawn from `[A-Za-z0-9._-]`. Pure, so it is
+/// unit-testable.
 fn validate_suite(suite: &str) -> Result<(), ConfigError> {
     let mut chars = suite.chars();
     let ok = matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
@@ -1348,11 +1377,27 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(kprofiles, ["rk3576-fixes"]);
-        // The board declares the aic8800 external module, with its firmware sourced from
-        // the same pinned repo.
+        // The board opts into the aic8800 external module by name; every field below is
+        // the shipped `kmods/aic8800.toml`, not something the device restates.
         let kmod = img.device_kmods.iter().find(|k| k.name == "aic8800").expect("aic8800 device_kmod");
         assert_eq!(kmod.modules, ["aic8800_bsp", "aic8800_fdrv"]);
-        assert!(kmod.firmware.is_some(), "the aic8800 kmod ships firmware");
+        // Both make args are load-bearing: without NO_REG_SDIO the driver never creates
+        // wlan0, and BTLPM does not compile on a 7.1 kernel.
+        assert_eq!(
+            kmod.make_args,
+            ["CONFIG_AIC8800_BTLPM_SUPPORT=n", "CONFIG_FDRV_NO_REG_SDIO=y"]
+        );
+        // The compat shims are bare filenames under `kmods/aic8800/patches/`, in apply
+        // order — the SDIO 7.1 cfg80211 port before the log-level default.
+        assert_eq!(
+            kmod.local_patches,
+            ["0001-sdio-linux-7.1.patch", "0002-quiet-log-level.patch"]
+        );
+        let fw = kmod.firmware.as_ref().expect("the aic8800 kmod ships firmware");
+        // The install path is what fix-sdio-firmware-path.patch compiles into the BSP
+        // loader; a drift here is a driver that boots and then finds no firmware.
+        assert_eq!(fw.subdir, "src/SDIO/driver_fw/fw/aic8800D80");
+        assert_eq!(fw.install, "usr/lib/firmware/aic8800_fw/SDIO/aic8800D80");
         assert_eq!(
             img.rkbin_boot().unwrap().uboot_profile.as_deref(),
             Some("rk3576-display")
@@ -1795,7 +1840,6 @@ mod tests {
         // capability's driver would never be built — the feature would install its
         // userspace against hardware support that is not there. Named for the feature,
         // since the fix is to drop it or change kernel, not to edit the device.
-        let root = repo_root();
         let feature = crate::feature::Feature {
             description: "test".into(),
             packages: vec![],
@@ -1963,6 +2007,14 @@ mod tests {
             "behind both 16 MiB slots (12 + 16 + 16), not behind one"
         );
         assert!(!boot.cmdline.contains("root="), "root= is depthchargectl's to derive");
+        // The console gate is signed in with the rest of the cmdline. It has to be:
+        // this value lives inside the vboot signature, so it cannot be edited on the
+        // device — a board that shipped a verbose console would need a reflash.
+        assert!(
+            boot.cmdline.contains(CONSOLE_LOGLEVEL_ARG),
+            "the console gate reaches a signed cmdline too: {}",
+            boot.cmdline
+        );
 
         // A laptop whose primary link is wifi: NetworkManager owns the interfaces, so
         // the base layer's dhcpcd is dropped rather than left to fight it.
@@ -2383,16 +2435,16 @@ mod tests {
         }
     }
 
-    /// A valid `device_kmods` entry, mutated per case in the rejection tests below.
-    fn valid_kmod() -> DeviceKmod {
-        DeviceKmod {
-            name: "aic8800".into(),
+    /// A valid `kmods/<name>.toml`, mutated per case in the rejection tests below.
+    fn valid_kmod() -> KmodLayer {
+        KmodLayer {
+            description: "AIC8800 SDIO Wi-Fi".into(),
             git: "https://github.com/radxa-pkg/aic8800.git".into(),
             git_ref: "main".into(),
             subdir: "src/SDIO/driver_fw/driver/aic8800".into(),
             patch_dir: "debian/patches".into(),
-            patches: vec!["fix-sdio-firmware-path.patch".into()],
-            local_patches: vec!["devices/h96-max-m9/kmod-patches/aic8800-sdio-linux-7.1.patch".into()],
+            repo_patches: vec!["fix-sdio-firmware-path.patch".into()],
+            local_patches: vec!["0001-sdio-linux-7.1.patch".into()],
             make_args: vec!["CONFIG_FDRV_NO_REG_SDIO=y".into()],
             modules: vec!["aic8800_bsp".into(), "aic8800_fdrv".into()],
             firmware: Some(KmodFirmware {
@@ -2403,50 +2455,121 @@ mod tests {
     }
 
     #[test]
-    fn validate_device_kmods_accepts_a_well_formed_entry() {
-        validate_device_kmods(std::slice::from_ref(&valid_kmod()), "h96-max-m9").unwrap();
-        // An empty list is always fine — the board carries no out-of-tree module.
-        validate_device_kmods(&[], "h96-max-m9").unwrap();
+    fn validate_kmod_accepts_a_well_formed_layer() {
+        validate_kmod(&valid_kmod(), "aic8800").unwrap();
     }
 
     #[test]
-    fn validate_device_kmods_rejects_malformed_entries() {
-        // Each mutation trips exactly one rule; the error names the offending kmod.
-        let escaping_subdir = DeviceKmod { subdir: "../evil".into(), ..valid_kmod() };
-        let non_bare_patch = DeviceKmod { patches: vec!["sub/dir.patch".into()], ..valid_kmod() };
-        let escaping_local = DeviceKmod { local_patches: vec!["/etc/shadow".into()], ..valid_kmod() };
-        let bad_make_arg = DeviceKmod { make_args: vec!["rm -rf /".into()], ..valid_kmod() };
-        let bad_name = DeviceKmod { name: "Bad_Name".into(), ..valid_kmod() };
-        let escaping_fw = DeviceKmod {
+    fn validate_kmod_rejects_malformed_layers() {
+        // Each mutation trips exactly one rule; the error names the offending kmod file.
+        let escaping_subdir = KmodLayer { subdir: "../evil".into(), ..valid_kmod() };
+        let non_bare_patch =
+            KmodLayer { repo_patches: vec!["sub/dir.patch".into()], ..valid_kmod() };
+        // A local patch is joined under `kmods/<name>/patches/`, so it is bare too — an
+        // absolute path would reach a file outside the kmod's own directory.
+        let escaping_local = KmodLayer { local_patches: vec!["/etc/shadow".into()], ..valid_kmod() };
+        let bad_make_arg = KmodLayer { make_args: vec!["rm -rf /".into()], ..valid_kmod() };
+        let escaping_fw = KmodLayer {
             firmware: Some(KmodFirmware { subdir: "../fw".into(), install: "usr/lib/firmware".into() }),
             ..valid_kmod()
         };
-        let absolute_fw_install = DeviceKmod {
+        let absolute_fw_install = KmodLayer {
             firmware: Some(KmodFirmware { subdir: "fw".into(), install: "/usr/lib/firmware".into() }),
             ..valid_kmod()
         };
 
         for kmod in [
-            &escaping_subdir, &non_bare_patch, &escaping_local, &bad_make_arg, &bad_name,
+            &escaping_subdir, &non_bare_patch, &escaping_local, &bad_make_arg,
             &escaping_fw, &absolute_fw_install,
         ] {
-            match validate_device_kmods(std::slice::from_ref(kmod), "h96-max-m9").unwrap_err() {
-                ConfigError::InvalidDeviceKmod { device, name, .. } => {
-                    assert_eq!(device, "h96-max-m9");
-                    assert_eq!(&name, &kmod.name);
-                }
-                other => panic!("expected InvalidDeviceKmod, got {other:?}"),
+            match validate_kmod(kmod, "aic8800").unwrap_err() {
+                ConfigError::InvalidKmod { kmod, .. } => assert_eq!(kmod, "aic8800"),
+                other => panic!("expected InvalidKmod, got {other:?}"),
             }
         }
 
-        // A duplicate name across two entries is rejected.
-        let dup = vec![valid_kmod(), valid_kmod()];
-        match validate_device_kmods(&dup, "h96-max-m9").unwrap_err() {
-            ConfigError::InvalidDeviceKmod { name, why, .. } => {
-                assert_eq!(name, "aic8800");
-                assert!(why.contains("more than once"), "{why}");
+        // The name is the file stem, and it becomes a deb name — an overlay shipping
+        // `kmods/Bad_Name.toml` is caught here rather than at `dpkg-deb`.
+        match validate_kmod(&valid_kmod(), "Bad_Name").unwrap_err() {
+            ConfigError::InvalidKmod { kmod, why } => {
+                assert_eq!(kmod, "Bad_Name");
+                assert!(why.contains("dpkg-package-safe"), "{why}");
             }
-            other => panic!("expected InvalidDeviceKmod, got {other:?}"),
+            other => panic!("expected InvalidKmod, got {other:?}"),
+        }
+    }
+
+    /// The smallest config root that resolves a kmod: one `kmods/<name>.toml` per entry.
+    fn kmod_root(files: &[(&str, &str)]) -> (tempfile::TempDir, ConfigRoot) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("kmods")).unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(format!("kmods/{name}.toml")), body).unwrap();
+        }
+        let root = ConfigRoot::new(dir.path());
+        (dir, root)
+    }
+
+    /// A minimal kmod layer whose only variable is the git ref, so two entries are
+    /// distinguishable in the resolved order.
+    fn kmod_toml(git_ref: &str) -> String {
+        format!(
+            "description = \"d\"\ngit = \"https://example.invalid/d.git\"\n\
+             ref = \"{git_ref}\"\nsubdir = \"src\"\n"
+        )
+    }
+
+    #[test]
+    fn kmods_resolve_in_the_order_the_device_named_them() {
+        // The device supplies only the order and the names; every field comes from the
+        // kmod's own layer, and the stem lands on the resolved struct as its identity.
+        let (_d, root) = kmod_root(&[("beta", &kmod_toml("v2")), ("alpha", &kmod_toml("v1"))]);
+        let names = ["beta".to_string(), "alpha".to_string()];
+        let resolved = resolve_kmods(&root, &names, "dev").unwrap();
+        assert_eq!(
+            resolved.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+            ["beta", "alpha"]
+        );
+        assert_eq!(resolved[0].git_ref, "v2");
+        assert_eq!(resolved[1].git_ref, "v1");
+        // `patch_dir` defaults rather than being restated in every kmod file.
+        assert_eq!(resolved[0].patch_dir, "debian/patches");
+
+        // An empty list is always fine — the board carries no out-of-tree module.
+        assert!(resolve_kmods(&root, &[], "dev").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_kmod_named_twice_is_rejected() {
+        // One kmod is one build node, one deb, and one lock pin, so a repeat has no
+        // meaning to honour.
+        let (_d, root) = kmod_root(&[("alpha", &kmod_toml("v1"))]);
+        let names = ["alpha".to_string(), "alpha".to_string()];
+        match resolve_kmods(&root, &names, "dev").unwrap_err() {
+            ConfigError::DuplicateKmod { device, kmod } => {
+                assert_eq!(device, "dev");
+                assert_eq!(kmod, "alpha");
+            }
+            other => panic!("expected DuplicateKmod, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_kmod_names_the_kmod_it_could_not_find() {
+        // The fault is a device naming a driver that does not exist, so the error says
+        // which kmod — not which device file mentioned it.
+        let (_d, root) = kmod_root(&[("alpha", &kmod_toml("v1"))]);
+        match resolve_kmods(&root, &["nope".to_string()], "dev").unwrap_err() {
+            ConfigError::NotFound { kind, name, .. } => {
+                assert_eq!(kind, "kmod");
+                assert_eq!(name, "nope");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        // A traversing name never becomes a path join.
+        match resolve_kmods(&root, &["../../etc/passwd".to_string()], "dev").unwrap_err() {
+            ConfigError::InvalidName { kind, .. } => assert_eq!(kind, "kmod"),
+            other => panic!("expected InvalidName, got {other:?}"),
         }
     }
 

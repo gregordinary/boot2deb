@@ -14,7 +14,7 @@ ref = "main"
 commit = "087989e661427ad445926a3fed3bfc864056a416"
 
 [uboot]
-source = "https://source.denx.de/u-boot/u-boot.git"
+source = "https://git.u-boot-project.org/u-boot/u-boot.git"
 ref = "v2026.04"
 commit = "88dc2788777babfd6322fa655df549a019aa1e69"
 

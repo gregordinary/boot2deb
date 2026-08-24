@@ -24,8 +24,8 @@ workspace; every axis and layer merge is validated before a build runs.
 Two properties it is built around:
 
 - **Rootless.** Cross-architecture package builds and the Debian bootstrap run in a
-  rootless sandbox (`mmdebstrap --mode=unshare`, an in-process user-namespace sandbox,
-  and `qemu-user`), and the disk image is assembled with no root and no loop devices:
+  rootless, in-process user-namespace sandbox (plus `qemu-user` when cross-building),
+  and the disk image is assembled with no root and no loop devices:
   GPT tables, `.xz` compression, and the ext4 filesystem are all pure Rust. An x86_64
   host builds an arm64 image without `sudo`.
 - **Reproducible.** The `.lock` pins every input — source commits, firmware-blob hashes,

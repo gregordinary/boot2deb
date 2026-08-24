@@ -24,8 +24,8 @@ pub fn snapshot_mirror(timestamp: &str) -> String {
     format!("{SNAPSHOT_ARCHIVE}/{timestamp}/")
 }
 
-/// Resolve the ordered mirror list `mmdebstrap` fetches from, honoring the active
-/// snapshot mode. `base_mirror` is the live Debian mirror ([`crate::DEFAULT_MIRROR`]);
+/// Resolve the ordered mirror list the rootfs bootstrap fetches from, honoring the
+/// active snapshot mode. `base_mirror` is the live Debian mirror ([`crate::DEFAULT_MIRROR`]);
 /// `mode` is the effective mode (a `--snapshot` override, else the lock's captured
 /// mode); `snapshot` is the lock's captured pin, if any.
 ///

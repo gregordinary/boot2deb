@@ -23,11 +23,10 @@ There is no provider auto-resolution — the recipe names both features explicit
 ## Package source
 
 Jellyfin is not in the Debian mirror, so the feature adds its signed upstream apt
-repository via `[[apt_sources]]`. The rootfs stage renders each resolved
-`[[apt_sources]]` into a signed `deb [signed-by=…]` positional for the
-`mmdebstrap` solve, so apt resolves `jellyfin` and its dependencies at bootstrap
-time — installed at build, not left as a live third-party repo on the
-device. The repository signing key is a **build-host prerequisite**, vendored under
+repository via `[[apt_sources]]`. The rootfs stage turns each resolved
+`[[apt_sources]]` into a signed repository the bootstrap verifies against its own
+keyring, so `jellyfin` and its dependencies resolve at bootstrap time — installed at
+build, not left as a live third-party repo on the device. The repository signing key is a **build-host prerequisite**, vendored under
 `blobs/keyrings/jellyfin.gpg` the same way the Debian archive keyring is —
 see `blobs/keyrings/README.md`; a build whose declared source has no vendored
 keyring fails fast before bootstrapping.

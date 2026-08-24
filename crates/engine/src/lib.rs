@@ -23,8 +23,8 @@
 //! into a content-addressed [`debstore`] and verifies against their sha256 pins
 //! — and the [`rootfs`] node bootstraps the
 //! device userland from it into the tarball the image node formats — with a unique
-//! per-image first-boot password ([`secret`]). A cheap `mmdebstrap --simulate`
-//! solve lets [`rootcache`] skip that bootstrap on an unchanged *solved* package set
+//! per-image first-boot password ([`secret`]). Resolving the plan up front lets
+//! [`rootcache`] skip that bootstrap on an unchanged *solved* package set
 //! (early cutoff) without ever reusing a stale solve. The rootfs bootstrap fetches
 //! from the mirror list [`snapshot`] resolves (the live mirror, plus a
 //! `snapshot.debian.org` mirror when a captured snapshot is activated), and its

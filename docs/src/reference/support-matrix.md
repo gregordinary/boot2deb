@@ -27,7 +27,7 @@ the evidence the claim rested on.
 | `asus-c201/trixie` | asus-c201 | trixie | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
 | `asus-chromebit-cs10/forky` | asus-chromebit-cs10 | forky | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
 | `asus-chromebit-cs10/trixie` | asus-chromebit-cs10 | trixie | `debian-armmp` (from the suite) | none | none | `expected` | 2026-07-20 |
-| `h96-max-m9-npu/forky` | h96-max-m9-npu | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes`, `rk3576-npu` `main` (`01ad0a39aa6f`) | `rk3576-display` `main` (`01ad0a39aa6f`) | `experimental` | 2026-07-24 |
+| `h96-max-m9-npu/forky` | h96-max-m9-npu | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes`, `rk3576-npu` `main` (`e56368aa9a73`) | `rk3576-display` `main` (`e56368aa9a73`) | `experimental` | 2026-07-24 |
 | `h96-max-m9/forky` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes` `main` (`7fd19b5e76b8`) | `rk3576-display` `main` (`7fd19b5e76b8`) | `validated` | 2026-07-24 |
 | `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes`, `rk3576-rga` `main` (`087989e66142`) | `rk3576-display` `main` (`087989e66142`) | `experimental` | 2026-07-25 |
 | `h96-max-m9/util` | h96-max-m9 | — | (u-boot only) | none | `h96-max-m9-util` `main` (`a86051e87f5c`) | `expected` | 2026-07-22 |

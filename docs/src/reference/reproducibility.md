@@ -76,6 +76,19 @@ like any other, and the provenance manifest records it: a `[built_with]` section
 boot2deb version, the git commit of the checkout that built the image, and whether that
 checkout was dirty.
 
+The builder also decides the environment a compile runs in. Every package build and the
+rootfs customize run in an unprivileged sandbox, and what they produce depends on the
+variables they carry and the filesystem they see — neither of which any source pin covers,
+and both of which move with the sandbox library boot2deb links. So the manifest records
+them as data rather than leaving them to be inferred from a version: `[sandbox_env]` is the
+command's complete environment, and `[[sandbox_mounts]]` is every mount the sandbox
+establishes, in order, down to the `/dev` device nodes and symlinks. Two images built from
+one lock that differ can be compared on the inputs that could explain it.
+
+That record is the profile every command *starts from*. A run's own working and artifact
+binds are per-build paths, and the `/etc/resolv.conf` an `apt` run binds comes from the
+build host, so neither is recorded — the section describes the builder, not the machine.
+
 That stamp is an **as-built record, not a requirement.** The stamped commit is a *floor*:
 it, and later commits up to the next change that alters the output for this lock, will
 reproduce the image — and a later one may carry fixes you want. A commit past that change
@@ -135,10 +148,9 @@ records the image and kernel identity, which a rescue tool reads without the pro
 
 The per-image first-boot password is unique per build by design, so `/etc/shadow` is
 intentionally not byte-reproducible. Everything else in the rootfs is, given the same three
-layers frozen. Both rootfs backends clamp every tar member's mtime to `SOURCE_DATE_EPOCH`, so
-a bootstrap's wall-clock stamps do not leak into the image: the `mmdebstrap` backend through
-its environment, and the `--rootfs-backend provisioner` path through its ownership-preserving
-`export_tar`, whose encoder records each mtime as `min(mtime, epoch)` as it writes. The
+layers frozen. The rootfs export clamps every tar member's mtime to `SOURCE_DATE_EPOCH`, so
+a bootstrap's wall-clock stamps do not leak into the image: its encoder records each mtime
+as `min(mtime, epoch)` as it writes. The
 encoder is the one place that can apply the ceiling: under the subordinate id-map that gives
 the tree its real ownership, the provisioned files sit at ids the host user cannot set times
 on. The export also emits entries in sorted order — directory children and extended attributes

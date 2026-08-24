@@ -192,6 +192,55 @@ fetched, nothing is applied, `verify-patches` reports there is nothing to verify
 the lock **omits its `[patches]` block entirely** rather than pinning a commit the build
 never consumes. Such a board builds on a machine with no `patches` checkout.
 
+## Out-of-tree modules are their own layer
+
+Some hardware is driven by a module that lives in nobody's kernel tree — a Wi-Fi part
+whose vendor maintains its own repo, say. That is not a patch series: it is a *fifth*
+source tree, fetched from a third-party repo at a commit boot2deb pins. It gets its own
+config layer, `kmods/<name>.toml`:
+
+```toml
+description = "AICSemi AIC8800 SDIO Wi-Fi (radxa-pkg tracking fork)"
+
+git    = "https://github.com/radxa-pkg/aic8800.git"
+ref    = "main"
+subdir = "src/SDIO/driver_fw/driver/aic8800"
+
+repo_patches  = ["fix-sdio-firmware-path.patch"]   # the fetched repo's own quilt
+local_patches = ["0001-sdio-linux-7.1.patch"]      # ours, kmods/aic8800/patches/
+make_args     = ["CONFIG_FDRV_NO_REG_SDIO=y"]
+modules       = ["aic8800_bsp", "aic8800_fdrv"]
+```
+
+A board opts in by **name only**:
+
+```toml
+device_kmods = ["aic8800"]
+```
+
+The build fetches the repo at the locked commit, applies `repo_patches` then
+`local_patches` (both `git apply -p1` unified diffs, not a `git am` series), builds the
+modules against that board's freshly compiled kernel with `make M=<subdir>`, and ships
+them as `<name>-modules-<kver>`. Firmware named in the layer becomes a separate
+`Architecture: all` `<name>-firmware` deb, so two coexisting kernels never collide over
+one firmware path. `boot2deb list-kmods` prints what is available.
+
+**Why not the `patches` repo.** That repo is scoped to the four trees boot2deb pins
+itself — kernel, u-boot, ffmpeg, userspace — and its series carry kernel-version
+envelopes, because a kernel patch's applicability is keyed to a kernel version. A kmod's
+patches are keyed to a *driver revision* instead, and a lock carries exactly one
+`patches` pin, so routing a kmod tweak through it would couple that tweak to every
+kernel, u-boot, and ffmpeg series pinned in the same lock.
+
+**No per-board overrides.** A device names a kmod; it cannot retune one. The deb is
+`<name>-modules-<kver>` and the artifact-cache node is `kmod:<name>`, and a local patch
+does not move the upstream commit the version is built from — so two boards overriding,
+say, `make_args` under one name would put different content behind one key. A board that
+needs different build flags authors its own `kmods/<name>.toml`; a distinct name is a
+distinct cache node, correct by construction. An out-of-tree overlay can still retune a
+shipped kmod (or replace one of its patch files), because a kmod merges across the
+search path like every other layer.
+
 ## The hardware stack
 
 The device's hardware properties resolve by merging four TOML layers, lowest to
@@ -210,11 +259,12 @@ to the hardware.
 The config layers are the top-level directories:
 
 ```
-arches/  socs/  boot-methods/  devices/  kernels/  recipes/
+arches/  socs/  boot-methods/  devices/  kernels/  kmods/  features/  recipes/
 ```
 
 with vendored bootloader blobs under `blobs/<soc>/`, kernel `.config` fragments under
-`fragments/`, and the resolved exact pins in `recipes/<device>/<leaf>.lock`.
+`fragments/`, each kmod's own patches under `kmods/<name>/patches/`, and the resolved
+exact pins in `recipes/<device>/<leaf>.lock`.
 
 ### Media-accel sources ride the feature, not the SoC
 
@@ -310,6 +360,63 @@ cmdline. Base arguments stay generated — `root=` in particular is derived from
 `/etc/fstab` on the device and is rejected here, as is anything the shell would
 interpret when sourcing `board.conf`. A board with no entry gets the generated command
 line alone.
+
+### Every build gates its console
+
+Among the generated base arguments is `loglevel=4`, on every board and both boot paths:
+the console shows `KERN_ERR` and worse, and everything else stays in the kernel ring
+buffer where `dmesg` and `journalctl -k` still show it.
+
+This exists because a single chatty driver can otherwise print faster than a login can
+be typed, which costs you the console exactly when a first boot needs it. Out-of-tree
+vendor drivers are the usual source: a bare `printk()` carries no severity, so it lands
+at `KERN_WARNING` however trivial the message, and such calls are typically ungated by
+any of the driver's own debug knobs — lowering a driver's debug level does not reach
+them. Gating the console bounds every driver at once, including the ones nothing else
+can quiet.
+
+A board that wants a louder console appends its own `loglevel=` to `kernel_cmdline`.
+Device arguments are appended after the generated ones and the kernel takes the last
+value, so the board wins:
+
+```toml
+kernel_cmdline = "loglevel=7"
+```
+
+### A variant board extends another
+
+Sometimes two devices are the same board with one difference: a block enabled for
+bring-up, a different DTB, a different memory fitting. The difference is real enough to
+need its own device — `device_dts` and the DTB name are device-layer fields — but
+everything else is the same hardware. Such a device names its parent and states only its
+deltas:
+
+```toml
+extends = "h96-max-m9"
+
+description = "H96 MAX M9 (RK3576) TV box -- NPU experimental"
+hostname    = "h96-max-m9-npu"
+kernel_dtb  = "rockchip/rk3576-h96-max-m9-npu.dtb"
+```
+
+The parent is merged under the child by the same rules the overlay search path uses:
+tables merge key-by-key, and **a scalar or array is replaced wholesale, not
+concatenated**. So a variant that wants to add one entry to an inherited list restates
+the list — which is why the example above also restates the parent's `device_dts` and
+`device_config_fragments` alongside its own. Chains are walked to the base-most device,
+and a cycle is a named error rather than a hang.
+
+The parent's **assets come too**: its `overlay/` tree is laid into the rootfs before the
+variant's, so the variant inherits the parent board's runtime config — driver tuning in
+`modprobe.d`, systemd units, keymaps — and can override any file of it by shipping its
+own copy at the same path. This is the half a hand-copied variant cannot express: TOML
+keys can be duplicated by hand, but a device's overlay tree is found by the device's
+*name*, so a variant with no tree of its own would otherwise get none at all and still
+build a plausible image.
+
+The two merge axes compose. The `extends` chain is flattened first, then the search path
+merges over the result, so an out-of-tree overlay can retune the parent — and have it
+reach every variant — or retune one variant alone.
 
 ### Explicit over derived
 

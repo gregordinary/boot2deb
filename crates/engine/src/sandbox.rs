@@ -40,9 +40,10 @@ use crate::bootstrap::{COMPONENTS, DEFAULT_MIRROR};
 use crate::build;
 use crate::error::EngineError;
 use crate::event::{Step, Stream};
+use boot2deb_core::provenance::{SandboxMount, SandboxProvenance};
 use ferroday_cage::provision::debian::{Debian, DebianEvent, Stream as DebianStream};
 use ferroday_cage::provision::{self, Provisioned};
-use ferroday_cage::{Cage, Network, Observer};
+use ferroday_cage::{Cage, Network, Observer, ResolvedMount};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
@@ -231,13 +232,11 @@ impl BuildSandbox for RootlessSandbox {
         // keyring, a `signed-by` sources line for every component, and an apt
         // sandbox-user posture matching the single-identity map). The later
         // `install`/`install_local_debs` build-time apt runs read those sources.
-        let mut sink = |event: DebianEvent<'_>| forward_bootstrap_event(step, event);
         let mut builder = Debian::builder(&self.suite)
             .architecture(&self.arch)
             .mirror(&self.mirror)
             .components(COMPONENTS.split(','))
-            .include(BASE_DEPS.iter().copied())
-            .progress(&mut sink);
+            .include(BASE_DEPS.iter().copied());
         // A vendored keyring makes the bootstrap portable to a non-Debian host;
         // without one the provisioner falls back to its embedded Debian archive
         // keyring.
@@ -248,12 +247,16 @@ impl BuildSandbox for RootlessSandbox {
             context: format!("configure the {} {} bootstrap", self.arch, self.suite),
             message: source.to_string(),
         })?;
-        let outcome = provision::ensure(&self.rootfs, &mut debian).map_err(|source| {
-            EngineError::Bootstrap {
-                context: format!("bootstrap the {} {} rootfs", self.arch, self.suite),
-                message: source.to_string(),
-            }
-        })?;
+        // The sink is bound for this one run rather than for the provisioner's life,
+        // so its borrow of `step` ends when `ensure` returns.
+        let mut sink = |event: DebianEvent<'_>| forward_bootstrap_event(step, event);
+        let outcome =
+            provision::ensure(&self.rootfs, &mut debian.observe(&mut sink)).map_err(|source| {
+                EngineError::Bootstrap {
+                    context: format!("bootstrap the {} {} rootfs", self.arch, self.suite),
+                    message: source.to_string(),
+                }
+            })?;
         // `Existing` means a prior build already published this rootfs; anything
         // else means this call produced it.
         if outcome == Provisioned::Existing {
@@ -341,32 +344,19 @@ impl BuildSandbox for RootlessSandbox {
 impl RootlessSandbox {
     /// Build the [`Cage`] that enters [`rootfs`](Self::rootfs) and runs `spec`.
     ///
-    /// The rootfs is mounted as `/`; the cage's default profile gives the build a
-    /// working `/proc`, minimal `/dev`, and `/tmp`, and the single-identity map
-    /// maps the caller to root inside — `dpkg`/`dpkg-buildpackage` require it,
-    /// matching "root in the chroot" of the proven build. [`Network::Host`] shares
-    /// the host network only when `spec.net` is set (an `apt` run needs it); an
+    /// The [`baseline`] profile plus what this one run adds to it. [`Network::Host`]
+    /// shares the host network only when `spec.net` is set (an `apt` run needs it); an
     /// offline compile keeps the default [`Network::Isolated`] namespace (loopback
-    /// only), shrinking a build step's egress surface. The environment is built
-    /// from scratch and seeded with [`SANDBOX_ENV`] for a clean, reproducible run;
-    /// per-run `spec.env` entries override it on collision. Each read-write `bind`
-    /// and each read-only `ro_bind` is exposed at its host path so artifacts
-    /// written beside a source tree land back on the host while input-only mounts
-    /// stay unwritable.
+    /// only), shrinking a build step's egress surface. Per-run `spec.env` entries
+    /// override [`SANDBOX_ENV`] on collision. Each read-write `bind` and each read-only
+    /// `ro_bind` is exposed at its host path so artifacts written beside a source tree
+    /// land back on the host while input-only mounts stay unwritable.
     fn cage(&self, spec: &SandboxRun) -> ferroday_cage::CageBuilder {
-        let mut builder = Cage::builder()
-            .rootfs(&self.rootfs)
-            // The stages pass bare tool names (`dpkg-buildpackage`, `make`,
-            // `apt-get`); the cage resolves them against SANDBOX_ENV's `PATH`
-            // inside the rootfs, like a shell.
-            .path_lookup(true)
+        let mut builder = baseline(&self.rootfs)
             .command(&spec.argv[0])
             .args(&spec.argv[1..])
             .network(if spec.net { Network::Host } else { Network::Isolated })
             .current_dir(spec.work);
-        for (key, value) in SANDBOX_ENV {
-            builder = builder.env(key, value);
-        }
         for (key, value) in spec.env {
             builder = builder.env(key, value);
         }
@@ -380,9 +370,174 @@ impl RootlessSandbox {
     }
 }
 
-/// Baseline environment for every sandbox command, seeded onto the cage's
-/// built-from-scratch environment so the host env never leaks in (reproducibility,
-/// and it avoids `dpkg`/`perl` reading the host `HOME`/locale). Per-run `spec.env`
+/// The sandbox profile **every** boot2deb cage runs under, over `rootfs`: the package
+/// stages here and the OS rootfs customize in [`crate::rootfs`] both start from this and
+/// add only their own command, network, and binds.
+///
+/// The rootfs is mounted as `/` and the cage's managed mounts give the build a working
+/// `/proc`, a minimal `/dev`, and a `/tmp`. `base_env(false)` makes the command's
+/// environment exactly [`SANDBOX_ENV`], with nothing composed underneath, so what a
+/// compile sees is a function of this file alone: a variable the library adds to its own
+/// base in a later release cannot reach a build.
+///
+/// The identity map is left at the library default, which maps the caller to root inside
+/// — `dpkg`/`dpkg-buildpackage` require it. The rootfs customize swaps in the subordinate
+/// map, which is the one thing about it that is not this profile: it needs a range of ids
+/// to give the provisioned tree its real ownership.
+///
+/// One definition, because [`resolved_inputs`] records what it resolves to as the
+/// image's provenance: a second site configuring the same profile by hand could drift
+/// from the record without either changing.
+pub(crate) fn baseline(rootfs: &Path) -> ferroday_cage::CageBuilder {
+    let mut builder = Cage::builder()
+        .rootfs(rootfs)
+        // Declared, not inherited: see the note above.
+        .base_env(false)
+        // The stages pass bare tool names (`dpkg-buildpackage`, `make`, `apt-get`);
+        // the cage resolves them against SANDBOX_ENV's `PATH` inside the rootfs, like
+        // a shell.
+        .path_lookup(true);
+    for (key, value) in SANDBOX_ENV {
+        builder = builder.env(key, value);
+    }
+    builder
+}
+
+/// Where a build root's overlay upper layer is created, for a build whose scratch tree
+/// is `work_dir`.
+///
+/// Beside the sandbox base it overlays, and deliberately **not** under `TMPDIR`. An
+/// unprivileged overlay records its whiteouts and opaque markers in `user.*` extended
+/// attributes, which a tmpfs older than Linux 6.6 cannot hold — so an upper placed in a
+/// tmpfs `TMPDIR` fails on a host whose work dir would have carried it. Which
+/// filesystem this lands on is therefore a host requirement, and
+/// [`overlay_check`](crate::checks::overlay_check) probes this directory rather than
+/// `/tmp` for exactly that reason.
+pub fn build_root_uppers(work_dir: &Path) -> PathBuf {
+    work_dir.join("sandbox").join("layers")
+}
+
+/// The sandbox profile as provenance data: the environment and the mounts every
+/// sandboxed build command runs under.
+///
+/// Resolved from the profile the stages themselves run in rather than restated, so the
+/// record reports what a command actually sees — including the six `/dev` device nodes
+/// and five `/dev` symlinks, which the sandbox library establishes and which no accessor
+/// other than [`Cage::resolved_inputs`](ferroday_cage::Cage::resolved_inputs) reports.
+///
+/// The profile is a function of the builder configuration alone — no mount in it names
+/// the rootfs — so it resolves against an empty stand-in root. That is what makes the
+/// record the same for every build: a base image bootstraps no build-sandbox rootfs at
+/// all, and its provenance still has to state the profile its rootfs customize ran under.
+///
+/// A run's own additions are deliberately outside the record: its working and artifact
+/// binds are per-build paths, and the host `/etc/resolv.conf` an `apt` run binds is a
+/// host path. Both would make the record a property of the machine rather than of the
+/// builder.
+pub fn resolved_inputs() -> Result<SandboxProvenance, EngineError> {
+    let scratch = tempfile::Builder::new()
+        .prefix("boot2deb-sandbox-profile-")
+        .tempdir()
+        .map_err(|source| EngineError::io(&std::env::temp_dir(), source))?;
+    let cage = baseline(scratch.path())
+        // A command is required to freeze a launch plan and contributes nothing to the
+        // environment or the mounts, so any resolvable name serves.
+        .command("true")
+        .build()
+        .map_err(|source| EngineError::Sandbox {
+            context: "resolve the sandbox profile".into(),
+            source,
+        })?;
+    Ok(project(cage.resolved_inputs()))
+}
+
+/// Project the sandbox library's resolved inputs onto the manifest's shape.
+fn project(inputs: ferroday_cage::ResolvedInputs) -> SandboxProvenance {
+    SandboxProvenance {
+        // Every variable is declared by SANDBOX_ENV from `&str` constants, so the lossy
+        // conversion is exact for the environment this profile carries.
+        env: inputs
+            .env
+            .iter()
+            .map(|(name, value)| {
+                (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())
+            })
+            .collect(),
+        mounts: inputs.mounts.iter().map(project_mount).collect(),
+    }
+}
+
+/// Project one resolved mount onto the manifest's one flat shape: `target` is always
+/// where the mount is established inside the sandbox, `source` always what is exposed
+/// there.
+///
+/// Each arm names every field of its variant rather than eliding the rest with `..` —
+/// the opposite of [`forward_bootstrap_event`]'s deliberate `..`, and for the opposite
+/// reason. A progress stream may drop a milestone it has no line for; a record whose
+/// value is being complete may not drop an input, so a field added to a variant is a
+/// compile error here rather than a silent omission from every later manifest.
+fn project_mount(mount: &ResolvedMount) -> SandboxMount {
+    let base = |kind: &str| SandboxMount {
+        kind: kind.to_string(),
+        target: mount.get_target().display().to_string(),
+        source: None,
+        fstype: None,
+        flags: None,
+        options: None,
+        read_only: None,
+    };
+    match mount {
+        ResolvedMount::Tmpfs { target: _, flags, data } => SandboxMount {
+            flags: Some(hex_flags(*flags)),
+            options: data_string(data),
+            ..base("tmpfs")
+        },
+        ResolvedMount::Procfs { target: _ } => base("procfs"),
+        ResolvedMount::Devpts { target: _, data } => SandboxMount {
+            options: data_string(data),
+            ..base("devpts")
+        },
+        ResolvedMount::Bind { source, target: _, read_only } => SandboxMount {
+            source: Some(source.display().to_string()),
+            read_only: Some(*read_only),
+            ..base("bind")
+        },
+        ResolvedMount::Raw { source, target: _, fstype, flags, data } => SandboxMount {
+            source: source.as_ref().map(|p| p.display().to_string()),
+            fstype: fstype.clone(),
+            flags: Some(hex_flags(*flags)),
+            options: data.as_deref().and_then(data_string),
+            ..base("raw")
+        },
+        // `get_target()` gives the link itself; the variant's own `target` is what the
+        // link points at, which is what this shape calls a source.
+        ResolvedMount::Symlink { path: _, target } => SandboxMount {
+            source: Some(target.display().to_string()),
+            ..base("symlink")
+        },
+        // The enum is `#[non_exhaustive]`, so a kind this release cannot name is still
+        // recorded — by the one thing every mount has — rather than dropped.
+        _ => base("unknown"),
+    }
+}
+
+/// One `MS_*` flag word in the manifest's form: `0x`-prefixed and 8 hex digits, matching
+/// how the filesystem pin renders a feature word.
+fn hex_flags(flags: u64) -> String {
+    format!("{flags:#010x}")
+}
+
+/// A mount's filesystem data string, or `None` where it carries none: the library
+/// freezes an unset one as the empty string, and `options = ""` would read as a value
+/// rather than an absence.
+fn data_string(data: &str) -> Option<String> {
+    (!data.is_empty()).then(|| data.to_string())
+}
+
+/// The environment for every sandbox command. With `base_env(false)` on the builder
+/// these entries and the per-run `spec.env` are the whole of it — the host env never
+/// leaks in (reproducibility, and it avoids `dpkg`/`perl` reading the host
+/// `HOME`/locale), and neither does the cage library's own base. Per-run `spec.env`
 /// entries are applied afterwards and override these. `TZ=UTC` and `LC_ALL=C.UTF-8`
 /// pin timezone and locale so packaged timestamps/collation do not vary with the
 /// build host; the host-side [`build::run`](crate::build::run) normalizes the same
@@ -404,6 +559,12 @@ pub(crate) fn forward_bootstrap_event(step: &Step, event: DebianEvent<'_>) {
     match event {
         DebianEvent::Fetching { url, .. } => step.log(format!("fetching {url}")),
         DebianEvent::Resolving => step.log("resolving the package set"),
+        // The closure the bootstrap itself resolved and is about to install — the
+        // build sandbox's only record of what it contains, and the rootfs node's
+        // manifest source.
+        DebianEvent::Resolved { plan, .. } => {
+            step.log(format!("bootstrap resolved {} packages", plan.packages.len()))
+        }
         DebianEvent::Downloading { package, index, total, .. } => {
             step.log(format!("downloading {package} ({index}/{total})"))
         }
@@ -579,5 +740,83 @@ mod tests {
     fn describe_names_the_target_arch() {
         let sb = RootlessSandbox::new(PathBuf::from("/w/rootfs"), "forky", "arm64", None);
         assert_eq!(sb.describe(), "rootless arm64");
+    }
+
+    /// The recorded profile is what the manifest claims it is: the declared environment
+    /// entire, and a mount set that names nothing belonging to the build host — so two
+    /// manifests differing here differ because the *builder* changed, not because the
+    /// machines did.
+    #[test]
+    fn the_recorded_profile_is_declared_and_host_independent() {
+        let profile = resolved_inputs().expect("the profile resolves");
+
+        // `base_env(false)` in force: SANDBOX_ENV is the whole environment, with nothing
+        // composed underneath it. An entry appearing here that this file does not
+        // declare means the library's own base reached a compile.
+        assert_eq!(profile.env.len(), SANDBOX_ENV.len());
+        for (key, value) in SANDBOX_ENV {
+            assert_eq!(profile.env.get(*key).map(String::as_str), Some(*value));
+        }
+
+        // The only host paths the profile exposes are the six /dev character devices,
+        // which cannot be created inside an unprivileged namespace. Anything else — the
+        // stand-in root this resolved against above all — would make the record a
+        // property of the machine that built the image.
+        for mount in &profile.mounts {
+            assert!(
+                mount.target.starts_with('/'),
+                "mount target is not a path inside the sandbox: {mount:?}"
+            );
+            if mount.kind == "bind" {
+                let source = mount.source.as_deref().expect("a bind names its source");
+                assert!(source.starts_with("/dev/"), "the profile binds a host path: {source}");
+            }
+        }
+
+        // The five /dev symlinks, which no other accessor reports and which a consumer
+        // cannot re-create by hand — the reason the mount half is the payload.
+        let links: Vec<&str> = profile
+            .mounts
+            .iter()
+            .filter(|m| m.kind == "symlink")
+            .map(|m| m.target.as_str())
+            .collect();
+        for link in ["/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/fd", "/dev/ptmx"] {
+            assert!(links.contains(&link), "missing {link} in {links:?}");
+        }
+    }
+
+    /// The flat shape carries every kind's parameters: `raw` is the widest, and the one
+    /// kind whose source, filesystem type, and data string are each optional.
+    #[test]
+    fn a_raw_mount_projects_its_whole_parameter_set() {
+        let full = project_mount(&ResolvedMount::Raw {
+            source: Some(PathBuf::from("tmpfs")),
+            target: PathBuf::from("/run"),
+            fstype: Some("tmpfs".to_string()),
+            flags: 6,
+            data: Some("mode=0755".to_string()),
+        });
+        assert_eq!(full.kind, "raw");
+        assert_eq!(full.target, "/run");
+        assert_eq!(full.source.as_deref(), Some("tmpfs"));
+        assert_eq!(full.fstype.as_deref(), Some("tmpfs"));
+        // Hex, because the word is a bit set and only hex diffs one bit at a time.
+        assert_eq!(full.flags.as_deref(), Some("0x00000006"));
+        assert_eq!(full.options.as_deref(), Some("mode=0755"));
+
+        // An unset parameter is absent from the record; a zero flag word is not unset,
+        // so it is recorded rather than dropped.
+        let bare = project_mount(&ResolvedMount::Raw {
+            source: None,
+            target: PathBuf::from("/run"),
+            fstype: None,
+            flags: 0,
+            data: None,
+        });
+        assert_eq!(bare.source, None);
+        assert_eq!(bare.fstype, None);
+        assert_eq!(bare.options, None);
+        assert_eq!(bare.flags.as_deref(), Some("0x00000000"));
     }
 }

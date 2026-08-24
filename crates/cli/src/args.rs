@@ -47,6 +47,9 @@ pub(crate) enum Command {
     ListKernels,
     /// List available rootfs features (the `--feature` override's valid values).
     ListFeatures,
+    /// List available out-of-tree kernel-module sets (a device's `device_kmods`
+    /// entries).
+    ListKmods,
     /// Print the support matrix: each shipped recipe's support claim joined to the
     /// exact pins its lock records.
     SupportMatrix {
@@ -78,6 +81,11 @@ pub(crate) enum Command {
     Doctor {
         /// Optional device/recipe to report cross-arch status against.
         target: Option<String>,
+        /// Scratch dir the target would build in; default: `build/<target>`. Only the
+        /// overlay check reads it — it probes the filesystem that dir lands on, so
+        /// checking a build you will run with `--work-dir` needs the same path here.
+        #[arg(long)]
+        work_dir: Option<std::path::PathBuf>,
         #[command(flatten)]
         overrides: OverrideArgs,
     },
@@ -178,17 +186,6 @@ pub(crate) enum StageArg {
     /// Only the disk image. Uses the rootfs tar from `--stage rootfs` (or
     /// `--rootfs-tar`) plus the u-boot payloads (run `--stage uboot` first).
     Image,
-}
-
-/// Which backend the `rootfs` stage bootstraps the device userland with.
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum RootfsBackendArg {
-    /// `mmdebstrap --mode=unshare` — the hardware-validated default.
-    Mmdebstrap,
-    /// The in-process ferroday-cage Debian provisioner: no external bootstrap
-    /// binary, real ownership via a subordinate id-map, an ownership-preserving
-    /// `export_tar`. Opt-in until it clears the hardware cross-build parity gate.
-    Provisioner,
 }
 
 /// `build`'s flags: the stage selector, per-tree clone-source overrides, the
@@ -308,18 +305,11 @@ pub(crate) struct BuildArgs {
     #[arg(long, conflicts_with = "save_manifest")]
     pub(crate) allow_manifest_drift: bool,
     /// Ignore a rootfs cache hit and re-bootstrap, refreshing the stored tree.
-    /// The cheap `--simulate` solve still runs — the rootfs cache keys on
-    /// the *solved* set, so a moved mirror already rebuilds automatically; this is
-    /// the manual escape when you want a clean bootstrap regardless.
+    /// The plan is still resolved — the rootfs cache keys on the *solved* set, so a
+    /// moved mirror already rebuilds automatically; this is the manual escape when
+    /// you want a clean bootstrap regardless.
     #[arg(long)]
     pub(crate) refresh_rootfs: bool,
-    /// Which backend the rootfs stage bootstraps with. `mmdebstrap` is the
-    /// hardware-validated default; `provisioner` selects the in-process
-    /// ferroday-cage Debian provisioner (no external bootstrap binary, real
-    /// ownership via a subordinate id-map), opt-in until it clears the hardware
-    /// cross-build parity gate.
-    #[arg(long, value_enum, default_value_t = RootfsBackendArg::Mmdebstrap)]
-    pub(crate) rootfs_backend: RootfsBackendArg,
     /// Disable the Tier-2 artifact cache: always recompile the kernel /
     /// u-boot / userspace / ffmpeg `.deb`s instead of restoring a stored output on a
     /// signature hit, and do not store this build's outputs. The durable store at

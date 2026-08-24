@@ -1,17 +1,14 @@
-//! Rootfs early-cutoff cache — skip the expensive `mmdebstrap` bootstrap
-//! when the *solved* package set is unchanged, without ever serving a stale solve.
+//! Rootfs early-cutoff cache — skip the expensive bootstrap when the *solved*
+//! package set is unchanged, without ever serving a stale solve.
 //!
 //! The rootfs node's cost is dominated by the qemu-emulated package configure
 //! (~250 s), not by the dependency solve (seconds). So this caches on the **solved
-//! manifest** rather than on the input package *names* ("early cutoff"): every
-//! build first runs a cheap `mmdebstrap --simulate` to learn the exact versions the
-//! current mirror resolves, hashes that solved set into a [`Signature`], and reuses
-//! a stored rootfs only when the hash matches. A moved mirror resolves different
-//! versions → a different key → an automatic fresh bootstrap, so a cache hit can
-//! never reflect an out-of-date mirror. This is the same early-cutoff the `debrepo`
-//! backend gets natively from its `resolvo` solve-then-materialize path; here
-//! it is realized on the `mmdebstrap` backend via `--simulate`, and the key/store
-//! carry over unchanged when `debrepo` is promoted.
+//! manifest** rather than on the input package *names* ("early cutoff"): the
+//! provisioner resolves the plan up front — the exact versions the current mirror
+//! offers, without downloading — that solved set hashes into a [`Signature`], and a
+//! stored rootfs is reused only when the hash matches. A moved mirror resolves
+//! different versions → a different key → an automatic fresh bootstrap, so a cache
+//! hit can never reflect an out-of-date mirror.
 //!
 //! **Soundness of keying on the solved set.** Debian archive versions are
 //! immutable — a given `name version` is byte-identical across every mirror and
@@ -44,41 +41,23 @@ use std::path::{Path, PathBuf};
 /// overlay, so the `locales`/`keyboard-configuration`/`tzdata` packages configure
 /// themselves against it and `locale-gen` runs during the install — a different tree
 /// from the same inputs.
-const ROOTFS_STAGE_VERSION: u32 = 5;
-
-/// Parse `mmdebstrap --simulate --verbose` output into the solved package set: one
-/// `"name version arch"` line per configured package, sorted and de-duplicated.
 ///
-/// `--simulate` runs `apt-get --simulate`, which emits a `Conf <name> (<version>
-/// <origin> [<arch>])` line for every package it would configure — the exact
-/// installed set. Non-`Conf` lines (mmdebstrap's own `I:`/`Inst`/progress noise)
-/// are ignored. Pure, so the parse is unit-tested against real simulate output.
-pub fn parse_solved(output: &str) -> Vec<String> {
-    let mut set: Vec<String> = output
-        .lines()
-        .filter_map(|line| {
-            // `Conf <name> (<version> <origin> [<arch>])`
-            let rest = line.strip_prefix("Conf ")?;
-            let (name, paren) = rest.split_once(" (")?;
-            let inside = paren.strip_suffix(')')?;
-            let version = inside.split_whitespace().next()?;
-            // The arch is the last bracketed token: `... [arm64]`.
-            let arch = inside.rsplit_once('[')?.1.strip_suffix(']')?;
-            if name.is_empty() || version.is_empty() || arch.is_empty() {
-                return None;
-            }
-            Some(format!("{name} {version} {arch}"))
-        })
-        .collect();
-    set.sort();
-    set.dedup();
-    set
-}
+/// v6: the node generates `/etc/resolv.conf` and the initramfs drop-in
+/// (`/etc/initramfs-tools/conf.d/boot2deb.conf`), which changes both the tree and the
+/// initramfs built from it.
+///
+/// v7: the node bootstraps in-process under the subordinate identity map, so its
+/// trees carry real system ownership. Entries stored by any earlier version were
+/// produced differently and must not be served to it.
+const ROOTFS_STAGE_VERSION: u32 = 7;
 
 /// The rootfs cache key: a [`Signature`] over the solved package set, the
 /// assembled overlay's content, the local-repo `.deb`s' content, and the target
 /// `arch`/`suite`. Everything that determines the produced tree *except* the
 /// per-image password (applied on restore). Pure.
+///
+/// The solved set is `name version arch` per package, from the resolved
+/// [`Plan`](ferroday_cage::provision::debian::Plan).
 pub fn cache_key(
     solved: &[String],
     overlay: &[String],
@@ -86,40 +65,7 @@ pub fn cache_key(
     arch: &str,
     suite: &str,
 ) -> Signature {
-    key_in("rootfs", solved, overlay, repo_debs, arch, suite)
-}
-
-/// The rootfs cache key for the ferroday-cage provisioner backend
-/// ([`crate::rootfs::ProvisionerRootfs`]) — the same folds as [`cache_key`] over
-/// a **distinct** signature domain, so the two backends never serve each other's
-/// stored trees. Their trees are not interchangeable for the same inputs: the
-/// provisioner seeds the `important` base variant and lays real
-/// (subordinate-mapped) ownership, where the `mmdebstrap` backend's variant and
-/// ownership handling differ. The solved set here is derived from the resolved
-/// [`Plan`](ferroday_cage::provision::debian::Plan), not an `mmdebstrap
-/// --simulate` solve, but is the same `name version arch` shape. Pure.
-pub fn provisioner_cache_key(
-    solved: &[String],
-    overlay: &[String],
-    repo_debs: &[String],
-    arch: &str,
-    suite: &str,
-) -> Signature {
-    key_in("rootfs-provisioner", solved, overlay, repo_debs, arch, suite)
-}
-
-/// The shared fold behind [`cache_key`] and [`provisioner_cache_key`]: everything
-/// that determines the produced tree *except* the per-image password, under the
-/// given signature `domain`.
-fn key_in(
-    domain: &'static str,
-    solved: &[String],
-    overlay: &[String],
-    repo_debs: &[String],
-    arch: &str,
-    suite: &str,
-) -> Signature {
-    let mut b = SignatureBuilder::new(domain, ROOTFS_STAGE_VERSION);
+    let mut b = SignatureBuilder::new("rootfs", ROOTFS_STAGE_VERSION);
     b.fold_scalar("arch", arch);
     b.fold_scalar("suite", suite);
     b.fold_set("solved", solved);
@@ -314,31 +260,6 @@ impl RootfsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_solved_extracts_name_version_arch_from_conf_lines() {
-        // Real `mmdebstrap --simulate --verbose` output shape (Conf + Inst + noise).
-        let output = "\
-I: simulate creating tarball...
-Inst libc6 (2.41-2 Debian:forky [arm64])
-Conf ca-certificates (20260601 Debian:testing [all])
-Conf openssl (3.6.3-1 Debian:testing [arm64])
-Conf libpopt0 (1.19+dfsg-2+b2 Debian:testing [arm64])
-Conf libc6 (2.41-2 Debian:forky [arm64])
-I: success in 2.7310 seconds
-";
-        let solved = parse_solved(output);
-        // Only Conf lines, sorted, name+version+arch — the Inst line and I: noise out.
-        assert_eq!(
-            solved,
-            vec![
-                "ca-certificates 20260601 all".to_string(),
-                "libc6 2.41-2 arm64".to_string(),
-                "libpopt0 1.19+dfsg-2+b2 arm64".to_string(),
-                "openssl 3.6.3-1 arm64".to_string(),
-            ]
-        );
-    }
 
     #[test]
     fn put_replaces_the_entry_and_spares_another_builds_staging() {
