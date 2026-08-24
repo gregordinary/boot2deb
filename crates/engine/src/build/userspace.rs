@@ -689,6 +689,8 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         let mpp = Package { name: "mpp", source: "", pin: &pin, deb_prefixes: &[] };
         let pin_at = |commit: &str| boot2deb_core::lock::PatchesPin {
             profile: "rk3588-accel".into(),
+            source: "https://example.invalid/patches.git".into(),
+            reference: "main".into(),
             commit: commit.into(),
         };
         let (pin1, pin2) = (pin_at("p1"), pin_at("p2"));
@@ -841,6 +843,8 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         // A patch series reaches the output signature through the tree dependency.
         let pc1 = boot2deb_core::lock::PatchesPin {
             profile: "rk3588-accel".into(),
+            source: "https://example.invalid/patches.git".into(),
+            reference: "main".into(),
             commit: "pc1".into(),
         };
         let patches = PatchInputs { pin: Some(&pc1), patches: PatchSeries::Pinned };

@@ -66,7 +66,7 @@ For orientation, the checks fall into a few groups:
 | --- | --- | --- |
 | Rootfs bootstrap | `mmdebstrap` + unprivileged user namespaces | always |
 | Packaging / apt repo | `dpkg-deb`, `dpkg-scanpackages`, `apt-ftparchive`, `sha256sum` | always |
-| Image assembly | `mke2fs` + `e2fsck` (format the rootfs ext4 and verify it clean) | always |
+| Image assembly | none — the rootfs ext4 is formatted and checksum-verified in pure Rust; `e2fsck` is an optional cross-check when present | optional |
 | Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler (native, or the `<triple>gcc` cross compiler) | only if the recipe compiles a kernel or a bootloader |
 | Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | cross only |
 | Sandbox | `bwrap`, to enter the rootless target-arch build sandbox | the recipe builds target-arch packages (the media-accel stack) — on any host |

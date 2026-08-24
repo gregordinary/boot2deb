@@ -17,7 +17,7 @@
 //! of this is built on the shared [`git`] shell-outs, `make`/`merge_config.sh`,
 //! and blob verification ([`blobs`]). The [`image`] node assembles the
 //! bootable disk image without root — GPT and `.xz` in pure Rust, the ext4
-//! rootfs via host `mke2fs -d` from a userns-staged tree. The [`repo`] module assembles the build's
+//! rootfs formatted in-process by the pure-Rust `ferrosys` formatter. The [`repo`] module assembles the build's
 //! `.deb`s into a local apt repo — including the pre-built `extra_debs` a
 //! layer or feature pulls from outside the mirror, which [`extradebs`] materializes
 //! into a content-addressed [`debstore`] and verifies against their sha256 pins
@@ -90,10 +90,10 @@ pub(crate) mod test_support {
         )
     }
 
-    /// The resolved `turing-rk1-media-accel-forky` build, for stage tests that need
+    /// The resolved `turing-rk1/media-accel-forky` build, for stage tests that need
     /// real device / offset / soc values *and* the media userspace + ffmpeg pins.
     pub(crate) fn rk1_build() -> ResolvedBuild {
-        resolve_recipe(&repo_root(), "turing-rk1-media-accel-forky", &Overrides::default()).unwrap()
+        resolve_recipe(&repo_root(), "turing-rk1/media-accel-forky", &Overrides::default()).unwrap()
     }
 }
 

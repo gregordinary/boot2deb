@@ -31,7 +31,9 @@ const CLONE_STAGE_VERSION: u32 = 1;
 /// v2: the defconfig is now generated with the blob `make` variables, so a board with
 /// a BL32 resolves `OPTEE_LIB`/`HAS_TEE_IN_BUILD_ENV` at config time and produces a
 /// different `.config` — and payloads — than v1 did.
-const OUTPUT_STAGE_VERSION: u32 = 2;
+/// v3: maskrom boards additionally stage the merged RKBOOT loader
+/// ([`MASKROM_LOADER`]), so the output set grew.
+const OUTPUT_STAGE_VERSION: u32 = 3;
 
 /// Filesystem inputs for the u-boot stage.
 pub struct UbootOptions<'a> {
@@ -54,6 +56,34 @@ pub struct UbootOptions<'a> {
     pub store: Option<&'a Path>,
 }
 
+/// binman's maskrom USB download payload filenames, emitted only when the u-boot
+/// build enables `CONFIG_ROCKCHIP_MASKROM_IMAGE` (the `rk3576-loader` profile does).
+const MASKROM_USB471: &str = "u-boot-rockchip-usb471.bin";
+const MASKROM_USB472: &str = "u-boot-rockchip-usb472.bin";
+/// The merged RKBOOT loader packed from the two payloads by [`crate::build::rkboot`]:
+/// the single file `rkdeveloptool db` (and other rockusb hosts) stream to the
+/// BootROM to RAM-boot this u-boot. Staged alongside the raw payloads (pyrographer
+/// sends the raw pair; rkdeveloptool takes the merged file).
+const MASKROM_LOADER: &str = "u-boot-rockchip-maskrom.bin";
+
+/// The maskrom USB boot images: the CODE471/CODE472 payloads the BootROM download
+/// protocol takes to run this u-boot from RAM over USB with nothing written to
+/// storage. Present only when the build enables `CONFIG_ROCKCHIP_MASKROM_IMAGE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskromImages {
+    /// `u-boot-rockchip-usb471.bin` — CODE471, the external DDR TPL (the rkbin blob).
+    pub usb471: PathBuf,
+    /// `u-boot-rockchip-usb472.bin` — CODE472, SPL + the FIT, laid out so the FIT
+    /// sits at `SPL_LOAD_FIT_ADDRESS`. The SPL advertises `SPL_TEXT_BASE` as its load
+    /// address (patch `0005`), which the RK3576 BootROM honours to place the download.
+    pub usb472: PathBuf,
+    /// `u-boot-rockchip-maskrom.bin` — the two payloads packed into the RKBOOT
+    /// container `rkdeveloptool db` consumes (see [`crate::build::rkboot`]). The
+    /// directly-flashable single-file loader; the raw pair above is what pyrographer
+    /// streams.
+    pub loader: PathBuf,
+}
+
 /// The raw-gap boot payloads produced by [`build_uboot`], plus the packaged deb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UbootArtifacts {
@@ -66,6 +96,11 @@ pub struct UbootArtifacts {
     /// this deb is the package-centric artifact + on-board reference, not the
     /// bootloader-write path (it never auto-flashes).
     pub deb: PathBuf,
+    /// The maskrom USB boot images, when the build produced them (see
+    /// [`MaskromImages`]); `None` for boards whose u-boot does not enable
+    /// `CONFIG_ROCKCHIP_MASKROM_IMAGE`. Cached alongside the payloads, so a Tier-2
+    /// restore reproduces them.
+    pub maskrom: Option<MaskromImages>,
 }
 
 /// Run the u-boot stage, emitting its [`Event`](crate::event::Event)s to `sink`.
@@ -111,12 +146,16 @@ pub fn build_uboot(
     )?
     .as_deref()
     {
+        // The store restores every artifact under the signature into out_dir, so a
+        // board whose entry carries the maskrom images has them here already.
+        let maskrom = maskrom_in(opts.out_dir);
         step.progress(100);
         step.finish();
         return Ok(UbootArtifacts {
             idbloader: idbloader.clone(),
             uboot_itb: uboot_itb.clone(),
             deb: deb.clone(),
+            maskrom,
         });
     }
 
@@ -157,28 +196,31 @@ pub fn build_uboot(
     compile(env, &tree, &blobs, epoch, &step)?;
 
     let (idbloader, uboot_itb) = collect(opts, &tree, &step)?;
+    let maskrom = collect_maskrom(opts, &tree, &step)?;
     step.progress(90);
 
     let deb = package_deb(build, boot, &uboot.reference, opts, epoch, &idbloader, &uboot_itb, &step)?;
 
-    // Store the payloads + deb under the output signature.
-    build::store_stage_outputs(
-        opts.store,
-        "uboot",
-        &out_man.signature(),
-        &[
-            ("idbloader", idbloader.as_path()),
-            ("uboot_itb", uboot_itb.as_path()),
-            ("deb", deb.as_path()),
-        ],
-        &step,
-    )?;
+    // Store the payloads + deb under the output signature, plus the maskrom images
+    // when this build produced them, so a Tier-2 restore reproduces the full set.
+    let mut outputs = vec![
+        ("idbloader", idbloader.as_path()),
+        ("uboot_itb", uboot_itb.as_path()),
+        ("deb", deb.as_path()),
+    ];
+    if let Some(m) = &maskrom {
+        outputs.push(("usb471", m.usb471.as_path()));
+        outputs.push(("usb472", m.usb472.as_path()));
+        outputs.push(("maskrom_loader", m.loader.as_path()));
+    }
+    build::store_stage_outputs(opts.store, "uboot", &out_man.signature(), &outputs, &step)?;
     step.progress(100);
     step.finish();
     Ok(UbootArtifacts {
         idbloader,
         uboot_itb,
         deb,
+        maskrom,
     })
 }
 
@@ -373,6 +415,84 @@ fn collect(opts: &UbootOptions, tree: &Path, step: &Step) -> Result<(PathBuf, Pa
     let uboot_itb = stage_artifact(opts.out_dir, &itb_src)?;
     step.log("staged idbloader.img and u-boot.itb");
     Ok((idbloader, uboot_itb))
+}
+
+/// Stage the maskrom USB boot images from a freshly built tree, when binman emitted
+/// them (`CONFIG_ROCKCHIP_MASKROM_IMAGE`). Both files must be present or the build
+/// produced neither — a lone one is a binman contract break, reported as missing.
+fn collect_maskrom(
+    opts: &UbootOptions,
+    tree: &Path,
+    step: &Step,
+) -> Result<Option<MaskromImages>, EngineError> {
+    let src471 = tree.join(MASKROM_USB471);
+    let src472 = tree.join(MASKROM_USB472);
+    match (src471.exists(), src472.exists()) {
+        (false, false) => Ok(None),
+        (true, true) => {
+            let usb471 = stage_artifact(opts.out_dir, &src471)?;
+            let usb472 = stage_artifact(opts.out_dir, &src472)?;
+            let loader = pack_maskrom_loader(opts.out_dir, tree, &usb471, &usb472)?;
+            step.log("staged maskrom USB boot images (usb471 + usb472 + merged loader)");
+            Ok(Some(MaskromImages { usb471, usb472, loader }))
+        }
+        (has471, _) => Err(EngineError::ArtifactMissing {
+            what: if has471 { MASKROM_USB472 } else { MASKROM_USB471 }.into(),
+            location: tree.display().to_string(),
+        }),
+    }
+}
+
+/// Pack the two staged payloads into the merged RKBOOT loader
+/// ([`crate::build::rkboot`]) and write it to `out_dir`. The SoC's four-digit code
+/// (for the container `chipType`) is read from the built u-boot `.config`
+/// (`CONFIG_ROCKCHIP_RK<code>=y`), so the packer stays chip-agnostic.
+fn pack_maskrom_loader(
+    out_dir: &Path,
+    tree: &Path,
+    usb471: &Path,
+    usb472: &Path,
+) -> Result<PathBuf, EngineError> {
+    let chip = rk_chip_code(tree).ok_or_else(|| EngineError::ArtifactMissing {
+        what: "CONFIG_ROCKCHIP_RK<code> in .config".into(),
+        location: tree.display().to_string(),
+    })?;
+    let b471 = std::fs::read(usb471).map_err(|source| EngineError::io(usb471, source))?;
+    let b472 = std::fs::read(usb472).map_err(|source| EngineError::io(usb472, source))?;
+    let bytes = crate::build::rkboot::write_maskrom_loader(chip, &b471, &b472);
+    let dest = out_dir.join(MASKROM_LOADER);
+    let tmp = out_dir.join(format!(".{MASKROM_LOADER}.{}.partial", std::process::id()));
+    std::fs::write(&tmp, &bytes).map_err(|source| {
+        let _ = std::fs::remove_file(&tmp);
+        EngineError::io(&tmp, source)
+    })?;
+    std::fs::rename(&tmp, &dest).map_err(|source| {
+        let _ = std::fs::remove_file(&tmp);
+        EngineError::io(&dest, source)
+    })?;
+    Ok(dest)
+}
+
+/// The SoC's four-character code from the built u-boot `.config`, e.g. `b"3576"`
+/// from `CONFIG_ROCKCHIP_RK3576=y`. `None` if no such symbol is set.
+fn rk_chip_code(tree: &Path) -> Option<[u8; 4]> {
+    let config = std::fs::read_to_string(tree.join(".config")).ok()?;
+    config.lines().find_map(|line| {
+        let code = line.strip_prefix("CONFIG_ROCKCHIP_RK")?.strip_suffix("=y")?;
+        let bytes = code.as_bytes();
+        (bytes.len() == 4 && bytes.iter().all(u8::is_ascii_digit))
+            .then(|| bytes.try_into().unwrap())
+    })
+}
+
+/// The maskrom images already sitting in `dir` (a Tier-2 restore copies every stored
+/// artifact there), or `None` when this board's entry carried none.
+fn maskrom_in(dir: &Path) -> Option<MaskromImages> {
+    let usb471 = dir.join(MASKROM_USB471);
+    let usb472 = dir.join(MASKROM_USB472);
+    let loader = dir.join(MASKROM_LOADER);
+    (usb471.is_file() && usb472.is_file() && loader.is_file())
+        .then_some(MaskromImages { usb471, usb472, loader })
 }
 
 /// Add `CROSS_COMPILE` to a `make` invocation when cross-building.
@@ -606,7 +726,7 @@ mod tests {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
             kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() }),
-            patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
+            patches: Some(PatchesPin { profile: "rk3588-accel".into(), source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
             uboot: Some(UbootPin { source: "us".into(), reference: "v2026.04".into(), commit: uboot_commit.into() }),
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git("b"), rockchip: git("rk") }),
@@ -884,5 +1004,59 @@ mod tests {
         // Sleep-free: the two runs stage files at (possibly different) build-clock
         // times, both far newer than the 2020 epoch, so both clamp to it identically.
         assert_eq!(package("run-a"), package("run-b"));
+    }
+
+    #[test]
+    fn maskrom_images_stage_only_when_binman_emitted_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("u-boot");
+        let out = tmp.path().join("out");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "uboot");
+        let opts = UbootOptions {
+            source: "unused",
+            patches: None,
+            blobs_dir: tmp.path(),
+            work_dir: tmp.path(),
+            out_dir: &out,
+            store: None,
+        };
+
+        // A board without CONFIG_ROCKCHIP_MASKROM_IMAGE emits neither file: no images,
+        // no error, and nothing staged.
+        assert_eq!(collect_maskrom(&opts, &tree, &step).unwrap(), None);
+        assert_eq!(maskrom_in(&out), None);
+
+        // A lone file is a binman contract break, reported rather than half-staged.
+        std::fs::write(tree.join(MASKROM_USB471), b"471").unwrap();
+        assert!(matches!(
+            collect_maskrom(&opts, &tree, &step),
+            Err(EngineError::ArtifactMissing { what, .. }) if what == MASKROM_USB472
+        ));
+
+        // Both present (plus a .config naming the SoC): the pair is staged and the
+        // merged RKBOOT loader is packed from them.
+        std::fs::write(tree.join(MASKROM_USB472), b"472").unwrap();
+        std::fs::write(tree.join(".config"), "CONFIG_ROCKCHIP_RK3576=y\n").unwrap();
+        let m = collect_maskrom(&opts, &tree, &step).unwrap().unwrap();
+        assert_eq!(m.usb471, out.join(MASKROM_USB471));
+        assert_eq!(m.usb472, out.join(MASKROM_USB472));
+        assert_eq!(m.loader, out.join(MASKROM_LOADER));
+        assert_eq!(std::fs::read(&m.usb472).unwrap(), b"472");
+        // The loader is a real RKBOOT container ("LDR " tag) built from the payloads.
+        assert_eq!(&std::fs::read(&m.loader).unwrap()[..4], b"LDR ");
+        // maskrom_in recovers the same trio a Tier-2 restore leaves in out_dir.
+        assert_eq!(maskrom_in(&out), Some(m));
+
+        // Without a chip code in .config, the payloads exist but the loader cannot
+        // be packed — surfaced rather than silently skipped.
+        std::fs::write(tree.join(".config"), "CONFIG_FOO=y\n").unwrap();
+        std::fs::remove_file(out.join(MASKROM_LOADER)).unwrap();
+        assert!(matches!(
+            collect_maskrom(&opts, &tree, &step),
+            Err(EngineError::ArtifactMissing { .. })
+        ));
     }
 }

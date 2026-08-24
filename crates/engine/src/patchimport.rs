@@ -170,7 +170,7 @@ uboot = []
         assert!(edited.contains("# u-boot tree: pristine, no patches."));
         let reparsed: boot2deb_core::PatchProfile = toml::from_str(&edited).unwrap();
         assert_eq!(
-            reparsed.kernel,
+            reparsed.kernel.iter().map(|e| e.path()).collect::<Vec<_>>(),
             vec![
                 "media-accel/kernel/040-a.patch",
                 "media-accel/kernel/045-mid.patch",
@@ -191,7 +191,9 @@ uboot = []
         insert_into_profile(&path, Scope::Uboot, 99, "uboot/001-fix.patch").unwrap();
         let reparsed: boot2deb_core::PatchProfile =
             toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(reparsed.uboot, vec!["uboot/001-fix.patch"]);
+        assert_eq!(
+            reparsed.uboot.iter().map(|e| e.path()).collect::<Vec<_>>(),
+            vec!["uboot/001-fix.patch"]);
     }
 
     #[test]
@@ -210,7 +212,9 @@ uboot = []
         // The pre-existing inline comment survives the edit.
         assert!(edited.contains("# keep me"), "comment clobbered:\n{edited}");
         let reparsed: boot2deb_core::PatchProfile = toml::from_str(&edited).unwrap();
-        assert_eq!(reparsed.kernel, vec!["k/040-a.patch", "k/050-b.patch"]);
+        assert_eq!(
+            reparsed.kernel.iter().map(|e| e.path()).collect::<Vec<_>>(),
+            vec!["k/040-a.patch", "k/050-b.patch"]);
     }
 
     #[test]
@@ -223,6 +227,8 @@ uboot = []
         insert_into_profile(&path, Scope::Ffmpeg, 0, "media-accel/ffmpeg/0001-x.patch").unwrap();
         let reparsed: boot2deb_core::PatchProfile =
             toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(reparsed.ffmpeg, vec!["media-accel/ffmpeg/0001-x.patch"]);
+        assert_eq!(
+            reparsed.ffmpeg.iter().map(|e| e.path()).collect::<Vec<_>>(),
+            vec!["media-accel/ffmpeg/0001-x.patch"]);
     }
 }

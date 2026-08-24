@@ -28,6 +28,7 @@ pub mod resolve;
 pub mod scaffold;
 pub mod size;
 pub mod sources;
+pub mod support;
 
 pub use error::ConfigError;
 pub use feature::Feature;
@@ -35,5 +36,5 @@ pub use host::HostInfo;
 pub use kconfig::KernelConfig;
 pub use loader::ConfigRoot;
 pub use model::*;
-pub use profile::{load_profile, PatchProfile};
+pub use profile::{load_profile, PatchEntry, PatchProfile, RangeMatch};
 pub use resolve::{resolve_device, resolve_recipe};

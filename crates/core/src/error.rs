@@ -19,17 +19,34 @@ pub enum ConfigError {
         path: String,
     },
 
-    /// A layer/recipe name (from a CLI argument or a config cross-reference) is
-    /// not a bare identifier, so it cannot be trusted to join into a filesystem
-    /// path. Names must match `[A-Za-z0-9._-]`, be non-empty, not start with a dot,
-    /// and contain no path separators or `..` — this stops a `../` traversal or an
-    /// absolute path from escaping the config root (both a read *and*, via
-    /// `lock_path`, a write target).
+    /// A flat layer name or manifest filename (from a CLI argument or a config
+    /// cross-reference) is not a bare identifier, so it cannot be trusted to join
+    /// into a filesystem path. Names must match `[A-Za-z0-9._-]`, be non-empty, not
+    /// start with a dot, and contain no path separators or `..` — this stops a `../`
+    /// traversal or an absolute path from escaping the config root (both a read *and*,
+    /// via `lock_path`, a write target). Recipe references, which nest one level and
+    /// so admit a single `/`, are validated separately ([`InvalidRecipeRef`](Self::InvalidRecipeRef)).
     #[error("invalid {kind} name '{name}': must be a bare identifier ([A-Za-z0-9._-], no separators or '..')")]
     InvalidName {
         /// Layer kind, e.g. `"device"`.
         kind: &'static str,
         /// The offending name.
+        name: String,
+    },
+
+    /// A recipe reference (a CLI argument or config cross-reference) is not a valid
+    /// `<device>/<leaf>` — or bare `<leaf>` — path. Recipes are the one layer that
+    /// nests one level under a device folder, so a reference may carry a *single*
+    /// interior `/`; both halves must be bare identifiers (`[A-Za-z0-9._-]`, non-empty,
+    /// no leading dot). That bars `..`, a leading/trailing/absolute/doubled slash, and
+    /// more than one separator, so a reference can never escape `recipes/` when joined
+    /// into `recipes/<ref>.toml`, its `.lock`, or its manifest sibling.
+    #[error(
+        "invalid recipe name '{name}': must be `<device>/<leaf>` or a bare identifier \
+         (at most one '/', each part [A-Za-z0-9._-], no '..')"
+    )]
+    InvalidRecipeRef {
+        /// The offending reference.
         name: String,
     },
 
@@ -300,6 +317,21 @@ pub enum ConfigError {
         /// Underlying semver parse error.
         #[source]
         source: semver::Error,
+    },
+
+    /// A kernel definition names a patch profile but no `patches_url`. The lock
+    /// records the source beside the commit, and a commit id is meaningless outside
+    /// the repo it came from, so a series without a source cannot be pinned honestly.
+    #[error(
+        "kernel '{kernel}' names patch profile '{profile}' but no patches_url — \
+         add `patches_url` to kernels/{kernel}.toml (the lock records it beside the \
+         pinned commit, which means nothing without the repo it is in)"
+    )]
+    MissingPatchesUrl {
+        /// Kernel definition id.
+        kernel: String,
+        /// The profile it names.
+        profile: String,
     },
 
     /// The resolved kernel version falls outside the profile's declared range —

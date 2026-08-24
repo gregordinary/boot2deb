@@ -1,0 +1,25 @@
+# devices/rk3576-evb1-v10.toml — Rockchip RK3576 EVB1 v10 (upstream reference).
+# The RK3576 SoC-path validator: its DTB is already in mainline (no device_dts
+# needed), so a full build exercises the whole chain — kernel builds the DTB,
+# u-boot builds with the DDR loader + BL31 — and isolates a SoC-path failure from
+# a board-DTS failure.
+description             = "Rockchip RK3576 EVB1 v10 (upstream reference board)"
+soc                     = "rk3576"                 # -> arch, dt_dir, modules, rkbin
+boot_method             = "rockchip-rkbin"
+supported_boot_methods  = ["rockchip-rkbin"]
+
+# Validated against u-boot v2026.04: builds idbloader.img + u-boot.itb.
+uboot_defconfig         = "generic-rk3576_defconfig"
+
+# In mainline arch/arm64/boot/dts/rockchip/ — a plain mainline build produces it.
+kernel_dtb              = "rockchip/rk3576-evb1-v10.dtb"
+
+device_config_fragments = []
+supported_kernels       = ["rk3576-mainline-7.1"]
+default_kernel          = "rk3576-mainline-7.1"
+default_suite           = "forky"
+default_layout          = "combined"
+hostname                = "rk3576-evb1"
+image_size              = "2G"
+
+# rkbin inherited from socs/rk3576.toml (ATF + unified DDR loader; no BL32).

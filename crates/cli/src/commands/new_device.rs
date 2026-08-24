@@ -162,8 +162,14 @@ pub(crate) fn run(
     let device_path = out_dir.join("devices").join(format!("{name}.toml"));
     write_scaffold_file(&device_path, &scaffold.device_toml(), args.force)?;
     println!("wrote {}", device_path.display());
+    // Recipes nest under their device folder; the scaffolded starter's leaf is the
+    // suite, so its reference is `<device>/<suite>` (e.g. `my-board/forky`).
+    let recipe_ref = format!("{name}/{}", scaffold.suite);
     if let Some(recipe) = scaffold.recipe_toml() {
-        let recipe_path = out_dir.join("recipes").join(format!("{name}.toml"));
+        let recipe_path = out_dir
+            .join("recipes")
+            .join(name)
+            .join(format!("{}.toml", scaffold.suite));
         write_scaffold_file(&recipe_path, &recipe, args.force)?;
         println!("wrote {}", recipe_path.display());
     }
@@ -190,8 +196,8 @@ pub(crate) fn run(
     println!("\nnext steps:");
     println!("  1. edit {} and replace the TODO values", device_path.display());
     if !args.no_recipe {
-        println!("  2. boot2deb update {name}    # resolve pins into the lock");
-        println!("  3. boot2deb build  {name}    # build the image");
+        println!("  2. boot2deb update {recipe_ref}    # resolve pins into the lock");
+        println!("  3. boot2deb build  {recipe_ref}    # build the image");
     }
     Ok(())
 }
@@ -251,11 +257,12 @@ mod tests {
         run(&root, "test-board", args).unwrap();
         // Files land in the overlay, not the primary root.
         assert!(overlay.path().join("devices/test-board.toml").is_file());
-        assert!(overlay.path().join("recipes/test-board.toml").is_file());
+        // The starter recipe nests under its device folder, leaf = suite (forky).
+        assert!(overlay.path().join("recipes/test-board/forky.toml").is_file());
         // The scaffolded recipe resolves against the composed search path, carrying
         // its selected feature — and the media-accel feature pulls in the SoC sources
         //. (The device alone has no features; they live in the recipe.)
-        let build = resolve_recipe(&root, "test-board", &Overrides::default()).unwrap();
+        let build = resolve_recipe(&root, "test-board/forky", &Overrides::default()).unwrap();
         assert_eq!(build.soc, Soc::Rk3588);
         assert_eq!(build.features, vec!["media-accel-rockchip"]);
         assert!(build.userspace.is_some());

@@ -72,7 +72,7 @@ pub fn apply_kernel_series(
     tree: &Path,
     base_commit: &str,
     patches_root: &Path,
-    series: &[String],
+    series: &[&str],
     target: &str,
 ) -> Result<usize, EngineError> {
     // Clear any leftover in-progress `am` and reset to a clean base, so an apply onto
@@ -191,7 +191,7 @@ mod tests {
             &tree,
             &commit,
             &patches,
-            &[format!("k/{label}")],
+            &[&format!("k/{label}")],
             "test @ v1.0",
         )
         .unwrap();

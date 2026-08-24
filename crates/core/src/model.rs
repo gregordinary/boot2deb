@@ -681,6 +681,15 @@ pub struct DeviceLayer {
     /// [`kernel_dtb`](Self::kernel_dtb) to name one of these sources. §4.
     #[serde(default)]
     pub device_dts: Vec<String>,
+    /// Extra kernel command-line arguments for this board, space-separated
+    /// (e.g. a workaround that disables a broken output). Appended to the boot
+    /// path's generated command line: the extlinux path ships them in
+    /// `/etc/boot2deb/board.conf` (`EXTL_CMD_LINE`), the depthcharge path appends
+    /// them to the boot method's signing cmdline. Base arguments stay generated —
+    /// `root=` in particular is derived from `/etc/fstab` on device and is rejected
+    /// here. Empty/absent means the generated command line stands alone.
+    #[serde(default)]
+    pub kernel_cmdline: Option<String>,
     /// Board-specific kconfig fragments (board deltas only; SoC/accel fragments
     /// belong to the kernel definition).
     pub device_config_fragments: Vec<String>,
@@ -1059,20 +1068,138 @@ pub struct CompiledKernelDef {
     /// Resolution maps the sentinel to
     /// [`ResolvedKernel::patch_profile`]`= None`.
     pub patch_profile: String,
-    /// Clone URL of the `patches` repo the profile lives in. Used to
-    /// auto-fetch the series at the lock-pinned commit when no local checkout is
-    /// present — the North-Star "selecting a device auto-fetches the right
-    /// patches." Optional: a kernel with no patch profile omits it,
-    /// and an explicit `--patches-path`/`--patches-url` overrides it.
+    /// Clone URL of the `patches` repo the profile lives in. Used to auto-fetch the
+    /// series at the lock-pinned commit when no local checkout is present, and
+    /// recorded in the lock so the pin names the repo its commit is meaningful in.
+    ///
+    /// Required whenever [`patch_profile`](Self::patch_profile) names a real profile
+    /// — resolution rejects a profile without one — and omitted only by a kernel that
+    /// applies no series. An explicit `--patches-path`/`--patches-url` overrides it
+    /// for a given run without changing what the lock records.
     #[serde(default)]
     pub patches_url: Option<String>,
+    /// The `patches` ref to pin the series at: a release tag once the series has one,
+    /// otherwise the default branch. Recorded in the lock beside the commit as the
+    /// human-legible half of the pin.
+    ///
+    /// Defaults to [`DEFAULT_PATCHES_REF`].
+    #[serde(default)]
+    pub patches_ref: Option<String>,
     /// SoCs this kernel supports; resolution rejects a mismatched device.
     pub supported_socs: Vec<Soc>,
 }
 
+/// The `patches` ref recorded when a kernel definition names none.
+///
+/// A patches release marks a validation event ("this series is validated against
+/// kernel X on these boards"), not a commit, so tags are rare and there is a real
+/// stretch with none. Naming the branch is the honest value for that stretch: it says
+/// the pin was taken from the tip of development rather than implying a release that
+/// was never cut.
+pub const DEFAULT_PATCHES_REF: &str = "main";
+
 // ---------------------------------------------------------------------------
 // Recipe
 // ---------------------------------------------------------------------------
+
+/// How far a recipe has been taken on real hardware.
+///
+/// The claim is per *recipe*, not per device, because it varies within a device: a
+/// board can have one build point booted and another — a different kernel, suite, or
+/// feature set — never built. Ordered from strongest to weakest claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SupportStatus {
+    /// An image built from this recipe has booted on the hardware. The strongest
+    /// claim the project makes, and the only one that required a physical board.
+    Validated,
+    /// Derived from a validated sibling — it differs along an axis expected not to
+    /// change the outcome (a suite, an added feature) — but this exact point was
+    /// never built, or was built and never booted. Honest for a configuration
+    /// believed good on reasoning rather than evidence.
+    Expected,
+    /// Under active bring-up: it may not build, and no validated sibling backs it.
+    Experimental,
+}
+
+kebab_enum!(SupportStatus {
+    Validated => "validated", Expected => "expected", Experimental => "experimental" });
+
+/// A recipe's support claim: what the maintainer asserts about this build point,
+/// and when the assertion was last established.
+///
+/// This is the *declared* half of the project's support story; the generated
+/// support matrix is the other half, joining this claim to the exact pins the
+/// sibling lock records. The two agree by construction because the matrix reads the
+/// pins from the lock rather than restating them — and `update` warns when it moves
+/// pins out from under a [`Validated`](SupportStatus::Validated) claim, which is the
+/// only moment the pair can be driven apart.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Support {
+    /// How far this build point has been taken.
+    pub status: SupportStatus,
+    /// `YYYY-MM-DD` the claim was last established: for
+    /// [`Validated`](SupportStatus::Validated) the day the image booted, otherwise
+    /// the day the claim was last assessed. Validated as a real calendar date at
+    /// load, so a published claim cannot carry an impossible one.
+    ///
+    /// A date is unavoidably an assertion — nothing mechanical knows when a board
+    /// was booted — so it lives here, with the rest of the assertion, rather than
+    /// in the lock, which records only what a build resolved.
+    #[serde(deserialize_with = "de_iso_date")]
+    pub date: String,
+}
+
+/// Deserialize a support-claim date, enforcing `YYYY-MM-DD` *and* real-calendar
+/// validity (month, day-in-month, leap years) at the parse boundary.
+///
+/// Shape alone would admit `2026-13-45`. A support claim is published — it renders
+/// into the matrix and the docs — so an impossible date must fail attributably at
+/// load rather than reach a reader.
+fn de_iso_date<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    check_iso_date(&s)
+        .map_err(|why| serde::de::Error::custom(format!("support date '{s}' {why}")))?;
+    Ok(s)
+}
+
+/// Validate one `YYYY-MM-DD` calendar date, returning the failure reason for a
+/// deserializer to wrap. Proleptic Gregorian: a leap year is divisible by 4,
+/// except centuries, except those divisible by 400.
+fn check_iso_date(s: &str) -> Result<(), String> {
+    let parts: Vec<&str> = s.split('-').collect();
+    let [y, m, d] = parts[..] else {
+        return Err("is not in YYYY-MM-DD form".into());
+    };
+    if (y.len(), m.len(), d.len()) != (4, 2, 2) || !s.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+    {
+        return Err("is not in YYYY-MM-DD form".into());
+    }
+    // Widths and digit-ness are established above, so these cannot fail.
+    let (year, month, day) = (
+        y.parse::<u32>().unwrap(),
+        m.parse::<u32>().unwrap(),
+        d.parse::<u32>().unwrap(),
+    );
+    if !(1..=12).contains(&month) {
+        return Err(format!("has month {month}, which is not 1-12"));
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if leap => 29,
+        _ => 28,
+    };
+    if !(1..=last).contains(&day) {
+        return Err(format!("has day {day}, but month {month} of {year} has {last}"));
+    }
+    Ok(())
+}
 
 /// A recipe (`recipes/<name>.toml`): a named, buildable point across the
 /// device, kernel, suite, features, and image-knob axes. Holds *constraints*;
@@ -1114,6 +1241,15 @@ pub struct Recipe {
     /// Keymap override; `None` → device `keymap`.
     #[serde(default)]
     pub keymap: Option<Keymap>,
+    /// The maintainer's support claim for this build point.
+    ///
+    /// Optional because a claim is only meaningful from someone in a position to
+    /// make it: every *shipped* recipe declares one (a test enforces it, and the
+    /// generated support matrix covers exactly those that do), while a recipe
+    /// authored locally against your own board asserts nothing until you say so.
+    /// `None` is therefore "no claim made", not a fourth status.
+    #[serde(default)]
+    pub support: Option<Support>,
 }
 
 /// Per-axis overrides applied during resolution.
@@ -1223,9 +1359,15 @@ pub struct ResolvedCompiledKernel {
     /// resolved, no series is applied, and the lock records no `[patches]` table.
     pub patch_profile: Option<String>,
     /// Clone URL of the `patches` repo, for auto-fetching the series at the
-    /// lock-pinned commit when no local checkout is present. `None` when
-    /// [`patch_profile`](Self::patch_profile) is `None` (nothing to fetch).
+    /// lock-pinned commit when no local checkout is present, and for the lock's
+    /// `[patches] source`. Resolution guarantees this is `Some` exactly when
+    /// [`patch_profile`](Self::patch_profile) is `Some`: a series always names the
+    /// repo it comes from, and a kernel with no series has nothing to fetch.
     pub patches_url: Option<String>,
+    /// The `patches` ref the lock pins the series at — the definition's
+    /// `patches_ref`, or [`DEFAULT_PATCHES_REF`].
+    /// `Some` under the same condition as [`patches_url`](Self::patches_url).
+    pub patches_ref: Option<String>,
     /// Kernel-owned fragments followed by device fragments, in apply order.
     pub config_fragments: Vec<String>,
 }
@@ -1338,7 +1480,9 @@ pub struct ResolvedDepthchargeBoot {
     /// The ChromeOS kernel partition this build writes.
     pub kpart: Kpart,
     /// Kernel command line baked into the signed FIT, minus `root=` — which
-    /// `depthchargectl` derives from `/etc/fstab`.
+    /// `depthchargectl` derives from `/etc/fstab`. The boot method's `cmdline`
+    /// with the device's extra [`kernel_cmdline`](DeviceLayer::kernel_cmdline)
+    /// (if any) appended; the merged value passes the same validation.
     pub cmdline: String,
     /// Start offset of the rootfs partition.
     pub rootfs_offset: String,
@@ -1417,6 +1561,13 @@ pub struct ResolvedBuild {
     /// `..`), names a `.dts`/`.dtsi`, and that [`kernel_dtb`](Self::kernel_dtb) is
     /// compiled from one of them. §4.
     pub device_dts: Vec<String>,
+    /// Extra kernel command-line arguments (from the device), space-separated and
+    /// trimmed; empty when the board declares none. Resolution guarantees the value
+    /// is a single line of plain arguments, safe to embed in the sourced
+    /// `/etc/boot2deb/board.conf` (no quote/escape/expansion characters), and free
+    /// of `root=`. The extlinux path emits it as `EXTL_CMD_LINE`; the depthcharge
+    /// path has already folded it into [`ResolvedDepthchargeBoot::cmdline`].
+    pub kernel_cmdline: String,
     /// Device-tree subdirectory (from the SoC).
     pub dt_dir: String,
     /// Force-loaded accel modules (from the SoC).
@@ -1585,5 +1736,35 @@ mod tests {
         assert!(unsafe_deb("vendor/sub/a.deb").validate().is_ok());
         // A `.` segment does not escape and is allowed.
         assert!(unsafe_deb("./vendor/a.deb").validate().is_ok());
+    }
+
+    #[test]
+    fn a_support_claim_parses_and_rejects_impossible_dates() {
+        let claim: Support =
+            toml::from_str("status = \"validated\"\ndate = \"2026-07-14\"\n").unwrap();
+        assert_eq!(claim.status, SupportStatus::Validated);
+        assert_eq!(claim.date, "2026-07-14");
+
+        // A recipe may omit the claim entirely (`None` = no claim made), but an
+        // unknown status is a typo, not a fourth state.
+        let none: Recipe = toml::from_str("device = \"turing-rk1\"\n").unwrap();
+        assert!(none.support.is_none());
+        assert!(toml::from_str::<Support>("status = \"probably-fine\"\ndate = \"2026-07-14\"\n")
+            .is_err());
+
+        // Shape failures.
+        for bad in ["2026-7-14", "26-07-14", "2026/07/14", "2026-07-14T00:00:00Z", "", "x"] {
+            assert!(check_iso_date(bad).is_err(), "expected {bad:?} to be rejected");
+        }
+        // Calendar failures: a date that parses but cannot exist.
+        for bad in ["2026-13-01", "2026-00-10", "2026-04-31", "2026-02-30", "2026-01-00"] {
+            assert!(check_iso_date(bad).is_err(), "expected {bad:?} to be rejected");
+        }
+        // February follows the proleptic-Gregorian leap rule: 2024 and 2000 are
+        // leap years, 2026 and 1900 are not.
+        assert!(check_iso_date("2024-02-29").is_ok());
+        assert!(check_iso_date("2000-02-29").is_ok());
+        assert!(check_iso_date("2026-02-29").is_err());
+        assert!(check_iso_date("1900-02-29").is_err());
     }
 }

@@ -578,6 +578,16 @@ pub enum EngineError {
         detail: String,
     },
 
+    /// Building the rootfs ext4 filesystem failed inside the pure-Rust formatter: the
+    /// rootfs archive could not be parsed, or the image could not be realized (a
+    /// geometry, allocation, or serialization failure). Unlike a host tool's nonzero
+    /// exit, this is a typed failure raised from within the build.
+    #[error("formatting the rootfs ext4 image failed: {detail}")]
+    Ext4Format {
+        /// The formatter's own error, rendered.
+        detail: String,
+    },
+
     /// A filesystem operation failed.
     #[error("failed to access {path}: {source}")]
     Io {

@@ -82,8 +82,19 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
                     root: opts.patches_path.display().to_string(),
                 });
             }
+            // Resolution guarantees a profile carries both of these, so a series is
+            // never pinned without naming the repo and ref it came from.
+            let compiled = build.kernel.compiled().expect("a profile implies a compiled kernel");
             Ok(PatchesPin {
                 profile: profile.to_string(),
+                source: compiled
+                    .patches_url
+                    .clone()
+                    .expect("resolution rejects a profile without a patches_url"),
+                reference: compiled
+                    .patches_ref
+                    .clone()
+                    .expect("resolution pairs patches_ref with the profile"),
                 commit: git::rev_parse_head(opts.patches_path)?,
             })
         })
@@ -579,7 +590,7 @@ mod tests {
         let git = |c: char| GitPin { source: "s".into(), reference: "r".into(), commit: std::iter::repeat_n(c, 40).collect() };
         let lock = Lock {
             kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v7.1.1".into(), commit: "a".repeat(40) }),
-            patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: "b".repeat(40) }),
+            patches: Some(PatchesPin { profile: "rk3588-accel".into(), source: "ps".into(), reference: "main".into(), commit: "b".repeat(40) }),
             uboot: Some(UbootPin { source: "us".into(), reference: "v2026.04".into(), commit: "c".repeat(40) }),
             userspace: Some(UserspacePins { mpp: git('1'), librga: git('2'), libmali: git('3') }),
             ffmpeg: Some(FfmpegPins { base: git('4'), rockchip: git('5') }),
@@ -639,6 +650,8 @@ mod tests {
             }),
             Some(PatchesPin {
                 profile: "rk3588-accel".into(),
+                source: "https://example.invalid/patches.git".into(),
+                reference: "main".into(),
                 commit: "67750099d1f73e36ca3551de380744a72e4d5ef7".into(),
             }),
             Some(UserspacePins {
@@ -809,6 +822,8 @@ mod tests {
             }),
             patches: build.kernel.patch_profile().map(|profile| PatchesPin {
                 profile: profile.to_string(),
+                source: "https://example.invalid/patches.git".into(),
+                reference: "main".into(),
                 commit: "p".into(),
             }),
             uboot: Some(UbootPin {

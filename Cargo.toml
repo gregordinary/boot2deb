@@ -14,8 +14,9 @@ toml = "0.8"
 thiserror = "2"
 semver = "1"
 sha2 = "0.10"
-# Matches the major used by gpt + arcbox-ext4 so their `Uuid`-typed APIs accept
-# the deterministic identifiers the image node derives from the lock.
+# Matches the major `gpt` exposes so its `Uuid`-typed API accepts the deterministic
+# identifiers the image node derives from the lock. (The ext4 formatter takes the raw
+# 16 bytes, so it imposes no version constraint of its own.)
 uuid = "1"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"

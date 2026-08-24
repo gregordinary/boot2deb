@@ -9,6 +9,7 @@ pub(crate) mod list;
 pub(crate) mod new_device;
 pub(crate) mod patch;
 pub(crate) mod resolve;
+pub(crate) mod support_matrix;
 pub(crate) mod update;
 pub(crate) mod verify_config;
 pub(crate) mod verify_patches;

@@ -1,0 +1,17 @@
+# kernels/rk3576-mainline-7.1.toml — mainline 7.1.x for RK3576 boards.
+# The SoC is fully upstream, so the kernel tree is built pristine: HW decode
+# (VDPU383) is native mainline, and encode is absent from mainline (a
+# vendor-kernel dependency, out of scope). The rk3576-loader patch profile
+# carries only u-boot patches (reboot-loader + SARADC download key); its
+# kernel/ffmpeg/userspace series are empty, so the kernel stays unpatched.
+flavor           = "mainline"
+source           = "linux-stable"        # 7.1.x stable releases live in linux-stable
+track            = "7.1.y"               # resolved to an exact tag/SHA in the lock (v7.1.3)
+base_defconfig   = "defconfig"           # in-tree arm64 base; fragments merge onto it
+config_fragments = ["base/debian-arm64", "soc/rk3576"]
+patch_profile    = "rk3576-loader"       # u-boot-only: reboot-loader + SARADC download key (no kernel patches)
+# Clone URL of the patches repo, so a build with no local checkout auto-fetches
+# the series at the lock-pinned commit. Override with --patches-url, or point
+# --patches-path at a local checkout to co-develop the series.
+patches_url      = "https://github.com/gregordinary/patches.git"
+supported_socs   = ["rk3576"]

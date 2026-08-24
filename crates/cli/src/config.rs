@@ -32,16 +32,22 @@ pub(crate) fn ensure_config_root(root: &ConfigRoot) -> Result<(), Box<dyn std::e
     .into())
 }
 
-/// Resolve `target` as a recipe if one exists, else as a device.
+/// Resolve `target` as a recipe if one exists or it is a nested `<device>/<leaf>`
+/// reference, else as a device.
 pub(crate) fn resolve(
     root: &ConfigRoot,
     target: &str,
     overrides: Overrides,
 ) -> Result<ResolvedBuild, boot2deb_core::ConfigError> {
-    if root.list("recipes")?.iter().any(|n| n == target) {
-        // A name that is both a recipe and a device resolves as the recipe; surface
-        // the ambiguity rather than silently preferring one.
-        if root.list("devices")?.iter().any(|n| n == target) {
+    let is_recipe = root.list_recipes()?.iter().any(|n| n == target);
+    // A `/` is unambiguously a recipe reference — devices are flat — so route a
+    // slashed target to recipe resolution even when it names no recipe: a "recipe not
+    // found" error reads better than device validation rejecting the separator.
+    if is_recipe || target.contains('/') {
+        // A bare name that is both a recipe and a device resolves as the recipe;
+        // surface the ambiguity rather than silently preferring one. A slashed target
+        // can never be a device, so this only fires for a bare recipe.
+        if is_recipe && root.list("devices")?.iter().any(|n| n == target) {
             eprintln!("note: '{target}' is both a recipe and a device — resolving as the recipe");
         }
         resolve_recipe(root, target, &overrides)
@@ -358,6 +364,20 @@ pub(crate) fn source_axes<'a>(
             commit: &ff_pins.base.commit,
         });
     }
+    // The patches axis, which needs this check more than any other: `update` takes
+    // its commit from a local checkout's HEAD rather than resolving a remote ref, so
+    // it is the pin most likely to name something that exists nowhere else — a series
+    // committed locally and not yet pushed pins fine and fails for everyone else.
+    // Every other axis was already graded; this one could not be until the pin
+    // carried a source.
+    if let Some(pin) = &lock.patches {
+        axes.push(SourceAxis {
+            name: "patches",
+            url: pin.source.clone(),
+            reference: &pin.reference,
+            commit: &pin.commit,
+        });
+    }
     Ok(axes)
 }
 
@@ -371,7 +391,7 @@ mod tests {
         // Geometry + fragment existence are validated up front (by both update
         // and build), so a bad axis fails at resolution, not deep in the build.
         let root = repo_root();
-        let resolved = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
+        let resolved = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
         // The shipped RK1 config passes.
         preflight_config(&root, &resolved).unwrap();
 
@@ -413,7 +433,7 @@ mod tests {
         // keyring is vendored, so the shipped composition passes the same gate
         // that rejects a missing one — `resolve turing-rk1-jellyfin` stays green.
         let root = repo_root();
-        let resolved = resolve_recipe(&root, "turing-rk1-jellyfin", &Overrides::default()).unwrap();
+        let resolved = resolve_recipe(&root, "turing-rk1/jellyfin", &Overrides::default()).unwrap();
         assert!(
             resolved.apt_sources.iter().any(|s| s.name == "jellyfin"),
             "the jellyfin feature declares its apt source"
@@ -441,16 +461,26 @@ mod tests {
 
     #[test]
     fn source_axes_cover_every_fetched_tree_of_a_media_accel_build() {
-        // The probed set is exactly what a build fetches: the two base trees plus the
-        // media-accel ones. The ffmpeg `rockchip` pin is provenance-only, so it is not
-        // an axis — pinning it against a URL nothing clones would be a false report.
+        // The probed set is exactly what a build fetches: the two base trees, the
+        // media-accel ones, and the patch series. The ffmpeg `rockchip` pin is
+        // provenance-only, so it is not an axis — pinning it against a URL nothing
+        // clones would be a false report.
         let root = repo_root();
         let build =
-            resolve_recipe(&root, "turing-rk1-media-accel-forky", &Overrides::default()).unwrap();
-        let lock = root.lock("turing-rk1-media-accel-forky").unwrap();
+            resolve_recipe(&root, "turing-rk1/media-accel-forky", &Overrides::default()).unwrap();
+        let lock = root.lock("turing-rk1/media-accel-forky").unwrap();
         let axes = source_axes(&build, &lock).unwrap();
         let names: Vec<&str> = axes.iter().map(|a| a.name).collect();
-        assert_eq!(names, ["kernel", "u-boot", "mpp", "librga", "libmali", "ffmpeg-base"]);
+        assert_eq!(
+            names,
+            ["kernel", "u-boot", "mpp", "librga", "libmali", "ffmpeg-base", "patches"]
+        );
         assert!(axes.iter().all(|a| !a.url.is_empty() && !a.commit.is_empty()));
+        // The patches axis is the reason the pin carries a source at all: `update`
+        // takes its commit from a local HEAD, so it is the likeliest of any axis to
+        // name something unreachable, and it could not be graded until now.
+        let patches = axes.iter().find(|a| a.name == "patches").unwrap();
+        assert!(patches.url.contains("patches"));
+        assert_eq!(patches.reference, "main");
     }
 }

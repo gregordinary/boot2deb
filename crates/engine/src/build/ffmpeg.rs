@@ -733,7 +733,7 @@ mod tests {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
             kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v".into(), commit: "kc".into() }),
-            patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: patches_commit.into() }),
+            patches: Some(PatchesPin { profile: "rk3588-accel".into(), source: "ps".into(), reference: "main".into(), commit: patches_commit.into() }),
             uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "uc".into() }),
             userspace: Some(UserspacePins { mpp: git("m"), librga: git("r"), libmali: git("l") }),
             ffmpeg: Some(FfmpegPins { base: git(base_commit), rockchip: git("rk") }),

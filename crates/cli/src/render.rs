@@ -196,6 +196,10 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     if !b.device_dts.is_empty() {
         println!("device dts   : {}", b.device_dts.join(", "));
     }
+    // Extra kernel arguments only where the board declares them.
+    if !b.kernel_cmdline.is_empty() {
+        println!("cmdline extra: {}", b.kernel_cmdline);
+    }
     // The boot section is the boot method's, and the two methods have nothing in
     // common to print: one compiles a bootloader out of blobs and writes it into a raw
     // gap, the other signs a kernel into a partition the firmware picks by its bits.

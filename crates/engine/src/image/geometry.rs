@@ -24,12 +24,12 @@ use boot2deb_core::size::parse_size;
 /// raw-gap `bs`/`seek` arithmetic and the `gpt` crate's default.
 pub(crate) const SECTOR: u64 = 512;
 
-/// ext4 block size the rootfs filesystem is formatted with (`mke2fs -b`). The
-/// filesystem is a whole number of these, sized to exactly fill its partition.
+/// ext4 block size the rootfs filesystem is formatted with. The filesystem is a
+/// whole number of these, sized to exactly fill its partition.
 pub(crate) const EXT4_BLOCK: u64 = 4096;
 
 /// Smallest rootfs filesystem the geometry accepts: one 128 MiB ext4 block
-/// group. `mke2fs` can format smaller, but a Debian rootfs cannot fit in one —
+/// group. A smaller ext4 is legal, but a Debian rootfs cannot fit in one —
 /// rejecting here fails a mis-sized image at resolution time, before any stage
 /// runs, instead of at the format's ENOSPC.
 const MIN_ROOTFS_BYTES: u64 = EXT4_BLOCK * 8 * EXT4_BLOCK;
@@ -152,7 +152,7 @@ impl Geometry {
         let available_bytes = (last_usable_lba - rootfs_first_lba + 1) * SECTOR;
         // The GPT partition fills the usable range, floored to a whole ext4 block —
         // one rootfs partition spanning the disk. The filesystem is formatted to
-        // exactly the partition size (`mke2fs` takes an explicit block count).
+        // exactly the partition size (the formatter takes an explicit block count).
         let partition_bytes = (available_bytes / EXT4_BLOCK) * EXT4_BLOCK;
         let rootfs_bytes = partition_bytes;
         if rootfs_bytes < MIN_ROOTFS_BYTES {

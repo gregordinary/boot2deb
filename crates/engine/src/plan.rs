@@ -208,7 +208,7 @@ mod tests {
         let git = |c: &str| GitPin { source: "s".into(), reference: "r".into(), commit: c.into() };
         Lock {
             kernel: Some(KernelPin { id: "k".into(), source: "ks".into(), reference: "v7.1.1".into(), commit: kernel_commit.into() }),
-            patches: Some(PatchesPin { profile: "rk3588-accel".into(), commit: "p1".into() }),
+            patches: Some(PatchesPin { profile: "rk3588-accel".into(), source: "ps".into(), reference: "main".into(), commit: "p1".into() }),
             uboot: Some(UbootPin { source: "us".into(), reference: "v".into(), commit: "u1".into() }),
             userspace: Some(UserspacePins {
                 mpp: git(mpp_commit),

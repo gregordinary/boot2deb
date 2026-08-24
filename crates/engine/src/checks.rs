@@ -18,9 +18,9 @@
 //! - **Cross-arch only** (host arch ≠ target arch): a `qemu-<arch>` interpreter and
 //!   a registered+enabled binfmt handler for the target. A same-arch host runs the
 //!   target's binaries directly and skips these entirely.
-//! - **Image path:** `mke2fs` (formats the rootfs ext4 from a userns-staged
-//!   tree) and `e2fsck` (the clean-verify gate); the staging itself rides on the
-//!   same unprivileged-userns capability the rootless bootstrap needs.
+//! - **Image path:** none required — the rootfs ext4 is formatted and every metadata
+//!   checksum verified in-process by the pure-Rust `ferrosys` formatter. `e2fsck`, when
+//!   present, runs as an optional cross-check.
 //!
 //! Detection is a side effect (PATH scan, `/proc` + `/etc/os-release` reads,
 //! `pkg-config` shell-out), so it lives in the engine, not `core`.
@@ -424,11 +424,10 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
         checks.push(binfmt_check(pm, target, qa));
     }
 
-    // Image assembly path: `mke2fs -d` formats the rootfs ext4 from a
-    // userns-staged tree and `e2fsck -fn` verifies it clean. Both ship in
-    // e2fsprogs, so the `mke2fs` probe already guarantees the pair; the userns
-    // capability itself is covered by the unprivileged-userns check above.
-    checks.push(exe(pm, target, "mke2fs", &["mke2fs"], "format the rootfs ext4 image", true, Pkg::E2fsprogs));
+    // Image assembly is pure Rust (ferrosys): the rootfs ext4 is formatted and every
+    // metadata checksum verified in-process, so no `mke2fs`/`e2fsprogs` is required.
+    // `e2fsck` is an optional `-fn` cross-check the image stage runs only when present.
+    checks.push(exe(pm, target, "e2fsck", &["e2fsck"], "optional cross-check of the formatted rootfs ext4 image", false, Pkg::E2fsprogs));
 
     checks
 }
@@ -524,12 +523,11 @@ fn python_module_check(
 }
 
 /// Unprivileged user namespaces with subuid/subgid ranges — the rootless
-/// `mmdebstrap --mode=unshare` bootstrap, the `bwrap` sandbox, and the ext4
-/// image staging (multi-uid ownership under `unshare --map-auto`) all depend
-/// on them.
+/// `mmdebstrap --mode=unshare` bootstrap and the `bwrap` sandbox both depend on
+/// them.
 ///
 /// Probed **functionally**: actually create one with `unshare --map-root-user
-/// --map-auto true` — the exact invocation the ext4 staging uses. A
+/// --map-auto true` — the exact invocation the rootless bootstrap uses. A
 /// single-sysctl read (`unprivileged_userns_clone`) misses the other ways a
 /// host forbids namespaces — Ubuntu 24.04's
 /// `apparmor_restrict_unprivileged_userns=1` and `user.max_user_namespaces=0` —
@@ -704,11 +702,17 @@ mod tests {
     #[test]
     fn a_compiling_build_asks_for_the_toolchain() {
         let checks = tool_checks(&compiling_build());
-        for needed in ["git", "make", "bc", "flex", "bison", "mmdebstrap", "mke2fs", "dpkg-deb"] {
+        for needed in ["git", "make", "bc", "flex", "bison", "mmdebstrap", "dpkg-deb"] {
             assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
         }
-        // Every check is a hard requirement — there are no fallback-only tools.
-        assert!(checks.iter().all(|c| c.required));
+        // Image assembly needs no host filesystem tool now; `e2fsck` rides along as the
+        // sole optional cross-check, and every other tool is a hard requirement.
+        assert!(
+            checks.iter().filter(|c| c.name != "e2fsck").all(|c| c.required),
+            "only e2fsck is optional"
+        );
+        let e2fsck = checks.iter().find(|c| c.name == "e2fsck").expect("e2fsck check present");
+        assert!(!e2fsck.required, "e2fsck is an optional cross-check");
     }
 
     #[test]
@@ -790,10 +794,10 @@ mod tests {
         }
         assert!(!checks.iter().any(|c| c.name.ends_with("gcc")));
 
-        // What it *does* still need: the image is assembled the same way, and its
-        // armhf maintainer scripts still run under qemu — so a missing binfmt handler
-        // is still a blocking failure, and it is the *arm* one, not aarch64.
-        for needed in ["mmdebstrap", "mke2fs", "dpkg-deb", "sha256sum"] {
+        // What it *does* still need: the rootfs is bootstrapped and content-pinned the
+        // same way, and its armhf maintainer scripts still run under qemu — so a missing
+        // binfmt handler is still a blocking failure, and it is the *arm* one, not aarch64.
+        for needed in ["mmdebstrap", "dpkg-deb", "sha256sum"] {
             assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
         }
         let host = HostInfo::detect();

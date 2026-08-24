@@ -36,14 +36,101 @@ pub fn patch_profile(authored: &str) -> Option<&str> {
     (authored != NO_PATCH_PROFILE).then_some(authored)
 }
 
+/// How a kernel version is matched against a declared range.
+///
+/// The distinction exists only for prereleases. By semver's rule a prerelease
+/// never satisfies a range whose bounds carry none, so `7.2.0-rc3` does not match
+/// `">=7.0, <7.2"` — and separately does not match `">=7.2"` either, leaving an RC
+/// matched by nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeMatch {
+    /// Release-strict: a prerelease matches only a range that names one. This is
+    /// what a **build** uses — a profile's declared envelope is a claim about
+    /// released kernels, and quietly building an RC against it would overstate it.
+    Release,
+    /// Candidate: a prerelease is matched as its base release (`7.2.0-rc3` is read
+    /// as `7.2.0`). This is what **candidate verification** uses, where an RC is
+    /// precisely the tree the question is about.
+    Candidate,
+}
+
+/// One entry in a profile's ordered scope list.
+///
+/// Bare string or table, so the version-insensitive majority stay one-liners and
+/// only the volatile few carry a range:
+///
+/// ```toml
+/// kernel = [
+///   "media-accel/kernel/040-vdpu381-multicore-v1-curated.patch",
+///   { path = "rocket/084-rocket-drv-fix-bo-mm-uaf.patch", kernels = "<7.3" },
+/// ]
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum PatchEntry {
+    /// A bare path: applies to every kernel the profile's envelope admits.
+    Always(String),
+    /// A path narrowed to its own kernel range, intersected with the envelope.
+    Ranged(RangedPatch),
+}
+
+/// A [`PatchEntry`] carrying its own kernel range.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RangedPatch {
+    /// Patches-repo-relative path, as a bare entry would spell it.
+    pub path: String,
+    /// Semver requirement narrowing this patch within the profile's envelope
+    /// (e.g. `"<7.3"` for one upstreamed at 7.3, `">=7.2"` for a successor).
+    pub kernels: String,
+}
+
+impl PatchEntry {
+    /// The patches-repo-relative path, however the entry was spelled.
+    pub fn path(&self) -> &str {
+        match self {
+            PatchEntry::Always(p) => p,
+            PatchEntry::Ranged(r) => &r.path,
+        }
+    }
+
+    /// This entry's own kernel range, or `None` for a bare path ("always").
+    pub fn kernels(&self) -> Option<&str> {
+        match self {
+            PatchEntry::Always(_) => None,
+            PatchEntry::Ranged(r) => Some(&r.kernels),
+        }
+    }
+
+    /// True when this entry is selected for `kernel_version`. A bare entry always
+    /// is; a ranged one is when its range matches under `mode`.
+    ///
+    /// `profile` names the owner for the error message only.
+    pub fn selected(
+        &self,
+        profile: &str,
+        kernel_version: &str,
+        mode: RangeMatch,
+    ) -> Result<bool, ConfigError> {
+        match self.kernels() {
+            None => Ok(true),
+            Some(range) => matches_range(profile, range, kernel_version, mode),
+        }
+    }
+}
+
 /// A patch profile manifest (`profiles/<name>/profile.toml`).
 ///
-/// Each scope list is an ordered sequence of patches-repo-relative paths, and
-/// the list — not the filename prefixes — is the authoritative apply order. A
-/// single tree's list may span scopes: the `kernel` list interleaves
-/// `media-accel/kernel/*` and `rocket/*` patches in one apply sequence, so a
-/// `rocket` patch can fall between two `media-accel` patches. The engine
-/// applies each list to its corresponding source tree via `git am --3way`.
+/// Each scope list is an ordered sequence of [`PatchEntry`], and the list — not the
+/// filename prefixes — is the authoritative apply order. A single tree's list may
+/// span scopes: the `kernel` list interleaves `media-accel/kernel/*` and `rocket/*`
+/// patches in one apply sequence, so a `rocket` patch can fall between two
+/// `media-accel` patches. The engine applies each list to its corresponding source
+/// tree via `git am --3way`.
+///
+/// Two ranges gate a build: [`applies_to_kernel`](Self::applies_to_kernel) is the
+/// profile's overall envelope, and each entry may narrow itself further within it.
+/// Both express *declared intent*; the engine's `git am` pass is the enforcement.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchProfile {
@@ -54,17 +141,17 @@ pub struct PatchProfile {
     /// Kernel-tree patches, in apply order (may span the `media-accel` and
     /// `rocket` scopes).
     #[serde(default)]
-    pub kernel: Vec<String>,
+    pub kernel: Vec<PatchEntry>,
     /// ffmpeg-tree patches, in apply order.
     #[serde(default)]
-    pub ffmpeg: Vec<String>,
+    pub ffmpeg: Vec<PatchEntry>,
     /// Userspace-tree (MPP/RGA) patches, in apply order.
     #[serde(default)]
-    pub userspace: Vec<String>,
+    pub userspace: Vec<PatchEntry>,
     /// u-boot-tree patches, in apply order (empty for boards that patch no
     /// u-boot, e.g. the RK1's pristine `v2026.04`).
     #[serde(default)]
-    pub uboot: Vec<String>,
+    pub uboot: Vec<PatchEntry>,
 }
 
 impl PatchProfile {
@@ -81,16 +168,83 @@ impl PatchProfile {
         })
     }
 
-    /// True when `kernel_version` falls in this profile's declared range.
+    /// True when `kernel_version` falls in this profile's declared envelope,
+    /// matched release-strict ([`RangeMatch::Release`]).
     ///
     /// `kernel_version` may be `v`-prefixed (`v7.1.1`) and may omit the patch
-    /// component (`7.1` is read as `7.1.0`). Matching targets *release* versions:
-    /// an `-rc` / prerelease tag is not matched by a release-only range, which is
-    /// intentional — profiles pin against release kernels.
+    /// component (`7.1` is read as `7.1.0`).
     pub fn applies_to(&self, profile: &str, kernel_version: &str) -> Result<bool, ConfigError> {
-        let req = self.version_req(profile)?;
-        let ver = parse_kernel_version(kernel_version)?;
-        Ok(req.matches(&ver))
+        self.applies_to_under(profile, kernel_version, RangeMatch::Release)
+    }
+
+    /// [`applies_to`](Self::applies_to) under an explicit [`RangeMatch`], so
+    /// candidate verification can ask about an `-rc` kernel that the release-strict
+    /// build path would refuse.
+    pub fn applies_to_under(
+        &self,
+        profile: &str,
+        kernel_version: &str,
+        mode: RangeMatch,
+    ) -> Result<bool, ConfigError> {
+        matches_range(profile, &self.applies_to_kernel, kernel_version, mode)
+    }
+
+    /// The ordered paths of one [`Scope`] that apply to `kernel_version` — the
+    /// series the engine actually feeds to `git am`.
+    ///
+    /// Entries whose own range excludes this kernel are filtered out; order among
+    /// the survivors is preserved. The envelope is *not* re-checked here (the
+    /// kernel node gates it once per build via [`ensure_applies`](Self::ensure_applies)),
+    /// so this is purely the per-entry narrowing.
+    pub fn series_for(
+        &self,
+        scope: Scope,
+        profile: &str,
+        kernel_version: &str,
+        mode: RangeMatch,
+    ) -> Result<Vec<&str>, ConfigError> {
+        self.scope(scope)
+            .iter()
+            .filter_map(|e| match e.selected(profile, kernel_version, mode) {
+                Ok(true) => Some(Ok(e.path())),
+                Ok(false) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
+    /// Entries the profile can never select, as `(scope, entry)` pairs.
+    ///
+    /// An entry is unreachable when its own range shares no version with the
+    /// profile's envelope: no kernel the profile admits can select it, so it is dead
+    /// by construction rather than by judgement. Envelope `">=7.8, <8.0"` with an
+    /// entry pinned `"<7.2"` is the shape this catches — typically a patch that was
+    /// upstreamed long enough ago that the envelope has moved past its cap.
+    ///
+    /// Deleting a reported entry (and its file) is safe for the same reason the
+    /// commit pin exists: an old lock names an old `patches` commit whose tree still
+    /// contains both.
+    ///
+    /// Conservative: an entry whose range or envelope uses an operator this cannot
+    /// bound (`^`, `~`, `*`) is never reported, so a finding is always a real one.
+    pub fn unreachable(&self, profile: &str) -> Result<Vec<(Scope, &PatchEntry)>, ConfigError> {
+        let envelope = self.version_req(profile)?;
+        let Some(env) = Interval::of(&envelope) else {
+            return Ok(Vec::new());
+        };
+        let mut dead = Vec::new();
+        for scope in Scope::ALL {
+            for entry in self.scope(scope) {
+                let Some(range) = entry.kernels() else {
+                    continue;
+                };
+                let req = parse_req(profile, range)?;
+                if Interval::of(&req).is_some_and(|i| !env.intersects(&i)) {
+                    dead.push((scope, entry));
+                }
+            }
+        }
+        Ok(dead)
     }
 
     /// [`applies_to`](PatchProfile::applies_to) as a hard gate: returns
@@ -109,9 +263,10 @@ impl PatchProfile {
         }
     }
 
-    /// The ordered patch list for one [`Scope`] — the tree `patch import` slots a
-    /// new patch into.
-    pub fn scope(&self, scope: Scope) -> &[String] {
+    /// The ordered entry list for one [`Scope`], unfiltered — the tree
+    /// `patch import` slots a new patch into. Use
+    /// [`series_for`](Self::series_for) to get the paths a given kernel selects.
+    pub fn scope(&self, scope: Scope) -> &[PatchEntry] {
         match scope {
             Scope::Kernel => &self.kernel,
             Scope::Ffmpeg => &self.ffmpeg,
@@ -136,6 +291,10 @@ pub enum Scope {
 }
 
 impl Scope {
+    /// Every scope, in profile-declaration order — so a check that must cover the
+    /// whole manifest cannot silently miss one when a scope is added.
+    pub const ALL: [Scope; 4] = [Scope::Kernel, Scope::Ffmpeg, Scope::Userspace, Scope::Uboot];
+
     /// The profile TOML array key for this scope (`"kernel"`, `"ffmpeg"`, …).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -191,7 +350,7 @@ pub fn patch_prefix(label: &str) -> Option<u32> {
 /// The one case with no automatic room is prepending before a `000`-prefixed first
 /// entry (nothing sorts below it): that is [`ConfigError::PatchPrefixNoGap`], so the
 /// caller supplies an explicit `--as` label.
-pub fn derive_prefix(list: &[String], index: usize) -> Result<String, ConfigError> {
+pub fn derive_prefix(list: &[&str], index: usize) -> Result<String, ConfigError> {
     let before = index
         .checked_sub(1)
         .and_then(|i| list.get(i))
@@ -219,7 +378,7 @@ pub fn derive_prefix(list: &[String], index: usize) -> Result<String, ConfigErro
 
 /// The zero-padding width for a derived prefix: the widest numeric prefix among the
 /// scope's existing filenames, floored at 3, so a new prefix lines up with them.
-fn prefix_width(list: &[String]) -> usize {
+fn prefix_width(list: &[&str]) -> usize {
     list.iter()
         .filter_map(|l| l.rsplit('/').next())
         .map(|b| b.chars().take_while(|c| c.is_ascii_digit()).count())
@@ -233,7 +392,7 @@ fn prefix_width(list: &[String]) -> usize {
 /// numeric prefix is `value` (so `070` + existing `070a` yields `b`). Falls back to
 /// `z` in the absurd case that all 26 are taken; the prefix is advisory, so a
 /// collision there only affects display ordering.
-fn next_suffix(list: &[String], value: u32) -> char {
+fn next_suffix(list: &[&str], value: u32) -> char {
     let used: std::collections::BTreeSet<char> = list
         .iter()
         .filter_map(|l| l.rsplit('/').next())
@@ -278,6 +437,92 @@ pub fn load_profile(patches_root: &Path, name: &str) -> Result<PatchProfile, Con
     })
 }
 
+/// Parse `range` and test `kernel_version` against it under `mode`.
+///
+/// Under [`RangeMatch::Candidate`] the version's prerelease is dropped before
+/// matching, which is what makes an `-rc` tree answerable: semver would otherwise
+/// exclude it from every range whose bounds name no prerelease.
+fn matches_range(
+    profile: &str,
+    range: &str,
+    kernel_version: &str,
+    mode: RangeMatch,
+) -> Result<bool, ConfigError> {
+    let req = parse_req(profile, range)?;
+    let mut ver = parse_kernel_version(kernel_version)?;
+    if mode == RangeMatch::Candidate {
+        ver.pre = semver::Prerelease::EMPTY;
+    }
+    Ok(req.matches(&ver))
+}
+
+/// Parse a semver requirement, attributing a failure to `profile`.
+fn parse_req(profile: &str, range: &str) -> Result<VersionReq, ConfigError> {
+    VersionReq::parse(range).map_err(|source| ConfigError::InvalidVersionReq {
+        profile: profile.to_string(),
+        value: range.to_string(),
+        source,
+    })
+}
+
+/// The half-open version span a [`VersionReq`] admits, used to decide whether two
+/// ranges can share a version.
+///
+/// Only the bounding operators (`=`, `>`, `>=`, `<`, `<=`) are modelled;
+/// [`of`](Interval::of) returns `None` for `^`, `~`, or `*` rather than guess. That
+/// keeps the unreachable lint one-sided: it may miss a dead entry, but it never
+/// reports a live one.
+#[derive(Debug)]
+struct Interval {
+    /// Inclusive lower bound; `None` is unbounded below.
+    lo: Option<Version>,
+    /// Exclusive upper bound; `None` is unbounded above.
+    hi: Option<Version>,
+}
+
+impl Interval {
+    /// Derive the interval, or `None` if any comparator uses an unmodelled operator.
+    ///
+    /// A comparator's missing components read as zero (`<7.2` bounds at `7.2.0`),
+    /// matching how the profiles spell their ranges. `<=`/`=` are widened to the
+    /// next patch release so the upper bound stays exclusive throughout.
+    fn of(req: &VersionReq) -> Option<Self> {
+        use semver::Op;
+        let mut lo: Option<Version> = None;
+        let mut hi: Option<Version> = None;
+        for c in &req.comparators {
+            let at = Version::new(c.major, c.minor.unwrap_or(0), c.patch.unwrap_or(0));
+            let next = Version::new(at.major, at.minor, at.patch + 1);
+            let (l, h) = match c.op {
+                Op::GreaterEq => (Some(at), None),
+                Op::Greater => (Some(next), None),
+                Op::Less => (None, Some(at)),
+                Op::LessEq => (None, Some(next)),
+                Op::Exact => (Some(at.clone()), Some(next)),
+                _ => return None,
+            };
+            // Several comparators in one requirement conjoin: keep the tightest.
+            if let Some(l) = l {
+                lo = Some(lo.map_or(l.clone(), |cur| cur.max(l)));
+            }
+            if let Some(h) = h {
+                hi = Some(hi.map_or(h.clone(), |cur| cur.min(h)));
+            }
+        }
+        Some(Interval { lo, hi })
+    }
+
+    /// True when the two spans share at least one version.
+    fn intersects(&self, other: &Interval) -> bool {
+        let below = |lo: &Option<Version>, hi: &Option<Version>| match (lo, hi) {
+            (Some(lo), Some(hi)) => lo < hi,
+            // An unbounded side cannot close the gap on its own.
+            _ => true,
+        };
+        below(&self.lo, &other.hi) && below(&other.lo, &self.hi)
+    }
+}
+
 /// Parse a kernel version tag into a [`Version`], tolerating a leading `v` and a
 /// missing patch component (`v7.1` → `7.1.0`). Prerelease suffixes (`-rc2`) are
 /// preserved as semver prereleases.
@@ -311,12 +556,25 @@ fn pad_to_three_components(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A bare (always-applies) entry, for tests that do not exercise ranges.
+    fn always(path: &str) -> PatchEntry {
+        PatchEntry::Always(path.into())
+    }
+
+    /// A range-narrowed entry.
+    fn ranged(path: &str, kernels: &str) -> PatchEntry {
+        PatchEntry::Ranged(RangedPatch {
+            path: path.into(),
+            kernels: kernels.into(),
+        })
+    }
+
     fn profile() -> PatchProfile {
         PatchProfile {
             applies_to_kernel: ">=7.0, <7.2".into(),
             kernel: vec![
-                "media-accel/kernel/040-vdpu381-multicore-v1-curated.patch".into(),
-                "rocket/081-rocket-drv-npu-clk.patch".into(),
+                always("media-accel/kernel/040-vdpu381-multicore-v1-curated.patch"),
+                always("rocket/081-rocket-drv-npu-clk.patch"),
             ],
             ffmpeg: vec![],
             userspace: vec![],
@@ -334,8 +592,125 @@ mod tests {
         "#;
         let p: PatchProfile = toml::from_str(text).unwrap();
         assert_eq!(p.kernel.len(), 2);
-        assert_eq!(p.ffmpeg, vec!["media-accel/ffmpeg/0001-z.patch"]);
+        assert_eq!(p.ffmpeg, vec![always("media-accel/ffmpeg/0001-z.patch")]);
         assert!(p.uboot.is_empty());
+    }
+
+    #[test]
+    fn parses_bare_and_ranged_entries_in_one_list() {
+        // The volatile few carry a range; the rest stay one-liners.
+        let text = r#"
+            applies_to_kernel = ">=7.0, <7.4"
+            kernel = [
+              "media-accel/kernel/040-x.patch",
+              { path = "media-accel/kernel/050-av1-v14.patch", kernels = "<7.2" },
+              { path = "media-accel/kernel/050-av1-v15.patch", kernels = ">=7.2" },
+            ]
+        "#;
+        let p: PatchProfile = toml::from_str(text).unwrap();
+        assert_eq!(p.kernel[0], always("media-accel/kernel/040-x.patch"));
+        assert_eq!(p.kernel[1].path(), "media-accel/kernel/050-av1-v14.patch");
+        assert_eq!(p.kernel[1].kernels(), Some("<7.2"));
+        assert_eq!(p.kernel[0].kernels(), None);
+    }
+
+    #[test]
+    fn a_ranged_entry_with_an_unknown_key_is_rejected() {
+        // Guards the untagged enum: a typo must not silently fall through to some
+        // other variant, it must fail the parse.
+        let text = r#"
+            applies_to_kernel = ">=7.0"
+            kernel = [{ path = "k/010-x.patch", kernel = "<7.2" }]
+        "#;
+        assert!(toml::from_str::<PatchProfile>(text).is_err());
+    }
+
+    #[test]
+    fn series_for_selects_the_entries_the_kernel_admits() {
+        let p = PatchProfile {
+            applies_to_kernel: ">=7.0, <7.4".into(),
+            kernel: vec![
+                always("k/040-always.patch"),
+                ranged("k/050-v14.patch", "<7.2"),
+                ranged("k/050-v15.patch", ">=7.2"),
+                ranged("k/084-upstreamed.patch", "<7.3"),
+            ],
+            ffmpeg: vec![],
+            userspace: vec![],
+            uboot: vec![],
+        };
+        let at = |v| p.series_for(Scope::Kernel, "t", v, RangeMatch::Release).unwrap();
+
+        // 7.1: the pre-rework AV1 patch and the not-yet-upstreamed fix.
+        assert_eq!(at("7.1.1"), ["k/040-always.patch", "k/050-v14.patch", "k/084-upstreamed.patch"]);
+        // 7.2: the AV1 successor takes over; the fix is still needed.
+        assert_eq!(at("7.2.0"), ["k/040-always.patch", "k/050-v15.patch", "k/084-upstreamed.patch"]);
+        // 7.3: mainline absorbed 084, so it drops out by its own upper bound.
+        assert_eq!(at("7.3.0"), ["k/040-always.patch", "k/050-v15.patch"]);
+    }
+
+    #[test]
+    fn a_release_candidate_is_answerable_only_on_the_candidate_path() {
+        let p = profile(); // envelope ">=7.0, <7.2"
+
+        // Release-strict: semver excludes a prerelease from a release-only range,
+        // which is correct for a build -- the envelope claims released kernels.
+        assert!(!p.applies_to("t", "v7.1.0-rc3").unwrap());
+
+        // Candidate: the RC is read as its base release, so the gate can answer
+        // "would this series survive 7.1?" against the actual RC tree.
+        assert!(p
+            .applies_to_under("t", "v7.1.0-rc3", RangeMatch::Candidate)
+            .unwrap());
+        // Still bounded -- an RC past the envelope stays out.
+        assert!(!p
+            .applies_to_under("t", "v7.2.0-rc1", RangeMatch::Candidate)
+            .unwrap());
+    }
+
+    #[test]
+    fn unreachable_reports_only_entries_the_envelope_cannot_select() {
+        let p = PatchProfile {
+            applies_to_kernel: ">=7.8, <8.0".into(),
+            kernel: vec![
+                always("k/040-always.patch"),          // bare: never unreachable
+                ranged("k/084-old.patch", "<7.2"),     // dead: caps below the envelope
+                ranged("k/090-live.patch", ">=7.9"),   // overlaps 7.9..8.0
+                ranged("k/091-future.patch", ">=8.2"), // dead: starts above the envelope
+            ],
+            ffmpeg: vec![],
+            userspace: vec![],
+            uboot: vec![],
+        };
+        let dead: Vec<&str> = p.unreachable("t").unwrap().iter().map(|(_, e)| e.path()).collect();
+        assert_eq!(dead, ["k/084-old.patch", "k/091-future.patch"]);
+    }
+
+    #[test]
+    fn unreachable_declines_to_judge_an_unmodelled_operator() {
+        // `^` is not bounded by Interval::of, so the lint stays silent rather than
+        // report a live entry. One-sided by design.
+        let p = PatchProfile {
+            applies_to_kernel: ">=7.8, <8.0".into(),
+            kernel: vec![ranged("k/010-x.patch", "^6.1")],
+            ffmpeg: vec![],
+            userspace: vec![],
+            uboot: vec![],
+        };
+        assert!(p.unreachable("t").unwrap().is_empty());
+    }
+
+    #[test]
+    fn unreachable_covers_every_scope() {
+        // Scope::ALL is what keeps a newly added scope from escaping the lint.
+        let p = PatchProfile {
+            applies_to_kernel: ">=7.8, <8.0".into(),
+            kernel: vec![],
+            ffmpeg: vec![ranged("f/010-x.patch", "<7.0")],
+            userspace: vec![ranged("u/010-y.patch", "<7.0")],
+            uboot: vec![ranged("b/010-z.patch", "<7.0")],
+        };
+        assert_eq!(p.unreachable("t").unwrap().len(), 3);
     }
 
     #[test]
@@ -400,10 +775,10 @@ mod tests {
 
     #[test]
     fn derive_prefix_appends_midpoints_and_pads() {
-        let list = vec![
-            "media-accel/kernel/040-a.patch".to_string(),
-            "media-accel/kernel/050-b.patch".to_string(),
-            "rocket/081-c.patch".to_string(),
+        let list = [
+            "media-accel/kernel/040-a.patch",
+            "media-accel/kernel/050-b.patch",
+            "rocket/081-c.patch",
         ];
         // Append past the end: last + 10.
         assert_eq!(derive_prefix(&list, 3).unwrap(), "091");
@@ -419,10 +794,7 @@ mod tests {
 
     #[test]
     fn derive_prefix_suffixes_when_no_integer_gap() {
-        let list = vec![
-            "k/070-a.patch".to_string(),
-            "k/071-b.patch".to_string(),
-        ];
+        let list = ["k/070-a.patch", "k/071-b.patch"];
         // Consecutive 070/071 leave no whole-number gap: fall back to a lettered
         // sub-prefix on the lower neighbor, which sorts between them.
         assert_eq!(derive_prefix(&list, 1).unwrap(), "070a");
@@ -432,19 +804,15 @@ mod tests {
     #[test]
     fn derive_prefix_advances_the_suffix_letter() {
         // A second insert at the same slot skips the taken `a` and uses `b`.
-        let list = vec![
-            "k/070-a.patch".to_string(),
-            "k/070a-x.patch".to_string(),
-            "k/071-b.patch".to_string(),
-        ];
+        let list = ["k/070-a.patch", "k/070a-x.patch", "k/071-b.patch"];
         assert_eq!(derive_prefix(&list, 1).unwrap(), "070b");
     }
 
     #[test]
     fn derive_prefix_prepends_before_a_low_first_entry() {
         // Before `001` there is integer room (`000`); before `000` there is none.
-        assert_eq!(derive_prefix(&["k/001-a.patch".to_string()], 0).unwrap(), "000");
-        let err = derive_prefix(&["k/000-a.patch".to_string()], 0).unwrap_err();
+        assert_eq!(derive_prefix(&["k/001-a.patch"], 0).unwrap(), "000");
+        let err = derive_prefix(&["k/000-a.patch"], 0).unwrap_err();
         assert!(matches!(err, ConfigError::PatchPrefixNoGap { after: 0 }));
     }
 }

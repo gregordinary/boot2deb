@@ -177,17 +177,14 @@ which one it got.
 ## Status
 
 **A boot2deb-built image boots this board.** Confirmed end to end on a libreboot unit,
-from USB via Ctrl+U: forky comes up, runs first boot, reboots itself, and comes back to a
-login prompt. The per-image password works and is changed at first login; `nmtui` joins
-Wi-Fi.
+from USB via Ctrl+U: forky comes up, runs first boot, and reaches a login prompt. The
+per-image password works and is changed at first login; `nmtui` joins Wi-Fi.
 
-What that reboot proves is worth spelling out, because it is the part of the flow with no
-second chance. First boot gives the rootfs a new partition UUID and a new filesystem
-UUID, which invalidates the `root=` baked into the *signed* kernel — so the board is only
-bootable again because the `first-boot.d/10-depthcharge` hook re-signed the kernel against
-the new UUID and wrote it into **both** kernel slots before rebooting. A board that comes
-back to a login prompt has exercised that whole path, and comes out of it with two
-known-good kernels rather than one, which is the state every later upgrade relies on.
+The `root=` baked into the *signed* kernel names the rootfs PARTUUID the image was built
+with, and the device keeps that identity for life — first boot grows the partition but
+never rewrites its PARTUUID, so the signature stays valid with nothing to re-sign. KERN-A
+ships signed and correct; the empty KERN-B spare is first populated by a kernel upgrade,
+which writes the slot it is not running from and leaves the proven one as the fallback.
 
 Expect a **white screen for roughly 10 seconds** after Ctrl+U before the boot messages
 appear. That is normal and not a fault: there is no display driver in the initramfs, so

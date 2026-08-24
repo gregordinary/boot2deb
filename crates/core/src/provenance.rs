@@ -610,6 +610,8 @@ mod tests {
             }),
             patches: Some(PatchesPin {
                 profile: "rk3588-accel".into(),
+                source: "https://example.invalid/patches.git".into(),
+                reference: "main".into(),
                 commit: "pc".into(),
             }),
             uboot: Some(UbootPin {
@@ -655,7 +657,7 @@ mod tests {
         // A resolution over the shipped config gives a real build point to join.
         crate::resolve_recipe(
             &config_root(),
-            "turing-rk1-media-accel-forky",
+            "turing-rk1/media-accel-forky",
             &crate::Overrides::default(),
         )
         .unwrap()
@@ -663,7 +665,7 @@ mod tests {
 
     /// A depthcharge build — the boot method that *has* a board profile.
     fn depthcharge_build() -> ResolvedBuild {
-        crate::resolve_recipe(&config_root(), "asus-c201-forky", &crate::Overrides::default())
+        crate::resolve_recipe(&config_root(), "asus-c201/forky", &crate::Overrides::default())
             .unwrap()
     }
 

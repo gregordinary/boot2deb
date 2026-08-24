@@ -1,0 +1,17 @@
+# recipes/asus-c201-forky.toml — the ASUS Chromebook C201 on Debian forky (armhf).
+# The board's supported suite. What has been taken through hardware is the
+# [support] claim below; `boot2deb support-matrix` shows it against the exact pins.
+# Constraints only; the exact resolution is written to the sibling .lock.
+device     = "asus-c201"
+kernel     = "debian-armmp"    # Debian's own armhf kernel; forky resolves 7.1.x
+suite      = "forky"
+features   = []                # a base image: there is no Rockchip media-accel
+                               # userspace for the RK3288 (MPP/RGA are RK35xx parts),
+                               # so video decode rides the mainline V4L2 stateless
+                               # path via Hantro/rkvdec with no feature to select.
+layout     = "combined"
+image_size = "2G"
+
+[support]
+status = "validated"
+date   = "2026-07-14"

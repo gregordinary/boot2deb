@@ -15,6 +15,7 @@
 
 pub mod ffmpeg;
 pub mod kernel;
+pub mod rkboot;
 pub mod uboot;
 pub mod userspace;
 
@@ -596,14 +597,35 @@ pub(crate) enum PatchScope {
 }
 
 impl PatchScope {
-    /// The profile's ordered patch list for this scope.
-    fn series<'a>(&self, profile: &'a PatchProfile) -> &'a [String] {
+    /// The core [`Scope`](boot2deb_core::profile::Scope) this maps onto.
+    fn core_scope(&self) -> boot2deb_core::profile::Scope {
+        use boot2deb_core::profile::Scope;
         match self {
-            PatchScope::Kernel => &profile.kernel,
-            PatchScope::Uboot => &profile.uboot,
-            PatchScope::Ffmpeg => &profile.ffmpeg,
-            PatchScope::Userspace => &profile.userspace,
+            PatchScope::Kernel => Scope::Kernel,
+            PatchScope::Uboot => Scope::Uboot,
+            PatchScope::Ffmpeg => Scope::Ffmpeg,
+            PatchScope::Userspace => Scope::Userspace,
         }
+    }
+
+    /// The profile's ordered patch list for this scope, narrowed to the entries
+    /// `kernel_version` selects (see
+    /// [`series_for`](boot2deb_core::PatchProfile::series_for)).
+    ///
+    /// Release-strict: a build resolves an actual kernel tag, and an `-rc` must not
+    /// silently satisfy an envelope that claims released kernels only.
+    fn series<'a>(
+        &self,
+        profile: &'a PatchProfile,
+        name: &str,
+        kernel_version: &str,
+    ) -> Result<Vec<&'a str>, EngineError> {
+        Ok(profile.series_for(
+            self.core_scope(),
+            name,
+            kernel_version,
+            boot2deb_core::RangeMatch::Release,
+        )?)
     }
 
     /// The tree label used in patch-apply messages.
@@ -663,6 +685,11 @@ pub struct PatchSource<'a> {
     /// The checkout was chosen explicitly via `--patches-path` for co-development:
     /// a pin mismatch is a loud warning rather than an error.
     pub dev: bool,
+    /// The build's resolved kernel version, which per-entry ranges in the profile
+    /// are filtered against. Carried here rather than per-scope because every tree's
+    /// series is narrowed by the *kernel* the image ships — a u-boot patch that only
+    /// applies below 7.2 is expressed the same way a kernel patch is.
+    pub kernel_version: &'a str,
 }
 
 /// Clone/fetch the pinned source into `tree`, verify it sits at the locked commit,
@@ -760,10 +787,12 @@ pub(crate) fn apply_profile_scope(spec: &ApplyScope, step: &Step) -> Result<usiz
         // Declared-intent gate before touching the tree.
         profile.ensure_applies(&patches.pin.profile, reference)?;
     }
-    let series = spec.scope.series(&profile);
+    let series = spec
+        .scope
+        .series(&profile, &patches.pin.profile, patches.kernel_version)?;
     patches::apply_tree(
         patches.root,
-        series,
+        &series,
         spec.tree,
         spec.scope.tree_label(),
         spec.target,
@@ -979,14 +1008,22 @@ pub(crate) fn patch_series_fingerprint(
     let Ok(profile) = boot2deb_core::load_profile(patches_root, profile) else {
         return Vec::new();
     };
-    scope
-        .series(&profile)
+    // Unfiltered on purpose: this keys a cache, and folding every entry — including
+    // ones the current kernel does not select — only ever over-invalidates. The
+    // range is folded beside the digest because editing a range changes which
+    // patches apply without changing any file's content.
+    profile
+        .scope(scope.core_scope())
         .iter()
-        .map(|label| {
+        .map(|entry| {
+            let label = entry.path();
             let digest = std::fs::read(patches_root.join(label))
                 .map(|bytes| crate::blobs::sha256_hex(&bytes))
                 .unwrap_or_else(|_| "<unreadable>".to_string());
-            format!("{label}={digest}")
+            match entry.kernels() {
+                Some(range) => format!("{label}@{range}={digest}"),
+                None => format!("{label}={digest}"),
+            }
         })
         .collect()
 }

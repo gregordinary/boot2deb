@@ -3,8 +3,8 @@
 //!
 //! It takes a rootfs tarball plus the boot method's payload and writes a
 //! bootable disk image with no `sudo`, no loop device, and no mount: the ext4
-//! filesystem is formatted by host `mke2fs -d` from a tree staged inside an
-//! unprivileged user namespace (the `ext4` submodule), the partition table is written
+//! filesystem is formatted in-process by the pure-Rust `ferrosys` formatter, straight
+//! from the rootfs tar (the `ext4` submodule), the partition table is written
 //! in Rust (`gpt`), the boot payload is placed by seek+write, and the result is
 //! `.xz`-compressed with a pure-Rust encoder (`lzma-rust2`). All byte/LBA arithmetic
 //! is resolved and validated up front by the `geometry` submodule.
@@ -130,8 +130,8 @@ impl ImageIdentity {
     /// Derive every identifier from a lock-stable `seed` and the `device`.
     ///
     /// `seed` identifies the build point (the recipe), so two images of the same
-    /// recipe reproduce each other and two different recipes — `asus-c201-forky` and
-    /// `asus-c201-trixie`, say — never collide on a PARTUUID, which would make two
+    /// recipe reproduce each other and two different recipes — `asus-c201/forky` and
+    /// `asus-c201/trixie`, say — never collide on a PARTUUID, which would make two
     /// cards indistinguishable to a kernel that has both in front of it.
     pub fn derive(seed: &str, device: &str) -> Self {
         ImageIdentity {
@@ -652,44 +652,32 @@ mod tests {
     /// Resolve the RK1 build, overriding the image size so tests build a small
     /// (but geometry-valid) image quickly.
     fn small_rk1_build(image_size: &str) -> ResolvedBuild {
-        let mut b = resolve_recipe(&repo_root(), "turing-rk1-forky", &Overrides::default()).unwrap();
+        let mut b = resolve_recipe(&repo_root(), "turing-rk1/forky", &Overrides::default()).unwrap();
         b.image_size = image_size.to_string();
         b
     }
 
     /// True when a host tool is runnable — the image path is Linux-only, so tests
-    /// that need e2fsprogs/tar skip cleanly where it is absent.
+    /// that need a host fixture helper (`tar`, `openssl`) skip cleanly where it is absent.
     ///
     /// Presence is detected by whether the probe **spawns** (a missing binary fails to
-    /// exec with `ENOENT`), not by its exit status: some present tools — e2fsprogs
-    /// binaries — reject `--version` and exit non-zero, so a `status.success()` check
-    /// would wrongly report them absent and silently skip the end-to-end image tests
-    /// even on a capable host.
+    /// exec with `ENOENT`), not by its exit status: a present tool that rejects
+    /// `--version` and exits non-zero must not be reported absent, which would silently
+    /// skip the end-to-end image tests even on a capable host.
     fn have(tool: &str) -> bool {
         Command::new(tool).arg("--version").output().is_ok()
     }
 
-    /// Whether the end-to-end image path can run: every tool in `tools` is
-    /// runnable, and — since the ext4 step stages inside a user namespace — the
-    /// exact `unshare` invocation it uses works (binary presence alone does not
-    /// imply subuid ranges are configured). When something is missing the behavior
-    /// depends on `BOOT2DEB_REQUIRE_HOST_TOOLS`: a CI job that guarantees the tools
-    /// sets it, and a miss then **panics** so the most important image assertions
-    /// cannot silently drop out of the run; unset (a tool-minimal dev
-    /// host), the caller skips with a printed note.
+    /// Whether the end-to-end image path can run: every tool in `tools` is runnable.
+    /// The ext4 format itself is pure Rust and needs no host tool; `tools` covers only
+    /// the fixture and credential helpers the test drives (`tar`, `openssl`). When
+    /// something is missing the behavior depends on `BOOT2DEB_REQUIRE_HOST_TOOLS`: a CI
+    /// job that guarantees the tools sets it, and a miss then **panics** so the most
+    /// important image assertions cannot silently drop out of the run; unset (a
+    /// tool-minimal dev host), the caller skips with a printed note.
     fn require_host_tools(tools: &[&str]) -> bool {
-        let mut missing: Vec<String> =
+        let missing: Vec<String> =
             tools.iter().filter(|t| !have(t)).map(|t| t.to_string()).collect();
-        if missing.is_empty() {
-            let userns_ok = Command::new("unshare")
-                .args(["--map-root-user", "--map-auto", "true"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !userns_ok {
-                missing.push("unshare --map-root-user --map-auto (subuid ranges)".into());
-            }
-        }
         if missing.is_empty() {
             return true;
         }
@@ -718,9 +706,8 @@ mod tests {
         )
         .unwrap();
         let out = std::fs::File::create(path).unwrap();
-        // Record root ownership like the real rootfs tar (mmdebstrap emits uid 0),
-        // so the userns extraction maps it back to the build user — which the image
-        // stage's in-place shadow splice needs to be able to rewrite the file.
+        // Record root ownership like the real rootfs tar (mmdebstrap emits uid 0); the
+        // formatter reads each entry's ownership straight from the tar headers.
         let status = Command::new("tar")
             .args(["--owner=0", "--group=0", "--numeric-owner", "-C"])
             .arg(&root)
@@ -791,7 +778,7 @@ mod tests {
     #[test]
     fn bootloader_image_is_gap_sized_with_payloads_and_no_gpt() {
         // No ext4/rootfs here — pure geometry + splice — so this runs on any host
-        // (no tar/mke2fs gate), unlike the whole-disk tests below.
+        // (no host-tool gate), unlike the whole-disk tests below.
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("out");
         let idb = tmp.path().join("idbloader.img");
@@ -819,8 +806,8 @@ mod tests {
 
     #[test]
     fn combined_image_has_gpt_rootfs_and_bootloader_at_offsets() {
-        // End-to-end (Linux only): userns staging + mke2fs + GPT + splices.
-        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck", "openssl"]) {
+        // End-to-end (Linux only): ferrosys ext4 format + GPT + splices.
+        if !require_host_tools(&["tar", "openssl"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -905,7 +892,7 @@ mod tests {
     fn compression_deletes_the_raw_image_unless_kept() {
         // End-to-end (Linux only): compress, then confirm the raw is dropped and
         // only the .xz remains, and that --keep-raw retains it.
-        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck", "openssl"]) {
+        if !require_host_tools(&["tar", "openssl"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -958,7 +945,7 @@ mod tests {
 
     #[test]
     fn split_layout_emits_bootloader_and_rootfs_images() {
-        if !require_host_tools(&["tar", "unshare", "mke2fs", "e2fsck", "openssl"]) {
+        if !require_host_tools(&["tar", "openssl"]) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();

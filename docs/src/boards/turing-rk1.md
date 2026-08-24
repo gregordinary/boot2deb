@@ -119,8 +119,7 @@ Power the node on. On first boot the image:
 
 - **regenerates its SSH host keys**, and
 - **grows the rootfs** to fill the whole medium (the 2 GB image expands to the disk's
-  capacity). This reboots the node once to pick up the resized partition, so the first
-  power-on comes up, reboots itself, then settles.
+  capacity), online, in the same boot — no reboot involved.
 
 Log in as user **`debian`** with the password the build printed. It is expired, so you
 are required to set a new one immediately. The `debian` account has passwordless

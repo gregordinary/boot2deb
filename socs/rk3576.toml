@@ -1,0 +1,27 @@
+# socs/rk3576.toml — RK3576 SoC invariants shared across RK3576 boards:
+# arch, DT directory, force-loaded modules, and the rkbin blob defaults.
+description = "Rockchip RK3576 (4x Cortex-A72 + 4x Cortex-A53, Mali-G52 MC3)"
+arch        = "arm64"
+dt_dir      = "rockchip"                 # arch/arm64/boot/dts/<dt_dir>
+
+# Force-loaded modules. Empty for now: the in-tree RK3576 drivers auto-probe via
+# DT compat strings, and the media-accel stack (userspace/ffmpeg) is omitted from
+# this SoC layer, so nothing needs pinning at boot yet. HW decode is native
+# mainline (VDPU383); a media-accel feature can add its modules later.
+modules = []
+
+# rkbin defaults for RK3576 boards. The DDR loader is Rockchip's unified LP4/LP5
+# blob, which also drives DDR4 boards — there is no separate DDR4 file — so it is
+# the common default and boards rarely override `tpl`.
+#
+# No `bl32`. Mainline u-boot's binman assembles the OP-TEE FIT image with
+# `fit,operation = "split-elf"` and marks the entry `optional`, so it needs an
+# OP-TEE **ELF** (or a v1 `tee.bin` bearing the `OPTE\x01` header). rkbin ships
+# neither for this SoC: `rk3576_bl32_*.bin` is a raw payload for Rockchip's own
+# boot chain, and feeding it to binman fails with "Failed to read ELF file". The
+# image binman emits without it is, in its own words, "missing optional external
+# blobs but is still functional". Supplying OP-TEE means building it from
+# `optee_os` and passing the resulting `tee.elf`.
+[rkbin]
+atf  = "rk3576_bl31_v1.24.elf"
+tpl  = "rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.12.bin"

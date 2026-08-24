@@ -71,6 +71,7 @@ fn run(root: &ConfigRoot, command: Command, json: bool) -> Result<(), Box<dyn st
         Command::ListRecipes => commands::list::recipes(root, json),
         Command::ListKernels => commands::list::kernels(root, json),
         Command::ListFeatures => commands::list::features(root, json),
+        Command::SupportMatrix { markdown } => commands::support_matrix::run(root, markdown),
         Command::NewDevice { name, args } => commands::new_device::run(root, &name, args),
         Command::Resolve { target, overrides } => {
             commands::resolve::run(root, &target, overrides.into(), json)

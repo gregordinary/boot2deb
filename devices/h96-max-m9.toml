@@ -1,0 +1,41 @@
+# devices/h96-max-m9.toml — H96 MAX M9 / M9S (RK3576) TV box.
+# Hardware invariants + defaults; a device states only its deltas.
+description             = "H96 MAX M9 (RK3576) TV box"
+soc                     = "rk3576"                 # -> arch, dt_dir, modules, rkbin
+boot_method             = "rockchip-rkbin"         # default within supported_boot_methods
+supported_boot_methods  = ["rockchip-rkbin"]
+
+# Validated against u-boot v2026.04: builds idbloader.img + u-boot.itb.
+uboot_defconfig         = "generic-rk3576_defconfig"
+
+# The board DTS is not upstream, so the kernel builds this DTB from the
+# device_dts source below rather than from its own tree (PROJECT-PLAN §4).
+# Resolution checks that the two names agree.
+kernel_dtb              = "rockchip/rk3576-h96-max-m9.dtb"
+device_dts              = ["devices/h96-max-m9/dts/rk3576-h96-max-m9.dts"]
+
+# Boot-time workarounds this board needs (mk_extlinux appends them after root=):
+#  - cpuidle.off=1: a CPU suspended into the DT CPU_SLEEP state can miss its
+#    wakeup (BL31-side; the checker self-test is already off in the SoC kconfig
+#    fragment, this covers normal governor-driven idle). Drop once BL31 delivers
+#    core-off wakeups reliably.
+#
+# The display no longer needs a workaround. The u-boot VOP2 driver quiesces the
+# controller at OS handoff, so the kernel inherits a resettable VOP and drives
+# HDMI itself: console, EDID, and mode list all come up. Any build whose u-boot
+# lights the panel without that teardown needs
+# "drm_kms_helper.fbdev_emulation=0 video=HDMI-A-1:d" back, or the kernel loses
+# the display entirely -- see the display reference, section 5.
+kernel_cmdline          = "cpuidle.off=1"
+
+device_config_fragments = []                       # board-specific kconfig (none yet)
+supported_kernels       = ["rk3576-mainline-7.1", "rk3576-mainline-7.1-console", "rk3576-mainline-7.1-display"]
+default_kernel          = "rk3576-mainline-7.1-display"
+default_suite           = "forky"
+default_layout          = "combined"               # combined | split
+hostname                = "h96-max-m9"
+image_size              = "2G"
+
+# rkbin (ATF + DDR TPL; no BL32) is inherited from socs/rk3576.toml. The H96
+# carries LPDDR4X at 2112 MHz, which is the SoC default loader's native target, so
+# this board overrides no blobs.

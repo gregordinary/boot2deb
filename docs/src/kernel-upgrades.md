@@ -173,9 +173,10 @@ safe as any other.
 > and sound actually come from. A kernel written without its modules boots into a system
 > with no drivers. The `.deb` carries both, which is why it is what you move around.
 >
-> The signed blob is also **specific to the machine it was built on**: first boot gives
-> each board its own root filesystem PARTUUID, and that value is baked into the
-> *signature*. A blob signed for one board's PARTUUID cannot find root on another.
+> The signed blob is also **specific to the image it was built from**: the rootfs
+> PARTUUID is baked into the *signature*, and every device keeps the PARTUUID its image
+> was stamped with. A blob signed for one image's PARTUUID cannot find root on a disk
+> flashed from a different image.
 
 ## The other boards
 

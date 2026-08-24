@@ -217,5 +217,28 @@ pub(crate) fn run(
              `boot2deb verify-sources {recipe}` for the full reachability report)"
         );
     }
+
+    // A `validated` claim asserts that an image from *these* pins booted. Moving any
+    // of them retires that evidence, and this is the only moment both locks exist to
+    // compare — after the write the previous pins are gone. Advisory like the
+    // durability checks above: re-validating is the caller's call, not the tool's,
+    // and a lock write that already succeeded is not undone by a stale claim.
+    if let (Some(prev), Some(claim)) = (&prev, root.recipe(recipe)?.support) {
+        let moved = boot2deb_core::support::pin_changes(prev, &lock);
+        if claim.status == boot2deb_core::model::SupportStatus::Validated && !moved.is_empty() {
+            eprintln!(
+                "  warning: recipe '{recipe}' claims support = \"validated\" as of {}, but this \
+                 update moved its pins:",
+                claim.date
+            );
+            for change in &moved {
+                eprintln!("    {change}");
+            }
+            eprintln!(
+                "  that claim now describes a combination nothing has booted — re-validate on \
+                 hardware and update the date, or set status = \"expected\" until you do"
+            );
+        }
+    }
     Ok(())
 }

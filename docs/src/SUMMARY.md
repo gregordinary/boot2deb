@@ -19,8 +19,10 @@
 
 - [Config model](reference/config-model.md)
 - [CLI](reference/cli.md)
+- [Support matrix](reference/support-matrix.md)
 - [Overlays](reference/overlays.md)
 - [Image identity](reference/image-identity.md)
+- [The maskrom loader](reference/maskrom-loader.md)
 - [Reproducibility](reference/reproducibility.md)
 
 # Contributing

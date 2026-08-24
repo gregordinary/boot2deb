@@ -54,6 +54,8 @@ pub fn resolve_device(
     // builds fine and then finds no DTB at boot. §4.
     validate_device_dts(&device.device_dts, &device.kernel_dtb, device_name)?;
 
+    let kernel_cmdline = validate_kernel_cmdline(device.kernel_cmdline.as_deref())?;
+
     let layout = overrides.layout.unwrap_or(device.default_layout);
 
     // The boot method's *own* requirements, enforced only for the method that has
@@ -67,6 +69,7 @@ pub fn resolve_device(
         device_name,
         layout,
         overrides.board.as_deref(),
+        &kernel_cmdline,
     )?;
 
     let kernel = resolve_kernel(kdef, kernel_id, &device, device_name)?;
@@ -222,6 +225,7 @@ pub fn resolve_device(
         boot,
         kernel_dtb: device.kernel_dtb,
         device_dts: device.device_dts,
+        kernel_cmdline,
         dt_dir: soc.dt_dir,
         modules: soc.modules,
         kernel_arch: arch.kernel_arch,
@@ -252,6 +256,7 @@ fn resolve_boot(
     device_name: &str,
     layout: Layout,
     board_override: Option<&str>,
+    kernel_cmdline: &str,
 ) -> Result<ResolvedBoot, ConfigError> {
     match bm {
         BootMethodLayer::RockchipRkbin(l) => {
@@ -315,7 +320,16 @@ fn resolve_boot(
             for s in [&l.kpart_offset, &l.kpart_size, &l.rootfs_offset] {
                 crate::size::parse_size(s)?;
             }
-            validate_depthcharge_cmdline(&l.cmdline)?;
+            // The signing cmdline is the boot method's with the device's extra
+            // arguments appended; the merged value must pass the same rules (a
+            // device-authored `root=` is caught by validate_kernel_cmdline, but a
+            // `%` is only rejected here, where depthchargectl is in the path).
+            let cmdline = if kernel_cmdline.is_empty() {
+                l.cmdline.clone()
+            } else {
+                format!("{} {}", l.cmdline, kernel_cmdline)
+            };
+            validate_depthcharge_cmdline(&cmdline)?;
             if l.kpart_slots == 0 || l.kpart_slots > crate::chromeos::MAX_KPART_SLOTS {
                 return Err(ConfigError::InvalidKpartSlots {
                     value: l.kpart_slots,
@@ -335,11 +349,55 @@ fn resolve_boot(
                     successful: l.kpart_successful,
                     flags,
                 },
-                cmdline: l.cmdline.clone(),
+                cmdline,
                 rootfs_offset: l.rootfs_offset.clone(),
             }))
         }
     }
+}
+
+/// Validate and normalize a device's extra kernel command-line arguments
+/// ([`DeviceLayer::kernel_cmdline`]): trimmed, or empty when absent.
+///
+/// The value is embedded verbatim inside a double-quoted assignment in
+/// `/etc/boot2deb/board.conf`, a file **sourced by shell scripts** on the device
+/// (`mk_extlinux`, the kernel postinst hooks) — so any character the shell would
+/// interpret inside double quotes is rejected rather than escaped: `"`, `\`, `$`,
+/// backticks, and any control character (newlines would end the assignment).
+/// `root=` is rejected on every boot path for the same reason as depthcharge's
+/// rule: the device derives root from `/etc/fstab`, and an authored `root=` is a
+/// second source of truth that silently wins or loses depending on argument order.
+fn validate_kernel_cmdline(cmdline: Option<&str>) -> Result<String, ConfigError> {
+    let Some(raw) = cmdline else {
+        return Ok(String::new());
+    };
+    let value = raw.trim();
+    let bad = |why| {
+        Err(ConfigError::InvalidCmdline {
+            value: value.to_string(),
+            why,
+        })
+    };
+    if value.chars().any(|c| ['"', '\\', '$', '`'].contains(&c)) {
+        return bad(
+            "it contains a shell-active character (one of \" \\ $ `); the value is embedded \
+             in a double-quoted assignment in /etc/boot2deb/board.conf, which device scripts \
+             source — plain `key=value` arguments only",
+        );
+    }
+    if value.chars().any(|c| c.is_control()) {
+        return bad(
+            "it contains a control character; the value must be a single line of \
+             space-separated kernel arguments",
+        );
+    }
+    if value.split_whitespace().any(|tok| tok.starts_with("root=")) {
+        return bad(
+            "it sets `root=`, which the device derives from its /etc/fstab on every boot \
+             path — remove it and let fstab be the single source",
+        );
+    }
+    Ok(value.to_string())
 }
 
 /// Reject a depthcharge cmdline that `depthchargectl` cannot carry, or that claims
@@ -395,16 +453,36 @@ fn resolve_kernel(
             // Kernel-owned fragments first, then device fragments (apply order).
             let mut config_fragments = k.config_fragments;
             config_fragments.extend(device.device_config_fragments.iter().cloned());
+            // The `"none"` sentinel becomes a typed absence exactly here; nothing
+            // downstream compares the authored string.
+            let patch_profile =
+                crate::profile::patch_profile(&k.patch_profile).map(str::to_string);
+            // A series must name the repo it comes from: the lock records the source
+            // beside the commit, and a commit id means nothing without one. Caught
+            // here rather than at pin time, so the config is wrong at `resolve`
+            // instead of surfacing much later in `update`.
+            if patch_profile.is_some() && k.patches_url.is_none() {
+                return Err(ConfigError::MissingPatchesUrl {
+                    kernel: kernel_id,
+                    profile: k.patch_profile,
+                });
+            }
+            // Paired with the profile so the two are `Some` together — nothing
+            // downstream has to consider a source without a series.
+            let patches_ref = patch_profile.as_ref().map(|_| {
+                k.patches_ref
+                    .clone()
+                    .unwrap_or_else(|| crate::model::DEFAULT_PATCHES_REF.to_string())
+            });
             Ok(ResolvedKernel::Compiled(ResolvedCompiledKernel {
                 id: kernel_id,
                 flavor: k.flavor,
                 source: k.source,
                 track: k.track,
                 base_defconfig: k.base_defconfig,
-                // The `"none"` sentinel becomes a typed absence exactly here; nothing
-                // downstream compares the authored string.
-                patch_profile: crate::profile::patch_profile(&k.patch_profile).map(str::to_string),
+                patch_profile,
                 patches_url: k.patches_url,
+                patches_ref,
                 config_fragments,
             }))
         }
@@ -932,6 +1010,29 @@ mod tests {
     }
 
     #[test]
+    fn a_patch_profile_always_carries_its_source_and_ref() {
+        // The lock records `source` + `ref` beside the pinned commit, so the three
+        // travel together or not at all: a commit id is meaningless outside its repo,
+        // and `update` takes this one from a local HEAD rather than a remote, making it
+        // the pin likeliest to name something unreachable. Resolution is where the
+        // pairing is established, so assert both directions on the shipped config.
+        let root = repo_root();
+
+        let patched = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
+        let k = patched.kernel.compiled().expect("a compiled kernel");
+        assert_eq!(k.patch_profile.as_deref(), Some("rk3588-accel"));
+        assert!(k.patches_url.as_deref().is_some_and(|u| u.contains("patches")));
+        // No release tag exists yet, so the branch is the honest ref: it says the pin
+        // came from the tip of development rather than implying a release never cut.
+        assert_eq!(k.patches_ref.as_deref(), Some(crate::model::DEFAULT_PATCHES_REF));
+
+        // A kernel applying no series pins nothing, so it names neither.
+        let unpatched = resolve_recipe(&root, "asus-c201/forky", &Overrides::default()).unwrap();
+        assert_eq!(unpatched.kernel.patch_profile(), None);
+        assert!(unpatched.kernel.compiled().is_none());
+    }
+
+    #[test]
     fn the_none_sentinel_resolves_to_no_patch_profile() {
         // The `"none"` spelling is config-facing only; resolution turns it into a
         // typed absence so no downstream code compares against the magic string.
@@ -1015,14 +1116,14 @@ mod tests {
 
         // The RK1 is a headless server: it takes the base layer's system-wide locale
         // and timezone, and has no keymap at all — nothing is typing at its console.
-        let rk1 = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
+        let rk1 = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
         assert_eq!(rk1.locale, "C.UTF-8");
         assert_eq!(rk1.timezone, "UTC");
         assert_eq!(rk1.keymap, None, "a headless board declares no keymap");
 
         // The C201 is a laptop, and is the one shipped board a console keymap
         // configures anything on. It takes the same system-wide locale.
-        let c201 = resolve_recipe(&root, "asus-c201-forky", &Overrides::default()).unwrap();
+        let c201 = resolve_recipe(&root, "asus-c201/forky", &Overrides::default()).unwrap();
         assert_eq!(c201.locale, "C.UTF-8");
         let keymap = c201.keymap.expect("a board with a keyboard declares a keymap");
         assert_eq!(keymap.layout, "us");
@@ -1038,14 +1139,14 @@ mod tests {
         // package builds the choice list `dpkg-reconfigure locales` offers.
         let root = repo_root();
 
-        let base = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
+        let base = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
         assert_eq!(base.locales_generate, vec!["C.UTF-8", "en_US.UTF-8"]);
         assert!(base.locales_generate.contains(&base.locale));
 
         // An override the base never lists is generated anyway, and leads the set.
         let de = resolve_recipe(
             &root,
-            "turing-rk1-forky",
+            "turing-rk1/forky",
             &Overrides {
                 locale: Some("de_DE.UTF-8".into()),
                 ..Default::default()
@@ -1057,7 +1158,7 @@ mod tests {
         // Naming it in both places generates it once, not twice.
         let dup = resolve_recipe(
             &root,
-            "turing-rk1-forky",
+            "turing-rk1/forky",
             &Overrides {
                 locale: Some("fr_FR.UTF-8".into()),
                 locales_generate: Some(vec!["fr_FR.UTF-8".into(), "ja_JP.UTF-8".into()]),
@@ -1076,7 +1177,7 @@ mod tests {
         let root = repo_root();
         let b = resolve_recipe(
             &root,
-            "turing-rk1-forky",
+            "turing-rk1/forky",
             &Overrides {
                 keymap: Some(Keymap::from_layout("gb")),
                 ..Default::default()
@@ -1199,7 +1300,7 @@ mod tests {
     #[test]
     fn rk1_media_accel_recipe_resolves_expected_axes() {
         let root = repo_root();
-        let b = resolve_recipe(&root, "turing-rk1-media-accel-forky", &Overrides::default()).unwrap();
+        let b = resolve_recipe(&root, "turing-rk1/media-accel-forky", &Overrides::default()).unwrap();
         assert_eq!(b.arch, Arch::Arm64);
         assert_eq!(b.soc, Soc::Rk3588);
         assert_eq!(b.boot_method, BootMethod::RockchipRkbin);
@@ -1254,7 +1355,7 @@ mod tests {
         // same kernel (VEPU/VDPU/RGA + NPU drivers) and only omits the ffmpeg-rk / MPP
         // / RGA userspace, which installs later from the media-accel debs.
         let root = repo_root();
-        let b = resolve_recipe(&root, "turing-rk1-forky", &Overrides::default()).unwrap();
+        let b = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
         assert_eq!(b.suite, "forky");
         assert!(b.features.is_empty(), "a base recipe selects no features");
         // No feature sets `requires_media_accel`, so no userspace/ffmpeg source trees
@@ -1279,7 +1380,7 @@ mod tests {
         // and differ from their forky siblings only in `suite`.
         let root = repo_root();
 
-        let base = resolve_recipe(&root, "turing-rk1-trixie", &Overrides::default()).unwrap();
+        let base = resolve_recipe(&root, "turing-rk1/trixie", &Overrides::default()).unwrap();
         assert_eq!(base.suite, "trixie");
         assert!(base.features.is_empty());
         assert!(base.userspace.is_none());
@@ -1291,7 +1392,7 @@ mod tests {
             .contains(&"accel/full".to_string()));
 
         let accel =
-            resolve_recipe(&root, "turing-rk1-media-accel-trixie", &Overrides::default()).unwrap();
+            resolve_recipe(&root, "turing-rk1/media-accel-trixie", &Overrides::default()).unwrap();
         assert_eq!(accel.suite, "trixie");
         assert_eq!(accel.features, vec!["media-accel-rockchip"]);
         assert!(accel.userspace.is_some(), "the media-accel variant carries userspace");
@@ -1314,7 +1415,7 @@ mod tests {
     #[test]
     fn c201_recipe_resolves_a_depthcharge_board_with_a_distro_kernel() {
         let root = repo_root();
-        let b = resolve_recipe(&root, "asus-c201-forky", &Overrides::default()).unwrap();
+        let b = resolve_recipe(&root, "asus-c201/forky", &Overrides::default()).unwrap();
         assert_eq!(b.arch, Arch::Armv7);
         assert_eq!(b.arch.debian_arch(), "armhf");
         assert_eq!(b.soc, Soc::Rk3288);
@@ -1369,7 +1470,7 @@ mod tests {
         // version (forky 7.1.x, trixie 6.12.x), which is the whole point of not
         // authoring a kernel per release.
         let root = repo_root();
-        let b = resolve_recipe(&root, "asus-c201-trixie", &Overrides::default()).unwrap();
+        let b = resolve_recipe(&root, "asus-c201/trixie", &Overrides::default()).unwrap();
         assert_eq!(b.suite, "trixie");
         assert_eq!(b.kernel.id(), "debian-armmp");
         assert_eq!(b.device, "asus-c201");
@@ -1383,10 +1484,10 @@ mod tests {
         // to the *same* rootfs as the board that was validated on hardware — if a
         // sibling needed packages of its own, the family layer would be a fiction.
         let root = repo_root();
-        let c201 = resolve_recipe(&root, "asus-c201-forky", &Overrides::default()).unwrap();
-        let c100p = resolve_recipe(&root, "asus-c100p-forky", &Overrides::default()).unwrap();
+        let c201 = resolve_recipe(&root, "asus-c201/forky", &Overrides::default()).unwrap();
+        let c100p = resolve_recipe(&root, "asus-c100p/forky", &Overrides::default()).unwrap();
         let cs10 =
-            resolve_recipe(&root, "asus-chromebit-cs10-forky", &Overrides::default()).unwrap();
+            resolve_recipe(&root, "asus-chromebit-cs10/forky", &Overrides::default()).unwrap();
 
         for b in [&c100p, &cs10] {
             assert_eq!(b.rootfs_packages, c201.rootfs_packages);
@@ -1523,6 +1624,46 @@ mod tests {
         }
         // What the shipped board actually carries.
         assert!(validate_depthcharge_cmdline("console=tty1 rootwait ro panic=30").is_ok());
+    }
+
+    #[test]
+    fn a_device_kernel_cmdline_is_trimmed_and_shell_safe() {
+        // Absent and blank both resolve to empty — the generated cmdline stands alone.
+        assert_eq!(validate_kernel_cmdline(None).unwrap(), "");
+        assert_eq!(validate_kernel_cmdline(Some("  ")).unwrap(), "");
+        // A real value is trimmed and passed through.
+        assert_eq!(
+            validate_kernel_cmdline(Some(" video=HDMI-A-1:d cpuidle.off=1 ")).unwrap(),
+            "video=HDMI-A-1:d cpuidle.off=1"
+        );
+        // The value lands inside a double-quoted assignment in a shell-sourced file
+        // (board.conf), so shell-active characters, control characters, and a
+        // second `root=` source of truth are all typed errors at resolve time.
+        for bad in [
+            "quiet \"splash\"",
+            "arg=$(reboot)",
+            "arg=`id`",
+            "path=a\\b",
+            "line1\nline2",
+            "ro root=LABEL=other",
+        ] {
+            assert!(
+                matches!(
+                    validate_kernel_cmdline(Some(bad)),
+                    Err(ConfigError::InvalidCmdline { .. })
+                ),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_kernel_cmdline_reaches_the_resolved_build() {
+        // The shipped boards declare no extra arguments, so the resolved value is
+        // empty — the field's default must not invent one.
+        let root = repo_root();
+        let b = resolve_device(&root, "turing-rk1", &Overrides::default()).unwrap();
+        assert_eq!(b.kernel_cmdline, "");
     }
 
     #[test]

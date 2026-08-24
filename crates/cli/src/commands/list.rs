@@ -31,13 +31,17 @@ pub(crate) fn devices(root: &ConfigRoot, json: bool) -> Result {
     finish_listing(json, rows, "device", &broken)
 }
 
-/// `list-recipes`: every recipe, its device, and whether it has a committed lock —
-/// a recipe without one is not buildable until `update` resolves it, so the listing
-/// says so up front instead of letting `build` be the first to fail.
+/// `list-recipes`: every recipe, its device, its support claim, and whether it has a
+/// committed lock — a recipe without one is not buildable until `update` resolves it,
+/// so the listing says so up front instead of letting `build` be the first to fail.
+///
+/// The support claim is shown here because it is what a reader choosing a recipe most
+/// wants to know about it; `support-matrix` is the same claim beside the pins it was
+/// made against. A locally authored recipe declaring none renders `-`.
 pub(crate) fn recipes(root: &ConfigRoot, json: bool) -> Result {
     let mut broken = Vec::new();
     let mut rows = Vec::new();
-    for name in root.list("recipes")? {
+    for name in root.list_recipes()? {
         let (lock_state, lock_note) = match root.lock(&name) {
             Ok(_) => ("ok", ""),
             Err(boot2deb_core::ConfigError::NotFound { .. }) => {
@@ -49,9 +53,19 @@ pub(crate) fn recipes(root: &ConfigRoot, json: bool) -> Result {
             Ok(r) if json => {
                 rows.push(serde_json::json!({
                     "name": name, "device": r.device, "lock": lock_state,
+                    "support": r.support.as_ref().map(|s| serde_json::json!({
+                        "status": s.status.as_str(), "date": s.date,
+                    })),
                 }));
             }
-            Ok(r) => println!("{name:<24} device={}{lock_note}", r.device),
+            Ok(r) => {
+                let support = r.support.as_ref().map_or("-", |s| s.status.as_str());
+                // Trimmed: the support column is padded to align an absent lock note,
+                // which on the common path leaves every line ending in blanks.
+                let line =
+                    format!("{name:<24} device={:<14} support={support:<13}{lock_note}", r.device);
+                println!("{}", line.trim_end());
+            }
             Err(e) if json => {
                 rows.push(serde_json::json!({"name": name, "error": e.to_string()}));
             }
@@ -189,12 +203,15 @@ mod tests {
         // Every list-* over the shipped config must produce zero unreadable entries;
         // this is the regression gate on a layer file that stops deserializing.
         let root = repo_root();
-        for kind in ["devices", "recipes", "kernels", "features"] {
+        // The flat layers scan a single directory; recipes nest one level under their
+        // device folder, so they have their own recursive lister.
+        for kind in ["devices", "kernels", "features"] {
             let names = root.list(kind).unwrap();
             assert!(!names.is_empty(), "{kind} lists nothing");
         }
+        assert!(!root.list_recipes().unwrap().is_empty(), "recipes lists nothing");
         assert!(root.list("devices").unwrap().iter().all(|n| root.device(n).is_ok()));
-        assert!(root.list("recipes").unwrap().iter().all(|n| root.recipe(n).is_ok()));
+        assert!(root.list_recipes().unwrap().iter().all(|n| root.recipe(n).is_ok()));
         assert!(root.list("kernels").unwrap().iter().all(|n| root.kernel(n).is_ok()));
         assert!(root.list("features").unwrap().iter().all(|n| root.feature(n).is_ok()));
     }

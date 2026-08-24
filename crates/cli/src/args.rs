@@ -47,6 +47,14 @@ pub(crate) enum Command {
     ListKernels,
     /// List available rootfs features (the `--feature` override's valid values).
     ListFeatures,
+    /// Print the support matrix: each shipped recipe's support claim joined to the
+    /// exact pins its lock records.
+    SupportMatrix {
+        /// Emit the `docs/src/reference/support-matrix.md` page verbatim, for
+        /// regenerating it after a claim changes or a lock is re-pinned.
+        #[arg(long)]
+        markdown: bool,
+    },
     /// Scaffold a new `devices/<name>.toml` (and, by default, a matching recipe)
     /// from the typed model: it offers the valid SoC/boot-method/kernel/feature
     /// choices, fills every derivable value, and marks the researched values
@@ -61,7 +69,7 @@ pub(crate) enum Command {
     },
     /// Resolve a device or recipe to a complete build (no build work).
     Resolve {
-        /// Device name (e.g. turing-rk1) or recipe name (e.g. turing-rk1-forky).
+        /// Device name (e.g. turing-rk1) or recipe name (e.g. turing-rk1/forky).
         target: String,
         #[command(flatten)]
         overrides: OverrideArgs,
@@ -76,7 +84,7 @@ pub(crate) enum Command {
     /// Resolve upstream refs + hash blobs and write the recipe's `.lock`.
     /// The sole path that consults upstream; `build` reads only the lock.
     Update {
-        /// Recipe to resolve (e.g. turing-rk1-forky).
+        /// Recipe to resolve (e.g. turing-rk1/forky).
         recipe: String,
         #[command(flatten)]
         args: UpdateArgs,
@@ -104,7 +112,7 @@ pub(crate) enum Command {
     /// Read-only: `git ls-remote` plus a timeout-bounded ancestry check, no build,
     /// no checkout, no hardware.
     VerifySources {
-        /// Recipe whose lock names the source pins (e.g. turing-rk1-forky).
+        /// Recipe whose lock names the source pins (e.g. turing-rk1/forky).
         recipe: String,
     },
     /// Curate the patch series. Subcommand: `import`.
@@ -118,7 +126,7 @@ pub(crate) enum Command {
     /// image axes (`--layout`, `--image-size`) are overridable, while re-pinning a
     /// source axis (kernel/suite/features/boot-method) is `update`'s job.
     Build {
-        /// Recipe to build (e.g. turing-rk1-forky); its `.lock` must exist.
+        /// Recipe to build (e.g. turing-rk1/forky); its `.lock` must exist.
         recipe: String,
         #[command(flatten)]
         args: BuildArgs,
@@ -127,7 +135,7 @@ pub(crate) enum Command {
     /// cached source tree — and which pinned inputs changed if it will rebuild.
     /// Offline: reads the lock and the on-disk build stamps, runs no build.
     WhyRebuild {
-        /// Recipe to inspect (e.g. turing-rk1-forky); its `.lock` must exist.
+        /// Recipe to inspect (e.g. turing-rk1/forky); its `.lock` must exist.
         recipe: String,
         #[command(flatten)]
         args: WhyRebuildArgs,
@@ -135,7 +143,7 @@ pub(crate) enum Command {
     /// Remove a recipe's build scratch (clones, sandbox, rootfs cache, artifacts)
     /// under its work dir, to reclaim disk or force a clean rebuild.
     Clean {
-        /// Recipe whose build scratch to remove (e.g. turing-rk1-forky).
+        /// Recipe whose build scratch to remove (e.g. turing-rk1/forky).
         recipe: String,
         #[command(flatten)]
         args: CleanArgs,
@@ -483,6 +491,22 @@ pub(crate) struct VerifyArgs {
     /// present; default: the kernel definition's `patches_url`.
     #[arg(long)]
     pub(crate) patches_url: Option<String>,
+    /// Verify against this kernel version instead of the one the lock pins, leaving
+    /// the lock untouched — "would this series survive 7.2?" answered before
+    /// adopting 7.2. Takes a kernel tag (`v7.2`, `v7.2-rc3`); pair it with
+    /// `--kernel-path` or `--kernel-src` pointing at a tree that holds it.
+    ///
+    /// A release candidate is matched against its base release here, so an `-rc`
+    /// tree is answerable; the build path stays release-strict.
+    #[arg(long, value_name = "VERSION")]
+    pub(crate) kernel: Option<String>,
+    /// Report every patch that fails to apply rather than stopping at the first.
+    ///
+    /// One boundary usually spawns adjacent ones, so the first failure is rarely the
+    /// whole story. Note that each failing patch is skipped, so later results are
+    /// measured against a tree missing it — a map of the damage, not a final verdict.
+    #[arg(long)]
+    pub(crate) keep_going: bool,
 }
 
 /// `verify-config`'s flags: the kernel tree to configure (explicit or auto-fetched)

@@ -56,7 +56,10 @@ pub(crate) fn import(
 
     // The current scope list fixes the insertion index and the derived prefix.
     let profile = load_profile(&args.patches_path, &args.profile)?;
-    let scope_list = profile.scope(args.scope);
+    // `patch import` reasons about the list as paths: it derives a filename prefix
+    // that reads near its neighbours, and verifies the spliced series. A range on a
+    // neighbour changes neither, and the imported entry is written bare (= always).
+    let scope_list: Vec<&str> = profile.scope(args.scope).iter().map(|e| e.path()).collect();
     let index = insert_index(args.position, scope_list.len())
         .map_err(|e| format!("--position {e} (the {} scope)", args.scope.as_str()))?;
 
@@ -72,7 +75,7 @@ pub(crate) fn import(
                 .name
                 .clone()
                 .unwrap_or_else(|| mbox::slugify(&normalized.subject));
-            let prefix = derive_prefix(scope_list, index)?;
+            let prefix = derive_prefix(&scope_list, index)?;
             format!("{dest_dir}/{prefix}-{slug}.patch")
         }
     };
@@ -107,12 +110,18 @@ pub(crate) fn import(
     // a source checkout, if one was supplied. A failure rolls back the written file.
     match &args.verify_tree {
         Some(tree) => {
-            let mut spliced = scope_list.to_vec();
-            spliced.insert(index, label.clone());
+            let mut spliced = scope_list.clone();
+            spliced.insert(index, label.as_str());
             let target = format!("{} ({})", args.profile, tree.display());
-            match patches::verify_tree(&args.patches_path, &spliced, tree, args.scope.as_str(), &target)
-            {
-                Ok(n) => println!(
+            match patches::verify_tree(
+                &args.patches_path,
+                &spliced,
+                tree,
+                args.scope.as_str(),
+                &target,
+                patches::OnFailure::Stop,
+            ) {
+                Ok((n, _)) => println!(
                     "patch import: git am-verified the {} series ({n} patches) against {}",
                     args.scope.as_str(),
                     tree.display()
@@ -200,7 +209,7 @@ fn insert_index(position: Option<usize>, len: usize) -> Result<usize, String> {
 /// that fails to resolve, or a cwd outside any config root, contributes nothing
 /// rather than failing the import (which itself needs only the patches repo).
 fn recipes_using_profile(root: &ConfigRoot, profile: &str) -> Vec<String> {
-    let Ok(names) = root.list("recipes") else {
+    let Ok(names) = root.list_recipes() else {
         return Vec::new();
     };
     names
@@ -238,9 +247,9 @@ mod tests {
         // profile (or an unusable root) degrades to the generic hint.
         let root = repo_root();
         let recipes = recipes_using_profile(&root, "rk3588-accel");
-        assert!(recipes.contains(&"turing-rk1-forky".to_string()), "{recipes:?}");
-        assert!(recipes.contains(&"turing-rk1-media-accel-forky".to_string()), "{recipes:?}");
-        assert!(recipes.contains(&"turing-rk1-jellyfin".to_string()), "{recipes:?}");
+        assert!(recipes.contains(&"turing-rk1/forky".to_string()), "{recipes:?}");
+        assert!(recipes.contains(&"turing-rk1/media-accel-forky".to_string()), "{recipes:?}");
+        assert!(recipes.contains(&"turing-rk1/jellyfin".to_string()), "{recipes:?}");
         assert!(recipes_using_profile(&root, "no-such-profile").is_empty());
         let empty = tempfile::tempdir().unwrap();
         assert!(recipes_using_profile(&ConfigRoot::new(empty.path()), "rk3588-accel").is_empty());

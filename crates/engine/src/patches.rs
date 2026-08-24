@@ -1,12 +1,16 @@
-//! The verify-applies gate: dry-run an ordered patch series against a source
-//! tree with `git am --3way`, hard-erroring — naming the failing patch and the
-//! target — if any patch does not apply. Patches are never silently skipped or
-//! fuzzed in; `applies_to_kernel` in the profile is the declared intent, this is
-//! the enforcement.
+//! The verify-applies gate: dry-run an ordered patch series against a source tree
+//! with `git am --3way`, naming the failing patch and the target when one does not
+//! apply. Patches are never fuzzed in; the profile's ranges are the declared
+//! intent, this is the enforcement.
 //!
 //! "Dry-run" means the tree is restored to its starting commit afterwards, so a
 //! verify has no lasting effect. The build stage reuses the same `git am --3way`
-//! per but leaves the series applied.
+//! pass but leaves the series applied.
+//!
+//! Two failure behaviours ([`OnFailure`]): a build stops at the first patch that
+//! does not apply, because there is no point compiling a tree with a hole in it; a
+//! survey keeps going and reports every boundary at once, because one boundary
+//! usually spawns adjacent ones.
 
 use crate::error::EngineError;
 use crate::git;
@@ -21,12 +25,12 @@ struct ResolvedPatch {
 
 /// Resolve a profile's repo-relative patch labels to absolute paths under
 /// `patches_root`, preserving order.
-fn resolve_paths(patches_root: &Path, labels: &[String]) -> Vec<ResolvedPatch> {
+fn resolve_paths(patches_root: &Path, labels: &[&str]) -> Vec<ResolvedPatch> {
     labels
         .iter()
         .map(|label| ResolvedPatch {
             path: patches_root.join(label),
-            label: label.clone(),
+            label: (*label).to_string(),
         })
         .collect()
 }
@@ -39,17 +43,18 @@ fn resolve_paths(patches_root: &Path, labels: &[String]) -> Vec<ResolvedPatch> {
 /// - `tree` labels the tree for messages (`"kernel"`, `"ffmpeg"`, …).
 /// - `target` labels what the tree is checked at (`"rk3588-mainline-7.1 @ v7.1.1"`).
 ///
-/// On success the checkout is restored to its starting commit and the count of
-/// verified patches is returned. On the first patch that does not apply, the
-/// in-progress `am` is aborted, the checkout restored, and
-/// [`EngineError::PatchDoesNotApply`] returned naming that patch.
+/// The checkout is restored to its starting commit either way, so a verify has no
+/// lasting effect. Returns the count that applied plus the collected failures —
+/// empty under [`OnFailure::Stop`], which instead returns
+/// [`EngineError::PatchDoesNotApply`] naming the first patch to fail.
 pub fn verify_tree(
     patches_root: &Path,
-    labels: &[String],
+    labels: &[&str],
     repo: &Path,
     tree: &str,
     target: &str,
-) -> Result<usize, EngineError> {
+    on_failure: OnFailure,
+) -> Result<(usize, Vec<PatchFailure>), EngineError> {
     // `git am` runs with `-C <repo>`, so it resolves a relative patch path
     // against the target checkout, not our CWD. Anchor to an absolute patches
     // root up front so the paths are unambiguous.
@@ -64,7 +69,7 @@ pub fn verify_tree(
         });
     }
     let start = git::rev_parse_head(repo)?;
-    let outcome = apply_series(repo, tree, target, &patches);
+    let outcome = apply_series(repo, tree, target, &patches, on_failure);
     // Restore the worktree no matter what — this is a pure verify.
     let restore = git::reset_hard(repo, &start);
     match outcome {
@@ -86,7 +91,7 @@ pub fn verify_tree(
 /// returned. Arguments match [`verify_tree`].
 pub fn apply_tree(
     patches_root: &Path,
-    labels: &[String],
+    labels: &[&str],
     repo: &Path,
     tree: &str,
     target: &str,
@@ -99,17 +104,58 @@ pub fn apply_tree(
             repo: repo.display().to_string(),
         });
     }
-    apply_series(repo, tree, target, &patches)
+    apply_series(repo, tree, target, &patches, OnFailure::Stop).map(|(n, _)| n)
 }
 
-/// Apply the series, hard-erroring on the first patch that does not apply. Leaves
-/// applied commits in place; the caller restores.
+/// How a series pass reacts to a patch that does not apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnFailure {
+    /// Stop at the first patch that does not apply. What a **build** wants: the
+    /// tree is being brought to a compilable state, and continuing past a hole
+    /// would compile something nobody described.
+    Stop,
+    /// Skip a failing patch and keep going, collecting every failure.
+    ///
+    /// What **candidate verification** wants. One boundary usually spawns
+    /// adjacent ones — reworking a patch shifts the context every later patch
+    /// applies against — so stopping at the first turns a survey into serial
+    /// discovery: fix, re-run, find the next, re-run.
+    ///
+    /// Later results are measured against a tree missing the skipped patch, so a
+    /// batch pass is a map of the damage rather than a final verdict; a rework can
+    /// still change what comes after it.
+    KeepGoing,
+}
+
+/// What a multi-tree verify produces: the per-tree `(label, applied count)` in the
+/// order the trees were given, plus every failure collected across all of them.
+pub type ProfileReport = (Vec<(String, usize)>, Vec<PatchFailure>);
+
+/// One patch that did not apply, from a [`OnFailure::KeepGoing`] pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchFailure {
+    /// The tree the series was applied to (`"kernel"`, `"uboot"`, …).
+    pub tree: String,
+    /// The patches-repo-relative label of the patch that failed.
+    pub patch: String,
+    /// Indented `git am` output explaining the rejection.
+    pub detail: String,
+}
+
+/// Apply the series, leaving applied commits in place; the caller restores.
+///
+/// Returns the number of patches that applied, plus the failures collected under
+/// [`OnFailure::KeepGoing`] (always empty under [`OnFailure::Stop`], which returns
+/// [`EngineError::PatchDoesNotApply`] instead).
 fn apply_series(
     repo: &Path,
     tree: &str,
     target: &str,
     patches: &[ResolvedPatch],
-) -> Result<usize, EngineError> {
+    on_failure: OnFailure,
+) -> Result<(usize, Vec<PatchFailure>), EngineError> {
+    let mut applied = 0;
+    let mut failures = Vec::new();
     for patch in patches {
         if !patch.path.exists() {
             return Err(EngineError::PatchNotFound {
@@ -117,27 +163,40 @@ fn apply_series(
             });
         }
         let out = git::am_3way(repo, &patch.path)?;
-        if !out.status.success() {
-            // `git am` prints the conflict to stdout ("Applying: …", "error: …")
-            // and stderr; combine both for a useful message.
-            let mut detail = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !stderr.trim().is_empty() {
-                if !detail.is_empty() {
-                    detail.push('\n');
-                }
-                detail.push_str(stderr.trim());
+        if out.status.success() {
+            applied += 1;
+            continue;
+        }
+        // `git am` prints the conflict to stdout ("Applying: …", "error: …")
+        // and stderr; combine both for a useful message.
+        let mut detail = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !stderr.trim().is_empty() {
+            if !detail.is_empty() {
+                detail.push('\n');
             }
-            git::am_abort(repo);
-            return Err(EngineError::PatchDoesNotApply {
+            detail.push_str(stderr.trim());
+        }
+        // Always abort the half-finished am: the tree must be usable for the next
+        // patch (KeepGoing) or for the caller's restore (Stop).
+        git::am_abort(repo);
+        match on_failure {
+            OnFailure::Stop => {
+                return Err(EngineError::PatchDoesNotApply {
+                    tree: tree.to_string(),
+                    target: target.to_string(),
+                    patch: patch.label.clone(),
+                    detail: indent(&detail),
+                })
+            }
+            OnFailure::KeepGoing => failures.push(PatchFailure {
                 tree: tree.to_string(),
-                target: target.to_string(),
                 patch: patch.label.clone(),
                 detail: indent(&detail),
-            });
+            }),
         }
     }
-    Ok(patches.len())
+    Ok((applied, failures))
 }
 
 /// Indent multi-line `git am` output two spaces under the error header.
@@ -152,21 +211,28 @@ fn indent(s: &str) -> String {
 ///
 /// The caller selects which trees to exercise — e.g. only `kernel` before the
 /// ffmpeg/MPP checkouts exist — pairing each
-/// [`PatchProfile`](boot2deb_core::PatchProfile) list (`kernel`, `ffmpeg`, …) with
-/// the checkout to verify it against. `target` labels what the trees are checked
-/// at. Returns the per-tree verified counts in order; hard-errors on the first
-/// tree that fails.
+/// [`PatchProfile`](boot2deb_core::PatchProfile) series (already filtered to the
+/// kernel under test) with the checkout to verify it against. `target` labels what
+/// the trees are checked at.
+///
+/// Returns the per-tree verified counts in order, plus every failure collected
+/// across all trees. Under [`OnFailure::Stop`] it hard-errors on the first tree
+/// that fails; under [`OnFailure::KeepGoing`] it visits every tree and the failure
+/// list is the report.
 pub fn verify_profile(
     patches_root: &Path,
     target: &str,
-    trees: &[(&str, &[String], &Path)],
-) -> Result<Vec<(String, usize)>, EngineError> {
+    trees: &[(&str, &[&str], &Path)],
+    on_failure: OnFailure,
+) -> Result<ProfileReport, EngineError> {
     let mut report = Vec::new();
+    let mut failures = Vec::new();
     for (tree, labels, repo) in trees {
-        let n = verify_tree(patches_root, labels, repo, tree, target)?;
+        let (n, failed) = verify_tree(patches_root, labels, repo, tree, target, on_failure)?;
         report.push((tree.to_string(), n));
+        failures.extend(failed);
     }
-    Ok(report)
+    Ok((report, failures))
 }
 
 #[cfg(test)]
@@ -215,6 +281,49 @@ mod tests {
     }
 
     #[test]
+    fn keep_going_reports_every_failure_and_applies_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let patches = tmp.path().join("patches");
+        fs::create_dir_all(patches.join("s")).unwrap();
+        init_repo(&src, "hello.txt", "alpha\nbeta\ngamma\n");
+
+        // One patch generated against a *different* base, so it cannot apply, and one
+        // generated against the real base, so it can. Ordered failure-first: under
+        // Stop the second would never be reached.
+        let bad_gen = tmp.path().join("bad");
+        init_repo(&bad_gen, "hello.txt", "wholly\nunrelated\ncontent\n");
+        let bad = make_patch(&bad_gen, "hello.txt", "wholly\nCHANGED\ncontent\n", &patches);
+        fs::rename(&bad, patches.join("s/0001-bad.patch")).unwrap();
+
+        let good_gen = tmp.path().join("good");
+        init_repo(&good_gen, "hello.txt", "alpha\nbeta\ngamma\n");
+        let good = make_patch(&good_gen, "hello.txt", "alpha\nBETA\ngamma\n", &patches);
+        fs::rename(&good, patches.join("s/0002-good.patch")).unwrap();
+
+        let series = ["s/0001-bad.patch", "s/0002-good.patch"];
+
+        // Stop: the first failure is the whole report, and 0002 is never tried.
+        let err = verify_tree(&patches, &series, &src, "kernel", "t", OnFailure::Stop).unwrap_err();
+        assert!(matches!(
+            err,
+            EngineError::PatchDoesNotApply { ref patch, .. } if patch == "s/0001-bad.patch"
+        ));
+
+        // KeepGoing: 0001 is reported and skipped, and 0002 still applies -- which is
+        // the point, since a boundary is usually not the last one.
+        let (applied, failures) =
+            verify_tree(&patches, &series, &src, "kernel", "t", OnFailure::KeepGoing).unwrap();
+        assert_eq!(applied, 1);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].patch, "s/0001-bad.patch");
+        assert_eq!(failures[0].tree, "kernel");
+        assert!(!failures[0].detail.is_empty());
+        // Still a pure verify: the skipped am left nothing behind.
+        assert_eq!(git_in(&src, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
     fn clean_series_applies_and_restores() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
@@ -231,8 +340,10 @@ mod tests {
         fs::rename(&p, patches.join(&label)).unwrap();
 
         let before = git_in(&src, &["rev-parse", "HEAD"]);
-        let n = verify_tree(&patches, &[label], &src, "kernel", "test @ base").unwrap();
+        let (n, failed) = verify_tree(&patches, &[&label], &src, "kernel", "test @ base", OnFailure::Stop)
+            .unwrap();
         assert_eq!(n, 1);
+        assert!(failed.is_empty());
         // Pure verify: HEAD unchanged and worktree clean.
         assert_eq!(git_in(&src, &["rev-parse", "HEAD"]), before);
         assert_eq!(git_in(&src, &["status", "--porcelain"]), "");
@@ -254,7 +365,7 @@ mod tests {
         fs::rename(&p, patches.join(&label)).unwrap();
 
         let before = git_in(&src, &["rev-parse", "HEAD"]);
-        let n = apply_tree(&patches, &[label], &src, "kernel", "test @ base").unwrap();
+        let n = apply_tree(&patches, &[&label], &src, "kernel", "test @ base").unwrap();
         assert_eq!(n, 1);
         // Unlike verify, apply advances HEAD and leaves the change in the tree.
         assert_ne!(git_in(&src, &["rev-parse", "HEAD"]), before);
@@ -279,7 +390,7 @@ mod tests {
         fs::rename(&p, patches.join(&label)).unwrap();
 
         let before = git_in(&src, &["rev-parse", "HEAD"]);
-        let err = verify_tree(&patches, std::slice::from_ref(&label), &src, "kernel", "test @ base")
+        let err = verify_tree(&patches, &[&label], &src, "kernel", "test @ base", OnFailure::Stop)
             .unwrap_err();
         match err {
             EngineError::PatchDoesNotApply { patch, tree, .. } => {
@@ -300,7 +411,7 @@ mod tests {
         init_repo(&src, "hello.txt", "alpha\n");
         // Leave an uncommitted change.
         fs::write(src.join("hello.txt"), "alpha\nbeta\n").unwrap();
-        let err = verify_tree(tmp.path(), &[], &src, "kernel", "test @ base").unwrap_err();
+        let err = verify_tree(tmp.path(), &[], &src, "kernel", "test @ base", OnFailure::Stop).unwrap_err();
         assert!(matches!(err, EngineError::DirtyCheckout { .. }));
     }
 
@@ -311,10 +422,11 @@ mod tests {
         init_repo(&src, "hello.txt", "alpha\n");
         let err = verify_tree(
             tmp.path(),
-            &["does-not-exist.patch".to_string()],
+            &["does-not-exist.patch"],
             &src,
             "kernel",
             "test @ base",
+            OnFailure::Stop,
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::PatchNotFound { .. }));

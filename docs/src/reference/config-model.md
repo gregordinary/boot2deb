@@ -117,9 +117,71 @@ user-selected axis**: a kernel names its profile via `patch_profile` in
 `kernels/<id>.toml`, and there is deliberately no `--profile` flag, because a series
 that applies to one kernel version does not apply to another — so the profile is
 version-coupled to the kernel that owns it. Profiles live in a separate `patches` repo,
-not in this one; the resolved profile name and its exact `patches`-repo commit are
-recorded together in the lock's `[patches]` block. Authoring workflow:
+not in this one. Authoring workflow:
 [Adding a patch](../contributing/adding-a-patch.md).
+
+The lock's `[patches]` block records the profile plus the same three fields every other
+pinned source carries — where it came from, the ref that was resolved, and the exact
+commit:
+
+```toml
+[patches]
+profile = "rk3588-accel"
+source  = "https://github.com/gregordinary/patches.git"
+ref     = "main"
+commit  = "527d03d54ea68a375b814ccb3314901530cb8b32"
+```
+
+The commit is the reproducibility pin; the ref is the human-legible half, so "this image
+used patches v1.3.0" reads without decoding a SHA. Until the series has a release tag,
+`main` is the honest value — it says the pin came from the tip of development rather
+than implying a release nobody cut.
+
+`source` earns its place independently of tags. `verify-sources` grades every pin's
+durability, and this axis needs it most: `update` takes the patches commit from a local
+checkout's `HEAD` rather than resolving a remote ref, so it is the pin likeliest to name
+something that exists nowhere else — a series committed locally and not yet pushed pins
+fine and then fails for everyone. A kernel definition that names a `patch_profile` must
+therefore also name a `patches_url`; resolution rejects one without the other.
+
+### Two ranges, not one
+
+A profile declares an overall `applies_to_kernel` envelope, and each entry in a scope
+list may narrow itself further inside it:
+
+```toml
+applies_to_kernel = ">=7.0, <7.4"      # the envelope
+
+kernel = [
+  "media-accel/kernel/040-vdpu381-multicore-v1-curated.patch",             # no range = always
+  { path = "media-accel/kernel/050-av1-iommu-v14.patch", kernels = "<7.2" },
+  { path = "media-accel/kernel/050-av1-iommu-v15.patch", kernels = ">=7.2" },  # reworked at 7.2
+  { path = "rocket/084-rocket-drv-fix-bo-mm-uaf.patch", kernels = "<7.3" },    # upstreamed in 7.3
+]
+```
+
+The envelope gates the build; the per-entry ranges select which patches that build
+actually applies. Both are *declared intent* — the `git am` pass is the enforcement.
+
+This shape exists because the patch series changes discontinuously while kernels move
+continuously. A kernel bump where everything still applies changes nothing here except
+the envelope: no copied lists, no forked profile. When one patch does break, the
+boundary is expressed on that patch alone, and the version-insensitive majority stay
+bare strings. Upstreaming gets a first-class encoding too — an upper bound reading
+"needed until mainline absorbed it."
+
+Because both alternatives live in one list, a single repo checkout still builds 7.1 and
+7.2 correctly; a flat list mutated in place would lose that.
+
+Fork a **new profile name** only when the series *shape* diverges enough that one list
+is confusing. Profile names stay semantic, never version-suffixed, so the kernel
+definitions referencing them stay stable.
+
+An entry whose range no longer overlaps the envelope is unreachable by construction —
+no kernel the profile admits can select it. That is mechanically decidable rather than a
+judgement call, so it is reported as a lint rather than left to a cleanup someone has to
+remember. Retiring such an entry, file included, is safe: an old lock names an old
+`patches` commit whose tree still contains both.
 
 A kernel may apply **no series at all** — a stock mainline kernel whose SoC is fully
 upstream, or a vendor tree that already ships its patches. It writes
@@ -187,6 +249,24 @@ actually built by one of the listed sources, and that each entry is a contained 
 patch's job, and a source that would overwrite an in-tree file is refused. For the
 edit → reflash loop, `build <recipe> --stage dtb` rebuilds just that DTB in seconds.
 
+### Extra kernel arguments per board
+
+A board that needs boot-time kernel parameters — a workaround for an output the kernel
+cannot drive, an idle state the platform firmware mishandles — declares them once at
+the device layer:
+
+```toml
+kernel_cmdline = "drm_kms_helper.fbdev_emulation=0 video=HDMI-A-1:d cpuidle.off=1"
+```
+
+The value is appended to the boot path's generated command line: the extlinux path
+ships it in `/etc/boot2deb/board.conf` (as `EXTL_CMD_LINE`, which `mk_extlinux` reads on
+every kernel install), the depthcharge path appends it to the boot method's signing
+cmdline. Base arguments stay generated — `root=` in particular is derived from
+`/etc/fstab` on the device and is rejected here, as is anything the shell would
+interpret when sourcing `board.conf`. A board with no entry gets the generated command
+line alone.
+
 ### Explicit over derived
 
 Several device values are redundant with a value the resolver could derive:
@@ -237,6 +317,30 @@ The split between the two is what makes a build reproducible:
   named error rather than a build against stale pins.
 
 See the [CLI reference](cli.md) for the commands that operate on these.
+
+### A recipe declares what it has been taken through
+
+A recipe may carry a `[support]` claim — `validated`, `expected`, or `experimental`,
+plus the `YYYY-MM-DD` the claim was last established:
+
+```toml
+[support]
+status = "validated"
+date   = "2026-07-16"
+```
+
+The claim is per recipe, not per device, because it varies within a device: a board can
+have one build point booted and another — a different kernel, suite, or feature set —
+never built. It is optional, and absent means *no claim made*, which is the honest state
+for a recipe you authored against your own board. Every recipe boot2deb ships declares
+one.
+
+This is the **declared** half of the project's support story. The [support
+matrix](support-matrix.md) is the generated half: it reads the pins from each recipe's
+lock and sets them beside the claim, so the table cannot describe a combination the
+build would not produce. The two are kept honest at the one moment they can be driven
+apart — `update` warns when it moves the pins out from under a `validated` claim, since
+moving them retires the evidence the claim rested on.
 
 ## Crates
 

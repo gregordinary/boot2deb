@@ -116,11 +116,6 @@ pub struct RootfsOptions<'a> {
     /// build artifacts whose names are version-specific and thus unknowable to the
     /// static config, above all the freshly built kernel image.
     pub extra_packages: &'a [String],
-    /// The ext4 volume label the image node will assign the rootfs partition. The
-    /// generated `/etc/fstab` mounts root by this label, so it must be the same
-    /// value the image node passes to mkfs — one resolved label threaded through
-    /// both nodes, else the root mount fails on-device.
-    pub rootfs_label: &'a str,
     /// Root of the content-addressed rootfs cache. `Some(dir)` enables the
     /// early-cutoff cache: a cheap `mmdebstrap --simulate` solve keys a store under
     /// `<dir>/rootfs/`, and an unchanged solved set restores a stored tree instead
@@ -249,7 +244,6 @@ impl Rootfs for MmdebstrapRootfs {
             &overlay,
             opts.overlay_dirs,
             build,
-            opts.rootfs_label,
             opts.rootfs_partuuid,
             opts.image_identity,
             &step,
@@ -707,14 +701,13 @@ fn stage_overlay(
     staging: &Path,
     overlay_dirs: &[PathBuf],
     build: &ResolvedBuild,
-    rootfs_label: &str,
     rootfs_partuuid: uuid::Uuid,
     image_identity: &boot2deb_core::provenance::SystemIdentity,
     step: &Step,
 ) -> Result<(), EngineError> {
     copy_overlay_trees(staging, overlay_dirs, step)?;
     // Generated config, mirroring rootfs paths.
-    write_staged(staging, "etc/fstab", &config::fstab(build, rootfs_label, rootfs_partuuid))?;
+    write_staged(staging, "etc/fstab", &config::fstab(build, rootfs_partuuid))?;
     write_staged(staging, "etc/hostname", &config::hostname(&build.hostname))?;
     write_staged(staging, "etc/hosts", &config::hosts(&build.hostname))?;
     write_staged(staging, "etc/apt/sources.list", &config::apt_sources(&build.suite))?;
@@ -725,7 +718,7 @@ fn stage_overlay(
     write_staged(
         staging,
         "etc/boot2deb/board.conf",
-        &config::board_conf(&build.kernel_dtb),
+        &config::board_conf(&build.kernel_dtb, &build.kernel_cmdline),
     )?;
     // The image's own account of what it is, beside the board config, for a tool that
     // reads this disk from outside — from other media, without mounting it, on a machine
@@ -859,7 +852,7 @@ impl BootstrapStaging {
 /// (`mk_extlinux`) hooks and initramfs-tools supplies the initrd hook, but the kernel
 /// package configured *before* the overlay was laid in, so its own postinst found an
 /// empty hook dir. Re-running them here — with the overlay, initramfs-tools, and the
-/// `LABEL=`-based `/etc/fstab` all in place — is what populates `/boot` with the
+/// `PARTUUID=`-rooted `/etc/fstab` all in place — is what populates `/boot` with the
 /// initrd, board dtb, and `extlinux/extlinux.conf` that u-boot's extlinux bootflow
 /// loads; without it the image has a kernel but nothing to boot it.
 ///
@@ -914,7 +907,7 @@ fn customize_hook_script(
          # Generate the boot artifacts u-boot's extlinux bootflow loads. The overlay\n\
          # (laid in above) and initramfs-tools ship the /etc/kernel/postinst.d hooks\n\
          # that build the initrd, copy the board dtb into /boot, and write\n\
-         # /boot/extlinux/extlinux.conf (root=LABEL=... from the generated fstab). The\n\
+         # /boot/extlinux/extlinux.conf (root=PARTUUID=... from the generated fstab). The\n\
          # kernel package was configured before the overlay existed, so its own\n\
          # postinst run-parts found an empty hook dir and produced none of them;\n\
          # re-run the hooks now, with everything in place. --exit-on-error fails the\n\
@@ -1303,28 +1296,31 @@ mod config {
     use std::fmt::Write;
     use uuid::Uuid;
 
-    /// `/etc/fstab`. **How root is named here depends on who reads it**, which is the
-    /// boot method's business:
+    /// `/etc/fstab`. Both boot methods root on the **PARTUUID** the image node stamps
+    /// into the GPT ([`ImageIdentity::rootfs_partuuid`](crate::image::ImageIdentity)),
+    /// derived up front and threaded through both nodes so this entry always names the
+    /// partition the image will actually write. The value is the device's boot
+    /// identity for its whole life: nothing on the device rewrites it (first-boot
+    /// grows the partition but keeps its PARTUUID), so the references that carry it —
+    /// this file, the extlinux cmdline, the signed depthcharge kernel — never go
+    /// stale. The ext4 label and filesystem UUID still exist (the label is handy for
+    /// rescue mounts) but nothing boots by them.
     ///
-    ///  - `rockchip-rkbin` mounts by ext4 **label**. The filesystem UUID is not known
-    ///    until the image node formats ext4, *after* this tarball is built, so the
-    ///    label decouples the rootfs build from image assembly; the caller threads one
-    ///    resolved label through both nodes so this entry always matches the on-disk
-    ///    label. The `mk_extlinux` hook reads root back out of here to build the
-    ///    bootloader's cmdline.
+    /// Per-method notes:
     ///
-    ///  - `depthcharge` mounts by **PARTUUID**, and this file is load-bearing for the
-    ///    boot itself: `depthchargectl` reads it to derive the `root=` it bakes into
-    ///    the kernel's *signature*, here and again on every on-device kernel upgrade.
-    ///    So the value must name the partition the image node is about to write —
-    ///    which is why the PARTUUID is derived up front and handed to both nodes,
-    ///    rather than minted when the table is written. A label would work for the
-    ///    kernel but not for the tool: it resolves root from fstab and strips any
-    ///    `root=` that disagrees, so whatever is here is what gets signed.
-    pub fn fstab(build: &ResolvedBuild, label: &str, rootfs_partuuid: Uuid) -> String {
+    ///  - `rockchip-rkbin`: the `mk_extlinux` hook reads root back out of here to
+    ///    build the bootloader's cmdline on every kernel install.
+    ///
+    ///  - `depthcharge`: this file is load-bearing for the boot itself —
+    ///    `depthchargectl` reads it to derive the `root=` it bakes into the kernel's
+    ///    *signature*, at image build and again on every on-device kernel upgrade. A
+    ///    label would work for the kernel but not for the tool: it resolves root from
+    ///    fstab and strips any `root=` that disagrees, so whatever is here is what
+    ///    gets signed.
+    pub fn fstab(build: &ResolvedBuild, rootfs_partuuid: Uuid) -> String {
         let (source, note) = match &build.boot {
             ResolvedBoot::RockchipRkbin(_) => (
-                format!("LABEL={label}"),
+                format!("PARTUUID={}", rootfs_partuuid.hyphenated()),
                 "# regenerate extlinux.conf via /boot/mk_extlinux after editing the root entry",
             ),
             ResolvedBoot::Depthcharge(_) => (
@@ -1465,14 +1461,26 @@ mod config {
     /// Derived from the device's resolved `kernel_dtb`: `DTB_PATH` (relative to the
     /// DT output dir) locates the dtb inside the installed `linux-image` package,
     /// and `DTB_NAME` (its basename) names the copy placed in `/boot`.
-    pub fn board_conf(kernel_dtb: &str) -> String {
+    ///
+    /// A board with extra kernel arguments ([`ResolvedBuild::kernel_cmdline`])
+    /// additionally gets `EXTL_CMD_LINE="rootwait <extra>"`, overriding
+    /// `mk_extlinux`'s own `rootwait` default (the file is sourced after that
+    /// default, so the assignment must carry `rootwait` itself). A board with none
+    /// gets no assignment at all and the script default stands — the file is
+    /// byte-identical to what it was before the knob existed. Resolution guarantees
+    /// the value is safe to embed in this double-quoted, shell-sourced assignment.
+    pub fn board_conf(kernel_dtb: &str, kernel_cmdline: &str) -> String {
         let name = kernel_dtb.rsplit('/').next().unwrap_or(kernel_dtb);
-        format!(
+        let mut conf = format!(
             "# Generated by boot2deb -- board boot parameters. Do not edit.\n\
              # Sourced by /etc/kernel/{{postinst,postrm}}.d hooks and /boot/mk_extlinux.\n\
              DTB_PATH=\"{kernel_dtb}\"\n\
              DTB_NAME=\"{name}\"\n"
-        )
+        );
+        if !kernel_cmdline.is_empty() {
+            conf.push_str(&format!("EXTL_CMD_LINE=\"rootwait {kernel_cmdline}\"\n"));
+        }
+        conf
     }
 }
 
@@ -1494,7 +1502,7 @@ mod tests {
     fn rk1() -> ResolvedBuild {
         // The media-accel build: these rootfs tests assert the bootstrap includes the
         // feature packages (ffmpeg-rk et al.), so they need the userspace-carrying recipe.
-        resolve_recipe(&repo_root(), "turing-rk1-media-accel-forky", &Overrides::default()).unwrap()
+        resolve_recipe(&repo_root(), "turing-rk1/media-accel-forky", &Overrides::default()).unwrap()
     }
 
     /// A lock with nothing pinned. These tests exercise how the rootfs node *stages* the
@@ -1582,10 +1590,9 @@ mod tests {
         // A path typo that found no hooks at all would make the assertions above vacuous,
         // and so would a layer kind missing from the list above. Name one hook from each
         // kind that ships one, so losing a whole kind fails here instead of quietly
-        // shrinking the test's reach.
+        // shrinking the test's reach. (No boot-method layer ships a hook: boot identity
+        // is fixed at build time, so there is nothing bootloader-side to redo on-device.)
         for expected in [
-            "boot-methods/depthcharge/overlay/etc/boot2deb/first-boot.d/10-depthcharge",
-            "boot-methods/rockchip-rkbin/overlay/etc/boot2deb/first-boot.d/10-extlinux",
             "socs/rk3288/overlay/etc/boot2deb/first-boot.d/20-audio",
             "devices/turing-rk1/overlay/etc/boot2deb/first-boot.d/20-network",
         ] {
@@ -1598,30 +1605,49 @@ mod tests {
 
     /// The other shape: a depthcharge board with a distro kernel.
     fn c201() -> ResolvedBuild {
-        resolve_recipe(&repo_root(), "asus-c201-forky", &Overrides::default()).unwrap()
+        resolve_recipe(&repo_root(), "asus-c201/forky", &Overrides::default()).unwrap()
     }
 
     #[test]
     fn board_conf_derives_dtb_path_and_name() {
-        let c = config::board_conf("rockchip/rk3576-h96-max-m9.dtb");
+        let c = config::board_conf("rockchip/rk3576-h96-max-m9.dtb", "");
         assert!(c.contains("DTB_PATH=\"rockchip/rk3576-h96-max-m9.dtb\""));
         assert!(c.contains("DTB_NAME=\"rk3576-h96-max-m9.dtb\""));
         // A bare filename (no dir) uses itself as the name.
-        assert!(config::board_conf("board.dtb").contains("DTB_NAME=\"board.dtb\""));
+        assert!(config::board_conf("board.dtb", "").contains("DTB_NAME=\"board.dtb\""));
+    }
+
+    #[test]
+    fn board_conf_emits_cmdline_only_when_present() {
+        // No extra arguments: no EXTL_CMD_LINE line at all, so mk_extlinux's own
+        // default stands and a pre-knob board's file is byte-identical.
+        let plain = config::board_conf("rockchip/rk3588-turing-rk1.dtb", "");
+        assert!(!plain.contains("EXTL_CMD_LINE"));
+
+        // Extra arguments ride a full assignment that re-states the script's
+        // `rootwait` default (board.conf is sourced after it and replaces it).
+        let extra = config::board_conf(
+            "rockchip/rk3576-h96-max-m9.dtb",
+            "video=HDMI-A-1:d cpuidle.off=1",
+        );
+        assert!(extra.contains("EXTL_CMD_LINE=\"rootwait video=HDMI-A-1:d cpuidle.off=1\"\n"));
     }
 
     /// The rootfs PARTUUID the image node will write — a fixed value for the tests.
     const PARTUUID: uuid::Uuid = uuid::Uuid::from_bytes([0xb2; 16]);
 
     #[test]
-    fn a_raw_gap_boot_mounts_root_by_label() {
-        // The bootloader reads root back out of fstab (mk_extlinux does), and the ext4
-        // UUID is not known until the image node formats it — so the label, which the
-        // caller threads through both nodes, is the identifier both sides agree on.
-        let f = config::fstab(&rk1(), "rootfs", PARTUUID);
-        assert!(f.contains("LABEL=rootfs\t/\text4"));
-        assert!(!f.contains("UUID="));
-        assert!(config::fstab(&rk1(), "rk1root", PARTUUID).contains("LABEL=rk1root\t/\text4"));
+    fn a_raw_gap_boot_mounts_root_by_the_partuuid_the_image_will_write() {
+        // mk_extlinux reads root back out of fstab to build the cmdline, so this line
+        // must name the partition the image node stamps into the GPT. It is the
+        // device's boot identity for life — first-boot grows the partition but never
+        // rewrites its PARTUUID — so no label and no filesystem UUID appears here.
+        let f = config::fstab(&rk1(), PARTUUID);
+        let expected = format!("PARTUUID={}\t/\text4", PARTUUID.hyphenated());
+        assert!(f.contains(&expected), "fstab must root on the derived PARTUUID:\n{f}");
+        assert!(!f.contains("LABEL="));
+        assert!(!f.contains("\tUUID="));
+        assert!(f.contains("mk_extlinux"));
     }
 
     #[test]
@@ -1629,7 +1655,7 @@ mod tests {
         // This line is what depthchargectl signs into the kernel, so it must name the
         // partition the image node is about to create — not a label, which the tool
         // would not resolve, and not a filesystem UUID, which does not exist yet.
-        let f = config::fstab(&c201(), "rootfs", PARTUUID);
+        let f = config::fstab(&c201(), PARTUUID);
         let expected = format!("PARTUUID={}\t/\text4", PARTUUID.hyphenated());
         assert!(f.contains(&expected), "fstab must root on the derived PARTUUID:\n{f}");
         assert!(!f.contains("LABEL="));
@@ -1759,7 +1785,6 @@ mod tests {
             manifest_out: Path::new("/w/m.pkgs.lock"),
             mirrors: &mirrors,
             extra_packages: &extra,
-            rootfs_label: "rootfs",
             cache_dir: None,
             refresh: false,
             apt_sources: &[],
@@ -1872,7 +1897,6 @@ mod tests {
             manifest_out: Path::new("/w/m.pkgs.lock"),
             mirrors: &mirrors,
             extra_packages: &extra,
-            rootfs_label: "rootfs",
             cache_dir: None,
             refresh: false,
             apt_sources: &[],
@@ -1940,7 +1964,6 @@ mod tests {
             manifest_out: Path::new("/w/m.pkgs.lock"),
             mirrors: &mirrors,
             extra_packages: &[],
-            rootfs_label: "rootfs",
             cache_dir: None,
             refresh: false,
             apt_sources: &repos,
@@ -2065,7 +2088,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "test");
-        stage_overlay(tmp.path(), &[], &build, "rootfs", uuid::Uuid::nil(), &identity, &step).unwrap();
+        stage_overlay(tmp.path(), &[], &build, uuid::Uuid::nil(), &identity, &step).unwrap();
 
         let path = tmp.path().join("etc/boot2deb/image.toml");
         let text = std::fs::read_to_string(&path).expect("identity staged into the rootfs");
@@ -2091,7 +2114,7 @@ mod tests {
         // empty string a reader would have to special-case.
         let rk = rk1();
         let tmp2 = tempfile::tempdir().unwrap();
-        stage_overlay(tmp2.path(), &[], &rk, "rootfs", uuid::Uuid::nil(), &ident(&rk), &step).unwrap();
+        stage_overlay(tmp2.path(), &[], &rk, uuid::Uuid::nil(), &ident(&rk), &step).unwrap();
         let rk_text = std::fs::read_to_string(tmp2.path().join("etc/boot2deb/image.toml")).unwrap();
         assert!(rk_text.contains("boot_method = \"rockchip-rkbin\""));
         assert!(!rk_text.contains("board ="));

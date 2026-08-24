@@ -1,97 +1,79 @@
-//! Rootfs ext4 partition assembly: stage the rootfs tarball inside an
-//! unprivileged user namespace and format it into a fixed-size ext4 image with
-//! host `mke2fs -d` — no mount, no loop device, no root.
+//! Rootfs ext4 partition assembly: format the rootfs tarball into a fixed-size,
+//! resize-safe ext4 image with the pure-Rust [`ferrosys::ext`] formatter — no mount,
+//! no loop device, no root, no `mke2fs`, and no user namespace.
 //!
-//! Ownership is the reason for the namespace: the tar carries multi-uid
-//! ownership (root, messagebus, ...), which an unprivileged extraction cannot
-//! set. Inside `unshare --map-root-user --map-auto` the build user is root with
-//! the host's subuid/subgid ranges mapped (the same host requirement the
-//! `mmdebstrap --mode=unshare` rootfs stage already relies on), so `tar -xp`
-//! preserves every owner and `mke2fs -d` records them into the filesystem.
+//! The formatter reads the rootfs `tar` in-process through [`ArchiveSource`], taking
+//! each entry's ownership, mode, times, extended attributes, and POSIX ACLs straight
+//! from the (PAX) headers, and writes those owner ids directly into the inodes. That
+//! removes the reason the old path needed a user namespace: nothing is extracted to a
+//! staging tree whose multi-uid ownership an unprivileged process cannot set, so the
+//! whole step runs as the plain build user.
 //!
-//! `mke2fs` writes the journal at format time and lays out a standard
-//! `sparse_super` + `resize_inode` filesystem whose reserved GDT blocks are
-//! explicitly sized for growth to [`ONLINE_RESIZE_CEILING`], which the
-//! kernel's online resize (`EXT4_IOC_RESIZE_FS`) grows without a meta_bg
-//! conversion — first boot expands the rootfs while it is mounted as `/`.
+//! The image is resize-safe by construction: [`GrowReservation::Max`] sizes the
+//! reserved group-descriptor-table blocks to the most the format can address (~8 TiB
+//! under this feature set, at a cost of ~4 MiB), so first boot grows the mounted root
+//! onto a larger NVMe with `resize2fs` and no descriptor-table relocation. The feature
+//! set is pinned here (not inherited from the library default) so the on-disk layout is
+//! host- and library-independent; `metadata_csum_seed` stores the checksum seed in the
+//! superblock, decoupled from the UUID, so an operator's `tune2fs -U` (rescue, cloning
+//! hygiene) never has to rewrite every metadata checksum.
 //!
-//! The staged tree is also where the unique per-image first-boot password is
-//! spliced: the cacheable rootfs tarball leaves the default account
-//! locked, and `/etc/shadow` is rewritten here — the one per-build-unique step —
-//! before `mke2fs` records the tree. Editing the extracted file in place keeps
-//! the `root:shadow` ownership the namespace set, so no fragile in-archive
-//! member surgery is needed.
+//! The per-image first-boot password is spliced into `/etc/shadow` here — the one
+//! per-build-unique step. The cacheable rootfs tarball leaves the default account
+//! locked; the splice rewrites the entry's bytes in the parsed entry list, before the
+//! filesystem is written, leaving the entry's ownership and mtime untouched (DET).
 //!
-//! The finished image must verify **clean**: `e2fsck -fn` runs read-only and
-//! any nonzero exit fails the build. A just-formatted filesystem has nothing
-//! legitimate to correct, so a "fix" here means the formatter and the checker
-//! disagree about the on-disk layout — exactly the disagreement that must never
-//! ship inside an image.
+//! The finished image is verified two ways: always by re-reading it with the crate's
+//! own [`Reader`] and checking every metadata checksum (a failure means the formatter
+//! wrote an image its own reader rejects), and — when `e2fsck` is present — by a
+//! read-only `e2fsck -fn` cross-check whose any correction fails the build. `e2fsprogs`
+//! is no longer required; where it is absent the pure-Rust gate stands alone.
 //!
-//! The output is the standalone ext4 image the [image orchestrator](super)
-//! splices into the whole-disk image at the rootfs partition offset.
+//! The output is the standalone ext4 image the [image orchestrator](super) splices
+//! into the whole-disk image at the rootfs partition offset.
 
 use crate::build;
 use crate::error::EngineError;
 use crate::event::Step;
 use crate::image::geometry::EXT4_BLOCK;
+use ferrosys::ext::ondisk::Timestamp;
+use ferrosys::ext::{
+    ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FormatOptions, GrowReservation, InodeCount,
+    Reader, ReservedRatio, Source, SourceEntry, format_to,
+};
+use sha2::{Digest, Sha256};
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::Command;
 use uuid::Uuid;
 
-/// The exact feature set the image filesystem is formatted with. Passed as an
-/// explicit `-O` list so the result does not vary with the host's
-/// `mke2fs.conf`: a build on any distribution produces the same layout.
-///
-/// `resize_inode` + `sparse_super` are the load-bearing pair — reserved GDT
-/// blocks give the kernel's online resize its growth headroom (sized by
-/// [`ONLINE_RESIZE_CEILING`]) without a meta_bg conversion.
-/// `metadata_csum_seed` stores the checksum seed in the superblock instead of
-/// deriving it from the UUID, which is what lets first-boot's `tune2fs -U`
-/// re-UUID the *mounted* root without rewriting every metadata checksum. The
-/// rest is the standard modern ext4 set the target kernel and e2fsprogs both
-/// support.
-const EXT4_FEATURES: &str = "64bit,dir_index,dir_nlink,ext_attr,extent,extra_isize,filetype,\
-                             flex_bg,has_journal,huge_file,large_file,metadata_csum,\
-                             metadata_csum_seed,resize_inode,sparse_super";
+/// One inode per this many bytes of filesystem — the ext4 default, pinned so the
+/// inode count does not vary with a library or host default.
+const BYTES_PER_INODE: u64 = 16384;
 
-/// Online-resize ceiling requested at format time — 8 TiB, passed to `mke2fs`
-/// as `-E resize=`.
-///
-/// First boot grows the mounted root with `resize2fs`, an *online* resize whose
-/// reach is exactly the reserved GDT blocks laid down here. Without an explicit
-/// request `mke2fs` reserves for ~1024x the formatted size, so a 2 GiB image
-/// tops out near 2 TiB and silently strands the rest of a larger NVMe. 8 TiB is
-/// the mechanism's own ceiling under this feature set: the resize inode
-/// addresses at most `block_size / 4` = 1024 reserved GDT blocks through its
-/// single indirect block, each holding 64 of the 64-byte (`64bit`-feature)
-/// descriptors, each descriptor one 128 MiB block group — 1024 x 64 x 128 MiB
-/// = 8 TiB. It also covers the largest M.2 NVMe the supported boards take. The
-/// reservation itself costs ~4 MiB in the image.
-const ONLINE_RESIZE_CEILING: u64 = 8 << 40;
+/// Blocks held back for the super-user, in hundredths of one percent: 1%, not the 5%
+/// default — enough to keep root-owned services writable when a non-root consumer fills
+/// the disk, without 5%'s cost on a grown NVMe.
+const RESERVED_HUNDREDTHS: u16 = 100;
 
-/// The `-E resize=` value in ext4 blocks: the ceiling, or the filesystem's own
-/// block count where the formatted size is already at/above it — a filesystem
-/// that large has no reserved-GDT headroom left to ask for, and `mke2fs`
-/// rejects a resize target below the filesystem size.
-fn online_resize_blocks(size: u64) -> u64 {
-    size.max(ONLINE_RESIZE_CEILING) / EXT4_BLOCK
-}
+/// Everything under `/dev` is dropped from the rootfs: `mknod`-style nodes are
+/// unnecessary because the kernel mounts devtmpfs over `/dev` at boot. The `/dev`
+/// directory entry itself is kept.
+const DEV_PREFIX: &[u8] = b"/dev/";
 
-/// Format `dest` as an ext4 filesystem of exactly `size` bytes holding the
-/// rootfs `tarball`'s contents, then verify it.
+/// Format `dest` as an ext4 filesystem of exactly `size` bytes holding the rootfs
+/// `tarball`'s contents, then verify it.
 ///
-/// `size` must be a multiple of the ext4 block size (the caller's geometry
-/// guarantees it). `label` is the ext4 volume label (≤ 16 bytes) the rootfs's
-/// `/etc/fstab` mounts by. `uuid` is the deterministic superblock UUID the caller
-/// derived from the lock, so a rebuild reproduces it instead of `mke2fs` drawing
-/// a random one. `first_boot` is the per-image credential spliced into the staged
-/// `/etc/shadow` after extraction and before formatting.
+/// `size` must be a multiple of the ext4 block size (the caller's geometry guarantees
+/// it). `label` is the ext4 volume label (≤ 16 bytes) the rootfs's `/etc/fstab` mounts
+/// by. `uuid` is the deterministic superblock UUID the caller derived from the lock, so
+/// a rebuild reproduces it. `first_boot` is the per-image credential spliced into the
+/// rootfs's `/etc/shadow` before the filesystem is written.
 ///
-/// The output is *not* byte-for-byte reproducible on its own: `mke2fs` stamps
-/// the superblock's format/check times from the wall clock, and the per-image
-/// first-boot password is unique per build. The UUID is the one identifier the
-/// reproducibility contract reaches.
+/// Unlike the old `mke2fs` path, the superblock's format times are deterministic too:
+/// they take the newest source mtime, which `mmdebstrap` has already clamped to the
+/// lock's `SOURCE_DATE_EPOCH`. The per-image first-boot password is still unique per
+/// build, so the image as a whole is not byte-for-byte reproducible.
 pub(crate) fn build_rootfs_ext4(
     dest: &Path,
     size: u64,
@@ -106,29 +88,51 @@ pub(crate) fn build_rootfs_ext4(
         "ext4 size must be block-aligned (geometry guarantees this)"
     );
     step.log(format!(
-        "formatting {}-byte ext4 rootfs at {} (mke2fs -d, userns staging)",
-        size,
+        "formatting {size}-byte ext4 rootfs at {} (ferrosys, pure-Rust: no mke2fs, no userns)",
         dest.display()
     ));
-    let staging = dest
-        .parent()
-        .expect("ext4 image path has a parent directory")
-        .join("rootfs-staging");
-    // A leftover staging tree from an aborted run is subuid-owned, so both the
-    // pre-clean and the post-clean run inside the namespace.
-    remove_staging(&staging, step)?;
-    std::fs::create_dir_all(&staging).map_err(|s| EngineError::io(&staging, s))?;
-    stage_rootfs(tarball, &staging, step)?;
-    splice_first_boot_password(&staging, first_boot, step)?;
-    mkfs(dest, size, &staging, label, uuid, step)?;
-    remove_staging(&staging, step)?;
+
+    // 1. Parse the rootfs tar into an entry list in-process. `ArchiveSource` reads
+    //    ownership, mode, times, xattrs, ACLs, and device nodes straight from the
+    //    (PAX) headers — no privileged extraction, so no user namespace.
+    let file = std::fs::File::open(tarball).map_err(|s| EngineError::io(tarball, s))?;
+    let mut entries = ArchiveSource::from_reader(std::io::BufReader::new(file))
+        .map_err(|e| EngineError::Ext4Format {
+            detail: format!("parsing rootfs tar {}: {e}", tarball.display()),
+        })?
+        .into_entries();
+
+    // 2. Drop everything under /dev (devtmpfs covers it at boot), keeping the /dev
+    //    directory itself — matching what the build has always materialized.
+    entries.retain(|e| !e.path.starts_with(DEV_PREFIX));
+
+    // 3. Splice the unique per-image first-boot password into /etc/shadow: the one
+    //    per-build-unique step, done on the parsed entry rather than a staged file.
+    splice_first_boot_password(&mut entries, first_boot)?;
+    step.log("spliced the unique per-image first-boot password into /etc/shadow");
+
+    // 4. Format straight into `dest`. `format_to` streams only the blocks it uses into
+    //    the (sparse) file and extends it to the full size, so the whole image never
+    //    lives in memory; a freshly truncated file gives it the zeroed holes it needs.
+    let options = format_options(uuid, label, &entries);
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(dest)
+        .map_err(|s| EngineError::io(dest, s))?;
+    format_to(Entries(entries), size, options, &mut out).map_err(|e| EngineError::Ext4Format {
+        detail: e.to_string(),
+    })?;
+    out.sync_all().map_err(|s| EngineError::io(dest, s))?;
+    drop(out);
+
     verify_clean(dest, step)
 }
 
-/// The per-image first-boot credential spliced into the staged rootfs before it
-/// is formatted. The default account is created locked in the cacheable
-/// rootfs tarball; this rewrites its `/etc/shadow` line with a fresh hash and
-/// forces a change at first login.
+/// The per-image first-boot credential spliced into the rootfs before it is formatted.
+/// The default account is created locked in the cacheable rootfs tarball; this rewrites
+/// its `/etc/shadow` line with a fresh hash and forces a change at first login.
 pub(crate) struct FirstBoot<'a> {
     /// The default account whose locked shadow line receives the hash.
     pub user: &'a str,
@@ -136,183 +140,170 @@ pub(crate) struct FirstBoot<'a> {
     pub password_hash: &'a str,
 }
 
-/// Rewrite `first_boot.user`'s locked `/etc/shadow` line in the staged tree with
-/// the per-image hash, before `mke2fs -d` records the tree.
+/// The options a format is a function of: identity (UUID, deterministic times, hash
+/// seed), the pinned feature set, and the size-independent tunables.
+fn format_options(uuid: Uuid, label: &str, entries: &[SourceEntry]) -> FormatOptions {
+    // A deterministic creation time: the newest source mtime, which mmdebstrap has
+    // already clamped to the lock's SOURCE_DATE_EPOCH — so the superblock's format
+    // times are a function of the lock, not the wall clock mke2fs stamped. Clamped to
+    // the superblock's 32-bit range for safety; real rootfs mtimes are well inside it.
+    let time_secs = entries
+        .iter()
+        .map(|e| e.meta.mtime.secs)
+        .max()
+        .unwrap_or(0)
+        .clamp(0, i64::from(u32::MAX));
+    let time = Timestamp::from_secs(time_secs);
+
+    let mut options = FormatOptions::new(uuid.into_bytes(), time, derive_hash_seed(uuid));
+    options.feature = feature_set();
+    // Reserve the most online-grow headroom the format allows, so a small image grows
+    // in place onto a large NVMe at first boot without relocating its descriptor table.
+    options.grow = GrowReservation::Max;
+    options.inodes =
+        InodeCount::BytesPerInode(NonZeroU64::new(BYTES_PER_INODE).expect("nonzero ratio"));
+    options.reserved =
+        ReservedRatio::from_hundredths_of_percent(RESERVED_HUNDREDTHS).expect("1% is in range");
+    // Remount read-only on a detected error, so an inconsistency cannot spread through
+    // further writes (the safety policy the old `mke2fs -e remount-ro` set).
+    options.errors = ErrorBehavior::RemountReadOnly;
+    options.volume_name = volume_name(label);
+    options
+}
+
+/// The feature set the image is formatted with, pinned here rather than inherited from
+/// the library default so the on-disk layout is host- and library-independent — the
+/// same reason the old explicit `mke2fs -O` list existed.
 ///
-/// The unique per-image password is non-reproducible, so the cacheable rootfs
-/// tarball leaves the account locked (`{user}:!:…`) and the splice happens here —
-/// the one per-build-unique step. The extracted file is owner-writable (mode
-/// `0640`), so an in-place content rewrite keeps its inode: the `root:shadow`
-/// ownership the userns extraction set survives for `mke2fs` to read back, with
-/// no fragile `tar --delete`/`--append` on the (PAX) archive. The extracted
-/// file's mtime is mmdebstrap's epoch clamp; it is restored across the rewrite so
-/// the splice reintroduces no build-time mtime (DET).
+/// It is [`FeatureSet::DEFAULT`] minus `orphan_file`: the modern ext4 set the target
+/// kernel and the online-resize path need (`resize_inode` + `sparse_super` for growth,
+/// `metadata_csum` + `metadata_csum_seed` with the checksum seed stored independent of
+/// the UUID, extents, `64bit`, `dir_index`, `has_journal`), matching the validated
+/// feature contract.
+fn feature_set() -> FeatureSet {
+    FeatureSet::DEFAULT
+        .with_feature("orphan_file", false)
+        .expect("orphan_file is a known feature name")
+}
+
+/// The 16-byte `s_volume_name`: the label's bytes, truncated to sixteen and NUL-padded.
+fn volume_name(label: &str) -> [u8; 16] {
+    let mut name = [0u8; 16];
+    let bytes = label.as_bytes();
+    let n = bytes.len().min(16);
+    name[..n].copy_from_slice(&bytes[..n]);
+    name
+}
+
+/// The directory-hash seed (`s_hash_seed`): a deterministic function of the
+/// lock-derived UUID, so a hash-indexed directory's ordering — and the image bytes —
+/// do not depend on the build host, while staying distinct from the UUID itself.
+fn derive_hash_seed(uuid: Uuid) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"boot2deb-ext4-hash-seed\0");
+    hasher.update(uuid.as_bytes());
+    let digest = hasher.finalize();
+    let mut seed = [0u8; 16];
+    seed.copy_from_slice(&digest[..16]);
+    seed
+}
+
+/// Rewrite `first_boot.user`'s locked `/etc/shadow` line in the parsed entry list with
+/// the per-image hash, before the filesystem is written.
+///
+/// The unique per-image password is non-reproducible, so the cacheable rootfs tarball
+/// leaves the account locked (`{user}:!:…`) and the splice happens here. Only the shadow
+/// entry's content bytes change; its mode, ownership, and (epoch-clamped) mtime are the
+/// entry's own metadata and are untouched, so the splice reintroduces no build-time
+/// state (DET).
 fn splice_first_boot_password(
-    staging: &Path,
+    entries: &mut [SourceEntry],
     first_boot: FirstBoot,
-    step: &Step,
 ) -> Result<(), EngineError> {
-    let shadow = staging.join("etc/shadow");
-    let current = std::fs::read_to_string(&shadow).map_err(|s| EngineError::io(&shadow, s))?;
+    let shadow = entries
+        .iter_mut()
+        .find(|e| e.path == b"/etc/shadow")
+        .ok_or_else(|| EngineError::ArtifactMissing {
+            what: "/etc/shadow".into(),
+            location: "rootfs tar".into(),
+        })?;
+    let EntryKind::File(content) = &shadow.kind else {
+        return Err(EngineError::Ext4Format {
+            detail: "/etc/shadow in the rootfs tar is not a regular file".into(),
+        });
+    };
+    let current = std::str::from_utf8(content).map_err(|_| EngineError::Ext4Format {
+        detail: "/etc/shadow in the rootfs tar is not valid UTF-8".into(),
+    })?;
     let spliced =
-        crate::rootcache::splice_shadow(&current, first_boot.user, first_boot.password_hash)
+        crate::rootcache::splice_shadow(current, first_boot.user, first_boot.password_hash)
             .ok_or_else(|| EngineError::ArtifactMissing {
                 what: format!("{} account in /etc/shadow", first_boot.user),
-                location: shadow.display().to_string(),
+                location: "rootfs tar".into(),
             })?;
-    let mtime = std::fs::metadata(&shadow)
-        .and_then(|m| m.modified())
-        .map_err(|s| EngineError::io(&shadow, s))?;
-    std::fs::write(&shadow, spliced).map_err(|s| EngineError::io(&shadow, s))?;
-    std::fs::File::options()
-        .write(true)
-        .open(&shadow)
-        .and_then(|f| f.set_modified(mtime))
-        .map_err(|s| EngineError::io(&shadow, s))?;
-    step.log("spliced the unique per-image first-boot password into /etc/shadow");
+    shadow.kind = EntryKind::File(spliced.into_bytes());
     Ok(())
 }
 
-/// A command running inside a fresh user namespace: the build user mapped to
-/// root plus the host subuid/subgid ranges (`--map-auto`), so multi-uid file
-/// ownership can be created and read back.
-fn in_userns(argv0: &str) -> Command {
-    let mut cmd = Command::new("unshare");
-    cmd.args(["--map-root-user", "--map-auto", "--", argv0]);
-    cmd
-}
+/// A parsed, post-processed entry list handed to the formatter as a [`Source`].
+struct Entries(Vec<SourceEntry>);
 
-/// Extract the rootfs tar into `staging` with ownership, permissions, and
-/// xattrs (e.g. the POSIX ACLs on `/var/log/journal`) preserved.
-///
-/// `./dev/*` is excluded: `mknod` is not permitted in an unprivileged user
-/// namespace, and the image does not need the nodes — the kernel mounts
-/// devtmpfs over `/dev` at boot. The `/dev` directory entry itself extracts.
-fn stage_rootfs(tarball: &Path, staging: &Path, step: &Step) -> Result<(), EngineError> {
-    let mut cmd = in_userns("tar");
-    cmd.args([
-        "--extract",
-        "--preserve-permissions",
-        "--numeric-owner",
-        "--xattrs",
-        "--xattrs-include=*",
-        "--exclude=./dev/*",
-        "--file",
-    ]);
-    cmd.arg(tarball).arg("--directory").arg(staging);
-    build::run(cmd, "tar", "tar --extract (stage rootfs into userns tree)", step)
-}
-
-/// Format `dest` from the staged tree with `mke2fs -d`, pinning every
-/// `mke2fs.conf`-dependent knob so the layout is host-independent.
-fn mkfs(
-    dest: &Path,
-    size: u64,
-    staging: &Path,
-    label: &str,
-    uuid: Uuid,
-    step: &Step,
-) -> Result<(), EngineError> {
-    // Pre-size the backing file (sparse); mke2fs formats an existing file in
-    // place. The explicit block count below still pins the filesystem size.
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dest)
-        .map_err(|s| EngineError::io(dest, s))?;
-    f.set_len(size).map_err(|s| EngineError::io(dest, s))?;
-    drop(f);
-
-    // Inside the namespace so the subuid-owned staging tree reads back as its
-    // container ids — run on the host, mke2fs would record raw subuids.
-    let mut cmd = in_userns("mke2fs");
-    cmd.args(["-F", "-q", "-b"]);
-    cmd.arg(EXT4_BLOCK.to_string());
-    // Inode size/ratio pinned (conf-dependent otherwise): 256-byte inodes, one
-    // inode per 16 KiB — the ext4 defaults, stated explicitly.
-    cmd.args(["-I", "256", "-i", "16384"]);
-    // 1% reserved for root: keeps root-owned services writable when a non-root
-    // consumer fills the disk, without the default 5%'s cost on a grown NVMe.
-    cmd.args(["-m", "1", "-e", "remount-ro"]);
-    cmd.arg("-L").arg(label);
-    cmd.arg("-U").arg(uuid.to_string());
-    cmd.arg("-O").arg(EXT4_FEATURES);
-    // Fully initialize inode tables and the journal at format time — the image
-    // content must not depend on a first mount finishing the format. `resize=`
-    // reserves GDT headroom for online growth to the ceiling.
-    cmd.arg("-E").arg(format!(
-        "lazy_itable_init=0,lazy_journal_init=0,resize={}",
-        online_resize_blocks(size)
-    ));
-    cmd.arg("-d").arg(staging);
-    cmd.arg(dest);
-    cmd.arg((size / EXT4_BLOCK).to_string());
-    build::run(cmd, "mke2fs", "mke2fs -d (format rootfs ext4)", step)
-}
-
-/// Verify the finished image with a read-only `e2fsck -fn`; **any** nonzero
-/// exit fails the build. A freshly formatted filesystem has nothing to correct,
-/// so a would-be fix means formatter and checker disagree about the layout —
-/// an image that must not ship.
-fn verify_clean(dest: &Path, step: &Step) -> Result<(), EngineError> {
-    step.log("verifying ext4 image (e2fsck -fn, any correction fails the build)");
-    let mut cmd = Command::new("e2fsck");
-    cmd.arg("-fn").arg(dest);
-    build::run(cmd, "e2fsck", "e2fsck -fn (verify formatted rootfs)", step)
-}
-
-/// Remove a staging tree whose contents are subuid-owned (the host user cannot
-/// unlink inside root-owned directories, so the removal runs in the namespace).
-fn remove_staging(staging: &Path, step: &Step) -> Result<(), EngineError> {
-    if !staging.exists() {
-        return Ok(());
+impl Source for Entries {
+    fn into_entries(self) -> Vec<SourceEntry> {
+        self.0
     }
-    let mut cmd = in_userns("rm");
-    cmd.arg("-rf").arg(staging);
-    build::run(cmd, "rm", "rm -rf (clear rootfs staging tree)", step)
+}
+
+/// Verify the finished image: always with the crate's own [`Reader`] (every metadata
+/// checksum), and additionally with `e2fsck -fn` when it is available.
+///
+/// A checksum failure means the formatter wrote an image its own reader rejects; an
+/// `e2fsck` correction means the formatter and an independent checker disagree about the
+/// layout. Either fails the build — a disagreement that must never ship inside an image.
+fn verify_clean(dest: &Path, step: &Step) -> Result<(), EngineError> {
+    step.log("verifying ext4 image (ferrosys reader: every metadata checksum)");
+    let file = std::fs::File::open(dest).map_err(|s| EngineError::io(dest, s))?;
+    let mut reader = Reader::open(file).map_err(|e| EngineError::Ext4Format {
+        detail: format!("re-reading the formatted image: {e}"),
+    })?;
+    reader
+        .verify_checksums()
+        .map_err(|e| EngineError::Ext4Format {
+            detail: format!("metadata checksum verification failed: {e}"),
+        })?;
+
+    if have_tool("e2fsck") {
+        step.log("cross-checking with e2fsck -fn (any correction fails the build)");
+        let mut cmd = Command::new("e2fsck");
+        cmd.arg("-fn").arg(dest);
+        build::run(cmd, "e2fsck", "e2fsck -fn (verify formatted rootfs)", step)?;
+    } else {
+        step.log("e2fsck not found; skipping the external cross-check (ferrosys reader verified)");
+    }
+    Ok(())
+}
+
+/// True when a host tool is runnable (a missing binary fails to spawn).
+fn have_tool(tool: &str) -> bool {
+    Command::new(tool).arg("--version").output().is_ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::Step;
+    use ferrosys::ext::Metadata;
 
-    /// True when a host tool is runnable (missing binaries fail to spawn).
-    fn have(tool: &str) -> bool {
-        Command::new(tool).arg("--version").output().is_ok()
-    }
-
-    /// The end-to-end format needs the userns + e2fsprogs host tools; skip
-    /// (or panic under `BOOT2DEB_REQUIRE_HOST_TOOLS`) where absent.
-    fn host_ready() -> bool {
-        let missing: Vec<&str> = ["unshare", "tar", "mke2fs", "e2fsck"]
-            .into_iter()
-            .filter(|t| !have(t))
-            .collect();
-        if missing.is_empty() {
-            // `--map-auto` additionally needs subuid ranges for the build user;
-            // probe the exact invocation the build uses.
-            let userns_ok = Command::new("unshare")
-                .args(["--map-root-user", "--map-auto", "true"])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if userns_ok {
-                return true;
-            }
-            assert!(
-                std::env::var_os("BOOT2DEB_REQUIRE_HOST_TOOLS").is_none(),
-                "BOOT2DEB_REQUIRE_HOST_TOOLS is set but `unshare --map-auto` is not usable"
-            );
-            eprintln!("skipping: unshare --map-auto not usable on this host");
-            return false;
+    /// True when `tar` is runnable — needed only to build the fixture archive, not to
+    /// format it (the formatter is pure Rust). Panics under `BOOT2DEB_REQUIRE_HOST_TOOLS`.
+    fn tar_ready() -> bool {
+        if have_tool("tar") {
+            return true;
         }
         assert!(
             std::env::var_os("BOOT2DEB_REQUIRE_HOST_TOOLS").is_none(),
-            "BOOT2DEB_REQUIRE_HOST_TOOLS is set but required host tools are missing: {missing:?}"
+            "BOOT2DEB_REQUIRE_HOST_TOOLS is set but `tar` is unavailable to build the fixture"
         );
-        eprintln!("skipping: required host tools unavailable: {missing:?}");
+        eprintln!("skipping: tar unavailable to build the fixture");
         false
     }
 
@@ -324,22 +315,32 @@ mod tests {
         u32::from_le_bytes(img[1024 + off..1024 + off + 4].try_into().unwrap())
     }
 
-    /// The formatted image must carry the supplied UUID (the reproducibility
-    /// contract) and the resize-critical layout: `sparse_super` + `resize_inode`
-    /// with reserved GDT blocks, at exactly the requested size, verifying clean.
+    /// A shadow entry as `ArchiveSource` would parse it: a `0640` regular file.
+    fn shadow_entry(content: &[u8], mtime: Timestamp) -> SourceEntry {
+        SourceEntry {
+            path: b"/etc/shadow".to_vec(),
+            kind: EntryKind::File(content.to_vec()),
+            meta: Metadata::new(0o640, mtime),
+            xattrs: Vec::new(),
+        }
+    }
+
+    /// The formatted image must carry the supplied UUID, the resize-critical layout
+    /// (`sparse_super` + `resize_inode` with reserved GDT blocks reaching the format
+    /// ceiling), the pinned `remount-ro` error policy, and exactly the requested size —
+    /// and pass the in-formatter checksum verification `build_rootfs_ext4` runs.
     #[test]
     fn formats_resizable_filesystem_with_the_supplied_uuid() {
-        if !host_ready() {
+        if !tar_ready() {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        // A small rootfs tree with root ownership recorded in the tar, as the
-        // rootfs stage produces.
+        // A small rootfs tree with root ownership recorded in the tar, as the rootfs
+        // stage produces. The account is locked; the image stage splices the first-boot
+        // hash into it.
         let root = tmp.path().join("tree");
         std::fs::create_dir_all(root.join("etc")).unwrap();
         std::fs::write(root.join("etc/hostname"), b"turing-rk1\n").unwrap();
-        // The account is locked in the tarball; the image stage splices the
-        // per-image first-boot hash into it.
         std::fs::write(
             root.join("etc/shadow"),
             b"root:*:19000:0:99999:7:::\ndebian:!:19000:0:99999:7:::\n",
@@ -378,101 +379,126 @@ mod tests {
         assert_ne!(compat & 0x0004, 0, "has_journal must be set");
         // s_feature_ro_compat at 0x64: SPARSE_SUPER (0x0001).
         assert_ne!(sb_u32(&bytes, 0x64) & 0x0001, 0, "sparse_super must be set");
-        // s_feature_incompat at 0x60: CSUM_SEED (0x2000) — first-boot re-UUIDs
-        // the mounted root, which needs the seed decoupled from the UUID.
-        assert_ne!(sb_u32(&bytes, 0x60) & 0x2000, 0, "metadata_csum_seed must be set");
-        // s_reserved_gdt_blocks at 0xCE: the online-resize growth headroom must
-        // reach the 8 TiB ceiling, not mke2fs's ~1024x-formatted default
-        // — growth to 8 TiB needs 1024 GDT blocks total (65536 groups x 64-byte
-        // descriptors / 4 KiB blocks), one of which this small filesystem
-        // already uses, so at least 1023 are reserved.
+        // s_feature_incompat at 0x60: CSUM_SEED (0x2000) — the checksum seed lives in
+        // the superblock, decoupled from the UUID, so a UUID change never rewrites
+        // every metadata checksum.
+        assert_ne!(
+            sb_u32(&bytes, 0x60) & 0x2000,
+            0,
+            "metadata_csum_seed must be set"
+        );
+        // s_errors at 0x3c: 2 (remount-ro), the safety policy pinned for the image.
+        assert_eq!(sb_u16(&bytes, 0x3c), 2, "errors must be remount-ro");
+        // s_reserved_gdt_blocks at 0xCE: the online-resize headroom reaches the format
+        // ceiling — 1024 GDT blocks (8 TiB) under this feature set, one of which this
+        // small filesystem already uses, so at least 1023 are reserved.
         assert!(
             sb_u16(&bytes, 0xCE) >= 1023,
-            "reserved GDT blocks must cover the 8 TiB online-resize ceiling, got {}",
+            "reserved GDT blocks must reach the resize ceiling, got {}",
             sb_u16(&bytes, 0xCE)
         );
-
-        // The staging tree is cleaned up.
-        assert!(!tmp.path().join("rootfs-staging").exists());
     }
 
     #[test]
-    fn online_resize_request_is_the_ceiling_until_the_image_reaches_it() {
-        // A normal-sized rootfs asks for the full 8 TiB ceiling...
-        assert_eq!(
-            online_resize_blocks(2 << 30),
-            ONLINE_RESIZE_CEILING / EXT4_BLOCK
-        );
-        // ...an image at the ceiling asks for exactly itself (no headroom, but
-        // also no mke2fs rejection for a target below the filesystem size)...
-        assert_eq!(
-            online_resize_blocks(ONLINE_RESIZE_CEILING),
-            ONLINE_RESIZE_CEILING / EXT4_BLOCK
-        );
-        // ...and a larger one asks for its own size.
-        assert_eq!(online_resize_blocks(16 << 40), (16u64 << 40) / EXT4_BLOCK);
-    }
-
-    #[test]
-    fn splice_first_boot_password_rewrites_the_locked_line_in_place() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let staging = tmp.path().join("stage");
-        std::fs::create_dir_all(staging.join("etc")).unwrap();
-        let shadow = staging.join("etc/shadow");
-        std::fs::write(
-            &shadow,
-            "root:*:19000:0:99999:7:::\ndebian:!:19000:0:99999:7:::\n",
-        )
-        .unwrap();
-        // The on-disk shape the userns extraction leaves: mode 0640 and an
-        // epoch-clamped mtime, both of which the in-place rewrite must keep.
-        std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
-        std::fs::File::options()
-            .write(true)
-            .open(&shadow)
-            .unwrap()
-            .set_modified(epoch)
-            .unwrap();
-
-        let sink = |_: crate::event::Event| {};
-        let step = Step::start(&sink, "image");
+    fn splice_first_boot_password_rewrites_the_shadow_entry() {
+        let mtime = Timestamp::from_secs(1_600_000_000);
+        let mut entries = vec![
+            shadow_entry(
+                b"root:*:19000:0:99999:7:::\ndebian:!:19000:0:99999:7:::\n",
+                mtime,
+            ),
+            SourceEntry {
+                path: b"/etc/hostname".to_vec(),
+                kind: EntryKind::File(b"turing-rk1\n".to_vec()),
+                meta: Metadata::new(0o644, mtime),
+                xattrs: Vec::new(),
+            },
+        ];
         let first_boot = FirstBoot {
             user: "debian",
             password_hash: "$6$saltsalt$hashhashhash",
         };
-        splice_first_boot_password(&staging, first_boot, &step).unwrap();
+        splice_first_boot_password(&mut entries, first_boot).unwrap();
 
-        let out = std::fs::read_to_string(&shadow).unwrap();
+        let EntryKind::File(content) = &entries[0].kind else {
+            panic!("shadow is a file");
+        };
+        let out = std::str::from_utf8(content).unwrap();
         // The debian line carries the hash and is expired (field 3 = 0); root is untouched.
         assert!(
             out.contains("debian:$6$saltsalt$hashhashhash:0:0:99999:7:::"),
             "spliced line missing, got: {out}"
         );
         assert!(out.contains("root:*:19000:0:99999:7:::"), "root line preserved");
-        // In-place rewrite preserves both the mode and the clamped mtime.
-        let meta = std::fs::metadata(&shadow).unwrap();
-        assert_eq!(meta.permissions().mode() & 0o777, 0o640, "0640 preserved");
-        assert_eq!(meta.modified().unwrap(), epoch, "epoch-clamped mtime preserved");
+        // Only the content changes: the entry's mode and mtime are its own metadata.
+        assert_eq!(entries[0].meta.mode, 0o640, "shadow mode preserved");
+        assert_eq!(entries[0].meta.mtime, mtime, "shadow mtime preserved");
     }
 
     #[test]
     fn splice_first_boot_password_errors_when_the_account_is_absent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let staging = tmp.path().join("stage");
-        std::fs::create_dir_all(staging.join("etc")).unwrap();
-        std::fs::write(staging.join("etc/shadow"), "root:*:19000:0:99999:7:::\n").unwrap();
-        let sink = |_: crate::event::Event| {};
-        let step = Step::start(&sink, "image");
+        let mut entries = vec![shadow_entry(b"root:*:19000:0:99999:7:::\n", Timestamp::from_secs(1))];
         let first_boot = FirstBoot {
             user: "debian",
             password_hash: "$6$x$y",
         };
-        let err = splice_first_boot_password(&staging, first_boot, &step).unwrap_err();
+        let err = splice_first_boot_password(&mut entries, first_boot).unwrap_err();
         assert!(
             matches!(err, EngineError::ArtifactMissing { what, .. } if what.contains("debian account")),
             "expected a missing-account error"
         );
+    }
+
+    #[test]
+    fn splice_first_boot_password_errors_when_shadow_is_absent() {
+        let mut entries = vec![SourceEntry {
+            path: b"/etc/hostname".to_vec(),
+            kind: EntryKind::File(b"turing-rk1\n".to_vec()),
+            meta: Metadata::new(0o644, Timestamp::from_secs(1)),
+            xattrs: Vec::new(),
+        }];
+        let first_boot = FirstBoot {
+            user: "debian",
+            password_hash: "$6$x$y",
+        };
+        let err = splice_first_boot_password(&mut entries, first_boot).unwrap_err();
+        assert!(
+            matches!(err, EngineError::ArtifactMissing { what, .. } if what == "/etc/shadow"),
+            "expected a missing-/etc/shadow error"
+        );
+    }
+
+    #[test]
+    fn the_volume_label_is_truncated_and_nul_padded() {
+        assert_eq!(&volume_name("rootfs"), b"rootfs\0\0\0\0\0\0\0\0\0\0");
+        // Over sixteen bytes is truncated, as mke2fs truncates -L.
+        assert_eq!(&volume_name("0123456789abcdefghij"), b"0123456789abcdef");
+    }
+
+    #[test]
+    fn the_pinned_feature_set_matches_the_on_disk_contract() {
+        let f = feature_set();
+        assert!(f.has_resize_inode(), "resize_inode for online growth");
+        assert!(f.is_sparse_super(), "sparse_super");
+        assert!(f.has_journal(), "has_journal");
+        assert!(f.has_metadata_csum(), "metadata_csum");
+        assert!(f.has_csum_seed(), "metadata_csum_seed (seed decoupled from the UUID)");
+        assert!(f.has_extents(), "extents");
+        assert!(f.is_64bit(), "64bit");
+        assert!(f.has_dir_index(), "dir_index");
+        // orphan_file is intentionally off, matching the validated mke2fs feature set.
+        assert!(!f.has_orphan_file(), "orphan_file pinned off");
+        assert_eq!(f.block_size, EXT4_BLOCK as u32);
+        assert_eq!(f.inode_size, 256);
+    }
+
+    #[test]
+    fn the_hash_seed_is_deterministic_and_distinct_from_the_uuid() {
+        let uuid = Uuid::from_bytes([0x5a; 16]);
+        // Deterministic: the same UUID yields the same seed.
+        assert_eq!(derive_hash_seed(uuid), derive_hash_seed(uuid));
+        // Distinct from the UUID bytes, and distinct for a different UUID.
+        assert_ne!(derive_hash_seed(uuid), *uuid.as_bytes());
+        assert_ne!(derive_hash_seed(uuid), derive_hash_seed(Uuid::from_bytes([0x5b; 16])));
     }
 }

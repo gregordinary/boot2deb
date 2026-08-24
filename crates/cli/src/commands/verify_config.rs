@@ -68,7 +68,7 @@ pub(crate) fn run(
                     )?;
                     let profile = load_profile(&patches_root, &pin.profile)?;
                     profile.ensure_applies(&pin.profile, &kernel_pin.reference)?;
-                    Some((patches_root, profile))
+                    Some((patches_root, profile, pin.profile.clone()))
                 }
                 None => None,
             };
@@ -86,14 +86,23 @@ pub(crate) fn run(
                 &verify_trees_cache(root),
                 &sink,
             )?;
-            if let Some((patches_root, profile)) = series {
+            if let Some((patches_root, profile, pin_profile)) = series {
                 let target = format!("{} @ {}", kernel_pin.id, kernel_pin.reference);
                 let step = Step::start(&sink, "apply-patches");
+                // The config gate compiles against what this kernel actually gets, so
+                // the series is narrowed by the locked kernel exactly as a build
+                // narrows it — release-strict, since the lock pins a released tag.
+                let kernel_series = profile.series_for(
+                    boot2deb_core::profile::Scope::Kernel,
+                    &pin_profile,
+                    &kernel_pin.reference,
+                    boot2deb_core::RangeMatch::Release,
+                )?;
                 let n = boot2deb_engine::srcfetch::apply_kernel_series(
                     &tree,
                     &kernel_pin.commit,
                     &patches_root,
-                    &profile.kernel,
+                    &kernel_series,
                     &target,
                 )?;
                 step.log(format!("applied {n} kernel patch(es) for the config gate"));

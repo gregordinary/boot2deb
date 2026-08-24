@@ -298,9 +298,18 @@ impl ConfigRoot {
             KernelFlavor::DistroPackage => KernelDef::Distro(deserialize_at(value, &path)?),
         })
     }
-    /// Load `recipes/<name>.toml`.
+    /// Load a recipe by its `<device>/<leaf>` reference
+    /// (`recipes/<device>/<leaf>.toml`). The one config key that carries a directory
+    /// separator: a recipe lives under its device's folder, and the reference is the
+    /// path to it (minus the extension), so the leaf drops the redundant device
+    /// prefix — `turing-rk1/media-accel-forky`, not `turing-rk1-media-accel-forky`.
+    /// The reference admits at most one interior `/`, both halves bare identifiers
+    /// with no `.`/`..`, absolute, or repeated separator — so it cannot traverse out
+    /// of `recipes/`.
     pub fn recipe(&self, name: &str) -> Result<Recipe, ConfigError> {
-        self.load("recipe", "recipes", name)
+        validate_recipe_ref(name)?;
+        let rel = format!("recipes/{name}.toml");
+        self.load_merged("recipe", name, &rel)
     }
 
     /// Load `features/<name>.toml` — a composable rootfs feature.
@@ -325,7 +334,7 @@ impl ConfigRoot {
     /// and its lock as a unit; an overlay retuning a shipped recipe owns both
     /// automatically.
     pub fn lock(&self, name: &str) -> Result<crate::lock::Lock, ConfigError> {
-        validate_name("lock", name)?;
+        validate_recipe_ref(name)?;
         let path = self
             .owning_root("recipes", name)
             .join("recipes")
@@ -350,24 +359,33 @@ impl ConfigRoot {
     /// this is a *write* target: an unchecked `../` or absolute name would let
     /// `update` clobber a file outside `recipes/`.
     pub fn lock_path(&self, name: &str) -> Result<PathBuf, ConfigError> {
-        validate_name("lock", name)?;
+        validate_recipe_ref(name)?;
         Ok(self
             .owning_root("recipes", name)
             .join("recipes")
             .join(format!("{name}.lock")))
     }
 
-    /// Filesystem path of a file that lives beside `recipe`, `recipes/<filename>` —
-    /// e.g. that recipe's committed solved package manifest. Anchored to the
-    /// root that *owns* `recipe`, the same way [`lock_path`](Self::lock_path) is, so
-    /// an overlay recipe's manifest lands in that overlay beside its lock rather than
-    /// diverging into the primary root. Both `recipe` and `filename` are validated as
-    /// bare names, since this is a *write* target: an unchecked `../` or absolute name
-    /// would let `build --save-manifest` write outside `recipes/`.
+    /// Filesystem path of a file that lives beside `recipe` in the recipe's own
+    /// directory (`recipes/<device>/<filename>`) — e.g. that recipe's committed solved
+    /// package manifest, next to its `.toml` and `.lock`. Anchored to the root that
+    /// *owns* `recipe`, the same way [`lock_path`](Self::lock_path) is, so an overlay
+    /// recipe's manifest lands in that overlay beside its lock rather than diverging
+    /// into the primary root. `recipe` is validated as a recipe reference (a single
+    /// `<device>/<leaf>` separator, no traversal) and `filename` as a bare name (no
+    /// separator at all), since this is a *write* target: an unchecked `../` or
+    /// absolute component would let `build --save-manifest` write outside `recipes/`.
     pub fn recipe_sibling(&self, recipe: &str, filename: &str) -> Result<PathBuf, ConfigError> {
-        validate_name("recipe", recipe)?;
+        validate_recipe_ref(recipe)?;
         validate_name("manifest", filename)?;
-        Ok(self.owning_root("recipes", recipe).join("recipes").join(filename))
+        // The recipe's own directory: the parent of `recipes/<device>/<leaf>.toml`,
+        // i.e. `recipes/<device>` (or `recipes/` for a bare, un-nested reference).
+        let owning = self.owning_root("recipes", recipe);
+        let recipe_rel = format!("recipes/{recipe}.toml");
+        let dir = Path::new(&recipe_rel)
+            .parent()
+            .expect("recipes/<ref>.toml always has a parent");
+        Ok(owning.join(dir).join(filename))
     }
 
     /// Stems of every `*.toml` in `subdir`, unioned across the search path, sorted
@@ -393,6 +411,65 @@ impl ConfigRoot {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        names.insert(stem.to_string());
+                    }
+                }
+            }
+        }
+        Ok(names.into_iter().collect())
+    }
+
+    /// Recipe references across the search path, as `<device>/<leaf>` strings, sorted
+    /// and de-duplicated. Unlike [`list`](Self::list) — which is a flat single-level
+    /// scan for the strictly-flat layers (devices, socs, kernels, features) — recipes
+    /// nest one level under their device's folder (`recipes/<device>/<leaf>.toml`), so
+    /// this descends exactly one level: each `recipes/<device>/` directory contributes
+    /// its `*.toml` stems as `<device>/<stem>`. Non-`.toml` siblings (`.lock`,
+    /// `.pkgs.lock`) and any deeper sidecar subdirectory are ignored; a stray
+    /// top-level `recipes/*.toml` is listed by its bare stem for robustness, though the
+    /// shipped layout nests every recipe. An overlay's recipes union with the shipped
+    /// ones, a reference present in both appears once, and an absent `recipes/`
+    /// contributes nothing while any other read failure is [`ConfigError::Io`].
+    pub fn list_recipes(&self) -> Result<Vec<String>, ConfigError> {
+        let mut names = std::collections::BTreeSet::new();
+        for root in &self.roots {
+            let base = root.join("recipes");
+            let entries = match std::fs::read_dir(&base) {
+                Ok(entries) => entries,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(ConfigError::Io {
+                        path: base.display().to_string(),
+                        source,
+                    })
+                }
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // A device directory: emit `<device>/<leaf>` for each recipe toml.
+                    let Some(device) = path.file_name().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    let leaves = match std::fs::read_dir(&path) {
+                        Ok(leaves) => leaves,
+                        Err(source) => {
+                            return Err(ConfigError::Io {
+                                path: path.display().to_string(),
+                                source,
+                            })
+                        }
+                    };
+                    for leaf in leaves.flatten() {
+                        let lp = leaf.path();
+                        if lp.extension().and_then(|e| e.to_str()) == Some("toml") {
+                            if let Some(stem) = lp.file_stem().and_then(|s| s.to_str()) {
+                                names.insert(format!("{device}/{stem}"));
+                            }
+                        }
+                    }
+                } else if path.extension().and_then(|e| e.to_str()) == Some("toml") {
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                         names.insert(stem.to_string());
                     }
@@ -439,21 +516,53 @@ fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
     }
 }
 
-/// Reject any name that is not a bare identifier before it joins into a filesystem
-/// path. Allows `[A-Za-z0-9._-]`; rejects the empty string, a leading dot
-/// (hidden files, `.`, `..`), path separators, and absolute paths — so a config
-/// cross-reference or CLI argument can never traverse out of the config root.
+/// Whether `s` is a bare identifier safe to join into a filesystem path: non-empty,
+/// no leading dot (excludes hidden files, `.`, and `..`), and drawn only from
+/// `[A-Za-z0-9._-]` — which excludes every path separator. This is the atom both
+/// [`validate_name`] (one such atom) and [`validate_recipe_ref`] (two, joined by a
+/// single `/`) are built from.
+fn is_bare_name(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('.')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Reject any name that is not a single bare identifier before it joins into a
+/// filesystem path — so a config cross-reference or CLI argument can never traverse
+/// out of the config root. Used for the strictly-flat layers (devices, socs, arches,
+/// boot-methods, kernels, features) and for a manifest *filename*; recipe references
+/// go through [`validate_recipe_ref`] instead.
 fn validate_name(kind: &'static str, name: &str) -> Result<(), ConfigError> {
-    let ok = !name.is_empty()
-        && !name.starts_with('.')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    if ok {
+    if is_bare_name(name) {
         Ok(())
     } else {
         Err(ConfigError::InvalidName {
             kind,
+            name: name.to_string(),
+        })
+    }
+}
+
+/// Reject any recipe reference that is not `<device>/<leaf>` (or a bare `<leaf>`)
+/// before it joins into a filesystem path. Recipes are the one config layer that
+/// nests one level under a device folder, so a reference may carry a *single*
+/// interior `/` separating two [bare identifiers](is_bare_name); each half is held to
+/// the same rule [`validate_name`] enforces. Because each segment must be bare and
+/// non-empty, this rejects a leading/trailing/absolute/doubled slash, more than one
+/// slash, and any `.` or `..` segment — so the reference can never traverse out of
+/// `recipes/` when joined into `recipes/<ref>.toml`, its `.lock`, or its manifest.
+fn validate_recipe_ref(name: &str) -> Result<(), ConfigError> {
+    let mut segments = name.split('/');
+    let ok = match (segments.next(), segments.next(), segments.next()) {
+        (Some(leaf), None, _) => is_bare_name(leaf),
+        (Some(device), Some(leaf), None) => is_bare_name(device) && is_bare_name(leaf),
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidRecipeRef {
             name: name.to_string(),
         })
     }
@@ -485,7 +594,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    validate_name("recipe", n),
+                    validate_name("device", n),
                     Err(ConfigError::InvalidName { .. })
                 ),
                 "{n:?} should be rejected"
@@ -494,12 +603,44 @@ mod tests {
     }
 
     #[test]
+    fn recipe_ref_allows_one_nested_segment_and_rejects_traversal() {
+        // A bare leaf or a single `<device>/<leaf>` boundary is accepted.
+        for ok in [
+            "forky",
+            "turing-rk1/forky",
+            "turing-rk1/media-accel-forky",
+            "h96-max-m9/console-forky",
+        ] {
+            assert!(validate_recipe_ref(ok).is_ok(), "{ok:?} should be a valid recipe ref");
+        }
+        // Anything that could traverse out of `recipes/` is rejected: empty, a second
+        // separator, a leading/trailing/absolute/doubled slash, and dot segments.
+        for bad in [
+            "",                    // empty
+            "/forky",              // absolute / leading slash
+            "turing-rk1/",         // trailing slash
+            "a//b",                // doubled slash (empty middle segment)
+            "a/b/c",               // more than one separator
+            "turing-rk1/../etc",   // dot-dot segment
+            "turing-rk1/.hidden",  // leading-dot leaf
+            "../turing-rk1/forky", // traversal
+            "a\\b",                // backslash
+            "a b/forky",           // space
+        ] {
+            assert!(
+                matches!(validate_recipe_ref(bad), Err(ConfigError::InvalidRecipeRef { .. })),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn lock_path_rejects_traversal() {
         let root = ConfigRoot::new("/cfg");
-        assert!(root.lock_path("turing-rk1-forky").is_ok());
+        assert!(root.lock_path("turing-rk1/forky").is_ok());
         assert!(matches!(
             root.lock_path("../../etc/cron.d/x"),
-            Err(ConfigError::InvalidName { .. })
+            Err(ConfigError::InvalidRecipeRef { .. })
         ));
     }
 
@@ -576,24 +717,55 @@ mod tests {
     #[test]
     fn overlay_only_file_resolves_and_lists() {
         // A recipe present only in the overlay resolves and lists alongside the
-        // primary's; a name in both appears once.
+        // primary's; a reference present in both appears once. Recipes nest one level
+        // under their device folder, and `list_recipes` returns `<device>/<leaf>`.
         let p = tempfile::tempdir().unwrap();
         let o = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(p.path().join("recipes")).unwrap();
-        std::fs::create_dir_all(o.path().join("recipes")).unwrap();
-        std::fs::write(p.path().join("recipes/shipped.toml"), "device = \"d\"\n").unwrap();
-        std::fs::write(o.path().join("recipes/extra.toml"), "device = \"d\"\n").unwrap();
-        // `shipped` in both roots: overlay adds a suite, must merge, not duplicate.
-        std::fs::write(o.path().join("recipes/shipped.toml"), "suite = \"sid\"\n").unwrap();
+        std::fs::create_dir_all(p.path().join("recipes/d")).unwrap();
+        std::fs::create_dir_all(o.path().join("recipes/d")).unwrap();
+        std::fs::write(p.path().join("recipes/d/shipped.toml"), "device = \"d\"\n").unwrap();
+        std::fs::write(o.path().join("recipes/d/extra.toml"), "device = \"d\"\n").unwrap();
+        // `d/shipped` in both roots: overlay adds a suite, must merge, not duplicate.
+        std::fs::write(o.path().join("recipes/d/shipped.toml"), "suite = \"sid\"\n").unwrap();
         let root = ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
 
-        assert_eq!(root.list("recipes").unwrap(), vec!["extra", "shipped"]);
-        let extra = root.recipe("extra").unwrap();
+        assert_eq!(root.list_recipes().unwrap(), vec!["d/extra", "d/shipped"]);
+        let extra = root.recipe("d/extra").unwrap();
         assert_eq!(extra.device, "d");
         // Merged: device from primary, suite from overlay.
-        let shipped = root.recipe("shipped").unwrap();
+        let shipped = root.recipe("d/shipped").unwrap();
         assert_eq!(shipped.device, "d");
         assert_eq!(shipped.suite.as_deref(), Some("sid"));
+    }
+
+    #[test]
+    fn nested_recipe_ref_addresses_lock_and_manifest_in_the_device_dir() {
+        // A `<device>/<leaf>` recipe's lock and manifest sit in the device folder
+        // beside the recipe toml, anchored to the root that owns the recipe.
+        let p = tempfile::tempdir().unwrap();
+        let o = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(o.path().join("recipes/turing-rk1")).unwrap();
+        std::fs::write(
+            o.path().join("recipes/turing-rk1/media-accel-forky.toml"),
+            "device = \"turing-rk1\"\n",
+        )
+        .unwrap();
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+
+        let rref = "turing-rk1/media-accel-forky";
+        assert_eq!(
+            root.lock_path(rref).unwrap(),
+            o.path().join("recipes/turing-rk1/media-accel-forky.lock")
+        );
+        assert_eq!(
+            root.recipe_sibling(rref, "media-accel-forky.pkgs.lock").unwrap(),
+            o.path().join("recipes/turing-rk1/media-accel-forky.pkgs.lock")
+        );
+        // The manifest filename itself must stay a bare name (no separator)...
+        assert!(root.recipe_sibling(rref, "a/b.pkgs.lock").is_err());
+        // ...and a two-slash reference is not a valid recipe reference.
+        assert!(root.lock_path("a/b/c").is_err());
     }
 
     #[test]

@@ -26,13 +26,20 @@ cargo run -p boot2deb-cli -- list-devices
 cargo run -p boot2deb-cli -- list-recipes
 cargo run -p boot2deb-cli -- list-kernels
 cargo run -p boot2deb-cli -- list-features
+cargo run -p boot2deb-cli -- support-matrix
 cargo run -p boot2deb-cli -- resolve turing-rk1-forky
 cargo run -p boot2deb-cli -- resolve turing-rk1 --suite sid --layout split
 cargo run -p boot2deb-cli -- doctor turing-rk1-forky
 ```
 
 - **`list-devices` / `list-recipes`** enumerate the buildable targets; `list-recipes`
-  flags any recipe with no committed lock as not-yet-buildable (run `update`).
+  shows each recipe's support claim and flags any recipe with no committed lock as
+  not-yet-buildable (run `update`).
+- **`support-matrix`** prints that claim beside the exact pins the recipe's lock
+  records — board, suite, kernel, patch series — so "which patch series worked with
+  which kernel, on what board" is answerable without decoding a SHA. `--markdown`
+  emits [the docs page](support-matrix.md) verbatim; regenerate it after changing a
+  claim or re-pinning a lock, and a test fails if the committed page is stale.
 - **`list-kernels` / `list-features`** enumerate the valid values for the `--kernel`
   and `--feature` overrides — name, version/compatibility, and (for kernels) the patch
   profile — so the override knobs are discoverable without reading the TOML tree.
@@ -175,7 +182,35 @@ cargo run -p boot2deb-cli -- verify-patches turing-rk1-forky
 
 # Fast path when you already have a local kernel checkout:
 cargo run -p boot2deb-cli -- verify-patches turing-rk1-forky --kernel-src ../linux
+
+# "Would this series survive 7.2?" -- asked against a kernel you have not adopted,
+# reporting every boundary at once rather than stopping at the first.
+cargo run -p boot2deb-cli -- verify-patches turing-rk1-forky \
+    --kernel v7.2 --kernel-path ../linux --keep-going
 ```
+
+#### Asking about a kernel you have not adopted
+
+`--kernel <version>` verifies against a kernel the lock does not pin, and **leaves the
+lock alone**. That ordering matters: without it, finding out whether a series survives a
+new kernel means re-pinning to that kernel first — mutating state before knowing whether
+the answer is yes, which is backwards for the one command whose job is finding out.
+
+Because the lock pins no commit for a kernel it does not name, a candidate needs
+`--kernel-path` pointing at a checkout already at that version. Two rules shift on this
+path:
+
+- **A release candidate is answerable.** By semver's rule `7.2.0-rc3` satisfies neither
+  `<7.2` nor `>=7.2`, so a release-only range rejects every RC. That strictness is right
+  for a build — a profile's envelope is a claim about *released* kernels — but wrong
+  here, where an RC is exactly the tree you want to measure. On the candidate path an RC
+  is matched as its base release; the build path stays release-strict.
+- **`--keep-going` reports every failure in one pass.** A single boundary frequently
+  spawns adjacent ones: reworking a patch shifts the context every later patch applies
+  against. Stopping at the first turns that into serial discovery — fix, re-run, find the
+  next, re-run. Each failing patch is skipped so the rest still get measured, which means
+  a batch report shows the *shape* of the damage rather than a final verdict; a rework can
+  still change what comes after it.
 
 `--kernel-path` / `--ffmpeg-path` / `--userspace-path` are all **optional**: an omitted
 tree is auto-fetched at its locked commit (ffmpeg and userspace only when the profile

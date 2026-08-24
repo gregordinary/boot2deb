@@ -249,15 +249,31 @@ pub(crate) fn run(
         )?),
         _ => None,
     };
+    // Only a compiled kernel can name a patch profile, so a lock that pins patches
+    // pins a kernel too. Check it rather than assume it: the kernel's version is what
+    // the profile's per-entry ranges are filtered against, and defaulting it would
+    // silently select the wrong series.
+    if lock.patches.is_some() && lock.kernel.is_none() {
+        return Err(format!(
+            "the lock for '{recipe}' pins a patch series but no kernel to apply it to \
+             — re-run `boot2deb update`"
+        )
+        .into());
+    }
     // Bind the resolved checkout to the lock's pin, so no stage can be handed a
     // profile without a checkout to read it from (or vice versa).
-    let patches = checkout.as_ref().zip(lock.patches.as_ref()).map(
-        |((root, dev), pin)| boot2deb_engine::build::PatchSource {
-            root,
-            pin,
-            dev: *dev,
-        },
-    );
+    let patches = checkout
+        .as_ref()
+        .zip(lock.patches.as_ref())
+        .zip(lock.kernel.as_ref())
+        .map(
+            |(((root, dev), pin), kernel)| boot2deb_engine::build::PatchSource {
+                root,
+                pin,
+                dev: *dev,
+                kernel_version: &kernel.reference,
+            },
+        );
 
     // The rootfs tarball the image stage consumes: produced by the rootfs stage,
     // or supplied directly via --rootfs-tar for an image-only build.
@@ -340,6 +356,15 @@ pub(crate) fn run(
         emit_artifact(&sink, "uboot", "idbloader", &artifacts.idbloader);
         emit_artifact(&sink, "uboot", "uboot_itb", &artifacts.uboot_itb);
         emit_artifact(&sink, "uboot", "deb", &artifacts.deb);
+        // The maskrom USB boot images, when this board's u-boot builds them: the
+        // CODE471/CODE472 payloads for running this u-boot from RAM over USB.
+        // pyrographer streams the raw usb471/usb472 pair; `maskrom_loader` is the two
+        // packed into the single RKBOOT file `rkdeveloptool db` consumes directly.
+        if let Some(m) = &artifacts.maskrom {
+            emit_artifact(&sink, "uboot", "usb471", &m.usb471);
+            emit_artifact(&sink, "uboot", "usb472", &m.usb472);
+            emit_artifact(&sink, "uboot", "maskrom_loader", &m.loader);
+        }
         record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
         // A uboot-only build also emits a standalone, directly-flashable bootloader
         // image (`<device>-boot.img`) — the eMMC/SPI medium for a split install
@@ -504,7 +529,6 @@ pub(crate) fn run(
             manifest_out: &manifest_out,
             mirrors: &mirrors,
             extra_packages: &extra_packages,
-            rootfs_label: &args.rootfs_label,
             cache_dir: Some(&cache_dir),
             refresh: args.refresh_rootfs,
             apt_sources: &apt_repos,

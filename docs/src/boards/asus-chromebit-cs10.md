@@ -126,10 +126,19 @@ sudo reboot                 # then Ctrl+D to boot the eMMC, or wait out the time
 ```
 
 First boot on the eMMC then does what it did on the stick: it grows the rootfs to fill the
-device, gives it fresh UUIDs, and re-signs the kernel against them into both of that
-medium's kernel slots. The stick can stay plugged in — the two installs do not collide,
-because first boot already gave the stick its own UUIDs, and Ctrl+D and Ctrl+U pick
-between the two *media* explicitly, each of which carries its own pair of slots.
+device. That is all it changes — identity is stamped at build time and nothing on the
+device rewrites it.
+
+Both installs therefore carry the same rootfs PARTUUID. That matters less here than it
+would elsewhere, because nothing on this boot path is automatic: Ctrl+D and Ctrl+U each
+name a medium explicitly, and the firmware verifies and loads *that* medium's own signed
+kernel. You get the kernel you asked for.
+
+The one thing the keypress does not cover is the `root=` lookup that kernel then performs,
+which resolves the PARTUUID by scanning attached disks. With the stick still plugged in it
+can land on the other medium's rootfs — the same build either way, so it boots normally,
+but you may be writing to the disk you thought you had left behind. Pull the stick once
+the eMMC is written and the question does not arise.
 
 **Why this needs no kernel patch, contrary to the usual advice.** The Veyron eMMC ships
 with its primary GPT deliberately corrupted — ChromeOS marks it `IGNOREME` and uses the

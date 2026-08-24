@@ -206,12 +206,30 @@ pub struct KernelPin {
     pub commit: String,
 }
 
-/// Pinned patch series: the profile and the exact `patches`-repo commit.
+/// Pinned patch series: the profile, the repo it came from, the ref that was
+/// resolved, and the exact commit.
+///
+/// Symmetric with [`KernelPin`] and [`UbootPin`] on purpose. `commit` alone
+/// answers *reproducibility* ("these exact bytes") but nothing else: a bare SHA
+/// cannot tell a reader which patch release worked with which kernel, and — more
+/// sharply — cannot be graded for durability. `update` takes this pin from a local
+/// checkout's HEAD rather than resolving it against a remote, which makes it the
+/// pin *most* likely to name a commit that exists nowhere else, and `source` is what
+/// lets it join the durability check every other fetched axis already gets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchesPin {
     /// Patch profile name.
     pub profile: String,
+    /// Clone URL the commit was pinned from (the kernel definition's
+    /// `patches_url`). A commit id means nothing outside its repo, so the pin
+    /// records where it came from.
+    pub source: String,
+    /// The tag or branch that was resolved (TOML key `ref`) — a release tag once
+    /// the series has one, else `main`. The human-legible half of the pin: it is
+    /// what lets "this image used patches v1.3.0" be read without decoding a SHA.
+    #[serde(rename = "ref")]
+    pub reference: String,
     /// `patches` repo commit. Deserialization enforces the full-hex-sha
     /// shape.
     #[serde(deserialize_with = "de_commit")]
@@ -376,6 +394,8 @@ mod tests {
             }),
             patches: Some(PatchesPin {
                 profile: "rk3588-accel".into(),
+                source: "https://example.invalid/patches.git".into(),
+                reference: "main".into(),
                 commit: "f78b240894a29a4c3976ad22935b1c2e16b3c6ad".into(),
             }),
             uboot: Some(UbootPin {
@@ -459,6 +479,8 @@ mod tests {
             }),
             patches: Some(PatchesPin {
                 profile: "rk3588-accel".into(),
+                source: "https://example.invalid/patches.git".into(),
+                reference: "main".into(),
                 commit: "b".repeat(40),
             }),
             uboot: Some(UbootPin {
