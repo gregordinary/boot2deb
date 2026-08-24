@@ -61,6 +61,23 @@ jobs:
         run: cargo test --workspace
         env:
           BOOT2DEB_REQUIRE_HOST_TOOLS: "1"
+      # The SBOM's correctness is partly a claim about two *external* specifications,
+      # and no amount of Rust typing checks that: a misspelled key or a value outside an
+      # enum produces a document that compiles, serializes, and is rejected by every
+      # consumer. The integration test above renders both formats from the shipped RK1
+      # configuration into `target/sbom/`; this validates them against the published
+      # schemas. Fetched rather than vendored, because the question is whether the
+      # output conforms to the specification as it stands, not to a copy of it.
+      - name: Validate the SBOM documents against the published schemas
+        # `pipx run` rather than `pip install`: the runner's system Python is
+        # externally managed (PEP 668), which refuses a plain install.
+        run: |
+          pipx run check-jsonschema \
+            --schemafile https://raw.githubusercontent.com/spdx/spdx-spec/support/2.3/schemas/spdx-schema.json \
+            target/sbom/spdx.json
+          pipx run check-jsonschema \
+            --schemafile https://raw.githubusercontent.com/CycloneDX/specification/1.6/schema/bom-1.6.schema.json \
+            target/sbom/cyclonedx.json
       # `--all-targets` so test and example code is linted too, not just the libs.
       # The toolchain is not pinned, so a new stable can add a lint and fail this on
       # an unrelated change; fix the lint or add a scoped `#[allow]` with a reason.

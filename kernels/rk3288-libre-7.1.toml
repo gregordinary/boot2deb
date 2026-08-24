@@ -1,0 +1,50 @@
+# kernels/rk3288-libre-7.1.toml — GNU Linux-libre 7.1.y for RK3288 boards.
+#
+# The same kernel as rk3288-mainline-7.1 — same release, same defconfig, same
+# fragments, same `rk3288-fixes` series — built from the deblobbed tree instead of
+# `linux-stable`. Everything that differs between the two is a property of the
+# source, which is what makes them comparable: if a board behaves differently on
+# this kernel, a removed blob is the reason.
+#
+# `libre = true` is not decoration. It reaches the whole image: resolution drops
+# every hardware layer's `nonfree_firmware_packages` and its `overlay-nonfree/`
+# tree, and narrows the image's apt components to `main`. So this one key is the
+# difference between a build and a *blob-free* build, and no recipe can select the
+# deblobbed kernel and ship the firmware anyway.
+#
+# What that costs on an RK3288 Chromebook is the Broadcom BCM4354 — Wi-Fi and
+# Bluetooth both, since brcmfmac's loader and btbcm's patchram name are removed
+# from the tree. Everything else on these boards is driven by code that asks for no
+# firmware at all: display (rockchip-drm/analogix_dp), GPU (panfrost — the
+# Mali-T764 is Midgard, which needs no firmware, unlike the CSF parts Panthor
+# drives), video decode (hantro/rockchip_vdec), audio (max98090), storage
+# (dw_mmc), USB, and the ChromeOS EC keyboard. The supported way onto a network is
+# an AR9271 USB adapter, whose firmware is Free and comes from Debian `main`
+# (`firmware-ath9k-htc`, carried by socs/rk3288). The board page has the full
+# account.
+#
+# The kconfig is deliberately identical to the blobbed kernel's, so a driver whose
+# firmware was removed still builds and still loads — it logs that the firmware is
+# not Free and stops, which is what every libre distribution ships and is more
+# informative than the driver silently not existing.
+flavor           = "mainline"
+
+# The tree is published as a git repository of released sources, tagged
+# `sources/v<version>-gnu` — that whole ref is what the lock pins and what git
+# resolves. Only `git://` is offered; there is no HTTPS endpoint. That is
+# acceptable here for the same reason the Debian mirror is plain HTTP: integrity
+# rides on the pin, not the transport. `update` resolves the tag once and writes
+# the commit into the lock, and every build after that fetches *that commit* by
+# sha and would fail if the server answered with anything else.
+source           = { git = "git://linux-libre.fsfla.org/releases.git", ref = "sources/v7.1.6-gnu" }
+track            = "7.1.y"                 # the lock pins the exact tag (update --kernel-ref)
+
+base_defconfig   = "multi_v7_defconfig"    # in-tree 32-bit multiplatform base; fragments merge onto it
+config_fragments = ["base/debian-armhf", "soc/rk3288"]
+patch_series     = ["rk3288-fixes"]
+patches_url      = "https://github.com/gregordinary/patches.git"
+supported_socs   = ["rk3288"]
+
+# Deblobbed: no driver this tree builds can load nonfree firmware, so the image is
+# built and shipped without any.
+libre            = true

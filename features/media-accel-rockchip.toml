@@ -26,6 +26,14 @@ requires_soc = ["rk3588"]
 # The two providers both build an `ffmpeg-rk` deb; only one can win.
 conflicts    = ["media-accel-v4l2"]
 
+# What this stack does not deliver. Both are properties of the `ffmpeg-rk` build,
+# which is what this feature provides — so they hold in every recipe that composes
+# it, on any RK3588 board, and belong here rather than being restated by each.
+caveats = [
+  "Scaling inside a hardware transcode runs on the CPU. The RGA filters (`scale_rkrga`, `vpp_rkrga`, `overlay_rkrga`) accept only frames carrying an RKMPP hardware context, and the mainline V4L2 decoder hands out plain DRM PRIME frames, which they reject; `hwmap` does not bridge the two either. A decode/scale/encode chain therefore downloads frames to system memory, scales them with swscale, and re-uploads them to the encoder. RGA still accelerates a scale fed from software-decoded frames, and the 2D engine itself works.",
+  "The `h264_rkmpp`, `hevc_rkmpp`, `vp8_rkmpp` and `vp9_rkmpp` *decoders* are compiled in but fail to open: MPP finds no decode client on a mainline kernel, where `rkvdec` is a V4L2 stateless driver rather than an MPP service. Hardware decode is reached with `-hwaccel v4l2request`. The matching `*_rkmpp` encoders do work.",
+]
+
 # This feature's packages are built from the SoC's media-accel source trees
 # (socs/<soc>.toml [userspace]/[ffmpeg]), not the Debian mirror. The flag requires
 # the resolved SoC to supply those stanzas and schedules the userspace/ffmpeg

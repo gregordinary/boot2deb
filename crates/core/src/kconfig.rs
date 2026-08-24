@@ -117,6 +117,54 @@ impl KernelConfig {
     }
 }
 
+/// A kernel's config fragments merged in declaration order, remembering which
+/// fragment last set each symbol.
+///
+/// The merge order is the kernel definition's `config_fragments` order, and last
+/// wins — the same rule a `.config` follows. The attribution is the point: comparing
+/// two builds' resolved fragment sets says *which fragment* introduced a symbol,
+/// which comparing two generated `.config` files cannot, because by then every
+/// symbol is anonymous.
+///
+/// This is the *requested* configuration, not the realized one. A symbol here can
+/// still be dropped or forced by the kernel's own dependency resolution when the
+/// tree generates its `.config`; the clean-merge gate is what checks that, and this
+/// is what a reader compares two build points on without a tree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FragmentSet {
+    config: KernelConfig,
+    origin: BTreeMap<String, String>,
+}
+
+impl FragmentSet {
+    /// Merge `fragments` — `(name, text)` pairs in declaration order — into one
+    /// config, recording for each symbol the name of the fragment that last set it.
+    ///
+    /// `name` is whatever the caller wants a reader to see: the fragment's path
+    /// relative to the config root reads best, since that is how the kernel
+    /// definition names it.
+    pub fn merge<'a>(fragments: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let mut set = FragmentSet::default();
+        for (name, text) in fragments {
+            for (symbol, value) in KernelConfig::parse(text).entries {
+                set.origin.insert(symbol.clone(), name.to_string());
+                set.config.entries.insert(symbol, value);
+            }
+        }
+        set
+    }
+
+    /// The merged configuration.
+    pub fn config(&self) -> &KernelConfig {
+        &self.config
+    }
+
+    /// Which fragment last set `symbol`, or `None` when no fragment mentions it.
+    pub fn origin(&self, symbol: &str) -> Option<&str> {
+        self.origin.get(symbol).map(String::as_str)
+    }
+}
+
 /// One symbol whose value differs between two configs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diff {
@@ -249,6 +297,35 @@ mod tests {
     fn identical_configs_have_no_diff() {
         let text = "CONFIG_ARM64=y\nCONFIG_ROCKCHIP_MULTI_RGA=m\n# CONFIG_FOO is not set\n";
         assert!(diff(&KernelConfig::parse(text), &KernelConfig::parse(text)).is_empty());
+    }
+
+    /// Last fragment wins, and the winner is the one attributed — which is the whole
+    /// reason to merge fragments rather than compare two generated `.config` files.
+    #[test]
+    fn a_fragment_set_merges_in_order_and_names_the_winner() {
+        let set = FragmentSet::merge([
+            ("fragments/base.config", "CONFIG_A=y\nCONFIG_B=m\n"),
+            (
+                "fragments/rk3588-accel.config",
+                "CONFIG_B=y\n# CONFIG_C is not set\n",
+            ),
+        ]);
+        assert_eq!(set.config().get("CONFIG_A"), Value::Set("y".into()));
+        assert_eq!(set.config().get("CONFIG_B"), Value::Set("y".into()));
+        assert_eq!(set.config().get("CONFIG_C"), Value::NotSet);
+
+        assert_eq!(set.origin("CONFIG_A"), Some("fragments/base.config"));
+        assert_eq!(
+            set.origin("CONFIG_B"),
+            Some("fragments/rk3588-accel.config")
+        );
+        // An explicit "is not set" is a fragment saying something, so it is attributed
+        // — unlike a symbol no fragment mentions, which reads as not-set from nowhere.
+        assert_eq!(
+            set.origin("CONFIG_C"),
+            Some("fragments/rk3588-accel.config")
+        );
+        assert_eq!(set.origin("CONFIG_NEVER_MENTIONED"), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Modules for the Veyron initramfs. MODULES=list is set by the depthcharge boot
-# method (its conf.d/depthcharge.conf), which is what makes this list the whole
-# initramfs rather than a supplement to it.
+# method (in the conf.d drop-in the rootfs stage generates), which is what makes
+# these lists the whole initramfs rather than a supplement to it.
 #
 # This lives under /usr/share rather than /etc/initramfs-tools/modules because
 # that file is an initramfs-tools conffile: writing it before the package is
@@ -80,21 +80,20 @@ cros_ec_keyb
 usbhid
 hid-generic
 
-# NO DISPLAY STACK in the standard image -- a headroom policy, not a size limit.
+# NO DISPLAY STACK on a 16 MiB board -- a headroom policy, not a size limit.
 #
 # The DRM stack (rockchipdrm + analogix_dp + panel + backlight) compresses to
 # only ~575 KB of xz and fits under even the stock 16 MiB ceiling, but the forky
 # payload already sits above 90% with it included, and kernels grow at every
-# Debian update. The standard image therefore leaves it out and accepts a
-# console that appears only after the real root mounts -- measured 8-10 s of
-# white splash on a healthy boot. A C201 with libreboot has a 32 MiB ceiling
-# (`--board speedy-libreboot`), which is the headroom to carry the display stack
-# and watch the initramfs on the panel 2-3 s after Ctrl+U.
+# Debian update. A board at that ceiling therefore leaves it out and accepts a
+# console that appears only after the real root mounts. A board whose firmware
+# buffers 32 MiB has the headroom, and carries it as its own modules.d drop-in
+# beside this one -- see devices/asus-c201-libreboot/.
 #
-# Because a standard-image initramfs failure is invisible on these boards, three
-# things back this list up: the rootfs stage asserts every module here resolves
-# under the installed kernel AND lands in the built initrd (so a typo fails the
-# build, not the boot); the signed cmdline carries panic=30 (so a failed boot
-# visibly reboots to the splash rather than hanging on a white screen); and
+# Because an initramfs failure is invisible on a board without the display stack,
+# three things back this list up: the rootfs stage asserts every module here
+# resolves under the installed kernel AND lands in the built initrd (so a typo
+# fails the build, not the boot); the signed cmdline carries panic=30 (so a failed
+# boot visibly reboots to the splash rather than hanging on a white screen); and
 # scripts/panic/boot2deb-breadcrumb writes the full dmesg to every reachable ext4
 # partition before that reboot.

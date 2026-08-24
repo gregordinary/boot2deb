@@ -8,10 +8,13 @@ first 32-bit Arm board and first ChromeOS-firmware board boot2deb supports.
 | --- | --- | --- |
 | `asus-c201/forky` | Debian's `armmp`, installed from the archive | validated |
 | `asus-c201/trixie` | the same, on the stable suite | expected |
-| `asus-c201/mainline-forky` | compiled here from mainline 7.1.y | validated |
+| `asus-c201/mainline-forky` | compiled here from mainline 7.1.y | expected |
+| `asus-c201/libre-forky` | the same, from GNU Linux-libre — no blobs | expected |
 
 The first two are the board as Debian ships it. The third is the seam for changing the
-kernel — see [A kernel of your own](#a-kernel-of-your-own) below.
+kernel — see [A kernel of your own](#a-kernel-of-your-own) below. The fourth is that
+same kernel deblobbed, in an image with no nonfree firmware at all — see
+[Without the blobs](#without-the-blobs-gnu-linux-libre).
 
 ```sh
 boot2deb build asus-c201/forky
@@ -83,15 +86,83 @@ you: a `7.1.y` point release is an `update --kernel-ref` and a rebuild, not an
 `apt upgrade`. Take it when you need a kernel change; stay on `asus-c201/forky` when you
 do not.
 
+## Without the blobs: GNU Linux-libre
+
+`asus-c201/libre-forky` is `asus-c201/mainline-forky` with one thing changed: the kernel
+comes from the [GNU Linux-libre](https://www.fsfla.org/ikiwiki/selibre/linux-libre/)
+tree instead of `linux-stable`. Same 7.1.6 release, same `multi_v7_defconfig` base, same
+fragments, same `rk3288-fixes` series — the source is deblobbed, and nothing else
+differs. The two locks are worth a diff; the kernel's three lines are all of it.
+
+```sh
+boot2deb build asus-c201/libre-forky              # stock firmware, or libreboot
+boot2deb build asus-c201-libreboot/libre-forky    # libreboot, 32 MiB slots
+```
+
+Choosing that kernel is what makes the whole *image* free, not just the kernel. The
+kernel definition carries `libre = true`, and resolution reads it:
+
+- the SoC layer's `firmware-brcm80211` is dropped from the package set,
+- its `overlay-nonfree/` tree — the two vendored Broadcom blobs — is not laid in,
+- `/etc/apt/sources.list` offers `main` alone, so the running board is not one
+  `apt install` away from putting the firmware back by accident.
+
+`boot2deb resolve asus-c201/libre-forky` prints a `libre` line when this is in effect.
+
+Moving it to a newer release works like any compiled recipe, with one difference worth
+knowing: linux-libre publishes its trees under a tag namespace and appends `-gnu` to the
+version, so the ref is `sources/v7.1.7-gnu` rather than `v7.1.7`.
+
+```sh
+boot2deb update asus-c201/libre-forky --kernel-ref sources/v7.1.7-gnu
+```
+
+### What stops working
+
+One part, and it is the radio. The BCM4354 is the only thing on this board that cannot
+run without firmware, and linux-libre removes both loaders that would fetch it:
+`brcmfmac`'s firmware request and `btbcm`'s patchram filename. Both drivers still build
+and still load — they log that the firmware is not Free and stop.
+
+| Hardware | On linux-libre | Why |
+|---|---|---|
+| Wi-Fi (BCM4354, SDIO) | **does not work** | `brcmfmac` needs `brcmfmac4354-sdio.bin` + the board NVRAM |
+| Bluetooth (BCM4354, uart0) | **does not work** | `btbcm` needs the `BCM4354.hcd` patchram |
+| Wi-Fi via AR9271 USB adapter | works | `ath9k_htc`; its firmware is Free (Debian `main`) |
+| Display — eDP panel + HDMI | works | `rockchip-drm` / `analogix_dp`, no firmware |
+| GPU (Mali-T764) | works | `panfrost`; Midgard needs no firmware, unlike the CSF parts |
+| Video decode | works | `hantro_vpu` / `rockchip_vdec`, stateless V4L2, no firmware |
+| Audio (max98090) | works | no firmware |
+| eMMC / microSD / USB | works | `dw_mmc`, `dwc2`, EHCI/OHCI, no firmware |
+| Keyboard, trackpad, EC | works | `cros_ec` over SPI, no firmware |
+| Crypto engine | works | in-SoC, `rk3288-fixes` applies unchanged |
+
+Nothing else on the board loads firmware, so nothing else changes. The RK3288 also has
+no loadable CPU microcode, and on a unit running libreboot the boot firmware is already
+free — which is what makes this board a sensible target for the exercise in the first
+place.
+
+### Getting online without the internal radio
+
+Plug in an **AR9271** USB adapter. Its firmware comes from the
+`open-ath9k-htc-firmware` project, is Free, and ships in Debian `main` as
+`firmware-ath9k-htc` — which is on every C201 image, libre or not, so the adapter works
+the moment it is plugged in and `nmtui` treats it like any other interface. This is the
+same adapter PrawnOS uses on these machines for the same reason.
+
+Bluetooth has no equivalent packaged answer: a USB adapter that needs no firmware at all
+(some CSR-class dongles) works with the `bluez` the image already ships, but most modern
+ones want a blob. Nothing on the image will load one.
+
 ## Board profiles
 
 A depthcharge **board profile** describes the *firmware a unit runs*, not the board
 model. The C201 has two, and each is a whole shipped build point:
 
-| build | profile | payload | initrd delivery | boots on |
+| build | profile | payload | initramfs | boots on |
 |---|---|---|---|---|
-| `asus-c201/forky` | `speedy` | 16 MiB slots | patched into every DTB's `/chosen` | stock firmware **and** libreboot |
-| `asus-c201-libreboot/forky` | `speedy-libreboot` | 32 MiB slots | a real FIT ramdisk node | libreboot only |
+| `asus-c201/forky` | `speedy` | 16 MiB slots | xz, no display stack | stock firmware **and** libreboot |
+| `asus-c201-libreboot/forky` | `speedy-libreboot` | 32 MiB slots | zstd, display stack included | libreboot only |
 
 Both are confirmed on the hardware. **The stock profile is the default deliberately**: a
 stock-profile image boots on either firmware, while the reverse is not true —
@@ -100,13 +171,25 @@ depthcharge-tools sets `hwid-match = None` on the libreboot profile, so a runnin
 stock constraints.
 
 The libreboot build exists for the payload headroom: libreboot's depthcharge buffers a
-32 MiB kernel (`CONFIG_KERNEL_SIZE = 0x2000000`) where the stock firmware buffers 16,
-which is room for a debug initramfs carrying the display stack — making the boot visible
-on the panel a few seconds after Ctrl+U instead of after the rootfs mounts. Taking that
-headroom needs a matching kernel *partition*, not just the profile, so the two travel
-together on `devices/asus-c201-libreboot.toml`: it `extends = "asus-c201"` and states
-only the profile and `kpart_size = "32MiB"`. Everything else — the DTB, the kernel set,
-the keymap, the overlay tree — is the C201's and is inherited.
+32 MiB kernel (`CONFIG_KERNEL_SIZE = 0x2000000`) where the stock firmware buffers 16.
+Taking that headroom needs a matching kernel *partition*, not just the profile, so the
+two travel together on `devices/asus-c201-libreboot.toml`: it `extends = "asus-c201"` and
+states only the profile and `kpart_size = "32MiB"`. Everything else — the DTB, the kernel
+set, the keymap — is the C201's and is inherited.
+
+**What the headroom is spent on** is the boot you watch. A signed payload holds the
+kernel and the initramfs in one fixed budget, and at 16 MiB that budget dictates both
+halves of a slow, blind boot: the initramfs is compressed with xz, which is the smallest
+and by some way the slowest to decompress, and it carries no display driver, so nothing
+can draw until the real root is mounted and udev loads one. The board sits on the
+firmware's blank screen for the whole of it.
+
+At 32 MiB neither constraint is worth keeping. Resolution picks `zstd` for the initramfs
+(visible as the `initramfs` line in `boot2deb resolve`), and the device's `overlay-pre/`
+tree adds the display stack — `rockchipdrm`, `panel-simple`, `pwm_bl`, `pwm-rockchip` —
+to the initramfs module list. The panel then lights during the initramfs rather than
+after it, which shortens the blank screen and, more usefully, means an initramfs that
+*fails* says so on the panel instead of hanging silently.
 
 The wider slots move the rootfs from 44 MiB to 76 MiB into the image, which is the whole
 cost. Build it like any other recipe:
@@ -138,9 +221,12 @@ kernel never reached the initramfs at all — which on a machine with no serial 
 the single most useful thing a failed boot can say. A panic also writes a full dmesg to
 `BOOT2DEB-PANIC.txt` on every ext4 partition it can reach.
 
-Expect 8-10 seconds of white screen on a healthy boot before the display comes up: the
-standard image leaves the DRM stack out of the initramfs to keep the signed payload
-comfortably under its ceiling, so the console appears only once the real root is mounted.
+Expect white screen before the display comes up, and how much depends on the build. The
+`asus-c201` image leaves the DRM stack out of the initramfs to keep the signed payload
+under its 16 MiB ceiling, so the console appears only once the real root is mounted:
+about 5 seconds from eMMC, about 8 from USB, the difference being the time the initramfs
+spends enumerating the stick. The `asus-c201-libreboot` image carries the DRM stack, so
+the panel lights during the initramfs instead.
 
 ## Keyboard
 
@@ -185,9 +271,13 @@ two do not fight over the NIC), and it remembers the network, so this is a one-t
 step. `nmcli device wifi list` and `nmcli device wifi connect <ssid> --ask` do the same
 job without the interface.
 
-Wi-Fi needs two Broadcom blobs Debian does not ship; they are vendored in the device
-layer and are already in the image. Scanning shows randomized, locally-administered MAC
-addresses — that is NetworkManager, not a fault.
+Wi-Fi needs two Broadcom blobs Debian does not ship; they are vendored in the SoC
+layer's `overlay-nonfree/` tree and are already in the image. Scanning shows randomized,
+locally-administered MAC addresses — that is NetworkManager, not a fault.
+
+On a `libre-forky` image the internal radio does not come up at all, by construction;
+use an AR9271 USB adapter instead — see
+[Without the blobs](#without-the-blobs-gnu-linux-libre).
 
 ## Audio
 
@@ -249,11 +339,14 @@ which writes the slot it is not running from and leaves the proven one as the fa
 the same unit with no self-test failures, no warnings, and taint 0 — so the mainline 7.1.y
 kernel and the `rk3288-fixes` patch are both proven on silicon. A later build of it
 also booted from USB and **installed cleanly to internal eMMC**, which exercises the whole
-image path rather than just the boot.
+image path rather than just the boot. That was `v7.1.3`; the recipe now pins `v7.1.6`,
+which is why its claim reads `expected` rather than `validated` — the point release has
+not been on the board.
 
-Expect a **white screen for roughly 10 seconds** after Ctrl+U before the boot messages
-appear. That is normal and not a fault: there is no display driver in the initramfs, so
-the panel holds the firmware's last frame until the kernel's DRM stack takes over.
+Expect a **white screen of a few seconds** after Ctrl+U before the boot messages appear —
+measured at about 5 seconds from eMMC and about 8 from USB. That is normal and not a
+fault: this image carries no display driver in the initramfs, so the panel holds the
+firmware's last frame until the kernel's DRM stack loads from the mounted root.
 
 Audio is **confirmed on hardware**: the internal speakers and volume control work out
 of the box. Bluetooth ships configured — the kernel log shows the radio initialize and
@@ -267,9 +360,15 @@ boot2deb image on a C201 running its factory firmware. Treat it as high-confiden
 not proven, and note the extra `crossystem dev_boot_usb=1` step above.
 
 Wi-Fi needs two Broadcom blobs Debian does not ship (a board NVRAM file and a Bluetooth
-patchram); they are vendored in the SoC layer's overlay, since it is the same radio module
-on every Broadcom board in the family. See `socs/rk3288/README.md` for their provenance
-and why Debian's and ChromiumOS's copies are the wrong module.
+patchram); they are vendored in the SoC layer's `overlay-nonfree/` tree, since it is the
+same radio module on every Broadcom board in the family. See `socs/rk3288/README.md` for
+their provenance and why Debian's and ChromiumOS's copies are the wrong module.
+
+**The linux-libre recipes have not been on the board.** They resolve, their kconfig
+merges clean, and the `rk3288-fixes` series applies to the deblobbed tree unchanged — all
+checked — but no image built from `asus-c201/libre-forky` has booted yet, which is why
+both libre claims read `expected`. The dead radio is by construction and is not what that
+claim is about.
 
 ## The family
 

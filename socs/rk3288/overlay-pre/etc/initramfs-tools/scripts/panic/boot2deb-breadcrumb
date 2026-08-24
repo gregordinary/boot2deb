@@ -1,10 +1,10 @@
 #!/bin/sh
 # initramfs panic hook: leave evidence somewhere a host can read it.
 #
-# These boards expose no serial console and (by budget, see the boot method's
-# conf.d/depthcharge.conf and modules.d/veyron) carry no display driver inside
-# the initramfs, so an initramfs failure is a silent white screen. This script
-# runs from initramfs-tools' panic() -- i.e. exactly when the boot has given up
+# These boards expose no serial console, and one at the stock 16 MiB payload
+# ceiling has no budget for a display driver inside the initramfs either (see
+# modules.d/veyron), so there an initramfs failure is a silent white screen. This
+# script runs from initramfs-tools' panic() -- i.e. exactly when the boot has given up
 # -- and writes the full story (cmdline, block devices, loaded modules, dmesg) to
 # the root of every ext4 partition it can reach. Pulling the medium afterwards
 # and looking for BOOT2DEB-PANIC.txt replaces a serial log. If the file never

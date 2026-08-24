@@ -75,10 +75,11 @@ splash about 30 seconds later. A board that *never* reboots means the kernel nev
 the initramfs at all. A panic also writes a full dmesg to `BOOT2DEB-PANIC.txt` on every
 ext4 partition it can reach.
 
-Expect 8-10 seconds of white screen on a healthy boot before the display comes up: the
-standard image leaves the DRM stack out of the initramfs to keep the signed payload
-comfortably under its 16 MiB ceiling, so the console appears only once the real root is
-mounted.
+Expect a few seconds of white screen on a healthy boot before the display comes up: the
+image leaves the DRM stack out of the initramfs to keep the signed payload under its
+16 MiB ceiling, so the console appears only once the real root is mounted. The same
+arrangement on the [C201](asus-c201.md) takes about 5 seconds from eMMC and about 8 from
+USB, the difference being the time the initramfs spends enumerating the stick.
 
 ## Installing to the eMMC
 

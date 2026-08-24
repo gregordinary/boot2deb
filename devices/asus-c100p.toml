@@ -35,6 +35,12 @@ image_size              = "2G"
 # A laptop, with a keyboard under the user's hands. The C100PA ships a US layout.
 keymap                  = "us"
 
+# What no build lifts on this board, beyond what socs/rk3288.toml states of the
+# silicon. Rendered in the support matrix and printed at the end of a build.
+caveats = [
+  "Two display controllers advertise the same maximum resolution and DRM decides at runtime which one the HDMI encoder lands on; the smaller (VOPL) tops out at 2560x1600. A 4K display showing only part of the picture is that, and `dmesg | grep -i vop` says which controller it got.",
+]
+
 # --- The board profile ---------------------------------------------------------
 # One profile: depthcharge-tools carries `minnie` as a first-class board, and it ships
 # no libreboot variant for it — the family's only libreboot profile is the C201's.

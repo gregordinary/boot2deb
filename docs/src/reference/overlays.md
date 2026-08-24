@@ -48,14 +48,32 @@ The search path is the shipped root first, then each `--overlay` in the order gi
   entry included.
 
 A layer file present only in an overlay simply adds a new target (nothing to merge).
-Fragments, blobs, and per-feature/-layer rootfs trees (both `overlay/` and
-`overlay-pre/`) resolve along the same path: a same-named asset in an overlay shadows the
-shipped one, while rootfs trees present in both roots stack (shipped first, overlay
+Fragments, blobs, and per-feature/-layer rootfs trees (`overlay/`, `overlay-pre/` and
+`overlay-nonfree/`) resolve along the same path: a same-named asset in an overlay shadows
+the shipped one, while rootfs trees present in both roots stack (shipped first, overlay
 last).
+
+## The three rootfs trees
+
+A layer can carry up to three trees, which differ in *when* they are laid in and
+*whether* they are:
+
+| Tree | Laid in | Carried by |
+|---|---|---|
+| `overlay-pre/` | before any package installs, so a maintainer script sees the config while it runs | any layer |
+| `overlay/` | after every package, so it wins over whatever a package shipped | any layer |
+| `overlay-nonfree/` | with `overlay/`, and **only** when the build is not [libre](config-model.md#a-deblobbed-kernel-decides-the-whole-image) | a SoC or device layer |
+
+`overlay-nonfree/` is where a hardware layer vendors nonfree firmware Debian does not
+package — on the RK3288 that is the two Broadcom blobs in `socs/rk3288/overlay-nonfree/`.
+It stacks directly after its own layer's `overlay/`, so a board's own file still wins
+over what it extends. It is a separate tree rather than a subtraction from `overlay/`
+so that every blob a layer ships sits in one directory you can audit, and a libre build
+skipping it cannot miss one by spelling a path wrong.
 
 ## File modes in a rootfs `overlay/` tree
 
-A per-layer `overlay/` or `overlay-pre/` tree is copied into the image, and its modes are
+A per-layer `overlay/`, `overlay-pre/` or `overlay-nonfree/` tree is copied into the image, and its modes are
 normalized to **git's own file model** on the way in: directories become `0755`, and a file
 becomes `0755` if its executable bit is set and `0644` otherwise. Symlinks are untouched.
 

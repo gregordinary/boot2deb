@@ -30,11 +30,12 @@
 //! other package and needs no separate fetch step.
 
 mod provisioner;
-pub use provisioner::{build_rootfs, sweep_provisioned};
+pub(crate) use provisioner::feature_repositories;
+pub use provisioner::{build_rootfs, read_plan_record, sweep_provisioned, PlanRecord};
 
 use crate::error::EngineError;
 use crate::event::Step;
-use boot2deb_core::model::{AptSource, ResolvedBuild};
+use boot2deb_core::model::{AptSource, InitramfsCompress, ResolvedBuild};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -139,6 +140,21 @@ pub struct RootfsOptions<'a> {
     /// Where the solved package manifest is written (the lock's `[rootfs].manifest`
     /// points at it).
     pub manifest_out: &'a Path,
+    /// A plan document from an earlier build, replayed instead of resolving one
+    /// (`reproduce`). `None` — every ordinary build — resolves against the mirrors.
+    ///
+    /// Set, the archive is not consulted at all: no release is fetched and no package
+    /// index is, and the exact versions the document names are installed by the digests
+    /// it records. **That moves the trust anchor.** An ordinary build's package digests
+    /// chain to the archive signature that vouched for the index they came from; a
+    /// replay's chain to this document, because the index that would have carried the
+    /// signature is never read. Each `.deb` is still verified against the digest here,
+    /// so a mirror serving different bytes is caught — what is no longer checked is that
+    /// the document itself describes a set the archive ever offered.
+    ///
+    /// That trade is right for reproducing a published image and wrong for a routine
+    /// build, which is why it is reachable only through the command that names it.
+    pub pinned_plan: Option<&'a Path>,
     /// Ordered Debian mirror list the bootstrap fetches from — the live mirror,
     /// plus a `snapshot.debian.org` mirror when a captured snapshot is activated
     /// (resolved by [`crate::snapshot::resolve_mirrors`]). Must be non-empty;
@@ -195,6 +211,10 @@ pub enum BootConfig<'a> {
         /// which `depthchargectl` derives from `/etc/fstab`, here and again on every
         /// on-device kernel upgrade.
         cmdline: &'a str,
+        /// The compressor `mkinitramfs` builds this board's initramfs with, resolved
+        /// from the kernel slot's size. It has to be in place before the kernel package
+        /// is, or the first initramfs is built with the wrong one and thrown away.
+        initramfs_compress: InitramfsCompress,
     },
 }
 
@@ -221,6 +241,20 @@ pub struct RootfsArtifacts {
     pub tar: PathBuf,
     /// The solved package manifest (`name version arch sha256` per line).
     pub manifest: PathBuf,
+    /// The plan document: the install set *and* the archive state it resolved against,
+    /// in the archive's own deb822 control format.
+    ///
+    /// The manifest beside it answers "which package bytes shipped"; this additionally
+    /// answers "selected from what", and it is the form a later
+    /// [`pinned_plan`](RootfsOptions::pinned_plan) replays. A `reproduce` run republishes
+    /// the document it was given, byte for byte, rather than re-rendering the plan it
+    /// parsed — see [`RootfsProvenance::plan_sha256`](boot2deb_core::provenance::RootfsProvenance::plan_sha256).
+    ///
+    /// What it contributes to the provenance manifest is read back off this file by
+    /// [`read_plan_record`], not carried alongside it: the manifest describes the
+    /// published document, so the digest it records must be the digest of what was
+    /// published.
+    pub plan: PathBuf,
 }
 
 /// Copy the layer overlay trees into `staging` (each existing dir, in order, via
@@ -412,16 +446,27 @@ fn stage_preinstall_overlay(
     overlay_dirs: &[PathBuf],
     build: &ResolvedBuild,
     boot: Option<BootConfig>,
+    source_date_epoch: Option<u64>,
     step: &Step,
 ) -> Result<(), EngineError> {
     copy_overlay_trees(staging, overlay_dirs, step)?;
-    if let Some(BootConfig::Depthcharge { board, cmdline }) = boot {
+    if let Some(BootConfig::Depthcharge {
+        board,
+        cmdline,
+        initramfs_compress,
+    }) = boot
+    {
         write_staged(
             staging,
             "etc/depthcharge-tools/config",
             &config::depthcharge_config(board, false),
         )?;
         write_staged(staging, "etc/kernel/cmdline", &format!("{cmdline}\n"))?;
+        write_staged(
+            staging,
+            "etc/initramfs-tools/conf.d/depthcharge.conf",
+            &config::depthcharge_initramfs_conf(initramfs_compress),
+        )?;
     }
 
     write_staged(
@@ -648,7 +693,9 @@ pub fn validate_tar(tarball: &Path) -> Result<(), EngineError> {
 /// Generated rootfs config files, rendered from resolved values. Pure —
 /// each returns the exact file content — so the config is unit-testable.
 mod config {
-    use boot2deb_core::model::{Keymap, ResolvedBoot, ResolvedBuild, CONSOLE_LOGLEVEL_ARG};
+    use boot2deb_core::model::{
+        InitramfsCompress, Keymap, ResolvedBoot, ResolvedBuild, CONSOLE_LOGLEVEL_ARG,
+    };
     use std::fmt::Write;
     use uuid::Uuid;
 
@@ -685,10 +732,21 @@ mod config {
                  # editing it, re-sign with `depthchargectl write --allow-current`",
             ),
         };
+        // Data volumes follow root, mounted by LABEL and with `nofail`, so a board
+        // whose data disk is absent or slow to enumerate still boots. The
+        // first-boot hook creates or adopts the volume these lines name; the lines
+        // themselves are here at build time so the mount survives every later boot
+        // without the hook, which runs exactly once.
+        let data: String = build
+            .data_volumes
+            .iter()
+            .map(|v| format!("{}\n", v.fstab_line()))
+            .collect();
         format!(
             "{note}\n\
              # <device>\t<mount>\t<type>\t<options>\t\t<dump> <pass>\n\
-             {source}\t/\text4\terrors=remount-ro\t0      1\n"
+             {source}\t/\text4\terrors=remount-ro\t0      1\n\
+             {data}"
         )
     }
 
@@ -715,6 +773,41 @@ mod config {
         )
     }
 
+    /// `/etc/initramfs-tools/conf.d/depthcharge.conf` — the two initramfs settings a
+    /// signed-payload board has to state outright.
+    ///
+    /// Generated rather than shipped as an overlay file because the compressor is not a
+    /// free choice: it follows from the kernel slot's size
+    /// ([`InitramfsCompress`](boot2deb_core::model::InitramfsCompress)), and a static
+    /// file would make every board take the narrowest board's answer.
+    ///
+    /// A drop-in, not `/etc/initramfs-tools/initramfs.conf`, which is a conffile:
+    /// writing that before the package unpacks makes dpkg prompt about a
+    /// locally-modified file. `mkinitramfs` reads `conf.d/*` unconditionally, so a
+    /// drop-in has the same effect and no packaging conflict.
+    ///
+    /// `MODULES=list`, not `dep`, for two reasons and the second is the sharp edge:
+    ///
+    ///  - Budget. A `MODULES=most` initramfs does not fit under the payload ceiling once
+    ///    the kernel image has taken its share.
+    ///  - Correctness under cross-build. `MODULES=dep` guesses from the *building*
+    ///    system's mounted `/sys` and `/`, so in an armhf rootfs on an x86_64 host it
+    ///    resolves the host's root device and produces an initramfs with none of the
+    ///    drivers the board needs. It is only meaningful when built on the target; an
+    ///    explicit list is deterministic and works in both places.
+    ///
+    /// The list itself is a config-layer drop-in under
+    /// `usr/share/initramfs-tools/modules.d/`, so which modules a board carries stays
+    /// with the board.
+    pub fn depthcharge_initramfs_conf(compress: InitramfsCompress) -> String {
+        format!(
+            "# Generated by boot2deb.\n\
+             MODULES=list\n\
+             COMPRESS={}\n",
+            compress.as_str()
+        )
+    }
+
     /// `/etc/hostname`.
     pub fn hostname(h: &str) -> String {
         format!("{h}\n")
@@ -728,8 +821,12 @@ mod config {
         )
     }
 
-    /// `/etc/apt/sources.list` for `suite` with the standard component set, one line
-    /// per pocket the suite actually publishes.
+    /// `/etc/apt/sources.list` for `suite` over `components`, one line per pocket the
+    /// suite actually publishes.
+    ///
+    /// `components` is the set this image was *provisioned* from, so what the booted
+    /// board can install matches what the build could: a libre image, whose kernel
+    /// loads no blob, does not offer `non-free-firmware` on the console either.
     ///
     /// The pocket set comes from [`suite::pockets`](boot2deb_core::suite::pockets)
     /// rather than a `{suite}-security`/`{suite}-updates` format string, because it
@@ -742,12 +839,15 @@ mod config {
     /// mirror built it. Plain `http://` is standard Debian practice: apt verifies each
     /// `Release` signature against the device's archive keyring, so the transport
     /// carries no integrity burden.
-    pub fn apt_sources(suite: &str) -> String {
+    pub fn apt_sources(suite: &str, components: &str) -> String {
+        // The provisioner takes its components comma-separated; a sources.list line
+        // wants them space-separated.
+        let components = components.replace(',', " ");
         boot2deb_core::suite::pockets(suite)
             .iter()
             .map(|p| {
                 format!(
-                    "deb http://deb.debian.org/{} {} main contrib non-free non-free-firmware\n",
+                    "deb http://deb.debian.org/{} {} {components}\n",
                     p.archive, p.suite
                 )
             })
@@ -1120,7 +1220,7 @@ mod tests {
         );
 
         for layer in layer_dirs {
-            for overlay in ["overlay", "overlay-pre"] {
+            for overlay in ["overlay", "overlay-pre", "overlay-nonfree"] {
                 let hooks = layer.join(overlay).join("etc/boot2deb/first-boot.d");
                 let Ok(entries) = std::fs::read_dir(&hooks) else {
                     continue; // this layer ships no hooks, which is the common case
@@ -1227,6 +1327,43 @@ mod tests {
     }
 
     #[test]
+    fn a_data_volume_follows_root_by_label_and_cannot_block_the_boot() {
+        use boot2deb_core::datavolume::{
+            CreatePolicy, DataVolume, DiskKind, VolumeFs, VolumeMatch,
+        };
+        let mut b = rk1();
+        b.data_volumes = vec![DataVolume {
+            match_: VolumeMatch::Kind(DiskKind::Nvme),
+            label: "b2d-data".into(),
+            fstype: VolumeFs::Ext4,
+            mount: "/srv".into(),
+            create: CreatePolicy::IfBlank,
+        }];
+        let f = config::fstab(&b, PARTUUID);
+        let lines: Vec<&str> = f.lines().filter(|l| !l.starts_with('#')).collect();
+
+        // Root still comes first and still roots on the PARTUUID.
+        assert!(lines[0].starts_with(&format!("PARTUUID={}", PARTUUID.hyphenated())));
+        // The data volume mounts by LABEL: the one identifier that survives the disk
+        // moving slots, and the whole point of a volume that outlives its image.
+        assert_eq!(
+            lines[1],
+            "LABEL=b2d-data\t/srv\text4\tdefaults,nofail,x-systemd.device-timeout=10s\t0 2"
+        );
+        // A missing or slow data disk must never be why a system will not boot.
+        assert!(lines[1].contains("nofail"));
+    }
+
+    #[test]
+    fn a_build_with_no_data_volumes_writes_the_fstab_it_always_did() {
+        // The feature is opt-in, so an image that declares none must not gain a line,
+        // a blank, or a comment about an axis it does not use.
+        let f = config::fstab(&rk1(), PARTUUID);
+        assert_eq!(f.lines().filter(|l| !l.starts_with('#')).count(), 1);
+        assert!(!f.contains("LABEL="));
+    }
+
+    #[test]
     fn the_build_time_depthcharge_config_disarms_the_kernel_hooks() {
         // False during the build: the hook it gates runs `depthchargectl write`, which
         // hunts the *host's* block devices for a ChromeOS kernel partition. With the
@@ -1240,15 +1377,80 @@ mod tests {
     }
 
     #[test]
+    fn the_depthcharge_initramfs_conf_states_the_list_and_the_slot_s_compressor() {
+        // Pinned rather than probed: this file is what every `update-initramfs` on the
+        // board reads, at build time and for the life of the image.
+        assert_eq!(
+            config::depthcharge_initramfs_conf(InitramfsCompress::Xz),
+            "# Generated by boot2deb.\nMODULES=list\nCOMPRESS=xz\n"
+        );
+        assert_eq!(
+            config::depthcharge_initramfs_conf(InitramfsCompress::Zstd),
+            "# Generated by boot2deb.\nMODULES=list\nCOMPRESS=zstd\n"
+        );
+    }
+
+    #[test]
+    fn a_depthcharge_board_is_told_its_compressor_before_a_kernel_package_arrives() {
+        // The whole reason this is pre-install config: `MODULES=list` and `COMPRESS=`
+        // have to be readable when the kernel package's own hooks build the first
+        // initramfs, or that one is built wrong and thrown away.
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "test");
+        stage_preinstall_overlay(
+            tmp.path(),
+            &[],
+            &c201(),
+            Some(BootConfig::Depthcharge {
+                board: "speedy-libreboot",
+                cmdline: "console=tty1 ro",
+                initramfs_compress: InitramfsCompress::Zstd,
+            }),
+            None,
+            &step,
+        )
+        .unwrap();
+        let conf = std::fs::read_to_string(
+            tmp.path()
+                .join("etc/initramfs-tools/conf.d/depthcharge.conf"),
+        )
+        .unwrap();
+        assert!(conf.contains("COMPRESS=zstd"), "{conf}");
+        assert!(conf.contains("MODULES=list"), "{conf}");
+
+        // A raw-gap board has no signed payload and generates none of this.
+        let rkbin = tempfile::tempdir().unwrap();
+        stage_preinstall_overlay(rkbin.path(), &[], &rk1(), None, None, &step).unwrap();
+        assert!(!rkbin
+            .path()
+            .join("etc/initramfs-tools/conf.d/depthcharge.conf")
+            .exists());
+    }
+
+    #[test]
     fn apt_sources_has_suite_pockets_and_components() {
         // The emitted text is pinned rather than probed for substrings: this file is
         // what every `apt update` on the shipped board reads, and the component list
         // and archive-per-pocket split are both part of the contract.
         assert_eq!(
-            config::apt_sources("forky"),
+            config::apt_sources("forky", crate::bootstrap::COMPONENTS),
             "deb http://deb.debian.org/debian forky main contrib non-free non-free-firmware\n\
              deb http://deb.debian.org/debian-security forky-security main contrib non-free non-free-firmware\n\
              deb http://deb.debian.org/debian forky-updates main contrib non-free non-free-firmware\n"
+        );
+    }
+
+    #[test]
+    fn a_libre_image_offers_only_the_free_archive() {
+        // The whole point of the libre axis reaching this file: an image whose kernel
+        // cannot load a blob does not offer `non-free-firmware` to the person at its
+        // console either. Every pocket narrows, not just the first.
+        assert_eq!(
+            config::apt_sources("forky", crate::bootstrap::FREE_COMPONENTS),
+            "deb http://deb.debian.org/debian forky main\n\
+             deb http://deb.debian.org/debian-security forky-security main\n\
+             deb http://deb.debian.org/debian forky-updates main\n"
         );
     }
 
@@ -1259,11 +1461,11 @@ mod tests {
         // reported two dead sources on every `apt update`. `sid` is a documented,
         // deliberate suite value, so the fix belongs here and not in suite validation.
         assert_eq!(
-            config::apt_sources("sid"),
+            config::apt_sources("sid", crate::bootstrap::COMPONENTS),
             "deb http://deb.debian.org/debian sid main contrib non-free non-free-firmware\n"
         );
         assert_eq!(
-            config::apt_sources("unstable"),
+            config::apt_sources("unstable", crate::bootstrap::COMPONENTS),
             "deb http://deb.debian.org/debian unstable main contrib non-free non-free-firmware\n"
         );
     }
@@ -1340,7 +1542,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(tmp.path(), &[], &rk1(), None, &step).unwrap();
+        stage_preinstall_overlay(tmp.path(), &[], &rk1(), None, None, &step).unwrap();
 
         assert!(tmp.path().join("etc/locale.conf").is_file());
         assert!(
@@ -1366,7 +1568,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "test");
-        stage_overlay(tmp.path(), &[], &build, uuid::Uuid::nil(), &identity, &step).unwrap();
+        stage_overlay(
+            tmp.path(),
+            &[],
+            &build,
+            uuid::Uuid::nil(),
+            &identity,
+            None,
+            &step,
+        )
+        .unwrap();
 
         let path = tmp.path().join("etc/boot2deb/image.toml");
         let text = std::fs::read_to_string(&path).expect("identity staged into the rootfs");
@@ -1395,7 +1606,16 @@ mod tests {
         // empty string a reader would have to special-case.
         let rk = rk1();
         let tmp2 = tempfile::tempdir().unwrap();
-        stage_overlay(tmp2.path(), &[], &rk, uuid::Uuid::nil(), &ident(&rk), &step).unwrap();
+        stage_overlay(
+            tmp2.path(),
+            &[],
+            &rk,
+            uuid::Uuid::nil(),
+            &ident(&rk),
+            None,
+            &step,
+        )
+        .unwrap();
         let rk_text = std::fs::read_to_string(tmp2.path().join("etc/boot2deb/image.toml")).unwrap();
         assert!(rk_text.contains("boot_method = \"rockchip-rkbin\""));
         assert!(!rk_text.contains("board ="));
@@ -1417,6 +1637,7 @@ mod tests {
             &build,
             uuid::Uuid::nil(),
             &ident(&build),
+            None,
             &step,
         )
         .unwrap();
@@ -1455,7 +1676,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(tmp.path(), &[], &rk1(), None, &step).unwrap();
+        stage_preinstall_overlay(tmp.path(), &[], &rk1(), None, None, &step).unwrap();
 
         let link = tmp.path().join("etc/localtime");
         assert_eq!(
@@ -1474,7 +1695,7 @@ mod tests {
         // the one keyboard-configuration seeds its debconf answers from.
         let laptop = tempfile::tempdir().unwrap();
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(laptop.path(), &[], &c201(), None, &step).unwrap();
+        stage_preinstall_overlay(laptop.path(), &[], &c201(), None, None, &step).unwrap();
         let kb = std::fs::read_to_string(laptop.path().join("etc/default/keyboard")).unwrap();
         assert!(kb.contains("XKBLAYOUT=\"us\""));
         assert!(kb.contains("XKBMODEL=\"pc105\""));
@@ -1483,7 +1704,7 @@ mod tests {
         // a claim we cannot back; Debian's own default stands instead.
         let headless = tempfile::tempdir().unwrap();
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(headless.path(), &[], &rk1(), None, &step).unwrap();
+        stage_preinstall_overlay(headless.path(), &[], &rk1(), None, None, &step).unwrap();
         assert!(!headless.path().join("etc/default/keyboard").exists());
     }
 

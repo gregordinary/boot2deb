@@ -133,6 +133,8 @@ Resolve a device or recipe to a complete build (no build work)
 | `--locale-gen` | `<LOCALES_GENERATE>`, repeatable | Extra locale to generate into the image, repeatable (`--locale-gen fr_FR.UTF-8`). When any is given, replaces the base `locales_generate` list; the system locale is generated regardless |
 | `--timezone` | `<TIMEZONE>` | System timezone (e.g. `America/New_York`); default: the recipe/base `timezone` |
 | `--keymap` | `<KEYMAP>` | Console keyboard layout (e.g. `gb`); default: the recipe/device `keymap`, and none at all on a headless board. Sets `XKBLAYOUT`; the model, variant, and options keep their defaults — set those in the device's `[keymap]` table |
+| `--sudo` | `<SUDO>` | What `sudo` asks of the default account: `nopasswd` (root with no prompt) or `password` (prompts for the account's own); default: the recipe/base `sudo` |
+| `--password-length` | `<PASSWORD_LENGTH>` | Length of the generated per-image first-boot password; default: the recipe/base `first_boot_password_length`. Shorter is friendlier to transcribe at a console and weaker in exactly one way — an attack on the password hash inside a shared image — so authorize an SSH key (`ssh_authorized_keys`) rather than shortening this if the goal is to stop typing it |
 
 
 ## doctor
@@ -158,6 +160,8 @@ Preflight the host: arch/OS facts, and whether every tool a build needs is prese
 | `--locale-gen` | `<LOCALES_GENERATE>`, repeatable | Extra locale to generate into the image, repeatable (`--locale-gen fr_FR.UTF-8`). When any is given, replaces the base `locales_generate` list; the system locale is generated regardless |
 | `--timezone` | `<TIMEZONE>` | System timezone (e.g. `America/New_York`); default: the recipe/base `timezone` |
 | `--keymap` | `<KEYMAP>` | Console keyboard layout (e.g. `gb`); default: the recipe/device `keymap`, and none at all on a headless board. Sets `XKBLAYOUT`; the model, variant, and options keep their defaults — set those in the device's `[keymap]` table |
+| `--sudo` | `<SUDO>` | What `sudo` asks of the default account: `nopasswd` (root with no prompt) or `password` (prompts for the account's own); default: the recipe/base `sudo` |
+| `--password-length` | `<PASSWORD_LENGTH>` | Length of the generated per-image first-boot password; default: the recipe/base `first_boot_password_length`. Shorter is friendlier to transcribe at a console and weaker in exactly one way — an attack on the password hash inside a shared image — so authorize an SSH key (`ssh_authorized_keys`) rather than shortening this if the goal is to stop typing it |
 
 
 ## update
@@ -172,12 +176,12 @@ Resolve upstream refs + hash blobs and write the recipe's `.lock`. The sole path
 | --- | --- | --- |
 | `--feature` | `<FEATURES>`, repeatable | Rootfs feature to select, repeatable (`--feature jellyfin --feature media-accel-rockchip`). Replaces the recipe's own feature list and pins the result as a *variant* of the recipe: the lock, its solved package manifest, and the build directory are all named `<recipe>+<feature>...`, so the recipe's own lock is left alone and two selections never collide. Order is significant — kernel fragments and patch series compose in selection order. A variant carries no `[support]` claim; the claim belongs to the recipe |
 | `--kernel-ref` | `<KERNEL_REF>` | Kernel ref to pin, resolved to a commit (e.g. v7.1.1). Optional once a lock exists: omitting it re-pins the *previous lock's* kernel ref, so a routine re-pin (e.g. after importing a patch) needs no kernel tag the user did not touch. Required only for the first update, which has no prior ref to inherit. Auto-resolving a kernel `track` to its latest tag is a later refinement |
-| `--uboot-ref` | `<UBOOT_REF>` | u-boot ref to pin (default: the boot-method's `uboot_ref`) |
-| `--mpp-ref` | `<MPP_REF>` | MPP source ref to pin (default: the SoC layer's `userspace.mpp` ref) |
-| `--librga-ref` | `<LIBRGA_REF>` | librga source ref to pin (default: the SoC layer's `userspace.librga`) |
-| `--libmali-ref` | `<LIBMALI_REF>` | libmali source ref to pin (default: the SoC layer's `userspace.libmali`) |
-| `--ffmpeg-base-ref` | `<FFMPEG_BASE_REF>` | ffmpeg base (V4L2) ref to pin (default: the SoC layer's `ffmpeg.base`) |
-| `--ffmpeg-rockchip-ref` | `<FFMPEG_ROCKCHIP_REF>` | ffmpeg Rockchip provenance-tree ref to pin (default: the SoC layer's `ffmpeg.rockchip`). Recorded as the graft's provenance; not fetched |
+| `--uboot-ref` | `<UBOOT_REF>` | u-boot ref to pin. Defaults to the boot-method's `uboot_ref`, re-read on every update, so bumping that one constraint moves every board on the method — except a lock already pinned to a bare commit sha, which is kept as the deliberate hand-pin only this flag can have created |
+| `--mpp-ref` | `<MPP_REF>` | MPP source ref to pin. Defaults to the SoC layer's `userspace.mpp` ref, re-read on every update; a lock pinned to a bare commit sha is kept instead |
+| `--librga-ref` | `<LIBRGA_REF>` | librga source ref to pin. Defaults to the SoC layer's `userspace.librga`, re-read on every update; a lock pinned to a bare commit sha is kept instead |
+| `--libmali-ref` | `<LIBMALI_REF>` | libmali source ref to pin. Defaults to the SoC layer's `userspace.libmali`, re-read on every update; a lock pinned to a bare commit sha is kept instead |
+| `--ffmpeg-base-ref` | `<FFMPEG_BASE_REF>` | ffmpeg base (V4L2) ref to pin. Defaults to the SoC layer's `ffmpeg.base`, re-read on every update; a lock pinned to a bare commit sha is kept instead |
+| `--ffmpeg-rockchip-ref` | `<FFMPEG_ROCKCHIP_REF>` | ffmpeg Rockchip provenance-tree ref to pin. Defaults to the SoC layer's `ffmpeg.rockchip`, re-read on every update; a lock pinned to a bare commit sha is kept instead. Recorded as the graft's provenance; not fetched |
 | `--patches-path` | `<PATCHES_PATH>` | `patches` repo checkout whose HEAD pins the series (default: the config root's sibling `../patches`). `update` requires this local clone when the kernel names a patch series — the pin *is* its HEAD — unlike `build`, which auto-fetches the already-pinned commit and needs no checkout |
 | `--blobs-dir` | `<BLOBS_DIR>` | Vendored rkbin blob directory (default: blobs/SOC under the config root) |
 | `--rootfs-manifest` | `<ROOTFS_MANIFEST>` | Name recorded for the solved package manifest the rootfs stage writes (default: RECIPE.pkgs.lock) |
@@ -224,6 +228,16 @@ Generate the kernel `.config` (base defconfig + fragments via `merge_config.sh`)
 | `--patches-path` | `<PATCHES_PATH>` | `patches` repo checkout the kernel series is read from when auto-fetching the tree (ignored with `--kernel-path`, which is assumed already patched). Omit to use the config root's sibling `../patches` if present, else auto-fetch at the lock's `patches.commit` |
 | `--patches-url` | `<PATCHES_URL>` | Clone URL for auto-fetching the `patches` series; default: the kernel definition's `patches_url`. Used only when auto-fetching the kernel tree |
 
+
+## verify-packages
+
+Ask the archives a build would resolve against whether they carry every package the recipe names, and report the ones they do not. Runs the read half of a resolve — release and indexes, nothing downloaded, no closure computed — so one pass answers every name at once, before any build work starts
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `recipe` | yes | Recipe whose resolved package set to check (e.g. turing-rk1/forky) |
+
+This command takes no flags of its own.
 
 ## verify-sources
 
@@ -293,17 +307,102 @@ Drive the build stages (kernel, u-boot, userspace, ffmpeg, and the disk image) f
 | `--jobs` | `<JOBS>` | `make -j` parallelism (default: host available parallelism). Must be at least 1 — 0 would reach `make -j0` ("unlimited"), never what a typo means |
 | `--rootfs-tar` | `<ROOTFS_TAR>` | Rootfs `tar` archive for the image stage. Optional: `--stage image` otherwise uses the tar the rootfs stage produced (auto-discovered in the output dir), so this is only needed to point at a tar built elsewhere |
 | `--rootfs-label` | `<ROOTFS_LABEL>` (default `rootfs`) | ext4 volume label / GPT partition name for the image rootfs |
-| `--no-compress` |  | Skip `.xz` compression of the finished image(s) |
-| `--keep-raw` |  | Keep the raw `.img` after compressing it (default: delete it once the `.xz` is written, since it is derivable and the largest artifact). Conflicts with `--no-compress`, under which the raw image is the only output anyway |
+| `--compress` | `xz` \| `gz` \| `none`, repeatable (default `xz`) | Containers to compress the finished image(s) into, comma-separated and in preference order — `xz` (default), `gz`, or `none`. Use `gz` for an image u-boot will write to a disk itself: `gzwrite` reads gzip only, never xz. `--compress xz,gz` emits both; the first named is what the `next:` hint points at |
+| `--keep-raw` |  | Keep the raw `.img` after compressing it (default: delete it once every requested container is written, since it is derivable and the largest artifact). Has no effect under `--compress none`, where the raw image is the only output anyway |
 | `--layout` | `<LAYOUT>` | Image layout override (`combined` \| `split`); default: the recipe/device layout. Lock-independent — it changes only image packaging, not any pinned source, so it is safe to set against an existing lock |
-| `--image-size` | `<IMAGE_SIZE>` | Image-size override (e.g. `4G`); default: the recipe/device `image_size`. Lock-independent — it changes only image geometry, not any pinned source |
+| `--image-size` | `<IMAGE_SIZE>` | Image-size override (e.g. `4G`, or `fit+20%` to size the image to its contents with a fifth of the rootfs left free); default: the recipe/device `image_size`. Lock-independent — it changes only image geometry, not any pinned source |
 | `--snapshot` | `<SNAPSHOT>` | Snapshot activation for the rootfs bootstrap: `off` (live mirror), `fallback` (live first, `snapshot.debian.org` fills 404s), `pin` (snapshot only, fully deterministic). Default: the lock's captured mode (off if none). `fallback`/`pin` need a captured snapshot (`--save-snapshot`) |
 | `--save-snapshot` |  | After a successful build, capture the current UTC time as a `snapshot.debian.org` timestamp into the lock (dormant, `mode = off`), so the solved versions stay fetchable after they rotate off the live mirror; a later build activates it with `--snapshot fallback\|pin` |
 | `--save-manifest` |  | After the rootfs stage, commit the solved package manifest beside the lock and record its sha256 in the lock (`[rootfs].manifest_sha256`) — the reproducibility pin later builds verify a fresh solve against |
 | `--allow-manifest-drift` |  | Downgrade a solved-manifest drift from the committed pin to a warning instead of a hard error — for co-development or a knowingly-moved mirror. Re-pin deliberately with `--save-manifest` (which skips the drift check entirely, so combining the two is rejected as contradictory) |
+| `--sbom` | `spdx` \| `cyclonedx`, repeatable | Also write a software bill of materials beside the image, in this format (repeatable — `--sbom spdx --sbom cyclonedx` writes both). Off by default, so a build never silently gains a file; the same documents can be produced later from the published provenance manifest with `boot2deb sbom`. Set `SOURCE_DATE_EPOCH` for a byte-reproducible document — everything else in it is derived from the image's own content |
 | `--refresh-rootfs` |  | Ignore a rootfs cache hit and re-bootstrap, refreshing the stored tree. The plan is still resolved — the rootfs cache keys on the *solved* set, so a moved mirror already rebuilds automatically; this is the manual escape when you want a clean bootstrap regardless |
 | `--no-artifact-cache` |  | Disable the Tier-2 artifact cache: always recompile the kernel / u-boot / userspace / ffmpeg `.deb`s instead of restoring a stored output on a signature hit, and do not store this build's outputs. The durable store at `<root>/cache/artifacts` is left untouched |
 
+
+## reproduce
+
+Rebuild an image from the plan document a previous build published, instead of resolving the archive afresh. The lock pins the sources; the plan pins the package versions the archive served, which the lock cannot. Takes every `build` flag, and differs from it in one way: the rootfs installs the plan's exact set by the digests it records, reading neither a release nor a package index — so the plan, not an archive signature, is what those digests chain to
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `recipe` | yes | Recipe to reproduce (e.g. turing-rk1/forky); its `.lock` must exist |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--from` | `<FROM>` | Directory holding the published `<stem>.plan` (and, for the builder advisory, `<stem>.provenance.toml`) — the directory the image shipped from. Default: this build point's own output dir, which is where a build on this machine already published them |
+| `--feature` | `<FEATURES>`, repeatable | Rootfs feature to select, repeatable — the same selection `update --feature` pinned. It names which lock to build from (`<recipe>+<feature>...`), it does not re-resolve one: `update` must have written that variant's lock first, and a selection with no lock is an error naming the `update` line to run. Passing the reference directly (`build turing-rk1/forky+jellyfin`) is equivalent |
+| `--stage` | `all` \| `kernel` \| `dtb` \| `kmod` \| `uboot` \| `userspace` \| `ffmpeg` \| `rootfs` \| `image` (default `all`) | Which stage(s) to run |
+| `--kernel-src` | `<KERNEL_SRC>` | Kernel clone source (git URL or local path); default: the kernel definition's source URL. A local clone (e.g. ../linux) is far faster |
+| `--uboot-src` | `<UBOOT_SRC>` | u-boot clone source (git URL or local path); default: the boot method's `uboot_source` |
+| `--mpp-src` | `<MPP_SRC>` | MPP clone source (git URL or local path); default: the SoC layer's `userspace.mpp` URL. A local checkout (e.g. ../mpp-rockchip) is far faster |
+| `--librga-src` | `<LIBRGA_SRC>` | librga clone source; default: the SoC layer's `userspace.librga` URL |
+| `--libmali-src` | `<LIBMALI_SRC>` | libmali clone source; default: the SoC layer's `userspace.libmali` URL |
+| `--ffmpeg-base-src` | `<FFMPEG_BASE_SRC>` | ffmpeg base (Kwiboo) clone source; default: the SoC layer's `ffmpeg.base` URL. A local checkout makes the fetch near-instant |
+| `--kmod-src` | `<NAME=SRC>`, repeatable | Out-of-tree module clone source, as `NAME=SRC`, repeatable; default: that kmod's locked `source`. Unlike the single-tree axes there are several modules, so each override names the `device_kmods` entry it applies to (`--kmod-src aic8800=../aic8800`). The clone is still made at the locked commit, so the named tree must contain it |
+| `--build-libmali` |  | Also build the Mali userspace (off by default — unused on a headless box) |
+| `--patches-path` | `<PATCHES_PATH>` | `patches` repo checkout the series is read from. Omit to use the config root's sibling `../patches` (if present, with the lock's `patches.commit` enforced), else auto-fetch the series at the pinned commit from `--patches-url`/the repo the pin names. Pass an explicit path to co-develop the series from a working checkout, which downgrades a pin mismatch to a loud warning |
+| `--patches-url` | `<PATCHES_URL>` | Clone URL for auto-fetching the `patches` series when no local checkout is present; default: the repo the lock's patch pin names. The series is fetched at the lock's `patches.commit` into a durable cache and its pin enforced. Ignored when `--patches-path` or the sibling `../patches` supplies a checkout |
+| `--blobs-dir` | `<BLOBS_DIR>` | Vendored rkbin blob directory (default: blobs/SOC under the config root) |
+| `--keyring` | `<KEYRING>` | Debian archive keyring every root this build provisions is verified against (default: the vendored blobs/keyrings/debian-archive-keyring.gpg; omit on a Debian host to use its apt trust store) |
+| `--unsafe-overlay-keyring` |  | Trust an overlay-shipped copy of the archive keyring. By default an overlay that ships blobs/keyrings/debian-archive-keyring.gpg is refused as a trust-anchor swap; this opts into the overlay's copy explicitly |
+| `--work-dir` | `<WORK_DIR>` | Scratch dir for clones + builds (default: `<root>/build/RECIPE`) |
+| `--out-dir` | `<OUT_DIR>` | Where produced artifacts are staged (default: WORK_DIR/artifacts). Every artifact is named for the recipe, so several builds may share one directory |
+| `--jobs` | `<JOBS>` | `make -j` parallelism (default: host available parallelism). Must be at least 1 — 0 would reach `make -j0` ("unlimited"), never what a typo means |
+| `--rootfs-tar` | `<ROOTFS_TAR>` | Rootfs `tar` archive for the image stage. Optional: `--stage image` otherwise uses the tar the rootfs stage produced (auto-discovered in the output dir), so this is only needed to point at a tar built elsewhere |
+| `--rootfs-label` | `<ROOTFS_LABEL>` (default `rootfs`) | ext4 volume label / GPT partition name for the image rootfs |
+| `--compress` | `xz` \| `gz` \| `none`, repeatable (default `xz`) | Containers to compress the finished image(s) into, comma-separated and in preference order — `xz` (default), `gz`, or `none`. Use `gz` for an image u-boot will write to a disk itself: `gzwrite` reads gzip only, never xz. `--compress xz,gz` emits both; the first named is what the `next:` hint points at |
+| `--keep-raw` |  | Keep the raw `.img` after compressing it (default: delete it once every requested container is written, since it is derivable and the largest artifact). Has no effect under `--compress none`, where the raw image is the only output anyway |
+| `--layout` | `<LAYOUT>` | Image layout override (`combined` \| `split`); default: the recipe/device layout. Lock-independent — it changes only image packaging, not any pinned source, so it is safe to set against an existing lock |
+| `--image-size` | `<IMAGE_SIZE>` | Image-size override (e.g. `4G`, or `fit+20%` to size the image to its contents with a fifth of the rootfs left free); default: the recipe/device `image_size`. Lock-independent — it changes only image geometry, not any pinned source |
+| `--snapshot` | `<SNAPSHOT>` | Snapshot activation for the rootfs bootstrap: `off` (live mirror), `fallback` (live first, `snapshot.debian.org` fills 404s), `pin` (snapshot only, fully deterministic). Default: the lock's captured mode (off if none). `fallback`/`pin` need a captured snapshot (`--save-snapshot`) |
+| `--save-snapshot` |  | After a successful build, capture the current UTC time as a `snapshot.debian.org` timestamp into the lock (dormant, `mode = off`), so the solved versions stay fetchable after they rotate off the live mirror; a later build activates it with `--snapshot fallback\|pin` |
+| `--save-manifest` |  | After the rootfs stage, commit the solved package manifest beside the lock and record its sha256 in the lock (`[rootfs].manifest_sha256`) — the reproducibility pin later builds verify a fresh solve against |
+| `--allow-manifest-drift` |  | Downgrade a solved-manifest drift from the committed pin to a warning instead of a hard error — for co-development or a knowingly-moved mirror. Re-pin deliberately with `--save-manifest` (which skips the drift check entirely, so combining the two is rejected as contradictory) |
+| `--sbom` | `spdx` \| `cyclonedx`, repeatable | Also write a software bill of materials beside the image, in this format (repeatable — `--sbom spdx --sbom cyclonedx` writes both). Off by default, so a build never silently gains a file; the same documents can be produced later from the published provenance manifest with `boot2deb sbom`. Set `SOURCE_DATE_EPOCH` for a byte-reproducible document — everything else in it is derived from the image's own content |
+| `--refresh-rootfs` |  | Ignore a rootfs cache hit and re-bootstrap, refreshing the stored tree. The plan is still resolved — the rootfs cache keys on the *solved* set, so a moved mirror already rebuilds automatically; this is the manual escape when you want a clean bootstrap regardless |
+| `--no-artifact-cache` |  | Disable the Tier-2 artifact cache: always recompile the kernel / u-boot / userspace / ffmpeg `.deb`s instead of restoring a stored output on a signature hit, and do not store this build's outputs. The durable store at `<root>/cache/artifacts` is left untouched |
+
+
+## diff
+
+Compare two build points: the packages, the kernel pin and its requested config, the patch series and the patch files behind them, every other source pin, the rkbin blobs, and what built each side. Each side is a recipe name, a `.lock`, or a `.provenance.toml`; mixing is allowed, and a section only one side can answer is reported unavailable rather than as a change. Offline — reads documents the build already wrote
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `left` | yes | The left side: a recipe (e.g. turing-rk1/forky), or a path to a `.lock` or `.provenance.toml` |
+| `right` | yes | The right side, in any of the same forms |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--section` | `packages` \| `kernel` \| `patches` \| `sources` \| `blobs` \| `builder`, repeatable | Report only these sections (repeatable). Default: all of them |
+| `--patches-path` | `<PATCHES_PATH>` | `patches` checkout to resolve a moved patches commit into named files. Default: the config root's sibling `../patches` |
+
+
+## sbom
+
+Export an image's bill of materials as SPDX 2.3 or CycloneDX 1.6 JSON, from the provenance manifest and solved package manifest a build published. Lists every installed package with its version and sha256, every pinned source tree the image was compiled from, every rkbin blob, and every externally-fetched `.deb`. Licenses are declared NOASSERTION — boot2deb records none, and inventing them would produce a field that looks authoritative and is not. Offline; builds nothing
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `target` | yes | Recipe whose published image to describe (e.g. turing-rk1/forky), or a path to a `.provenance.toml` shipped with an image |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--format` | `spdx` \| `cyclonedx` (default `spdx`) | Document format to write |
+| `--out` | `<OUT>` | Write to this file instead of stdout |
+| `--feature` | `<FEATURES>`, repeatable | Rootfs feature the published image was built with, repeatable — the same selection `build --feature` used. It names which image's documents to read; passing the reference directly (`sbom turing-rk1/forky+jellyfin`) is equivalent. Ignored when a `.provenance.toml` path is given, which already names one image |
+
+
+## outdated
+
+Survey what has moved upstream since the locks were pinned: for each recipe's git source pins, whether a newer release tag exists (and how far behind the pin is), or whether a pinned branch's tip has moved. Read-only — one `git ls-remote` per distinct remote, no fetch and no re-pin. Being behind is not a failure, so this always exits zero; `verify-sources` is the gate, and it answers the different question of whether a pin is still fetchable at all
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `recipes` | no | Recipes to survey (e.g. turing-rk1/forky). Default: every recipe in the config tree |
+
+This command takes no flags of its own.
 
 ## why-rebuild
 

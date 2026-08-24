@@ -195,8 +195,8 @@ pub struct PatchSeries {
     /// Userspace-tree (MPP/RGA) patches, in apply order.
     #[serde(default)]
     pub userspace: Vec<PatchEntry>,
-    /// u-boot-tree patches, in apply order (empty for boards that patch no
-    /// u-boot, e.g. the RK1's pristine `v2026.04`).
+    /// u-boot-tree patches, in apply order (empty for a series that makes no
+    /// u-boot claim, such as a kernel-only fixes series).
     #[serde(default)]
     pub uboot: Vec<PatchEntry>,
 }
@@ -570,7 +570,7 @@ fn matches_range(
     mode: RangeMatch,
 ) -> Result<bool, ConfigError> {
     let req = parse_req(series, range)?;
-    let mut ver = parse_version(version)?;
+    let mut ver = crate::version::parse_tag(version)?;
     if mode == RangeMatch::Candidate {
         ver.pre = semver::Prerelease::EMPTY;
     }
@@ -581,12 +581,14 @@ fn matches_range(
 ///
 /// Each comparator's version core is normalized first, so a range may be written
 /// with the same zero padding as the tags it bounds (`">=2026.04, <2027.01"`) —
-/// see [`normalize_core`].
+/// see [`crate::version::parse_tag`].
 fn parse_req(series: &str, range: &str) -> Result<VersionReq, ConfigError> {
-    VersionReq::parse(&normalize_req(range)).map_err(|source| ConfigError::InvalidVersionReq {
-        series: series.to_string(),
-        value: range.to_string(),
-        source,
+    VersionReq::parse(&crate::version::normalize_req(range)).map_err(|source| {
+        ConfigError::InvalidVersionReq {
+            series: series.to_string(),
+            value: range.to_string(),
+            source,
+        }
     })
 }
 
@@ -672,81 +674,6 @@ impl Interval {
         };
         below(&self.lo, &other.hi) && below(&other.lo, &self.hi)
     }
-}
-
-/// Parse a version tag into a [`Version`], tolerating a leading `v`, a missing
-/// patch component (`v7.1` → `7.1.0`), and zero-padded components
-/// (`v2026.04` → `2026.4.0`). Prerelease suffixes (`-rc2`) are preserved as semver
-/// prereleases.
-///
-/// Serves both axes: kernel tags (`v7.1.3`) and u-boot's `vYYYY.MM` release tags.
-fn parse_version(s: &str) -> Result<Version, ConfigError> {
-    let stripped = s.strip_prefix('v').unwrap_or(s);
-    let (core, rest) = split_core(stripped);
-    let core = normalize_core(core);
-    // Pad a two-component core to three, so `v7.1` parses; a core that is already
-    // three parts (or one) is left as it is.
-    let padded = if core.split('.').count() == 2 {
-        format!("{core}.0")
-    } else {
-        core
-    };
-    Version::parse(&format!("{padded}{rest}")).map_err(|source| ConfigError::InvalidVersion {
-        value: s.to_string(),
-        source,
-    })
-}
-
-/// Split a version string at its first prerelease/build delimiter, into the numeric
-/// core and the untouched remainder (`""` when there is none).
-fn split_core(s: &str) -> (&str, &str) {
-    match s.find(['-', '+']) {
-        Some(i) => s.split_at(i),
-        None => (s, ""),
-    }
-}
-
-/// Strip leading zeros from each numeric component of a version core.
-///
-/// u-boot releases as `vYYYY.MM` with a zero-padded month (`v2026.04`), which semver
-/// rejects outright — "invalid leading zero in minor version number" — so without
-/// this the u-boot axis could be range-matched only by writing its versions in a
-/// spelling that appears on no tag. Non-numeric components (a `*` or `x` wildcard in
-/// a requirement) are left alone, and an all-zero component collapses to a single
-/// `0` rather than to nothing.
-fn normalize_core(core: &str) -> String {
-    core.split('.')
-        .map(|c| {
-            if c.is_empty() || !c.bytes().all(|b| b.is_ascii_digit()) {
-                return c;
-            }
-            let trimmed = c.trim_start_matches('0');
-            if trimmed.is_empty() {
-                "0"
-            } else {
-                trimmed
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-/// Apply [`normalize_core`] to every comparator in a comma-separated semver
-/// requirement, leaving each comparator's operator prefix intact — so a range may
-/// bound u-boot tags in the spelling they actually carry (`">=2026.04, <2027.01"`).
-fn normalize_req(range: &str) -> String {
-    range
-        .split(',')
-        .map(|comparator| {
-            let trimmed = comparator.trim();
-            let rest = trimmed.trim_start_matches(['=', '>', '<', '^', '~']);
-            let (op, version) = trimmed.split_at(trimmed.len() - rest.len());
-            let version = version.trim_start();
-            let (core, suffix) = split_core(version.strip_prefix('v').unwrap_or(version));
-            format!("{op}{}{suffix}", normalize_core(core))
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[cfg(test)]
@@ -1080,6 +1007,40 @@ mod tests {
         assert!(!p.applies_to("rk3588-accel", "6.12.0").unwrap());
         // Upper bound exclusive.
         assert!(!p.applies_to("rk3588-accel", "7.2.0").unwrap());
+    }
+
+    #[test]
+    fn linux_libre_tags_range_match_as_the_release_they_deblob() {
+        // GNU Linux-libre publishes `refs/tags/sources/v7.1.6-gnu`, and that whole ref
+        // is what the lock pins and git resolves. Two things about it are not a plain
+        // kernel tag: the namespace, which semver cannot parse at all, and the `-gnu`
+        // suffix, which semver would read as a *prerelease* of 7.1.6 and so exclude
+        // from `>=7.0, <7.2` — declining a tree the series applies to perfectly well.
+        let p = series();
+        for inside in [
+            "sources/v7.1.6-gnu",
+            "v7.1.6-gnu",
+            "7.1.6-gnu",
+            "sources/v7.1.6",
+        ] {
+            assert!(
+                p.applies_to("rk3588-accel", inside).unwrap(),
+                "{inside} should be inside >=7.0, <7.2"
+            );
+        }
+        // The envelope still bounds a deblobbed tree, and a real prerelease of one is
+        // still a prerelease: `-gnu` is stripped, `-rc1` is not.
+        assert!(!p.applies_to("rk3588-accel", "sources/v7.2-gnu").unwrap());
+        assert!(!p
+            .applies_to("rk3588-accel", "sources/v7.2-rc1-gnu")
+            .unwrap());
+        assert!(p
+            .applies_to_under(
+                "rk3588-accel",
+                "sources/v7.1-rc1-gnu",
+                RangeMatch::Candidate
+            )
+            .unwrap());
     }
 
     #[test]

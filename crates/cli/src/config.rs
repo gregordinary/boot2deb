@@ -220,25 +220,70 @@ pub(crate) fn kmod_local_patches(
     Ok(out)
 }
 
+/// The directory vendored apt keyrings live in, relative to a config root. Named
+/// once so the boundary [`apt_source_keyring`] enforces, the one its failure message
+/// describes, and the one it points an operator at cannot drift apart.
+const KEYRING_DIR: &str = "blobs/keyrings";
+
+/// Resolve one apt source's `signed_by` to the vendored keyring it names, or `None`
+/// if no root along the config search path ships it.
+///
+/// The value is a bare file name by construction — resolution rejects a separator or
+/// dot segment with [`ConfigError::AptSourceBadField`](boot2deb_core::ConfigError) —
+/// so the *string* cannot aim this out of the keyring directory. What is enforced
+/// here is the symlink half: the resolved file is canonicalized and must still lie
+/// inside some root's `blobs/keyrings/`, so a link planted in the tree cannot make an
+/// arbitrary host file the trust anchor a third-party repo is verified against. A
+/// path that escapes is an error, never a silent fall-through to the host.
+///
+/// Containment is checked against every root's keyring directory, not only the
+/// primary's, because an overlay may legitimately vendor a keyring for a repo it
+/// adds — unlike the Debian archive keyring, which
+/// [`find_trust_anchor`](ConfigRoot::find_trust_anchor) pins to the shipped root.
+pub(crate) fn apt_source_keyring(root: &ConfigRoot, signed_by: &str) -> Result<Option<PathBuf>> {
+    let rel = format!("{KEYRING_DIR}/{signed_by}");
+    let Some(path) = root.find_asset(&rel) else {
+        return Ok(None);
+    };
+    let canonical = path
+        .canonicalize()
+        .map_err(|source| format!("{}: {source}", path.display()))?;
+    let contained = root.search_paths().iter().any(|base| {
+        base.join(KEYRING_DIR)
+            .canonicalize()
+            .map(|dir| canonical.starts_with(dir))
+            .unwrap_or(false)
+    });
+    if !contained {
+        return Err(format!(
+            "keyring '{signed_by}' resolves to {}, outside {KEYRING_DIR}/ — a trust \
+             anchor must be a file vendored in the config tree, not a link out of it",
+            canonical.display()
+        )
+        .into());
+    }
+    Ok(Some(path))
+}
+
 /// Resolve each declared apt source's signing keyring to a vendored host path,
-/// erroring on the first source whose keyring is missing or does not match its
-/// fingerprint manifest: the repo is verified during the rootfs solve, not trusted
-/// blindly, so its key is a build-host prerequisite like the Debian archive keyring —
-/// and the key itself is held to the fingerprints a human vetted, so a swapped blob
-/// cannot quietly become a trust anchor. Called from [`preflight_config`] as the early
-/// gate and from the rootfs stage for the paths it actually mounts.
+/// erroring on the first source whose keyring is missing, escapes the keyring
+/// directory ([`apt_source_keyring`]), or does not match its fingerprint manifest:
+/// the repo is verified during the rootfs solve, not trusted blindly, so its key is a
+/// build-host prerequisite like the Debian archive keyring — and the key itself is
+/// held to the fingerprints a human vetted, so a swapped blob cannot quietly become a
+/// trust anchor. Called from [`preflight_config`] as the early gate and from the
+/// rootfs stage for the paths it actually mounts.
 pub(crate) fn apt_source_keyrings<'a>(
     root: &ConfigRoot,
     sources: &'a [boot2deb_core::model::AptSource],
 ) -> Result<Vec<rootfs::AptRepo<'a>>> {
     let mut repos = Vec::with_capacity(sources.len());
     for source in sources {
-        let rel = format!("blobs/keyrings/{}", source.signed_by);
-        let keyring = root.find_asset(&rel).ok_or_else(|| {
+        let keyring = apt_source_keyring(root, &source.signed_by)?.ok_or_else(|| {
             format!(
                 "apt source '{}' requires signing keyring '{}', but it is not vendored \
-                 — add it under blobs/keyrings/ (see blobs/keyrings/README.md)",
-                source.name, rel
+                 — add it under {KEYRING_DIR}/ (see {KEYRING_DIR}/README.md)",
+                source.name, source.signed_by
             )
         })?;
         boot2deb_engine::keyring::verify(&keyring)?;
@@ -260,6 +305,10 @@ pub(crate) fn apt_source_keyrings<'a>(
 /// — the same relationship its TOML keys have. A device that extends nothing
 /// contributes exactly one tree.
 ///
+/// The two hardware layers may also carry an [`OVERLAY_NONFREE`] tree, which stacks
+/// directly after their own and is skipped entirely on a
+/// [`libre`](ResolvedBuild::libre) build.
+///
 /// `stage` selects *when* the tree is laid into the rootfs, which is a different
 /// question from what is in it (see [`OverlayStage`]).
 pub(crate) fn overlay_dirs(
@@ -268,13 +317,20 @@ pub(crate) fn overlay_dirs(
     stage: OverlayStage,
 ) -> Vec<PathBuf> {
     let dir = stage.dir_name();
-    let mut rels = vec![
-        format!("base/{dir}"),
-        format!("socs/{}/{dir}", b.soc.as_str()),
-        format!("boot-methods/{}/{dir}", b.boot_method.as_str()),
-    ];
+    // A hardware layer contributes its own tree, then — unless this build is libre —
+    // its vendored-blob tree, so a board's own file still wins over what it extends.
+    let hardware = |prefix: String| {
+        let mut trees = vec![format!("{prefix}/{dir}")];
+        if !b.libre && stage == OverlayStage::Customize {
+            trees.push(format!("{prefix}/{OVERLAY_NONFREE}"));
+        }
+        trees
+    };
+    let mut rels = vec![format!("base/{dir}")];
+    rels.extend(hardware(format!("socs/{}", b.soc.as_str())));
+    rels.push(format!("boot-methods/{}/{dir}", b.boot_method.as_str()));
     for device in &b.device_lineage {
-        rels.push(format!("devices/{device}/{dir}"));
+        rels.extend(hardware(format!("devices/{device}")));
     }
     for feature in &b.features {
         rels.push(format!("features/{feature}/{dir}"));
@@ -284,6 +340,20 @@ pub(crate) fn overlay_dirs(
         .collect()
 }
 
+/// The tree a SoC or device layer vendors **nonfree firmware** in: files Debian does
+/// not package, laid into the rootfs exactly like that layer's `overlay/` and left out
+/// of a [`libre`](ResolvedBuild::libre) image, whose kernel could not load them.
+///
+/// It is a tree of its own rather than a subtraction from `overlay/` because the
+/// blobs are then visible as blobs — one directory to audit, and a `libre` build that
+/// skips it cannot miss one by spelling a path wrong.
+///
+/// Only the *customize* stage has one. Firmware is read by a driver binding real
+/// hardware, long after the initramfs has handed off; nothing in this repo needs a
+/// blob before the first package is unpacked, and a second gated tree that no layer
+/// fills would be a mechanism with no user.
+pub(crate) const OVERLAY_NONFREE: &str = "overlay-nonfree";
+
 /// When a layer's overlay tree is laid into the rootfs.
 ///
 /// Most config belongs *after* the packages, where it wins over whatever they
@@ -291,8 +361,8 @@ pub(crate) fn overlay_dirs(
 /// it is where nearly everything goes.
 ///
 /// [`PreInstall`](OverlayStage::PreInstall) — the `overlay-pre/` tree — exists for the
-/// config a package's own maintainer scripts have to *see while they run*. Two things
-/// on a depthcharge board need it, and one of them is a safety property:
+/// config a package's own maintainer scripts have to *see while they run*. Three
+/// things need it, and one of them is a safety property:
 ///
 ///  - `depthcharge-tools` registers a kernel hook that re-signs and re-flashes a
 ///    ChromeOS kernel partition. Installed with no config present, it runs at its
@@ -301,9 +371,14 @@ pub(crate) fn overlay_dirs(
 ///  - The initramfs settings (`MODULES=list`) must precede the kernel package, or the
 ///    first initramfs is built at `MODULES=most` — three times the size budget the
 ///    signed payload has — and then thrown away and rebuilt.
+///  - Jellyfin's `/etc/jellyfin/encoding.xml` has to end up owned by the service
+///    user, which rewrites it on every start. An overlay file lands root-owned and
+///    that uid is allocated at install time, so the tree cannot pre-assign it —
+///    but `jellyfin-server.postinst` chowns the whole directory while it is still
+///    root's, and a file laid in beforehand is inside that sweep.
 ///
-/// Both are cases where "config wins over the package" is not enough, because the
-/// package *acted* before the config arrived.
+/// All three are cases where "config wins over the package" is not enough, because
+/// the package *acted* before the config arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OverlayStage {
     /// `overlay-pre/` — laid in before any package is installed.
@@ -589,13 +664,60 @@ mod tests {
         );
     }
 
+    /// Resolution holds `signed_by` to a bare file name, so the string cannot aim the
+    /// lookup out of `blobs/keyrings/`. A symlink can, and that is the half checked
+    /// here: a link inside the keyring directory pointing at a host file is refused
+    /// rather than silently becoming the trust anchor a third-party repo is verified
+    /// against.
+    #[test]
+    fn a_keyring_symlinked_out_of_the_keyring_directory_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_dir = tmp.path().join("config");
+        std::fs::create_dir_all(root_dir.join(KEYRING_DIR)).unwrap();
+        std::fs::create_dir_all(root_dir.join("devices")).unwrap();
+        std::fs::write(root_dir.join("base.toml"), "").unwrap();
+
+        // A key elsewhere on the host, and a link to it planted in the keyring dir.
+        let outside = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("attacker.gpg"), b"KEY").unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("attacker.gpg"),
+            root_dir.join(KEYRING_DIR).join("vendor.gpg"),
+        )
+        .unwrap();
+
+        let root = ConfigRoot::new(&root_dir);
+        let err = apt_source_keyring(&root, "vendor.gpg")
+            .expect_err("a keyring resolving outside the keyring directory must fail")
+            .to_string();
+        assert!(
+            err.contains("outside") && err.contains("vendor.gpg"),
+            "the failure names the escape and the keyring, got: {err}"
+        );
+
+        // A real file in the same place resolves — containment refuses the link, not
+        // the directory.
+        std::fs::remove_file(root_dir.join(KEYRING_DIR).join("vendor.gpg")).unwrap();
+        std::fs::write(root_dir.join(KEYRING_DIR).join("vendor.gpg"), b"KEY").unwrap();
+        assert_eq!(
+            apt_source_keyring(&root, "vendor.gpg").unwrap(),
+            Some(root_dir.join(KEYRING_DIR).join("vendor.gpg"))
+        );
+
+        // A keyring no root ships is absent, not an escape: the caller that needs it
+        // says so, naming the source that asked.
+        assert_eq!(apt_source_keyring(&root, "absent.gpg").unwrap(), None);
+    }
+
     #[test]
     fn preflight_accepts_the_shipped_jellyfin_composition() {
-        // The jellyfin recipe declares a third-party apt source; its signing
+        // The jellyfin recipes declare a third-party apt source; its signing
         // keyring is vendored, so the shipped composition passes the same gate
-        // that rejects a missing one — `resolve turing-rk1/jellyfin` stays green.
+        // that rejects a missing one — `resolve turing-rk1/jellyfin-forky` stays green.
         let root = repo_root();
-        let resolved = resolve_recipe(&root, "turing-rk1/jellyfin", &Overrides::default()).unwrap();
+        let resolved =
+            resolve_recipe(&root, "turing-rk1/jellyfin-forky", &Overrides::default()).unwrap();
         assert!(
             resolved.apt_sources.iter().any(|s| s.name == "jellyfin"),
             "the jellyfin feature declares its apt source"
@@ -736,9 +858,10 @@ mod tests {
     #[test]
     fn source_axes_cover_every_fetched_tree_of_a_media_accel_build() {
         // The probed set is exactly what a build fetches: the two base trees, the
-        // media-accel ones, and the patch series. The ffmpeg `rockchip` pin is
-        // provenance-only, so it is not an axis — pinning it against a URL nothing
-        // clones would be a false report.
+        // media-accel ones, and both patch series — the kernel's and u-boot's, which
+        // are pinned against the `patches` repo independently. The ffmpeg `rockchip`
+        // pin is provenance-only, so it is not an axis — pinning it against a URL
+        // nothing clones would be a false report.
         let root = repo_root();
         let build =
             resolve_recipe(&root, "turing-rk1/media-accel-forky", &Overrides::default()).unwrap();
@@ -754,7 +877,8 @@ mod tests {
                 "librga",
                 "libmali",
                 "ffmpeg-base",
-                "patches"
+                "patches",
+                "u-boot patches"
             ]
         );
         assert!(axes
@@ -837,6 +961,93 @@ mod tests {
                 .any(|d| d.ends_with("devices/h96-max-m9-variant/overlay")),
             "a board must not pick up its variant's tree"
         );
+    }
+
+    #[test]
+    fn the_libreboot_c201_ships_its_display_stack_into_the_initramfs() {
+        // Also a silent failure: a modules.d drop-in that is never collected costs
+        // nothing at build time and simply does not exist at boot, leaving the board on
+        // the firmware's blank screen exactly as if the file had never been written.
+        let root = ConfigRoot::new(repo_root_path());
+        let b = resolve_device(&root, "asus-c201-libreboot", &Overrides::default()).unwrap();
+        let dirs = overlay_dirs(&root, &b, OverlayStage::PreInstall);
+
+        let display = root
+            .find_asset("devices/asus-c201-libreboot/overlay-pre")
+            .expect("the libreboot device ships a pre-install tree");
+        assert!(
+            dirs.contains(&display),
+            "the libreboot display stack is missing from {dirs:?}"
+        );
+        let list = display.join("usr/share/initramfs-tools/modules.d/veyron-display");
+        let modules = std::fs::read_to_string(&list).expect("the module list is a real file");
+        for module in ["rockchipdrm", "panel-simple", "pwm_bl", "pwm-rockchip"] {
+            assert!(modules.contains(module), "{module} missing from {list:?}");
+        }
+
+        // It adds to the SoC family's list rather than replacing it — mkinitramfs reads
+        // every file in the directory — so the drivers that reach the root device have
+        // to still be coming from the layer that owns them.
+        let family = root
+            .find_asset("socs/rk3288/overlay-pre")
+            .expect("the SoC layer ships the family's list");
+        let family_at = dirs.iter().position(|d| d == &family).unwrap();
+        let display_at = dirs.iter().position(|d| d == &display).unwrap();
+        assert!(family_at < display_at, "the family's list comes first");
+        assert!(family
+            .join("usr/share/initramfs-tools/modules.d/veyron")
+            .is_file());
+
+        // And the stock board does not pick it up: its 16 MiB payload has no room for a
+        // display stack, which is the whole reason the two are different devices.
+        let stock = resolve_device(&root, "asus-c201", &Overrides::default()).unwrap();
+        assert!(!overlay_dirs(&root, &stock, OverlayStage::PreInstall).contains(&display));
+    }
+
+    #[test]
+    fn a_libre_build_lays_in_no_vendored_blob() {
+        // The failure this guards is the one that matters most on this axis and is the
+        // least visible: an image advertised as free that quietly carries two Broadcom
+        // blobs. Nothing at build time would complain — the files copy fine and the
+        // kernel simply never reads them — so the only place it can be caught is here.
+        let root = ConfigRoot::new(repo_root_path());
+        let blobs = root
+            .find_asset("socs/rk3288/overlay-nonfree")
+            .expect("the SoC layer vendors the BCM4354 firmware");
+        for blob in ["BCM4354.hcd", "brcmfmac4354-sdio.txt"] {
+            assert!(blobs.join("usr/lib/firmware/brcm").join(blob).is_file());
+        }
+
+        // The blobbed kernel gets them, directly after the tree they belong beside.
+        let ov = |kernel: &str| Overrides {
+            kernel: Some(kernel.to_string()),
+            ..Default::default()
+        };
+        let blobbed = resolve_device(&root, "asus-c201", &ov("rk3288-mainline-7.1")).unwrap();
+        let dirs = overlay_dirs(&root, &blobbed, OverlayStage::Customize);
+        assert!(dirs.contains(&blobs), "blobs missing from {dirs:?}");
+        let soc = root.find_asset("socs/rk3288/overlay").unwrap();
+        assert_eq!(
+            dirs.iter().position(|d| d == &blobs),
+            dirs.iter().position(|d| d == &soc).map(|i| i + 1),
+            "the nonfree tree stacks directly after its own layer's"
+        );
+
+        // The libre kernel gets neither the tree nor the package — and still gets the
+        // layer's ordinary overlay, so this is a gate and not a lost SoC layer.
+        let libre = resolve_device(&root, "asus-c201", &ov("rk3288-libre-7.1")).unwrap();
+        assert!(libre.libre);
+        let dirs = overlay_dirs(&root, &libre, OverlayStage::Customize);
+        assert!(!dirs.contains(&blobs), "a libre image carries {blobs:?}");
+        assert!(dirs.contains(&soc));
+        assert!(!libre
+            .rootfs_packages
+            .contains(&"firmware-brcm80211".to_string()));
+        // The Free firmware is not gated with it: an AR9271 adapter is the only way
+        // onto a network here, so its firmware has to be on the image.
+        assert!(libre
+            .rootfs_packages
+            .contains(&"firmware-ath9k-htc".to_string()));
     }
 
     #[test]

@@ -17,6 +17,7 @@ use crate::config::{
 };
 use crate::fsutil::absolutize;
 use crate::render::{emit_artifact, note, print_event_at, print_event_json, short, Verbosity};
+use crate::timing::Timeline;
 use crate::workdir::mark_work_dir;
 use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
 use boot2deb_core::model::{Overrides, ResolvedBoot, ResolvedBuild};
@@ -32,10 +33,16 @@ use boot2deb_engine::{extradebs, pins};
 use std::path::PathBuf;
 
 /// Run `build <recipe>`.
+///
+/// `pinned_plan` is [`reproduce`](super::reproduce)'s one addition: a published plan
+/// document the rootfs replays instead of resolving. Every other input is the same, so
+/// the two commands share one pipeline rather than one of them being a second
+/// implementation of it. `None` is an ordinary build.
 pub(crate) fn run(
     root: &ConfigRoot,
     recipe: &str,
     args: BuildArgs,
+    pinned_plan: Option<&std::path::Path>,
     json: bool,
     verbosity: Verbosity,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -49,6 +56,9 @@ pub(crate) fn run(
     // path — lock, work dir, image identity, provenance — keys off the reference, so a
     // variant build cannot land on the recipe's artifacts.
     let point = crate::config::build_point(recipe, args.features.clone())?;
+    // Resolved before any work: a contradictory `--compress` is an argument error,
+    // and discovering it after a multi-hour compile would waste the whole build.
+    let compress = crate::args::image_compression(&args.compress)?;
     let reference = point.reference();
     let recipe = reference.as_str();
     // Every artifact this build publishes is named for the point rather than the
@@ -286,12 +296,18 @@ pub(crate) fn run(
         cross_compile,
         jobs: args.jobs,
     };
+    // Started before the first step, so its total covers the work outside every step.
+    let timeline = Timeline::new();
     // The one stdout contract for a build: human rendering, or NDJSON under
     // --json — artifact locations travel as Event::Artifact either way.
     // A closure rather than a `fn` pointer: the human renderer has to carry the
     // verbosity, and `--json` deliberately ignores it (the NDJSON stream is the
     // record of the build, and a filtered record is a wrong one).
-    let sink = move |e: Event| {
+    //
+    // The timeline sees every event on both paths, since what it accumulates is a
+    // property of the build rather than of how it is being rendered.
+    let sink = |e: Event| {
+        timeline.record(&e);
         if json {
             print_event_json(&e)
         } else {
@@ -558,6 +574,10 @@ pub(crate) fn run(
     // The solved manifest, captured when this run builds the rootfs; joins the
     // image stage's per-image password to emit the provenance manifest at the end.
     let mut rootfs_manifest: Option<PathBuf> = None;
+    // The plan document that stage published beside it — the install set plus the
+    // archive state it resolved against, which the provenance manifest records and a
+    // later `reproduce` replays.
+    let mut rootfs_plan: Option<PathBuf> = None;
     // The per-image first-boot password, captured when this run assembles the image
     // (the image stage owns it, splicing it into the staged rootfs).
     let mut first_boot_password: Option<String> = None;
@@ -570,6 +590,14 @@ pub(crate) fn run(
     // format itself knows it. `None` until the image stage runs — which is also when the
     // provenance manifest becomes writable at all.
     let mut rootfs_filesystem: Option<boot2deb_core::provenance::FilesystemProvenance> = None;
+    // The whole-disk size that stage laid out. Reported by it rather than re-parsed from
+    // the recipe, because a fitted `image_size` names a rule and not a number — the
+    // format decides how large the rootfs is and the disk is sized around it.
+    let mut image_bytes: Option<u64> = None;
+    // What this run left to write, for the closing hint: the image files themselves,
+    // paired with the medium each goes to. Empty for every run that stops short of the
+    // image node, which is what makes the hint absent rather than wrong there.
+    let mut flashables: Vec<crate::nextstep::Flashable> = Vec::new();
     // The freshly-solved manifest's sha256, set by the rootfs stage — verified
     // against the committed pin and recorded into the lock by `--save-manifest`.
     let mut solved_manifest_digest: Option<String> = None;
@@ -850,6 +878,7 @@ pub(crate) fn run(
             .map(|b| rootfs::BootConfig::Depthcharge {
                 board: &b.board,
                 cmdline: &b.cmdline,
+                initramfs_compress: b.initramfs_compress,
             });
         // The rootfs PARTUUID is an *input* here, not an output of the image node: under
         // depthcharge the signed kernel's root= is derived from this rootfs's own
@@ -936,6 +965,7 @@ pub(crate) fn run(
             keyring: keyring.as_deref(),
             interpreter_id: interpreter_id.as_deref(),
             manifest_out: &manifest_out,
+            pinned_plan,
             mirrors: &mirrors,
             extra_packages: &extra_packages,
             cache_dir: Some(&cache_dir),
@@ -950,6 +980,7 @@ pub(crate) fn run(
         let artifacts = rootfs::build_rootfs(&resolved, &opts, &sink)?;
         emit_artifact(&sink, "rootfs", "tar", &artifacts.tar);
         emit_artifact(&sink, "rootfs", "manifest", &artifacts.manifest);
+        emit_artifact(&sink, "rootfs", "plan", &artifacts.plan);
         // Manifest-as-input verification: unless `--save-manifest` re-pins,
         // a fresh solve must reproduce the committed pin — a drift means the live
         // mirror moved off the pinned package set. Hard error unless the drift is
@@ -975,6 +1006,7 @@ pub(crate) fn run(
         // password is assigned at image assembly (surfaced there), not here.
         rootfs_tar = Some(artifacts.tar);
         rootfs_manifest = Some(artifacts.manifest);
+        rootfs_plan = Some(artifacts.plan);
     }
 
     if matches!(args.stage, StageArg::All | StageArg::Image) && resolved.produces_image() {
@@ -1032,7 +1064,7 @@ pub(crate) fn run(
             work_dir: &work_dir,
             rootfs_label: &args.rootfs_label,
             identity: image_identity(recipe, &resolved),
-            compress: !args.no_compress,
+            compress: &compress,
             keep_raw: args.keep_raw,
             jobs: build_env.jobs,
         };
@@ -1048,9 +1080,10 @@ pub(crate) fn run(
                 }
             }
         }
-        for xz in &artifacts.compressed {
-            emit_artifact(&sink, "image", "compressed", xz);
+        for c in &artifacts.compressed {
+            emit_artifact(&sink, "image", "compressed", &c.path);
         }
+        flashables = crate::nextstep::flashables(&artifacts.output, &artifacts.compressed);
         // The per-image first-boot password: unique per build, expired so it
         // must be changed at first login. Surfaced here since it exists nowhere else
         // the operator can read it except the provenance manifest.
@@ -1068,6 +1101,7 @@ pub(crate) fn run(
         first_boot_password = Some(artifacts.password);
         rootfs_verified_with = artifacts.rootfs_verified_with;
         rootfs_filesystem = Some(artifacts.rootfs_filesystem);
+        image_bytes = Some(artifacts.image_bytes);
     }
 
     // The solved manifest describing the rootfs inside the image this run assembled:
@@ -1084,6 +1118,19 @@ pub(crate) fn run(
             .map(|_| out_dir.join(format!("{stem}.pkgs.lock")))
             .filter(|p| p.exists())
     });
+    // The plan document beside that manifest, found the same way and for the same
+    // reason: one rootfs run writes the tar, the manifest and the plan together, so an
+    // image-only re-run over that tar records the plan that produced it rather than
+    // dropping the section.
+    let image_plan: Option<PathBuf> = rootfs_plan
+        .clone()
+        .or_else(|| {
+            if args.rootfs_tar.is_some() {
+                return None;
+            }
+            Some(out_dir.join(format!("{stem}.plan")))
+        })
+        .filter(|p| p.exists());
 
     // The provenance manifest describes the image beside it, so it is emitted by every
     // run that assembles one — including an image-only run, whose freshly generated
@@ -1112,13 +1159,16 @@ pub(crate) fn run(
             );
         }
     }
-    // All three come from the image stage, so the manifest is writable exactly when that
+    // All four come from the image stage, so the manifest is writable exactly when that
     // stage ran. Naming them together makes that structural rather than a comment: a
     // build stopping before the image writes no provenance, because the record it would
     // describe does not exist.
-    if let (Some(manifest_path), Some(password), Some(filesystem)) =
-        (&image_manifest, &first_boot_password, &rootfs_filesystem)
-    {
+    if let (Some(manifest_path), Some(password), Some(filesystem), Some(image_bytes)) = (
+        &image_manifest,
+        &first_boot_password,
+        &rootfs_filesystem,
+        image_bytes,
+    ) {
         let manifest_bytes = std::fs::read(manifest_path)
             .map_err(|e| format!("read solved manifest {}: {e}", manifest_path.display()))?;
         let manifest_sha256 = boot2deb_engine::blobs::sha256_hex(&manifest_bytes);
@@ -1126,6 +1176,20 @@ pub(crate) fn run(
             .lines()
             .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
             .count();
+        // The plan document beside it, read back off the published file so the digest
+        // recorded is of what a reader will open. One rootfs run writes both, so a
+        // manifest without a plan means the directory was edited between the two runs —
+        // an error rather than a silently thinner record, since the archive state is
+        // exactly what this section exists to carry.
+        let plan_path = image_plan.as_deref().ok_or_else(|| {
+            format!(
+                "no plan document beside the solved manifest {} — the rootfs stage \
+                 publishes {stem}.plan with it; re-run `--stage rootfs`",
+                manifest_path.display()
+            )
+        })?;
+        let plan_record = boot2deb_engine::rootfs::read_plan_record(plan_path)?;
+        let plan_name = format!("{stem}.plan");
         // The three provisioned roots that produced this build's `.deb`s — the
         // target-arch base that compiled the media-accel ones, the host-arch cross root
         // that compiled the kernel, u-boot and modules, and the host-arch root whose
@@ -1190,6 +1254,12 @@ pub(crate) fn run(
             cross: pf.cross_toolchain,
             manifest_sha256: &manifest_sha256,
             package_count,
+            image_bytes,
+            // Named by the leaf the rootfs stage publishes it under, so the manifest
+            // refers to a sibling rather than to a path on this machine.
+            plan: &plan_name,
+            plan_sha256: &plan_record.sha256,
+            archives: &plan_record.archives,
             user: rootfs::DEFAULT_USER,
             password,
             // Stamped by build.rs from the boot2deb checkout; the commit is empty when
@@ -1224,6 +1294,17 @@ pub(crate) fn run(
         std::fs::write(&prov_path, prov.to_toml_string()?)
             .map_err(|e| format!("write provenance {}: {e}", prov_path.display()))?;
         emit_artifact(&sink, "image", "provenance", &prov_path);
+
+        // `--sbom`: the bill of materials, rendered from the two documents just
+        // written rather than from the values still in memory, so it describes exactly
+        // what shipped. Off unless asked for — an image build never silently gains a
+        // file — and the same documents are producible later from the manifest above
+        // by `boot2deb sbom`, which is what someone handed an image will use.
+        for path in
+            crate::commands::sbom::write_beside(&prov, &stem, &out_dir, manifest_path, &args.sbom)?
+        {
+            emit_artifact(&sink, "image", "sbom", &path);
+        }
     }
 
     // `--save-snapshot` / `--save-manifest`: persist the captured snapshot timestamp
@@ -1287,6 +1368,32 @@ pub(crate) fn run(
             "build",
             format!("updated lock  : {}", path.display()),
         );
+    }
+
+    // Where the time went, what this build point does not do, then what to do with
+    // what was built. All three summarize the stream above them, so they come after it
+    // rather than in it, and the hint comes last because it is the actionable one.
+    // None prints under `--json` (a table is not JSON, and the durations are already
+    // on that stream as structured events) or under `--quiet`, which asks for the
+    // artifacts alone.
+    if !json && verbosity != Verbosity::Quiet {
+        timeline.print();
+        // The caveats matter most here: this is the only place an operator meets them
+        // without going looking, and a freshly built image is exactly when knowing
+        // what it will not do is worth something.
+        if !resolved.caveats.is_empty() {
+            println!("\ncaveats for {recipe}:");
+            for c in &resolved.caveats {
+                println!("  - {c}");
+            }
+        }
+        let hint = crate::nextstep::hint(&flashables);
+        if !hint.is_empty() {
+            println!();
+            for line in hint {
+                println!("{line}");
+            }
+        }
     }
     Ok(())
 }

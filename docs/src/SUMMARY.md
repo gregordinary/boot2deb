@@ -7,6 +7,9 @@
 - [Getting started](getting-started.md)
 - [Upgrading the kernel](kernel-upgrades.md)
 - [Locale, timezone, and keyboard](localization.md)
+- [The account, sudo, and SSH keys](access.md)
+- [Data volumes](data-volumes.md)
+- [Accelerated Jellyfin](jellyfin.md)
 
 # Tutorials
 

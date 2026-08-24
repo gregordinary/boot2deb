@@ -35,6 +35,15 @@ packages = [
 ]
 exclude = ["dhcpcd"]
 
+# What no build on this silicon lifts. Rendered in the support matrix and printed at
+# the end of a build; the board layer adds what is true of one board rather than the
+# part.
+caveats = [
+  "HDMI tops out at 4K30 and cannot reach 4K60: the dw-hdmi-qp bridge has no SCDC/scrambling support and rejects every mode above 340 MHz TMDS, even where the display advertises 4K60. This is upstream behaviour, not a device-tree limitation.",
+  "There is no mainline hardware video encoder for this SoC. Decode is driven (VDPU383, 1080p H.264 and HEVC); encode is not driven at all.",
+  "The NPU computes but nothing can drive it yet: the rocket userspace stack targets RK3588 only, so no RK3576 userspace exists.",
+]
+
 # rkbin defaults for RK3576 boards. The DDR loader is Rockchip's unified LP4/LP5
 # blob, which also drives DDR4 boards — there is no separate DDR4 file — so it is
 # the common default and boards rarely override `tpl`.

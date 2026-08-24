@@ -15,3 +15,6 @@ semver.workspace = true
 [dev-dependencies]
 # Fixture config roots for resolution tests, decoupled from the shipped layers.
 tempfile.workspace = true
+# The `--json` shapes of the reports rendered here are part of their contract, so
+# the tests assert on the serialized document rather than on the Rust value alone.
+serde_json.workspace = true

@@ -20,12 +20,18 @@ pub(crate) fn run(
     name: &str,
     args: NewDeviceArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // The name is a file stem and a TOML value; keep it to the safe set the loader
-    // accepts for the layers it will live beside.
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    // The slug is a file stem, a TOML value, and — because `hostname` defaults to it —
+    // the name the image comes up under. The shape rule is the loader's, called here so
+    // a name it would refuse fails before anything is written rather than after.
+    boot2deb_core::hostname::check(name)
+        .map_err(|why| format!("device name '{name}' is invalid: {why}"))?;
+    // Generated boards are additionally lowercase and dotless. Neither is required to
+    // load — a hand-authored board may use either — but a slug is a file name as well
+    // as a host name, and DNS is case-insensitive while a filesystem may not be, so a
+    // generator that offered `MyBoard` would be offering two boards that are one host.
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     {
         return Err(format!(
             "device name '{name}' is invalid — use lowercase letters, digits, and dashes"

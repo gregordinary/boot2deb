@@ -43,7 +43,8 @@ A build is a single point across the axes a user selects:
   [A feature can reach the kernel](#a-feature-can-reach-the-kernel). Features are the
   knob the RK1 recipes differ by over one shared device
   and kernel: `turing-rk1/forky` (base) selects none, `turing-rk1/media-accel-forky` adds
-  the capability, and `turing-rk1/jellyfin` adds the app on top of it. Override with
+  the capability, and `turing-rk1/jellyfin-forky` adds the app plus the glue that points
+  it at that capability. Override with
   `--feature` (repeatable; values from `list-features`).
 
 Two more knobs round out a build without being headline axes: `--boot-method` (a device
@@ -85,6 +86,37 @@ One definition then serves every suite, because the suite picks the version:
 A distro kernel rejects the two device fields it could never act on — `device_dts` and
 `device_config_fragments` are compile inputs, and a board that declared them with a
 kernel that compiles nothing would read as configured and boot as broken.
+
+### A deblobbed kernel decides the whole image
+
+A compiled kernel may declare `libre = true`, which says its source is
+[GNU Linux-libre](https://www.fsfla.org/ikiwiki/selibre/linux-libre/): every
+nonfree-firmware loader has been removed from the tree, so no driver it builds can read
+a blob. `kernels/rk3288-libre-7.1.toml` is the shipped one.
+
+That is a property of the *source*, but it decides things well outside the kernel, so
+resolution propagates it to the whole build rather than leaving each layer to restate
+it. Three subtractions follow, and only subtractions — a build on any other kernel
+resolves exactly as it would if this axis did not exist:
+
+| What | Where it is declared | What `libre` does |
+|---|---|---|
+| Firmware packages | `nonfree_firmware_packages` on the SoC and device layers | left out of the merged package set |
+| Vendored blobs | an `overlay-nonfree/` tree beside a SoC or device layer | not laid into the rootfs |
+| Apt components | — | the image resolves and ships `main` alone, not `main contrib non-free non-free-firmware` |
+
+Nonfree firmware is declared by the two *hardware* layers because which blobs a build
+needs is a fact about the silicon and the board — not about the distro substrate, the
+bootloader, or a userspace feature. It sits on the SoC layer when it identifies a part
+every board on that SoC carries, and moves down to a device when boards differ.
+
+The package half is a subtraction from the *include* set rather than an entry in
+`exclude`: the firmware is unreachable, not unwanted, and excluding it by name would
+also forbid `apt` from pulling it in as some other package's dependency.
+
+The cross-build sandbox deliberately keeps the full component set. It is a build
+environment that is never shipped, and narrowing the toolchain a libre image is
+*compiled by* would not change a byte of what is in it.
 
 ## Boot methods describe different things
 
@@ -141,6 +173,12 @@ cannot hold buys nothing — so a device built for a wider profile states the ma
 from `kpart_offset + slots x kpart_size` so the partitions cannot disagree.
 `devices/asus-c201-libreboot.toml` is that pairing: it `extends = "asus-c201"` and states
 only `board = "speedy-libreboot"` and `kpart_size = "32MiB"`.
+
+The slot size then decides more than the layout. The signed payload holds the kernel and
+the initramfs in one budget, so `kpart_size` also picks the initramfs compressor: a
+narrow slot takes `xz` for its size, a roomy one takes `zstd` for its speed, and
+`boot2deb resolve` prints which on its `initramfs` line. Derived rather than authored,
+so widening a slot cannot leave a board paying a decompression cost it no longer owes.
 
 ## Patch series belong to the kernel
 
@@ -529,6 +567,39 @@ The two merge axes compose. The `extends` chain is flattened first, then the sea
 merges over the result, so an out-of-tree overlay can retune the parent — and have it
 reach every variant — or retune one variant alone.
 
+### An image size can be stated or measured
+
+`image_size` is normally a size — `"2G"`, `"8G"` — chosen by whoever added the board, and
+it is the whole-disk size of the artifact rather than of the installed system: the rootfs
+grows to fill its medium on first boot.
+
+Picking that number is real friction on a new board, so it can also be **measured**:
+
+```toml
+image_size = "fit+20%"   # the smallest image holding the rootfs, a fifth of it free
+image_size = "fit+512M"  # ... with 512 MiB free instead
+```
+
+`fit` sizes the filesystem to its contents. The size a rootfs needs is not a formula — how
+much room a filesystem has left depends on its group count, its inode tables, the
+descriptor blocks it reserves to grow into, and the journal its size earns, and every one
+of those follows from the size — so it is found by *placing* the rootfs into candidate
+geometries through the format's own placement pass. The size that comes back is one that
+formats, and one ext4 block less is not. The disk is then laid out around it: boot region,
+that filesystem, backup GPT, nothing over.
+
+The slack is written rather than defaulted. A fitted filesystem with nothing free is the
+smallest one that holds the rootfs, which boots into a full disk, so a bare `fit` is
+refused and names the two forms; `fit+0%` is accepted, because an explicit zero is a
+decision. A share is capped at 90% and a byte slack at 64 GiB — past either you have named
+a size, and naming it is faster than searching for it. Both are checked by `resolve`,
+offline, rather than discovered mid-build — and by `update` and `build`, which run the
+same gate before anything is committed or compiled.
+
+`fit` is opt-in per board and nothing else changes: the shipped recipes all carry a
+hand-picked size, and a stated size lays out the disk first and formats into it exactly as
+before.
+
 ### Explicit over derived
 
 Several device values are redundant with a value the resolver could derive:
@@ -541,6 +612,74 @@ few lines. The redundancy is not unchecked — resolution rejects a `default_ker
 `supported_kernels`, a `boot_method` outside `supported_boot_methods`, and so on — so a
 drifted duplicate fails fast rather than silently. `boot2deb new-device` emits these
 values for you, so the boilerplate is paid by the generator, not the author.
+
+### A value that becomes a file or a line is checked at resolve
+
+Most config values are copied verbatim into something with a grammar of its own — a
+file name, a shell-sourced line, an `/etc/hosts` entry, an apt source line. In every
+such case the *shape* is checked where the value is authored, so a config that could
+not produce a working image fails `resolve` rather than producing an image that is
+quietly wrong:
+
+| Value | Accepted shape | Because it becomes |
+|---|---|---|
+| device slug (`devices/<slug>.toml`) | a host name, as below | the file, the recipe folder, the overlay tree, the work dir — **and the default `hostname`** |
+| `hostname` | RFC 1123 host name: `[A-Za-z0-9-]` labels joined by `.`, ≤ 63 per label and ≤ 64 total, no leading/trailing `-` | all of `/etc/hostname`, and the name half of an `/etc/hosts` line |
+| `apt_sources.name` | portable file stem: `[A-Za-z0-9._-]`, not `.`/`..` | `sources.list.d/<name>.list` and `<name>.gpg` in the image |
+| `apt_sources.signed_by` | the same, a bare file name | a lookup in `blobs/keyrings/` |
+| `apt_sources.uri` / `suite` / `components` | non-empty, no whitespace or `[`/`]`; the URI `http(s)` | positional fields of one apt source line |
+| `kernel_cmdline` | no `root=`, nothing a shell would interpret | a line of `/etc/boot2deb/board.conf`, sourced at each kernel install |
+| `depthcharge.board` | bare identifier | a key in `/etc/depthcharge-tools/config`, written through a quoted heredoc |
+| `locale` / `timezone` / `keymap` | see [Locale, timezone, and keyboard](../localization.md) | `/etc/locale.gen`, the `/etc/localtime` target, shell-sourced `/etc/default/keyboard` |
+| `ssh_authorized_keys` | one line per entry: a known key type, a base64 blob whose own embedded type name agrees with it, an optional comment. Private key material and options prefixes are refused — see [The account, sudo, and SSH keys](../access.md) | a line of `~debian/.ssh/authorized_keys`, written through a quoted heredoc |
+
+The rule these share is that a value is **rejected, never repaired**. A hostname with a
+space in it is not trimmed and an out-of-set source name is not folded to a legal
+neighbour: the mapping that would do the folding is not one-to-one, so two names the
+config states as different repositories could land on one file, and the one that lost
+would be missing from the finished image with its packages already installed. Failing
+at the point of authorship is the only outcome that cannot silently change what was
+asked for.
+
+`apt_sources.name` doubles as the key that de-duplicates sources across features. Two
+features naming the same repository collapse to one entry; the same name with
+*different* settings is an error, since the solve could not tell which repo to
+activate.
+
+**A board's slug is a host name.** That is the one entry above whose rule comes from
+somewhere other than the file it is written into. `hostname` defaults to the slug, and
+nearly every board keeps that default, so the two are the same string in practice —
+which means a slug outside the host-name shape would make the default a value no image
+could carry. Holding the slug to the tighter rule is what makes the default correct by
+construction. A board that wants a different network name simply states `hostname`
+(`rk3576-evb1-v10` comes up as `rk3576-evb1`); what it cannot do is inherit an invalid
+one. In practice the rule costs nothing: it rules out `_`, a leading or trailing `-`, a
+doubled or trailing `.`, and names over 64 characters, and the house style is already
+lowercase-and-hyphens.
+
+The alternative — letting the slug be looser and repairing the derived hostname — is
+the same trap as the source names above, and one Debian falls into on our behalf if we
+let it: `hostname(5)` says systemd *filters* invalid characters out of `/etc/hostname`
+rather than refusing them. An unrepaired `my_board` would therefore boot as `myboard`
+while the `/etc/hosts` entry generated beside it still said `my_board`, so every
+lookup of the machine's own name would miss. Rejecting the slug is what keeps those two
+files describing the same host.
+
+### A value whose wrongness is invisible is bounded, not advised
+
+The table above is about *shapes* — values that must parse as something. One value is
+range-checked instead, for a different reason: `first_boot_password_length` is accepted
+only between 8 and 64.
+
+The usual argument against a hard bound is that the author knows their own situation
+better than the config layer does. It does not hold here, because this is the one setting
+whose effect cannot be observed anywhere. A board booted with an 8-character credential
+looks exactly like one booted with a 20-character credential; nothing on the running
+system, in the image, or in a test reveals how much entropy the login had. Every other
+setting announces a bad value eventually — a wrong timezone shows a wrong clock, a
+malformed key fails a login — so advice is enough for them, and a bound is what covers
+this one. [The account, sudo, and SSH keys](../access.md) explains where the two ends of
+the range come from.
 
 ## Recipes and the lock
 
@@ -585,6 +724,32 @@ The split between the two is what makes a build reproducible:
 
 See the [CLI reference](cli.md) for the commands that operate on these.
 
+### Re-pinning: constraints move, hand-pins stay
+
+The config layers declare a **constraint** — `uboot_ref = "v2026.07"` on the boot method,
+`[userspace.mpp] ref = "…"` on the SoC — and the lock records the **exact pin** resolved
+from it. An `update` given no per-tree ref flag re-reads the constraint, so editing one
+and re-pinning carries every recipe that resolves through that layer with it:
+
+```sh
+# after bumping uboot_ref in boot-methods/rockchip-rkbin.toml
+boot2deb update turing-rk1/forky
+#   bumped   u-boot v2026.04 -> v2026.07 (config constraint)
+```
+
+Every pin moved this way is named in the output, so a propagated bump is visible where it
+happens rather than surfacing later as an unexplained ref change in a lock diff.
+
+The exception is a lock pinned to a **bare commit sha**. No config layer authors one — a
+40-hex ref only ever arrives through an explicit `--<tree>-ref` — so it is a deliberate
+hand-pin, and re-reading the constraint over it would discard that choice and float the
+tree back to a branch tip. Those pins stay put until a flag moves them, which is what
+lets a tree sit on a fixed commit while its constraint says `master`.
+
+The kernel has no constraint to follow: a kernel definition declares a `track`, not a
+concrete ref, so an omitted `--kernel-ref` re-pins the previous lock's ref. Only a first
+update, with no lock to inherit from, must supply one.
+
 ### A recipe declares what it has been taken through
 
 A recipe may carry a `[support]` claim — `validated`, `expected`, or `experimental`,
@@ -608,6 +773,66 @@ lock and sets them beside the claim, so the table cannot describe a combination 
 build would not produce. The two are kept honest at the one moment they can be driven
 apart — `update` warns when it moves the pins out from under a `validated` claim, since
 moving them retires the evidence the claim rested on.
+
+### A status says how far, not how much
+
+`validated` means an image built from this recipe booted. It does not mean everything on
+the board works, and a claim that leaves that unsaid overstates itself. What a build
+point does *not* do is a `caveats` list, on the layer that owns the limitation:
+
+```toml
+# socs/rk3576.toml — true of the part, so of every board on it
+caveats = [
+  "HDMI tops out at 4K30 and cannot reach 4K60: the dw-hdmi-qp bridge has no SCDC/scrambling support ...",
+]
+
+# devices/h96-max-m9.toml — true of this board
+caveats = [
+  "No port on the box delivers USB 3.0. The blue port beside HDMI is capped to high speed ...",
+]
+
+# features/media-accel-rockchip.toml — true wherever this capability is selected
+caveats = [
+  "Scaling inside a hardware transcode runs on the CPU. The RGA filters accept only frames carrying an RKMPP hardware context ...",
+]
+
+# recipes/asus-c201/libre-forky.toml — true of this build point alone
+[support]
+status  = "expected"
+date    = "2026-08-04"
+caveats = [
+  "The internal BCM4354 Wi-Fi and Bluetooth do not work. linux-libre removes brcmfmac's firmware request ...",
+]
+```
+
+Resolution concatenates the four in that order — silicon, board, features, build point
+— and de-duplicates them, so a board with three recipes states its limitations once and
+each recipe adds only what is its own. Each entry keeps the layer that stated it, which
+is what tells a reader whether another board would do better, or whether dropping a
+feature would.
+
+A capability's limits belong to the capability, not to whichever recipe named it first:
+every recipe composing the feature inherits them, and a limit stated once cannot fall
+out of step across recipes that all have it. Reserve a recipe's own `[support].caveats`
+for what is true of that build point alone.
+
+They are printed by `resolve`, at the end of a `build`, and in the
+[support matrix](support-matrix.md), which groups the two hardware scopes under the
+board — they hold for every recipe on it — and the feature and recipe ones under each
+recipe, since those depend on what that recipe selected.
+
+`caveats` is the one device list that **accumulates** down an `extends` chain rather
+than being replaced by it. Every other array follows the ordinary last-wins rule, and a
+variant restates what it wants to keep — but a variant shares its parent's hardware, so
+last-wins there would let a variant that adds one caveat silently drop every limitation
+it inherits. A variant cannot un-say one of its parent's; a board that genuinely lacks
+the limitation is its own device rather than a variant.
+
+A caveat is a sentence, not a code, so the only rule at load is that it is non-empty
+and carries no ragged whitespace. **Where a limitation is mechanically checkable it
+belongs in the board's selftest expectations instead**, where it fails rather than
+merely informs; a caveat that could have been an `[[expect]]` entry is a check nobody
+runs. Caveats are for what cannot be asked of the running system.
 
 ### A feature selection is a build point, not a new recipe
 

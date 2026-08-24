@@ -1,0 +1,23 @@
+# features/jellyfin-rockchip.toml — point Jellyfin at the Rockchip transcode
+# stack. The glue between the `jellyfin` application feature and the
+# `media-accel-rockchip` capability feature: it installs nothing and enables
+# nothing, it configures one to use the other.
+#
+# It is a feature of its own rather than part of either side because it is
+# meaningful only where both are present. `jellyfin` is portable and must not
+# ship RK35xx encoder settings to an x86 box; `media-accel-rockchip` serves any
+# consumer of the stack (a Plex recipe, a bare-ffmpeg box) and must not carry one
+# application's config file. A recipe that wants accelerated Jellyfin names all
+# three — there is no provider auto-resolution (non-goal).
+#
+# Composing this without `media-accel-rockchip` produces an image whose Jellyfin
+# points at an `/opt/ffmpeg-rk` that no package installed, and Jellyfin will have
+# no encoder at all. `requires_soc` catches the hardware mismatch; it cannot catch
+# a recipe that names the wrong sibling feature, so name both.
+description  = "Configure Jellyfin to transcode on the Rockchip stack (ffmpeg-rk + VEPU580)"
+requires_soc = ["rk3588"]
+
+# No packages: `jellyfin` brings the server, `media-accel-rockchip` brings
+# ffmpeg-rk. This feature is the seeded `/etc/jellyfin/encoding.xml` under
+# overlay-pre/ and nothing else. See README.md for why that file is `overlay-pre`
+# and not `overlay`, and why hardware decoding is switched off in it.

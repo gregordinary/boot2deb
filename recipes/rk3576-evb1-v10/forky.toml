@@ -9,7 +9,10 @@ layout     = "combined"
 image_size = "2G"
 
 # The SoC-path validator: it builds end-to-end, but there is no EVB hardware to
-# boot it on, so the claim is "expected".
+# boot it on, so the claim is "expected". Re-assessed over the v7.1.6 kernel, which
+# changes `rk3576.dtsi` in one place: `vdec` lists `reg`/`reg-names` in the order its
+# binding declares, where earlier 7.1.x transposed "link" and "function". Each name
+# keeps the same address, and nothing else on the SoC path moves.
 [support]
 status = "expected"
-date   = "2026-07-20"
+date   = "2026-08-04"

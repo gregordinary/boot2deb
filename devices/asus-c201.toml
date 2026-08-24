@@ -23,7 +23,11 @@ kernel_dtb              = "rockchip/rk3288-veyron-speedy.dtb"
 # rk3288 SoC slice when a recipe compiles the mainline kernel.
 device_config_fragments = []
 
-supported_kernels       = ["debian-armmp", "rk3288-mainline-7.1"]
+# Three kernels, one default. Debian's own is what the board runs unless a recipe
+# says otherwise; `rk3288-mainline-7.1` is the compiled seam; `rk3288-libre-7.1` is
+# that same kernel from the deblobbed tree, which also strips the nonfree firmware
+# out of the image and so costs the board its Broadcom Wi-Fi and Bluetooth.
+supported_kernels       = ["debian-armmp", "rk3288-mainline-7.1", "rk3288-libre-7.1"]
 default_kernel          = "debian-armmp"
 supported_suites        = ["forky", "trixie"]
 default_suite           = "forky"                           # validated on the hardware; trixie also boots
@@ -40,6 +44,12 @@ image_size              = "2G"
 
 # A laptop, with a keyboard under the user's hands. The C201PA ships a US layout.
 keymap                  = "us"
+
+# What no build lifts on this board, beyond what socs/rk3288.toml states of the
+# silicon. Rendered in the support matrix and printed at the end of a build.
+caveats = [
+  "Two display controllers advertise the same maximum resolution and DRM decides at runtime which one the HDMI encoder lands on; the smaller (VOPL) tops out at 2560x1600. A 4K display showing only part of the picture is that, and `dmesg | grep -i vop` says which controller it got.",
+]
 
 # --- The board profile ---------------------------------------------------------
 # `speedy` is the *stock* depthcharge profile, and it is the default deliberately: a

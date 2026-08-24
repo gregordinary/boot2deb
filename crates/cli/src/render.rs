@@ -78,7 +78,11 @@ pub(crate) fn print_event_at(verbosity: Verbosity, event: &Event) {
             Stream::Stdout => println!("    {line}"),
             Stream::Stderr => eprintln!("    {line}"),
         },
-        Event::StepFinished { step } => println!("==> [{step}] done"),
+        // The outcome, not the duration: the per-step time is the timing summary's
+        // job, and repeating it on every boundary would put it twice on one screen.
+        Event::StepFinished { step, outcome, .. } => {
+            println!("==> [{step}] done ({})", outcome.as_str())
+        }
         Event::Artifact { role, path, .. } => println!("{role:<14}: {path}"),
         Event::Error { step, context } => eprintln!("==> [{step}] error: {context}"),
     }
@@ -276,6 +280,13 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
                 }
             );
             println!("  fragments  : {}", k.config_fragments.join(", "));
+            // The libre axis is a *subtraction* from the image — no nonfree firmware,
+            // `main` alone in apt — so the resolve output is where a reader can see it
+            // was applied. Printed only when it is on: the ordinary build is the one
+            // that needs no remark.
+            if k.libre {
+                println!("  libre      : yes — no nonfree firmware; apt offers main only");
+            }
         }
         Some(ResolvedKernel::Distro(k)) => {
             println!("kernel       : {} (distro-package)", k.id);
@@ -337,6 +348,26 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     println!("layout       : {}", b.layout);
     if image {
         println!("image size   : {}", b.image_size);
+        // Printed only when the build declares one: a line reading "none" on every
+        // other board would imply an axis most images have no opinion about. Each
+        // entry names the disk it looks for, so the operator can see what first boot
+        // will and will not touch before flashing.
+        for v in &b.data_volumes {
+            let source = match &v.match_ {
+                boot2deb_core::datavolume::VolumeMatch::Kind(k) => k.as_str().to_string(),
+                boot2deb_core::datavolume::VolumeMatch::Device(d) => d.clone(),
+            };
+            let create = match v.create {
+                boot2deb_core::datavolume::CreatePolicy::IfBlank => "create if blank",
+                boot2deb_core::datavolume::CreatePolicy::Never => "never create",
+            };
+            println!(
+                "data volume  : {} on {source} -> {} ({}, {create})",
+                v.label,
+                v.mount,
+                v.fstype.fstab_type()
+            );
+        }
         println!("hostname     : {}", b.hostname);
         println!(
             "locale       : {} (generated: {})",
@@ -354,6 +385,18 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             }
             println!("keymap       : {km} [{}]", k.model);
         }
+        // Who can reach the finished image, on one line. The key count rather than the
+        // keys: a single line stays scannable, and the keys themselves are in the
+        // recipe the reader just resolved.
+        let keys = match b.ssh_authorized_keys.len() {
+            0 => "no ssh keys".to_string(),
+            1 => "1 ssh key".to_string(),
+            n => format!("{n} ssh keys"),
+        };
+        println!(
+            "access       : sudo {}, {}-char first-boot password, {keys}",
+            b.sudo, b.first_boot_password_length,
+        );
         println!("dtb          : {}", b.kernel_dtb);
         // Only a board carrying its own (not-yet-upstream) device tree has sources to
         // show; an upstream-DTB board would print an empty line for nothing.
@@ -401,6 +444,10 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             );
             println!("cmdline      : {} (root= derived from fstab)", boot.cmdline);
             println!("offsets      : rootfs {}", boot.rootfs_offset);
+            println!(
+                "initramfs    : COMPRESS={} (the slot's budget chooses it)",
+                boot.initramfs_compress.as_str()
+            );
         }
     }
     // The SoC's initramfs module list is a kernel-axis value, so it has no meaning
@@ -433,6 +480,14 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             }
         }
         _ => println!("media-accel  : none (no feature builds the transcode stack)"),
+    }
+    // Last, and as sentences rather than a field: what this point does *not* do is
+    // not an axis of the build, it is what the axes above add up to leaving out.
+    if !b.caveats.is_empty() {
+        println!("caveats      :");
+        for c in &b.caveats {
+            println!("  - {c}");
+        }
     }
 }
 

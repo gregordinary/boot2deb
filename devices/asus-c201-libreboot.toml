@@ -8,10 +8,12 @@
 # holding it can also hold. So the profile and the slot size come as a pair, and the
 # pair is what this file is.
 #
-# What the pairing buys: a signed payload up to 32 MiB and a real FIT ramdisk node,
-# instead of 16 MiB with the initramfs address patched into every DTB's /chosen. That
-# is headroom for a debug initramfs carrying the display stack, which brings the panel
-# up seconds after Ctrl+U instead of after the rootfs mounts.
+# What the pairing buys is a signed payload up to 32 MiB, and this file spends it. The
+# budget is what forces a 16 MiB board to build a slow initramfs and boot blind; with it
+# lifted, resolution picks zstd over xz for the initramfs (see `InitramfsCompress`) and
+# the overlay-pre tree beside this file adds the display stack to it. Together those
+# bring the panel up during the initramfs instead of after the rootfs mounts, which
+# shortens the firmware's blank screen and makes a failed boot something you can read.
 #
 # What it costs: 32 MiB of image ahead of the rootfs (two slots at 32 MiB rather than
 # two at 16), and an image that boots ONLY on a libreboot unit. depthcharge-tools sets
@@ -22,7 +24,8 @@ extends     = "asus-c201"
 description = "ASUS Chromebook C201 running libreboot (RK3288, google,veyron-speedy)"
 
 # Everything else — the SoC, the boot method, the DTB, the kernel set, the suites, the
-# keymap — is the C201's and is inherited, including its overlay/ tree.
+# keymap — is the C201's and is inherited, including its overlay/ tree, which this
+# device's own trees are laid over rather than replacing.
 
 [depthcharge]
 board            = "speedy-libreboot"

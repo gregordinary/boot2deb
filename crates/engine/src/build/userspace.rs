@@ -284,7 +284,12 @@ pub fn build_userspace(
             build::purge_stage_debs(&stage_root, pkg.deb_prefixes)?;
             store
                 .restore(&node_name(pkg), &out_sigs[i], &stage_root)?
-                .inspect(|_| step.log(format!("{}: restored from artifact cache", pkg.name)))
+                .inspect(|_| {
+                    // Per package, not per step: this stage is the one that can restore
+                    // some of its `.deb`s and compile the rest, so it reports both.
+                    step.restored();
+                    step.log(format!("{}: restored from artifact cache", pkg.name))
+                })
                 .is_some()
         } else {
             false
@@ -297,6 +302,7 @@ pub fn build_userspace(
                 .as_ref()
                 .expect("a cache miss implies the branch that acquires the build root");
             build_one(pkg, &stage_root, env, root, &patch_ctx, &step)?;
+            step.compiled();
             if let Some(s) = store.as_ref() {
                 store_package(s, pkg, &node_name(pkg), &out_sigs[i], &stage_root, &step)?;
             }

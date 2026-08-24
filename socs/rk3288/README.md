@@ -1,8 +1,13 @@
 # RK3288 / Veyron — vendored firmware
 
-The SoC layer's `overlay/` tree carries two Broadcom firmware blobs, both vendored
-because Debian ships neither, both landing in the image at
+The SoC layer's `overlay-nonfree/` tree carries two Broadcom firmware blobs, both
+vendored because Debian ships neither, both landing in the image at
 `/usr/lib/firmware/brcm/`.
+
+They sit in `overlay-nonfree/` rather than `overlay/` because that tree is the one a
+[libre](../../kernels/rk3288-libre-7.1.toml) build does not lay in: a GNU Linux-libre
+kernel has no loader left that could read either file. One directory holds every blob
+this layer ships, which is also what makes them auditable as blobs.
 
 | file | bytes | sha256 | role |
 |---|---|---|---|
@@ -18,9 +23,10 @@ the day one of those is added, the radio half of this layer moves down to the de
 
 ## Why these are vendored and the Wi-Fi `.bin` is not
 
-Debian's `firmware-brcm80211` (pulled in by `socs/rk3288.toml`) carries the
-`brcmfmac4354-sdio.bin` and its `clm_blob`, so those come from the mirror like any
-other package. It carries neither of the files above:
+Debian's `firmware-brcm80211` (pulled in by `socs/rk3288.toml`'s
+`nonfree_firmware_packages`) carries the `brcmfmac4354-sdio.bin` and its `clm_blob`,
+so those come from the mirror like any other package. It carries neither of the files
+above:
 
 - The only BCM4354 NVRAM in Debian is `brcm/brcmfmac4354-sdio.nvidia,p2371-2180.txt`
   — an nVidia Jetson TX1 board file. NVRAM is not tuning; `boardtype`, `boardrev`, and

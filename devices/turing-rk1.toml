@@ -9,6 +9,15 @@ kernel_dtb              = "rockchip/rk3588-turing-rk1.dtb"
 device_config_fragments = ["device/turing-rk1"]    # board-specific kconfig only
 supported_kernels       = ["rk3588-mainline-7.1"]
 default_kernel          = "rk3588-mainline-7.1"
+
+# The board's u-boot series. `turing-rk1-recovery` ships with every image because
+# of what a compute module lacks: no front-panel USB, one OTG-capable controller,
+# and a carrier whose management controller writes the module's eMMC and nothing
+# else. `ums` is what puts a disk on the M.2 slot in front of that controller, so
+# an NVMe is writable with no OS on the module. `turing-rk1-util` layers the
+# recovery and bring-up commands on top and is built as a u-boot-only deliverable.
+supported_uboot_series  = ["turing-rk1-recovery", "turing-rk1-util"]
+default_uboot_series    = "turing-rk1-recovery"
 # forky is the validated suite; trixie builds and ships as its own recipe. Anything
 # older predates the RK3588 support this board's kernel and firmware assume.
 supported_suites        = ["forky", "trixie"]

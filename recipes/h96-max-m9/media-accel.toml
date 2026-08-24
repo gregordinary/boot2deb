@@ -23,13 +23,14 @@ image_size = "3G"
 # and Panfrost + Mesa render first-party at 4K. The decode and RGA paths in this
 # recipe are not yet exercised on hardware, so the recipe as a whole is
 # `experimental` until an image built from it decodes and binds RGA on the box.
-# Unchanged over the v7.1.5 kernel: nothing about either path was exercised on the
-# previous pin either.
+# Unchanged over the v7.1.6 kernel: nothing about either path was exercised on the
+# previous pin either, and v7.1.6 leaves `rkvdec` and the rk3576 device trees
+# byte-identical to v7.1.5, so it moves neither path.
 #
-# One thing to know before that test, because it is the decode path: v7.1.5 lists
+# One thing to know before that test, because it is the decode path: v7.1.6 lists
 # `vdec`'s `reg`/`reg-names` in the order its binding declares, where earlier 7.1.x
 # transposed "link" and "function". Each name keeps the same address either way, so
 # this reaches only a consumer that indexes the banks instead of naming them.
 [support]
 status = "experimental"
-date   = "2026-07-29"
+date   = "2026-08-03"

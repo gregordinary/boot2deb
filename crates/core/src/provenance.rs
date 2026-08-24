@@ -10,10 +10,15 @@
 //! form are unit-testable without a build. It is a join of pins the build already
 //! computes, not new tracking; license/SBOM data rides on the Debian packages
 //! themselves and is out of scope.
+//!
+//! The document reads back as well as it writes
+//! ([`ProvenanceManifest::from_toml_str`], [`SystemIdentity::from_toml_str`]): it is
+//! how a command answers a question about a build it did not run, and how a program
+//! outside boot2deb reads an image's account of itself.
 
 use crate::lock::Lock;
 use crate::model::ResolvedBuild;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Banner prepended to a serialized provenance manifest.
@@ -51,6 +56,19 @@ pub struct BuildFacts<'a> {
     pub manifest_sha256: &'a str,
     /// Number of installed packages the solved manifest pins.
     pub package_count: usize,
+    /// The whole-disk size the image node laid out, in bytes. Engine-owned because a
+    /// fitted `image_size` is decided by the format rather than by the recipe.
+    pub image_bytes: u64,
+    /// Filename of the published plan document, beside the manifest in the artifact
+    /// directory. Engine-owned: the document is what the provisioner resolved.
+    pub plan: &'a str,
+    /// Lowercase-hex sha256 of that document's bytes as written. See
+    /// [`RootfsProvenance::plan_sha256`] for why it is not taken from a re-rendering.
+    pub plan_sha256: &'a str,
+    /// The archive state the rootfs resolved against, one entry per configured
+    /// repository in resolution order. Engine-owned, as the plan is: the values come
+    /// from the provisioner library the engine links.
+    pub archives: &'a [ArchiveProvenance],
     /// Default account name the image ships with.
     pub user: &'a str,
     /// The per-image first-boot password. Deliberately unique per
@@ -125,7 +143,7 @@ pub struct BuildFacts<'a> {
 /// Unlike the rootfs manifest, this one is a record and not a contract: nothing pins it
 /// in the lock and no later build is verified against it. A base is discarded and
 /// re-bootstrapped whenever its manifest is absent, so the two never disagree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvisionedRootProvenance {
     /// Debian suite the base was bootstrapped for. The build's own for every root,
     /// though they need not agree: the target-arch sandbox exists only where there is an
@@ -299,30 +317,30 @@ pub struct SandboxMount {
     pub target: String,
     /// What is exposed at [`target`](Self::target): the host path a bind takes, or the
     /// path a symlink points at. Absent for a kind that has neither.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// The filesystem type, where the mount names one. Absent otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fstype: Option<String>,
     /// The kernel's `MS_*` flag word, `0x`-prefixed 8-digit hex. Hex rather than a
     /// decimal integer because it is a bit set, and only hex diffs one bit at a time.
     /// Absent for a kind that passes no flags at all; `0x00000000` where it passes an
     /// empty word.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flags: Option<String>,
     /// The filesystem data string the kernel receives (`mode=1777`). Absent where the
     /// mount carries none.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<String>,
     /// Whether a bind is remounted read-only. Absent for every other kind.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
 }
 
 /// The resolved build point + every pin, joined into one document. Each
 /// section is a flat table so the manifest reads cleanly and serializes to valid
 /// TOML (scalars only, no nested tables within a section).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceManifest {
     /// Resolved device / arch / suite / features build point.
     pub image: ImageProvenance,
@@ -332,17 +350,17 @@ pub struct ProvenanceManifest {
     pub rootfs: RootfsProvenance,
     /// The target-arch sandbox base that compiled this build's media-accel `.deb`s.
     /// Absent when the build compiled none, so no such sandbox was stood up.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_sandbox: Option<ProvisionedRootProvenance>,
     /// The cross root base that compiled this build's kernel, u-boot and out-of-tree
     /// modules. Absent when the build compiled none of them, so no such root was stood
     /// up.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cross_sandbox: Option<ProvisionedRootProvenance>,
     /// The packaging root whose `dpkg` archived this build's u-boot and kmod `.deb`s.
     /// Absent when the build archived none — every such artifact restored from the
     /// artifact cache, so no root was provisioned.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packaging_root: Option<ProvisionedRootProvenance>,
     /// The on-disk contract the rootfs filesystem was formatted to — the one
     /// determinant of the image's bytes that no source pin covers.
@@ -352,7 +370,7 @@ pub struct ProvenanceManifest {
     /// Verified rkbin blob pins. Absent when the boot method consumes no rkbin blobs
     /// — a depthcharge board's firmware is its own, so there is no ATF or DDR TPL in
     /// its boot chain to record.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blobs: Option<BlobsProvenance>,
     /// Build host / toolchain identity.
     pub toolchain: ToolchainProvenance,
@@ -360,17 +378,29 @@ pub struct ProvenanceManifest {
     pub built_with: BuiltWithProvenance,
     /// First-boot credential — the per-image secret.
     pub credentials: CredentialsProvenance,
+    /// How every sandboxed build command is rooted, who it is, what it can reach, and
+    /// what confines it. See [`SandboxProvenance`] for what the three keys record
+    /// between them. Its own nested lists are arrays-of-tables, so it is declared after
+    /// every plain `[section]` struct.
+    pub sandbox: SandboxPosture,
     /// The environment every sandboxed build command carries, variable name to value.
     /// boot2deb declares it in full rather than composing over the sandbox library's
     /// base, so this is the whole of what a compile sees. Declared after the last
     /// `[section]` struct and before the arrays-of-tables, since it serializes as a
-    /// table itself. See [`SandboxProvenance`] for what the pair of keys records.
+    /// table itself. See [`SandboxProvenance`] for what the three keys record.
     pub sandbox_env: BTreeMap<String, String>,
+    /// The archive state the rootfs resolved against, one entry per configured
+    /// repository in the order the resolve saw them — so an entry's position is the
+    /// index the published plan document's packages name. Empty for a build whose
+    /// rootfs stage did not run, which is an `--stage image` re-run over an existing
+    /// tar. Declared with the other arrays-of-tables. See [`ArchiveProvenance`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archives: Vec<ArchiveProvenance>,
     /// Pre-built `extra_debs` pulled from outside the Debian mirror,
     /// each content-pinned by sha256 — part of "exactly what went into this image."
     /// Omitted when none. Declared before the durability list so both arrays-of-tables
     /// serialize after every `[section]` table (valid TOML ordering).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_debs: Vec<crate::model::ExtraDeb>,
     /// Per-source pin durability *form*, derived offline from each fetched
     /// source's `(reference, commit)` — the offline half of "what went into this
@@ -391,7 +421,7 @@ pub struct ProvenanceManifest {
 /// classified [`PinForm`](crate::sources::PinForm) so a reader sees, per source,
 /// whether the image rests on a durable named ref or an undurable bare commit
 /// without a network round-trip.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceDurability {
     /// Source axis name (`kernel`, `uboot`, `mpp`, `librga`, `libmali`,
     /// `ffmpeg-base`).
@@ -430,7 +460,7 @@ pub struct SourceDurability {
 /// [`version`](Self::version) makes this a stable wire format. It is parsed by programs
 /// versioned independently of boot2deb, so a reader must be able to tell which schema it
 /// is looking at, and must tolerate fields it does not know.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemIdentity {
     /// Schema version of this document. Declared first so it serializes ahead of every
     /// `[table]`, which TOML requires of a top-level scalar.
@@ -448,7 +478,7 @@ pub struct SystemIdentity {
 /// secret), the toolchain identity (a property of the build host, not the board),
 /// `image_size` (superseded by the first-boot resize), and the locale/timezone/keymap
 /// (already queryable from the system itself).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityImage {
     /// Device name.
     pub device: String,
@@ -464,7 +494,7 @@ pub struct IdentityImage {
     /// The depthcharge board profile the kernel partition was signed for. **The one
     /// field here that is not recoverable from the disk**, and what an off-board
     /// `depthchargectl --board` needs. Absent under a boot method with no board profile.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<String>,
     /// Debian suite.
     pub suite: String,
@@ -479,7 +509,7 @@ pub struct IdentityImage {
 }
 
 /// The kernel the image boots, and the fact that decides how a new one reaches it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityKernel {
     /// Kernel definition id.
     pub id: String,
@@ -488,25 +518,25 @@ pub struct IdentityKernel {
     /// arrives through `apt`, a compiled one is a `.deb` that somebody has to hand it.
     pub flavor: String,
     /// The kernel package a distro-package build installs. Absent for a compiled kernel.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     /// The pinned kernel ref. Absent for a distro-package kernel, which is not fetched
     /// from git at all.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     /// The exact kernel commit.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     /// The patch series applied to that kernel, in order. They are the difference
     /// between two boards running the same kernel version and having different hardware
     /// working, so they belong on the device rather than only in the build's records.
     /// Empty when the kernel applied no series.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub patch_series: Vec<String>,
 }
 
 /// The resolved build point (from [`ResolvedBuild`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageProvenance {
     /// Device name.
     pub device: String,
@@ -522,7 +552,7 @@ pub struct ImageProvenance {
     /// boot method has one. It records *which firmware* this image targets — a stock
     /// C201 and a libreboot'd one take different profiles — which is not otherwise
     /// recoverable from the image. Absent under a boot method with no board profile.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<String>,
     /// Debian suite.
     pub suite: String,
@@ -530,8 +560,20 @@ pub struct ImageProvenance {
     pub features: Vec<String>,
     /// Image layout (`combined` / `split`).
     pub layout: String,
-    /// Image size (authored string).
+    /// Image size as the recipe authored it — `4G`, or `fit+20%`.
     pub image_size: String,
+    /// The whole-disk size the build realized, in bytes.
+    ///
+    /// Recorded beside the authored string because the two answer different questions
+    /// once a size can be *measured*: `fit+20%` states the rule, not the result, so on
+    /// its own it leaves "how large is this image" unanswerable from the manifest. For a
+    /// stated size the two agree, and the redundancy is the point — a disagreement would
+    /// mean the geometry did not lay out what the recipe asked for.
+    ///
+    /// This is the disk, not the filesystem: `[filesystem.geometry]` records the ext4
+    /// that sits in the rootfs partition, which is smaller by the boot region ahead of it
+    /// and the backup GPT behind it.
+    pub image_bytes: u64,
     /// Image hostname.
     pub hostname: String,
     /// The `LANG` the image boots with.
@@ -543,12 +585,12 @@ pub struct ImageProvenance {
     pub timezone: String,
     /// The console keyboard layout, when the board has a keyboard. Absent on a
     /// headless board, which ships Debian's default rather than a configured one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keymap: Option<String>,
 }
 
 /// Every pinned source, as `ref` + exact `commit` pairs (from the [`Lock`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourcesProvenance {
     /// Kernel definition id.
     pub kernel_id: String,
@@ -559,35 +601,35 @@ pub struct SourcesProvenance {
     /// [`kernel_commit`](Self::kernel_commit) — for a distro-package kernel, which is
     /// not fetched from git at all: its exact version and hash are pinned in the
     /// solved package manifest, like every other package in the image.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_ref: Option<String>,
     /// Kernel commit.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_commit: Option<String>,
     /// The kernel package a distro-package build installs (`linux-image-armmp`).
     /// Absent for a compiled kernel.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_package: Option<String>,
     /// Patch series names, in order. Empty — along with
     /// [`patches_commit`](Self::patches_commit) being absent — when the kernel applied
     /// no series, so the record never implies a `patches` dependency the build did not
     /// have.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub patch_series: Vec<String>,
     /// `patches` repo commit the series is pinned at.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patches_commit: Option<String>,
     /// u-boot ref. Absent — with [`uboot_commit`](Self::uboot_commit) — when the boot
     /// method compiles no u-boot.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot_ref: Option<String>,
     /// u-boot commit.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot_commit: Option<String>,
     /// The media-accel source pins, present only when the image built the HW
     /// transcode stack (a `requires_media_accel` feature was selected). Omitted
     /// from the manifest for a base image, which has no such sources.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_accel: Option<MediaAccelProvenance>,
 }
 
@@ -595,40 +637,40 @@ pub struct SourcesProvenance {
 /// the ffmpeg V4L2 base and its Rockchip graft-provenance tree — as `ref` +
 /// exact `commit` pairs (from the [`Lock`]). Present in a [`SourcesProvenance`]
 /// only when the image compiled the transcode stack.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaAccelProvenance {
     /// MPP ref. Absent when the SoC declares no such tree.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mpp_ref: Option<String>,
     /// MPP commit. Absent when the SoC declares no such tree.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mpp_commit: Option<String>,
     /// librga ref. Absent when the SoC declares no such tree.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub librga_ref: Option<String>,
     /// librga commit. Absent when the SoC declares no such tree.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub librga_commit: Option<String>,
     /// libmali ref. Absent when the SoC declares no such tree.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub libmali_ref: Option<String>,
     /// libmali commit. Absent when the SoC declares no such tree.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub libmali_commit: Option<String>,
     /// ffmpeg V4L2-base ref.
     pub ffmpeg_base_ref: String,
     /// ffmpeg V4L2-base commit.
     pub ffmpeg_base_commit: String,
     /// ffmpeg Rockchip provenance-tree ref (graft source). Absent when no graft applies.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg_rockchip_ref: Option<String>,
     /// ffmpeg Rockchip provenance-tree commit. Absent when no graft applies.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg_rockchip_commit: Option<String>,
 }
 
 /// The rootfs suite plus the content-pinned solved-manifest reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootfsProvenance {
     /// Debian suite.
     pub suite: String,
@@ -638,52 +680,149 @@ pub struct RootfsProvenance {
     pub manifest_sha256: String,
     /// Number of installed packages the manifest pins.
     pub package_count: usize,
+    /// The published plan document's filename, beside this manifest.
+    pub plan: String,
+    /// Lowercase-hex sha256 of that document, as it was written.
+    ///
+    /// The digest of the bytes on disk rather than of a re-rendering: a document
+    /// carries fields the writer that produced it knew and a later reader may not,
+    /// and a round trip through this builder re-emits those after the ones it does
+    /// know rather than where they were. So the file is the artifact and this is its
+    /// digest; re-rendering to check it would be checking a different document.
+    pub plan_sha256: String,
 }
 
-/// The rootfs filesystem's on-disk contract: the feature set it was formatted to, and
-/// the geometry that came out.
+/// One repository's state at the moment the rootfs plan resolved against it — the
+/// manifest's `[[archives]]` list.
+///
+/// [`RootfsProvenance`] pins *which package bytes* the image carries. This says what
+/// they were selected **from**, which is the question a solved manifest cannot answer:
+/// the same suite resolves to different versions a week apart, and a set naming only
+/// what it selected leaves the archive that served it unstated. The release digest is
+/// the sharp field — it identifies the exact archive state a signature vouched for, so
+/// two builds a month apart are comparable on whether the archive moved rather than
+/// only on whether the packages did.
+///
+/// Entries are in the order the resolve configured the repositories, and
+/// [`index`](Self::index) is that position: the published plan document names each
+/// package's archive by the same number, so the two documents join on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveProvenance {
+    /// Position in the configured repository list, which is what a plan document's
+    /// packages name. Written rather than left implicit in the array order so the join
+    /// survives a reader that sorts or filters the list.
+    pub index: usize,
+    /// The mirror URL that served the release — the one the packages were fetched
+    /// from, not the configured list, since a repository with a snapshot backstop
+    /// resolves against whichever mirror answered.
+    ///
+    /// Absent exactly when [`local`](Self::local) is set. The build's own pool lives at
+    /// a per-run path under a per-run directory, and recording it would make this
+    /// document a description of the machine — the same reason the sandbox record
+    /// carries no working or artifact path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<String>,
+    /// Whether this entry is the build's own `.deb` pool rather than an external
+    /// repository — the trusted `file://` archive holding the kernel, u-boot and
+    /// media-accel packages this build compiled.
+    ///
+    /// Always written, including `false`: a reader that saw the key only on the pool
+    /// could not tell a plain archive from a document written before the key existed.
+    pub local: bool,
+    /// The suite as this repository requested it. Need not be the image's — a feature
+    /// repository publishes under its vendor's own suite name.
+    pub suite: String,
+    /// The components resolved from this repository.
+    pub components: Vec<String>,
+    /// Lowercase-hex sha256 of the release body that was verified. For a signed
+    /// repository this is the digest of the cleartext the signature covers, so it
+    /// names the exact archive state that signature vouched for.
+    pub release_sha256: String,
+    /// The release's `Date` field, as written. Absent where the release carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    /// The release's `Valid-Until` field, as written. Absent where the release carries
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
+    /// Uppercase-hex fingerprints of the key that verified the release.
+    ///
+    /// **Empty is a fact, not an absence:** it says the repository was trusted
+    /// unsigned, which is how the build's own pool is configured and is the strongest
+    /// claim this list makes about that entry's trust. A release may carry several
+    /// signatures and verification stops at the first valid one, so this names the key
+    /// that was used rather than every key that could have been.
+    pub signed_by: Vec<String>,
+}
+
+/// The rootfs filesystem's on-disk contract: the format policy it was written to, what
+/// that policy lays out at a fixed reference size, and the geometry this image's own
+/// size realized.
 ///
 /// Every other pin in this manifest answers "which sources went in." This one answers
 /// "what shape were they written into," and it is the only such determinant that moves
-/// independently of the lock: the feature set is a builder constant chosen by the image
-/// stage, not a value resolved from config, so a formatter whose baseline set gains a
-/// feature relays a different on-disk layout for an unchanged lock. Recording what the
+/// independently of the lock: the format options are builder constants chosen by the
+/// image stage, not values resolved from config, so a formatter whose baseline set gains
+/// a feature relays a different on-disk layout for an unchanged lock. Recording what the
 /// format *resolved* makes that a visible difference between two builds rather than a
 /// silent one.
 ///
-/// The two halves are the two things that can move independently. [`pin`](Self::pin) is
-/// the intent — the feature set the formatter was handed — and
-/// [`geometry`](Self::geometry) is the outcome, which also answers to the image's size.
-/// One can change while the other does not: a larger partition moves every geometry
-/// number with an identical pin, and a formatter that gains a baseline feature moves the
-/// pin at an unchanged size.
+/// # Three records, because three things move for three reasons
 ///
-/// # What this does not cover
-///
-/// The feature set is not the whole of what a format is a function of: the grow
-/// reservation, the inode ratio, the reserved-block ratio and the error behaviour are
-/// format options outside it, and the formatter publishes no pin over those. Their
-/// effects reach [`geometry`](Self::geometry) — a changed grow reservation moves
-/// `reserved_gdt_blocks` — but the error behaviour reaches neither field and is recorded
-/// nowhere. The image stage's own tests hold it instead.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// - [`policy_pin`](Self::policy_pin) is the **intent**: every option by name. It moves
+///   when an option is renamed, re-defaulted, or set differently here, and it is
+///   identical across every image built from these constants — so an empty diff between
+///   two images' policy pins means they were built to the same contract.
+/// - [`reference_geometry_pin`](Self::reference_geometry_pin) is what that policy
+///   **lays out**, planned at one size chosen once. It closes the gap the policy pin
+///   cannot: a change to the *formula* behind an option whose name did not change.
+///   `grow max` reads the same before and after a change to what `Max` reserves; the
+///   blocks it reserves do not.
+/// - [`geometry`](Self::geometry) is the **outcome for this image**, which answers to
+///   the image's size as well. A larger partition moves every number in it with both
+///   pins unchanged, and that is correct rather than drift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilesystemProvenance {
     /// The filesystem type (`ext4`).
     pub kind: String,
-    /// The formatter's own feature-set pin document, verbatim.
+    /// The formatter's own policy pin document, verbatim: the whole format contract —
+    /// the feature set plus every option that is a property of *how* images are built
+    /// rather than of which image this is.
     ///
     /// Carried whole rather than re-spelled field by field, and that is the point: the
-    /// formatter builds it from an exhaustive destructure of its own feature set, so a
-    /// field it gains appears here without this crate being changed. A record assembled
-    /// here would keep compiling and silently stop covering it.
+    /// formatter builds it by destructuring its own options exhaustively, so an option
+    /// it gains appears here without this crate being changed. A record assembled here
+    /// would keep compiling and silently stop covering it.
+    ///
+    /// It is the whole policy rather than the feature set alone because the feature set
+    /// decides only five of the values that shape an image. The grow reservation, the
+    /// inode ratio, the reserved share, the error behaviour, the journal size and the
+    /// two directory-hash choices each move bytes too — and the error behaviour is the
+    /// sharp case, since it reaches neither the feature words nor the geometry and so
+    /// appears in no other record here.
     ///
     /// Self-describing and versioned by its own first line, so it is readable without
     /// this documentation and a reader can tell one revision of the format from another.
-    /// It states every feature word twice — as exact bits and as names — plus the block
-    /// and inode sizes, which are not features and appear in no feature word but change
-    /// the layout comprehensively.
-    pub pin: String,
-    /// The geometry the format realized.
+    ///
+    /// **Nothing image-specific is in it** — no UUID, no timestamp, no label, no block
+    /// count. Those are the formatter's separate identity pin, which is not recorded:
+    /// every field of it is a superblock field readable back off the image, and carrying
+    /// it would make every image's record differ for a reason that is not drift.
+    pub policy_pin: String,
+    /// The formatter's own geometry pin document for this policy planned at a **fixed
+    /// reference size**, verbatim.
+    ///
+    /// Not the geometry of the image beside it — see [`geometry`](Self::geometry) for
+    /// that. The reference size is a constant the image stage chose once and does not
+    /// move, which is exactly what makes this comparable across builds: two images of
+    /// different sizes have the same reference geometry pin unless the *formula* behind
+    /// an option changed, and that is the class of change a by-name policy pin cannot
+    /// see.
+    ///
+    /// It is a function of the policy options and the reference size alone, so it says
+    /// nothing about the rootfs that went in.
+    pub reference_geometry_pin: String,
+    /// The geometry the format realized for this image's own size.
     pub geometry: FilesystemGeometry,
 }
 
@@ -691,10 +830,11 @@ pub struct FilesystemProvenance {
 /// filesystem blocks.
 ///
 /// Every scalar the formatter's layout carries, projected mechanically. Two of its
-/// values are deliberately absent: the feature set, which [`FilesystemProvenance::pin`]
-/// states in full, and the per-group table, which is O(image size) — thousands of rows
-/// for a real rootfs — and derivable from the scalars here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// values are deliberately absent: the feature set, which
+/// [`FilesystemProvenance::policy_pin`] states in full, and the per-group table, which
+/// is O(image size) — thousands of rows for a real rootfs — and derivable from the
+/// scalars here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilesystemGeometry {
     /// Block size in bytes — the unit every other count here is in.
     pub block_size: u32,
@@ -733,14 +873,14 @@ pub struct FilesystemGeometry {
 }
 
 /// Verified rkbin blob pins (`"<filename>@sha256:<hex>"`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobsProvenance {
     /// ATF/BL31 blob pin.
     pub atf: String,
     /// DDR TPL blob pin.
     pub tpl: String,
     /// OP-TEE BL32 blob pin, present only when the build has one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bl32: Option<String>,
 }
 
@@ -752,7 +892,7 @@ pub struct BlobsProvenance {
 /// exactly what this manifest exists to state. Without the record, two images from one
 /// lock could have been checked to different standards with nothing but a log line to
 /// say so; with it, a release build can be gated on the list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationProvenance {
     /// Every check the rootfs filesystem passed, in the order it ran. `ferrosys-scan`
     /// is the in-process full scan of the finished image — every metadata checksum, the
@@ -776,7 +916,7 @@ pub struct VerificationProvenance {
 /// What is left is `qemu-user`, which no root can carry — it is registered with the host
 /// kernel's binfmt handler and executes from the host filesystem — and the parallelism,
 /// which is a property of the machine rather than of any tree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolchainProvenance {
     /// Build-host architecture.
     pub host_arch: String,
@@ -804,7 +944,7 @@ pub struct ToolchainProvenance {
     ///
     /// Serializes as a `[toolchain.qemu]` table, so it is declared after every scalar
     /// above it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qemu: Option<QemuProvenance>,
 }
 
@@ -815,11 +955,24 @@ pub struct ToolchainProvenance {
 /// interpreter still runs every target binary through the registered one, and the two
 /// paths are not required to name the same file. A record derived from `PATH` can
 /// therefore name a binary that never ran, or report an absence that is not one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QemuProvenance {
-    /// The file the registration resolves to, with symlinks followed — the binary that
-    /// actually executes, rather than the wrapper path the registration names.
+    /// The interpreter path exactly as the kernel recorded it — the wrapper under
+    /// `/usr/libexec/qemu-binfmt/` on a Debian host, not the `qemu-<arch>-static` a
+    /// `PATH` lookup finds. This is the provenance-faithful value and the one
+    /// [`sha256`](Self::sha256) is taken over; `open` follows any symlink along it, so
+    /// the digest is of the file that runs whether or not the path is canonical.
     pub interpreter: String,
+    /// [`interpreter`](Self::interpreter) with symlinks followed. Absent where it does
+    /// not resolve, which is a fact rather than an error.
+    ///
+    /// Its own field because the two are different facts: repointing the wrapper symlink
+    /// changes the interpreter without changing the registration, and a record carrying
+    /// one path alone could not show that. It is also the only form that can be
+    /// *executed* — `qemu` refuses to run under its binfmt wrapper name — so it is what
+    /// [`version`](Self::version) was read from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
     /// sha256 of that file, lowercase hex. The identity, and what the artifact cache
     /// keys on: it moves when the binary is rebuilt at an unchanged version, and it can
     /// be taken from a binary that refuses to run.
@@ -832,7 +985,7 @@ pub struct QemuProvenance {
     pub sha256: String,
     /// First line of its `--version` output, for a reader. Absent where the binary could
     /// not be run, which does not affect the digest above.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
 
@@ -842,13 +995,13 @@ pub struct QemuProvenance {
 /// this lock — a boundary that cannot be known at build time. So it records *when the
 /// build worked*, never a forward compatibility range, and a reproduce flow reads it to
 /// advise (warn on a mismatch), never to enforce.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuiltWithProvenance {
     /// boot2deb crate version, from `Cargo.toml` (e.g. `0.1.0`).
     pub version: String,
     /// Short git commit of the boot2deb checkout that built the image. Absent when the
     /// build tree was not a git checkout, leaving `version` the only builder coordinate.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     /// Whether the boot2deb checkout had uncommitted changes at build time. `true` means
     /// `commit` alone does not identify the builder — the image is not reproducible from
@@ -856,8 +1009,10 @@ pub struct BuiltWithProvenance {
     pub dirty: bool,
 }
 
-/// The image's initial first-boot credential.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// The image's initial first-boot credential, and the rest of what can reach the
+/// default account — the whole answer to "who can log in to this image, and what does
+/// reaching root cost them".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialsProvenance {
     /// Default account name.
     pub user: String,
@@ -865,6 +1020,18 @@ pub struct CredentialsProvenance {
     pub password: String,
     /// How the credential behaves on the shipped image.
     pub note: String,
+    /// What `sudo` asks of the account, as
+    /// [`SudoPolicy::as_str`](crate::model::SudoPolicy::as_str) spells it. Recorded
+    /// because it decides what the password above is worth: under `nopasswd` it is root.
+    pub sudo: String,
+    /// The SSH public keys the image authorizes for the account, verbatim, in the order
+    /// the file lists them. Empty when it authorizes nobody.
+    ///
+    /// The keys themselves rather than fingerprints of them: they are public key
+    /// material, this file is already the sensitive one (it carries the password), and a
+    /// reader auditing who can reach a built image is better served by the value than by
+    /// a digest they would have to go and resolve.
+    pub authorized_keys: Vec<String>,
 }
 
 /// Assemble the image's on-device [`SystemIdentity`] from the resolved build and its
@@ -925,6 +1092,25 @@ impl SystemIdentity {
         })?;
         Ok(format!("{IDENTITY_BANNER}{body}"))
     }
+
+    /// Read an image identity back from its serialized form. The banner is a TOML
+    /// comment, so the canonical document parses as-is.
+    ///
+    /// Unknown keys are ignored, which is the tolerance
+    /// [`version`](Self::version) exists to make safe: a reader of an older schema
+    /// accepts a document a newer boot2deb wrote, and decides from `version` whether
+    /// it understands it.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Parse`](crate::ConfigError::Parse) when the text is not an
+    /// identity document. `path` names the file in that error and is not read from.
+    pub fn from_toml_str(text: &str, path: &str) -> Result<Self, crate::ConfigError> {
+        toml::from_str(text).map_err(|source| crate::ConfigError::Parse {
+            path: path.to_string(),
+            source,
+        })
+    }
 }
 
 /// Join a resolved build, its lock, and the engine's build-time facts into a
@@ -944,6 +1130,7 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             features: build.features.clone(),
             layout: build.layout.to_string(),
             image_size: build.image_size.clone(),
+            image_bytes: facts.image_bytes,
             hostname: build.hostname.clone(),
             locale: build.locale.clone(),
             locales_generate: build.locales_generate.clone(),
@@ -995,6 +1182,8 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             manifest: rootfs.manifest.clone(),
             manifest_sha256: facts.manifest_sha256.to_string(),
             package_count: facts.package_count,
+            plan: facts.plan.to_string(),
+            plan_sha256: facts.plan_sha256.to_string(),
         },
         build_sandbox: facts.build_sandbox.clone(),
         cross_sandbox: facts.cross_sandbox.clone(),
@@ -1025,10 +1214,16 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             user: facts.user.to_string(),
             password: facts.password.to_string(),
             note: "expired at first login (passwd -e); unique per built image".to_string(),
+            // From the resolved build rather than from `BuildFacts`: both are properties
+            // of the build point, known before anything is built, unlike the password.
+            sudo: build.sudo.as_str().to_string(),
+            authorized_keys: build.ssh_authorized_keys.clone(),
         },
-        // The one fact the engine hands over as a unit, split here because its two
-        // halves sit on opposite sides of the table/array-of-tables boundary.
+        // The one fact the engine hands over as a unit, split here because its three
+        // parts sit on opposite sides of the table/array-of-tables boundary.
+        sandbox: facts.sandbox.posture.clone(),
         sandbox_env: facts.sandbox.env.clone(),
+        archives: facts.archives.to_vec(),
         extra_debs: lock.extra_debs.clone(),
         // Every source axis the build actually *fetches*, classified offline by pin
         // form. A source the build never fetches has no re-fetch durability to report,
@@ -1111,6 +1306,42 @@ fn source_durability(source: &str, reference: &str, commit: &str) -> SourceDurab
     }
 }
 
+/// The `[built_with]` section of a serialized manifest, read back out of it.
+///
+/// Named as its own document so only that section is deserialized. The rest of a
+/// manifest holds the image's first-boot credential, and a reader after the builder
+/// coordinate has no business parsing — let alone holding — the secret beside it.
+/// Sections this struct does not name are ignored, which is also what lets it read a
+/// manifest a builder recording more than this one wrote.
+#[derive(Deserialize)]
+struct StampedManifest {
+    built_with: BuiltWithProvenance,
+}
+
+/// Read which boot2deb produced an image out of its serialized provenance manifest.
+///
+/// The counterpart to [`assemble`] for the one section a *later* run acts on: a
+/// reproduce flow compares the stamped builder with the running one, and the stamp is a
+/// floor rather than a ceiling — it says when the build worked, never when it breaks —
+/// so what a reader does with it is advice.
+///
+/// # Errors
+///
+/// [`ConfigError::Parse`](crate::ConfigError::Parse) when the text is not a manifest
+/// carrying a `[built_with]` section. `path` names the file in that error and is not
+/// read from.
+pub fn builder_stamp(
+    manifest: &str,
+    path: &str,
+) -> Result<BuiltWithProvenance, crate::ConfigError> {
+    toml::from_str::<StampedManifest>(manifest)
+        .map(|stamped| stamped.built_with)
+        .map_err(|source| crate::ConfigError::Parse {
+            path: path.to_string(),
+            source,
+        })
+}
+
 impl ProvenanceManifest {
     /// Serialize to the canonical form: the sensitivity banner followed by the
     /// TOML body.
@@ -1121,10 +1352,34 @@ impl ProvenanceManifest {
         })?;
         Ok(format!("{BANNER}{body}"))
     }
+
+    /// Read a whole manifest back from its serialized form — the reader half of the
+    /// wire format, used by every command that answers a question about a build it did
+    /// not run (`diff`, `sbom`). The banner is a TOML comment, so the canonical
+    /// document parses as-is.
+    ///
+    /// The parsed value carries the image's first-boot password, since the document
+    /// does; a caller that only wants the builder coordinate should use
+    /// [`builder_stamp`] instead, which reads that one section and holds no secret.
+    ///
+    /// Unknown keys are ignored, so a reader accepts a manifest a later boot2deb wrote
+    /// with sections this one does not know. Absent optional sections deserialize to
+    /// their empty form, which is the same value the writer skipped them for.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Parse`](crate::ConfigError::Parse) when the text is not a
+    /// manifest. `path` names the file in that error and is not read from.
+    pub fn from_toml_str(text: &str, path: &str) -> Result<Self, crate::ConfigError> {
+        toml::from_str(text).map_err(|source| crate::ConfigError::Parse {
+            path: path.to_string(),
+            source,
+        })
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::lock::*;
 
@@ -1184,17 +1439,55 @@ mod tests {
         vec!["ferrosys-scan".to_string(), "e2fsck".to_string()]
     }
 
+    /// The archive rows as the rootfs stage reports them: the signed primary mirror and
+    /// the build's own pool, which is the pair every real build produces and the one that
+    /// exercises both shapes — a recorded URL beside a dropped one, and a verified
+    /// signature beside a deliberate absence of one.
+    fn sample_archives() -> Vec<ArchiveProvenance> {
+        vec![
+            ArchiveProvenance {
+                index: 0,
+                mirror: Some("https://deb.debian.org/debian".into()),
+                local: false,
+                suite: "forky".into(),
+                components: vec!["main".into(), "non-free-firmware".into()],
+                release_sha256: "a".repeat(64),
+                date: Some("Sun, 02 Aug 2026 08:12:34 UTC".into()),
+                valid_until: Some("Sun, 09 Aug 2026 08:12:34 UTC".into()),
+                signed_by: vec!["4CB50190207B4758A3F73A796ED0E7B82643E131".into()],
+            },
+            ArchiveProvenance {
+                index: 1,
+                mirror: None,
+                local: true,
+                suite: "forky".into(),
+                components: vec!["main".into()],
+                release_sha256: "b".repeat(64),
+                date: Some("Sun, 02 Aug 2026 08:12:34 UTC".into()),
+                valid_until: None,
+                signed_by: Vec::new(),
+            },
+        ]
+    }
+
     /// The filesystem record as the image stage reports it — the engine's real pin
-    /// document and a real image's geometry, so the join is exercised against the shape
-    /// that actually ships. The pin is multi-line, which is the case that decides how
-    /// the manifest renders it.
+    /// documents and a real image's geometry, so the join is exercised against the shape
+    /// that actually ships. Both pins are multi-line, which is the case that decides how
+    /// the manifest renders them.
     fn sample_filesystem() -> FilesystemProvenance {
         FilesystemProvenance {
             kind: "ext4".into(),
-            pin: "ferrosys-feature-pin 1\n\
+            policy_pin: "ferrosys-policy-pin 1\n\
                   compat 0x0000003c has_journal ext_attr resize_inode dir_index\n\
                   block_size 4096\n\
-                  inode_size 256\n"
+                  inode_size 256\n\
+                  grow max\n\
+                  errors remount-ro\n"
+                .into(),
+            reference_geometry_pin: "ferrosys-geometry-pin 1\n\
+                  block_size 4096\n\
+                  total_blocks 1048576\n\
+                  journal_blocks 16384\n"
                 .into(),
             geometry: FilesystemGeometry {
                 block_size: 4096,
@@ -1302,6 +1595,52 @@ mod tests {
         .unwrap()
     }
 
+    /// A full RK1 media-accel manifest, assembled the way a build assembles one.
+    ///
+    /// Shared with the SBOM tests ([`crate::sbom`]) so a document rendered *from* a
+    /// manifest is exercised against a manifest [`assemble`] actually produces, rather
+    /// than against a hand-written fixture that could drift from the type. It carries
+    /// every optional section — compiled kernel and u-boot, a patch series, the
+    /// media-accel trees, blobs, an extra `.deb` — so a renderer's every branch is
+    /// reachable from one value.
+    pub(crate) fn sample_manifest() -> ProvenanceManifest {
+        let archives = sample_archives();
+        let verified = sample_verified_with();
+        let mut lock = sample_lock();
+        lock.extra_debs = vec![crate::model::ExtraDeb {
+            url: Some("https://vendor.example/foo_1.2_arm64.deb".into()),
+            path: None,
+            sha256: "cc".repeat(32),
+        }];
+        assemble(
+            &sample_build(),
+            &lock,
+            &BuildFacts {
+                host_arch: "x86_64",
+                cross: true,
+                manifest_sha256: "3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a",
+                package_count: 2,
+                plan: "turing-rk1-media-accel-forky.plan",
+                image_bytes: 2 << 30,
+                plan_sha256: "beef",
+                archives: &archives,
+                user: "debian",
+                password: "pw",
+                builder_version: "0.1.0",
+                builder_commit: Some("abc1234"),
+                builder_dirty: false,
+                filesystem: sample_filesystem(),
+                rootfs_verified_with: &verified,
+                qemu: None,
+                jobs: 8,
+                sandbox: sample_sandbox(),
+                build_sandbox: None,
+                cross_sandbox: None,
+                packaging_root: None,
+            },
+        )
+    }
+
     /// The identity document ships **inside** the image, so the one thing it must never
     /// carry is the one thing the provenance manifest exists to record: the per-image
     /// first-boot password. The two documents are assembled from overlapping inputs, so
@@ -1338,6 +1677,10 @@ mod tests {
             cross: true,
             manifest_sha256: "abc",
             package_count: 1,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &sample_archives(),
             user: "debian",
             password: "Kp7rTx",
             builder_version: "0.0.0-test",
@@ -1414,6 +1757,307 @@ mod tests {
         assert!(v < text.find("[image]").expect("image table"));
     }
 
+    /// `[rootfs]` pins which package bytes shipped; `[[archives]]` says what they were
+    /// selected from, which no other section answers. Both halves of that record are
+    /// checked here: the external mirror keeps its URL and its signer, and the build's
+    /// own pool keeps neither — its URL is a path on the build host, and it is trusted
+    /// unsigned, which the empty list states rather than omits.
+    #[test]
+    fn the_archive_list_records_what_the_rootfs_was_selected_from() {
+        let archives = sample_archives();
+        let facts = BuildFacts {
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc123",
+            package_count: 223,
+            plan: "turing-rk1-forky.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "beef",
+            archives: &archives,
+            user: "debian",
+            password: "pw",
+            builder_version: "0.0.0-test",
+            builder_commit: None,
+            builder_dirty: false,
+            filesystem: sample_filesystem(),
+            rootfs_verified_with: &[],
+            qemu: None,
+            jobs: 8,
+            sandbox: sample_sandbox(),
+            build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
+        };
+        let text = assemble(&sample_build(), &sample_lock(), &facts)
+            .to_toml_string()
+            .unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+
+        // The plan is named beside the manifest it accompanies, so a reader holding the
+        // image can find the document a `reproduce` replays.
+        let rootfs = parsed["rootfs"].as_table().unwrap();
+        assert_eq!(rootfs["plan"].as_str(), Some("turing-rk1-forky.plan"));
+        assert_eq!(rootfs["plan_sha256"].as_str(), Some("beef"));
+
+        let rows = parsed["archives"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["index"].as_integer(), Some(0));
+        assert_eq!(
+            rows[0]["mirror"].as_str(),
+            Some("https://deb.debian.org/debian")
+        );
+        assert_eq!(rows[0]["local"].as_bool(), Some(false));
+        assert_eq!(rows[0]["signed_by"].as_array().unwrap().len(), 1);
+
+        assert_eq!(rows[1]["local"].as_bool(), Some(true));
+        assert!(
+            rows[1].get("mirror").is_none(),
+            "the pool's per-run path must not reach the manifest:\n{text}"
+        );
+        assert!(
+            rows[1]["signed_by"].as_array().unwrap().is_empty(),
+            "trusted-unsigned is written as an empty list, not omitted:\n{text}"
+        );
+    }
+
+    /// A fitted `image_size` records a rule, so the realized size has to be recorded
+    /// separately or the manifest cannot answer how large its own image is. The two keys
+    /// are independent by construction: this asserts the recorded bytes come from the
+    /// build rather than from re-parsing the authored string, which for `fit+20%` is not
+    /// a number at all.
+    #[test]
+    fn a_fitted_image_records_the_size_it_realized_and_not_only_the_rule() {
+        let archives = sample_archives();
+        let facts = |image_bytes| BuildFacts {
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc123",
+            package_count: 223,
+            image_bytes,
+            plan: "sample.plan",
+            plan_sha256: "beef",
+            archives: &archives,
+            user: "debian",
+            password: "pw",
+            builder_version: "0.0.0-test",
+            builder_commit: None,
+            builder_dirty: false,
+            filesystem: sample_filesystem(),
+            rootfs_verified_with: &[],
+            qemu: None,
+            jobs: 8,
+            sandbox: sample_sandbox(),
+            build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
+        };
+        let mut build = sample_build();
+        build.image_size = "fit+20%".into();
+
+        let text = assemble(&build, &sample_lock(), &facts(917_533_184))
+            .to_toml_string()
+            .unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["image"]["image_size"].as_str(), Some("fit+20%"));
+        assert_eq!(
+            parsed["image"]["image_bytes"].as_integer(),
+            Some(917_533_184),
+            "the realized size is the build's, not a re-parsing of the rule:\n{text}"
+        );
+    }
+
+    /// The builder stamp is the one section a *later* run reads back, so the write and
+    /// the read are held to agree here rather than in two places that can drift.
+    #[test]
+    fn the_builder_stamp_reads_back_out_of_a_rendered_manifest() {
+        let archives = sample_archives();
+        let facts = BuildFacts {
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc123",
+            package_count: 223,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "beef",
+            archives: &archives,
+            user: "debian",
+            password: "pw",
+            builder_version: "0.4.2",
+            builder_commit: Some("deadbeef1234"),
+            builder_dirty: false,
+            filesystem: sample_filesystem(),
+            rootfs_verified_with: &[],
+            qemu: None,
+            jobs: 8,
+            sandbox: sample_sandbox(),
+            build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
+        };
+        let text = assemble(&sample_build(), &sample_lock(), &facts)
+            .to_toml_string()
+            .unwrap();
+        let stamp = builder_stamp(&text, "sample.provenance.toml").unwrap();
+        assert_eq!(stamp.version, "0.4.2");
+        assert_eq!(stamp.commit.as_deref(), Some("deadbeef1234"));
+        assert!(!stamp.dirty);
+
+        // A document that is not a manifest names the file it was read from, so the
+        // operator learns which path was wrong rather than only that a parse failed.
+        let err = builder_stamp("[image]\ndevice = \"x\"\n", "elsewhere.toml").unwrap_err();
+        assert!(err.to_string().contains("elsewhere.toml"), "{err}");
+    }
+
+    /// A lock pinning nothing but the rootfs — the shape behind a manifest whose every
+    /// optional section is absent. A distro-kernel board fetches no source at all, so
+    /// this is a real lock and not only a degenerate one.
+    fn bare_lock() -> Lock {
+        Lock {
+            kernel: None,
+            patches: None,
+            uboot: None,
+            uboot_patches: None,
+            userspace: None,
+            ffmpeg: None,
+            rootfs: Some(RootfsPin {
+                suite: "forky".into(),
+                manifest: "asus-c201-forky.pkgs.lock".into(),
+                manifest_sha256: None,
+            }),
+            blobs: None,
+            kmods: vec![],
+            extra_debs: vec![],
+            snapshot: None,
+        }
+    }
+
+    /// The manifest is a wire format: `diff` and `sbom` answer questions about builds
+    /// they did not run by reading it back, and the document is documented as readable
+    /// by other programs. This pins both directions of that contract, so the writer
+    /// cannot drift into emitting something the reader rejects.
+    ///
+    /// Both extremes are exercised. The full document catches a field that serializes
+    /// to a form it cannot be parsed from; the bare one catches the opposite failure —
+    /// a skipped absent field the reader would demand — which is what the `default` on
+    /// every `skip_serializing_if` field buys.
+    #[test]
+    fn a_rendered_manifest_parses_back_to_the_value_that_wrote_it() {
+        let archives = sample_archives();
+        let verified = sample_verified_with();
+        let root = |manifest: &str, arch: &str| ProvisionedRootProvenance {
+            suite: "forky".into(),
+            architecture: arch.into(),
+            manifest: manifest.into(),
+            manifest_sha256: "f00d".into(),
+            package_count: 312,
+        };
+        let mut lock = sample_lock();
+        lock.extra_debs = vec![crate::model::ExtraDeb {
+            url: Some("https://vendor.example/x_1_arm64.deb".into()),
+            path: None,
+            sha256: "aa".repeat(32),
+        }];
+        let full = assemble(
+            &sample_build(),
+            &lock,
+            &BuildFacts {
+                host_arch: "x86_64",
+                cross: true,
+                manifest_sha256: "abc123",
+                package_count: 223,
+                plan: "sample.plan",
+                image_bytes: 2 << 30,
+                plan_sha256: "beef",
+                archives: &archives,
+                user: "debian",
+                password: "pw",
+                builder_version: "0.4.2",
+                builder_commit: Some("deadbeef1234"),
+                builder_dirty: true,
+                filesystem: sample_filesystem(),
+                rootfs_verified_with: &verified,
+                qemu: Some(QemuProvenance {
+                    resolved: Some("/usr/bin/qemu-aarch64-static".into()),
+                    interpreter: "/usr/bin/qemu-aarch64-static".into(),
+                    sha256: "d1".repeat(32),
+                    version: Some("qemu-aarch64 version 9.2.0".into()),
+                }),
+                jobs: 8,
+                sandbox: sample_sandbox(),
+                build_sandbox: Some(root("media-accel-forky.sandbox.pkgs", "arm64")),
+                cross_sandbox: Some(root("media-accel-forky.cross.pkgs", "amd64")),
+                packaging_root: Some(root("media-accel-forky.packaging.pkgs", "amd64")),
+            },
+        );
+        let text = full.to_toml_string().unwrap();
+        assert_eq!(
+            ProvenanceManifest::from_toml_str(&text, "sample.provenance.toml").unwrap(),
+            full
+        );
+
+        let bare = assemble(
+            &depthcharge_build(),
+            &bare_lock(),
+            &BuildFacts {
+                host_arch: "x86_64",
+                cross: true,
+                manifest_sha256: "abc123",
+                package_count: 223,
+                plan: "bare.plan",
+                image_bytes: 2 << 30,
+                plan_sha256: "beef",
+                archives: &[],
+                user: "debian",
+                password: "pw",
+                builder_version: "0.4.2",
+                builder_commit: None,
+                builder_dirty: false,
+                filesystem: sample_filesystem(),
+                rootfs_verified_with: &[],
+                qemu: None,
+                jobs: 8,
+                sandbox: sample_sandbox(),
+                build_sandbox: None,
+                cross_sandbox: None,
+                packaging_root: None,
+            },
+        );
+        // The writer really does skip them; without that this half proves nothing.
+        let text = bare.to_toml_string().unwrap();
+        assert!(!text.contains("[blobs]"), "{text}");
+        assert!(!text.contains("[[archives]]"), "{text}");
+        assert_eq!(
+            ProvenanceManifest::from_toml_str(&text, "bare.provenance.toml").unwrap(),
+            bare
+        );
+
+        // A document that is not a manifest names the file it was read from, so the
+        // operator learns which path was wrong rather than only that a parse failed.
+        let err =
+            ProvenanceManifest::from_toml_str("device = \"x\"\n", "elsewhere.toml").unwrap_err();
+        assert!(err.to_string().contains("elsewhere.toml"), "{err}");
+    }
+
+    /// The identity document is parsed by programs versioned independently of
+    /// boot2deb, so it round-trips for the same reason the manifest does.
+    #[test]
+    fn a_rendered_identity_parses_back_to_the_value_that_wrote_it() {
+        let identity = system_identity(&depthcharge_build(), &sample_lock());
+        let text = identity.to_toml_string().unwrap();
+        assert_eq!(
+            SystemIdentity::from_toml_str(&text, "image.toml").unwrap(),
+            identity
+        );
+
+        // A reader of this schema accepts a document a later boot2deb wrote: the
+        // version says what it is, and a key this reader does not know is not an error.
+        let extended = format!("{text}\n[future]\nkey = \"value\"\n");
+        assert_eq!(
+            SystemIdentity::from_toml_str(&extended, "image.toml").unwrap(),
+            identity
+        );
+    }
+
     #[test]
     fn assembles_and_serializes_to_toml() {
         let build = sample_build();
@@ -1423,6 +2067,10 @@ mod tests {
             cross: true,
             manifest_sha256: "abc123",
             package_count: 223,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &sample_archives(),
             user: "debian",
             password: "Kp7rTx",
             builder_version: "0.0.0-test",
@@ -1516,19 +2164,27 @@ mod tests {
         );
         assert_eq!(parsed["built_with"]["dirty"].as_bool(), Some(false));
         // The filesystem record: the on-disk contract the rootfs was formatted to, which
-        // no source pin covers. The formatter's pin document survives the join and the
-        // TOML round-trip whole — line breaks included, so it stays the document the
-        // formatter emitted rather than a re-spelling of it.
+        // no source pin covers. Both of the formatter's pin documents survive the join
+        // and the TOML round-trip whole — line breaks included, so each stays the
+        // document the formatter emitted rather than a re-spelling of it.
         assert_eq!(parsed["filesystem"]["kind"].as_str(), Some("ext4"));
         assert_eq!(
-            parsed["filesystem"]["pin"].as_str(),
-            Some(sample_filesystem().pin.as_str())
+            parsed["filesystem"]["policy_pin"].as_str(),
+            Some(sample_filesystem().policy_pin.as_str())
         );
-        // And it renders as a readable multi-line string rather than one line of
-        // escapes, which is the whole reason it is worth carrying verbatim.
+        assert_eq!(
+            parsed["filesystem"]["reference_geometry_pin"].as_str(),
+            Some(sample_filesystem().reference_geometry_pin.as_str())
+        );
+        // And each renders as a readable multi-line string rather than one line of
+        // escapes, which is the whole reason they are worth carrying verbatim.
         assert!(
-            text.contains("pin = \"\"\"\nferrosys-feature-pin 1\n"),
-            "the pin document must render multi-line:\n{text}"
+            text.contains("policy_pin = \"\"\"\nferrosys-policy-pin 1\n"),
+            "the policy pin document must render multi-line:\n{text}"
+        );
+        assert!(
+            text.contains("reference_geometry_pin = \"\"\"\nferrosys-geometry-pin 1\n"),
+            "the reference geometry pin document must render multi-line:\n{text}"
         );
         // The realized geometry lands in its own subtable, after the scalars above.
         assert_eq!(
@@ -1576,6 +2232,78 @@ mod tests {
             .any(|r| r.source.contains("patches")));
     }
 
+    /// `[credentials]` is the whole answer to "who can reach this image": the password,
+    /// what `sudo` costs, and every authorized key. A manifest recording only the
+    /// password would understate the access an image grants — under `nopasswd` that
+    /// password is root, and a key holder needs no password at all.
+    #[test]
+    fn credentials_record_the_whole_access_picture() {
+        const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe operator@workstation";
+        let build = crate::resolve_recipe(
+            &config_root(),
+            "turing-rk1/forky",
+            &crate::Overrides {
+                sudo: Some(crate::model::SudoPolicy::Password),
+                ssh_authorized_keys: Some(vec![KEY.to_string()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let facts = BuildFacts {
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc",
+            package_count: 1,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &sample_archives(),
+            user: "debian",
+            password: "pw",
+            builder_version: "0.0.0-test",
+            builder_commit: None,
+            builder_dirty: false,
+            filesystem: sample_filesystem(),
+            rootfs_verified_with: &sample_verified_with(),
+            qemu: None,
+            jobs: 8,
+            sandbox: sample_sandbox(),
+            build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
+        };
+        let prov = assemble(&build, &sample_lock(), &facts);
+        assert_eq!(prov.credentials.sudo, "password");
+        assert_eq!(prov.credentials.authorized_keys, vec![KEY]);
+
+        let text = prov.to_toml_string().unwrap();
+        assert!(text.contains("sudo = \"password\""), "{text}");
+        assert!(
+            text.contains(KEY),
+            "the authorized key is recorded:\n{text}"
+        );
+        // Still valid TOML with a string array inside `[credentials]`.
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(
+            parsed["credentials"]["authorized_keys"][0].as_str(),
+            Some(KEY)
+        );
+
+        // The *on-disk* identity staged into the image must still carry none of this.
+        // A key is not a secret, but `/etc/boot2deb/image.toml` is readable by anyone
+        // holding the disk, and an image that inventories its own access rules hands a
+        // reader the list of accounts to go after.
+        let identity = system_identity(&build, &sample_lock())
+            .to_toml_string()
+            .unwrap();
+        assert!(
+            !identity.contains(KEY),
+            "identity leaked a key:\n{identity}"
+        );
+        assert!(!identity.contains("authorized_keys"));
+        assert!(!identity.contains("sudo"));
+    }
+
     #[test]
     fn extra_debs_are_joined_and_serialize_after_the_tables() {
         let build = sample_build();
@@ -1590,6 +2318,10 @@ mod tests {
             cross: true,
             manifest_sha256: "abc",
             package_count: 1,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &sample_archives(),
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
@@ -1644,6 +2376,10 @@ mod tests {
             cross: true,
             manifest_sha256: "abc",
             package_count: 1,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &sample_archives(),
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
@@ -1714,6 +2450,7 @@ mod tests {
     /// an empty section would claim a base that never existed.
     #[test]
     fn the_build_sandbox_is_recorded_when_one_compiled_the_build() {
+        let archives = sample_archives();
         let facts = |build_sandbox| BuildFacts {
             cross_sandbox: None,
             packaging_root: None,
@@ -1721,6 +2458,10 @@ mod tests {
             cross: true,
             manifest_sha256: "abc",
             package_count: 1,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &archives,
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
@@ -1784,12 +2525,17 @@ mod tests {
     /// not be the image's, both of which show up here.
     #[test]
     fn the_packaging_root_is_recorded_apart_from_the_sandbox_that_compiled() {
+        let archives = sample_archives();
         let facts = |build_sandbox, packaging_root| BuildFacts {
             cross_sandbox: None,
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
             package_count: 1,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &archives,
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
@@ -1864,6 +2610,7 @@ mod tests {
     /// section's presence as standing in for the other's.
     #[test]
     fn the_cross_root_is_recorded_apart_from_the_target_arch_sandbox() {
+        let archives = sample_archives();
         let facts = |cross_sandbox, build_sandbox| BuildFacts {
             cross_sandbox,
             build_sandbox,
@@ -1872,6 +2619,10 @@ mod tests {
             cross: true,
             manifest_sha256: "abc",
             package_count: 1,
+            plan: "sample.plan",
+            image_bytes: 2 << 30,
+            plan_sha256: "0d0e",
+            archives: &archives,
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",

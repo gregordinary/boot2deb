@@ -5,7 +5,7 @@ soc                     = "rk3576"                 # -> arch, dt_dir, modules, r
 boot_method             = "rockchip-rkbin"         # default within supported_boot_methods
 supported_boot_methods  = ["rockchip-rkbin"]
 
-# Validated against u-boot v2026.04: builds idbloader.img + u-boot.itb.
+# Validated against u-boot v2026.07: builds idbloader.img + u-boot.itb.
 uboot_defconfig         = "generic-rk3576_defconfig"
 
 # The board DTS is not upstream, so the kernel builds this DTB from the
@@ -94,3 +94,10 @@ image_size              = "2G"
 # rkbin (ATF + DDR TPL; no BL32) is inherited from socs/rk3576.toml. The H96
 # carries LPDDR4X at 2112 MHz, which is the SoC default loader's native target, so
 # this board overrides no blobs.
+
+# What no build lifts on this board, beyond what socs/rk3576.toml already states of
+# the silicon. Rendered in the support matrix and printed at the end of a build.
+caveats = [
+  "No port on the box delivers USB 3.0. The blue port beside HDMI is capped to high speed in the board device tree, because SuperSpeed training collapses into a SetAddress loop that takes the boot medium down with it; the black ports sit behind an internal USB 2.0 hub, and their SuperSpeed lane reaches no connector.",
+  "There is no SD-card slot: it is depopulated on this box. eMMC and USB are the only storage.",
+]

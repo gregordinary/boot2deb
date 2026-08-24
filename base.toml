@@ -52,6 +52,68 @@ locales_generate = [
 # where it sits; `timedatectl set-timezone` changes it on a running image.
 timezone = "UTC"
 
+# --- Account and access -------------------------------------------------------
+# Who can log in to a built image as the default `debian` account, and what reaching
+# root costs them. Every key here is overridable per recipe.
+#
+# Each image gets its own randomly generated first-boot password, expired so it must be
+# changed at first login. Three facts about the shipped base decide how much that
+# password is protecting, and they are worth knowing before changing anything below:
+# openssh-server is installed and Debian enables it, a DHCP client brings the board onto
+# the network before anyone has logged in, and `sudo` below is `nopasswd`. So the
+# generated password is root on whatever network the board is plugged into, from the
+# moment it powers on.
+#
+# Expiry does not change that. A login against an expired account is permitted and then
+# required to *set* the new password — which protects against a credential nobody ever
+# rotates, and not at all against someone reaching the board before its owner does.
+# Length is what covers that window.
+
+# What `sudo` asks of the default account:
+#   "nopasswd" — root with no prompt.
+#   "password" — prompts for the account's own password.
+# `nopasswd` suits a single-operator board: the account's password was just set at first
+# login, and re-typing it to reach root adds nothing that login did not already decide.
+# Choose `password` for a board that is shared, that runs anything reachable from
+# outside a trusted network, or whose console someone else can walk up to. It is also
+# one line to change afterwards on a running board, by rewriting
+# /etc/sudoers.d/debian — so this is a default, not a commitment.
+sudo = "nopasswd"
+
+# Length of the generated per-image first-boot password, in characters drawn from a
+# 56-symbol alphabet with the ambiguous glyphs (0/O/o, 1/l/I) removed — so ~5.8 bits
+# each. Accepted range is 8 to 64.
+#
+# 12 is ~70 bits. That is far past what anyone can reach by guessing at the login, and
+# the reason it is not lower is the *other* attack: /etc/shadow travels inside the
+# image file, so anyone holding a copy of an image — or of the .provenance.toml beside
+# it — can attack the hash offline, with no rate limit and no board involved. 12
+# characters puts that out of reach as well.
+#
+# Before shortening this: the friction is transcribing a password at a console, and
+# `ssh_authorized_keys` below removes that entirely without giving anything up. Reach
+# for it first. If you do shorten, 8 (~46 bits) is the floor and it is a real floor —
+# still far beyond guessing at an sshd that services tens of attempts per second, but
+# with the offline margin spent. It suits an image one operator flashes and boots, not
+# one that is copied or published.
+first_boot_password_length = 12
+
+# SSH public keys authorized for the default account, one authorized_keys line each —
+# the key material itself, not a path to it (a path would resolve differently on another
+# machine, and the point of writing a key down is that every build carries it). Public
+# keys are not secret, so they belong in config.
+#
+# This is the friendly answer to a long password: with a key here you never type the
+# password at all, and it becomes the console fallback for the day the key is on a
+# laptop you do not have. Empty here so a stock build authorizes nobody; set it in your
+# own recipe, or once for every recipe via a base.toml overlay (see the Overlays
+# reference).
+#
+#   ssh_authorized_keys = ["ssh-ed25519 AAAAC3Nza... operator@workstation"]
+#
+# Authorize the *public* key — the `.pub` file. A private key here is refused.
+ssh_authorized_keys = []
+
 # --- Packages -----------------------------------------------------------------
 # The base system is Debian's `required` + `important` priority set; everything below
 # stacks onto it. Two properties of the install decide what has to be named here:

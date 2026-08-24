@@ -99,6 +99,13 @@ move it up instead.
    `soc`, `boot_method`, `supported_boot_methods`, `kernel_dtb`, `image_size`,
    `hostname`, `supported_kernels` / `default_kernel`, `default_suite`, `default_layout`,
    plus **whatever its boot method requires**:
+   - **The slug must be a host name** — `[A-Za-z0-9-]` labels joined by `.`, no leading
+     or trailing `-`, at most 64 characters. `hostname` defaults to it, so anything else
+     would hand the image a name it cannot come up under; use `my-board`, not
+     `my_board`. See [A value that becomes a file or a line is checked at
+     resolve](../reference/config-model.md#a-value-that-becomes-a-file-or-a-line-is-checked-at-resolve).
+     `boot2deb new-device` narrows this further for generated boards, to lowercase,
+     digits, and dashes.
    - under `rockchip-rkbin`: a `uboot_defconfig`, and — only if the board departs from
      the SoC's defaults — an `[rkbin]` block. The bootloader blobs are **inherited from
      the soc layer** and merged per field, so a board on the SoC's usual memory omits the
@@ -154,14 +161,17 @@ Each layer may ship two trees of files that are copied into the rootfs:
   packages shipped, which is what nearly all config wants.
 - **`overlay-pre/`** — laid in **before** any package is installed. This is for config a
   package's own maintainer scripts must see *while they run*, where winning afterwards is
-  too late because the package already acted. Two examples, both from the Veyron
-  Chromebooks:
-  - initramfs settings (`MODULES=list`) must precede the kernel package, or the first
-    initramfs is built at `MODULES=most` — far over the signed payload's size budget —
-    and then thrown away and rebuilt.
-  - `depthcharge-tools`' kernel hook re-signs and re-flashes a ChromeOS kernel partition.
-    Installed with no config present, it runs at its defaults and goes looking for that
-    partition on **the build host's** disks. Its config has to be there first.
+  too late because the package already acted. The Veyron Chromebooks are the clearest
+  case: the initramfs module list under
+  `usr/share/initramfs-tools/modules.d/` has to precede the kernel package, or the first
+  initramfs is built without the drivers that reach the root device and then thrown away
+  and rebuilt.
+
+Boot-method config that resolution derives — the `depthcharge-tools` board profile, the
+signed cmdline, the initramfs `MODULES=`/`COMPRESS=` settings — is *generated* into the
+same pre-install stage rather than authored as an overlay file, for the same
+before-the-package reason. A layer does not ship those; it states the values they come
+from.
 
 Use `overlay/` unless the package acts before your file would arrive.
 
@@ -270,7 +280,7 @@ supported_kernels       = ["rk3588-mainline-7.1"]
 default_kernel          = "rk3588-mainline-7.1"
 default_suite           = "forky"
 default_layout          = "combined"
-hostname                = "my-board"
+hostname                = "my-board"                     # defaults to the slug, which is already one
 image_size              = "2G"
 
 [rkbin]                                                  # board-memory-specific DDR init

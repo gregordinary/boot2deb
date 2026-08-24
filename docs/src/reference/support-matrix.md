@@ -18,24 +18,117 @@ booted; otherwise the day the claim was last assessed. Re-pinning a lock under a
 `validated` claim is flagged by `boot2deb update`, because moving the pins retires
 the evidence the claim rested on.
 
+A status says how far a build point has been taken, not that everything on the board
+works. What each one does *not* do is under [Caveats](#caveats) below, and is printed
+at the end of a build of that recipe.
+
 | Recipe | Device | Suite | Kernel | Patches | U-boot | Modules | Status | As of |
 |---|---|---|---|---|---|---|---|---|
 | `asus-c100p/forky` | asus-c100p | forky | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
 | `asus-c100p/trixie` | asus-c100p | trixie | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
 | `asus-c201-libreboot/forky` | asus-c201-libreboot | forky | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-31 |
+| `asus-c201-libreboot/libre-forky` | asus-c201-libreboot | forky | `rk3288-libre-7.1` `sources/v7.1.6-gnu` | `rk3288-fixes` `main` (`ced7afe82f85`) | none | none | `expected` | 2026-08-04 |
+| `asus-c201-libreboot/mainline-forky` | asus-c201-libreboot | forky | `rk3288-mainline-7.1` `v7.1.6` | `rk3288-fixes` `main` (`ced7afe82f85`) | none | none | `expected` | 2026-08-04 |
 | `asus-c201/forky` | asus-c201 | forky | `debian-armmp` (from the suite) | none | none | none | `validated` | 2026-07-14 |
-| `asus-c201/mainline-forky` | asus-c201 | forky | `rk3288-mainline-7.1` `v7.1.3` | `rk3288-fixes` `main` (`adfdc19d7caf`) | none | none | `validated` | 2026-07-16 |
+| `asus-c201/libre-forky` | asus-c201 | forky | `rk3288-libre-7.1` `sources/v7.1.6-gnu` | `rk3288-fixes` `main` (`ced7afe82f85`) | none | none | `expected` | 2026-08-04 |
+| `asus-c201/mainline-forky` | asus-c201 | forky | `rk3288-mainline-7.1` `v7.1.6` | `rk3288-fixes` `main` (`ced7afe82f85`) | none | none | `expected` | 2026-08-04 |
 | `asus-c201/trixie` | asus-c201 | trixie | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
 | `asus-chromebit-cs10/forky` | asus-chromebit-cs10 | forky | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
 | `asus-chromebit-cs10/trixie` | asus-chromebit-cs10 | trixie | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
-| `h96-max-m9/forky` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.5` | `rk3576-fixes`, `rk3576-npu` `main` (`adfdc19d7caf`) | `rk3576-display` `main` (`adfdc19d7caf`) | `aic8800` `main` (`6e076049b719`) | `expected` | 2026-07-29 |
-| `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.5` | `rk3576-fixes`, `rk3576-npu`, `rk3576-rga` `main` (`adfdc19d7caf`) | `rk3576-display` `main` (`adfdc19d7caf`) | `aic8800` `main` (`6e076049b719`) | `experimental` | 2026-07-29 |
-| `h96-max-m9/util` | h96-max-m9 | — | (u-boot only) | none | `h96-max-m9-util` `main` (`adfdc19d7caf`) | none | `expected` | 2026-07-22 |
-| `rk3576-evb1-v10/forky` | rk3576-evb1-v10 | forky | `rk3576-mainline-7.1` `v7.1.3` | `rk3576-fixes` `main` (`adfdc19d7caf`) | `rk3576-loader` `main` (`adfdc19d7caf`) | none | `expected` | 2026-07-20 |
-| `rk3576-generic/loader` | rk3576-generic | — | (u-boot only) | none | `rk3576-loader` `main` (`adfdc19d7caf`) | none | `expected` | 2026-07-21 |
-| `rk3576-generic/util` | rk3576-generic | — | (u-boot only) | none | `rk3576-util` `main` (`adfdc19d7caf`) | none | `expected` | 2026-07-21 |
-| `turing-rk1/forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `validated` | 2026-07-16 |
-| `turing-rk1/jellyfin` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `experimental` | 2026-07-20 |
-| `turing-rk1/media-accel-forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `expected` | 2026-07-20 |
-| `turing-rk1/media-accel-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `expected` | 2026-07-20 |
-| `turing-rk1/trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.1` | `rk3588-accel` `main` (`adfdc19d7caf`) | none | none | `expected` | 2026-07-20 |
+| `h96-max-m9/forky` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.6` | `rk3576-fixes`, `rk3576-npu` `main` (`ced7afe82f85`) | `rk3576-display` `main` (`ced7afe82f85`) | `aic8800` `main` (`df4c783b663e`) | `expected` | 2026-08-06 |
+| `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.1` `v7.1.6` | `rk3576-fixes`, `rk3576-npu`, `rk3576-rga` `main` (`ced7afe82f85`) | `rk3576-display` `main` (`ced7afe82f85`) | `aic8800` `main` (`df4c783b663e`) | `experimental` | 2026-08-03 |
+| `h96-max-m9/util` | h96-max-m9 | — | (u-boot only) | none | `h96-max-m9-util` `main` (`ced7afe82f85`) | none | `expected` | 2026-07-22 |
+| `rk3576-evb1-v10/forky` | rk3576-evb1-v10 | forky | `rk3576-mainline-7.1` `v7.1.6` | `rk3576-fixes` `main` (`ced7afe82f85`) | `rk3576-loader` `main` (`ced7afe82f85`) | none | `expected` | 2026-08-04 |
+| `rk3576-generic/loader` | rk3576-generic | — | (u-boot only) | none | `rk3576-loader` `main` (`ced7afe82f85`) | none | `expected` | 2026-07-21 |
+| `rk3576-generic/util` | rk3576-generic | — | (u-boot only) | none | `rk3576-util` `main` (`ced7afe82f85`) | none | `expected` | 2026-07-21 |
+| `turing-rk1/forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.6` | `rk3588-accel` `main` (`ced7afe82f85`) | `turing-rk1-recovery` `main` (`ced7afe82f85`) | none | `expected` | 2026-08-05 |
+| `turing-rk1/jellyfin-forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.6` | `rk3588-accel` `main` (`ced7afe82f85`) | `turing-rk1-recovery` `main` (`ced7afe82f85`) | none | `experimental` | 2026-08-05 |
+| `turing-rk1/jellyfin-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.6` | `rk3588-accel` `main` (`ced7afe82f85`) | `turing-rk1-recovery` `main` (`ced7afe82f85`) | none | `experimental` | 2026-08-05 |
+| `turing-rk1/media-accel-forky` | turing-rk1 | forky | `rk3588-mainline-7.1` `v7.1.6` | `rk3588-accel` `main` (`ced7afe82f85`) | `turing-rk1-recovery` `main` (`ced7afe82f85`) | none | `expected` | 2026-08-04 |
+| `turing-rk1/media-accel-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.6` | `rk3588-accel` `main` (`ced7afe82f85`) | `turing-rk1-recovery` `main` (`ced7afe82f85`) | none | `expected` | 2026-08-04 |
+| `turing-rk1/trixie` | turing-rk1 | trixie | `rk3588-mainline-7.1` `v7.1.6` | `rk3588-accel` `main` (`ced7afe82f85`) | `turing-rk1-recovery` `main` (`ced7afe82f85`) | none | `expected` | 2026-08-04 |
+| `turing-rk1/util` | turing-rk1 | — | (u-boot only) | none | `turing-rk1-util` `main` (`ced7afe82f85`) | none | `expected` | 2026-08-05 |
+
+## Caveats
+
+Limitations that hold whatever you build: they come from the silicon, the board, a
+capability the recipe selected, or the build point itself, and no rebuild lifts them.
+The first two are listed once per device, since they hold for every recipe on it; the
+rest are listed per recipe, and a `(feature)` tag marks the ones that follow their
+capability onto any other recipe composing it. A recipe with none listed is not a
+recipe with none — nothing mechanical establishes that — only one that states none.
+
+Anything a running system could be asked about belongs in that board's selftest
+expectations instead, where it fails rather than merely informs. These are the ones
+that cannot be checked from the running system.
+
+### `asus-c100p`
+
+- *(SoC)* HDMI tops out at 4K30 and cannot reach 4K60: the RK3288 caps TMDS at 340 MHz, its PHY has no scrambling above that, and the VOP cannot emit YUV420, so there is no reduced-rate path either.
+- *(board)* Two display controllers advertise the same maximum resolution and DRM decides at runtime which one the HDMI encoder lands on; the smaller (VOPL) tops out at 2560x1600. A 4K display showing only part of the picture is that, and `dmesg | grep -i vop` says which controller it got.
+
+### `asus-c201-libreboot`
+
+- *(SoC)* HDMI tops out at 4K30 and cannot reach 4K60: the RK3288 caps TMDS at 340 MHz, its PHY has no scrambling above that, and the VOP cannot emit YUV420, so there is no reduced-rate path either.
+- *(board)* Two display controllers advertise the same maximum resolution and DRM decides at runtime which one the HDMI encoder lands on; the smaller (VOPL) tops out at 2560x1600. A 4K display showing only part of the picture is that, and `dmesg | grep -i vop` says which controller it got.
+
+### `asus-c201`
+
+- *(SoC)* HDMI tops out at 4K30 and cannot reach 4K60: the RK3288 caps TMDS at 340 MHz, its PHY has no scrambling above that, and the VOP cannot emit YUV420, so there is no reduced-rate path either.
+- *(board)* Two display controllers advertise the same maximum resolution and DRM decides at runtime which one the HDMI encoder lands on; the smaller (VOPL) tops out at 2560x1600. A 4K display showing only part of the picture is that, and `dmesg | grep -i vop` says which controller it got.
+
+### `asus-chromebit-cs10`
+
+- *(SoC)* HDMI tops out at 4K30 and cannot reach 4K60: the RK3288 caps TMDS at 340 MHz, its PHY has no scrambling above that, and the VOP cannot emit YUV420, so there is no reduced-rate path either.
+
+### `h96-max-m9`
+
+- *(SoC)* HDMI tops out at 4K30 and cannot reach 4K60: the dw-hdmi-qp bridge has no SCDC/scrambling support and rejects every mode above 340 MHz TMDS, even where the display advertises 4K60. This is upstream behaviour, not a device-tree limitation.
+- *(SoC)* There is no mainline hardware video encoder for this SoC. Decode is driven (VDPU383, 1080p H.264 and HEVC); encode is not driven at all.
+- *(SoC)* The NPU computes but nothing can drive it yet: the rocket userspace stack targets RK3588 only, so no RK3576 userspace exists.
+- *(board)* No port on the box delivers USB 3.0. The blue port beside HDMI is capped to high speed in the board device tree, because SuperSpeed training collapses into a SetAddress loop that takes the boot medium down with it; the black ports sit behind an internal USB 2.0 hub, and their SuperSpeed lane reaches no connector.
+- *(board)* There is no SD-card slot: it is depopulated on this box. eMMC and USB are the only storage.
+
+### `rk3576-evb1-v10`
+
+- *(SoC)* HDMI tops out at 4K30 and cannot reach 4K60: the dw-hdmi-qp bridge has no SCDC/scrambling support and rejects every mode above 340 MHz TMDS, even where the display advertises 4K60. This is upstream behaviour, not a device-tree limitation.
+- *(SoC)* There is no mainline hardware video encoder for this SoC. Decode is driven (VDPU383, 1080p H.264 and HEVC); encode is not driven at all.
+- *(SoC)* The NPU computes but nothing can drive it yet: the rocket userspace stack targets RK3588 only, so no RK3576 userspace exists.
+
+### `rk3576-generic`
+
+- *(SoC)* HDMI tops out at 4K30 and cannot reach 4K60: the dw-hdmi-qp bridge has no SCDC/scrambling support and rejects every mode above 340 MHz TMDS, even where the display advertises 4K60. This is upstream behaviour, not a device-tree limitation.
+- *(SoC)* There is no mainline hardware video encoder for this SoC. Decode is driven (VDPU383, 1080p H.264 and HEVC); encode is not driven at all.
+- *(SoC)* The NPU computes but nothing can drive it yet: the rocket userspace stack targets RK3588 only, so no RK3576 userspace exists.
+
+### `asus-c201-libreboot/libre-forky`
+
+- The internal BCM4354 Wi-Fi and Bluetooth do not work. linux-libre removes brcmfmac's firmware request and btbcm's patchram filename, and this radio is the one part of the board that cannot run without a blob. An AR9271 USB adapter (firmware-ath9k-htc, in Debian main and already installed) is the supported way onto a network.
+
+### `asus-c201/libre-forky`
+
+- The internal BCM4354 Wi-Fi and Bluetooth do not work. linux-libre removes brcmfmac's firmware request and btbcm's patchram filename, and this radio is the one part of the board that cannot run without a blob. An AR9271 USB adapter (firmware-ath9k-htc, in Debian main and already installed) is the supported way onto a network.
+
+### `turing-rk1/jellyfin-forky`
+
+- *(feature)* Scaling inside a hardware transcode runs on the CPU. The RGA filters (`scale_rkrga`, `vpp_rkrga`, `overlay_rkrga`) accept only frames carrying an RKMPP hardware context, and the mainline V4L2 decoder hands out plain DRM PRIME frames, which they reject; `hwmap` does not bridge the two either. A decode/scale/encode chain therefore downloads frames to system memory, scales them with swscale, and re-uploads them to the encoder. RGA still accelerates a scale fed from software-decoded frames, and the 2D engine itself works.
+- *(feature)* The `h264_rkmpp`, `hevc_rkmpp`, `vp8_rkmpp` and `vp9_rkmpp` *decoders* are compiled in but fail to open: MPP finds no decode client on a mainline kernel, where `rkvdec` is a V4L2 stateless driver rather than an MPP service. Hardware decode is reached with `-hwaccel v4l2request`. The matching `*_rkmpp` encoders do work.
+- Transcoding is hardware-*encode* only. The seeded /etc/jellyfin/encoding.xml selects the `rkmpp` acceleration type with an empty hardware-decoding codec list, so video is decoded and scaled on the CPU and encoded on the VEPU580. Re-enabling any codec under Playback > Transcoding > "Enable hardware decoding for" makes Jellyfin emit `-hwaccel rkmpp`, whose decoder cannot open on a mainline kernel, and those streams fail outright rather than falling back to software.
+- Jellyfin's bundled FFmpeg is not installed — the recipe supplies /opt/ffmpeg-rk/bin/ffmpeg instead, which is the only build here that can reach the VEPU580. There is therefore no second encoder to fall back to if that path is changed to something invalid.
+
+### `turing-rk1/jellyfin-trixie`
+
+- *(feature)* Scaling inside a hardware transcode runs on the CPU. The RGA filters (`scale_rkrga`, `vpp_rkrga`, `overlay_rkrga`) accept only frames carrying an RKMPP hardware context, and the mainline V4L2 decoder hands out plain DRM PRIME frames, which they reject; `hwmap` does not bridge the two either. A decode/scale/encode chain therefore downloads frames to system memory, scales them with swscale, and re-uploads them to the encoder. RGA still accelerates a scale fed from software-decoded frames, and the 2D engine itself works.
+- *(feature)* The `h264_rkmpp`, `hevc_rkmpp`, `vp8_rkmpp` and `vp9_rkmpp` *decoders* are compiled in but fail to open: MPP finds no decode client on a mainline kernel, where `rkvdec` is a V4L2 stateless driver rather than an MPP service. Hardware decode is reached with `-hwaccel v4l2request`. The matching `*_rkmpp` encoders do work.
+- Transcoding is hardware-*encode* only. The seeded /etc/jellyfin/encoding.xml selects the `rkmpp` acceleration type with an empty hardware-decoding codec list, so video is decoded and scaled on the CPU and encoded on the VEPU580. Re-enabling any codec under Playback > Transcoding > "Enable hardware decoding for" makes Jellyfin emit `-hwaccel rkmpp`, whose decoder cannot open on a mainline kernel, and those streams fail outright rather than falling back to software.
+- Jellyfin's bundled FFmpeg is not installed — the recipe supplies /opt/ffmpeg-rk/bin/ffmpeg instead, which is the only build here that can reach the VEPU580. There is therefore no second encoder to fall back to if that path is changed to something invalid.
+
+### `turing-rk1/media-accel-forky`
+
+- *(feature)* Scaling inside a hardware transcode runs on the CPU. The RGA filters (`scale_rkrga`, `vpp_rkrga`, `overlay_rkrga`) accept only frames carrying an RKMPP hardware context, and the mainline V4L2 decoder hands out plain DRM PRIME frames, which they reject; `hwmap` does not bridge the two either. A decode/scale/encode chain therefore downloads frames to system memory, scales them with swscale, and re-uploads them to the encoder. RGA still accelerates a scale fed from software-decoded frames, and the 2D engine itself works.
+- *(feature)* The `h264_rkmpp`, `hevc_rkmpp`, `vp8_rkmpp` and `vp9_rkmpp` *decoders* are compiled in but fail to open: MPP finds no decode client on a mainline kernel, where `rkvdec` is a V4L2 stateless driver rather than an MPP service. Hardware decode is reached with `-hwaccel v4l2request`. The matching `*_rkmpp` encoders do work.
+
+### `turing-rk1/media-accel-trixie`
+
+- *(feature)* Scaling inside a hardware transcode runs on the CPU. The RGA filters (`scale_rkrga`, `vpp_rkrga`, `overlay_rkrga`) accept only frames carrying an RKMPP hardware context, and the mainline V4L2 decoder hands out plain DRM PRIME frames, which they reject; `hwmap` does not bridge the two either. A decode/scale/encode chain therefore downloads frames to system memory, scales them with swscale, and re-uploads them to the encoder. RGA still accelerates a scale fed from software-decoded frames, and the 2D engine itself works.
+- *(feature)* The `h264_rkmpp`, `hevc_rkmpp`, `vp8_rkmpp` and `vp9_rkmpp` *decoders* are compiled in but fail to open: MPP finds no decode client on a mainline kernel, where `rkvdec` is a V4L2 stateless driver rather than an MPP service. Hardware decode is reached with `-hwaccel v4l2request`. The matching `*_rkmpp` encoders do work.

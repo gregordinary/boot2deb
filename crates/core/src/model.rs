@@ -132,6 +132,63 @@ pub enum Layout {
     Split,
 }
 
+/// What `sudo` asks of the image's default account.
+///
+/// The account is in `sudo`'s group either way — this decides only whether reaching
+/// root through it costs a password. It is the multiplier on the first-boot
+/// credential: under [`Nopasswd`](Self::Nopasswd) the generated password *is* root,
+/// because anything that can log in can then become root without proving anything
+/// further.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SudoPolicy {
+    /// `NOPASSWD: ALL` — root with no further prompt. The default, because these are
+    /// single-operator boards where the account's own password was just set at first
+    /// login and re-typing it to reach root protects nothing the login did not already
+    /// decide.
+    #[default]
+    Nopasswd,
+    /// `ALL` — `sudo` prompts for the account's own password. Worth choosing for a
+    /// board that is shared, that runs a service exposed beyond a trusted network, or
+    /// whose console is physically reachable by someone who should not have root.
+    Password,
+}
+
+impl SudoPolicy {
+    /// The `sudoers` right-hand side this policy grants, for the drop-in the rootfs
+    /// customize step writes as `<user> ALL=(ALL) <this>`.
+    pub fn sudoers_spec(&self) -> &'static str {
+        match self {
+            SudoPolicy::Nopasswd => "NOPASSWD: ALL",
+            SudoPolicy::Password => "ALL",
+        }
+    }
+}
+
+/// Generated first-boot password length a config root that says nothing gets.
+///
+/// 12 symbols over the builder's 56-symbol unambiguous alphabet is ~70 bits. That is
+/// far past what an attacker guessing at the login could reach, and — the reason it is
+/// not lower — it also stays out of reach of an *offline* attack on the password hash,
+/// which matters because the hash travels inside any image that is copied or published
+/// before its first login replaces it.
+pub const DEFAULT_PASSWORD_LENGTH: u8 = 12;
+
+/// Shortest generated first-boot password a config root may ask for.
+///
+/// 8 symbols is ~46 bits: still far beyond reach at the tens-of-guesses-per-second an
+/// `sshd` on one of these boards will service, which is what makes it a floor rather
+/// than a recommendation. It gives up the offline margin
+/// [`DEFAULT_PASSWORD_LENGTH`] keeps, so it suits an image that is flashed and booted
+/// by one operator rather than one that is distributed.
+pub const MIN_PASSWORD_LENGTH: u8 = 8;
+
+/// Longest generated first-boot password a config root may ask for. A bound on typos
+/// rather than on security: nothing above this is more secure in any way that can be
+/// measured, and a `120` where `12` was meant should fail rather than produce a
+/// credential nobody can transcribe at a console.
+pub const MAX_PASSWORD_LENGTH: u8 = 64;
+
 /// Provenance of a kernel — and, since two of these are compiled from source and
 /// one is not, which shape its definition takes ([`KernelDef`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +245,7 @@ kebab_enum!(Arch { Arm64 => "arm64", Armv7 => "armv7", Riscv64 => "riscv64" });
 kebab_enum!(Soc { Rk3588 => "rk3588", Rk3576 => "rk3576", Rk3566 => "rk3566", Rk3288 => "rk3288" });
 kebab_enum!(BootMethod { RockchipRkbin => "rockchip-rkbin", Depthcharge => "depthcharge" });
 kebab_enum!(Layout { Combined => "combined", Split => "split" });
+kebab_enum!(SudoPolicy { Nopasswd => "nopasswd", Password => "password" });
 kebab_enum!(KernelFlavor {
     Mainline => "mainline", Vendor => "vendor", DistroPackage => "distro-package" });
 
@@ -431,12 +489,34 @@ pub struct SocLayer {
     /// RK1, whose accel userspace ships via features, not the SoC layer.
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Packages carrying **nonfree firmware** this SoC's hardware loads at runtime,
+    /// separated from [`packages`](Self::packages) so a
+    /// [`libre`](CompiledKernelDef::libre) build can drop exactly them and nothing
+    /// else. Merged into the rootfs set on any other build, in the same position.
+    ///
+    /// Nonfree firmware is declared by the two *hardware* layers — this one and
+    /// [`DeviceLayer::nonfree_firmware_packages`] — because which blobs a build needs
+    /// is a fact about the silicon and the board, not about the distro substrate, the
+    /// bootloader, or a userspace add-in. It sits at the SoC layer when it identifies
+    /// a part every board on that SoC carries, and moves down to a device when boards
+    /// differ.
+    #[serde(default)]
+    pub nonfree_firmware_packages: Vec<String>,
     /// Packages this SoC layer drops from the merged rootfs set — the
     /// scoped subtraction a pure package union cannot express. Unioned with every
     /// other layer's `exclude`; any name in that union is removed from the include
     /// set (exclude wins). Empty for the RK1.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Limitations of this **silicon** that no build lifts, in sentences an operator
+    /// reads. See [`Support::caveats`] for what belongs in one and
+    /// [`DeviceLayer::caveats`] for the board-level half.
+    ///
+    /// Here when the limitation is a property of the part every board on it carries —
+    /// a display controller that cannot reach 4K60 constrains every board built on it
+    /// — and at the device layer when boards differ.
+    #[serde(default)]
+    pub caveats: Vec<String>,
     /// Pre-built `.deb`s this SoC layer pulls from outside the Debian mirror;
     /// empty for the RK1, whose accel userspace builds from source.
     #[serde(default)]
@@ -659,6 +739,10 @@ pub struct AptSource {
     /// Stable identifier for this source (the `.sources` file stem and the dedup
     /// key when features are unioned). Two features naming the same `name` with
     /// differing definitions is a resolution error.
+    ///
+    /// A portable file-name stem — `[A-Za-z0-9._-]`, non-empty, not `.` or `..` —
+    /// enforced at resolution, since the dedup key and the file the rootfs writes it
+    /// as are the same string.
     pub name: String,
     /// Repository base URL (deb822 `URIs`), e.g. `https://repo.jellyfin.org/debian`.
     pub uri: String,
@@ -670,6 +754,10 @@ pub struct AptSource {
     /// Signing keyring filename (deb822 `Signed-By`), resolved against the build
     /// host's vendored keyrings. Mandatory — the repo is verified, not trusted
     /// blindly.
+    ///
+    /// A bare file name in the same portable set as [`name`](Self::name), enforced at
+    /// resolution: the value is joined onto `blobs/keyrings/`, so a separator or dot
+    /// segment would pick this repo's trust anchor from outside the vetted set.
     pub signed_by: String,
 }
 
@@ -969,8 +1057,8 @@ pub struct DeviceLayer {
     /// [`supported_kernels`](Self::supported_kernels). Selecting one applies its
     /// `uboot`-scope series over the compiled u-boot; the kernel tree is untouched, so
     /// a u-boot variant costs a series here, not a whole kernel definition. Empty on a
-    /// board whose u-boot ships pristine (the RK1) or whose firmware is not ours to
-    /// build (a depthcharge Chromebook). Only meaningful under `rockchip-rkbin`.
+    /// board whose u-boot ships pristine, or whose firmware is not ours to build (a
+    /// depthcharge Chromebook). Only meaningful under `rockchip-rkbin`.
     #[serde(default)]
     pub supported_uboot_series: Vec<String>,
     /// u-boot series used when none is specified. Required when
@@ -1001,7 +1089,9 @@ pub struct DeviceLayer {
     pub default_suite: String,
     /// Image layout used when none is specified.
     pub default_layout: Layout,
-    /// Default image hostname.
+    /// Image hostname, written to `/etc/hostname` and `/etc/hosts`. An RFC 1123 host
+    /// name (`[A-Za-z0-9-]` labels joined by `.`, at most 64 characters), enforced at
+    /// resolution.
     pub hostname: String,
     /// Default image size (authored string, e.g. `2G`).
     pub image_size: String,
@@ -1021,10 +1111,29 @@ pub struct DeviceLayer {
     /// RK1.
     #[serde(default)]
     pub packages: Vec<String>,
+    /// Packages carrying **nonfree firmware** this board's hardware loads at runtime,
+    /// under the same contract as [`SocLayer::nonfree_firmware_packages`]: dropped
+    /// on a [`libre`](CompiledKernelDef::libre) build, merged in place on any other.
+    /// This is where a blob belongs when boards on one SoC carry different parts —
+    /// two radios in the same family, say — and the SoC layer is where it belongs
+    /// when they do not.
+    #[serde(default)]
+    pub nonfree_firmware_packages: Vec<String>,
     /// Packages this board drops from the merged rootfs set, unioned with
     /// every other layer's `exclude` (exclude wins). Empty for the RK1.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Limitations of **this board** that no build lifts, in sentences an operator
+    /// reads. See [`Support::caveats`] for what belongs in one.
+    ///
+    /// Here when the limitation is a property of the board — a port wired without a
+    /// SuperSpeed pair, a codec whose output is not routed — and at the SoC layer
+    /// ([`SocLayer::caveats`]) when it belongs to the silicon and so to every board
+    /// on it. A device that `extends` another inherits its caveats and adds its own;
+    /// a variant that lifts one of its parent's has to be its own device rather than
+    /// a variant, since a caveat cannot be un-said.
+    #[serde(default)]
+    pub caveats: Vec<String>,
     /// Pre-built `.deb`s this board pulls from outside the Debian mirror;
     /// empty for the RK1.
     #[serde(default)]
@@ -1076,6 +1185,32 @@ pub struct BaseLayer {
     /// distro-generic base.
     #[serde(default)]
     pub extra_debs: Vec<ExtraDeb>,
+    /// What `sudo` asks of the default account. Distro policy rather than a hardware
+    /// property, so it lives here and not on a device; a recipe or `--sudo` overrides
+    /// it. Defaults to [`SudoPolicy::Nopasswd`].
+    #[serde(default)]
+    pub sudo: SudoPolicy,
+    /// Length of the unique first-boot password generated per built image.
+    ///
+    /// Bounded to [`MIN_PASSWORD_LENGTH`]`..=`[`MAX_PASSWORD_LENGTH`] at resolution,
+    /// and [`DEFAULT_PASSWORD_LENGTH`] when unset. Shortening it is the one
+    /// configuration change here whose effect cannot be observed on the finished
+    /// image, which is why the range is enforced rather than advised.
+    #[serde(default = "default_password_length")]
+    pub first_boot_password_length: u8,
+    /// SSH public keys authorized for the default account, one `authorized_keys` line
+    /// each, validated by [`check_authorized_key`](crate::authkeys::check_authorized_key).
+    ///
+    /// Public key material is not secret, so entries are the keys themselves rather
+    /// than paths to them: a recipe that named a path would resolve differently on
+    /// another machine, and the point of writing a key down is that every build of that
+    /// recipe carries it. Empty by default — an image authorizes nobody unless a config
+    /// root says who.
+    ///
+    /// With a key here, the generated first-boot password stops being the only way in
+    /// and becomes the console fallback, which is what makes a long one cost nothing.
+    #[serde(default)]
+    pub ssh_authorized_keys: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,6 +1226,11 @@ fn default_locale() -> String {
 /// The system timezone a config root falls back to.
 fn default_timezone() -> String {
     "UTC".to_string()
+}
+
+/// The generated first-boot password length a config root falls back to.
+fn default_password_length() -> u8 {
+    DEFAULT_PASSWORD_LENGTH
 }
 
 /// The XKB model `keyboard-configuration` assumes for a generic keyboard, and the
@@ -1391,6 +1531,19 @@ pub struct CompiledKernelDef {
     pub patches_ref: Option<String>,
     /// SoCs this kernel supports; resolution rejects a mismatched device.
     pub supported_socs: Vec<Soc>,
+    /// This tree is GNU Linux-libre: every nonfree-firmware loader in it is
+    /// removed, so no driver it builds can load a blob.
+    ///
+    /// A property of the *source*, with a consequence for the whole image — which is
+    /// why it is declared here and reaches [`ResolvedBuild::libre`] rather than being
+    /// restated per device. Resolution drops the hardware layers'
+    /// [`nonfree_firmware_packages`](SocLayer::nonfree_firmware_packages) and their
+    /// `overlay-nonfree/` trees, and narrows the image's apt components to `main`:
+    /// firmware this kernel refuses to load is dead weight, and an image built to be
+    /// free should not offer more of it. Default `false` — every other kernel loads
+    /// whatever the hardware asks for.
+    #[serde(default)]
+    pub libre: bool,
 }
 
 /// The `patches` ref recorded when a kernel definition names none.
@@ -1453,6 +1606,51 @@ pub struct Support {
     /// in the lock, which records only what a build resolved.
     #[serde(deserialize_with = "de_iso_date")]
     pub date: String,
+    /// What this build point does **not** do, in sentences: limitations an operator
+    /// meets on the running system and no amount of rebuilding lifts.
+    ///
+    /// A caveat is for what cannot be checked from the running system. Where a
+    /// limitation *is* mechanically checkable it belongs in the selftest expectations
+    /// instead, which fail rather than merely inform; a caveat that could have been an
+    /// `[[expect]]` entry is a check nobody runs.
+    ///
+    /// Scoped to this build point. The board-wide and silicon-wide halves live at the
+    /// layers that own them ([`DeviceLayer::caveats`], [`SocLayer::caveats`]), so a
+    /// board with three recipes states its own limitations once;
+    /// [`ResolvedBuild::caveats`] is the three concatenated, which is what a reader
+    /// is shown. Here belongs only what this *point* does not do — a feature whose
+    /// userspace has a broken filter, a suite whose package is too old.
+    ///
+    /// A caveat is a sentence, not a code, so the only load-time rule is that it is
+    /// non-empty and carries no leading or trailing whitespace: it is published into
+    /// the support matrix and printed after a build, and a blank entry or a ragged one
+    /// is a defect a reader sees.
+    #[serde(default, deserialize_with = "de_caveats")]
+    pub caveats: Vec<String>,
+}
+
+/// Deserialize a caveat list, holding each entry to the shape a published sentence
+/// has to have: non-empty, and no leading or trailing whitespace.
+///
+/// Enforced at the parse boundary rather than at render time because a caveat reaches
+/// a reader through three renderers, and a rule applied by one of them is a rule the
+/// other two do not have.
+fn de_caveats<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let caveats = Vec::<String>::deserialize(d)?;
+    for c in &caveats {
+        if c.is_empty() {
+            return Err(serde::de::Error::custom("a caveat may not be empty"));
+        }
+        if c.trim() != c {
+            return Err(serde::de::Error::custom(format!(
+                "caveat '{c}' has leading or trailing whitespace"
+            )));
+        }
+    }
+    Ok(caveats)
 }
 
 /// Deserialize a support-claim date, enforcing `YYYY-MM-DD` *and* real-calendar
@@ -1593,6 +1791,29 @@ pub struct Recipe {
     /// Keymap override; `None` → device `keymap`.
     #[serde(default)]
     pub keymap: Option<Keymap>,
+    /// Sudo-policy override; `None` → base `sudo`.
+    #[serde(default)]
+    pub sudo: Option<SudoPolicy>,
+    /// First-boot password length override; `None` → base
+    /// `first_boot_password_length`.
+    #[serde(default)]
+    pub first_boot_password_length: Option<u8>,
+    /// Authorized-key override; `None` → base `ssh_authorized_keys`. `Some`
+    /// **replaces** the base list rather than adding to it, so a recipe can withhold a
+    /// key the base authorizes as well as add one — the same contract as
+    /// [`locales_generate`](Self::locales_generate), and the one that lets a recipe for
+    /// an image you intend to hand to someone else authorize nobody.
+    #[serde(default)]
+    pub ssh_authorized_keys: Option<Vec<String>>,
+    /// Second disks this image mounts for data, kept whole across reimaging.
+    ///
+    /// Declared at the recipe rather than the device because populating a board's
+    /// M.2 slot is a deployment choice, not a hardware invariant: two recipes for
+    /// the same board can disagree about whether a data disk exists. Requires the
+    /// `data-volume` feature, which carries the first-boot hook that acts on these
+    /// — see [`crate::datavolume`].
+    #[serde(default)]
+    pub data_volumes: Vec<crate::datavolume::DataVolume>,
     /// The maintainer's support claim for this build point.
     ///
     /// Optional because a claim is only meaningful from someone in a position to
@@ -1646,6 +1867,14 @@ pub struct Overrides {
     /// `console-setup` ships on every image, so a keymap is always actionable — a
     /// headless board simply has no reason to *default* one.
     pub keymap: Option<Keymap>,
+    /// Override what `sudo` asks of the default account.
+    pub sudo: Option<SudoPolicy>,
+    /// Override the generated first-boot password length.
+    pub first_boot_password_length: Option<u8>,
+    /// Override the authorized SSH keys (`Some` replaces the base list). Set from a
+    /// recipe rather than a flag: a key is written down so that every build of a point
+    /// carries it, which a per-invocation override cannot express.
+    pub ssh_authorized_keys: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1690,6 +1919,12 @@ impl ResolvedKernel {
         }
     }
 
+    /// Whether this kernel is GNU Linux-libre. Always `false` for a distro-package
+    /// kernel: Debian's own `linux-image` is built from the blobbed tree.
+    pub fn libre(&self) -> bool {
+        self.compiled().is_some_and(|k| k.libre)
+    }
+
     /// The patch series this kernel applies, in order; empty when it applies no
     /// series — either an empty authored list, or a distro-package kernel, which never
     /// reads the `patches` repo at all.
@@ -1732,6 +1967,10 @@ pub struct ResolvedCompiledKernel {
     pub patches_ref: Option<String>,
     /// Kernel-owned fragments followed by device fragments, in apply order.
     pub config_fragments: Vec<String>,
+    /// This tree is GNU Linux-libre — see [`CompiledKernelDef::libre`] for what it
+    /// costs the build, and [`ResolvedBuild::libre`] for the image-wide form the rest
+    /// of the pipeline reads.
+    pub libre: bool,
 }
 
 /// A resolved distro-package kernel: nothing but which package installs it. Its
@@ -1846,6 +2085,55 @@ pub struct ResolvedRkbinBoot {
     pub offsets: Offsets,
 }
 
+/// The compressor `mkinitramfs` uses on a depthcharge board.
+///
+/// Here the initramfs travels **inside the signature**, sharing one fixed budget with
+/// the kernel image, so the compressor is a trade between bytes in the slot and seconds
+/// at every boot. Which side of that trade a board sits on follows from
+/// [`Kpart::size`] and nothing else, which is why this is resolved rather than authored:
+/// a board that widens its slot gets the faster compressor with it.
+///
+/// The cost lands where it is most visible. A depthcharge initramfs carries no display
+/// driver unless the board has the headroom to add one, so on a board that does not,
+/// every second spent decompressing is a second of the firmware's blank screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InitramfsCompress {
+    /// `xz` — the smallest and the slowest to decompress. What a 16 MiB slot has to
+    /// take: at that ceiling a `zstd` initramfs leaves around 141 KB before the FIT and
+    /// vboot headers are added, which is not margin a growing kernel can live in.
+    Xz,
+    /// `zstd` — Debian's own default, several times faster to decompress for roughly
+    /// 2 MB more payload. What a slot wide enough to stop counting bytes takes.
+    Zstd,
+}
+
+/// Kernel-slot size from which the payload budget stops choosing the compressor.
+///
+/// A 32 MiB slot holds an image of the shape these boards build with room to spare, so
+/// there is nothing left for `xz` to buy and its decompression time is pure boot
+/// latency.
+const ROOMY_KPART_BYTES: u64 = 32 * 1024 * 1024;
+
+impl InitramfsCompress {
+    /// The value `initramfs-tools` expects for `COMPRESS=`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Xz => "xz",
+            Self::Zstd => "zstd",
+        }
+    }
+
+    /// The compressor a kernel slot of `kpart_bytes` can afford.
+    pub fn for_kpart_size(kpart_bytes: u64) -> Self {
+        if kpart_bytes >= ROOMY_KPART_BYTES {
+            Self::Zstd
+        } else {
+            Self::Xz
+        }
+    }
+}
+
 /// The resolved `depthcharge` boot configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedDepthchargeBoot {
@@ -1869,6 +2157,11 @@ pub struct ResolvedDepthchargeBoot {
     /// overlap the rootfs — the one arrangement that corrupts an image rather than
     /// failing to boot it.
     pub rootfs_offset: String,
+    /// The compressor this board's initramfs is built with, derived from
+    /// [`kpart.size`](Kpart::size) — see [`InitramfsCompress`] for the trade it
+    /// settles. Written into the pre-install overlay, so the first initramfs a kernel
+    /// package builds is already the right one.
+    pub initramfs_compress: InitramfsCompress,
 }
 
 /// A complete, validated build point — the single input the engine consumes.
@@ -1928,6 +2221,15 @@ pub struct ResolvedBuild {
     /// base image. Validated at resolution: each is known, compatible with the
     /// resolved SoC, and non-conflicting.
     pub features: Vec<String>,
+    /// Second disks this image mounts for data, in recipe order; empty on a build
+    /// that stores everything on the boot medium. Validated at resolution
+    /// ([`crate::datavolume::validate_all`]) and paired with the `data-volume`
+    /// feature, which carries the first-boot hook.
+    ///
+    /// This is an image property, not a source pin: it changes bytes in the rootfs
+    /// (an fstab entry and a generated config) and nothing about what is compiled,
+    /// which is why it lives here and not in the lock.
+    pub data_volumes: Vec<crate::datavolume::DataVolume>,
     /// The merged rootfs package set: base ∪ soc ∪ boot-method ∪ device ∪
     /// Σ features, de-duplicated with order preserved (base first), then with every
     /// name in [`rootfs_exclude`](Self::rootfs_exclude) removed (exclude wins).
@@ -1939,6 +2241,16 @@ pub struct ResolvedBuild {
     /// include set: no name appears in both [`rootfs_packages`](Self::rootfs_packages)
     /// and here.
     pub rootfs_exclude: Vec<String>,
+    /// This build ships no nonfree firmware, because its kernel is GNU Linux-libre
+    /// and could not load any — the resolved form of
+    /// [`CompiledKernelDef::libre`], `false` for every distro-package kernel.
+    ///
+    /// Three things read it, and each is a subtraction rather than an addition, so a
+    /// non-libre build resolves exactly as it did before this axis existed: the
+    /// hardware layers' `nonfree_firmware_packages` are left out of
+    /// [`rootfs_packages`](Self::rootfs_packages), their `overlay-nonfree/` trees are
+    /// not laid into the rootfs, and the image's apt components narrow to `main`.
+    pub libre: bool,
     /// Image layout.
     pub layout: Layout,
     /// Image size.
@@ -1962,6 +2274,18 @@ pub struct ResolvedBuild {
     /// Console keyboard layout, or `None` on a board with no keyboard — in which case
     /// the build writes no `/etc/default/keyboard` and Debian's own default stands.
     pub keymap: Option<Keymap>,
+    /// What `sudo` asks of the default account, materialized as its
+    /// `/etc/sudoers.d/<user>` drop-in.
+    pub sudo: SudoPolicy,
+    /// Length of the unique first-boot password the image node generates for this
+    /// build. Resolution guarantees it is within
+    /// [`MIN_PASSWORD_LENGTH`]`..=`[`MAX_PASSWORD_LENGTH`].
+    pub first_boot_password_length: u8,
+    /// SSH public keys written to the default account's `~/.ssh/authorized_keys`, in
+    /// the order the config named them; empty when no config root authorizes anyone.
+    /// Resolution guarantees each entry is a single well-formed `authorized_keys` line
+    /// carrying a public key ([`crate::authkeys::check_authorized_key`]).
+    pub ssh_authorized_keys: Vec<String>,
     /// The boot-method-specific configuration, tagged by method: what the
     /// bootloader/boot payload is, where it goes, and what it needs. Every field is
     /// guaranteed present for the method it belongs to.
@@ -2019,6 +2343,77 @@ pub struct ResolvedBuild {
     /// the lock; `build` materializes them into the local apt repo before the
     /// solve. Empty when no layer or feature adds one.
     pub extra_debs: Vec<ExtraDeb>,
+    /// What this build point does **not** do, in sentences: the SoC's, the device
+    /// lineage's, and the recipe's [`Support::caveats`] concatenated in that order and
+    /// de-duplicated by text, first-appearance order.
+    ///
+    /// Silicon first, then board, then build point, because that is the order of
+    /// increasing specificity — a reader meets the limitation that constrains the most
+    /// before the one that constrains the least. De-duplicated so a device restating a
+    /// caveat it inherits does not print it twice; the concatenation is the whole rule,
+    /// since a caveat states a limitation and no layer can lift one another layer
+    /// declared.
+    ///
+    /// Empty for a build point whose layers declare none. That is not a claim of no
+    /// limitations — nothing mechanical establishes that — only that none is stated.
+    pub caveats: Vec<Caveat>,
+}
+
+/// One stated limitation, and how widely it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Caveat {
+    /// The sentence, as authored.
+    pub text: String,
+    /// Which layer stated it — what tells a reader whether it is the chip, the board,
+    /// or this particular build.
+    pub scope: CaveatScope,
+}
+
+impl std::fmt::Display for Caveat {
+    /// The sentence prefixed with where it comes from — `(SoC) …`, `(board) …`,
+    /// `(recipe) …`.
+    ///
+    /// The prefix is the whole reason the scope is carried: "the chip cannot" and
+    /// "this board does not" are different answers to "would another board do it",
+    /// and a bare list of sentences makes the reader guess which they are reading.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}) {}", self.scope.as_str(), self.text)
+    }
+}
+
+impl CaveatScope {
+    /// The scope as the word a rendering prints for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CaveatScope::Soc => "SoC",
+            CaveatScope::Device => "board",
+            CaveatScope::Feature => "feature",
+            CaveatScope::Recipe => "recipe",
+        }
+    }
+}
+
+/// Which layer a [`Caveat`] came from.
+///
+/// Carried because a flat list loses the one thing a reader most wants from it: a
+/// limitation of the silicon holds for every board on it and every recipe for those
+/// boards, and one from a recipe holds for that recipe alone. It is also what lets a
+/// rendering group them instead of repeating a board's limitations under each of its
+/// recipes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaveatScope {
+    /// From [`SocLayer::caveats`]: true of the part, so of every board on it.
+    Soc,
+    /// From [`DeviceLayer::caveats`], the resolved device's or an ancestor's: true of
+    /// the board, so of every recipe that builds for it.
+    Device,
+    /// From [`Feature::caveats`](crate::feature::Feature::caveats): true wherever that feature is selected, on any board
+    /// and in any recipe. What a capability does *not* do belongs to the capability —
+    /// a recipe that composes it inherits the limitation without restating it.
+    Feature,
+    /// From the recipe's [`Support::caveats`]: true of this build point alone.
+    Recipe,
 }
 
 impl ResolvedBuild {
@@ -2264,5 +2659,76 @@ mod tests {
         assert!(check_iso_date("2000-02-29").is_ok());
         assert!(check_iso_date("2026-02-29").is_err());
         assert!(check_iso_date("1900-02-29").is_err());
+    }
+
+    /// A caveat is published — into the support matrix and after every build of the
+    /// recipe — so the two ways it can be malformed have to fail at load, where the
+    /// file that holds it is still known.
+    #[test]
+    fn a_caveat_must_be_a_non_empty_sentence_without_ragged_edges() {
+        let claim: Support = toml::from_str(
+            "status = \"expected\"\ndate = \"2026-08-04\"\n\
+             caveats = [\"HDMI tops out at 4K30.\", \"The radio needs a blob.\"]\n",
+        )
+        .unwrap();
+        assert_eq!(claim.caveats.len(), 2);
+
+        // A claim without the key at all is the ordinary case, and states nothing.
+        let bare: Support =
+            toml::from_str("status = \"validated\"\ndate = \"2026-07-14\"\n").unwrap();
+        assert!(bare.caveats.is_empty());
+
+        for bad in ["\"\"", "\" leading\"", "\"trailing \"", "\"\\n\""] {
+            let text = format!("status = \"expected\"\ndate = \"2026-08-04\"\ncaveats = [{bad}]\n");
+            assert!(
+                toml::from_str::<Support>(&text).is_err(),
+                "expected {bad} to be rejected"
+            );
+        }
+    }
+
+    /// The scope is what tells a reader whether another board would do better, so it
+    /// travels with the sentence rather than being inferred from where it is printed.
+    #[test]
+    fn a_caveat_renders_with_the_layer_that_stated_it() {
+        let caveat = |scope| Caveat {
+            text: "HDMI tops out at 4K30.".to_string(),
+            scope,
+        };
+        assert_eq!(
+            caveat(CaveatScope::Soc).to_string(),
+            "(SoC) HDMI tops out at 4K30."
+        );
+        assert_eq!(
+            caveat(CaveatScope::Device).to_string(),
+            "(board) HDMI tops out at 4K30."
+        );
+        assert_eq!(
+            caveat(CaveatScope::Recipe).to_string(),
+            "(recipe) HDMI tops out at 4K30."
+        );
+    }
+
+    #[test]
+    fn the_initramfs_compressor_follows_the_slot_that_has_to_hold_it() {
+        // The two sizes that exist on real hardware: the stock Veyron firmware buffer
+        // and the libreboot one.
+        assert_eq!(
+            InitramfsCompress::for_kpart_size(16 * 1024 * 1024),
+            InitramfsCompress::Xz
+        );
+        assert_eq!(
+            InitramfsCompress::for_kpart_size(32 * 1024 * 1024),
+            InitramfsCompress::Zstd
+        );
+        // The threshold is inclusive, and a byte under it is the constrained case —
+        // the direction that matters, since guessing "roomy" on a board that is not
+        // produces a payload the firmware refuses.
+        assert_eq!(
+            InitramfsCompress::for_kpart_size(32 * 1024 * 1024 - 1),
+            InitramfsCompress::Xz
+        );
+        assert_eq!(InitramfsCompress::Xz.as_str(), "xz");
+        assert_eq!(InitramfsCompress::Zstd.as_str(), "zstd");
     }
 }

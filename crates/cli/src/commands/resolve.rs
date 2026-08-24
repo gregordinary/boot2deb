@@ -53,6 +53,8 @@ const RECIPE_ONLY_AXES: &[(&str, &str)] = &[
     ("--locale-gen", "locales_generate"),
     ("--timezone", "timezone"),
     ("--keymap", "keymap"),
+    ("--sudo", "sudo"),
+    ("--password-length", "first_boot_password_length"),
 ];
 
 /// Build the advisory for a resolution whose overrides name a point `build` cannot
@@ -109,6 +111,8 @@ fn unbuildable_note(target: &str, ov: &Overrides) -> Option<String> {
             }),
             "--timezone" => ov.timezone.clone(),
             "--keymap" => ov.keymap.as_ref().map(|k| k.layout.clone()),
+            "--sudo" => ov.sudo.map(|s| s.as_str().to_string()),
+            "--password-length" => ov.first_boot_password_length.map(|n| n.to_string()),
             _ => None,
         };
         push(flag, key, value);
@@ -128,9 +132,11 @@ fn unbuildable_note(target: &str, ov: &Overrides) -> Option<String> {
     let body = keys
         .iter()
         .map(|(k, v)| {
-            // `locales_generate` is already a TOML array; everything else is a scalar
-            // that needs quoting.
-            let rendered = if v.starts_with('[') {
+            // The fragment is pasted into a recipe, so each value has to be the TOML
+            // its field deserializes from: `locales_generate` is already an array,
+            // `first_boot_password_length` is an integer, and a quoted form of either
+            // would fail to load. Everything else is a string.
+            let rendered = if v.starts_with('[') || v.parse::<u64>().is_ok() {
                 v.clone()
             } else {
                 format!("{v:?}")

@@ -18,7 +18,8 @@
 use crate::error::EngineError;
 use boot2deb_core::chromeos::{kpart_flags, SPARE_KPART_FLAGS};
 use boot2deb_core::model::{Offsets, ResolvedBoot};
-use boot2deb_core::size::parse_size;
+use boot2deb_core::size::{parse_size, Slack as CoreSlack};
+use ferrosys::ext::Slack;
 
 /// Disk logical block (sector) size. RK images use 512-byte sectors, matching the
 /// raw-gap `bs`/`seek` arithmetic and the `gpt` crate's default.
@@ -103,25 +104,45 @@ pub(crate) struct Geometry {
     pub(crate) rootfs_bytes: u64,
 }
 
-impl Geometry {
-    /// Resolve the layout from the resolved boot configuration and image size,
-    /// validating every invariant the writers rely on. Returns
-    /// [`EngineError::ImageGeometry`] on any malformed value, bad ordering,
-    /// misalignment, or an image too small to hold the GPT plus a rootfs partition.
-    pub(crate) fn resolve(boot: &ResolvedBoot, image_size: &str) -> Result<Geometry, EngineError> {
-        let total_size = parse_size(image_size)?;
+/// The head of the disk: what the boot method owns there, and where the rootfs
+/// partition begins.
+///
+/// Resolved on its own because it is the half of the layout that does **not** answer to
+/// the image's size. That is what lets a fitted image check its boot payload and plan its
+/// filesystem before the disk size exists — under
+/// [`ImageSize::Fit`](boot2deb_core::size::ImageSize::Fit) the size is decided *by* the
+/// filesystem, so the two halves cannot be resolved in one pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BootRegion {
+    /// What the boot method places ahead of the rootfs.
+    pub(crate) boot: BootGeometry,
+    /// Rootfs partition start byte offset — a multiple of both [`SECTOR`] and
+    /// [`EXT4_BLOCK`], and at or past the byte the boot region ends at.
+    pub(crate) rootfs_off: u64,
+}
+
+impl BootRegion {
+    /// Resolve the head of the disk from the resolved boot configuration, validating
+    /// every invariant that does not answer to the image's size: the offsets parse, they
+    /// are aligned, they increase, they clear the primary GPT, and whatever the boot
+    /// method owns ends at or before the rootfs begins.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::ImageGeometry`] on any malformed value, bad ordering, or
+    /// misalignment.
+    pub(crate) fn resolve(boot: &ResolvedBoot) -> Result<BootRegion, EngineError> {
         let rootfs_off = parse_size(boot.rootfs_offset())?;
         let (boot_geom, boot_end) = match boot {
             ResolvedBoot::RockchipRkbin(b) => Self::raw_gap(&b.offsets, rootfs_off)?,
             ResolvedBoot::Depthcharge(b) => Self::kpart(b)?,
         };
 
-        // Every offset and the total must be whole sectors — partitions and the
-        // GPT are sector-addressed.
-        for (what, v) in [("image size", total_size), ("rootfs offset", rootfs_off)] {
-            if !v.is_multiple_of(SECTOR) {
-                return Err(geom(format!("{what} ({v}) is not a multiple of {SECTOR}")));
-            }
+        // Partitions and the GPT are sector-addressed.
+        if !rootfs_off.is_multiple_of(SECTOR) {
+            return Err(geom(format!(
+                "rootfs offset ({rootfs_off}) is not a multiple of {SECTOR}"
+            )));
         }
         // The rootfs partition additionally aligns to the ext4 block size.
         if !rootfs_off.is_multiple_of(EXT4_BLOCK) {
@@ -136,39 +157,9 @@ impl Geometry {
             )));
         }
 
-        let total_lba = total_size / SECTOR;
-        let rootfs_first_lba = rootfs_off / SECTOR;
-        // The backup GPT occupies the final GPT_BACK_SECTORS; the last LBA the
-        // rootfs may use is one before it.
-        let last_usable_lba = total_lba
-            .checked_sub(GPT_BACK_SECTORS + 1)
-            .filter(|last| *last >= rootfs_first_lba)
-            .ok_or_else(|| {
-                geom(format!(
-                    "image size ({total_size}) is too small for a rootfs partition at offset {rootfs_off}"
-                ))
-            })?;
-
-        let available_bytes = (last_usable_lba - rootfs_first_lba + 1) * SECTOR;
-        // The GPT partition fills the usable range, floored to a whole ext4 block —
-        // one rootfs partition spanning the disk. The filesystem is formatted to
-        // exactly the partition size (the formatter takes an explicit block count).
-        let partition_bytes = (available_bytes / EXT4_BLOCK) * EXT4_BLOCK;
-        let rootfs_bytes = partition_bytes;
-        if rootfs_bytes < MIN_ROOTFS_BYTES {
-            return Err(geom(format!(
-                "usable rootfs area ({available_bytes} bytes) is smaller than the {MIN_ROOTFS_BYTES}-byte minimum"
-            )));
-        }
-        let rootfs_length_lba = partition_bytes / SECTOR;
-
-        Ok(Geometry {
-            total_size,
+        Ok(BootRegion {
             boot: boot_geom,
             rootfs_off,
-            rootfs_first_lba,
-            rootfs_length_lba,
-            rootfs_bytes,
         })
     }
 
@@ -345,6 +336,207 @@ impl Geometry {
     }
 }
 
+impl Geometry {
+    /// Resolve the whole layout from the resolved boot configuration and an authored
+    /// whole-disk size: the head of the disk, then the rootfs partition filling what is
+    /// left of it.
+    ///
+    /// `total_size` is the already-parsed whole-disk size — the caller has read the
+    /// authored `image_size` to learn whether it is fixed at all, so re-parsing the
+    /// string here would be the same work twice and a second place for it to disagree.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::ImageGeometry`] on any malformed value, bad ordering,
+    /// misalignment, or an image too small to hold the GPT plus a rootfs partition.
+    pub(crate) fn resolve(boot: &ResolvedBoot, total_size: u64) -> Result<Geometry, EngineError> {
+        if !total_size.is_multiple_of(SECTOR) {
+            return Err(geom(format!(
+                "image size ({total_size}) is not a multiple of {SECTOR}"
+            )));
+        }
+        let region = BootRegion::resolve(boot)?;
+        let rootfs_off = region.rootfs_off;
+
+        let total_lba = total_size / SECTOR;
+        let rootfs_first_lba = rootfs_off / SECTOR;
+        // The backup GPT occupies the final GPT_BACK_SECTORS; the last LBA the
+        // rootfs may use is one before it.
+        let last_usable_lba = total_lba
+            .checked_sub(GPT_BACK_SECTORS + 1)
+            .filter(|last| *last >= rootfs_first_lba)
+            .ok_or_else(|| {
+                geom(format!(
+                    "image size ({total_size}) is too small for a rootfs partition at offset {rootfs_off}"
+                ))
+            })?;
+
+        let available_bytes = (last_usable_lba - rootfs_first_lba + 1) * SECTOR;
+        // The GPT partition fills the usable range, floored to a whole ext4 block —
+        // one rootfs partition spanning the disk. The filesystem is formatted to
+        // exactly the partition size (the formatter takes an explicit block count).
+        let partition_bytes = (available_bytes / EXT4_BLOCK) * EXT4_BLOCK;
+        // The floor belongs to this direction only: it catches a *mis-authored* number
+        // before any work happens. See [`around_rootfs`](Self::around_rootfs) for why a
+        // measured size is not held to it.
+        if partition_bytes < MIN_ROOTFS_BYTES {
+            return Err(geom(format!(
+                "usable rootfs area ({available_bytes} bytes) is smaller than the {MIN_ROOTFS_BYTES}-byte minimum"
+            )));
+        }
+
+        Self::assemble(region, total_size, partition_bytes)
+    }
+
+    /// Lay the disk out around a filesystem whose size the format already decided.
+    ///
+    /// The inverse of [`resolve`](Self::resolve): there the authored size fixes the disk
+    /// and the rootfs fills what is left, here the fitted filesystem fixes the partition
+    /// and the disk is sized to carry it plus the backup GPT. `rootfs_bytes` is what the
+    /// format reported, so the partition is exactly the filesystem — there is no slack
+    /// between them to floor away.
+    ///
+    /// [`MIN_ROOTFS_BYTES`] deliberately does **not** apply here. That floor exists to
+    /// catch a *mis-authored* number before work happens; a fitted size is a measurement
+    /// of a rootfs that provably fits. Honouring it would mean either re-formatting at
+    /// the floor — a wasted pass — or laying out a partition larger than the filesystem
+    /// written into it, which does not mount.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::ImageGeometry`] for a boot region that does not resolve, a
+    /// filesystem that is not whole ext4 blocks, or a total that overflows the offset
+    /// arithmetic.
+    pub(crate) fn around_rootfs(
+        boot: &ResolvedBoot,
+        rootfs_bytes: u64,
+    ) -> Result<Geometry, EngineError> {
+        let region = BootRegion::resolve(boot)?;
+        // The disk is the head, the partition, and the backup GPT behind it — the
+        // smallest medium that carries this filesystem at this offset.
+        let total_size = region
+            .rootfs_off
+            .checked_add(rootfs_bytes)
+            .and_then(|end| end.checked_add(GPT_BACK_SECTORS * SECTOR))
+            .ok_or_else(|| {
+                geom(format!(
+                    "a rootfs of {rootfs_bytes} bytes at offset {} overflows the offset arithmetic",
+                    region.rootfs_off
+                ))
+            })?;
+
+        Self::assemble(region, total_size, rootfs_bytes)
+    }
+
+    /// The one place a [`Geometry`] is built, whichever direction it was resolved from,
+    /// and where the invariants both directions owe the writers are checked.
+    ///
+    /// Each direction reaches this having decided a different half — [`resolve`](Self::resolve)
+    /// the disk, [`around_rootfs`](Self::around_rootfs) the filesystem — so neither is in a
+    /// position to check the *relationship* between them against the other's arithmetic.
+    /// Here both are in hand, so the GPT consistency the writers rely on is stated once
+    /// rather than argued twice: the partition is whole ext4 blocks, it is a whole number
+    /// of sectors, and it ends at or before the last LBA the backup table leaves usable.
+    ///
+    /// That last one is the load-bearing check. A filesystem laid past the usable range is
+    /// a partition the GPT writer refuses; a partition laid *larger* than its filesystem is
+    /// worse, because the table is written happily and the image only fails when a board
+    /// tries to mount it.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::ImageGeometry`] naming whichever invariant does not hold.
+    fn assemble(
+        region: BootRegion,
+        total_size: u64,
+        rootfs_bytes: u64,
+    ) -> Result<Geometry, EngineError> {
+        let rootfs_off = region.rootfs_off;
+        if !rootfs_bytes.is_multiple_of(EXT4_BLOCK) {
+            return Err(geom(format!(
+                "the rootfs filesystem ({rootfs_bytes} bytes) is not a multiple of the ext4 block size {EXT4_BLOCK}"
+            )));
+        }
+        if !total_size.is_multiple_of(SECTOR) {
+            return Err(geom(format!(
+                "image size ({total_size}) is not a multiple of {SECTOR}"
+            )));
+        }
+        let rootfs_first_lba = rootfs_off / SECTOR;
+        let rootfs_length_lba = rootfs_bytes / SECTOR;
+        // The rootfs must end at or before the last usable LBA: the backup table owns
+        // the final GPT_BACK_SECTORS, and the last LBA a partition may use is one before
+        // it. A fitted disk lands exactly on that bound, so there is no slack here to
+        // absorb an off-by-one in either direction's arithmetic.
+        let end_lba = rootfs_first_lba
+            .checked_add(rootfs_length_lba)
+            .ok_or_else(|| geom("the rootfs partition overflows the LBA arithmetic".into()))?;
+        let usable_end_lba = (total_size / SECTOR)
+            .checked_sub(GPT_BACK_SECTORS)
+            .filter(|usable| end_lba <= *usable)
+            .ok_or_else(|| {
+                geom(format!(
+                    "the rootfs partition ends at LBA {end_lba}, past what the {total_size}-byte \
+                     image leaves usable before the backup GPT"
+                ))
+            })?;
+        debug_assert!(end_lba <= usable_end_lba);
+
+        Ok(Geometry {
+            total_size,
+            boot: region.boot,
+            rootfs_off,
+            rootfs_first_lba,
+            rootfs_length_lba,
+            rootfs_bytes,
+        })
+    }
+}
+
+/// The largest byte slack a fit search will look for — 64 GiB.
+///
+/// The share ceiling is the formatter's own ([`Slack::MAX_SHARE`]); this one is not,
+/// because a byte slack is an absolute quantity the search has no opinion about. Past
+/// this the caller has effectively named a size, and naming it outright is both faster
+/// and what they meant: the search would otherwise place the rootfs into candidate
+/// geometries tens of gibibytes wide to arrive at a number the recipe could have stated.
+const MAX_SLACK_BYTES: u64 = 64 << 30;
+
+/// Translate an authored fit slack into the formatter's own, refusing one the search
+/// will not accept.
+///
+/// The two types say the same thing in different vocabularies — [`parse_image_size`]
+/// validates the *grammar* and stops there, deliberately, because the limits belong to
+/// whoever runs the search. This is where they are applied, and it runs at resolution
+/// time as well as at build time: a `fit+95%` that the formatter would refuse must fail
+/// before a rootfs is built, not after.
+///
+/// `image_size` is the authored string, carried only so the message names what the
+/// recipe wrote rather than a number the reader has to map back.
+///
+/// # Errors
+///
+/// [`EngineError::ImageGeometry`] for a share past [`Slack::MAX_SHARE`] or a byte slack
+/// past [`MAX_SLACK_BYTES`].
+pub(crate) fn fit_slack(image_size: &str, slack: CoreSlack) -> Result<Slack, EngineError> {
+    match slack {
+        CoreSlack::Bytes(bytes) if bytes > MAX_SLACK_BYTES => Err(geom(format!(
+            "image_size {image_size:?} asks for {bytes} bytes free, past the {} GiB the fit \
+             search accepts — that much room is a size to name outright",
+            MAX_SLACK_BYTES >> 30,
+        ))),
+        CoreSlack::Bytes(bytes) => Ok(Slack::Bytes(bytes)),
+        CoreSlack::Share(hundredths) if hundredths > Slack::MAX_SHARE => Err(geom(format!(
+            "image_size {image_size:?} asks for {}.{:02}% free, past the {}% the fit search accepts \
+             — a filesystem that far from what its contents need is a size to name outright",
+            hundredths / 100,
+            hundredths % 100,
+            Slack::MAX_SHARE / 100,
+        ))),
+        CoreSlack::Share(hundredths) => Ok(Slack::Share(hundredths)),
+    }
+}
+
 /// Build an [`EngineError::ImageGeometry`] with `detail`.
 fn geom(detail: String) -> EngineError {
     EngineError::ImageGeometry { detail }
@@ -353,7 +545,9 @@ fn geom(detail: String) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boot2deb_core::model::{Kpart, ResolvedDepthchargeBoot, ResolvedRkbinBoot, Rkbin};
+    use boot2deb_core::model::{
+        InitramfsCompress, Kpart, ResolvedDepthchargeBoot, ResolvedRkbinBoot, Rkbin,
+    };
 
     /// The RK1 raw-gap layout (boot-methods/rockchip-rkbin.toml).
     fn rk1_boot() -> ResolvedBoot {
@@ -401,12 +595,13 @@ mod tests {
             },
             cmdline: "console=tty1 rootwait ro panic=30".into(),
             rootfs_offset: rootfs.into(),
+            initramfs_compress: InitramfsCompress::Xz,
         })
     }
 
     #[test]
     fn resolves_the_rk1_2g_layout() {
-        let g = Geometry::resolve(&rk1_boot(), "2G").unwrap();
+        let g = Geometry::resolve(&rk1_boot(), 2 << 30).unwrap();
         assert_eq!(g.total_size, 2 * 1024 * 1024 * 1024);
         assert_eq!(
             g.boot,
@@ -433,7 +628,7 @@ mod tests {
         // The exact numbers the C201 image carries: KERN-A at LBA 24576 spanning 32768
         // sectors, KERN-B abutting it at LBA 57344, and the rootfs behind both at LBA
         // 90112.
-        let g = Geometry::resolve(&c201_boot(), "4G").unwrap();
+        let g = Geometry::resolve(&c201_boot(), 4 << 30).unwrap();
         assert_eq!(
             g.boot,
             BootGeometry::Kpart {
@@ -479,7 +674,7 @@ mod tests {
     /// believe in.
     #[test]
     fn a_single_slot_layout_leaves_no_spare() {
-        let g = Geometry::resolve(&c201_boot_with("12MiB", "16MiB", 1, "28MiB"), "4G").unwrap();
+        let g = Geometry::resolve(&c201_boot_with("12MiB", "16MiB", 1, "28MiB"), 4 << 30).unwrap();
         let BootGeometry::Kpart { ref slots } = g.boot else {
             panic!("expected kernel slots")
         };
@@ -490,45 +685,165 @@ mod tests {
     #[test]
     fn rejects_bad_ordering_and_alignment() {
         // rootfs before u-boot.itb.
-        assert!(Geometry::resolve(&rk1_boot_with("32KiB", "16MiB", "8MiB"), "2G").is_err());
+        assert!(Geometry::resolve(&rk1_boot_with("32KiB", "16MiB", "8MiB"), 2 << 30).is_err());
         // idbloader inside the primary GPT reservation.
-        assert!(Geometry::resolve(&rk1_boot_with("512", "8MiB", "16MiB"), "2G").is_err());
+        assert!(Geometry::resolve(&rk1_boot_with("512", "8MiB", "16MiB"), 2 << 30).is_err());
         // rootfs offset 512-aligned (16385 sectors) but not 4 KiB-aligned.
-        assert!(Geometry::resolve(&rk1_boot_with("32KiB", "8MiB", "8389120"), "2G").is_err());
+        assert!(Geometry::resolve(&rk1_boot_with("32KiB", "8MiB", "8389120"), 2 << 30).is_err());
     }
 
     #[test]
     fn rejects_kernel_slots_that_collide() {
         // Overlapping the primary GPT: the firmware's own table would be destroyed.
-        assert!(Geometry::resolve(&c201_boot_with("512", "16MiB", 2, "44MiB"), "4G").is_err());
+        assert!(Geometry::resolve(&c201_boot_with("512", "16MiB", 2, "44MiB"), 4 << 30).is_err());
         // The *second* slot runs into the rootfs: 12 + 2*16 = 44 MiB, past a rootfs at
         // 40 MiB. This is the collision a one-slot geometry cannot have, and the reason
         // the rootfs offset is checked against the last slot rather than the first — a
         // spare silently overlapping the rootfs would be a kernel upgrade that eats the
         // filesystem.
-        assert!(Geometry::resolve(&c201_boot_with("12MiB", "16MiB", 2, "40MiB"), "4G").is_err());
+        assert!(Geometry::resolve(&c201_boot_with("12MiB", "16MiB", 2, "40MiB"), 4 << 30).is_err());
         // A zero-size kernel slot could hold no kernel.
-        assert!(Geometry::resolve(&c201_boot_with("12MiB", "0", 2, "44MiB"), "4G").is_err());
+        assert!(Geometry::resolve(&c201_boot_with("12MiB", "0", 2, "44MiB"), 4 << 30).is_err());
         // A gap between the last slot and the rootfs is allowed — only an overlap is not.
-        assert!(Geometry::resolve(&c201_boot_with("12MiB", "8MiB", 2, "44MiB"), "4G").is_ok());
+        assert!(Geometry::resolve(&c201_boot_with("12MiB", "8MiB", 2, "44MiB"), 4 << 30).is_ok());
+    }
+
+    /// A fitted image inverts the layout: the filesystem is decided first and the disk
+    /// is sized around it. The properties that must hold are that the head of the disk
+    /// is untouched by the inversion, that the partition is exactly the filesystem the
+    /// format reported, and that the backup GPT still fits behind it.
+    #[test]
+    fn a_fitted_rootfs_sizes_the_disk_around_itself() {
+        let rootfs_bytes = 700 * 1024 * 1024;
+        let g = Geometry::around_rootfs(&rk1_boot(), rootfs_bytes).unwrap();
+
+        // The head of the disk does not answer to the size, so it is what the authored
+        // layout says regardless of which direction the geometry was resolved in.
+        let fixed = Geometry::resolve(&rk1_boot(), 2 << 30).unwrap();
+        assert_eq!(g.boot, fixed.boot);
+        assert_eq!(g.rootfs_off, fixed.rootfs_off);
+        assert_eq!(g.rootfs_first_lba, fixed.rootfs_first_lba);
+
+        // The partition is the filesystem exactly — under a fit there is no slack
+        // between them to floor away.
+        assert_eq!(g.rootfs_bytes, rootfs_bytes);
+        assert_eq!(g.rootfs_bytes, g.rootfs_length_lba * SECTOR);
+
+        // And the disk carries the head, the partition, and the backup table.
+        assert_eq!(
+            g.total_size,
+            g.rootfs_off + rootfs_bytes + GPT_BACK_SECTORS * SECTOR
+        );
+        let end_lba = g.rootfs_first_lba + g.rootfs_length_lba;
+        assert!(end_lba <= g.total_size / SECTOR - GPT_BACK_SECTORS);
+
+        // A filesystem that is not whole ext4 blocks is refused rather than laid out
+        // into a partition that would describe it wrongly.
+        assert!(Geometry::around_rootfs(&rk1_boot(), rootfs_bytes + 1).is_err());
+
+        // But the authored-size floor does *not* apply to a fitted one. A format that
+        // returned a small filesystem returned a working one, and rejecting it here
+        // would fail a build after the whole rootfs had been written — which is exactly
+        // what an 8 MiB fitted rootfs did before this was separated out.
+        let small = Geometry::around_rootfs(&rk1_boot(), 8 * 1024 * 1024)
+            .expect("a fitted size is reported by a completed format, not authored");
+        assert!(small.rootfs_bytes < MIN_ROOTFS_BYTES);
+        assert_eq!(
+            small.total_size,
+            small.rootfs_off + small.rootfs_bytes + GPT_BACK_SECTORS * SECTOR
+        );
+    }
+
+    /// The exact disk a hardware-gated fitted build came out to, pinned as arithmetic.
+    ///
+    /// `asus-c201-libreboot/mainline-forky --image-size fit+20%` passed the build gate on
+    /// 2026-08-03 with these numbers measured off the artifact: 32 MiB kernel slots at 12
+    /// and 44 MiB, the rootfs at 76 MiB, a filesystem of 837,824,512 bytes, and a whole
+    /// image of 917,533,184. This asserts the layout still derives that disk from that
+    /// filesystem, which is the half of the gate that does not need a board — so a change
+    /// to the offset arithmetic fails here rather than on the next flash.
+    #[test]
+    fn the_gated_c201_libreboot_fit_lays_out_the_disk_it_was_measured_at() {
+        const ROOTFS_BYTES: u64 = 837_824_512;
+        const IMAGE_BYTES: u64 = 917_533_184;
+
+        let boot = c201_boot_with("12MiB", "32MiB", 2, "76MiB");
+        let g = Geometry::around_rootfs(&boot, ROOTFS_BYTES).unwrap();
+
+        assert_eq!(g.rootfs_off, 76 * 1024 * 1024, "the rootfs sits at 76 MiB");
+        assert_eq!(
+            g.total_size, IMAGE_BYTES,
+            "76 MiB + {ROOTFS_BYTES} + 33 sectors is the disk the gate measured"
+        );
+        // The filesystem fills its partition to the byte — the property the gate checked
+        // as "ext4 = its GPT partition".
+        assert_eq!(g.rootfs_bytes, ROOTFS_BYTES);
+        assert_eq!(g.rootfs_length_lba * SECTOR, ROOTFS_BYTES);
+        // And the slots the pairing resolved to, which is what puts the rootfs at 76 MiB
+        // rather than the stock 44.
+        let BootGeometry::Kpart { ref slots } = g.boot else {
+            panic!("expected kernel slots")
+        };
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].offset, 12 * 1024 * 1024);
+        assert_eq!(slots[1].offset, 44 * 1024 * 1024);
+    }
+
+    /// `parse_image_size` validates the grammar and stops; the limit is the search's.
+    /// A share the formatter would refuse has to fail at resolution time, because the
+    /// alternative is discovering it after the whole rootfs has been built.
+    #[test]
+    fn a_fit_slack_past_what_the_search_accepts_is_refused() {
+        // Inside the limit, both spellings pass straight through.
+        assert_eq!(
+            fit_slack("fit+20%", CoreSlack::Share(2000)).unwrap(),
+            Slack::Share(2000)
+        );
+        assert_eq!(
+            fit_slack("fit+512M", CoreSlack::Bytes(512 << 20)).unwrap(),
+            Slack::Bytes(512 << 20)
+        );
+        // Each boundary itself is accepted; one step past it is not.
+        assert!(fit_slack("fit+90%", CoreSlack::Share(Slack::MAX_SHARE)).is_ok());
+        assert!(fit_slack("fit+64G", CoreSlack::Bytes(MAX_SLACK_BYTES)).is_ok());
+
+        let err = fit_slack("fit+95%", CoreSlack::Share(9500)).unwrap_err();
+        let EngineError::ImageGeometry { detail } = err else {
+            panic!("expected an image-geometry error");
+        };
+        // The message names what the recipe wrote and what the ceiling is, so the fix
+        // does not require mapping a number back to the authored string.
+        assert!(detail.contains("fit+95%"), "{detail}");
+        assert!(detail.contains("90%"), "{detail}");
+
+        // The byte form has a ceiling of its own. It is boot2deb's, not the formatter's
+        // — ferrosys refuses an oversized *share* and has no opinion about bytes — so
+        // without this a `fit+1T` would search geometries a terabyte wide before
+        // failing, long after the rootfs had been built.
+        let err = fit_slack("fit+1T", CoreSlack::Bytes(1 << 40)).unwrap_err();
+        let EngineError::ImageGeometry { detail } = err else {
+            panic!("expected an image-geometry error");
+        };
+        assert!(detail.contains("fit+1T"), "{detail}");
+        assert!(detail.contains("64 GiB"), "{detail}");
     }
 
     #[test]
     fn rejects_image_too_small_for_the_rootfs() {
         // 8 MiB total cannot hold a rootfs starting at 16 MiB.
-        assert!(Geometry::resolve(&rk1_boot(), "8MiB").is_err());
+        assert!(Geometry::resolve(&rk1_boot(), 8 << 20).is_err());
     }
 
     #[test]
     fn rejects_rootfs_area_below_the_minimum() {
         // The rootfs clears the 16 MiB gap, but the ~84 MiB left is under the
         // 128 MiB minimum a Debian rootfs needs.
-        assert!(Geometry::resolve(&rk1_boot(), "100MiB").is_err());
+        assert!(Geometry::resolve(&rk1_boot(), 100 << 20).is_err());
     }
 
     #[test]
     fn payload_fit_catches_overruns() {
-        let g = Geometry::resolve(&rk1_boot(), "2G").unwrap();
+        let g = BootRegion::resolve(&rk1_boot()).unwrap();
         let gap = |idb: u64, itb: u64| {
             g.check_payload_fit(&[("idbloader.img", idb), ("u-boot.itb", itb)])
         };
@@ -546,7 +861,7 @@ mod tests {
 
     #[test]
     fn a_kernel_payload_must_fit_its_slot() {
-        let g = Geometry::resolve(&c201_boot(), "4G").unwrap();
+        let g = BootRegion::resolve(&c201_boot()).unwrap();
         let kpart = |len: u64| g.check_payload_fit(&[("vmlinuz.kpart", len)]);
         // The measured signed payload — 14,569,472 bytes — fits the 16 MiB slot.
         assert!(kpart(14_569_472).is_ok());

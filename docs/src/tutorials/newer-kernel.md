@@ -32,8 +32,8 @@ definition is also one line there.
 ## Shape 1: within the track
 
 `kernels/rk3588-mainline-7.1.toml` tracks `7.1.y`, and `series/rk3588-accel.toml` declares
-`applies_to_kernel = ">=7.0, <7.2"`. A later 7.1 point release is inside both, so nothing in
-the config or the series changes — only the pin.
+`applies_to_kernel = ">=7.1.5, <7.2"`. A later 7.1 point release is inside both, so if the
+series holds, nothing in the config or the series changes — only the pin.
 
 ```sh
 # 1. Re-pin. This is the only command that consults upstream.
@@ -69,6 +69,21 @@ rested on, and `update` says so:
 
 Both are advisory — the lock is written either way — and both name work that belongs at the
 end of this tutorial, in [Closing the loop](#closing-the-loop).
+
+Deciding whether the `validated` claim survives means knowing *what* the re-pin moved,
+which is what `diff` is for. Keep the old lock before step 1 and compare against it
+afterwards:
+
+```sh
+cp recipes/turing-rk1/forky.lock /tmp/old.lock       # before step 1
+boot2deb diff /tmp/old.lock turing-rk1/forky         # after it
+```
+
+It names the kernel ref and commit that moved, the kconfig symbols the fragment sets
+now request differently (with the fragment behind each), and — where the patches
+commit moved too — the individual patch files that were added, removed, or rewritten.
+That is the evidence the claim is re-earned or retired on. See
+[Comparing two build points](../reference/cli.md#comparing-two-build-points).
 
 If you would rather not touch the lock until you know the answer, step 2 can come first:
 `verify-patches turing-rk1/forky --kernel v7.1.5 --kernel-path ../linux` measures a version

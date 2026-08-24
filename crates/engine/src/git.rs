@@ -114,6 +114,54 @@ pub(crate) fn is_clean(repo: &Path) -> Result<bool, EngineError> {
     Ok(!in_progress)
 }
 
+/// Whether `repo` holds `commit` as a commit object.
+///
+/// The question a read-only query over a *historical* pin has to ask first: a
+/// checkout at one commit need not carry another, and asking for a blob under a
+/// commit that is not there fails deep inside the read rather than at its premise.
+/// Best-effort — a path that is not a repository at all answers `false`, since from
+/// the caller's side that is the same situation.
+pub fn has_commit(repo: &Path, commit: &str) -> bool {
+    run(
+        Some(repo),
+        &["cat-file", "-e", &format!("{commit}^{{commit}}")],
+        "cat-file -e",
+    )
+    .is_ok_and(|out| out.status.success())
+}
+
+/// The contents of `path` at `commit`, or `None` when the commit does not carry it.
+///
+/// Reads out of the object store rather than the worktree, so a query about a
+/// historical pin does not need — and cannot disturb — a checkout at that commit.
+/// A file absent at that commit is `None` rather than an error: for a series that
+/// did not exist yet, absence is the answer.
+pub fn show_file(repo: &Path, commit: &str, path: &str) -> Option<String> {
+    let out = run(
+        Some(repo),
+        &["show", &format!("{commit}:{path}")],
+        "show <commit>:<path>",
+    )
+    .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The object id of `path` at `commit`, or `None` when the commit does not carry it.
+///
+/// Comparing two blob ids is how two revisions of one file are told apart without
+/// reading either: git already content-addresses them, so equal ids are equal bytes.
+pub fn blob_id(repo: &Path, commit: &str, path: &str) -> Option<String> {
+    let out = run(
+        Some(repo),
+        &["rev-parse", &format!("{commit}:{path}")],
+        "rev-parse <commit>:<path>",
+    )
+    .ok()?;
+    out.status.success().then(|| stdout_of(out))
+}
+
 /// Whether `ancestor` is an ancestor of (or equal to) `descendant` in `repo`,
 /// via `git merge-base --is-ancestor`. `None` when the relationship cannot be
 /// determined — e.g. a commit absent from the local object store — so callers

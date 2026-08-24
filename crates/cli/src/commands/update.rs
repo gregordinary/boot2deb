@@ -1,9 +1,11 @@
 //! `update`: resolve upstream refs, hash the blobs, and write the recipe's `.lock`.
 //!
 //! The sole path that consults upstream — `build` reads only the lock. An omitted
-//! per-tree ref flag re-pins the *previous lock's* ref (not the config's symbolic
-//! one), so a routine re-pin only moves what the caller named. After the lock is
-//! written, every pinned source is checked for re-fetch durability and any
+//! per-tree ref flag re-pins the config layer's declared ref, so an authored
+//! constraint bump propagates, while a lock pinned to a bare commit sha is left
+//! alone as a deliberate hand-pin ([`boot2deb_core::repin`]); the kernel, whose
+//! config declares no ref, inherits the previous lock's. After the lock is written,
+//! every pinned source is checked for re-fetch durability and any
 //! ephemeral/unadvertised pin is flagged (advisory — it never blocks the write).
 
 use crate::args::UpdateArgs;
@@ -15,6 +17,31 @@ use boot2deb_core::{resolve_recipe, ConfigRoot};
 use boot2deb_engine::debstore::DebStore;
 use boot2deb_engine::event::{Event, Step};
 use boot2deb_engine::{extradebs, pins, sources};
+
+/// Choose the ref to pin for one source axis and record the choice when it follows a
+/// moved config constraint.
+///
+/// Thin wrapper over [`boot2deb_core::repin::pick_ref`] that adds the two things the
+/// command needs around it: `configured: None` is the "this build carries no such
+/// tree" case (an undeclared SoC source, or u-boot on a board whose firmware is its
+/// own), which pins nothing and yields the empty string `resolve_lock` never reads;
+/// and a followed bump is appended to `bumps` under `axis` for the post-write report.
+fn take(
+    bumps: &mut Vec<String>,
+    axis: &str,
+    flag: Option<String>,
+    locked: Option<&str>,
+    configured: Option<&str>,
+) -> String {
+    let Some(configured) = configured else {
+        return String::new();
+    };
+    let chosen = boot2deb_core::repin::pick_ref(flag, locked, configured);
+    if boot2deb_core::repin::is_config_bump(locked, &chosen, configured) {
+        bumps.push(format!("{axis} {} -> {chosen}", locked.unwrap_or_default()));
+    }
+    chosen
+}
 
 /// Run `update <recipe>`.
 pub(crate) fn run(
@@ -35,11 +62,11 @@ pub(crate) fn run(
     // `rootfs_offset` or a typo'd fragment fails here rather than being pinned into
     // the lock and failing at the next build.
     preflight_config(root, &build)?;
-    // An omitted per-tree ref flag preserves the *previous lock's* ref, not the
-    // config's symbolic ref. Otherwise a routine `update` that only bumps
-    // the kernel would silently re-pin every other tree from its committed exact
-    // commit back to the current branch head. Flags still override; a first update
-    // (no prior lock) falls back to the config default.
+    // An omitted per-tree ref flag takes the *config's* declared ref, so editing a
+    // constraint in `boot-methods/` or `socs/` reaches every already-locked recipe on
+    // the next `update` rather than moving only the boards that have no lock yet. A
+    // lock pinned to a bare commit sha is the exception and is left alone — see
+    // [`boot2deb_core::repin`] for the whole rule. Flags still override.
     //
     // A variant's *first* update inherits the recipe's lock instead of starting bare.
     // A feature selection is the only thing that differs from the recipe, so every
@@ -50,12 +77,10 @@ pub(crate) fn run(
         .lock(recipe)
         .ok()
         .or_else(|| point.is_variant().then(|| root.lock(point.recipe()).ok())?);
-    let ref_for = |flag: Option<String>,
-                   from_lock: fn(&boot2deb_core::lock::Lock) -> String,
-                   default: &str| {
-        flag.or_else(|| prev.as_ref().map(from_lock))
-            .unwrap_or_else(|| default.to_string())
-    };
+    // Constraint bumps this run followed, reported after the lock is written so a
+    // propagated move is visible at pin time instead of surfacing later as an
+    // unexplained ref change in the lock diff.
+    let mut bumps: Vec<String> = Vec::new();
     // The kernel ref has no config default (the config carries only a `track`, not a
     // concrete tag), so an omitted `--kernel-ref` inherits the previous lock's ref —
     // the "re-pin what changed" model for a patch-only update. Only the first update
@@ -76,90 +101,85 @@ pub(crate) fn run(
                 )
             })?,
     };
-    // Likewise u-boot: only the boot method that compiles one has a ref.
-    let configured_uboot_ref = build
-        .rkbin_boot()
-        .map(|b| b.uboot_ref.clone())
-        .unwrap_or_default();
-    let uboot_ref = ref_for(
+    // Likewise u-boot: only the boot method that compiles one has a ref. The *boot
+    // method* declares it, not the device, so bumping that one constraint is a
+    // statement about every board on the method and reaches all of them here.
+    let uboot_ref = take(
+        &mut bumps,
+        "u-boot",
         args.uboot_ref,
-        |l| {
-            l.uboot
-                .as_ref()
-                .map(|u| u.reference.clone())
-                .unwrap_or_default()
-        },
-        &configured_uboot_ref,
+        prev.as_ref()
+            .and_then(|l| l.uboot.as_ref())
+            .map(|u| u.reference.as_str()),
+        build.rkbin_boot().map(|b| b.uboot_ref.as_str()),
     );
     // Media-accel source refs are pinned only when the recipe builds the transcode
     // stack (its resolved build carries the sources). A base build leaves them empty —
     // `resolve_lock` never reads a ref without a matching source, and the lock omits
-    // both pin tables. Each ref inherits the prior lock's pin, else the SoC-layer
-    // default constraint ("re-pin what changed").
+    // both pin tables.
     let prev_us = prev.as_ref().and_then(|l| l.userspace.as_ref());
     let prev_ff = prev.as_ref().and_then(|l| l.ffmpeg.as_ref());
-    let pick = |flag: Option<String>, prev: Option<String>, default: &str| {
-        flag.or(prev).unwrap_or_else(|| default.to_string())
-    };
-    // A tree the SoC does not declare is pinned by nobody, so its ref stays empty and
-    // `resolve_lock` never reads it — the same contract as a base build, applied per
-    // tree rather than to the whole stack.
-    let one = |flag: Option<String>,
-               prev: Option<&boot2deb_core::lock::GitPin>,
-               decl: Option<&boot2deb_core::model::GitSource>| {
-        match decl {
-            Some(d) => pick(flag, prev.map(|p| p.reference.clone()), &d.git_ref),
-            None => String::new(),
-        }
-    };
-    let (mpp_ref, librga_ref, libmali_ref) = match &build.userspace {
-        Some(us) => (
-            one(
-                args.mpp_ref,
-                prev_us.and_then(|u| u.mpp.as_ref()),
-                us.mpp.as_ref(),
-            ),
-            one(
-                args.librga_ref,
-                prev_us.and_then(|u| u.librga.as_ref()),
-                us.librga.as_ref(),
-            ),
-            one(
-                args.libmali_ref,
-                prev_us.and_then(|u| u.libmali.as_ref()),
-                us.libmali.as_ref(),
-            ),
-        ),
-        None => (String::new(), String::new(), String::new()),
-    };
-    let (ffmpeg_base_ref, ffmpeg_rockchip_ref) = match &build.ffmpeg {
-        Some(ff) => (
-            pick(
-                args.ffmpeg_base_ref,
-                prev_ff.map(|f| f.base.reference.clone()),
-                &ff.base.git_ref,
-            ),
-            one(
-                args.ffmpeg_rockchip_ref,
-                prev_ff.and_then(|f| f.rockchip.as_ref()),
-                ff.rockchip.as_ref(),
-            ),
-        ),
-        None => (String::new(), String::new()),
-    };
-    // Out-of-tree module refs: inherit each from the previous lock by name (a stable
-    // pin survives re-runs), else fall back to the device's declared ref. There is no
-    // per-module `--*-ref` flag — a `device_kmods` entry names its own ref.
+    let us = build.userspace.as_ref();
+    let mpp_ref = take(
+        &mut bumps,
+        "mpp",
+        args.mpp_ref,
+        prev_us
+            .and_then(|u| u.mpp.as_ref())
+            .map(|p| p.reference.as_str()),
+        us.and_then(|u| u.mpp.as_ref()).map(|s| s.git_ref.as_str()),
+    );
+    let librga_ref = take(
+        &mut bumps,
+        "librga",
+        args.librga_ref,
+        prev_us
+            .and_then(|u| u.librga.as_ref())
+            .map(|p| p.reference.as_str()),
+        us.and_then(|u| u.librga.as_ref())
+            .map(|s| s.git_ref.as_str()),
+    );
+    let libmali_ref = take(
+        &mut bumps,
+        "libmali",
+        args.libmali_ref,
+        prev_us
+            .and_then(|u| u.libmali.as_ref())
+            .map(|p| p.reference.as_str()),
+        us.and_then(|u| u.libmali.as_ref())
+            .map(|s| s.git_ref.as_str()),
+    );
+    let ff = build.ffmpeg.as_ref();
+    let ffmpeg_base_ref = take(
+        &mut bumps,
+        "ffmpeg",
+        args.ffmpeg_base_ref,
+        prev_ff.map(|f| f.base.reference.as_str()),
+        ff.map(|f| f.base.git_ref.as_str()),
+    );
+    let ffmpeg_rockchip_ref = take(
+        &mut bumps,
+        "ff-rk",
+        args.ffmpeg_rockchip_ref,
+        prev_ff
+            .and_then(|f| f.rockchip.as_ref())
+            .map(|p| p.reference.as_str()),
+        ff.and_then(|f| f.rockchip.as_ref())
+            .map(|s| s.git_ref.as_str()),
+    );
+    // Out-of-tree module refs follow the same rule, keyed by name. There is no
+    // per-module `--*-ref` flag — a `device_kmods` entry names its own ref, so the
+    // kmod layer's `ref` is the only constraint there is to follow.
     let prev_kmods = prev.as_ref().map(|l| l.kmods.as_slice()).unwrap_or(&[]);
     let kmod_refs: Vec<(String, String)> = build
         .device_kmods
         .iter()
         .map(|k| {
-            let reference = prev_kmods
+            let locked = prev_kmods
                 .iter()
                 .find(|p| p.name == k.name)
-                .map(|p| p.reference.clone())
-                .unwrap_or_else(|| k.git_ref.clone());
+                .map(|p| p.reference.as_str());
+            let reference = take(&mut bumps, &k.name, None, locked, Some(&k.git_ref));
             (k.name.clone(), reference)
         })
         .collect();
@@ -214,6 +234,13 @@ pub(crate) fn run(
     pins::write_lock(&path, &lock)?;
 
     println!("wrote {}", path.display());
+    // Name every pin that moved because a config constraint moved, not because the
+    // caller named it. Without this the ref change is indistinguishable from a no-op
+    // re-pin until someone reads the lock diff, which is exactly when a bump that
+    // should have been noticed has already been committed.
+    for bump in &bumps {
+        println!("  bumped   {bump} (config constraint)");
+    }
     // Only the pins this build actually has are printed. A row for an absent one
     // would claim a dependency the lock deliberately does not record.
     match (&lock.kernel, build.kernel.as_ref()) {

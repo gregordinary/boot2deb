@@ -45,6 +45,9 @@ locale       = "de_DE.UTF-8"     # omit -> base locale
 locales_generate = []            # omit -> base locales_generate (replaces, not adds)
 timezone     = "Europe/Berlin"   # omit -> base timezone
 keymap       = "de"              # omit -> device keymap
+sudo         = "nopasswd"        # omit -> base sudo ("nopasswd" | "password")
+first_boot_password_length = 12   # omit -> base length (8..=64)
+ssh_authorized_keys = []         # omit -> base keys (replaces, not adds)
 ```
 
 Real recipes are much shorter than that, because most of it is the board's default already.
@@ -83,7 +86,7 @@ they come up:
 | the suite | a plain image on that Debian release | `turing-rk1/forky`, `asus-c201/trixie` |
 | a capability, plus the suite where the board ships more than one | what the image can do | `turing-rk1/media-accel-forky`, `h96-max-m9/media-accel` |
 | the deliverable | a `deliverable = "uboot"` tool | `rk3576-generic/loader`, `h96-max-m9/util` |
-| the product | an image built around one application | `turing-rk1/jellyfin` |
+| the product | an image built around one application | `turing-rk1/jellyfin-forky` |
 
 Do not put a version in a leaf name if the version is already pinned elsewhere: the lock
 holds the exact tag, and a leaf named after it goes stale on the next bump. A leaf naming a

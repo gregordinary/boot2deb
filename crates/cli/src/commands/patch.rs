@@ -293,7 +293,7 @@ mod tests {
             "{recipes:?}"
         );
         assert!(
-            recipes.contains(&"turing-rk1/jellyfin".to_string()),
+            recipes.contains(&"turing-rk1/jellyfin-forky".to_string()),
             "{recipes:?}"
         );
         assert!(recipes_using_series(&root, "no-such-series").is_empty());

@@ -12,6 +12,8 @@ features   = []                          # base: accel kernel, no media userspac
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
+# Derived from turing-rk1/forky along the suite axis, and re-assessed over the v7.1.6
+# kernel: see that recipe for what the bump moves. Nothing it touches is suite-coupled.
 [support]
 status = "expected"
-date   = "2026-07-20"
+date   = "2026-08-04"

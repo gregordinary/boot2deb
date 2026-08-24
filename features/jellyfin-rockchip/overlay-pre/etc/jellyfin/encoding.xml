@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<EncodingOptions xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <!--
+    Seeded by boot2deb's `jellyfin-rockchip` feature. Jellyfin rewrites this file
+    on every start, so these are starting values, not enforced ones: change them
+    here for the next image, or in the Jellyfin dashboard for this one.
+
+    Only the fields that differ from Jellyfin's own defaults appear. Anything
+    absent keeps the default, including EncoderPreset, the CRF values, throttling,
+    and AllowHevcEncoding (off — HEVC output is a per-site decision about what the
+    clients can play, not a property of the hardware).
+  -->
+
+  <!--
+    The absolute prefix path, not the /usr/bin/ffmpeg-rk symlink. Jellyfin takes no
+    ffprobe path; it derives one by replacing the last component of this one. This
+    path yields /opt/ffmpeg-rk/bin/ffprobe, which the ffmpeg-rk package ships. The
+    symlink would yield /usr/bin/ffprobe, which this image does not install.
+  -->
+  <EncoderAppPath>/opt/ffmpeg-rk/bin/ffmpeg</EncoderAppPath>
+
+  <!-- The only value that reaches h264_rkmpp / hevc_rkmpp on the VEPU580. -->
+  <HardwareAccelerationType>rkmpp</HardwareAccelerationType>
+  <EnableHardwareEncoding>true</EnableHardwareEncoding>
+
+  <!--
+    Empty on purpose, and required rather than tuning.
+
+    The *_rkmpp decoders are compiled into ffmpeg-rk, so Jellyfin's capability
+    probe (which reads `ffmpeg -hwaccels` and `-filters`) sees them and believes
+    hardware decoding works. It does not: on a mainline kernel rkvdec is a V4L2
+    stateless driver, MPP finds no decode client, and the decoder fails to open at
+    runtime. FFmpeg does not fall back to software when that happens and Jellyfin
+    does not retry, so the stream fails outright.
+
+    Jellyfin's default for this field is ["h264", "vc1"], which means the default
+    configuration would break every H.264 transcode on this hardware. Empty makes
+    Jellyfin emit no -hwaccel at all; decode happens in software, on eight cores,
+    and the encoder stays in hardware.
+
+    Hardware decode does reach FFmpeg here, via `-hwaccel v4l2request` — but
+    Jellyfin's HardwareAccelerationType is a closed enum with no v4l2request in
+    it, so it is not expressible in this file.
+  -->
+  <HardwareDecodingCodecs />
+
+  <!--
+    ffmpeg-rk is built without OpenCL, so there is no hardware tone-map to reach
+    and enabling either of these would only cost CPU on a software path.
+  -->
+  <EnableTonemapping>false</EnableTonemapping>
+  <EnableVppTonemapping>false</EnableVppTonemapping>
+</EncodingOptions>

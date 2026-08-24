@@ -40,10 +40,26 @@ pub enum ConfigError {
     /// so admit a single `/`, are validated separately ([`InvalidRecipeRef`](Self::InvalidRecipeRef)).
     #[error("invalid {kind} name '{name}': must be a bare identifier ([A-Za-z0-9._-], no separators or '..')")]
     InvalidName {
-        /// Layer kind, e.g. `"device"`.
+        /// Layer kind, e.g. `"soc"`.
         kind: &'static str,
         /// The offending name.
         name: String,
+    },
+
+    /// A device slug is not a valid host name. Tighter than
+    /// [`InvalidName`](Self::InvalidName), which the slug also has to satisfy and
+    /// automatically does: a board's slug is the host name its image comes up under
+    /// unless the board states another, so a slug outside the host-name shape would
+    /// make the default `boot2deb new-device` writes one no image could carry.
+    #[error(
+        "invalid device name '{name}': {why} — the slug is also the image's default \
+         hostname, so it must be a valid host name (e.g. 'my-board')"
+    )]
+    InvalidDeviceName {
+        /// The offending slug.
+        name: String,
+        /// Which part of the host-name shape it fails.
+        why: &'static str,
     },
 
     /// A device's `extends` chain closes on itself, so there is no base-most device
@@ -134,6 +150,22 @@ pub enum ConfigError {
         path: String,
     },
 
+    /// A solved package manifest has a line that is not
+    /// `name version arch sha256` — see [`manifest::parse`](crate::manifest::parse).
+    ///
+    /// Attributed to a line rather than to the file as a whole because a manifest is a
+    /// content pin: dropping the line would silently shrink the package set the file
+    /// claims to pin, and a reader could not tell that had happened.
+    #[error("{path}:{line}: not a `name version arch sha256` manifest line: {content}")]
+    InvalidManifest {
+        /// The manifest that failed to parse.
+        path: String,
+        /// 1-based line number of the offending line.
+        line: usize,
+        /// The line itself, trimmed.
+        content: String,
+    },
+
     /// A generated artifact (e.g. a lockfile) could not be serialized to TOML.
     #[error("failed to serialize {what}: {source}")]
     Serialize {
@@ -199,7 +231,9 @@ pub enum ConfigError {
     OverrideNotApplicable {
         /// The device being resolved.
         device: String,
-        /// The offending axis as its flag spells it (e.g. `--suite`, `--image-size`).
+        /// The offending axis as its flag spells it (e.g. `--suite`, `--image-size`),
+        /// or as its recipe key spells it for an axis that has no flag
+        /// (`ssh_authorized_keys`).
         flag: &'static str,
     },
 
@@ -481,6 +515,23 @@ pub enum ConfigError {
         value: String,
     },
 
+    /// An `image_size` could not be parsed — see
+    /// [`parse_image_size`](crate::size::parse_image_size).
+    ///
+    /// Distinct from [`InvalidSize`](Self::InvalidSize) because `image_size` accepts a
+    /// form the offsets do not: a size measured from the rootfs. An author who wrote a
+    /// bare `fit` needs to be shown the slack forms, and an author who mistyped an offset
+    /// must not be.
+    #[error(
+        "invalid image size '{value}' (expected a size like '4G', or a measured size \
+         like 'fit+20%' / 'fit+512M' — a bare 'fit' names no slack, and a fitted \
+         filesystem with nothing free boots into a full disk)"
+    )]
+    InvalidImageSize {
+        /// The offending `image_size` string.
+        value: String,
+    },
+
     /// A version tag could not be parsed as a semver version, so no series range
     /// can be matched against it. Raised for either axis — a kernel tag or a u-boot
     /// one — hence the axis-neutral wording.
@@ -568,6 +619,55 @@ pub enum ConfigError {
         supported: String,
     },
 
+    /// A recipe's `[[data_volumes]]` mount path is unusable — not absolute, root
+    /// itself, trailing-slashed, or declared twice.
+    #[error("data volume mount '{mount}' {why}")]
+    DataVolumeMount {
+        /// The offending mount path.
+        mount: String,
+        /// What is wrong with it, as a predicate completing the message.
+        why: String,
+    },
+
+    /// A recipe's `[[data_volumes]]` label cannot serve as the volume's identity
+    /// across a reimage — empty, too long for the filesystem, holding a character
+    /// that would need quoting in `/etc/fstab`, or declared twice.
+    #[error("data volume label '{label}' {why}")]
+    DataVolumeLabel {
+        /// The offending label.
+        label: String,
+        /// What is wrong with it, as a predicate completing the message.
+        why: String,
+    },
+
+    /// A recipe's `[[data_volumes]]` `match` names something that cannot identify
+    /// a disk.
+    #[error("data volume match '{value}' {why}")]
+    DataVolumeMatch {
+        /// The offending match value.
+        value: String,
+        /// What is wrong with it, as a predicate completing the message.
+        why: String,
+    },
+
+    /// A recipe declares `[[data_volumes]]` without selecting the `data-volume`
+    /// feature, or selects that feature without declaring any volume. The two
+    /// halves are useless apart — the feature carries the first-boot hook that
+    /// acts on the declarations, and the declarations are inert without it — and
+    /// pulling the feature in implicitly would be the provider auto-resolution
+    /// this config model does not do.
+    #[error(
+        "recipe '{recipe}' {problem} — a data volume needs both the 'data-volume' \
+         feature (which carries the first-boot hook) and at least one \
+         [[data_volumes]] entry (which says what to mount where)"
+    )]
+    DataVolumeFeatureMismatch {
+        /// The recipe with only one of the two halves.
+        recipe: String,
+        /// Which half is missing, as a phrase completing the message.
+        problem: String,
+    },
+
     /// A selected feature declares `requires_media_accel` but the resolved SoC
     /// provides no `[userspace]`/`[ffmpeg]` source stanzas to build the stack
     /// from. The remedy is to add those stanzas at the SoC layer (as RK3588 does)
@@ -618,13 +718,21 @@ pub enum ConfigError {
     /// `[`/`]` would be parsed as line structure rather than content — and a
     /// non-http(s) URI would point the bootstrap solve at an arbitrary
     /// transport.
+    ///
+    /// `name` and `signed_by` are held to the tighter rule that they be portable
+    /// file-name stems (`[A-Za-z0-9._-]`, not `.` or `..`), because each names a
+    /// file: `name` the rootfs's `sources.list.d` entry and keyring, `signed_by` the
+    /// vendored keyring the repo is verified against. A separator or dot segment in
+    /// either would place a file — or read a trust anchor — outside the directory
+    /// that holds it.
     #[error("feature '{feature}': apt source '{name}' has an unusable {field}: {value:?}")]
     AptSourceBadField {
         /// The feature contributing the source.
         feature: String,
         /// The apt source's `name`.
         name: String,
-        /// Which field is unusable (`name`, `uri`, `suite`, or `components`).
+        /// Which field is unusable (`name`, `uri`, `suite`, `components`, or
+        /// `signed_by`).
         field: &'static str,
         /// The offending value.
         value: String,
@@ -799,6 +907,80 @@ pub enum ConfigError {
         /// Why it cannot be used.
         why: &'static str,
     },
+
+    /// A device's `hostname` is not an RFC 1123 host name. It is written verbatim
+    /// into `/etc/hostname` and into a `127.0.1.1` line of `/etc/hosts`, and that
+    /// second file is line- and token-oriented — so a value carrying a newline would
+    /// add host entries rather than name one host.
+    #[error("invalid hostname '{value}': {why}")]
+    InvalidHostname {
+        /// The offending hostname.
+        value: String,
+        /// Why it cannot be used.
+        why: &'static str,
+    },
+
+    /// An `ssh_authorized_keys` entry is not a usable `authorized_keys` line. Rejected
+    /// at resolution because `sshd` reports a line it cannot parse only in its own log,
+    /// on a board that may have no console — so the alternative to this error is an
+    /// image whose key silently does not work.
+    ///
+    /// The entry is quoted back truncated: a key blob is ~70 to ~700 characters, and a
+    /// message that reprints one buries its own explanation.
+    #[error(
+        "invalid ssh_authorized_keys entry {index} ('{}'): {why}",
+        crate::error::elide(value, 40)
+    )]
+    InvalidAuthorizedKey {
+        /// Position in the authored list, 1-based — the entry's only name.
+        index: usize,
+        /// The offending entry.
+        value: String,
+        /// Why it cannot be used.
+        why: &'static str,
+    },
+
+    /// A `first_boot_password_length` outside the accepted range. A short generated
+    /// password is the one setting whose weakness is invisible on the finished image:
+    /// nothing about a booted board reveals how much entropy its first credential had.
+    #[error(
+        "first_boot_password_length {value} is outside {min}..={max} — \
+         {min} is the floor at which guessing the login over the network stays \
+         infeasible, and the default {default} keeps that margin even if the image \
+         itself (and so the password hash in it) is shared"
+    )]
+    InvalidPasswordLength {
+        /// The offending length.
+        value: u32,
+        /// Smallest accepted length.
+        min: u32,
+        /// Largest accepted length.
+        max: u32,
+        /// The length a config root that says nothing gets.
+        default: u32,
+    },
+}
+
+/// `value` truncated to `max` characters with a trailing `…`, for an error message that
+/// must name a long authored value without being swamped by it. Character-, not
+/// byte-indexed, so a multi-byte comment cannot split a `char`.
+///
+/// Control characters are escaped, because one of the values this quotes back is
+/// rejected *for* containing a newline — and a diagnostic that printed it raw would
+/// break its own explanation across two lines.
+fn elide(value: &str, max: usize) -> String {
+    let mut out = String::with_capacity(max);
+    for c in value.chars().take(max) {
+        if c.is_control() {
+            out.extend(c.escape_debug());
+        } else {
+            out.push(c);
+        }
+    }
+    if value.chars().count() > max {
+        out.push('…');
+    }
+    out
 }
 
 /// The trailing hint on a [`ConfigError::NotFound`]: the near-miss names, or the

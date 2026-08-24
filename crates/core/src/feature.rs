@@ -138,6 +138,21 @@ pub struct Feature {
     /// [`config_fragments`](Feature::config_fragments).
     #[serde(default)]
     pub patch_series: Vec<String>,
+    /// What this feature does *not* deliver, in the operator's terms — one sentence
+    /// per limitation, tagged [`CaveatScope::Feature`](crate::model::CaveatScope::Feature)
+    /// in the resolved build.
+    ///
+    /// A capability's limits belong to the capability, not to whichever recipe
+    /// happened to name it first: every recipe composing the feature inherits them,
+    /// and a limit stated once cannot fall out of step across recipes that all have
+    /// it. Reserve the recipe's own `[support].caveats` for what is true of that
+    /// build point alone.
+    ///
+    /// Ordered after the hardware's caveats and before the recipe's, and
+    /// de-duplicated by text against both — a feature restating a SoC limitation
+    /// keeps the SoC's wider tag.
+    #[serde(default)]
+    pub caveats: Vec<String>,
 }
 
 impl Feature {
@@ -283,6 +298,7 @@ mod tests {
             apt_sources: vec![],
             extra_debs: vec![],
             conflicts: conflicts.into_iter().map(String::from).collect(),
+            caveats: vec![],
             requires_media_accel: false,
             config_fragments: vec![],
             patch_series: vec![],

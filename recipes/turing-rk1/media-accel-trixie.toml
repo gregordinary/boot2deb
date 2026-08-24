@@ -11,6 +11,9 @@ features   = ["media-accel-rockchip"]    # HW transcode userspace (MPP + RGA + f
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
+# The suite sibling of turing-rk1/media-accel-forky, re-assessed with it over the
+# v7.1.6 kernel; the media userspace is built from source and so suite-independent.
 [support]
 status = "expected"
-date   = "2026-07-20"
+date   = "2026-08-04"
+

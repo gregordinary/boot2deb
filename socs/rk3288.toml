@@ -18,17 +18,17 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 # The Veyron boards differ from each other in their panel, their input, and their
 # audio codec. They do not differ in how you reach a root filesystem, how you get
 # on a network, or which radio is soldered to them — so those live here, once,
-# and a device file states only its own deltas. `overlay/` and `overlay-pre/`
-# beside this file carry the matching trees: the initramfs module list, the
-# panic breadcrumb, the btsdio blacklist, the two Broadcom blobs, and the
-# max98090 first-boot hook.
+# and a device file states only its own deltas. `overlay/`, `overlay-pre/` and
+# `overlay-nonfree/` beside this file carry the matching trees: the initramfs
+# module list, the panic breadcrumb, the btsdio blacklist, the max98090 first-boot
+# hook, and the two Broadcom blobs.
 #
 # Wi-Fi and Bluetooth. Every Veyron is a Broadcom BCM4354 combo part on this SoC:
 # Wi-Fi over SDIO, Bluetooth over uart0. Debian's firmware-brcm80211 carries the
 # brcmfmac4354-sdio .bin and its .clm_blob; it carries neither the board NVRAM nor
-# any BCM4354 patchram, so those two are vendored in this layer's overlay (see
-# socs/rk3288/README.md). One copy of each serves the whole family — they identify
-# the radio module, and it is the same module on every board.
+# any BCM4354 patchram, so those two are vendored in this layer's `overlay-nonfree`
+# (see socs/rk3288/README.md). One copy of each serves the whole family — they
+# identify the radio module, and it is the same module on every board.
 #
 # Only the Broadcom Veyron boards (speedy/minnie/mickey/brain) need this package
 # and those blobs; the Marvell-radio boards (jerry/jaq/mighty/fievel/tiger) want
@@ -36,9 +36,17 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 # board this SoC layer currently serves is a Broadcom one; the day a Marvell board
 # is added, the radio half of this moves down to the devices.
 #
+# None of it reaches a libre build: `nonfree_firmware_packages` and the
+# `overlay-nonfree/` tree are exactly what a GNU Linux-libre kernel drops, which on
+# this SoC costs the internal radio outright — see `kernels/rk3288-libre-7.1.toml`.
+# What is left works: an AR9271 USB adapter, whose firmware is Free and packaged
+# below, is the supported way onto a network there.
+#
 # `bluez` is what makes the Bluetooth half usable. The kernel loads the vendored
 # patchram at probe whether or not anything can use it, so an image with the blob
-# and no host stack is a blob loaded for nothing.
+# and no host stack is a blob loaded for nothing. It stays on a libre image, where
+# the internal radio is dead: bluez is Free software, and a USB adapter that needs
+# no firmware is the same answer for Bluetooth that the AR9271 is for Wi-Fi.
 #
 # Networking. No Veyron has an ethernet port — they are Chromebooks — so Wi-Fi is
 # the only link on all of them and NetworkManager owns the interfaces, which means
@@ -55,8 +63,15 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 # (from this package) persists it, replaying it on every later boot. On the
 # Chromebit, which has no analog codec, it is the ordinary ALSA toolset for the
 # HDMI card.
+#
+# firmware-ath9k-htc is the one firmware package here that is Free — it is built
+# from the open-ath9k-htc-firmware sources and ships in Debian `main` — so it is
+# carried on every build rather than gated with the Broadcom blobs. On a libre
+# image it is the whole radio story; on any other it is 100 KB that makes an AR9271
+# adapter work the moment it is plugged in, on a family of laptops with no ethernet
+# port and one soldered radio.
 packages = [
-    "firmware-brcm80211",
+    "firmware-ath9k-htc",
     "network-manager",
     "network-manager-tui",
     "wpasupplicant",
@@ -67,7 +82,20 @@ packages = [
     "bluez",
     "ca-certificates",
 ]
+
+# The BCM4354's own firmware, from Debian's non-free-firmware component. Separated
+# from `packages` so a libre build drops it and nothing else: see the radio note
+# above, and `overlay-nonfree/` for the two blobs Debian does not carry.
+nonfree_firmware_packages = ["firmware-brcm80211"]
+
 exclude = ["dhcpcd"]
+
+# What no build on this silicon lifts. Rendered in the support matrix and printed at
+# the end of a build; the board layer adds what is true of one board rather than the
+# part.
+caveats = [
+  "HDMI tops out at 4K30 and cannot reach 4K60: the RK3288 caps TMDS at 340 MHz, its PHY has no scrambling above that, and the VOP cannot emit YUV420, so there is no reduced-rate path either.",
+]
 
 # No [userspace] / [ffmpeg]: there is no Rockchip media-accel userspace stack for the
 # RK3288 (MPP and RGA target the RK35xx family). Video decode here is the mainline

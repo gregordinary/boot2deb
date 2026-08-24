@@ -18,67 +18,43 @@
 //! sandbox base's manifest is a *record*, not a contract: it states what the toolchain
 //! that compiled the target `.deb`s was, and nothing verifies a later solve against it.
 //!
-//! [`digest`], [`verify_reproduced`], and [`render`] are pure, so the contract and the
-//! text form are testable without a bootstrap.
+//! [`digest`] and [`verify_reproduced`] are pure, so the contract is testable
+//! without a bootstrap. The text form itself lives in
+//! [`boot2deb_core::manifest`], so the writer here and every reader of a written
+//! manifest share one definition of what the bytes are.
 
 use crate::blobs::sha256_hex;
 use crate::error::EngineError;
+use boot2deb_core::manifest::{render, Package};
 use ferroday_cage::provision::debian::Plan;
-use std::fmt::Write as _;
 use std::path::Path;
 
-/// One package in a manifest: name, version, architecture, and the sha256 the
-/// archive records for its `.deb`.
-///
-/// The projected form of a [`Plan`]'s package, carrying exactly the four fields a
-/// manifest line holds. [`render`] takes these rather than a [`Plan`] so the text
-/// form is derivable — and testable — without resolving anything.
-pub type ManifestRow = (String, String, String, String);
-
-/// Project a resolved plan onto manifest rows, in the plan's own order.
+/// Project a resolved plan onto manifest packages, in the plan's own order.
 ///
 /// The plan *is* the installed set, resolved through the same path the provisioner
 /// installs, and it carries each `.deb`'s archive-recorded sha256 — so a manifest
 /// needs neither a dpkg-status parse nor an in-bootstrap hash hook.
-pub fn rows(plan: &Plan) -> Vec<ManifestRow> {
+pub fn packages(plan: &Plan) -> Vec<Package> {
     plan.packages
         .iter()
-        .map(|p| {
-            (
-                p.name.clone(),
-                p.version.clone(),
-                p.architecture.clone(),
-                p.sha256.clone(),
-            )
+        .map(|p| Package {
+            name: p.name.clone(),
+            version: p.version.clone(),
+            architecture: p.architecture.clone(),
+            sha256: p.sha256.clone(),
         })
         .collect()
-}
-
-/// Render manifest text: `header` as a leading `#` comment, then one
-/// `name version arch sha256` line per package.
-///
-/// Sorted by the whole row, name first, so one package set renders to one byte
-/// sequence regardless of resolution order — which is what makes [`digest`] a stable
-/// identity for the set rather than for the run that produced it.
-pub fn render(header: &str, rows: &[ManifestRow]) -> String {
-    let mut rows: Vec<&ManifestRow> = rows.iter().collect();
-    rows.sort();
-    let mut body = format!("# {header}\n");
-    for (name, version, arch, sha) in rows {
-        let _ = writeln!(body, "{name} {version} {arch} {sha}");
-    }
-    body
 }
 
 /// Write `plan` as a manifest at `out`, creating the parent directory, and return
 /// the number of packages written.
 pub fn write(header: &str, plan: &Plan, out: &Path) -> Result<usize, EngineError> {
-    let rows = rows(plan);
+    let packages = packages(plan);
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent).map_err(|s| EngineError::io(parent, s))?;
     }
-    std::fs::write(out, render(header, &rows)).map_err(|s| EngineError::io(out, s))?;
-    Ok(rows.len())
+    std::fs::write(out, render(header, &packages)).map_err(|s| EngineError::io(out, s))?;
+    Ok(packages.len())
 }
 
 /// sha256 of a manifest file's exact bytes — the identity `RootfsPin.manifest_sha256`
@@ -130,68 +106,5 @@ mod tests {
             }
             other => panic!("expected ManifestDrift, got {other:?}"),
         }
-    }
-
-    /// The rendered text is sorted by name and carries each package's
-    /// archive-recorded sha256, so one package set has one digest.
-    #[test]
-    fn render_is_sorted_and_pinned() {
-        let rows = vec![
-            (
-                "libc6".into(),
-                "2.41-1".into(),
-                "arm64".into(),
-                "aaaa".into(),
-            ),
-            (
-                "ffmpeg-rk".into(),
-                "3e53143".into(),
-                "arm64".into(),
-                "cccc".into(),
-            ),
-        ];
-        let body = render("Solved rootfs package manifest.", &rows);
-        assert!(body.starts_with("# Solved rootfs package manifest.\n"));
-        let lines: Vec<&str> = body.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(
-            lines,
-            vec!["ffmpeg-rk 3e53143 arm64 cccc", "libc6 2.41-1 arm64 aaaa"]
-        );
-    }
-
-    /// Resolution order does not reach the bytes: the same set rendered in either
-    /// order is the same file, which is what [`digest`] identifies.
-    #[test]
-    fn resolution_order_does_not_reach_the_digest() {
-        let a: ManifestRow = (
-            "libc6".into(),
-            "2.41-1".into(),
-            "arm64".into(),
-            "aaaa".into(),
-        );
-        let b: ManifestRow = (
-            "adduser".into(),
-            "3.157".into(),
-            "all".into(),
-            "bbbb".into(),
-        );
-        let header = "Solved package manifest.";
-        assert_eq!(
-            render(header, &[a.clone(), b.clone()]),
-            render(header, &[b, a])
-        );
-    }
-
-    /// The header is part of the file, so two manifests describing different trees
-    /// never collide on a digest even where their package sets coincide.
-    #[test]
-    fn the_header_reaches_the_bytes() {
-        let rows = vec![(
-            "libc6".into(),
-            "2.41-1".into(),
-            "arm64".into(),
-            "aaaa".into(),
-        )];
-        assert_ne!(render("rootfs.", &rows), render("build sandbox.", &rows));
     }
 }

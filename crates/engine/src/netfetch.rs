@@ -22,7 +22,7 @@ use std::io::Read;
 use std::time::Duration;
 
 /// Maximum redirect hops followed before the fetch is abandoned.
-const MAX_REDIRECTS: u32 = 5;
+pub(crate) const MAX_REDIRECTS: u32 = 5;
 
 /// A bounded-fetch failure. Callers map the message into their own typed error
 /// ([`ExtraDebFetch`](crate::error::EngineError::ExtraDebFetch) /

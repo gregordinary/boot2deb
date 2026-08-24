@@ -6,6 +6,11 @@
 # image omits is the Rockchip media *userspace* (MPP + RGA + ffmpeg-rk); add it
 # later from the media-accel debs, or build it in from the start with
 # turing-rk1/media-accel-forky.
+#
+# The u-boot it ships carries the turing-rk1-recovery series, whose one patch adds
+# `ums`. That is what lets a disk on the M.2 slot be written from the carrier at
+# all: the management controller writes the module's eMMC and nothing else, so
+# without it an NVMe u-boot enumerates perfectly well has no path to a host.
 # Constraints only; the exact resolution is written to the sibling .lock.
 device     = "turing-rk1"
 kernel     = "rk3588-mainline-7.1"       # omit -> device default_kernel
@@ -14,6 +19,30 @@ features   = []                          # base: accel kernel, no media userspac
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
+# The last pin that booted was v7.1.1, so this one has not been on the board. What
+# the five point releases to v7.1.6 move, on the paths this image runs: nothing in
+# `rkvdec`, the rocket NPU driver, `rockchip-iommu` or panfrost, which are byte-
+# identical. `rk3588-base.dtsi` changes in one place — `vdec0` and `vdec1` list
+# `reg`/`reg-names` in the order their binding declares, where earlier 7.1.x
+# transposed "link" and "function". Each name keeps the same address and `rkvdec`
+# maps both banks by name, so no consumer sees it; it is a source-context change,
+# and refreshing `rk3588-accel`'s 060 for it is the only edit the bump cost. The eMMC
+# controller (`sdhci-of-dwcmshc`) gains a bus-clock release on its probe *failure*
+# paths, which the board does not take. `rockchip_drm_gem` swaps `obj->import_attach`
+# for `drm_gem_is_imported()`, the same predicate behind an accessor; the remaining
+# rockchip DRM changes are to eDP and DisplayPort attachments, and the RK1's in-tree
+# DT brings up no display at all. So nothing on this board's boot path moved — but
+# nothing has booted this pin, which is what `expected` says.
+#
+# u-boot moves with it, and that release is worth more to this board than the
+# kernel point releases are. Three RK3588 fixes land: the memory map gains the DRAM
+# above the first addressable 4 GiB, a fallback fixes up the two known gaps on
+# 16+ GiB parts, and LMB now keeps DMA allocations below 4 G on all of
+# ARCH_ROCKCHIP — which upstream reports as the cause of grub finding no partitions
+# and of eMMC vanishing mid-boot on boards with 4 GiB or more. The NVMe driver also
+# picks up a fix for PRP-list arithmetic on transfers above 2 MiB and one for
+# command-ID wraparound, both of which a whole-image write to an M.2 disk would
+# otherwise reach. Built and command-verified on the bench, not booted.
 [support]
-status = "validated"
-date   = "2026-07-16"
+status = "expected"
+date   = "2026-08-05"

@@ -36,6 +36,46 @@ shows the first, so a tens-of-minutes kernel compile stays readable:
 Reach for `--verbose` when a stage fails or hangs: it is the level that shows what the
 failing subprocess actually said.
 
+At the default level a build ends with where its time went:
+
+```
+timing:
+kernel     12m04s  built
+uboot      3.0s    restored
+userspace  1m00s   partly restored
+rootfs     4m31s   built
+image      1m12s   built
+total      18m02s
+```
+
+The second column is what makes the first readable — a three-second kernel step is
+the artifact cache answering, not a fast compiler. `restored` means every one of that
+step's outputs came back from the cache and nothing was compiled; `partly restored`
+is a step whose outputs cache one at a time (the userspace stage builds several
+`.deb`s, each with its own signature) where some were restored and some were built.
+
+`total` is the command's own wall clock, so it exceeds the sum of the rows by
+whatever the build does outside any step. The summary is suppressed under `--quiet`
+and under `--json`, where the same numbers ride on each `step_finished` event.
+
+A build that wrote an image closes with what to do with it:
+
+```
+next: write the image to /dev/sdX — confirm the device with `lsblk` first, since dd
+      overwrites it whole
+      xzcat build/turing-rk1/forky/artifacts/turing-rk1-forky.img.xz | sudo dd \
+        of=/dev/sdX bs=4M status=progress conv=fsync
+```
+
+The paths are the files the run actually produced, so a `--compress none` build hints
+the raw `.img` and a `split` build hints both halves with the medium each goes to.
+The pipe matches the container: `xzcat` for a `.xz`, `zcat` for a `.gz`, and where a
+build asked for both (`--compress xz,gz`) the hint names the one asked for first.
+`/dev/sdX` is a placeholder in every case — a build cannot know which disk is meant,
+and a real device node in a copy-pasteable `dd` line is how the wrong disk gets
+overwritten. Boards with a flashing route of their own (the RK1's `tpi`, a Chromebook's
+recovery media) document it on their [board page](../boards/turing-rk1.md).
+
 ## Machine-readable output
 
 `--json` gives a machine form to the commands a script consumes:
@@ -48,15 +88,18 @@ failing subprocess actually said.
 | `verify-patches` | per axis: how many patches applied, and every one that did not |
 | `verify-config` | the merge or parity verdict, with each differing `CONFIG_*` |
 | `verify-sources` | per pin: its durability class and the detail behind it |
-| `build` | NDJSON — one object per line, tagged by its `event` field (`step_started`, `progress`, `log`, `artifact`, `step_finished`, `error`), with every produced artifact's path on an `artifact` event |
+| `verify-packages` | the present / provided / missing split, plus the names this build produces itself |
+| `diff` | every section's comparison as one document, with the per-series patch-file deltas under `patch_files` |
+| `outdated` | per recipe, every pin with its verdict flattened in — `status` plus the newer release or moved tip behind it |
+| `build` | NDJSON — one object per line, tagged by its `event` field (`step_started`, `progress`, `log`, `artifact`, `step_finished`, `error`), with every produced artifact's path on an `artifact` event and each step's `duration_ms` + `outcome` (`built`/`restored`/`mixed`) on its `step_finished` |
 
 Errors are still plain text on stderr, and the exit code is the result either way.
 `--quiet`/`--verbose` do not apply under `--json`: the stream *is* the record of the
 build, and a filtered record would be a wrong one.
 
 A command with no machine form — `update`, `clean`, `why-rebuild`, `new-device`,
-`support-matrix`, `patch import` — **rejects** `--json` rather than ignoring it, naming
-the structured route to the same information where one exists. A global flag that
+`support-matrix`, `patch import`, `sbom` — **rejects** `--json` rather than ignoring it,
+naming the structured route to the same information where one exists. A global flag that
 silently did nothing would be a trap for exactly the scripted caller it exists for.
 
 The two commands that split reproducibility from upstream are `update` (the only one
@@ -224,6 +267,10 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   it off.
 - **`--image-size <size>`** overrides the image size the same way. The rootfs grows to
   fill its medium on first boot, so this bounds the *artifact*, not the installed system.
+  It also takes the measured form — `--image-size fit+20%` builds the smallest image that
+  holds the rootfs with a fifth of it free, which is the quickest way to find out how
+  large a new board's image actually needs to be. See
+  [An image size can be stated or measured](config-model.md#an-image-size-can-be-stated-or-measured).
 - **`--refresh-rootfs`** forces a clean rootfs bootstrap instead of restoring the
   content cache; **`--no-artifact-cache`** forces every compile node to rebuild instead
   of restoring stored `.deb`s (see [Two caches](#two-caches-and-what-each-one-keys-on)).
@@ -254,7 +301,10 @@ unchanged restores the bootstrapped tree instead of re-running the multi-minute
 bootstrap. Because the key is the solved set and not the requested one, a moved mirror
 resolves new versions and rebuilds automatically — a hit is never stale. The unique
 per-image first-boot password is applied on restore rather than cached, so every image
-still gets its own credential. `--refresh-rootfs` forces a clean bootstrap.
+still gets its own credential. The *rest* of the account policy — the sudo drop-in and
+the authorized keys — is part of the tree and part of the key, so authorizing a key or
+tightening `sudo` rebuilds rather than restoring a tree with the old rules.
+`--refresh-rootfs` forces a clean bootstrap.
 
 **The artifact cache** keys on each compile node's *full set of output-determining
 inputs* — the source pins and patch series, the kconfig fragments' contents, the
@@ -291,12 +341,70 @@ needs no rootfs, so you can produce a flashable eMMC/SPI bootloader image withou
 a whole OS. The `split` layout emits the same image as part of a full build. See
 [Turing RK1](../boards/turing-rk1.md) for the eMMC-plus-NVMe workflow this serves.
 
+## reproduce
+
+```sh
+boot2deb reproduce turing-rk1/forky --from ./published
+```
+
+Rebuilds an image from the **plan document** a previous build published, rather than
+resolving the archive afresh. It takes every `build` flag and runs the same pipeline;
+what differs is the rootfs, which installs the plan's exact package set by the digests
+the plan records — reading neither a `Release` nor a package index.
+
+The lock pins sources, patches, and the builder. It cannot pin *which package versions
+the archive served*, so the same lock a month later resolves a different userland. The
+plan pins exactly that, and it is written beside every image as `<point>.plan`:
+
+```
+turing-rk1-forky.img.xz
+turing-rk1-forky.provenance.toml
+turing-rk1-forky.plan          <- the document reproduce replays
+turing-rk1-forky.pkgs.lock
+```
+
+It is deb822 — the archive's own control format — so it reviews as a diff. Each stanza
+names a package's version, architecture, sha256, pool path, and which archive it came
+from; a leading stanza per archive records the mirror that answered, the suite and
+components, the sha256 of the release body that was verified, its `Date` and
+`Valid-Until`, and the fingerprint of the key that verified it.
+
+`--from` names the directory holding that document; it defaults to this build point's
+own output directory, so re-running a build to check that it *is* reproducible needs no
+flag. The provenance manifest beside it is read for one advisory line — which boot2deb
+produced the image, and how the running checkout compares. That is advice and never a
+gate: a stamped commit is the commit at which the build worked, never the commit past
+which it breaks.
+
+**This moves the trust anchor, deliberately.** An ordinary build's package digests come
+from an index whose own digest a signed release vouched for, so they chain to the archive
+signature. A replay never reads that index, so the digests chain to the plan document
+instead. Each `.deb` is still verified against the digest the plan records — a mirror
+serving different bytes is caught — but nothing re-checks that the plan describes a set
+the archive ever offered. That trade is right for reproducing a published image and wrong
+for a routine build, which is why it is reachable only through this command; `build` has
+no flag for it.
+
+**A recipe that compiles its own packages replays only if those compiles are
+byte-reproducible.** The plan pins the sha256 of the kernel `.deb` — and, on a
+media-accel recipe, of `ffmpeg-rk`, `librockchip-mpp1` and `librga2` — that the original
+build produced, because those install from the build's own local pool like any other
+package. Replay them and either the digests match, which proves the whole image
+reproduced, or the install fails naming the package that drifted. The second outcome is
+the honest one: it says this recipe is not yet reproducible, rather than quietly
+producing a different image. A recipe that installs Debian's own kernel and compiles
+nothing has no such dependency.
+
+Pair it with a snapshot pin for the strongest form. The plan says which versions; the
+lock's `snapshot.debian.org` timestamp keeps those versions *fetchable* after they rotate
+off the live mirror. See [Reproducibility](reproducibility.md).
+
 ## Verification
 
-Three read-only commands catch config mistakes before any compile — each exits non-zero
+Four read-only commands catch config mistakes before any compile — each exits non-zero
 on failure, so they gate CI as well as an interactive bring-up. They share the
 reproducibility split: every one reads the recipe's lock for its pins, and any that needs
-a source tree **auto-fetches it at the locked commit** into a durable cache, so all three
+a source tree **auto-fetches it at the locked commit** into a durable cache, so all four
 work on a fresh clone with no hand-cloned trees.
 
 ### Which verify when
@@ -306,12 +414,31 @@ work on a fresh clone with no hand-cloned trees.
 | Imported or edited a patch — does the series still apply to the pinned kernel and u-boot (and ffmpeg/userspace)? | `verify-patches` |
 | Edited a `.config` fragment or the base defconfig — does the kernel `.config` still generate cleanly (and match a reference)? | `verify-config` |
 | A lock is old — are its pinned commits still fetchable upstream, or has a branch moved out from under them? | `verify-sources` |
+| Added a package to a layer, a feature, or a recipe — does the suite you build against actually carry it? | `verify-packages` |
 
 The first `verify-patches` or `verify-config` on a cold cache clones the kernel, and
 linux-stable is large. If you already have a local checkout, point `--kernel-src` at it
 (a git URL or path holding the locked commit) to make the fetch near-instant;
 `--ffmpeg-base-src` and `--mpp-src` do the same for the other trees. `verify-sources`
 never clones — it only queries the remotes.
+
+`verify-packages` clones nothing either. It runs the read half of a package resolve —
+the archive's `Release` and its package indexes, and then stops — against the same
+archives a build would use: the mirror the lock's snapshot pins (or the live one), plus
+every repository the selected features contribute. One pass answers every name at once,
+which is why it is cheap enough to run per board over every recipe.
+
+It is worth having as its own command because the resolver cannot answer it. A recipe
+naming a package the suite does not carry fails at resolve time — deep in a build, after
+every compile node has already run — and fails badly: a top-level include naming nothing
+makes the *whole* set unsatisfiable, so the error says the set could not be resolved and
+never which names were the problem.
+
+Two kinds of name are reported rather than failed. A package the build **produces** —
+anything a `requires_media_accel` feature contributes, which comes from the SoC's source
+trees through the build's own local pool — is set aside, since the archives are rightly
+silent about it. And a name something else `Provides` is listed with its providers,
+because apt then has a choice the recipe did not make.
 
 #### The free prerequisite: does the series even claim this version?
 
@@ -462,6 +589,10 @@ boot2deb verify-sources turing-rk1/forky
 a lock rotting before a build needs it. Capture a snapshot (`build --save-snapshot`) to
 make the rootfs solve durable the same way.
 
+It reads the same ref advertisement as [`outdated`](#what-has-moved-upstream) and
+answers the other half of the question: this one is about whether a pin can still be
+*fetched*, that one about whether something *newer* exists. Neither implies the other.
+
 ### patch import
 
 `patch import` fetches a patch, normalizes it to canonical `git am`-ready mbox, and slots
@@ -473,6 +604,181 @@ full workflow (commit, re-pin, verify) on
 boot2deb patch import https://patchwork.kernel.org/project/linux-rockchip/patch/NNNN/mbox/ \
   --series rk3588-accel --scope kernel
 ```
+
+## Comparing two build points
+
+```sh
+# Two recipes.
+boot2deb diff turing-rk1/forky turing-rk1/media-accel-forky
+
+# One recipe against an older copy of its own lock — git supplies the older one.
+git show HEAD~5:recipes/turing-rk1/media-accel-forky.lock > /tmp/old.lock
+boot2deb diff /tmp/old.lock turing-rk1/media-accel-forky
+
+# Two shipped images, from the provenance manifests beside them.
+boot2deb diff a/turing-rk1-forky.provenance.toml b/turing-rk1-forky.provenance.toml
+```
+
+Each side is a **recipe name**, a path to a **`.lock`**, or a path to a
+**`.provenance.toml`**, and the two sides need not be the same kind. Everything it
+reads is a document the build already wrote, so it runs offline and builds nothing.
+
+Six sections, in the order they answer the question:
+
+| section | what it compares |
+| --- | --- |
+| `packages` | the solved manifest: added, removed, re-versioned, and *rebuilt* (same version, different `.deb`) |
+| `kernel` | the pin — id, flavor, clone URL, ref, commit — and the requested kconfig, symbol by symbol |
+| `patches` | series membership, each axis's ref and commit, and the patch **files** behind a moved commit |
+| `sources` | every other pinned tree: u-boot, MPP, RGA, Mali, ffmpeg, each out-of-tree module |
+| `blobs` | the rkbin pins, by sha256 |
+| `builder` | which boot2deb ran, the host it cross-compiled from, and the archive state the rootfs resolved against |
+
+Narrow it with `--section` (repeatable); `--json` gives the whole report as one
+document, with the patch-file deltas under `patch_files`.
+
+**Unavailable is not unchanged.** A section neither side records says so rather than
+reporting agreement:
+
+```
+builder: not compared — neither side records a provenance manifest, which is where
+the builder and archive state are recorded
+```
+
+Which side is silent is named when only one is, so you know whether to go find the
+other document or accept that it does not exist.
+
+Two sections answer more when you name a **recipe** than when you name a document.
+The kconfig delta is one: a fragment set is resolved from the config tree, and no
+document a build writes names it — so `diff` reads the fragments a recipe's kernel
+merges and reports each differing symbol *with the fragment that set it*, which
+diffing two generated `.config` files cannot do. A distro-package kernel merges no
+fragments at all, and that section reports itself unavailable rather than claiming
+every symbol the other side enables is new.
+
+The patch-file delta is the other reach outside those documents: it resolves a moved
+patches-repo commit into named files by reading the `patches` repo.
+
+```
+patches:
+  kernel:
+    commit  adfdc19d7caf -> 659033b7e543
+    rk3588-accel:
+      +  rocket/088-rocket-drv-reset-before-iommu-detach.patch
+      ~  media-accel/kernel/060-vepu580-rcawston-v3.patch
+```
+
+`+` added, `-` removed, `~` rewritten under an unchanged name — the last being the
+case a membership comparison calls identical. It needs a `patches` checkout carrying
+both commits (`--patches-path`, else the config root's sibling `../patches`); without
+one it reports "the commit moved, and here is why the files could not be listed"
+rather than failing the rest of the comparison.
+
+That section is what turns deciding whether a `validated` [support
+claim](support-matrix.md) survives a kernel or patches bump from hand work into
+reading a list.
+
+## Bill of materials
+
+```sh
+# From a recipe's own published build.
+boot2deb sbom turing-rk1/forky --format spdx --out turing-rk1-forky.spdx.json
+
+# From an image someone handed you, by the provenance manifest that shipped with it.
+boot2deb sbom ./turing-rk1-forky.provenance.toml --format cyclonedx
+
+# Or write it as part of the build. Off by default; repeatable for both formats.
+boot2deb build turing-rk1/forky --sbom spdx --sbom cyclonedx
+```
+
+**SPDX 2.3** and **CycloneDX 1.6**, both JSON, both from one internal model, so the two
+documents state the same facts. What is in them:
+
+| component | how it is identified |
+| --- | --- |
+| every installed package | name, exact version, sha256, and a `pkg:deb/debian/...` purl |
+| every pinned source tree | the ref and the exact commit — kernel, u-boot, the patch series, and the media-accel trees |
+| every rkbin blob | its sha256, which is the only identity it has |
+| every externally-fetched `.deb` | its URL and sha256 |
+
+The one distinction worth reading is between what the image **contains** and what it was
+**generated from**. A kernel source tree is compiled into the image, not installed in
+it; SPDX says so with `CONTAINS` and `GENERATED_FROM`, and CycloneDX — which has one
+relationship kind — carries it in the component type and description instead.
+
+**Licenses are `NOASSERTION`, deliberately.** boot2deb records no per-package license,
+and synthesizing one by reading `/usr/share/doc/*/copyright` out of the rootfs would
+produce a field that looks authoritative and is not. An honest absence is worth more to
+a compliance scan than a wrong SPDX identifier.
+
+**The document is reproducible.** Its identity — the SPDX `documentNamespace` and the
+CycloneDX `serialNumber` — is derived from the solved manifest's digest, so two SBOMs of
+one package set are byte-identical rather than differing in a random UUID. The only
+field the image's own content does not determine is the creation timestamp, which both
+formats require; set `SOURCE_DATE_EPOCH` and the whole document is byte-stable.
+
+It reads a *published build*, not a recipe's lock. A lock says what an image would be
+made of; only a build says what one is — so `sbom <recipe>` reads the
+`.provenance.toml` and `.pkgs.lock` beside that recipe's image, and says so if no build
+has produced them yet.
+
+## What has moved upstream
+
+```sh
+# Every recipe in the tree, in one pass.
+boot2deb outdated
+
+# Or just the ones you are about to touch.
+boot2deb outdated turing-rk1/forky h96-max-m9/forky
+```
+
+`outdated` is the read-only sibling of `update`: it says what a re-pin *would* find,
+without writing a lock. For each git source pin it reports one of
+
+| status | meaning |
+| --- | --- |
+| `current` | the pinned tag is the newest comparable release, or the pinned branch is still at the pinned commit |
+| `behind` | newer releases exist — the next one in the pin's own line, and the newest upstream |
+| `tip-moved` | the pin names a branch whose tip has moved, with both commits |
+| `unknown` | nothing could be compared, and why — a bare-commit pin, a ref the remote no longer advertises, or a remote that could not be reached |
+
+```
+recipe                        axis     status     detail
+turing-rk1/forky              kernel   behind     v7.1.6 -> v7.1.9 (3 newer in this line); newest upstream v7.3 (7 newer)
+turing-rk1/forky              u-boot   behind     v2026.04 -> v2026.07 (1 newer release, none in this line)
+turing-rk1/forky              patches  tip-moved  branch main: tip moved 659033b7e543 -> ed52b7fa4a3d
+```
+
+Two figures because they are different moves. The **in-line** bump — the next stable
+point release — usually keeps the patch series inside its declared `applies_to_kernel`
+envelope and the kernel config where it was. The **newest upstream** release usually
+does not, and is the one that wants a [`verify-patches`](#verify-patches) run before it
+is pinned. A pin that is itself at the newest release in its line reports only the
+wider move.
+
+A release pin is never offered a **prerelease**: `v7.3-rc1` is not an upgrade from
+`v7.1.6`, it is a different question. Nor is a pin compared across naming schemes — the
+Linux-libre `sources/v7.1.6-gnu` trees and upstream's own `v7.1.6` live in the same
+repo and their versions interleave, so a survey that mixed them would offer to swap a
+board's whole firmware posture as a point release. The rule is that the pin states its
+own scheme and only tags spelled the same way are candidates, which is why no per-axis
+list of version patterns exists to fall out of date.
+
+Being behind is not a failure. `outdated` always exits zero; it is a survey, and
+whether to move is a decision with hardware evidence behind it. Its neighbour
+[`verify-sources`](#verify-sources) is the gate, and it asks the opposite question —
+not "is there something newer" but "is what we pinned still fetchable at all". A pin
+can be a durable tag and nine releases behind, or an ephemeral branch tip and current.
+
+Cost is one `git ls-remote` per **distinct remote**, not per pin: the shipped recipes
+share a kernel repo and a patches repo, so surveying the whole tree is a handful of
+round-trips and a few seconds. Nothing is fetched and nothing is written.
+
+What it does **not** cover is the pins that have no upstream ref to move: the rkbin
+blobs and any `extra_debs` are content-pinned by sha256 and read from the config tree,
+and the apt archive is pinned by the solved manifest rather than by a ref. Those move
+only when someone changes the config, which [`diff`](#comparing-two-build-points)
+shows.
 
 ## Rebuild planning and cleanup
 

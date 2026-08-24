@@ -294,6 +294,7 @@ version = "0.0.0"
 dependencies = [
  "semver",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "toml",

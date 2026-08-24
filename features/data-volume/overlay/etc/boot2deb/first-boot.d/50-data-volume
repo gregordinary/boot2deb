@@ -1,0 +1,177 @@
+#!/bin/sh
+set -eu
+# boot2deb data-volume first-boot hook, run once by /usr/lib/boot2deb/first-boot.
+#
+# For each volume the build declared in /etc/boot2deb/data-volumes.conf, walk a
+# three-step ladder and stop at the first step that applies:
+#
+#   1. adopt  -- a filesystem already carries our label. Mount it. Never format.
+#   2. create -- the matched disk is genuinely blank and the volume permits it.
+#                Write a GPT with one partition, mkfs with our label, mount.
+#   3. refuse -- anything else. Log what was found and leave the disk alone.
+#
+# Step 3 is the whole point. This feature exists so that reflashing the OS keeps
+# the data disk, which means every boot after the first must find a volume it did
+# not create and must not touch it. A disk holding a partition table, a
+# filesystem, or a label that is not ours is evidence of data someone wants.
+#
+# The fstab entries were written at build time, so mounting here is only about
+# this first boot; every later boot mounts from fstab with no hook involved. They
+# carry `nofail`, so a refusal below costs the data disk and never the boot.
+#
+# Failing leaves the whole first-boot unit re-runnable, so every step is
+# idempotent and the hook exits 0 on a refusal rather than blocking the rest of
+# first boot.
+
+conf=/etc/boot2deb/data-volumes.conf
+tab="$(printf '\t')"
+
+log() { echo "data-volume: $*"; }
+
+if [ ! -r "$conf" ]; then
+    log "no $conf; nothing to do"
+    exit 0
+fi
+
+# The disk holding root is never a candidate, whatever the match says. Resolving
+# it here rather than per-volume keeps the guard in one place.
+root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
+root_disk=""
+if [ -n "$root_src" ]; then
+    root_pk="$(lsblk -no pkname "$root_src" 2>/dev/null | head -n1 || true)"
+    [ -n "$root_pk" ] && root_disk="/dev/$root_pk"
+fi
+
+# Every whole disk of a transport, as /dev paths, one per line.
+#
+# Two independent tests, and a disk must pass both. The node name alone is not
+# enough: a SATA disk and a USB disk are both /dev/sd*, so an external drive
+# plugged in at the wrong moment is indistinguishable from an internal one by name.
+# The kernel's reported transport is the discriminator, and a disk whose transport
+# cannot be read is skipped rather than guessed at.
+#
+# mmc is the one exception: the block driver commonly reports no transport at all,
+# and there the name is already unambiguous. The pattern excludes mmcblk<n>boot<n>
+# -- the read-only eMMC boot hardware partitions, which lsblk also lists as whole
+# disks (TYPE=disk), and which must never be a candidate.
+#
+# `lsblk -d` lists whole disks only, so partitions never reach this.
+disks_of_kind() {
+    case "$1" in
+        nvme) pattern='^nvme[0-9]+n[0-9]+$'; want=nvme; tran_required=yes ;;
+        sata) pattern='^sd[a-z]+$';          want=sata; tran_required=yes ;;
+        usb)  pattern='^sd[a-z]+$';          want=usb;  tran_required=yes ;;
+        mmc)  pattern='^mmcblk[0-9]+$';      want=mmc;  tran_required=no  ;;
+        *)    return 1 ;;
+    esac
+    lsblk -dno NAME,TRAN 2>/dev/null | while read -r name tran; do
+        [ -n "$name" ] || continue
+        printf '%s\n' "$name" | grep -qE "$pattern" || continue
+        if [ "$tran" != "$want" ]; then
+            # No transport reported: only mmc may fall back to the name, because
+            # only mmc has a name that cannot be confused with another bus.
+            if [ -n "$tran" ] || [ "$tran_required" = yes ]; then
+                continue
+            fi
+        fi
+        # Read-only whole disks are never data volumes.
+        if [ "$(cat "/sys/block/$name/ro" 2>/dev/null || echo 0)" = "1" ]; then
+            continue
+        fi
+        printf '/dev/%s\n' "$name"
+    done
+}
+
+# True when the disk holds no partition table, no filesystem signature, and no
+# partitions the kernel knows about. Deliberately three independent checks: any
+# one of them alone has a case it misses, and the cost of a false "blank" is
+# somebody's data.
+is_blank() {
+    disk="$1"
+    if [ -n "$(blkid -p -o value -s PTTYPE "$disk" 2>/dev/null || true)" ]; then
+        return 1
+    fi
+    if [ -n "$(blkid -p -o value -s TYPE "$disk" 2>/dev/null || true)" ]; then
+        return 1
+    fi
+    # A child in lsblk means the kernel already sees partitions on it.
+    if [ "$(lsblk -no NAME "$disk" 2>/dev/null | wc -l)" -gt 1 ]; then
+        return 1
+    fi
+    return 0
+}
+
+while IFS="$tab" read -r match label fstype mount create; do
+    case "$match" in ''|\#*) continue ;; esac
+
+    # 1. Adopt: is there already a filesystem with our label? This is the path
+    #    every boot of a reflashed board takes.
+    existing="$(blkid -L "$label" 2>/dev/null || true)"
+    if [ -n "$existing" ]; then
+        log "adopting $existing (label $label) at $mount"
+        mkdir -p "$mount"
+        mountpoint -q "$mount" || mount "$mount" || log "WARNING: mount $mount failed"
+        continue
+    fi
+
+    # Resolve the match to exactly one disk. Zero means the disk is not present
+    # (a board built for one but shipped without); more than one means "the NVMe"
+    # was not an answer, and guessing which is not this hook's call.
+    case "$match" in
+        /dev/*) candidates="$match"; [ -b "$match" ] || candidates="" ;;
+        *)      candidates="$(disks_of_kind "$match" || true)" ;;
+    esac
+    # Never consider the disk root is on.
+    if [ -n "$root_disk" ]; then
+        candidates="$(printf '%s\n' "$candidates" | grep -v "^${root_disk}$" || true)"
+    fi
+    candidates="$(printf '%s\n' "$candidates" | grep -v '^$' || true)"
+    count="$(printf '%s\n' "$candidates" | grep -c . || true)"
+
+    if [ "$count" -eq 0 ]; then
+        log "no disk matches '$match' for label $label; leaving $mount unmounted"
+        continue
+    fi
+    if [ "$count" -gt 1 ]; then
+        log "REFUSING: '$match' matches $count disks ($(printf '%s' "$candidates" | tr '\n' ' ')); \
+name one explicitly as match = \"/dev/...\""
+        continue
+    fi
+    disk="$candidates"
+
+    if [ "$create" != "if-blank" ]; then
+        log "no volume labelled $label on $disk and create=$create; leaving it alone"
+        continue
+    fi
+
+    # 2/3. Create, but only on a disk that holds nothing at all.
+    if ! is_blank "$disk"; then
+        log "REFUSING: $disk already holds a partition table or filesystem and no \
+volume labelled $label; not touching it"
+        continue
+    fi
+
+    log "creating $fstype volume $label on blank disk $disk"
+    # One partition spanning the disk. sfdisk writes the GPT; the partition name
+    # mirrors the filesystem label so the disk reads the same from `lsblk` and
+    # from `blkid`.
+    printf 'label: gpt\nname="%s"\n' "$label" | sfdisk --quiet "$disk"
+    udevadm settle 2>/dev/null || sleep 2
+
+    part="$(lsblk -lno NAME "$disk" | sed -n '2p')"
+    if [ -z "$part" ]; then
+        log "WARNING: no partition appeared on $disk; leaving $mount unmounted"
+        continue
+    fi
+    part="/dev/$part"
+
+    case "$fstype" in
+        ext4) mkfs.ext4 -q -L "$label" "$part" ;;
+        *)    log "WARNING: unknown fstype '$fstype'; leaving $part unformatted"
+              continue ;;
+    esac
+
+    mkdir -p "$mount"
+    mountpoint -q "$mount" || mount "$mount" || log "WARNING: mount $mount failed"
+    log "$label ready at $mount"
+done < "$conf"

@@ -37,7 +37,7 @@ under the GNU General Public License, version 2. The exact package version, sour
 URL, and sha256 are recorded in
 `blobs/keyrings/debian-archive-keyring.README.md`.
 
-## Broadcom BCM4354 firmware — `socs/rk3288/overlay/usr/lib/firmware/brcm/`
+## Broadcom BCM4354 firmware — `socs/rk3288/overlay-nonfree/usr/lib/firmware/brcm/`
 
 - `brcmfmac4354-sdio.txt` — Wi-Fi board NVRAM / calibration data for the Veyron
   Chromebooks' BCM94354Z NGFF radio module.
@@ -51,6 +51,7 @@ They are vendored because Debian ships neither: its only BCM4354 NVRAM is an nVi
 Jetson board file, and it carries no BCM4354 `.hcd` at all. Taken from
 <https://github.com/jenneron/firmware-google-veyron-brcm>, which is what postmarketOS
 installs on these boards. They sit on the SoC layer because they identify the radio
-module, which is the same one on every Broadcom board in the family. Provenance,
-hashes, and why the superficially similar ChromiumOS copies are the *wrong module* are
-recorded in `socs/rk3288/README.md`.
+module, which is the same one on every Broadcom board in the family, and in an
+`overlay-nonfree/` tree rather than `overlay/` so that a `libre` build lays neither of
+them into the image. Provenance, hashes, and why the superficially similar ChromiumOS
+copies are the *wrong module* are recorded in `socs/rk3288/README.md`.

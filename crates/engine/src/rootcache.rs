@@ -20,20 +20,28 @@
 //! build by design, so it is applied *after* restore (the rootfs node splices it
 //! into `/etc/shadow`, [`splice_shadow`]), keeping the cached tree reusable.
 //!
-//! **The tree is not only its packages.** Two further inputs shape it without moving
-//! any package version, so both are folded. The **interpreter**: on a cross host every
-//! maintainer script runs under the host's `qemu-user`, and so does everything they
-//! invoke — `update-initramfs` writing the initrd the image boots, `ldconfig`,
+//! **The tree is not only its packages.** Three further inputs shape it without moving
+//! any package version, so all three are folded. The **interpreter**: on a cross host
+//! every maintainer script runs under the host's `qemu-user`, and so does everything
+//! they invoke — `update-initramfs` writing the initrd the image boots, `ldconfig`,
 //! `locale-gen`, a depthcharge board's kernel signing — so those bytes are the
 //! interpreter's as much as the package's. The **feature apt repositories**: the
 //! provisioner writes each one's `sources.list.d` entry and its keyring into the tree,
 //! so a re-pointed URI or a rotated key changes the image while the solve stands still.
+//! The **account policy** — the `sudoers` drop-in and `authorized_keys` — which the
+//! customize step writes from resolved config, so it appears in no overlay fingerprint
+//! and would otherwise be invisible to the key.
 //!
 //! Both fold only when present, and an absent fold contributes nothing rather than an
 //! empty record — so a native build can never key alike with a cross build whose
 //! interpreter is merely missing, and a build with no feature repository folds no such
 //! record at all. Labels and values are length-prefixed
 //! ([`SignatureBuilder`]), so an absent fold cannot be forged by a present one.
+//!
+//! The **archive components** fold unconditionally, because unlike those two they are
+//! not optional — every build provisions from some set. They are usually implied by
+//! the solved set, but only usually: a libre build narrows to `main` and would solve
+//! identically to an ordinary one on a board whose layers declare no nonfree firmware.
 //!
 //! Pure except [`dir_fingerprints`] / [`file_fingerprints`] (which hash files) and
 //! [`RootfsStore`] (the on-disk store); the parse, key, and splice are deterministic
@@ -59,7 +67,7 @@ use std::path::{Path, PathBuf};
 /// bootstrapped tree's dpkg state, apt configuration, and configure ordering, so a
 /// dependency bump that changes the emitted tree for unchanged inputs is a bump here
 /// too.
-const ROOTFS_STAGE_VERSION: u32 = 7;
+const ROOTFS_STAGE_VERSION: u32 = 10;
 
 /// Everything that determines the produced rootfs tree *except* the per-image
 /// password (applied on restore) — the inputs [`cache_key`] hashes.
@@ -89,11 +97,37 @@ pub struct CacheKeyInputs<'a> {
     pub arch: &'a str,
     /// Target Debian suite.
     pub suite: &'a str,
+    /// The archive components the tree was provisioned from — `main` alone on a libre
+    /// build, the full `main,contrib,non-free,non-free-firmware` otherwise.
+    ///
+    /// Folded in even though it is *usually* implied by the solved set, because
+    /// "usually" is not a cache guarantee: two builds differing only in whether they
+    /// permit nonfree firmware can solve to the same packages (when the layers declare
+    /// none) and would then share a key, serving one a tree the other's apt
+    /// configuration produced.
+    pub components: &'a str,
     /// Identity of the interpreter that executes the target's maintainer scripts
     /// ([`RootfsOptions::interpreter_id`](crate::rootfs::RootfsOptions::interpreter_id)),
     /// or `None` on a native host, where nothing is interpreted and no such input
     /// exists.
     pub interpreter: Option<&'a str>,
+    /// The resolved sudo policy, as
+    /// [`SudoPolicy::as_str`](boot2deb_core::model::SudoPolicy::as_str) spells it — the
+    /// `/etc/sudoers.d/<user>` drop-in the customize step writes.
+    ///
+    /// Folded unconditionally: every rootfs has this file, and the two policies produce
+    /// two different trees from the same package set. Without it a build that tightened
+    /// `sudo` would be served the cached tree that had not.
+    pub sudo: &'a str,
+    /// The `authorized_keys` entries written into the default account's home, in config
+    /// order. Empty when no config root authorizes anyone, and an empty set folds
+    /// nothing at all — so the common case keys identically to a tree with no such file,
+    /// which is what it is.
+    ///
+    /// Order-sensitive, unlike the package set: these are lines in a file, so a
+    /// different order is a different file, and the key must describe the bytes rather
+    /// than the intent.
+    pub authorized_keys: &'a [String],
 }
 
 /// The rootfs cache key: a [`Signature`] over [`CacheKeyInputs`]. Pure.
@@ -101,6 +135,7 @@ pub fn cache_key(inputs: &CacheKeyInputs) -> Signature {
     let mut b = SignatureBuilder::new("rootfs", ROOTFS_STAGE_VERSION);
     b.fold_scalar("arch", inputs.arch);
     b.fold_scalar("suite", inputs.suite);
+    b.fold_scalar("components", inputs.components);
     b.fold_set("solved", inputs.solved);
     b.fold_set("overlay", inputs.overlay);
     b.fold_set("repo_debs", inputs.repo_debs);
@@ -111,6 +146,10 @@ pub fn cache_key(inputs: &CacheKeyInputs) -> Signature {
     }
     if let Some(interpreter) = inputs.interpreter {
         b.fold_scalar("interpreter", interpreter);
+    }
+    b.fold_scalar("sudo", inputs.sudo);
+    if !inputs.authorized_keys.is_empty() {
+        b.fold_ordered("authorized_keys", inputs.authorized_keys);
     }
     b.finish()
 }
@@ -366,7 +405,10 @@ mod tests {
             apt_sources: &[],
             arch: "arm64",
             suite: "forky",
+            components: crate::bootstrap::COMPONENTS,
             interpreter: None,
+            sudo: "nopasswd",
+            authorized_keys: &[],
         }
     }
 
@@ -434,6 +476,17 @@ mod tests {
                 ..base
             })
         );
+        // A libre build narrows the archive it provisions from. It usually also solves
+        // to a different package set, but not always — a board whose layers declare no
+        // nonfree firmware solves identically — so without this the two would share a
+        // key and one would be served the other's tree.
+        assert_ne!(
+            key,
+            cache_key(&CacheKeyInputs {
+                components: crate::bootstrap::FREE_COMPONENTS,
+                ..base
+            })
+        );
     }
 
     #[test]
@@ -493,19 +546,89 @@ mod tests {
         );
     }
 
+    /// The account policy the customize step writes from resolved config — the one part
+    /// of the tree no overlay fingerprint can see. Every assertion here is a tree that
+    /// would otherwise be served for a *different* build's access rules.
+    #[test]
+    fn the_account_policy_keys() {
+        const ED25519: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe operator@workstation";
+        const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFnUiJTPBhP0rBnCEWEuMcnLRuxHhKzKXjXjnaMdtE7d laptop";
+
+        let solved = vec!["libc6 2.41-2 arm64".to_string()];
+        let overlay = vec!["ov1".to_string()];
+        let debs = vec!["deb1".to_string()];
+        let base = inputs(&solved, &overlay, &debs);
+        let nopasswd_no_keys = cache_key(&base);
+
+        // Tightening sudo rewrites `/etc/sudoers.d/<user>` and nothing else, so without
+        // this fold the tightened build would restore the permissive tree.
+        assert_ne!(
+            nopasswd_no_keys,
+            cache_key(&CacheKeyInputs {
+                sudo: "password",
+                ..base
+            }),
+            "the sudo policy must key"
+        );
+
+        // Authorizing a key adds a file the solve knows nothing about.
+        let one = vec![ED25519.to_string()];
+        let with_one = cache_key(&CacheKeyInputs {
+            authorized_keys: &one,
+            ..base
+        });
+        assert_ne!(
+            nopasswd_no_keys, with_one,
+            "authorizing a key must key — else the image authorizes nobody"
+        );
+
+        // Swapping *which* key is authorized is the dangerous case: same count, same
+        // everything else, and a stale hit would authorize the wrong person.
+        let other = vec![OTHER.to_string()];
+        assert_ne!(
+            with_one,
+            cache_key(&CacheKeyInputs {
+                authorized_keys: &other,
+                ..base
+            }),
+            "a different key must key"
+        );
+
+        // Revoking one of two keys must key, in both directions.
+        let both = vec![ED25519.to_string(), OTHER.to_string()];
+        let with_both = cache_key(&CacheKeyInputs {
+            authorized_keys: &both,
+            ..base
+        });
+        assert_ne!(with_both, with_one, "revoking a key must key");
+        assert_ne!(with_both, nopasswd_no_keys);
+
+        // Order *is* a property here, unlike the package set: these are lines in a file.
+        let reversed = vec![OTHER.to_string(), ED25519.to_string()];
+        assert_ne!(
+            with_both,
+            cache_key(&CacheKeyInputs {
+                authorized_keys: &reversed,
+                ..base
+            }),
+            "authorized_keys is ordered — the key describes the file's bytes"
+        );
+    }
+
     #[test]
     fn the_key_is_stable_for_a_fixed_input_set() {
         // A golden key, and the guard on the rule above: an absent optional fold must
-        // contribute *nothing*, so a build with neither an interpreter nor a feature
-        // repository keys on exactly these bytes however many optional inputs are added
-        // later. This hash may only move with a deliberate ROOTFS_STAGE_VERSION bump —
-        // any other change to it orphans every stored rootfs on every host.
+        // contribute *nothing*, so a build with neither an interpreter, a feature
+        // repository, nor an authorized key keys on exactly these bytes however many
+        // optional inputs are added later. This hash may only move with a deliberate
+        // ROOTFS_STAGE_VERSION bump — any other change to it orphans every stored rootfs
+        // on every host.
         let solved = vec!["libc6 2.41-2 arm64".to_string()];
         let overlay = vec!["etc/hostname\x00644\0abc".to_string()];
         let debs = vec!["def".to_string()];
         assert_eq!(
             cache_key(&inputs(&solved, &overlay, &debs)).as_str(),
-            "980530abb57b9f28c9313a6f66207673f9591539187fc5c07370504139539389"
+            "0c08a2881f12a8218334ec473fd411f0ddedf27dd52fb2e034e2e10da72467a7"
         );
     }
 

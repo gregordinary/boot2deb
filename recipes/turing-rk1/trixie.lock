@@ -4,19 +4,25 @@
 [kernel]
 id = "rk3588-mainline-7.1"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.1.1"
-commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
+ref = "v7.1.6"
+commit = "2609d60e2f6d0b8a96563baa08b56482962cebaa"
 
 [patches]
 series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "ed52b7fa4a3d69e933893a71a357173efdc51a56"
+commit = "ced7afe82f85e7da3a87f8cb69d48bf33fb24805"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
-ref = "v2026.04"
-commit = "88dc2788777babfd6322fa655df549a019aa1e69"
+ref = "v2026.07"
+commit = "ece349ade2973e220f524ce59e59711cc919263f"
+
+[uboot_patches]
+series = ["turing-rk1-recovery"]
+source = "https://github.com/gregordinary/patches.git"
+ref = "main"
+commit = "ced7afe82f85e7da3a87f8cb69d48bf33fb24805"
 
 [rootfs]
 suite = "trixie"

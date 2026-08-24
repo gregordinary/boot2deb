@@ -1,0 +1,36 @@
+# The display stack, carried in the initramfs so the panel comes up during it rather
+# than after it. A second modules.d drop-in, not an edit of the SoC layer's `veyron`
+# list: mkinitramfs reads every file in this directory and concatenates them, so a
+# board adds to the family's list by shipping its own.
+#
+# This is a device-layer file for the same reason `kpart_size` is. The signed payload
+# shares one fixed budget between the kernel image and the initramfs, and only a board
+# whose firmware buffers 32 MiB has room for a display stack inside it — so the profile,
+# the slot, and this list are one decision, made once, in one place.
+#
+# What it buys: on a board without it nothing can draw until the real root is mounted
+# and udev loads these same modules, so a boot is a blank firmware screen from Ctrl+U
+# until systemd is well underway, and an initramfs that *fails* is a blank screen
+# forever. With it the panel lights during the initramfs, which is both a faster-looking
+# boot and the difference between a diagnosable failure and a silent one.
+#
+# Names are the .ko basenames from the kernel's modules.order. Only drivers that bind a
+# device-tree node are listed: initramfs-tools resolves symbol dependencies itself, so
+# rockchipdrm pulls analogix_dp (the eDP bridge, which its built-in Rockchip glue calls
+# into), drm, drm_kms_helper, drm_display_helper and drm_client_lib along with it.
+
+# The display controller and its eDP output. CONFIG_DRM_FBDEV_EMULATION gives the
+# console a framebuffer to land on, so loading this is what makes the panel show text.
+rockchipdrm
+
+# The panel itself — rk3288-veyron-edp.dtsi declares an `innolux,n116bge`, which is a
+# panel-simple entry rather than a driver of its own.
+panel-simple
+
+# Backlight. Without these the panel is driven and black, which looks exactly like a
+# panel that is not driven at all. The DT wires a `pwm-backlight` (pwm_bl) to `&pwm0`
+# on the SoC's PWM controller (pwm-rockchip), and both ends have to be present. Their
+# supplies are `regulator-fixed`, which is built in, and the RK808 rails feeding those
+# are already in the SoC layer's list.
+pwm_bl
+pwm-rockchip

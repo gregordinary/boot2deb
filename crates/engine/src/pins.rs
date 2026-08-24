@@ -867,11 +867,14 @@ mod tests {
         // The dirty-checkout refusal above is the observable proof that `resolve_lock`
         // consults `patches_path`. Point a no-patch build at something that is not a
         // git repo at all: whatever else fails, it must not fail on the patches step.
-        // A fully-upstream board: no patch series, and no media-accel sources either
-        // (the transcode stack is what a patch series exists for).
+        // A fully-upstream board: no patch series on either axis, and no media-accel
+        // sources either (the transcode stack is what a patch series exists for).
         let mut build = rk1_build();
         if let Some(boot2deb_core::model::ResolvedKernel::Compiled(k)) = &mut build.kernel {
             k.patch_series = Vec::new();
+        }
+        if let boot2deb_core::model::ResolvedBoot::RockchipRkbin(b) = &mut build.boot {
+            b.uboot_series = None;
         }
         build.userspace = None;
         build.ffmpeg = None;

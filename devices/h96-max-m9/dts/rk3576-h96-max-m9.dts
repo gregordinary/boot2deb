@@ -807,19 +807,37 @@
 };
 
 /*
- * The RKNN NPU, driven by the mainline `rocket` DRM-accel driver. Both compute
- * cores run. The SoC nodes come in disabled from the rk3576-npu patch series;
- * a board enables them and wires the rail.
+ * The RKNN NPU, driven by the mainline `rocket` DRM-accel driver. Compute core 0
+ * runs. The SoC nodes come in disabled from the rk3576-npu patch series; a board
+ * enables the ones it wants and wires the rail.
  *
- * The rail needs regulator-always-on, *in addition to* npu-supply. Mainline
- * rocket references no regulator API, so npu-supply is inert and nothing claims
- * vdd_npu_s0; the regulator core then disables it as unused at t~33 s, long
- * after a clean probe at t~8 s. It presents as a runtime failure, not a boot
- * failure.
+ * rknn_core_1 and rknn_mmu_1 are deliberately left at that dtsi default. The part
+ * has one convolution buffer -- 1 MB in RKNN_TOP, outside either core's register
+ * bank, with a single clock pair both core nodes list, where the RK3588 gives each
+ * core its own -- and two rocket jobs in flight at once corrupt each other's
+ * output: 96-100% of calls wrong, over as much as 94% of the surface, deltas
+ * spanning the whole int8 range, across process boundaries. Overlap in time is the
+ * entire condition -- the same two cores driven through a mutex, one job in flight,
+ * are bit-exact -- so binding one core leaves the kernel nowhere to schedule a
+ * concurrent job and puts the failure out of reach by construction rather than
+ * making it unlikely. What would make the second core usable is a userspace encoder
+ * that stages each core into a disjoint slice of the buffer, the way the vendor
+ * driver's cache_sgt_init partitions it; no RK3576 encoder exists yet.
  *
- * The power domains are not a board's business: both core nodes carry both
+ * Giving it up costs nothing measurable. Two fds on core 0 alone run 1.5-1.7x a
+ * single fd, which is submit pipelining filling dispatch gaps at a ~340 us submit
+ * floor rather than parallelism; adding core 1 lands inside that range at small
+ * shapes and below it at 128x1024x1024.
+ *
+ * The rail needs regulator-always-on, *in addition to* npu-supply. Mainline rocket
+ * references no regulator API, so npu-supply is inert and nothing claims
+ * vdd_npu_s0; the regulator core then disables it as unused at t~33 s, long after
+ * a clean probe at t~8 s. It presents as a runtime failure, not a boot failure.
+ *
+ * The power domains are not a board's business: rknn_core_0 carries both
  * RK3576_PD_NPU0 and RK3576_PD_NPU1 in the SoC dtsi, because the convolution
- * buffer is read through PD_NPU1 whichever core computes. rocket attaches
+ * buffer is read through PD_NPU1 whichever core computes -- so core 0 alone holds
+ * the pair up and the buffer stays fully fed with core 1 down. rocket attaches
  * whatever the node lists, so trimming one would run half fed rather than fail;
  * the binding pins it at two. See rk3576/npu/README.md in the patches repo.
  */
@@ -829,15 +847,6 @@
 };
 
 &rknn_mmu_0 {
-	status = "okay";
-};
-
-&rknn_core_1 {
-	npu-supply = <&vdd_npu_s0>;
-	status = "okay";
-};
-
-&rknn_mmu_1 {
 	status = "okay";
 };
 

@@ -110,9 +110,11 @@ from and the board keeps booting — but the change that triggered the rebuild h
 reached the slot, and nothing will until the payload fits again.
 
 The payload is kernel + device tree + initramfs, and the part that grows is the
-initramfs. The image ships it deliberately small — an explicit module list
-(`MODULES=list`) and xz compression — which leaves about 2 MB of headroom under the
-stock ceiling.
+initramfs. Under the stock ceiling the image ships it deliberately small — an explicit
+module list (`MODULES=list`) and xz compression, which leaves about 2 MB of headroom. A
+board with a roomier firmware buffer spends that margin instead: `boot2deb resolve` shows
+which compressor a build gets on its `initramfs` line, and a board at `COMPRESS=zstd`
+has slot to spare and is unlikely to meet this failure at all.
 
 **What spends that headroom is initramfs-tools hooks**, and the one that spends it all at
 once is plymouth. Desktop metapackages (`cinnamon-desktop-environment`,
@@ -122,12 +124,18 @@ renderers, the theme, and the text plugin with its whole font stack into every i
 built afterwards. That is several MB, and the next slot write — a kernel upgrade, or any
 package that triggers `update-initramfs` — fails as above.
 
-The cost buys nothing on these boards. The initramfs carries no DRM modules, so plymouth
-cannot draw before the root pivot regardless — it says so itself during the rebuild:
+On a board at the stock ceiling the cost buys nothing anyway. Its initramfs carries no
+DRM modules, so plymouth cannot draw before the root pivot regardless — it says so itself
+during the rebuild:
 
 ```
 W: plymouth: not including drm modules since MODULES=list
 ```
+
+That warning is about plymouth's own hook declining to add modules, so it prints on any
+`MODULES=list` board. It only means "plymouth is dead weight" where nothing *else* put a
+DRM module in the initramfs; a board that carries the display stack in its module list
+has one either way.
 
 Remove it:
 

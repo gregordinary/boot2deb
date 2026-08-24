@@ -143,9 +143,12 @@ type Anchor = (String, Vec<boot2deb_engine::keyring::Key>);
 /// Verify every apt keyring this run bootstraps against — the Debian archive keyring
 /// plus one per third-party source — and return each with its vetted keys.
 ///
-/// A keyring that fails its fingerprint manifest is an error, not a printed warning:
-/// `doctor` doubles as a CI gate, and an unvetted trust anchor is exactly the thing
-/// that must not slip through one.
+/// A keyring that fails its fingerprint manifest, or that resolves outside the
+/// vendored keyring directory, is an error, not a printed warning: `doctor` doubles
+/// as a CI gate, and an unvetted trust anchor is exactly the thing that must not slip
+/// through one. A keyring that is simply *absent* is skipped instead, because it is
+/// not a trust anchor at all — `preflight_config` fails the build on it, naming the
+/// source that wanted it.
 fn trust_anchors(
     root: &ConfigRoot,
     apt_sources: &[boot2deb_core::model::AptSource],
@@ -157,7 +160,7 @@ fn trust_anchors(
         paths.push(archive);
     }
     for source in apt_sources {
-        if let Some(path) = root.find_asset(format!("blobs/keyrings/{}", source.signed_by)) {
+        if let Some(path) = crate::config::apt_source_keyring(root, &source.signed_by)? {
             paths.push(path);
         }
     }

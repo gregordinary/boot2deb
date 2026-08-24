@@ -286,7 +286,7 @@ impl ConfigRoot {
         let mut chain: Vec<(toml::Value, PathBuf)> = Vec::new();
         let mut current = name.to_string();
         loop {
-            validate_name("device", &current)?;
+            validate_device_name(&current)?;
             if lineage.contains(&current) {
                 lineage.push(current);
                 return Err(ConfigError::DeviceExtendsCycle {
@@ -324,6 +324,13 @@ impl ConfigRoot {
             }
         }
 
+        // `caveats` accumulates down the chain instead of being replaced by it — the
+        // one list in the device layer that does. A caveat states a limitation of the
+        // hardware, and a variant shares its parent's hardware, so last-wins would let
+        // a variant that adds one of its own silently drop every limitation it
+        // inherits and publish a support claim that is wrong. Collected here, before
+        // the merge overwrites the key.
+        let caveats = merged_caveats(&chain);
         // Merge base-most -> child, so a variant wins over what it extends. Errors are
         // attributed to the named device's file: it is the one the operator authored,
         // and after the merge a bad value cannot be traced to an ancestor anyway.
@@ -331,6 +338,9 @@ impl ConfigRoot {
         while let Some((value, path)) = chain.pop() {
             merge_toml(&mut merged, value);
             top_path = path;
+        }
+        if let (Some(caveats), toml::Value::Table(table)) = (caveats, &mut merged) {
+            table.insert("caveats".to_string(), toml::Value::Array(caveats));
         }
         lineage.reverse();
         Ok((deserialize_at(merged, &top_path)?, lineage))
@@ -617,6 +627,35 @@ fn deserialize_at<T: DeserializeOwned>(value: toml::Value, path: &Path) -> Resul
 /// array, or a type mismatch between the two sides — replaces `base` wholesale.
 /// This is the simplest predictable last-wins: a table grows/overrides field by
 /// field, while an array or scalar key is set, not concatenated.
+/// Every `caveats` entry in an `extends` chain, base-most first and de-duplicated —
+/// the accumulated list [`ConfigRoot::device_with_lineage`] writes back over the
+/// merged one.
+///
+/// `chain` is in child-to-base-most order, as the walk built it. `None` when any
+/// level's `caveats` is present but is not an array: the accumulation must not
+/// swallow a malformed value, so the key is left as authored and the type error
+/// surfaces from deserialization, attributed to a file.
+///
+/// Entries are compared as authored values rather than as strings, so a non-string
+/// element reaches the deserializer too.
+fn merged_caveats(chain: &[(toml::Value, PathBuf)]) -> Option<Vec<toml::Value>> {
+    let mut out: Vec<toml::Value> = Vec::new();
+    for (value, _) in chain.iter().rev() {
+        match value.get("caveats") {
+            None => {}
+            Some(toml::Value::Array(entries)) => {
+                for e in entries {
+                    if !out.contains(e) {
+                        out.push(e.clone());
+                    }
+                }
+            }
+            Some(_) => return None,
+        }
+    }
+    Some(out)
+}
+
 fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
     match overlay {
         toml::Value::Table(over) => {
@@ -652,9 +691,10 @@ fn is_bare_name(s: &str) -> bool {
 
 /// Reject any name that is not a single bare identifier before it joins into a
 /// filesystem path — so a config cross-reference or CLI argument can never traverse
-/// out of the config root. Used for the strictly-flat layers (devices, socs, arches,
-/// boot-methods, kernels, features) and for a manifest *filename*; recipe references
-/// go through [`validate_recipe_ref`] instead.
+/// out of the config root. Used for the strictly-flat layers (socs, arches,
+/// boot-methods, kernels, features) and for a manifest *filename*; devices are held to
+/// the tighter [`validate_device_name`], and recipe references go through
+/// [`validate_recipe_ref`].
 fn validate_name(kind: &'static str, name: &str) -> Result<(), ConfigError> {
     if is_bare_name(name) {
         Ok(())
@@ -664,6 +704,28 @@ fn validate_name(kind: &'static str, name: &str) -> Result<(), ConfigError> {
             name: name.to_string(),
         })
     }
+}
+
+/// Reject a device slug that is not a valid host name.
+///
+/// A board's slug is its name everywhere: the file that defines it, its recipe folder
+/// and overlay tree, the work directory, the artifacts — **and, unless the board says
+/// otherwise, the host name the image comes up under**, which is the default
+/// `boot2deb new-device` writes and the one nearly every board keeps. Holding the slug
+/// to the shape a host name must have ([`hostname::check`](crate::hostname::check)) is
+/// what makes that default correct by construction rather than a value the resolver has
+/// to catch later.
+///
+/// This is strictly tighter than [`validate_name`], not a different axis: every valid
+/// host name is already a bare identifier, so the filesystem-safety property that rule
+/// exists for still holds. What it removes is the gap — `_`, a leading or trailing `-`,
+/// a doubled or trailing `.`, an over-long name — where a legal slug made an illegal
+/// host name.
+fn validate_device_name(name: &str) -> Result<(), ConfigError> {
+    crate::hostname::check(name).map_err(|why| ConfigError::InvalidDeviceName {
+        name: name.to_string(),
+        why,
+    })
 }
 
 /// Reject any recipe reference that is not `<device>/<leaf>` (or a bare `<leaf>`)
@@ -746,7 +808,7 @@ mod tests {
             "rk3588-mainline-7.1",
             "a_b.c",
         ] {
-            assert!(validate_name("device", n).is_ok(), "{n} should be valid");
+            assert!(validate_name("kernel", n).is_ok(), "{n} should be valid");
         }
     }
 
@@ -765,11 +827,46 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    validate_name("device", n),
+                    validate_name("kernel", n),
                     Err(ConfigError::InvalidName { .. })
                 ),
                 "{n:?} should be rejected"
             );
+        }
+    }
+
+    /// A device slug is held to the host-name shape, not just the bare-identifier one,
+    /// because it *is* the image's default host name. The gap between the two rules is
+    /// what this pins: `_`, an edge `-`, a doubled or trailing `.`, an over-long name —
+    /// each a legal name for every other layer and an illegal one here.
+    #[test]
+    fn a_device_slug_must_be_a_host_name() {
+        for ok in ["turing-rk1", "h96-max-m9", "rk3576-evb1-v10", "board.lan"] {
+            validate_device_name(ok).unwrap_or_else(|e| panic!("{ok} should be valid: {e}"));
+        }
+        for bad in [
+            "my_board",      // the case anyone would actually type
+            "-board",        // leading hyphen
+            "board-",        // trailing hyphen
+            "board.",        // trailing dot
+            "a..b",          // doubled dot
+            &"a".repeat(65), // past what the kernel can hold
+            "a/b",           // still rejects everything validate_name did
+            "../etc/x",      //
+            "/etc/passwd",   //
+            "",              //
+            "..",            //
+        ] {
+            assert!(
+                matches!(
+                    validate_device_name(bad),
+                    Err(ConfigError::InvalidDeviceName { .. })
+                ),
+                "{bad:?} should be rejected"
+            );
+            // ...and each rejection is *tighter*, never looser: whatever the slug rule
+            // refuses that the flat-layer rule allowed is refused for being a bad host
+            // name, not for being unsafe to join into a path.
         }
     }
 
@@ -1045,6 +1142,68 @@ mod tests {
         assert!(base.extends.is_none());
     }
 
+    /// `caveats` is the one device list that accumulates down an `extends` chain
+    /// instead of being replaced by it. A variant shares its parent's hardware, so
+    /// last-wins would let a variant that adds one of its own silently drop every
+    /// limitation it inherits — publishing a support claim that is wrong.
+    #[test]
+    fn caveats_accumulate_down_an_extends_chain_where_every_other_list_is_replaced() {
+        let (_tmp, root) = device_root(&[
+            (
+                "base",
+                device_toml(
+                    "base",
+                    "packages = [\"a\"]\nimage_size = \"2G\"\n\
+                     caveats = [\"no SuperSpeed on any port\"]\n",
+                ),
+            ),
+            (
+                "mid",
+                device_toml(
+                    "mid",
+                    "extends = \"base\"\ncaveats = [\"the SD slot is depopulated\"]\n",
+                ),
+            ),
+            (
+                "leaf",
+                device_toml(
+                    "leaf",
+                    // Restates one it inherits, to check the de-duplication.
+                    "extends = \"mid\"\npackages = [\"z\"]\n\
+                     caveats = [\"no SuperSpeed on any port\", \"the jack is unrouted\"]\n",
+                ),
+            ),
+        ]);
+
+        let (d, _) = root.device_with_lineage("leaf").unwrap();
+        // Base-most first, de-duplicated, and nothing dropped across two hops.
+        assert_eq!(
+            d.caveats,
+            [
+                "no SuperSpeed on any port",
+                "the SD slot is depopulated",
+                "the jack is unrouted",
+            ]
+        );
+        // The accumulation is specific to `caveats`: every other array still follows
+        // the replace rule, so this is a documented exception and not a change of rule.
+        assert_eq!(d.packages, ["z"]);
+
+        // A parent with none of its own still contributes nothing and breaks nothing.
+        let (base, _) = root.device_with_lineage("base").unwrap();
+        assert_eq!(base.caveats, ["no SuperSpeed on any port"]);
+    }
+
+    /// The accumulation must not swallow a malformed value: a `caveats` that is not
+    /// an array is left as authored so deserialization names the file it is in.
+    #[test]
+    fn a_caveats_key_that_is_not_an_array_is_a_named_parse_error() {
+        let (_tmp, root) =
+            device_root(&[("bad", device_toml("bad", "caveats = \"not a list\"\n"))]);
+        let err = root.device_with_lineage("bad").unwrap_err().to_string();
+        assert!(err.contains("bad.toml"), "{err}");
+    }
+
     #[test]
     fn extends_walks_a_chain_and_hides_an_ancestors_parent() {
         let (_tmp, root) = device_root(&[
@@ -1113,7 +1272,7 @@ mod tests {
         let (_tmp, root) = device_root(&[("t", device_toml("t", "extends = \"../../etc/x\"\n"))]);
         assert!(matches!(
             root.device_with_lineage("t"),
-            Err(ConfigError::InvalidName { kind: "device", .. })
+            Err(ConfigError::InvalidDeviceName { .. })
         ));
     }
 

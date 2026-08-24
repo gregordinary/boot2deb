@@ -12,6 +12,17 @@ features   = []                # a base image, same surface as asus-c201/forky
 layout     = "combined"
 image_size = "2G"
 
+# The last pin that booted was v7.1.3, so this one has not been on the board. Three
+# things move to v7.1.6 that this board reaches. `rk3288-veyron.dtsi` gains a
+# `firmware` node carrying only `#address-cells`/`#size-cells`, which describes the
+# addressing of a node coreboot fills in and adds no device. The mainline RGA driver
+# fixes its command-buffer allocation: `RGA_CMDBUF_SIZE` was 0x20 while the per-job
+# memset zeroed `RGA_CMDBUF_SIZE * 4`, so every job wrote 96 bytes past a 32-byte
+# DMA-coherent allocation; the constant is now the byte count the memset always used.
+# That is a fix on hardware this board has, not a regression risk. `analogix_dp` — the
+# eDP the panel hangs off — null-checks its MEM resource before use, which is inert
+# for a DT that has one. The `rk3288-fixes` series applies unchanged. So the delta
+# reads as favorable, but the claim is `expected` until an image from this pin boots.
 [support]
-status = "validated"
-date   = "2026-07-16"
+status = "expected"
+date   = "2026-08-04"

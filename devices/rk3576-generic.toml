@@ -16,7 +16,7 @@ soc                     = "rk3576"                 # -> arch, dt_dir, modules, r
 boot_method             = "rockchip-rkbin"
 supported_boot_methods  = ["rockchip-rkbin"]
 
-# Validated against u-boot v2026.04: builds idbloader.img + u-boot.itb.
+# Validated against u-boot v2026.07: builds idbloader.img + u-boot.itb.
 uboot_defconfig         = "generic-rk3576_defconfig"
 
 # Schema-required, unused (no image recipe targets this device). The EVB's

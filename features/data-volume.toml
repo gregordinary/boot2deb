@@ -1,0 +1,27 @@
+# features/data-volume.toml — mount a second disk for data, and keep it across
+# reimaging.
+#
+# The mechanism half of the data-volume axis. This feature carries the first-boot
+# hook; the recipe's `[[data_volumes]]` entries say what to mount where, and
+# resolution rejects either half without the other. It is portable — no
+# `requires_soc`/`requires_arch` gate — because "there is a second disk" is a
+# property of the deployment, not of the silicon.
+#
+# What it is for: put the whole bootable system on the medium the board's flashing
+# route can write, and keep the large disk for data only. Reflashing the OS then
+# leaves the data untouched, because the new image finds the volume by label and
+# adopts it. On a compute module in a cluster carrier that is eMMC + M.2 NVMe, and
+# it means an OS reinstall costs nothing but the OS.
+#
+# The hook never formats a disk that holds anything. It adopts a volume carrying
+# the configured label, creates one only on a genuinely blank disk (and only under
+# `create = "if-blank"`), and otherwise refuses and logs. A feature that exists to
+# preserve data across reimaging cannot also be one that reformats on a boot.
+description = "Mount a second disk for data, adopted by label across reimaging"
+
+# e2fsprogs supplies mkfs.ext4 for the create step. Named outright rather than
+# assumed: the rootfs installs no Recommends and nothing at priority standard, so
+# a package that happens to be pulled in today is not a package that is there.
+# Everything else the hook uses -- sfdisk, blkid, lsblk, findmnt, wipefs -- is
+# util-linux, which is essential.
+packages = ["e2fsprogs"]

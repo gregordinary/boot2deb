@@ -8,6 +8,12 @@
 //! rootfs `/etc/shadow` outside the byte-reproducibility claim; the package
 //! content-pin is unaffected.
 //!
+//! Expiry forces the *operator* to replace the password; it does not hold off anyone
+//! else, since a login against an expired account is allowed to set the new password.
+//! That is what the length is for, and why the length is a validated config value
+//! rather than a preference: an unguessable secret is the only thing standing between
+//! the board and whoever else reaches it first.
+//!
 //! Both the draw and the hash are in-process: nothing on the credential path shells
 //! out to a host binary, so what lands in the image's `/etc/shadow` does not depend
 //! on which host built it.
@@ -23,9 +29,6 @@ use std::path::Path;
 /// at a console. All 56 symbols are shell-safe (no quoting/metacharacters), so the
 /// value bakes directly into the customize-hook's `chpasswd` line. 56 symbols.
 const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-/// Generated password length. 20 symbols over the 56-symbol alphabet is ~116 bits
-/// of entropy — unguessable within the first-boot window, and well beyond it.
-const LEN: usize = 20;
 /// Raw salt bytes drawn per hash. `sha512crypt` encodes the salt in its 6-bit crypt
 /// alphabet, so 12 bytes become the 16 salt characters the format allows at most.
 const SALT_BYTES: usize = 12;
@@ -39,22 +42,29 @@ fn fill_random(buf: &mut [u8]) -> Result<(), EngineError> {
         .map_err(|s| EngineError::io(path, s))
 }
 
-/// Generate a fresh per-image password from `/dev/urandom`.
+/// Generate a fresh per-image password of `len` symbols from `/dev/urandom`.
 ///
-/// A 20-symbol string, uniform over the 56-symbol unambiguous alphabet by
-/// rejection sampling: bytes at or above the largest multiple of the alphabet
-/// length are discarded, so `byte % len` maps no symbol more often than another
-/// (no modulo bias). Fails only if the CSPRNG cannot be read.
-pub fn generate_password() -> Result<String, EngineError> {
+/// Uniform over the 56-symbol unambiguous alphabet by rejection sampling: bytes at or
+/// above the largest multiple of the alphabet length are discarded, so `byte % len`
+/// maps no symbol more often than another (no modulo bias). Each symbol carries
+/// log2(56) ≈ 5.81 bits, so the length the config resolved to *is* the entropy
+/// statement. Fails only if the CSPRNG cannot be read.
+///
+/// `len` comes from
+/// [`ResolvedBuild::first_boot_password_length`](boot2deb_core::model::ResolvedBuild::first_boot_password_length),
+/// which resolution has already bounded — so this imposes no floor of its own. It has
+/// no business second-guessing a validated config value, and a second, quieter bound
+/// here would be a place for the two to disagree.
+pub fn generate_password(len: usize) -> Result<String, EngineError> {
     let n = ALPHABET.len();
     // Reject bytes >= this so `byte % n` is unbiased (each symbol equally likely).
     let limit = (256 / n) * n;
-    let mut out = String::with_capacity(LEN);
+    let mut out = String::with_capacity(len);
     let mut buf = [0u8; 64];
-    while out.len() < LEN {
+    while out.len() < len {
         fill_random(&mut buf)?;
         for &b in &buf {
-            if out.len() == LEN {
+            if out.len() == len {
                 break;
             }
             let b = b as usize;
@@ -107,24 +117,42 @@ pub(crate) fn crypt_password(pass: &str) -> Result<String, EngineError> {
 mod tests {
     use super::*;
 
+    /// The length the config asked for is the length that comes out, across the range
+    /// resolution admits and at both of its ends — the generator refills its random
+    /// buffer in 64-byte blocks, so a length near or above one block is a distinct case
+    /// from a short one.
     #[test]
-    fn password_has_expected_shape() {
-        let p = generate_password().unwrap();
-        assert_eq!(p.chars().count(), LEN);
-        // Every character is drawn from the unambiguous alphabet.
-        for c in p.chars() {
-            assert!(ALPHABET.contains(&(c as u8)), "char {c:?} not in alphabet");
-        }
-        // None of the excluded ambiguous characters leaked in.
-        for bad in ['0', 'O', 'o', '1', 'l', 'I'] {
-            assert!(!p.contains(bad), "ambiguous char {bad:?} present");
+    fn password_has_the_requested_length_and_alphabet() {
+        use boot2deb_core::model::{
+            DEFAULT_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH,
+        };
+        for len in [
+            MIN_PASSWORD_LENGTH,
+            DEFAULT_PASSWORD_LENGTH,
+            32,
+            MAX_PASSWORD_LENGTH,
+        ] {
+            let p = generate_password(len as usize).unwrap();
+            assert_eq!(p.chars().count(), len as usize, "length {len}");
+            // Every character is drawn from the unambiguous alphabet.
+            for c in p.chars() {
+                assert!(ALPHABET.contains(&(c as u8)), "char {c:?} not in alphabet");
+            }
+            // None of the excluded ambiguous characters leaked in.
+            for bad in ['0', 'O', 'o', '1', 'l', 'I'] {
+                assert!(!p.contains(bad), "ambiguous char {bad:?} present");
+            }
         }
     }
 
     #[test]
     fn passwords_are_unique() {
-        // Two 116-bit draws colliding is a broken-RNG signal, not a flake.
-        assert_ne!(generate_password().unwrap(), generate_password().unwrap());
+        // Two 70-bit draws colliding is a broken-RNG signal, not a flake.
+        let len = boot2deb_core::model::DEFAULT_PASSWORD_LENGTH as usize;
+        assert_ne!(
+            generate_password(len).unwrap(),
+            generate_password(len).unwrap()
+        );
     }
 
     /// The hash the image's `/etc/shadow` carries: `sha512crypt`, salted per call,

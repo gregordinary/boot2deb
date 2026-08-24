@@ -14,6 +14,12 @@ features   = ["media-accel-rockchip"]    # HW transcode userspace (MPP + RGA + f
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
+# Derived from turing-rk1/forky along the userspace axis. Re-assessed over the v7.1.6
+# kernel: the decode and encode drivers this feature builds against are unchanged from
+# v7.1.1 — `rkvdec` byte-identical, and 060's VEPU580 refresh is trailing context in
+# `rk3588-base.dtsi`, no driver line. The `vdec` `reg` reorder that forced the refresh
+# reaches only a consumer that indexes the banks instead of naming them, which `rkvdec`
+# does not.
 [support]
 status = "expected"
-date   = "2026-07-20"
+date   = "2026-08-04"

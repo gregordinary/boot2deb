@@ -101,8 +101,9 @@ rootless — no `sudo`.
    ```
 
    The final lines print the image path under `build/turing-rk1/forky/artifacts/` and a
-   unique first-boot password for user `debian` — note it down. For hardware video
-   transcode, build `turing-rk1/media-accel-forky` instead.
+   unique first-boot password for user `debian` — note it down, or authorize your SSH key
+   in the recipe and skip typing it. For hardware video transcode, build
+   `turing-rk1/media-accel-forky` instead.
 
 4. Flash it. This is board-specific — for the RK1 it is the Turing Pi BMC (`tpi` or the web
    UI), or a removable card. See [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html).
@@ -124,7 +125,9 @@ boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin
 
 **Keep your own work out-of-tree.** An overlay directory holds your devices, kernels, and
 recipes, wins over the shipped tree name-for-name, and takes the locks `update` writes — so
-there is nothing to fork and nothing to rebase.
+there is nothing to fork and nothing to rebase. A `base.toml` there is also where your own
+SSH keys belong, so every image you build authorizes you without editing the shipped tree:
+[the account, sudo, and SSH keys](https://gregordinary.github.io/boot2deb/access.html).
 
 The tutorials take these in order:
 

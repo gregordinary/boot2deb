@@ -201,6 +201,26 @@ impl Lock {
         })?;
         Ok(format!("{LOCK_BANNER}{body}"))
     }
+
+    /// Parse a lock from text — the form for a lock named by *path* rather than by
+    /// recipe, which is how a comparison reads an older one out of a checkout or an
+    /// artifact directory. [`ConfigRoot::lock`](crate::ConfigRoot::lock) is the form
+    /// for a lock named by recipe, and is the one a build uses.
+    ///
+    /// The banner is a TOML comment, so the canonical committed text parses as-is.
+    /// Every field's parse-boundary check still applies: a hand-edited commit or blob
+    /// pin fails here rather than downstream.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Parse`](crate::ConfigError::Parse) when the text is not a lock.
+    /// `path` names the file in that error and is not read from.
+    pub fn from_toml_str(text: &str, path: &str) -> Result<Self, crate::ConfigError> {
+        toml::from_str(text).map_err(|source| crate::ConfigError::Parse {
+            path: path.to_string(),
+            source,
+        })
+    }
 }
 
 /// Pinned kernel: which definition, from which repo, at which ref, resolved to

@@ -12,7 +12,7 @@
 //! recipe's [`Support`] claim, which is the only hand-written input here.
 
 use crate::lock::Lock;
-use crate::model::{Support, SupportStatus};
+use crate::model::{Caveat, CaveatScope, Support, SupportStatus};
 use crate::{ConfigError, ConfigRoot};
 
 /// Characters of a commit id shown in the matrix — the project's display
@@ -54,6 +54,16 @@ pub struct MatrixRow {
     pub status: SupportStatus,
     /// `YYYY-MM-DD` the claim was last established.
     pub date: String,
+    /// What this build point does not do
+    /// ([`ResolvedBuild::caveats`](crate::model::ResolvedBuild::caveats)): the SoC's,
+    /// the board's, and the recipe's limitations concatenated. Empty for a point whose
+    /// layers declare none.
+    ///
+    /// The one part of a row that is neither a pin nor a claim about a pin. It is
+    /// here rather than in a document of its own because a status without its
+    /// limitations overstates itself: `validated` means an image booted, not that
+    /// everything on the board works.
+    pub caveats: Vec<Caveat>,
 }
 
 /// The three facts that identify a validated patch series: which subset applied,
@@ -148,10 +158,41 @@ fn row(
             .collect(),
         status: claim.status,
         date: claim.date.clone(),
+        // From the resolution, not from `claim`: the recipe's own caveats are only
+        // the narrowest of the three scopes, and resolution is what joins them to the
+        // board's and the silicon's.
+        caveats: build.caveats.clone(),
     }
 }
 
 impl MatrixRow {
+    /// The caveats the hardware imposes — the SoC's and the board's — which are the
+    /// same under every recipe for this device, and so are rendered once per device.
+    ///
+    /// Membership is by scope rather than by "not a recipe's": a feature's caveats
+    /// hold only where that feature is selected, so listing them under the device
+    /// would claim them for every recipe on the board, including the ones that did
+    /// not select it.
+    pub fn hardware_caveats(&self) -> impl Iterator<Item = &Caveat> {
+        self.caveats
+            .iter()
+            .filter(|c| matches!(c.scope, CaveatScope::Soc | CaveatScope::Device))
+    }
+
+    /// The caveats this build point imposes on top of the hardware's: its own, and
+    /// those of the features it selected. Both vary between recipes for one device,
+    /// which is what makes them a per-recipe list.
+    pub fn build_point_caveats(&self) -> impl Iterator<Item = &Caveat> {
+        self.caveats
+            .iter()
+            .filter(|c| matches!(c.scope, CaveatScope::Feature | CaveatScope::Recipe))
+    }
+
+    /// Whether this build point states any limitation beyond the hardware's.
+    pub fn has_build_point_caveats(&self) -> bool {
+        self.build_point_caveats().next().is_some()
+    }
+
     /// The kernel cell: the definition id, plus the pinned tag where the lock has
     /// one. A distro kernel is marked as taking its version from the suite, which is
     /// the honest reading of a lock that pins no kernel commit.
@@ -373,6 +414,26 @@ The date is when the claim was last established: for `validated`, the day the im
 booted; otherwise the day the claim was last assessed. Re-pinning a lock under a
 `validated` claim is flagged by `boot2deb update`, because moving the pins retires
 the evidence the claim rested on.
+
+A status says how far a build point has been taken, not that everything on the board
+works. What each one does *not* do is under [Caveats](#caveats) below, and is printed
+at the end of a build of that recipe.
+";
+
+/// Heading and prose above the caveat list.
+const CAVEATS_INTRO: &str = "
+## Caveats
+
+Limitations that hold whatever you build: they come from the silicon, the board, a
+capability the recipe selected, or the build point itself, and no rebuild lifts them.
+The first two are listed once per device, since they hold for every recipe on it; the
+rest are listed per recipe, and a `(feature)` tag marks the ones that follow their
+capability onto any other recipe composing it. A recipe with none listed is not a
+recipe with none — nothing mechanical establishes that — only one that states none.
+
+Anything a running system could be asked about belongs in that board's selftest
+expectations instead, where it fails rather than merely informs. These are the ones
+that cannot be checked from the running system.
 ";
 
 /// Render the matrix as the complete `docs/src/reference/support-matrix.md` page.
@@ -429,6 +490,58 @@ pub fn render_markdown(matrix: &Matrix) -> String {
             r.date,
         ));
     }
+    // Below the table rather than in it: a caveat is a sentence, and sentences in a
+    // cell make a table nothing can read. Omitted entirely when no recipe declares
+    // one, so the page does not carry an empty heading.
+    if matrix.rows.iter().any(|r| !r.caveats.is_empty()) {
+        s.push_str(CAVEATS_INTRO);
+        s.push_str(&render_caveats(matrix));
+    }
+    s
+}
+
+/// The caveat sections: one per device for what the hardware imposes, then one per
+/// recipe for what only that build point does.
+///
+/// Grouped rather than listed per recipe because a board's limitations are the same
+/// under each of its recipes, and repeating them three times buries the one line that
+/// differs. Devices and recipes both appear in the matrix's own order, which is the
+/// order of the table above.
+fn render_caveats(matrix: &Matrix) -> String {
+    let mut s = String::new();
+    let mut seen_device: Vec<&str> = Vec::new();
+    for r in &matrix.rows {
+        if seen_device.contains(&r.device.as_str()) {
+            continue;
+        }
+        let hardware: Vec<&Caveat> = r.hardware_caveats().collect();
+        if hardware.is_empty() {
+            continue;
+        }
+        seen_device.push(&r.device);
+        s.push_str(&format!("\n### `{}`\n\n", r.device));
+        for c in hardware {
+            // The scope is named because "the chip cannot" and "this board does not"
+            // are different answers to "would another board do it".
+            s.push_str(&format!("- *({})* {}\n", c.scope.as_str(), c.text));
+        }
+    }
+    for r in matrix.rows.iter().filter(|r| r.has_build_point_caveats()) {
+        s.push_str(&format!("\n### `{}`\n\n", r.recipe));
+        for c in r.build_point_caveats() {
+            // Only a feature's scope is named. The heading is already the recipe, so
+            // tagging its own caveats `(recipe)` restates it, while "this came from a
+            // capability you selected" is the one thing the heading does not say —
+            // and it is what tells a reader the limitation follows the feature onto
+            // any other recipe that composes it.
+            match c.scope {
+                CaveatScope::Feature => {
+                    s.push_str(&format!("- *({})* {}\n", c.scope.as_str(), c.text))
+                }
+                _ => s.push_str(&format!("- {}\n", c.text)),
+            }
+        }
+    }
     s
 }
 
@@ -455,6 +568,7 @@ mod tests {
             kmods: vec![],
             status: SupportStatus::Validated,
             date: "2026-07-14".into(),
+            caveats: vec![],
         };
         assert_eq!(compiled.kernel_cell(), "rk3588-mainline-7.1 v7.1.1");
         assert_eq!(compiled.patches_cell(), "rk3588-accel main (527d03d54ea6)");
@@ -489,6 +603,7 @@ mod tests {
             kmods: vec![],
             status: SupportStatus::Expected,
             date: "2026-07-21".into(),
+            caveats: vec![],
         };
         assert_eq!(uboot_only.kernel_cell(), "(u-boot only)");
         assert_eq!(uboot_only.suite_cell(), "—");
@@ -534,6 +649,7 @@ mod tests {
                 kmods: vec![],
                 status: SupportStatus::Expected,
                 date: "2026-07-20".into(),
+                caveats: vec![],
             }],
             unclaimed: vec![],
         });

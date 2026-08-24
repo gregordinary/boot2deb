@@ -1,0 +1,41 @@
+# recipes/asus-c201/libre-forky.toml — the C201 on GNU Linux-libre, with no nonfree
+# firmware in the image.
+#
+# The stock-firmware half of the pair: this image boots on a unit whose SPI flash
+# still holds the ChromeOS firmware, and on a libreboot one too (the `speedy` board
+# profile is valid on both). Reach for asus-c201-libreboot/libre-forky when the
+# firmware has been replaced and the wider kernel slot is worth having.
+#
+# Choosing `rk3288-libre-7.1` is what makes this a libre build, and it is the only
+# difference from asus-c201/mainline-forky: same 7.1.6 release, same defconfig and
+# fragments, same `rk3288-fixes` series, deblobbed tree. Resolution then drops the
+# SoC layer's `firmware-brcm80211` and its two vendored Broadcom blobs, and narrows
+# the image's apt components to `main`.
+#
+# What that costs, stated plainly because it is the reason to choose the other
+# recipe: **the internal Wi-Fi and Bluetooth do not work.** The BCM4354 is the one
+# part on this board that cannot run without a blob, and linux-libre removes both
+# the brcmfmac firmware loader and btbcm's patchram name. An AR9271 USB adapter
+# (`firmware-ath9k-htc`, Debian `main`, already installed) is the supported way onto
+# a network. Nothing else on the board is affected — display, GPU, video decode,
+# audio, storage, USB and the keyboard all run on firmware-free drivers.
+device     = "asus-c201"
+kernel     = "rk3288-libre-7.1"
+suite      = "forky"
+features   = []                # a base image, same surface as the other C201 recipes
+layout     = "combined"
+image_size = "2G"
+
+# The deblobbed 7.1.6 tree is byte-identical to the blobbed one everywhere this
+# board's drivers live — the release's deblob log touches nothing under
+# rockchip/, hantro, panfrost or analogix — and the `rk3288-fixes` series applies to
+# it unchanged. So the reasoning that backs asus-c201/mainline-forky's claim carries
+# over intact, and this recipe stands exactly where that one does: `expected` until
+# an image built from this pin boots. The radio being dead is by construction, not a
+# defect, and is not what the claim is about.
+[support]
+status = "expected"
+date   = "2026-08-04"
+caveats = [
+  "The internal BCM4354 Wi-Fi and Bluetooth do not work. linux-libre removes brcmfmac's firmware request and btbcm's patchram filename, and this radio is the one part of the board that cannot run without a blob. An AR9271 USB adapter (firmware-ath9k-htc, in Debian main and already installed) is the supported way onto a network.",
+]

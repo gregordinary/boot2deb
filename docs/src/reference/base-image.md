@@ -36,7 +36,7 @@ closure where that closure is the interesting part.
 | packages | why |
 |---|---|
 | `initramfs-tools`, `dbus`, `dhcpcd`, `libpam-systemd`, `systemd-timesyncd`, `sudo` | boot, session, clock, privilege. A board with no RTC gets its time from the network. |
-| `openssh-server`, `openssh-client` | Remote access both ways. The server's `Depends` already pull `openssh-sftp-server`, so `scp`/`sftp` *to* a board work without the client; the client is what provides `scp`, `sftp`, `ssh-keygen`, and `ssh-copy-id` *from* it. |
+| `openssh-server`, `openssh-client` | Remote access both ways. The server's `Depends` already pull `openssh-sftp-server`, so `scp`/`sftp` *to* a board work without the client; the client is what provides `scp`, `sftp`, `ssh-keygen`, and `ssh-copy-id` *from* it. The server is enabled, so a booted board is reachable before anyone has logged in — see [The account, sudo, and SSH keys](../access.md). |
 | `ca-certificates`, `curl`, `wget`, `rsync` | Fetching and moving files, https included. |
 | `bind9-dnsutils` (~6 MiB with `bind9-libs`) | `dig` and `host`, for triaging a board whose network is the thing that is wrong. |
 | `unzip`, `zip`, `xz-utils`, `zstd` | Archives. |

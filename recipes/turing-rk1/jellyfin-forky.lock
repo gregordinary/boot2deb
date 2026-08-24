@@ -4,19 +4,25 @@
 [kernel]
 id = "rk3588-mainline-7.1"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.1.1"
-commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
+ref = "v7.1.6"
+commit = "2609d60e2f6d0b8a96563baa08b56482962cebaa"
 
 [patches]
 series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "ed52b7fa4a3d69e933893a71a357173efdc51a56"
+commit = "ced7afe82f85e7da3a87f8cb69d48bf33fb24805"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
-ref = "v2026.04"
-commit = "88dc2788777babfd6322fa655df549a019aa1e69"
+ref = "v2026.07"
+commit = "ece349ade2973e220f524ce59e59711cc919263f"
+
+[uboot_patches]
+series = ["turing-rk1-recovery"]
+source = "https://github.com/gregordinary/patches.git"
+ref = "main"
+commit = "ced7afe82f85e7da3a87f8cb69d48bf33fb24805"
 
 [userspace.mpp]
 source = "https://github.com/tsukumijima/mpp-rockchip.git"
@@ -25,27 +31,27 @@ commit = "750e76ec2d9287babfaf08c8bf395ebc5e8778ea"
 
 [userspace.librga]
 source = "https://github.com/tsukumijima/librga-rockchip.git"
-ref = "master"
+ref = "2cffdf6f332c3ddb93eb087841d78e8b487db2a3"
 commit = "2cffdf6f332c3ddb93eb087841d78e8b487db2a3"
 
 [userspace.libmali]
 source = "https://github.com/tsukumijima/libmali-rockchip.git"
-ref = "master"
+ref = "bd33ee262f47fd936b831afccaa0759b3ecc2482"
 commit = "bd33ee262f47fd936b831afccaa0759b3ecc2482"
 
 [ffmpeg.base]
 source = "https://code.ffmpeg.org/Kwiboo/FFmpeg.git"
-ref = "v4l2-request-n8.1"
+ref = "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935"
 commit = "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935"
 
 [ffmpeg.rockchip]
 source = "https://github.com/nyanmisaka/ffmpeg-rockchip.git"
-ref = "8.1"
-commit = "388741a3544b92cf525f1cb3746ba9fb8f301d9a"
+ref = "f66f2f804627e4464c2d1b10181772b5437bb991"
+commit = "f66f2f804627e4464c2d1b10181772b5437bb991"
 
 [rootfs]
 suite = "forky"
-manifest = "jellyfin.pkgs.lock"
+manifest = "jellyfin-forky.pkgs.lock"
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"

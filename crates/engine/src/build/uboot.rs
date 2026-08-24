@@ -1,7 +1,7 @@
-//! u-boot compile stage: clone the pinned u-boot, apply any locked
-//! u-boot patches (none for the RK1's pristine `v2026.04`), build the board
-//! defconfig with the sha256-verified rkbin ATF/TPL blobs, and stage the raw-gap
-//! payloads (`idbloader.img`, `u-boot.itb`).
+//! u-boot compile stage: clone the pinned u-boot, apply the locked u-boot patch
+//! series if the resolved device selects one, build the board defconfig with the
+//! sha256-verified rkbin ATF/TPL blobs, and stage the raw-gap payloads
+//! (`idbloader.img`, `u-boot.itb`).
 //!
 //! RK3588 u-boot builds with the aarch64 toolchain (`CROSS_COMPILE` on a
 //! non-arm64 host) and `CONFIG_ARM64=y` from the defconfig, so no `ARCH=` is

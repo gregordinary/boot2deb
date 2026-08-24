@@ -2,9 +2,11 @@
 //! value parsers that turn flag strings into the typed model. Pure — parsing and
 //! validation only; the handlers in [`crate::commands`] own every side effect.
 
+use crate::commands;
 use boot2deb_core::lock::SnapshotMode;
-use boot2deb_core::model::{BootMethod, Keymap, Layout, Overrides};
+use boot2deb_core::model::{BootMethod, Keymap, Layout, Overrides, SudoPolicy};
 use boot2deb_core::series::Scope;
+use boot2deb_engine::image::ImageCompression;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
@@ -155,6 +157,14 @@ pub(crate) enum Command {
         #[command(flatten)]
         args: ConfigArgs,
     },
+    /// Ask the archives a build would resolve against whether they carry every
+    /// package the recipe names, and report the ones they do not. Runs the read half
+    /// of a resolve — release and indexes, nothing downloaded, no closure computed —
+    /// so one pass answers every name at once, before any build work starts.
+    VerifyPackages {
+        /// Recipe whose resolved package set to check (e.g. turing-rk1/forky).
+        recipe: String,
+    },
     /// Probe each locked source pin against its *configured* upstream URL and
     /// report whether it is a durable tag, an ephemeral branch, or ORPHANED (not
     /// re-fetchable) — the source-pin durability survey as a command.
@@ -180,6 +190,80 @@ pub(crate) enum Command {
         #[command(flatten)]
         args: BuildArgs,
     },
+    /// Rebuild an image from the plan document a previous build published, instead of
+    /// resolving the archive afresh. The lock pins the sources; the plan pins the
+    /// package versions the archive served, which the lock cannot. Takes every `build`
+    /// flag, and differs from it in one way: the rootfs installs the plan's exact set by
+    /// the digests it records, reading neither a release nor a package index — so the
+    /// plan, not an archive signature, is what those digests chain to.
+    Reproduce {
+        /// Recipe to reproduce (e.g. turing-rk1/forky); its `.lock` must exist.
+        recipe: String,
+        /// Directory holding the published `<stem>.plan` (and, for the builder
+        /// advisory, `<stem>.provenance.toml`) — the directory the image shipped from.
+        /// Default: this build point's own output dir, which is where a build on this
+        /// machine already published them.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        #[command(flatten)]
+        args: BuildArgs,
+    },
+    /// Compare two build points: the packages, the kernel pin and its requested
+    /// config, the patch series and the patch files behind them, every other source
+    /// pin, the rkbin blobs, and what built each side. Each side is a recipe name, a
+    /// `.lock`, or a `.provenance.toml`; mixing is allowed, and a section only one
+    /// side can answer is reported unavailable rather than as a change. Offline —
+    /// reads documents the build already wrote.
+    Diff {
+        /// The left side: a recipe (e.g. turing-rk1/forky), or a path to a `.lock`
+        /// or `.provenance.toml`.
+        left: String,
+        /// The right side, in any of the same forms.
+        right: String,
+        /// Report only these sections (repeatable). Default: all of them.
+        #[arg(long = "section", value_enum)]
+        sections: Vec<commands::diff::SectionArg>,
+        /// `patches` checkout to resolve a moved patches commit into named files.
+        /// Default: the config root's sibling `../patches`.
+        #[arg(long)]
+        patches_path: Option<PathBuf>,
+    },
+    /// Export an image's bill of materials as SPDX 2.3 or CycloneDX 1.6 JSON, from the
+    /// provenance manifest and solved package manifest a build published. Lists every
+    /// installed package with its version and sha256, every pinned source tree the image
+    /// was compiled from, every rkbin blob, and every externally-fetched `.deb`.
+    /// Licenses are declared NOASSERTION — boot2deb records none, and inventing them
+    /// would produce a field that looks authoritative and is not. Offline; builds
+    /// nothing.
+    Sbom {
+        /// Recipe whose published image to describe (e.g. turing-rk1/forky), or a path
+        /// to a `.provenance.toml` shipped with an image.
+        target: String,
+        /// Document format to write.
+        #[arg(long, value_enum, default_value = "spdx")]
+        format: commands::sbom::FormatArg,
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Rootfs feature the published image was built with, repeatable — the same
+        /// selection `build --feature` used. It names which image's documents to read;
+        /// passing the reference directly (`sbom turing-rk1/forky+jellyfin`) is
+        /// equivalent. Ignored when a `.provenance.toml` path is given, which already
+        /// names one image.
+        #[arg(long = "feature")]
+        features: Vec<String>,
+    },
+    /// Survey what has moved upstream since the locks were pinned: for each recipe's
+    /// git source pins, whether a newer release tag exists (and how far behind the
+    /// pin is), or whether a pinned branch's tip has moved. Read-only — one
+    /// `git ls-remote` per distinct remote, no fetch and no re-pin. Being behind is
+    /// not a failure, so this always exits zero; `verify-sources` is the gate, and it
+    /// answers the different question of whether a pin is still fetchable at all.
+    Outdated {
+        /// Recipes to survey (e.g. turing-rk1/forky). Default: every recipe in the
+        /// config tree.
+        recipes: Vec<String>,
+    },
     /// Explain, per compile node, what the next `build` will actually redo: whether it
     /// reuses or rebuilds the cached source tree (naming the pinned input that moved),
     /// and whether the durable artifact cache lets it skip the compile entirely.
@@ -199,6 +283,54 @@ pub(crate) enum Command {
         #[command(flatten)]
         args: CleanArgs,
     },
+}
+
+/// A `--compress` value: one of the image containers, or `none`.
+///
+/// `none` is a value of this option rather than a separate `--no-compress` flag so
+/// that "how is the image packaged" has exactly one spelling. It is only meaningful
+/// on its own, which [`image_compression`] enforces.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ImageCompressionArg {
+    /// `.xz` — the smallest artifact, and what an operator pipes into `dd`.
+    Xz,
+    /// `.gz` — larger, but the only container u-boot's `gzwrite` can read, so this
+    /// is the one for an image a board writes to its own disk from the bootloader.
+    Gz,
+    /// Emit the raw `.img` only.
+    None,
+}
+
+/// Resolve the `--compress` values into the engine's ordered container list.
+///
+/// Order is the operator's preference and is preserved; a format named twice is
+/// kept once, at its first position, since emitting the same container twice would
+/// just overwrite it. `none` mixed with a real format is rejected rather than
+/// silently resolved either way — the two readings ("no compression" and "compress,
+/// plus nothing") contradict, and guessing would delete a raw image the operator
+/// asked to keep.
+pub(crate) fn image_compression(
+    args: &[ImageCompressionArg],
+) -> Result<Vec<ImageCompression>, String> {
+    if args.contains(&ImageCompressionArg::None) {
+        return if args.len() == 1 {
+            Ok(Vec::new())
+        } else {
+            Err("--compress none cannot be combined with a compression format".into())
+        };
+    }
+    let mut out = Vec::with_capacity(args.len());
+    for arg in args {
+        let format = match arg {
+            ImageCompressionArg::Xz => ImageCompression::Xz,
+            ImageCompressionArg::Gz => ImageCompression::Gz,
+            ImageCompressionArg::None => unreachable!("handled above"),
+        };
+        if !out.contains(&format) {
+            out.push(format);
+        }
+    }
+    Ok(out)
 }
 
 /// Which stage(s) `build` runs.
@@ -325,20 +457,31 @@ pub(crate) struct BuildArgs {
     /// ext4 volume label / GPT partition name for the image rootfs.
     #[arg(long, default_value = "rootfs")]
     pub(crate) rootfs_label: String,
-    /// Skip `.xz` compression of the finished image(s).
+    /// Containers to compress the finished image(s) into, comma-separated and in
+    /// preference order — `xz` (default), `gz`, or `none`. Use `gz` for an image
+    /// u-boot will write to a disk itself: `gzwrite` reads gzip only, never xz.
+    /// `--compress xz,gz` emits both; the first named is what the `next:` hint
+    /// points at.
+    #[arg(
+        long,
+        default_value = "xz",
+        value_delimiter = ',',
+        value_name = "FMT[,FMT]"
+    )]
+    pub(crate) compress: Vec<ImageCompressionArg>,
+    /// Keep the raw `.img` after compressing it (default: delete it once every
+    /// requested container is written, since it is derivable and the largest
+    /// artifact). Has no effect under `--compress none`, where the raw image is the
+    /// only output anyway.
     #[arg(long)]
-    pub(crate) no_compress: bool,
-    /// Keep the raw `.img` after compressing it (default: delete it once the `.xz`
-    /// is written, since it is derivable and the largest artifact). Conflicts with
-    /// `--no-compress`, under which the raw image is the only output anyway.
-    #[arg(long, conflicts_with = "no_compress")]
     pub(crate) keep_raw: bool,
     /// Image layout override (`combined` | `split`); default: the recipe/device
     /// layout. Lock-independent — it changes only image packaging, not any pinned
     /// source, so it is safe to set against an existing lock.
     #[arg(long, value_parser = parse_layout)]
     pub(crate) layout: Option<Layout>,
-    /// Image-size override (e.g. `4G`); default: the recipe/device `image_size`.
+    /// Image-size override (e.g. `4G`, or `fit+20%` to size the image to its contents
+    /// with a fifth of the rootfs left free); default: the recipe/device `image_size`.
     /// Lock-independent — it changes only image geometry, not any pinned source.
     #[arg(long = "image-size")]
     pub(crate) image_size: Option<String>,
@@ -365,6 +508,14 @@ pub(crate) struct BuildArgs {
     /// so combining the two is rejected as contradictory).
     #[arg(long, conflicts_with = "save_manifest")]
     pub(crate) allow_manifest_drift: bool,
+    /// Also write a software bill of materials beside the image, in this format
+    /// (repeatable — `--sbom spdx --sbom cyclonedx` writes both). Off by default, so
+    /// a build never silently gains a file; the same documents can be produced later
+    /// from the published provenance manifest with `boot2deb sbom`. Set
+    /// `SOURCE_DATE_EPOCH` for a byte-reproducible document — everything else in it is
+    /// derived from the image's own content.
+    #[arg(long = "sbom", value_enum)]
+    pub(crate) sbom: Vec<commands::sbom::FormatArg>,
     /// Ignore a rootfs cache hit and re-bootstrap, refreshing the stored tree.
     /// The plan is still resolved — the rootfs cache keys on the *solved* set, so a
     /// moved mirror already rebuilds automatically; this is the manual escape when
@@ -479,8 +630,8 @@ pub(crate) struct NewDeviceArgs {
     pub(crate) non_interactive: bool,
 }
 
-/// `update`'s flags: the per-tree refs to pin (each inheriting the previous lock's
-/// pin when omitted) plus the blob/patches/manifest inputs.
+/// `update`'s flags: the per-tree refs to pin (each following its config layer's
+/// declared ref when omitted) plus the blob/patches/manifest inputs.
 #[derive(Args)]
 pub(crate) struct UpdateArgs {
     /// Rootfs feature to select, repeatable (`--feature jellyfin --feature
@@ -499,23 +650,31 @@ pub(crate) struct UpdateArgs {
     /// Auto-resolving a kernel `track` to its latest tag is a later refinement.
     #[arg(long)]
     pub(crate) kernel_ref: Option<String>,
-    /// u-boot ref to pin (default: the boot-method's `uboot_ref`).
+    /// u-boot ref to pin. Defaults to the boot-method's `uboot_ref`, re-read on every
+    /// update, so bumping that one constraint moves every board on the method — except
+    /// a lock already pinned to a bare commit sha, which is kept as the deliberate
+    /// hand-pin only this flag can have created.
     #[arg(long)]
     pub(crate) uboot_ref: Option<String>,
-    /// MPP source ref to pin (default: the SoC layer's `userspace.mpp` ref).
+    /// MPP source ref to pin. Defaults to the SoC layer's `userspace.mpp` ref, re-read
+    /// on every update; a lock pinned to a bare commit sha is kept instead.
     #[arg(long)]
     pub(crate) mpp_ref: Option<String>,
-    /// librga source ref to pin (default: the SoC layer's `userspace.librga`).
+    /// librga source ref to pin. Defaults to the SoC layer's `userspace.librga`,
+    /// re-read on every update; a lock pinned to a bare commit sha is kept instead.
     #[arg(long)]
     pub(crate) librga_ref: Option<String>,
-    /// libmali source ref to pin (default: the SoC layer's `userspace.libmali`).
+    /// libmali source ref to pin. Defaults to the SoC layer's `userspace.libmali`,
+    /// re-read on every update; a lock pinned to a bare commit sha is kept instead.
     #[arg(long)]
     pub(crate) libmali_ref: Option<String>,
-    /// ffmpeg base (V4L2) ref to pin (default: the SoC layer's `ffmpeg.base`).
+    /// ffmpeg base (V4L2) ref to pin. Defaults to the SoC layer's `ffmpeg.base`,
+    /// re-read on every update; a lock pinned to a bare commit sha is kept instead.
     #[arg(long)]
     pub(crate) ffmpeg_base_ref: Option<String>,
-    /// ffmpeg Rockchip provenance-tree ref to pin (default: the SoC layer's
-    /// `ffmpeg.rockchip`). Recorded as the graft's provenance; not fetched.
+    /// ffmpeg Rockchip provenance-tree ref to pin. Defaults to the SoC layer's
+    /// `ffmpeg.rockchip`, re-read on every update; a lock pinned to a bare commit sha
+    /// is kept instead. Recorded as the graft's provenance; not fetched.
     #[arg(long)]
     pub(crate) ffmpeg_rockchip_ref: Option<String>,
     /// `patches` repo checkout whose HEAD pins the series (default: the config
@@ -775,6 +934,17 @@ pub(crate) struct OverrideArgs {
     /// options keep their defaults — set those in the device's `[keymap]` table.
     #[arg(long)]
     pub(crate) keymap: Option<String>,
+    /// What `sudo` asks of the default account: `nopasswd` (root with no prompt) or
+    /// `password` (prompts for the account's own); default: the recipe/base `sudo`.
+    #[arg(long, value_parser = parse_sudo_policy)]
+    pub(crate) sudo: Option<SudoPolicy>,
+    /// Length of the generated per-image first-boot password; default: the recipe/base
+    /// `first_boot_password_length`. Shorter is friendlier to transcribe at a console
+    /// and weaker in exactly one way — an attack on the password hash inside a shared
+    /// image — so authorize an SSH key (`ssh_authorized_keys`) rather than shortening
+    /// this if the goal is to stop typing it.
+    #[arg(long = "password-length")]
+    pub(crate) password_length: Option<u8>,
 }
 
 impl From<OverrideArgs> for Overrides {
@@ -795,6 +965,12 @@ impl From<OverrideArgs> for Overrides {
             locales_generate: (!a.locales_generate.is_empty()).then_some(a.locales_generate),
             timezone: a.timezone,
             keymap: a.keymap.as_deref().map(Keymap::from_layout),
+            sudo: a.sudo,
+            first_boot_password_length: a.password_length,
+            // Authorized keys are config-only. A key is written down so that *every*
+            // build of a point carries it, which a per-invocation flag cannot express —
+            // and a flag on `resolve` would name a point `build` could not reach.
+            ssh_authorized_keys: None,
         }
     }
 }
@@ -804,6 +980,9 @@ fn parse_layout(s: &str) -> Result<Layout, String> {
     s.parse()
 }
 fn parse_boot_method(s: &str) -> Result<BootMethod, String> {
+    s.parse()
+}
+fn parse_sudo_policy(s: &str) -> Result<SudoPolicy, String> {
     s.parse()
 }
 /// Parse the `--snapshot` activation mode; matches the lock's serialized form.
@@ -858,6 +1037,27 @@ mod tests {
         assert_eq!(parse_jobs("4"), Ok(4));
         assert!(parse_jobs("0").unwrap_err().contains("at least 1"));
         assert!(parse_jobs("x").is_err());
+    }
+
+    #[test]
+    fn compress_none_stands_alone_and_anything_else_keeps_its_order() {
+        use ImageCompressionArg as A;
+        assert_eq!(image_compression(&[A::None]), Ok(Vec::new()));
+        // Order is the operator's preference and decides which container the
+        // finished-build hint points at, so it is preserved, not normalized.
+        assert_eq!(
+            image_compression(&[A::Gz, A::Xz]),
+            Ok(vec![ImageCompression::Gz, ImageCompression::Xz])
+        );
+        // A format named twice would just overwrite its own artifact.
+        assert_eq!(
+            image_compression(&[A::Xz, A::Gz, A::Xz]),
+            Ok(vec![ImageCompression::Xz, ImageCompression::Gz])
+        );
+        // `none` alongside a format is two contradictory readings, so it is an
+        // error rather than a guess that could delete a raw image.
+        assert!(image_compression(&[A::None, A::Xz]).is_err());
+        assert!(image_compression(&[A::Xz, A::None]).is_err());
     }
 
     #[test]

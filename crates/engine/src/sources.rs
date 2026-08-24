@@ -91,6 +91,18 @@ pub struct LsRef {
     pub name: String,
 }
 
+impl LsRef {
+    /// This ref as the pure comparison's borrowed view of it, so the upgrade survey
+    /// ([`boot2deb_core::outdated`]) reads the same advertisement the durability
+    /// probe classifies without either side copying it.
+    pub fn as_remote_ref(&self) -> boot2deb_core::outdated::RemoteRef<'_> {
+        boot2deb_core::outdated::RemoteRef {
+            name: &self.name,
+            commit: &self.sha,
+        }
+    }
+}
+
 /// The ref-only verdict from the ls-remote advertisement, before any ancestry
 /// check. `NotAdvertised` records whether the pin's own `reference` still names a
 /// branch, which decides orphaned-vs-historical once ancestry is (or is not) shown.
@@ -213,6 +225,23 @@ fn run_ls_remote(url: &str) -> Result<Vec<LsRef>, String> {
         )),
         Bounded::Spawn(e) => Err(format!("could not run git: {e}")),
     }
+}
+
+/// The refs `url` advertises — one bounded `git ls-remote`, parsed.
+///
+/// The whole network cost of both read-only surveys over a remote. `verify-sources`
+/// spends it through [`probe`] (which may then follow up with an ancestry fetch);
+/// `outdated` spends it here once per *URL* and compares every pin that names that
+/// URL against the one advertisement, since several recipes commonly share a kernel
+/// or patches repo.
+///
+/// # Errors
+///
+/// A human skip reason — a network error, the probe's 30-second timeout, or a
+/// URL that could be read as a git option. Never a typed error: a survey reports the
+/// reason in the row and carries on to the next remote.
+pub fn advertised_refs(url: &str) -> Result<Vec<LsRef>, String> {
+    run_ls_remote(url)
 }
 
 /// Classify a pin's durability cheaply (ls-remote only) for `update`'s warning.

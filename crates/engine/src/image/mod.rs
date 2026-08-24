@@ -6,8 +6,9 @@
 //! filesystem is formatted in-process by the pure-Rust `ferrosys` formatter, straight
 //! from the rootfs tar (the `ext4` submodule), the partition table is written
 //! in Rust (`gpt`), the boot payload is placed by seek+write, and the result is
-//! `.xz`-compressed with a pure-Rust encoder (`lzma-rust2`). All byte/LBA arithmetic
-//! is resolved and validated up front by the `geometry` submodule.
+//! compressed with pure-Rust encoders — `.xz` via `lzma-rust2`, `.gz` via `flate2`
+//! ([`ImageCompression`]). All byte/LBA arithmetic is resolved and validated up
+//! front by the `geometry` submodule.
 //!
 //! **Where the boot payload comes from is the boot method's business.** Under
 //! `rockchip-rkbin` it is two blobs the u-boot stage compiled, written into a raw gap
@@ -35,6 +36,7 @@ use crate::event::{EventSink, Step};
 use boot2deb_core::chromeos::MAX_KPART_SLOTS;
 use boot2deb_core::model::{Layout, ResolvedBoot};
 use boot2deb_core::provenance::FilesystemProvenance;
+use boot2deb_core::size::{parse_image_size, ImageSize};
 use boot2deb_core::ResolvedBuild;
 use geometry::{BootGeometry, Geometry};
 use lzma_rust2::{XzOptions, XzWriterMt};
@@ -47,6 +49,83 @@ use uuid::Uuid;
 /// `.xz` compression preset. Level 6 is the `xz(1)` default — a balanced size/time
 /// point; `lzma-rust2` matches liblzma from level 4 up.
 const XZ_PRESET: u32 = 6;
+
+/// `.gz` compression level. 6 is the `gzip(1)` default, chosen for the same
+/// size/time balance as [`XZ_PRESET`].
+const GZ_LEVEL: u32 = 6;
+
+/// A container a finished image is compressed into.
+///
+/// The two are not interchangeable. `.xz` is smaller and is what an operator
+/// pipes through `xzcat` into `dd`; `.gz` exists because **u-boot has no xz
+/// decompressor** — its `gzwrite` command reads gzip only — so an image meant to
+/// be written to a disk by the bootloader itself has to be in this container.
+///
+/// [`ImageOptions::compress`] is an ordered preference, not a set: the first
+/// format a build asks for is the one the finished-build hint points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageCompression {
+    /// `.xz`, via the pure-Rust multithreaded `lzma-rust2` encoder. The default.
+    Xz,
+    /// `.gz`, via the pure-Rust `miniz_oxide` backend of `flate2`. Single-threaded
+    /// (the format has no parallel container the way `.xz` blocks do), and a worse
+    /// ratio than `.xz` — its reason to exist is that u-boot can read it.
+    Gz,
+}
+
+impl ImageCompression {
+    /// The suffix appended to the raw `<stem>.img`, without the dot.
+    pub fn extension(self) -> &'static str {
+        match self {
+            ImageCompression::Xz => "xz",
+            ImageCompression::Gz => "gz",
+        }
+    }
+
+    /// The host command that streams this container back to raw bytes on stdout,
+    /// for the `dd` pipe in a finished build's hint.
+    pub fn decompressor(self) -> &'static str {
+        match self {
+            ImageCompression::Xz => "xzcat",
+            ImageCompression::Gz => "zcat",
+        }
+    }
+}
+
+impl std::str::FromStr for ImageCompression {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "xz" => Ok(ImageCompression::Xz),
+            "gz" | "gzip" => Ok(ImageCompression::Gz),
+            other => Err(format!(
+                "unknown image compression `{other}` (want xz or gz)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ImageCompression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.extension())
+    }
+}
+
+/// One compressed artifact, and the raw image it came from.
+///
+/// A build may ask for more than one container, so this names its `source`
+/// rather than relying on position: with two formats there is no longer one
+/// compressed file per raw image to pair index-wise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompressedImage {
+    /// The raw image this was compressed from — one of [`ImageOutput::images`].
+    pub source: PathBuf,
+    /// The compressed file on disk.
+    pub path: PathBuf,
+    /// Which container [`path`](Self::path) is in.
+    pub format: ImageCompression,
+}
 
 /// Per-block size for the multithreaded `.xz` encoder. Blocks are the unit of
 /// parallelism (one worker per block) and of the seekable index, so an
@@ -96,12 +175,17 @@ pub struct ImageOptions<'a> {
     pub rootfs_label: &'a str,
     /// The image's deterministic on-disk identifiers ([`ImageIdentity`]).
     pub identity: ImageIdentity,
-    /// Also emit a `.xz` alongside each raw image.
-    pub compress: bool,
+    /// Containers to emit alongside each raw image, in preference order — the
+    /// first is what the finished-build hint points an operator at. Empty leaves
+    /// the raw `.img` as the only output.
+    ///
+    /// Ordered rather than a set because the two formats serve different
+    /// consumers: see [`ImageCompression`].
+    pub compress: &'a [ImageCompression],
     /// Keep the raw `.img` after compressing it. Default (`false`): with
-    /// compression on, the raw image is derivable from the `.xz`, so it is deleted
-    /// once compression succeeds to save disk on the largest artifact.
-    /// Ignored when `compress` is off.
+    /// compression on, the raw image is derivable from any of its containers, so
+    /// it is deleted once every requested one is written, to save disk on the
+    /// largest artifact. Ignored when [`compress`](Self::compress) is empty.
     pub keep_raw: bool,
     /// Upper bound on the `.xz` encoder's worker pool — the build's
     /// [`jobs`](crate::build::BuildEnv::jobs). `None` uses the host's available
@@ -183,8 +267,10 @@ pub enum ImageOutput {
 }
 
 impl ImageOutput {
-    /// The raw image files, in a stable order — the inputs to compression.
-    fn images(&self) -> Vec<&Path> {
+    /// The raw image files, in a stable order — the inputs to compression, and the
+    /// order a consumer walks them in. Each is named as the `source` of any
+    /// [`CompressedImage`] made from it.
+    pub fn images(&self) -> Vec<&Path> {
         match self {
             ImageOutput::Combined { image } => vec![image],
             ImageOutput::Split { bootloader, rootfs } => vec![bootloader, rootfs],
@@ -198,10 +284,12 @@ pub struct ImageArtifacts {
     /// The raw image(s), per layout. When [`raw_removed`](Self::raw_removed) is
     /// true these paths no longer exist on disk (compressed, then deleted).
     pub output: ImageOutput,
-    /// The `.xz` artifacts (one per raw image), empty when compression was off.
-    pub compressed: Vec<PathBuf>,
+    /// The compressed artifacts — one per (raw image × requested container),
+    /// grouped by image in [`ImageOutput::images`] order and, within an image, in
+    /// the order the containers were requested. Empty when compression was off.
+    pub compressed: Vec<CompressedImage>,
     /// Whether the raw image files were deleted after compression, so a
-    /// consumer knows only the `.xz` remains.
+    /// consumer knows only the compressed forms remain.
     pub raw_removed: bool,
     /// The per-image first-boot password spliced into [`crate::rootfs::DEFAULT_USER`]'s
     /// account — unique per build, expired so it must be changed at first
@@ -220,13 +308,31 @@ pub struct ImageArtifacts {
     /// cannot be computed without repeating the format. Recorded in the provenance
     /// manifest's `[filesystem]`.
     pub rootfs_filesystem: FilesystemProvenance,
+    /// The whole-disk size this build laid out, in bytes.
+    ///
+    /// Reported rather than re-parsed from the recipe because under a fitted
+    /// `image_size` the recipe does not carry it: the format decided how large the
+    /// rootfs is and the disk was sized around the answer, so this node is the only
+    /// place the number exists. Recorded in the provenance manifest's `[image]`.
+    pub image_bytes: u64,
 }
 
 /// Validate the resolved build's image geometry (offsets, size, GPT/rootfs fit)
 /// without writing anything — the cheap up-front check `build` runs right after
 /// resolution so a bad layout fails before any stage compiles.
+///
+/// A fitted `image_size` has no disk size to check: the rootfs decides it, and the rootfs
+/// does not exist until several stages later. What *is* checkable now is the slack spec
+/// and the head of the disk — which is where a mis-authored offset lives, and the whole
+/// of what this check was ever catching for an authored size beyond the size itself.
 pub fn validate_geometry(build: &ResolvedBuild) -> Result<(), EngineError> {
-    Geometry::resolve(&build.boot, &build.image_size).map(|_| ())
+    match parse_image_size(&build.image_size)? {
+        ImageSize::Fixed(total) => Geometry::resolve(&build.boot, total).map(|_| ()),
+        ImageSize::Fit(slack) => {
+            geometry::fit_slack(&build.image_size, slack)?;
+            geometry::BootRegion::resolve(&build.boot).map(|_| ())
+        }
+    }
 }
 
 /// Derive a deterministic, RFC-4122-shaped UUID for one image identifier from the
@@ -268,7 +374,13 @@ pub fn build_image(
     sink: &dyn EventSink,
 ) -> Result<ImageArtifacts, EngineError> {
     let step = Step::start(sink, "image");
-    let geom = Geometry::resolve(&build.boot, &build.image_size)?;
+    let size = parse_image_size(&build.image_size)?;
+    // The head of the disk resolves first and on its own, because under a fitted size the
+    // rest of the layout answers to the filesystem rather than the other way round: the
+    // format decides how large the rootfs is, and the disk is then sized to carry it. The
+    // boot region is the half that is the same either way, and it is the half the payload
+    // check below asks about.
+    let region = geometry::BootRegion::resolve(&build.boot)?;
     std::fs::create_dir_all(opts.out_dir).map_err(|s| EngineError::io(opts.out_dir, s))?;
     std::fs::create_dir_all(opts.work_dir).map_err(|s| EngineError::io(opts.work_dir, s))?;
 
@@ -294,20 +406,36 @@ pub fn build_image(
     // ext4 build, so an oversized boot payload fails fast rather than after
     // formatting the whole rootfs.
     let payloads = boot_payloads(&opts.boot, kpart.as_deref())?;
-    geom.check_payload_fit(&payloads)?;
+    region.check_payload_fit(&payloads)?;
 
     // The per-image first-boot password: generated here so the shared,
     // cacheable rootfs tarball stays password-free (the account is locked in it)
     // and each built image gets its own credential — spliced into the staged
-    // `/etc/shadow` before formatting, not surgically into the tar.
-    let password = crate::secret::generate_password()?;
+    // `/etc/shadow` before formatting, not surgically into the tar. Its length is the
+    // resolved config's, already bounded there.
+    let password = crate::secret::generate_password(build.first_boot_password_length as usize)?;
     let password_hash = crate::secret::crypt_password(&password)?;
 
-    // The ext4 rootfs partition is identical across layouts — build it once.
+    // The ext4 rootfs partition is identical across layouts — build it once. An authored
+    // size lays out the disk first and formats into the partition it leaves; a fitted one
+    // formats first and lays out the disk around the size the search returned. Both end
+    // holding a geometry whose partition is exactly the filesystem written into it, which
+    // is the invariant a mount depends on.
     let ext4 = opts.work_dir.join("rootfs.ext4");
+    let (geom, rootfs_size) = match size {
+        ImageSize::Fixed(total) => {
+            let geom = Geometry::resolve(&build.boot, total)?;
+            let rootfs_size = ext4::RootfsSize::Exact(geom.rootfs_bytes);
+            (Some(geom), rootfs_size)
+        }
+        ImageSize::Fit(slack) => (
+            None,
+            ext4::RootfsSize::Fit(geometry::fit_slack(&build.image_size, slack)?),
+        ),
+    };
     let rootfs_fs = ext4::build_rootfs_ext4(
         &ext4,
-        geom.rootfs_bytes,
+        rootfs_size,
         opts.rootfs_tar,
         opts.rootfs_label,
         opts.identity.ext4_uuid,
@@ -317,6 +445,17 @@ pub fn build_image(
         },
         &step,
     )?;
+    let geom = match geom {
+        Some(geom) => geom,
+        None => {
+            let geom = Geometry::around_rootfs(&build.boot, rootfs_fs.size_bytes)?;
+            step.log(format!(
+                "sized the image to its contents: {} bytes on disk",
+                geom.total_size
+            ));
+            geom
+        }
+    };
     step.progress(50);
 
     let output = match build.layout {
@@ -350,7 +489,7 @@ pub fn build_image(
             assemble_disk(&rootfs, &geom, &ext4, None, false, opts, &step)?;
             // Bootloader image: just the raw-gap payloads on a gap-sized medium.
             let bootloader = opts.out_dir.join(format!("{}-boot.img", opts.stem));
-            assemble_bootloader(&bootloader, &geom, idbloader, uboot_itb, &step)?;
+            assemble_bootloader(&bootloader, &region, idbloader, uboot_itb, &step)?;
             step.log(format!(
                 "wrote split images {} + {}",
                 bootloader.display(),
@@ -363,21 +502,36 @@ pub fn build_image(
 
     let mut compressed = Vec::new();
     let mut raw_removed = false;
-    if opts.compress {
+    if !opts.compress.is_empty() {
         for image in output.images() {
-            let dst = append_xz(image);
-            compress_xz(image, &dst, opts.jobs, &step)?;
-            step.log(format!("compressed {}", dst.display()));
-            compressed.push(dst);
+            for &format in opts.compress {
+                let dst = append_ext(image, format.extension());
+                match format {
+                    ImageCompression::Xz => compress_xz(image, &dst, opts.jobs, &step)?,
+                    ImageCompression::Gz => compress_gz(image, &dst, &step)?,
+                }
+                step.log(format!("compressed {}", dst.display()));
+                compressed.push(CompressedImage {
+                    source: image.to_path_buf(),
+                    path: dst,
+                    format,
+                });
+            }
         }
-        // The raw image is derivable from its `.xz`, so drop it unless asked to keep
-        // it — it is the largest artifact.
+        // The raw image is derivable from any of its containers, so drop it unless
+        // asked to keep it — it is the largest artifact.
         if !opts.keep_raw {
             for image in output.images() {
                 std::fs::remove_file(image).map_err(|s| EngineError::io(image, s))?;
             }
             raw_removed = true;
-            step.log("removed raw image(s); keeping .xz only");
+            let kept = opts
+                .compress
+                .iter()
+                .map(|f| format!(".{f}"))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            step.log(format!("removed raw image(s); keeping {kept} only"));
         }
     }
 
@@ -390,6 +544,7 @@ pub fn build_image(
         password,
         rootfs_verified_with: rootfs_fs.verified_with,
         rootfs_filesystem: rootfs_fs.provenance,
+        image_bytes: geom.total_size,
     })
 }
 
@@ -414,15 +569,17 @@ pub fn build_bootloader_image(
     sink: &dyn EventSink,
 ) -> Result<PathBuf, EngineError> {
     let step = Step::start(sink, "bootloader-image");
-    let geom = Geometry::resolve(&build.boot, &build.image_size)?;
+    // Only the head of the disk: this image *is* the boot region, so it has no rootfs
+    // partition and no backup GPT, and the recipe's `image_size` says nothing about it.
+    let region = geometry::BootRegion::resolve(&build.boot)?;
     // The same fail-fast fit check the full image node runs before placing bytes.
-    geom.check_payload_fit(&[
+    region.check_payload_fit(&[
         ("idbloader.img", file_len(idbloader)?),
         ("u-boot.itb", file_len(uboot_itb)?),
     ])?;
     std::fs::create_dir_all(out_dir).map_err(|s| EngineError::io(out_dir, s))?;
     let image = out_dir.join(format!("{stem}-boot.img"));
-    assemble_bootloader(&image, &geom, idbloader, uboot_itb, &step)?;
+    assemble_bootloader(&image, &region, idbloader, uboot_itb, &step)?;
     step.log(format!("wrote bootloader image {}", image.display()));
     step.finish();
     Ok(image)
@@ -535,7 +692,7 @@ fn assemble_disk(
 /// bootloader). Shared by the split layout and [`build_bootloader_image`].
 fn assemble_bootloader(
     image: &Path,
-    geom: &Geometry,
+    region: &geometry::BootRegion,
     idbloader: &Path,
     uboot_itb: &Path,
     step: &Step,
@@ -543,14 +700,14 @@ fn assemble_bootloader(
     let BootGeometry::RawGap {
         idbloader_off,
         uboot_itb_off,
-    } = geom.boot
+    } = region.boot
     else {
         return Err(EngineError::StageNotApplicable {
             stage: "bootloader-image",
             why: "this boot method writes no bootloader into a raw gap",
         });
     };
-    create_sized_image(image, geom.rootfs_off)?;
+    create_sized_image(image, region.rootfs_off)?;
     splice_file(image, idbloader_off, idbloader)?;
     splice_file(image, uboot_itb_off, uboot_itb)?;
     step.log(format!("laid bootloader payloads into {}", image.display()));
@@ -675,6 +832,29 @@ fn xz_workers(jobs: Option<usize>) -> u32 {
     n.clamp(1, u32::MAX as usize) as u32
 }
 
+/// `.gz`-compress `src` to `dst` with the pure-Rust `miniz_oxide` backend.
+///
+/// Single-threaded: gzip is one deflate stream with no block index to fan out
+/// across, so unlike [`compress_xz`] there is no worker count to size. The header's
+/// mtime is pinned to zero so the container is a function of the image bytes alone
+/// — a build that replays to the same image replays to the same `.gz`.
+fn compress_gz(src: &Path, dst: &Path, step: &Step) -> Result<(), EngineError> {
+    step.log(format!(
+        "compressing {} -> {} (gzip level {GZ_LEVEL})",
+        src.display(),
+        dst.display()
+    ));
+    let input = std::fs::File::open(src).map_err(|s| EngineError::io(src, s))?;
+    let output = std::fs::File::create(dst).map_err(|s| EngineError::io(dst, s))?;
+    let mut writer = flate2::GzBuilder::new()
+        .mtime(0)
+        .write(output, flate2::Compression::new(GZ_LEVEL));
+    std::io::copy(&mut std::io::BufReader::new(input), &mut writer)
+        .map_err(|s| EngineError::io(src, s))?;
+    writer.finish().map_err(|s| EngineError::io(dst, s))?;
+    Ok(())
+}
+
 /// The byte length of `path`.
 fn file_len(path: &Path) -> Result<u64, EngineError> {
     Ok(std::fs::metadata(path)
@@ -682,10 +862,12 @@ fn file_len(path: &Path) -> Result<u64, EngineError> {
         .len())
 }
 
-/// `foo.img` → `foo.img.xz`.
-fn append_xz(path: &Path) -> PathBuf {
+/// `foo.img` + `xz` → `foo.img.xz`. Appends rather than replaces, so the raw
+/// image's own extension stays visible in the compressed name.
+fn append_ext(path: &Path, ext: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
-    s.push(".xz");
+    s.push(".");
+    s.push(ext);
     PathBuf::from(s)
 }
 
@@ -752,10 +934,21 @@ mod tests {
     }
 
     #[test]
-    fn append_xz_adds_suffix() {
+    fn append_ext_adds_the_containers_suffix() {
+        // Appended, not substituted: the raw `.img` stays visible in the name.
         assert_eq!(
-            append_xz(Path::new("/o/turing-rk1.img")),
+            append_ext(
+                Path::new("/o/turing-rk1.img"),
+                ImageCompression::Xz.extension()
+            ),
             Path::new("/o/turing-rk1.img.xz")
+        );
+        assert_eq!(
+            append_ext(
+                Path::new("/o/turing-rk1.img"),
+                ImageCompression::Gz.extension()
+            ),
+            Path::new("/o/turing-rk1.img.gz")
         );
     }
 
@@ -814,6 +1007,54 @@ mod tests {
     }
 
     #[test]
+    fn compress_gz_roundtrips_via_gzip_container() {
+        // Pure-Rust encode; decode with host `gzip` to prove the container is one a
+        // gzip reader accepts — which is the whole reason this format exists here,
+        // since u-boot's `gzwrite` is the consumer and cannot read `.xz`.
+        if !require_host_tools(&["gzip"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("data.bin");
+        let payload: Vec<u8> = (0..64u32 * 1024)
+            .map(|i| i.wrapping_mul(2654435761) as u8)
+            .collect();
+        std::fs::write(&src, &payload).unwrap();
+        let gz = tmp.path().join("data.bin.gz");
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "image");
+        compress_gz(&src, &gz, &step).unwrap();
+
+        let out = Command::new("gzip")
+            .args(["-dc"])
+            .arg(&gz)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "gzip -d failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, payload);
+    }
+
+    #[test]
+    fn compress_gz_is_a_function_of_the_input_bytes_alone() {
+        // The gzip header carries an mtime field, which the encoder pins to zero.
+        // Without that a rebuild would produce a different `.gz` for an identical
+        // image, and the reproducibility claim is about artifact bytes.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("data.bin");
+        std::fs::write(&src, b"the same bytes both times").unwrap();
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "image");
+        let (a, b) = (tmp.path().join("a.gz"), tmp.path().join("b.gz"));
+        compress_gz(&src, &a, &step).unwrap();
+        compress_gz(&src, &b, &step).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
+    }
+
+    #[test]
     fn jobs_bounds_the_xz_worker_pool() {
         // `--jobs N` used to bound `make` and nothing else, so a `build --jobs 4` on a
         // shared machine still fanned image compression across every core. The flag
@@ -861,6 +1102,72 @@ mod tests {
         assert_eq!(&bytes[510..512], &[0x00, 0x00]);
     }
 
+    /// A fitted image is the whole orchestration in the other direction: the format
+    /// decides the filesystem's size, and every later step — the GPT, the splices, the
+    /// disk itself — is laid out around what it decided. Nothing else covers that path;
+    /// the fixed-size test above cannot, because there the size is known before the
+    /// rootfs exists.
+    #[test]
+    fn a_fitted_image_sizes_the_disk_to_what_the_format_chose() {
+        if !require_host_tools(&["tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        let out = tmp.path().join("out");
+        let rootfs_tar = tmp.path().join("rootfs.tar");
+        make_rootfs_tar(tmp.path(), &rootfs_tar);
+        let idb = tmp.path().join("idbloader.img");
+        let itb = tmp.path().join("u-boot.itb");
+        std::fs::write(&idb, b"IDBLOADER-PAYLOAD").unwrap();
+        std::fs::write(&itb, b"UBOOT-ITB-PAYLOAD").unwrap();
+
+        let build = small_rk1_build("fit+20%");
+        let opts = ImageOptions {
+            rootfs_tar: &rootfs_tar,
+            boot: BootPayload::RockchipRkbin {
+                idbloader: &idb,
+                uboot_itb: &itb,
+            },
+            out_dir: &out,
+            stem: "turing-rk1-forky",
+            work_dir: &work,
+            rootfs_label: "rootfs",
+            identity: ImageIdentity::derive("test-seed", "turing-rk1"),
+            compress: &[],
+            keep_raw: false,
+            jobs: None,
+        };
+        let sink = |_: crate::event::Event| {};
+        let arts = build_image(&build, &opts, &sink).unwrap();
+        let ImageOutput::Combined { image } = &arts.output else {
+            panic!("expected combined, got {:?}", arts.output)
+        };
+
+        let len = std::fs::metadata(image).unwrap().len();
+        let bytes = std::fs::read(image).unwrap();
+        // The boot region is untouched by the inversion.
+        let at = |off: usize, tag: &[u8]| assert_eq!(&bytes[off..off + tag.len()], tag);
+        at(32 * 1024, b"IDBLOADER-PAYLOAD");
+        at(8 * 1024 * 1024, b"UBOOT-ITB-PAYLOAD");
+        assert_eq!(&bytes[510..512], &[0x55, 0xAA], "protective MBR");
+        let sb = 16 * 1024 * 1024 + 1024;
+        assert_eq!(&bytes[sb - 1024 + 0x438..sb - 1024 + 0x43a], &[0x53, 0xEF]);
+
+        // The disk is the head, the filesystem, and the backup table — nothing more.
+        let blocks = u32::from_le_bytes(bytes[sb + 4..sb + 8].try_into().unwrap()) as u64;
+        assert_eq!(
+            len,
+            16 * 1024 * 1024 + blocks * 4096 + 33 * 512,
+            "a fitted disk is exactly its contents plus the backup GPT"
+        );
+        // And it really is smaller than the authored fixture size, which is the point.
+        assert!(
+            len < 192 * 1024 * 1024,
+            "a few-kilobyte rootfs must fit well under the fixed fixture size, got {len}"
+        );
+    }
+
     #[test]
     fn combined_image_has_gpt_rootfs_and_bootloader_at_offsets() {
         // End-to-end (Linux only): ferrosys ext4 format + GPT + splices.
@@ -892,7 +1199,7 @@ mod tests {
             work_dir: &work,
             rootfs_label: "rootfs",
             identity: ImageIdentity::derive("test-seed", "turing-rk1"),
-            compress: false,
+            compress: &[],
             keep_raw: false,
             jobs: None,
         };
@@ -923,7 +1230,10 @@ mod tests {
         // sizes the filesystem to exactly the partition; assert the on-disk
         // superblock agrees. s_blocks_count_lo is a little-endian u32 at superblock
         // offset 0x04, and the superblock starts 1024 bytes into the partition.
-        let geom = Geometry::resolve(&build.boot, &build.image_size).unwrap();
+        let ImageSize::Fixed(total) = parse_image_size(&build.image_size).unwrap() else {
+            unreachable!("the fixture names an explicit size")
+        };
+        let geom = Geometry::resolve(&build.boot, total).unwrap();
         let sb = 16 * 1024 * 1024 + 1024;
         let blocks_count = u32::from_le_bytes(bytes[sb + 4..sb + 8].try_into().unwrap()) as u64;
         assert_eq!(
@@ -983,7 +1293,7 @@ mod tests {
                 work_dir: &out.join("work"),
                 rootfs_label: "rootfs",
                 identity: ImageIdentity::derive("test-seed", "turing-rk1"),
-                compress: true,
+                compress: &[ImageCompression::Xz],
                 keep_raw,
                 jobs: None,
             };
@@ -995,7 +1305,7 @@ mod tests {
         let arts = run(&out, false);
         assert!(arts.raw_removed);
         assert_eq!(arts.compressed.len(), 1);
-        assert!(arts.compressed[0].exists());
+        assert!(arts.compressed[0].path.exists());
         match &arts.output {
             ImageOutput::Combined { image } => assert!(!image.exists(), "raw should be gone"),
             other => panic!("expected combined, got {other:?}"),
@@ -1005,11 +1315,57 @@ mod tests {
         let out = tmp.path().join("out-keep");
         let arts = run(&out, true);
         assert!(!arts.raw_removed);
-        assert!(arts.compressed[0].exists());
+        assert!(arts.compressed[0].path.exists());
         match &arts.output {
             ImageOutput::Combined { image } => assert!(image.exists(), "raw should be kept"),
             other => panic!("expected combined, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn two_containers_both_land_and_name_the_same_source() {
+        // `--compress xz,gz`: one raw image, two artifacts, each recording the raw
+        // image it came from so a consumer can group them without counting.
+        if !require_host_tools(&["tar"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs_tar = tmp.path().join("rootfs.tar");
+        make_rootfs_tar(tmp.path(), &rootfs_tar);
+        let idb = tmp.path().join("idbloader.img");
+        let itb = tmp.path().join("u-boot.itb");
+        std::fs::write(&idb, b"IDB").unwrap();
+        std::fs::write(&itb, b"ITB").unwrap();
+        let out = tmp.path().join("out");
+        let opts = ImageOptions {
+            rootfs_tar: &rootfs_tar,
+            boot: BootPayload::RockchipRkbin {
+                idbloader: &idb,
+                uboot_itb: &itb,
+            },
+            out_dir: &out,
+            stem: "turing-rk1-forky",
+            work_dir: &out.join("work"),
+            rootfs_label: "rootfs",
+            identity: ImageIdentity::derive("test-seed", "turing-rk1"),
+            compress: &[ImageCompression::Xz, ImageCompression::Gz],
+            keep_raw: false,
+            jobs: None,
+        };
+        let sink = |_: crate::event::Event| {};
+        let arts = build_image(&small_rk1_build("192MiB"), &opts, &sink).unwrap();
+
+        assert_eq!(arts.compressed.len(), 2);
+        // Request order is preserved, so the first entry is the preferred container.
+        assert_eq!(arts.compressed[0].format, ImageCompression::Xz);
+        assert_eq!(arts.compressed[1].format, ImageCompression::Gz);
+        assert_eq!(arts.compressed[0].source, arts.compressed[1].source);
+        for c in &arts.compressed {
+            assert!(c.path.exists(), "{} missing", c.path.display());
+            assert!(c.path.to_string_lossy().ends_with(c.format.extension()));
+        }
+        // The raw is still dropped: it is derivable from either container.
+        assert!(arts.raw_removed);
     }
 
     #[test]
@@ -1038,7 +1394,7 @@ mod tests {
             work_dir: &tmp.path().join("work"),
             rootfs_label: "rootfs",
             identity: ImageIdentity::derive("test-seed", "turing-rk1"),
-            compress: false,
+            compress: &[],
             keep_raw: false,
             jobs: None,
         };

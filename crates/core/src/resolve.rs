@@ -15,6 +15,9 @@ pub fn resolve_device(
     let (device, device_lineage) = root.device_with_lineage(device_name)?;
     let soc = root.soc(device.soc)?;
     let arch = root.arch(soc.arch)?;
+    // Taken before the layers are consumed by the moves below, since both
+    // construction sites need them and neither runs before the other.
+    let (soc_caveats, device_caveats) = (soc.caveats.clone(), device.caveats.clone());
 
     // Boot method: override must be within the device's supported set.
     let boot_method = overrides.boot_method.unwrap_or(device.boot_method);
@@ -53,6 +56,12 @@ pub fn resolve_device(
     let device_kmods = resolve_kmods(root, &device.device_kmods, device_name)?;
 
     let kernel_cmdline = validate_kernel_cmdline(device.kernel_cmdline.as_deref())?;
+
+    // The board's name on the network, checked before the u-boot-only early return so
+    // a typo in `devices/<name>.toml` is an error on every path the board builds. Only
+    // the image path writes it, but a device file that cannot produce a valid image is
+    // worth failing on whichever recipe finds it first.
+    validate_hostname(&device.hostname)?;
 
     let layout = overrides.layout.unwrap_or(device.default_layout);
 
@@ -101,8 +110,13 @@ pub fn resolve_device(
             suite: None,
             packaging_suite: device.default_suite,
             features: Vec::new(),
+            // A bootloader has no rootfs and so no fstab to mount anything into.
+            data_volumes: Vec::new(),
             rootfs_packages: Vec::new(),
             rootfs_exclude: Vec::new(),
+            // A u-boot-only build resolves no kernel and no rootfs, so it has neither
+            // the thing that decides this nor anything for it to subtract from.
+            libre: false,
             layout,
             image_size: device.image_size,
             hostname: device.hostname,
@@ -110,6 +124,14 @@ pub fn resolve_device(
             locales_generate: Vec::new(),
             timezone: String::new(),
             keymap: None,
+            // A u-boot-only build creates no account: there is no rootfs to hold one,
+            // no `/etc/sudoers.d`, and no `/etc/shadow` to splice a password into. The
+            // neutral values below are placeholders for an axis this deliverable does
+            // not have, and `reject_rootfs_overrides` refuses any flag that names one —
+            // so nothing reads them.
+            sudo: SudoPolicy::default(),
+            first_boot_password_length: crate::model::DEFAULT_PASSWORD_LENGTH,
+            ssh_authorized_keys: Vec::new(),
             boot,
             kernel_dtb: device.kernel_dtb,
             device_dts: device.device_dts,
@@ -130,6 +152,10 @@ pub fn resolve_device(
             ffmpeg: None,
             apt_sources: Vec::new(),
             extra_debs: Vec::new(),
+            // The hardware limitations still hold: this deliverable produces the
+            // firmware that board boots, and a bootloader is no less constrained by
+            // the silicon than an image is.
+            caveats: hardware_caveats(&soc_caveats, &device_caveats),
         });
     }
 
@@ -228,13 +254,30 @@ pub fn resolve_device(
         ResolvedKernel::Distro(k) => vec![k.package.clone()],
         ResolvedKernel::Compiled(_) => Vec::new(),
     };
+    //
+    // The two hardware layers' nonfree firmware merges in its own layer's position on
+    // an ordinary build and is left out entirely on a libre one, where the kernel has
+    // no loader that could ask for it — see [`ResolvedBuild::libre`]. It is a
+    // subtraction from the *include* set rather than an entry in `rootfs_exclude`,
+    // because the package is not unwanted: it is unreachable, and naming it in an
+    // exclude set would also forbid it as any other package's dependency.
+    let libre = kernel.libre();
+    let (soc_firmware, device_firmware) = match libre {
+        true => (&[][..], &[][..]),
+        false => (
+            soc.nonfree_firmware_packages.as_slice(),
+            device.nonfree_firmware_packages.as_slice(),
+        ),
+    };
     let mut rootfs_packages = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for src in [
         base.packages.as_slice(),
         soc.packages.as_slice(),
+        soc_firmware,
         bm.packages(),
         device.packages.as_slice(),
+        device_firmware,
         kernel_packages.as_slice(),
     ] {
         extend_unique(&mut rootfs_packages, &mut seen, src);
@@ -278,9 +321,10 @@ pub fn resolve_device(
     // Validate the authored image size up front: a typo (`"2GB!"`) must fail at
     // resolve, not deep in the image stage after the whole pipeline has run. The
     // resolved build keeps the authored string; the image node re-parses it into its
-    // byte/LBA `Geometry`. A zero-size image is not buildable. (The boot method's own
-    // offsets are parsed the same way, in `resolve_boot`.)
-    if crate::size::parse_size(&image_size)? == 0 {
+    // byte/LBA `Geometry`. A zero-size image is not buildable — a *fitted* one has no
+    // size yet to be zero, since the rootfs decides it several stages later. (The boot
+    // method's own offsets are parsed the same way, in `resolve_boot`.)
+    if crate::size::parse_image_size(&image_size)? == crate::size::ImageSize::Fixed(0) {
         return Err(ConfigError::InvalidSize {
             value: image_size.clone(),
         });
@@ -291,6 +335,12 @@ pub fn resolve_device(
     // with no codeset is a typed error at resolve, not a dangling /etc/localtime or an
     // ungenerated LANG discovered on the booted board.
     let (locale, locales_generate, timezone, keymap) = resolve_l10n(&base, &device, overrides)?;
+
+    // The account axis: who can log in to the finished image and what reaching root
+    // costs them. Base-layer policy, each part overridable. Validated here for the same
+    // reason as the localization axes — a key `sshd` will skip and a password too short
+    // to resist guessing are both invisible on a booted board.
+    let account = resolve_account(&base, overrides)?;
 
     Ok(ResolvedBuild {
         device: device_name.to_string(),
@@ -306,8 +356,12 @@ pub fn resolve_device(
         packaging_suite: suite.clone(),
         suite: Some(suite),
         features,
+        // Filled in by `resolve_recipe`: a direct device build names no recipe and
+        // so declares no volumes.
+        data_volumes: Vec::new(),
         rootfs_packages,
         rootfs_exclude,
+        libre,
         layout,
         image_size,
         hostname: device.hostname,
@@ -315,6 +369,9 @@ pub fn resolve_device(
         locales_generate,
         timezone,
         keymap,
+        sudo: account.sudo,
+        first_boot_password_length: account.password_length,
+        ssh_authorized_keys: account.authorized_keys,
         boot,
         kernel_dtb: device.kernel_dtb,
         device_dts: device.device_dts,
@@ -331,6 +388,12 @@ pub fn resolve_device(
         ffmpeg: build_media_accel.then_some(soc.ffmpeg).flatten(),
         apt_sources,
         extra_debs,
+        // Silicon, then board, then each selected feature. A recipe's own caveats are
+        // appended by [`resolve_recipe`], which is the only caller that has them.
+        caveats: feature_caveats(
+            hardware_caveats(&soc_caveats, &device_caveats),
+            &loaded_features,
+        ),
     })
 }
 
@@ -478,6 +541,11 @@ fn resolve_boot(
                 },
                 cmdline,
                 rootfs_offset: crate::size::format_size(rootfs_offset),
+                // The slot is the whole input: it is the budget the initramfs shares
+                // with the kernel image, and a board with room to spare should not be
+                // paying xz's decompression time at every boot for margin it does not
+                // need.
+                initramfs_compress: InitramfsCompress::for_kpart_size(kpart_size_bytes),
             }))
         }
     }
@@ -691,6 +759,7 @@ fn resolve_kernel(
                 patches_url: k.patches_url,
                 patches_ref,
                 config_fragments,
+                libre: k.libre,
             }))
         }
         KernelDef::Distro(k) => {
@@ -1025,11 +1094,34 @@ fn apt_line_token(v: &str) -> bool {
             .all(|c| c.is_ascii_graphic() && c != '[' && c != ']')
 }
 
+/// A portable file-name stem: non-empty, drawn from `[A-Za-z0-9._-]`, and not a
+/// directory reference. The character set excludes every path separator, so a value
+/// that passes is a *basename* — it names a file inside whichever directory the
+/// consumer joins it onto and cannot climb out of one.
+fn apt_file_stem(v: &str) -> bool {
+    !v.is_empty()
+        && v != "."
+        && v != ".."
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
 /// Validate a feature's [`AptSource`] against the one-line source grammar the
-/// bootstrap renders it into: every field a clean token, the URI
-/// http(s) (any other transport would sidestep the mirror trust model), the
-/// name additionally separator-free (it becomes a dedup key and file stem), and
-/// at least one component unless the suite is an exact path (ends in `/`).
+/// bootstrap renders it into: every field a clean token, the URI http(s) (any other
+/// transport would sidestep the mirror trust model), and at least one component
+/// unless the suite is an exact path (ends in `/`).
+///
+/// `name` and `signed_by` are held to the stricter [`apt_file_stem`] instead,
+/// because each becomes a *file name* rather than a line field:
+///
+///  - `name` is the dedup key here and the `sources.list.d/<name>.list` and
+///    `<name>.gpg` stem in the finished rootfs. Holding it to the portable stem set
+///    is what makes the dedup key and the file name the same string: any looser set
+///    would need a sanitizing map on the way to disk, and a map that is not injective
+///    lets two names this function accepted as distinct land on one file.
+///  - `signed_by` is joined onto the vendored keyring directory to find the repo's
+///    trust anchor, so a value carrying `/` or `..` would choose a key from outside
+///    the set a reviewer vetted.
 fn validate_apt_source(feature: &str, src: &AptSource) -> Result<(), ConfigError> {
     let bad = |field: &'static str, value: &str| ConfigError::AptSourceBadField {
         feature: feature.to_string(),
@@ -1037,7 +1129,7 @@ fn validate_apt_source(feature: &str, src: &AptSource) -> Result<(), ConfigError
         field,
         value: value.to_string(),
     };
-    if !apt_line_token(&src.name) || src.name.contains('/') {
+    if !apt_file_stem(&src.name) {
         return Err(bad("name", &src.name));
     }
     if !apt_line_token(&src.uri)
@@ -1056,6 +1148,9 @@ fn validate_apt_source(feature: &str, src: &AptSource) -> Result<(), ConfigError
             return Err(bad("components", component));
         }
     }
+    if !apt_file_stem(&src.signed_by) {
+        return Err(bad("signed_by", &src.signed_by));
+    }
     Ok(())
 }
 
@@ -1065,6 +1160,11 @@ fn validate_apt_source(feature: &str, src: &AptSource) -> Result<(), ConfigError
 /// collapse to one entry — but a same-name pair with different settings is
 /// [`ConfigError::ConflictingAptSource`], since the bootstrap solve could not tell
 /// which repo to activate. Order follows first appearance across the feature list.
+///
+/// Keying on the raw `name` is sound because validation already holds it to the
+/// portable file-name stem the rootfs writes it as: the dedup key here and the
+/// `sources.list.d` entry there are the same string, so two names that merge into one
+/// file cannot pass as distinct repositories.
 fn merge_apt_sources(
     features: &[(String, crate::feature::Feature)],
 ) -> Result<Vec<AptSource>, ConfigError> {
@@ -1124,8 +1224,115 @@ pub fn resolve_recipe(
         locales_generate: cli.locales_generate.clone().or(recipe.locales_generate),
         timezone: cli.timezone.clone().or(recipe.timezone),
         keymap: cli.keymap.clone().or(recipe.keymap),
+        sudo: cli.sudo.or(recipe.sudo),
+        first_boot_password_length: cli
+            .first_boot_password_length
+            .or(recipe.first_boot_password_length),
+        ssh_authorized_keys: cli
+            .ssh_authorized_keys
+            .clone()
+            .or(recipe.ssh_authorized_keys),
     };
-    resolve_device(root, &recipe.device, &merged)
+    let mut build = resolve_device(root, &recipe.device, &merged)?;
+    // Data volumes are recipe-only: no CLI flag and no device default, because
+    // whether a board's second slot is populated is a property of the deployment
+    // this recipe describes. Validated here rather than in `resolve_device` since
+    // the errors name the recipe.
+    crate::datavolume::validate_all(&recipe.data_volumes)?;
+    let has_feature = build
+        .features
+        .iter()
+        .any(|f| f == crate::datavolume::FEATURE);
+    match (has_feature, recipe.data_volumes.is_empty()) {
+        // The hook without anything to act on, or declarations with nothing to act
+        // on them. Either half alone is inert, and silently ignoring it would give a
+        // board that comes up without the disk the recipe says it has.
+        (true, true) => {
+            return Err(ConfigError::DataVolumeFeatureMismatch {
+                recipe: reference.to_string(),
+                problem: format!(
+                    "selects the '{}' feature but declares no [[data_volumes]]",
+                    crate::datavolume::FEATURE
+                ),
+            })
+        }
+        (false, false) => {
+            return Err(ConfigError::DataVolumeFeatureMismatch {
+                recipe: reference.to_string(),
+                problem: format!(
+                    "declares [[data_volumes]] but does not select the '{}' feature",
+                    crate::datavolume::FEATURE
+                ),
+            })
+        }
+        _ => {}
+    }
+    build.data_volumes = recipe.data_volumes;
+    // The build point's own caveats, after the hardware's: a recipe states what *this
+    // point* does not do, which is the narrowest scope and so the last a reader meets.
+    // De-duplicated against what the layers already said, so a recipe restating an
+    // inherited limitation does not print it twice.
+    for text in recipe.support.iter().flat_map(|s| &s.caveats) {
+        if !build.caveats.iter().any(|c| &c.text == text) {
+            build.caveats.push(Caveat {
+                text: text.clone(),
+                scope: CaveatScope::Recipe,
+            });
+        }
+    }
+    Ok(build)
+}
+
+/// The hardware half of a build point's caveats: the SoC's then the board's, each
+/// tagged with the layer that stated it, de-duplicated by text in first-appearance
+/// order.
+///
+/// Silicon first because it constrains the most: a reader meets the limitation that
+/// holds for every board on the part before the one that holds for this board alone.
+/// First-appearance de-duplication is what makes that ordering matter — a board
+/// restating a SoC caveat keeps the SoC's tag, which is the wider and so the truer
+/// of the two.
+/// `hardware` extended with each selected feature's caveats, tagged
+/// [`CaveatScope::Feature`] and de-duplicated by text against what is already there.
+///
+/// Between the hardware's and the recipe's because that is where a capability sits:
+/// its limits hold only where it is selected, so they are narrower than the
+/// silicon's, and they hold in every recipe that selects it, so they are wider than
+/// a recipe's. Features keep the recipe's order, so a reader meets them in the order
+/// the recipe names them. De-duplication keeps the wider tag, as it does for the
+/// hardware pair — a feature restating a SoC limitation stays the SoC's.
+fn feature_caveats(
+    mut hardware: Vec<Caveat>,
+    features: &[(String, crate::Feature)],
+) -> Vec<Caveat> {
+    for (_, feat) in features {
+        for text in &feat.caveats {
+            if !hardware.iter().any(|c| &c.text == text) {
+                hardware.push(Caveat {
+                    text: text.clone(),
+                    scope: CaveatScope::Feature,
+                });
+            }
+        }
+    }
+    hardware
+}
+
+fn hardware_caveats(soc: &[String], device: &[String]) -> Vec<Caveat> {
+    let mut out: Vec<Caveat> = Vec::new();
+    let tagged = soc
+        .iter()
+        .map(|c| (c, CaveatScope::Soc))
+        .chain(device.iter().map(|c| (c, CaveatScope::Device)));
+    for (text, scope) in tagged {
+        if !out.iter().any(|c| &c.text == text) {
+            out.push(Caveat {
+                text: text.clone(),
+                scope,
+            });
+        }
+    }
+    out
 }
 
 /// Append `src` package names to `acc`, skipping any already present, so the
@@ -1160,7 +1367,7 @@ fn join<T: std::fmt::Display>(items: &[T]) -> String {
 ///
 /// Checked in flag order so the first-reported error is stable.
 fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(), ConfigError> {
-    let inapplicable: [(&'static str, bool); 8] = [
+    let inapplicable: [(&'static str, bool); 11] = [
         ("--kernel", overrides.kernel.is_some()),
         ("--suite", overrides.suite.is_some()),
         ("--feature", overrides.features.is_some()),
@@ -1169,6 +1376,16 @@ fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(
         ("--locale-gen", overrides.locales_generate.is_some()),
         ("--timezone", overrides.timezone.is_some()),
         ("--keymap", overrides.keymap.is_some()),
+        ("--sudo", overrides.sudo.is_some()),
+        (
+            "--password-length",
+            overrides.first_boot_password_length.is_some(),
+        ),
+        // No flag sets this one, so it is named as the recipe key that does.
+        (
+            "ssh_authorized_keys",
+            overrides.ssh_authorized_keys.is_some(),
+        ),
     ];
     match inapplicable.iter().find(|(_, set)| *set) {
         Some((flag, _)) => Err(ConfigError::OverrideNotApplicable {
@@ -1296,6 +1513,72 @@ fn resolve_l10n(
     Ok((locale, locales_generate, timezone, keymap))
 }
 
+/// The resolved account axis: what [`resolve_account`] returns.
+///
+/// A struct rather than a tuple because all three parts are about one thing — how the
+/// finished image is reached — and a caller destructuring three same-shaped values
+/// positionally is a swap waiting to happen.
+struct Account {
+    /// What `sudo` asks of the default account.
+    sudo: SudoPolicy,
+    /// Generated first-boot password length, validated in range.
+    password_length: u8,
+    /// Authorized `authorized_keys` lines, each validated, in config order.
+    authorized_keys: Vec<String>,
+}
+
+/// Resolve the account axis: the sudo policy, the generated first-boot password length,
+/// and the SSH keys authorized for the default account.
+///
+/// All three default at the **base** layer — they are distro/security policy, not
+/// properties of a board, and a board has no opinion about who its operator is. A
+/// recipe or CLI flag overrides any of them.
+///
+/// Every part is validated here rather than at the point of use, because each failure
+/// is silent on the finished image: a malformed key is one `sshd` skips into its own
+/// log, and a too-short password looks exactly like a long one from the outside. The
+/// keys keep config order — `authorized_keys` is a list `sshd` walks, and preserving
+/// the authored order keeps the file a readable statement of who was granted access.
+fn resolve_account(base: &BaseLayer, overrides: &Overrides) -> Result<Account, ConfigError> {
+    let sudo = overrides.sudo.unwrap_or(base.sudo);
+
+    let password_length = overrides
+        .first_boot_password_length
+        .unwrap_or(base.first_boot_password_length);
+    if !(crate::model::MIN_PASSWORD_LENGTH..=crate::model::MAX_PASSWORD_LENGTH)
+        .contains(&password_length)
+    {
+        return Err(ConfigError::InvalidPasswordLength {
+            value: password_length as u32,
+            min: crate::model::MIN_PASSWORD_LENGTH as u32,
+            max: crate::model::MAX_PASSWORD_LENGTH as u32,
+            default: crate::model::DEFAULT_PASSWORD_LENGTH as u32,
+        });
+    }
+
+    let authorized_keys = overrides
+        .ssh_authorized_keys
+        .clone()
+        .unwrap_or_else(|| base.ssh_authorized_keys.clone());
+    for (i, key) in authorized_keys.iter().enumerate() {
+        if let Err(why) = crate::authkeys::check_authorized_key(key) {
+            return Err(ConfigError::InvalidAuthorizedKey {
+                // 1-based: the entry's only name is where it sits in the authored list,
+                // and that list reads as a first, second, third in the file.
+                index: i + 1,
+                value: key.clone(),
+                why,
+            });
+        }
+    }
+
+    Ok(Account {
+        sudo,
+        password_length,
+        authorized_keys,
+    })
+}
+
 /// Reject a locale `locale-gen` could not act on, or that would not survive the two
 /// files it lands in.
 ///
@@ -1394,6 +1677,26 @@ fn validate_board_profile(board: &str) -> Result<(), ConfigError> {
             board: board.to_string(),
         })
     }
+}
+
+/// Reject a hostname the image's `/etc/hostname` and `/etc/hosts` could not carry.
+///
+/// The value is written into both verbatim — as the whole of the first file, and as
+/// the name half of a `127.0.1.1` line in the second. `/etc/hosts` is line- and
+/// token-oriented, so a newline in the value does not corrupt one entry, it *adds*
+/// one: everything after the newline becomes a further host line the operator never
+/// wrote, mapping names of an attacker's choosing to addresses of their choosing. A
+/// space is the same problem one field down, where the rest of the value becomes an
+/// alias of `127.0.1.1`.
+///
+/// The shape itself is [`hostname::check`](crate::hostname::check), shared with the
+/// device-slug rule so the generator's default cannot fall outside what a resolved
+/// build accepts.
+fn validate_hostname(hostname: &str) -> Result<(), ConfigError> {
+    crate::hostname::check(hostname).map_err(|why| ConfigError::InvalidHostname {
+        value: hostname.to_string(),
+        why,
+    })
 }
 
 /// Reject a keymap value `/etc/default/keyboard` cannot hold.
@@ -1998,6 +2301,148 @@ mod tests {
         assert_eq!(b.keymap.unwrap().layout, "gb");
     }
 
+    /// A real ed25519 public key, for the account tests.
+    const TEST_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe operator@workstation";
+
+    #[test]
+    fn account_defaults_come_from_the_base_layer_and_a_recipe_overrides_them() {
+        let root = repo_root();
+
+        // The shipped default: root with no prompt, a 12-character generated password,
+        // and nobody authorized by key — an image a stock build hands out authorizes
+        // whoever holds the password it printed, and no one else.
+        let b = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
+        assert_eq!(b.sudo, SudoPolicy::Nopasswd);
+        assert_eq!(
+            b.first_boot_password_length,
+            crate::model::DEFAULT_PASSWORD_LENGTH
+        );
+        assert!(b.ssh_authorized_keys.is_empty());
+
+        // Each part overrides independently, and the keys keep the authored order —
+        // authorized_keys is a file sshd walks, so the order is part of what was written.
+        let second = format!("{TEST_KEY}-two");
+        let tightened = resolve_recipe(
+            &root,
+            "turing-rk1/forky",
+            &Overrides {
+                sudo: Some(SudoPolicy::Password),
+                first_boot_password_length: Some(24),
+                ssh_authorized_keys: Some(vec![TEST_KEY.to_string(), second.clone()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tightened.sudo, SudoPolicy::Password);
+        assert_eq!(tightened.first_boot_password_length, 24);
+        assert_eq!(tightened.ssh_authorized_keys, vec![TEST_KEY, &second]);
+    }
+
+    /// The bounds exist because a short generated password is invisible on the finished
+    /// image: nothing about a booted board says how much entropy its first credential
+    /// had, so the only place to catch it is here.
+    #[test]
+    fn a_password_length_outside_the_accepted_range_is_refused() {
+        use crate::model::{MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH};
+        let root = repo_root();
+        let with_len = |n: u8| {
+            resolve_recipe(
+                &root,
+                "turing-rk1/forky",
+                &Overrides {
+                    first_boot_password_length: Some(n),
+                    ..Default::default()
+                },
+            )
+        };
+        // Both ends of the range are accepted — a floor that rejected its own value
+        // would leave the documented minimum unreachable.
+        assert!(with_len(MIN_PASSWORD_LENGTH).is_ok());
+        assert!(with_len(MAX_PASSWORD_LENGTH).is_ok());
+        for bad in [0, 1, MIN_PASSWORD_LENGTH - 1, MAX_PASSWORD_LENGTH + 1, 255] {
+            assert!(
+                matches!(
+                    with_len(bad),
+                    Err(ConfigError::InvalidPasswordLength { .. })
+                ),
+                "length {bad} should be rejected"
+            );
+        }
+    }
+
+    /// Keys are validated at resolution, so a key `sshd` would silently skip fails the
+    /// build instead of shipping an image whose login does not work.
+    #[test]
+    fn a_malformed_authorized_key_is_refused_and_names_its_position() {
+        let root = repo_root();
+        let with_keys = |keys: Vec<String>| {
+            resolve_recipe(
+                &root,
+                "turing-rk1/forky",
+                &Overrides {
+                    ssh_authorized_keys: Some(keys),
+                    ..Default::default()
+                },
+            )
+        };
+        assert!(with_keys(vec![TEST_KEY.to_string()]).is_ok());
+
+        // The offending entry is named by its position in the authored list — the only
+        // name it has.
+        let err = with_keys(vec![TEST_KEY.to_string(), "ssh-ed25519 nope".to_string()])
+            .expect_err("a malformed key fails resolution");
+        match err {
+            ConfigError::InvalidAuthorizedKey { index, .. } => assert_eq!(index, 2),
+            other => panic!("expected InvalidAuthorizedKey, got {other}"),
+        }
+
+        // The paste that matters most: a private key would otherwise be baked into
+        // every copy of the image.
+        let private = "-----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaA==";
+        let err = with_keys(vec![private.to_string()]).expect_err("private key refused");
+        assert!(
+            err.to_string().contains("private key material"),
+            "the message must name the cause: {err}"
+        );
+    }
+
+    /// A u-boot-only build has no rootfs, so it has no account — and an axis it cannot
+    /// act on must fail rather than be quietly dropped.
+    #[test]
+    fn account_overrides_do_not_apply_to_a_uboot_deliverable() {
+        let root = repo_root();
+        for (flag, ov) in [
+            (
+                "--sudo",
+                Overrides {
+                    sudo: Some(SudoPolicy::Password),
+                    ..Default::default()
+                },
+            ),
+            (
+                "--password-length",
+                Overrides {
+                    first_boot_password_length: Some(24),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ssh_authorized_keys",
+                Overrides {
+                    ssh_authorized_keys: Some(vec![TEST_KEY.to_string()]),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let err = resolve_recipe(&root, "h96-max-m9/util", &ov)
+                .expect_err("a u-boot build has no account axis");
+            match err {
+                ConfigError::OverrideNotApplicable { flag: got, .. } => assert_eq!(got, flag),
+                other => panic!("expected OverrideNotApplicable for {flag}, got {other}"),
+            }
+        }
+    }
+
     #[test]
     fn validate_locale_demands_a_codeset_and_rejects_shell_metacharacters() {
         for ok in ["C.UTF-8", "en_US.UTF-8", "sr_RS.UTF-8@latin", "ja_JP.UTF-8"] {
@@ -2137,6 +2582,39 @@ mod tests {
         }
     }
 
+    /// The shape itself is `hostname::check`'s to test; what matters here is that a
+    /// device carrying a bad one fails *resolution*, with the typed error naming the
+    /// value — rather than reaching the image writer, which would render it verbatim.
+    #[test]
+    fn a_bad_hostname_is_a_typed_resolve_error() {
+        validate_hostname("turing-rk1").unwrap();
+        for bad in [
+            "rk1\n10.0.0.1 deb.debian.org",
+            "rk1 deb.debian.org",
+            "rk_1",
+            "",
+        ] {
+            match validate_hostname(bad) {
+                Err(ConfigError::InvalidHostname { value, .. }) => assert_eq!(value, bad),
+                other => panic!("{bad:?}: expected InvalidHostname, got {other:?}"),
+            }
+        }
+    }
+
+    /// The rule is not narrower than the config it has to admit: every shipped board
+    /// resolves, on the image path and on the u-boot-only path that returns before
+    /// the rootfs axes are touched.
+    #[test]
+    fn every_shipped_device_carries_a_valid_hostname() {
+        let root = repo_root();
+        for device in root.list("devices").unwrap() {
+            let build = resolve_device(&root, &device, &Overrides::default())
+                .unwrap_or_else(|e| panic!("{device}: {e}"));
+            validate_hostname(&build.hostname)
+                .unwrap_or_else(|e| panic!("{device} resolved an invalid hostname: {e}"));
+        }
+    }
+
     #[test]
     fn a_keymap_parses_from_a_bare_layout_or_a_table() {
         #[derive(serde::Deserialize)]
@@ -2214,7 +2692,7 @@ mod tests {
         // The boot half resolves as the rkbin variant, carrying the u-boot source,
         // the raw-gap offsets, and the SoC-inherited blob set.
         let boot = b.rkbin_boot().expect("the RK1 boots via rockchip-rkbin");
-        assert_eq!(boot.uboot_ref, "v2026.04");
+        assert_eq!(boot.uboot_ref, "v2026.07");
         assert_eq!(boot.uboot_defconfig, "turing-rk1-rk3588_defconfig");
         assert_eq!(boot.offsets.idbloader, "32KiB");
         assert_eq!(boot.offsets.uboot_itb, "8MiB");
@@ -2355,6 +2833,7 @@ mod tests {
             requires_media_accel: false,
             config_fragments: vec!["accel/whatever".into()],
             patch_series: vec![],
+            caveats: vec![],
         };
         let selected = [("cap".to_string(), feature)];
         let (frags, series) = crate::feature::kernel_contributions(&selected);
@@ -2618,10 +3097,18 @@ mod tests {
             boot.rootfs_offset, "76MiB",
             "derived from the wider slots: 12 + 32 + 32"
         );
+        // And the slot spends itself: the wider budget is what lets the initramfs take
+        // the compressor that costs bytes and saves boot time.
+        assert_eq!(boot.initramfs_compress, InitramfsCompress::Zstd);
 
         // Everything the variant does not restate is the C201's, including the DTB and
         // the keymap — the point of extending rather than copying.
         let stock = resolve_recipe(&root, "asus-c201/forky", &Overrides::default()).unwrap();
+        assert_eq!(
+            stock.depthcharge_boot().unwrap().initramfs_compress,
+            InitramfsCompress::Xz,
+            "a 16 MiB slot still has to trade boot time for margin"
+        );
         assert_eq!(b.kernel_dtb, stock.kernel_dtb);
         assert_eq!(b.arch, stock.arch);
         assert_eq!(b.rootfs_packages, stock.rootfs_packages);
@@ -3367,6 +3854,7 @@ mod tests {
             extra_debs: vec![],
             conflicts: vec![],
             requires_media_accel: false,
+            caveats: vec![],
         }
     }
 
@@ -3383,9 +3871,10 @@ mod tests {
     #[test]
     fn apt_sources_reject_line_structure_injection() {
         // The rendered `deb [signed-by=…] <uri> <suite> <components…>` line is
-        // positional, so whitespace / brackets / newlines in any field — or a
-        // non-http(s) transport — must fail at resolve time, naming the
-        // field.
+        // positional, so whitespace / brackets / newlines in a line field — or a
+        // non-http(s) transport — must fail at resolve time, naming the field. The
+        // two fields that become *file names* are held to a tighter rule still; see
+        // `apt_sources_reject_names_that_are_not_portable_file_stems`.
         let with = |mutate: &dyn Fn(&mut AptSource)| {
             let mut s = src("vendor", "repo");
             mutate(&mut s);
@@ -3399,7 +3888,6 @@ mod tests {
             ("suite", with(&|s| s.suite = "trixie\nmain".into())),
             ("components", with(&|s| s.components = vec![])),
             ("components", with(&|s| s.components = vec!["ma in".into()])),
-            ("name", with(&|s| s.name = "je/llyfin".into())),
         ] {
             let feat = ("app".to_string(), feat_with_sources(vec![source]));
             match merge_apt_sources(&[feat]).unwrap_err() {
@@ -3416,6 +3904,77 @@ mod tests {
         });
         let feat = ("app".to_string(), feat_with_sources(vec![exact]));
         assert_eq!(merge_apt_sources(&[feat]).unwrap().len(), 1);
+    }
+
+    /// `name` and `signed_by` become file names, so both are held to the portable
+    /// stem set rather than only to the line grammar: a separator or dot segment in
+    /// either would place a `sources.list.d` entry, or read a trust anchor, outside
+    /// the directory that holds it.
+    #[test]
+    fn apt_sources_reject_names_that_are_not_portable_file_stems() {
+        let with = |mutate: &dyn Fn(&mut AptSource)| {
+            let mut s = src("vendor", "repo");
+            mutate(&mut s);
+            s
+        };
+        for (field, source) in [
+            ("name", with(&|s| s.name = "je/llyfin".into())),
+            ("name", with(&|s| s.name = "..".into())),
+            ("name", with(&|s| s.name = ".".into())),
+            ("name", with(&|s| s.name = String::new())),
+            // Accepted by the line grammar (no whitespace, no brackets) but not a
+            // portable stem — and `a:b` is exactly the shape that a sanitizing map
+            // would fold onto `a-b`.
+            ("name", with(&|s| s.name = "a:b".into())),
+            ("name", with(&|s| s.name = "vendor+extra".into())),
+            (
+                "signed_by",
+                with(&|s| s.signed_by = "../../etc/host.gpg".into()),
+            ),
+            (
+                "signed_by",
+                with(&|s| s.signed_by = "/etc/ssl/host.gpg".into()),
+            ),
+            ("signed_by", with(&|s| s.signed_by = "sub/k.gpg".into())),
+            ("signed_by", with(&|s| s.signed_by = "..".into())),
+            ("signed_by", with(&|s| s.signed_by = String::new())),
+        ] {
+            let feat = ("app".to_string(), feat_with_sources(vec![source.clone()]));
+            match merge_apt_sources(&[feat]).unwrap_err() {
+                ConfigError::AptSourceBadField { field: f, .. } => {
+                    assert_eq!(f, field, "wrong field named for {source:?}");
+                }
+                other => panic!("{field}: expected AptSourceBadField, got {other:?}"),
+            }
+        }
+    }
+
+    /// With `name` held to the stem set, two sources that a sanitizing map would
+    /// collapse onto one file cannot both resolve — the one that is not a stem is
+    /// rejected where it is authored, so the dedup key and the file it is written as
+    /// stay the same string.
+    #[test]
+    fn apt_source_names_that_would_collide_as_file_stems_cannot_both_resolve() {
+        let legal = (
+            "app-a".to_string(),
+            feat_with_sources(vec![src("a-b", "u1")]),
+        );
+        let folds_onto_it = (
+            "app-b".to_string(),
+            feat_with_sources(vec![src("a:b", "u2")]),
+        );
+        // On its own, the portable one resolves.
+        assert_eq!(
+            merge_apt_sources(std::slice::from_ref(&legal))
+                .unwrap()
+                .len(),
+            1
+        );
+        // Its would-be twin never joins it under a different key.
+        assert!(matches!(
+            merge_apt_sources(&[legal, folds_onto_it]).unwrap_err(),
+            ConfigError::AptSourceBadField { field: "name", .. }
+        ));
     }
 
     #[test]
@@ -3460,6 +4019,54 @@ mod tests {
             vec!["one", "two"]
         );
     }
+
+    /// The three scopes join in order of increasing specificity, tagged with the
+    /// layer that stated each — checked against the shipped config, so the ordering
+    /// rule is verified against real caveats rather than a fixture that agrees with
+    /// it by construction.
+    #[test]
+    fn caveats_join_silicon_then_board_then_build_point() {
+        let root = repo_root();
+        // A libre C201: the SoC states an HDMI limit, the board a display-controller
+        // one, and the recipe the radio that linux-libre puts out of reach.
+        let build = resolve_recipe(&root, "asus-c201/libre-forky", &Overrides::default()).unwrap();
+        let scopes: Vec<CaveatScope> = build.caveats.iter().map(|c| c.scope).collect();
+        assert_eq!(
+            scopes,
+            [CaveatScope::Soc, CaveatScope::Device, CaveatScope::Recipe],
+            "{:#?}",
+            build.caveats
+        );
+        // Sorted by scope is the same as the order they are in, which is what makes
+        // "silicon first" a property of the join and not of how these files happen to
+        // be written.
+        let mut sorted = scopes.clone();
+        sorted.sort();
+        assert_eq!(scopes, sorted);
+
+        // The recipe's own caveat is the recipe's, and no sibling recipe on the same
+        // board picks it up.
+        let sibling =
+            resolve_recipe(&root, "asus-c201/mainline-forky", &Overrides::default()).unwrap();
+        assert!(
+            sibling
+                .caveats
+                .iter()
+                .all(|c| c.scope != CaveatScope::Recipe),
+            "{:#?}",
+            sibling.caveats
+        );
+        // ...while the hardware's carry over unchanged, because they are the board's.
+        assert_eq!(
+            sibling.caveats.iter().map(|c| &c.text).collect::<Vec<_>>(),
+            build
+                .caveats
+                .iter()
+                .filter(|c| c.scope != CaveatScope::Recipe)
+                .map(|c| &c.text)
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 /// Fixture-based resolution tests: a minimal config root written to a
@@ -3489,6 +4096,8 @@ mod fixture_tests {
         layout: Option<&'static str>,
         features: &'static [&'static str],
         image_size: Option<&'static str>,
+        /// Raw TOML appended to the recipe, for the `[[data_volumes]]` table array.
+        data_volumes: &'static str,
     }
 
     /// A complete config tree with buildable defaults; a test sets only the axes
@@ -3498,10 +4107,16 @@ mod fixture_tests {
         base_exclude: &'static [&'static str],
         soc_packages: &'static [&'static str],
         soc_exclude: &'static [&'static str],
+        /// Nonfree firmware the SoC declares, which only a non-libre build merges.
+        soc_nonfree: &'static [&'static str],
         bm_packages: &'static [&'static str],
         bm_exclude: &'static [&'static str],
         device_packages: &'static [&'static str],
         device_exclude: &'static [&'static str],
+        /// Nonfree firmware the device declares, under the same gate.
+        device_nonfree: &'static [&'static str],
+        /// Write `libre = true` on every kernel definition this tree offers.
+        libre: bool,
         supported_kernels: &'static [&'static str],
         default_kernel: &'static str,
         /// Defaults to the `*` wildcard so a test exercising some other axis need not
@@ -3521,10 +4136,13 @@ mod fixture_tests {
                 base_exclude: &[],
                 soc_packages: &[],
                 soc_exclude: &[],
+                soc_nonfree: &[],
                 bm_packages: &[],
                 bm_exclude: &[],
                 device_packages: &[],
                 device_exclude: &[],
+                device_nonfree: &[],
+                libre: false,
                 supported_kernels: &["k1"],
                 default_kernel: "k1",
                 supported_suites: &["*"],
@@ -3591,9 +4209,11 @@ mod fixture_tests {
                 p.join("socs/rk3588.toml"),
                 format!(
                     "description = \"soc\"\narch = \"arm64\"\ndt_dir = \"rockchip\"\n\
-                     modules = []\npackages = {}\nexclude = {}\n{src}",
+                     modules = []\npackages = {}\nexclude = {}\n\
+                     nonfree_firmware_packages = {}\n{src}",
                     arr(self.soc_packages),
-                    arr(self.soc_exclude)
+                    arr(self.soc_exclude),
+                    arr(self.soc_nonfree)
                 ),
             )
             .unwrap();
@@ -3619,7 +4239,8 @@ mod fixture_tests {
                      supported_kernels = {}\ndefault_kernel = {:?}\n\
                      supported_suites = {}\ndefault_suite = {:?}\n\
                      default_layout = {:?}\nhostname = \"dev\"\nimage_size = {:?}\n\
-                     packages = {}\nexclude = {}\n\n[rkbin]\natf = \"atf.elf\"\ntpl = \"tpl.bin\"\n",
+                     packages = {}\nexclude = {}\nnonfree_firmware_packages = {}\n\
+                     \n[rkbin]\natf = \"atf.elf\"\ntpl = \"tpl.bin\"\n",
                     arr(self.supported_kernels),
                     self.default_kernel,
                     arr(self.supported_suites),
@@ -3627,7 +4248,8 @@ mod fixture_tests {
                     self.default_layout,
                     self.image_size,
                     arr(self.device_packages),
-                    arr(self.device_exclude)
+                    arr(self.device_exclude),
+                    arr(self.device_nonfree)
                 ),
             )
             .unwrap();
@@ -3635,8 +4257,12 @@ mod fixture_tests {
             for k in self.supported_kernels {
                 fs::write(
                     p.join(format!("kernels/{k}.toml")),
-                    "flavor = \"mainline\"\nsource = \"linux-stable\"\nbase_defconfig = \"defconfig\"\n\
-                     config_fragments = []\npatch_series = []\nsupported_socs = [\"rk3588\"]\n",
+                    format!(
+                        "flavor = \"mainline\"\nsource = \"linux-stable\"\nbase_defconfig = \"defconfig\"\n\
+                         config_fragments = []\npatch_series = []\nsupported_socs = [\"rk3588\"]\n\
+                         libre = {}\n",
+                        self.libre
+                    ),
                 )
                 .unwrap();
             }
@@ -3668,11 +4294,60 @@ mod fixture_tests {
                     body.push_str(&format!("image_size = {sz:?}\n"));
                 }
                 body.push_str(&format!("features = {}\n", arr(r.features)));
+                // Appended verbatim: `[[data_volumes]]` is a table array, so a test
+                // writes the TOML it means rather than the fixture modelling every
+                // field of a type whose validation is what is under test.
+                body.push_str(r.data_volumes);
                 fs::write(p.join("recipes/rec.toml"), body).unwrap();
             }
 
             dir
         }
+    }
+
+    /// The nonfree-firmware axis, both ways round, on one tree.
+    ///
+    /// The two hardware layers declare blobs; nothing else changes between the runs
+    /// but the kernel's `libre`. Asserting the *whole* package list each way is the
+    /// point: it shows both that the blobs leave on a libre build and that nothing
+    /// else does, which a `!contains` on the firmware names alone would not.
+    #[test]
+    fn a_libre_kernel_drops_the_hardware_layers_nonfree_firmware() {
+        let blobbed = Tree {
+            base_packages: &["base-pkg"],
+            soc_packages: &["soc-pkg"],
+            soc_nonfree: &["firmware-soc"],
+            device_packages: &["device-pkg"],
+            device_nonfree: &["firmware-board"],
+            ..Default::default()
+        };
+        let dir = blobbed.write();
+        let b = resolve_device(&ConfigRoot::new(dir.path()), "dev", &Overrides::default()).unwrap();
+        assert!(!b.libre);
+        // Each layer's firmware merges directly after that layer's own packages.
+        assert_eq!(
+            b.rootfs_packages,
+            vec![
+                "base-pkg",
+                "soc-pkg",
+                "firmware-soc",
+                "device-pkg",
+                "firmware-board"
+            ]
+        );
+
+        let libre = Tree {
+            libre: true,
+            ..blobbed
+        };
+        let dir = libre.write();
+        let b = resolve_device(&ConfigRoot::new(dir.path()), "dev", &Overrides::default()).unwrap();
+        assert!(b.libre);
+        assert_eq!(b.rootfs_packages, vec!["base-pkg", "soc-pkg", "device-pkg"]);
+        // Dropped from the include set, not pushed onto the exclude set: the blob is
+        // unreachable, not unwanted, and excluding it would also forbid apt from
+        // pulling it in as some other package's dependency.
+        assert!(b.rootfs_exclude.is_empty());
     }
 
     #[test]
@@ -3735,6 +4410,7 @@ mod fixture_tests {
                 layout: Some("combined"),
                 features: &["f1"],
                 image_size: Some("1G"),
+                data_volumes: "",
             }),
             ..Default::default()
         };
@@ -3773,6 +4449,7 @@ mod fixture_tests {
                 layout: Some("split"),
                 features: &["f1"],
                 image_size: Some("1G"),
+                data_volumes: "",
             }),
             ..Default::default()
         };
@@ -3811,6 +4488,77 @@ mod fixture_tests {
         let b = resolve_recipe(&root, "rec", &cli).unwrap();
         assert!(b.features.is_empty());
         assert!(!b.rootfs_packages.contains(&"p1".to_string()));
+    }
+
+    /// A tree whose only feature is `data-volume`, with the recipe selecting the
+    /// features given and appending `volumes` as raw TOML.
+    fn data_volume_tree(features: &'static [&'static str], volumes: &'static str) -> Tree {
+        Tree {
+            features: vec![Feat {
+                name: "data-volume",
+                packages: &["e2fsprogs"],
+                exclude: &[],
+            }],
+            recipe: Some(RecipeSpec {
+                features,
+                data_volumes: volumes,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    const ONE_VOLUME: &str = "\n[[data_volumes]]\nmatch = { kind = \"nvme\" }\n\
+                              label = \"b2d-data\"\nmount = \"/srv\"\n";
+
+    #[test]
+    fn a_data_volume_resolves_with_its_feature() {
+        let dir = data_volume_tree(&["data-volume"], ONE_VOLUME).write();
+        let root = ConfigRoot::new(dir.path());
+        let b = resolve_recipe(&root, "rec", &Overrides::default()).unwrap();
+        assert_eq!(b.data_volumes.len(), 1);
+        assert_eq!(b.data_volumes[0].label, "b2d-data");
+        assert_eq!(b.data_volumes[0].mount, "/srv");
+        // Defaults fill in rather than being restated in every recipe.
+        assert_eq!(b.data_volumes[0].fstype, crate::datavolume::VolumeFs::Ext4);
+        assert_eq!(
+            b.data_volumes[0].create,
+            crate::datavolume::CreatePolicy::IfBlank
+        );
+    }
+
+    #[test]
+    fn each_half_of_the_data_volume_axis_is_useless_without_the_other() {
+        // Declarations with no hook to act on them, and a hook with nothing to act
+        // on: both are inert, and an image that silently came up without the disk
+        // its recipe names is worse than a resolution error.
+        let dir = data_volume_tree(&[], ONE_VOLUME).write();
+        let err =
+            resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default()).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::DataVolumeFeatureMismatch { .. }),
+            "{err}"
+        );
+
+        let dir = data_volume_tree(&["data-volume"], "").write();
+        let err =
+            resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default()).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::DataVolumeFeatureMismatch { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_ill_formed_data_volume_is_refused_at_resolution() {
+        // The per-entry checks run through resolution, not only in the unit tests
+        // of the type — a bad mount must never reach a rootfs.
+        let bad = "\n[[data_volumes]]\nmatch = { kind = \"nvme\" }\n\
+                   label = \"b2d-data\"\nmount = \"/\"\n";
+        let dir = data_volume_tree(&["data-volume"], bad).write();
+        let err =
+            resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default()).unwrap_err();
+        assert!(matches!(err, ConfigError::DataVolumeMount { .. }), "{err}");
     }
 
     /// A 64-char lowercase-hex sha (all `seed`) — a well-formed content pin for the

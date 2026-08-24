@@ -18,14 +18,20 @@
 //! The pipeline, keyed by the resolved [`Plan`](ferroday_cage::provision::debian::Plan):
 //!
 //! 1. **Resolve** the plan (`Debian::resolve`) — the exact install set with each
-//!    `.deb`'s archive-recorded sha256, without downloading. This one call keys the
-//!    early-cutoff cache *and* becomes the content-pinned manifest.
-//! 2. On a cache miss, **provision** packages into a staging tree
+//!    `.deb`'s archive-recorded sha256, without downloading. The build resolves
+//!    **once**: this one call keys the early-cutoff cache, is handed back to the
+//!    bootstrap as the set to install, and becomes the content-pinned manifest, so
+//!    all three describe the same packages by construction. The plan is published
+//!    beside the tar as a deb822 document carrying the archive state it resolved
+//!    against; a later run replays that document instead of resolving
+//!    ([`RootfsOptions::pinned_plan`]), which is what `reproduce` does.
+//! 2. On a cache miss, **provision** that plan into a staging tree
 //!    (`provision::ensure`), with the build's own `.deb`s as a local trusted
 //!    `dists/` mirror, the feature repositories, and the pre-install overlay laid in
 //!    via [`pre_configure_overlay`](ferroday_cage::provision::debian::DebianBuilder::pre_configure_overlay)
 //!    so a package's maintainer scripts see the l10n/depthcharge config as they
-//!    configure.
+//!    configure. A pinned install fetches neither a release nor a package index —
+//!    see [`build_debian`].
 //! 3. **Customize** the tree boot2deb-side: lay the post-install overlay in, then
 //!    run the account/`postinst.d`/depthcharge steps as commands in a subordinate
 //!    cage over the finished tree.
@@ -33,13 +39,17 @@
 //!    both in the shared [`RootfsStore`].
 //!
 //! The account is created **locked**; the unique per-image first-boot password is
-//! spliced into `/etc/shadow` at image assembly, keeping the cached tree reusable.
+//! spliced into `/etc/shadow` at image assembly, keeping the cached tree reusable. Its
+//! `sudoers` drop-in and `authorized_keys` *are* part of the tree, and so part of the
+//! [`cache_key`](crate::rootcache::cache_key) — they are resolved config, identical for
+//! every image built from one build point, unlike the password.
 
 use super::{
     config, stage_overlay, stage_preinstall_overlay, AptRepo, BootConfig, RootfsArtifacts,
     RootfsOptions, DEFAULT_USER, REQUIRED_INITRD_MODULES,
 };
-use crate::bootstrap::COMPONENTS;
+use crate::archfetch::ArchiveFetch;
+use crate::bootstrap::components;
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::repo::LocalDistsRepo;
@@ -260,48 +270,30 @@ pub fn build_rootfs(
             .scratch_dir
             .join(format!("{PROVISIONED_PREFIX}{}", std::process::id()));
         sweep_provisioned(opts.scratch_dir);
-        // The bootstrap resolves the install closure a second time, for itself,
-        // and installs *that* result — the plan above was resolved earlier and
-        // only keys the cache. `DebianEvent::Resolved` carries the bootstrap's
-        // own resolution, so capturing it here is what lets the manifest describe
-        // the packages the image actually carries: between the two resolutions
-        // the archive can publish, and a manifest resolved before the install is
-        // then a claim about a set that was never installed.
-        let mut installed: Option<Plan> = None;
-        let mut bootstrap_sink = |event: DebianEvent<'_>| {
-            if let DebianEvent::Resolved { plan, .. } = &event {
-                installed = Some((*plan).clone());
-            }
-            forward_bootstrap_event(&step, event);
-        };
-        provision::ensure(&rootfs_dir, &mut debian.observe(&mut bootstrap_sink)).map_err(|e| {
-            EngineError::Bootstrap {
+        // The bootstrap installs the plan resolved above, verbatim. That is what
+        // makes the cache key, the installed set, and the manifest one claim
+        // rather than three: a bootstrap left to resolve for itself could pick up
+        // an archive that published in between, and the entry cached under the
+        // earlier key would then hold a tar and a manifest describing a different
+        // set. Handing the plan back also drops the second resolution's release
+        // and index fetches, which are the bulk of what a resolve costs.
+        let mut installer = build_debian(
+            build,
+            opts,
+            localrepo.file_url(),
+            feature_repositories(opts.apt_sources)?,
+            &deb_cache,
+            &preinstall,
+            Some(plan.clone()),
+        )?;
+        let mut bootstrap_sink = |event: DebianEvent<'_>| forward_bootstrap_event(&step, event);
+        provision::ensure(&rootfs_dir, &mut installer.observe(&mut bootstrap_sink)).map_err(
+            |e| EngineError::Bootstrap {
                 context: "provision the rootfs".into(),
                 message: e.to_string(),
-            }
-        })?;
+            },
+        )?;
         let _provisioned = ProvisionedRoot(rootfs_dir.clone());
-        // The two resolutions agreeing is the ordinary case; a divergence means
-        // the archive moved mid-build, which is worth seeing rather than
-        // silently absorbing — the cached entry is keyed on the earlier plan
-        // while its tar and manifest describe the later one.
-        let installed = match installed {
-            Some(installed) => {
-                if installed != plan {
-                    step.log(format!(
-                        "note: the bootstrap resolved {} packages, not the {} the cache key \
-                         was taken from — the archive published mid-build; the manifest \
-                         describes what was installed",
-                        installed.packages.len(),
-                        plan.packages.len()
-                    ));
-                }
-                installed
-            }
-            // The bootstrap always reports its plan; falling back to the
-            // cache-key resolution keeps a manifest written either way.
-            None => plan.clone(),
-        };
         step.progress(55);
 
         customize(
@@ -315,7 +307,7 @@ pub fn build_rootfs(
         step.progress(65);
 
         export_rootfs_tar(&rootfs_dir, &tarball, opts.source_date_epoch, &step)?;
-        write_plan_manifest(&installed, opts.manifest_out, &step)?;
+        write_plan_manifest(&plan, opts.manifest_out, &step)?;
         step.progress(70);
 
         if let Some((store, key)) = &cache {
@@ -330,7 +322,97 @@ pub fn build_rootfs(
     Ok(RootfsArtifacts {
         tar: tarball,
         manifest: opts.manifest_out.to_path_buf(),
+        plan: plan_out,
     })
+}
+
+/// Read a plan document a `reproduce` run handed in, returning the parsed plan and the
+/// document's own bytes.
+///
+/// Both halves are returned because they are not interchangeable. The plan drives the
+/// install; the *document* is what gets republished, verbatim, so the artifact this run
+/// leaves behind is the one it was given rather than this build's re-rendering of it. A
+/// document may carry fields written by a newer library than this one links — those are
+/// carried through a round trip, but re-emitted after the fields this version knows
+/// rather than where they were, so a re-render is a different file with the same
+/// meaning. Publishing the original keeps the digest a reader compares against stable.
+///
+/// The plan's suite, architecture, and archive count are checked against the configured
+/// bootstrap by the provisioner library at `build()` time, so they are not re-checked
+/// here — a mismatch surfaces as its own configuration error naming both values.
+fn read_pinned_plan(path: &Path, step: &Step) -> Result<(Plan, String), EngineError> {
+    let document = std::fs::read_to_string(path).map_err(|s| EngineError::io(path, s))?;
+    let plan = Plan::parse_document(&document).map_err(|e| EngineError::Bootstrap {
+        context: format!("read the pinned plan {}", path.display()),
+        message: e.to_string(),
+    })?;
+    step.log(format!(
+        "replaying the pinned plan {} ({} packages, {} archive(s)) — the archive is not consulted",
+        path.display(),
+        plan.packages.len(),
+        plan.archives.len()
+    ));
+    Ok((plan, document))
+}
+
+/// Read a published plan document into what the provenance manifest records of it.
+///
+/// The digest is of the file's bytes, and the archive rows are parsed from the same
+/// read, so the manifest describes the document that was published rather than a value
+/// carried alongside it. That also lets an `--stage image` re-run over an existing
+/// rootfs tar record the plan the earlier rootfs stage left in the output directory,
+/// the same way it records that stage's solved manifest.
+pub fn read_plan_record(path: &Path) -> Result<PlanRecord, EngineError> {
+    let bytes = std::fs::read(path).map_err(|s| EngineError::io(path, s))?;
+    let text = String::from_utf8(bytes.clone()).map_err(|_| EngineError::Bootstrap {
+        context: format!("read the plan document {}", path.display()),
+        message: "the document is not valid UTF-8".into(),
+    })?;
+    let plan = Plan::parse_document(&text).map_err(|e| EngineError::Bootstrap {
+        context: format!("read the plan document {}", path.display()),
+        message: e.to_string(),
+    })?;
+    Ok(PlanRecord {
+        sha256: crate::blobs::sha256_hex(&bytes),
+        archives: archive_records(&plan),
+    })
+}
+
+/// What a published plan document contributes to the provenance manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRecord {
+    /// Lowercase-hex sha256 of the document's bytes on disk.
+    pub sha256: String,
+    /// One row per repository the plan resolved against, in configuration order.
+    pub archives: Vec<boot2deb_core::provenance::ArchiveProvenance>,
+}
+
+/// Project a plan's archive states into the provenance manifest's `[[archives]]` rows.
+///
+/// A repository served over `file://` is marked local and its URL dropped: that URL is a
+/// path on the build host — for the build's own `.deb` pool, a per-run path under a
+/// per-run directory — and a record whose value is being portable may not carry one, the
+/// same reason the sandbox record drops a run's own working and artifact binds. Every
+/// other field is carried across as the resolve reported it.
+fn archive_records(plan: &Plan) -> Vec<boot2deb_core::provenance::ArchiveProvenance> {
+    plan.archives
+        .iter()
+        .enumerate()
+        .map(|(index, archive)| {
+            let local = archive.mirror.starts_with("file://");
+            boot2deb_core::provenance::ArchiveProvenance {
+                index,
+                local,
+                mirror: (!local).then(|| archive.mirror.clone()),
+                suite: archive.suite.clone(),
+                components: archive.components.clone(),
+                release_sha256: archive.release_sha256.clone(),
+                date: archive.date.clone(),
+                valid_until: archive.valid_until.clone(),
+                signed_by: archive.signed_by.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Removes a provisioned staging tree through the subordinate map on drop, so a
@@ -393,17 +475,32 @@ impl Drop for PoolDir {
     }
 }
 
-/// Assemble the [`Debian`] provisioner from the resolved build and options.
+/// Assemble the [`Debian`] provisioner from the resolved build and options, either to
+/// **resolve** a plan (`plan` is `None`) or to **install** one it was already given.
 ///
 /// The primary mirror (plus any `snapshot.debian.org` backstop, which relaxes
 /// freshness) is configured on the builder; the local trusted `dists/` pool and the
 /// feature repositories are merged in as additional [`Repository`] sources. The
-/// base seeds the `important` variant — a full base system, unlike the build
-/// sandbox's minimal one —
-/// the resolved package set and the build's `extra_packages` are the includes, the
-/// resolved excludes are dropped, and the subordinate map gives the tree real
-/// ownership. The pre-install overlay is handed to the provisioner's pre-configure
-/// hook, and the download cache is content-addressed for reuse.
+/// subordinate map gives the tree real ownership, the pre-install overlay is handed to
+/// the provisioner's pre-configure hook, and the download cache is content-addressed
+/// for reuse. All of that describes *how* a bootstrap runs and applies to both modes.
+///
+/// What differs is *what* it installs, and the two are mutually exclusive by the
+/// library's own rule:
+///
+/// - **Resolving.** The base seeds the `important` variant — a full base system, unlike
+///   the build sandbox's minimal one — the resolved package set and the build's
+///   `extra_packages` are the includes, and the resolved excludes are dropped.
+/// - **Installing.** A pinned [`Plan`] already names every package, so the selectors
+///   that would shape a resolution contradict it and are refused at `build()` with a
+///   configuration error; they are omitted here rather than passed and rejected. The
+///   bootstrap then fetches exactly the plan's packages by the digests it records,
+///   touching neither a release nor a package index — the resolve those pay for already
+///   happened.
+///
+/// Both modes configure the same repositories in the same order, which is what lets a
+/// plan resolved by the first be installed by the second: a planned package names its
+/// archive as an index into that list.
 ///
 /// The provisioner borrows nothing from the caller — its progress sink is bound
 /// per call by [`Debian::observe`] — so it is a `Debian<'static>` that outlives
@@ -415,6 +512,7 @@ fn build_debian(
     feature_repos: Vec<Repository>,
     deb_cache: &Path,
     preinstall: &Path,
+    plan: Option<Plan>,
 ) -> Result<Debian<'static>, EngineError> {
     let arch = build.arch.debian_arch();
     let (primary, fallbacks) = opts
@@ -424,15 +522,23 @@ fn build_debian(
 
     let mut b = Debian::builder(build.image_suite())
         .architecture(arch)
-        .components(COMPONENTS.split(','))
-        .base_priority(Priority::Important)
-        .include(build.rootfs_packages.iter().cloned())
-        .include(opts.extra_packages.iter().cloned())
-        .exclude(build.rootfs_exclude.iter().cloned())
+        .components(components(build).split(','))
         .identity_map(IdentityMap::Subordinate)
         .cache_dir(deb_cache)
         .pre_configure_overlay(preinstall)
+        // A feature repository can be published at any URL its vendor chose, and the
+        // library's own client speaks no TLS — so the transport is boot2deb's to
+        // supply. See [`ArchiveFetch`].
+        .fetcher(Box::new(ArchiveFetch::new()))
         .mirror(primary);
+    b = match plan {
+        Some(plan) => b.plan(plan),
+        None => b
+            .base_priority(Priority::Important)
+            .include(build.rootfs_packages.iter().cloned())
+            .include(opts.extra_packages.iter().cloned())
+            .exclude(build.rootfs_exclude.iter().cloned()),
+    };
     for fallback in fallbacks {
         b = b.mirror_fallback(fallback);
     }
@@ -475,7 +581,17 @@ fn build_debian(
 /// each verified against its own keyring and carrying its own suite/components, so
 /// an out-of-mirror app resolves in the provisioner's closure. Each writes its own
 /// `/etc/apt/sources.list.d/<name>.list` into the finished rootfs.
-fn feature_repositories(apt_sources: &[AptRepo]) -> Result<Vec<Repository>, EngineError> {
+///
+/// The source's `name` is passed through verbatim, because resolution already held it
+/// to the portable file-name stem a repository name accepts. Reducing an
+/// out-of-set name to a legal one instead would not be safer: the map is not
+/// injective, so two sources resolution accepted as distinct could land on one
+/// `sources.list.d` entry, and the repository whose line lost would be absent from the
+/// finished image with its packages already installed. An unusable name is rejected
+/// where it is authored.
+pub(crate) fn feature_repositories(
+    apt_sources: &[AptRepo],
+) -> Result<Vec<Repository>, EngineError> {
     apt_sources
         .iter()
         .map(|repo| {
@@ -483,7 +599,7 @@ fn feature_repositories(apt_sources: &[AptRepo]) -> Result<Vec<Repository>, Engi
                 .mirror(&repo.source.uri)
                 .components(repo.source.components.iter().cloned())
                 .keyring(&repo.keyring)
-                .name(sanitize_repo_name(&repo.source.name))
+                .name(&repo.source.name)
                 .build()
                 .map_err(|e| EngineError::Bootstrap {
                     context: format!("configure feature repository {}", repo.source.name),
@@ -493,32 +609,17 @@ fn feature_repositories(apt_sources: &[AptRepo]) -> Result<Vec<Repository>, Engi
         .collect()
 }
 
-/// Reduce a feature-source name to the portable file-name stem a repository name
-/// accepts (ASCII letters, digits, `.`, `-`, `_`), so its `sources.list.d` entry
-/// and keyring file cannot escape their directories.
-fn sanitize_repo_name(name: &str) -> String {
-    let stem: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if stem.is_empty() || stem == "." || stem == ".." {
-        "feature".to_string()
-    } else {
-        stem
-    }
-}
-
 /// The rootfs cache key: the plan's solved set plus the two staged overlay trees'
-/// content, the local-repo `.deb`s' content, the feature repositories, and the
-/// interpreter that configures the tree. Keying on the *solved* set is what
-/// makes a hit safe — a moved mirror resolves a different plan, hence a different
-/// key, and rebuilds.
+/// content, the local-repo `.deb`s' content, the feature repositories, the
+/// interpreter that configures the tree, and the account policy the customize step
+/// writes into it. Keying on the *solved* set is what makes a hit safe — a moved mirror
+/// resolves a different plan, hence a different key, and rebuilds.
+///
+/// The account policy has to be folded explicitly because it is the one part of the
+/// tree the customize script writes from resolved config rather than from a staged
+/// file: the overlay fingerprints below cannot see it, so without it a build that added
+/// an authorized key or tightened `sudo` would key alike with one that had not, and be
+/// served the older tree.
 fn rootfs_key(
     build: &ResolvedBuild,
     opts: &RootfsOptions,
@@ -545,7 +646,10 @@ fn rootfs_key(
         apt_sources: &apt_fp,
         arch: &arch,
         suite: build.image_suite(),
+        components: components(build),
         interpreter: opts.interpreter_id,
+        sudo: build.sudo.as_str(),
+        authorized_keys: &build.ssh_authorized_keys,
     }))
 }
 
@@ -706,8 +810,9 @@ fn run_customize_cage(rootfs: &Path, script: &str, step: &Step) -> Result<(), En
 /// `chroot` and no `$rootfs` prefix.
 ///
 /// It creates the default account **locked** (the per-image password is spliced in
-/// at image assembly, so the tree stays cacheable), grants group access, sets
-/// passwordless sudo, clears the ssh host keys for first-boot regeneration, drops
+/// at image assembly, so the tree stays cacheable), grants group access, writes the
+/// resolved [`SudoPolicy`](boot2deb_core::model::SudoPolicy) drop-in and any
+/// [`authorized_keys`], clears the ssh host keys for first-boot regeneration, drops
 /// the build-time-only local `.deb` repository's apt source (its `file://` temp dir
 /// is gone once the image runs), and re-runs the kernel `postinst.d` hooks so `/boot`
 /// gains the initrd, board dtb,
@@ -722,12 +827,14 @@ fn customize_script(user: &str, build: &ResolvedBuild, boot: Option<BootConfig>)
         "useradd -m -s /bin/bash '{user}'\n\
          usermod -aG video,render '{user}'\n\
          mkdir -p /etc/sudoers.d\n\
-         printf '%s ALL=(ALL) NOPASSWD: ALL\\n' '{user}' > /etc/sudoers.d/{user}\n\
+         printf '%s ALL=(ALL) {sudoers}\\n' '{user}' > /etc/sudoers.d/{user}\n\
          chmod 0440 /etc/sudoers.d/{user}\n\
          rm -f /etc/ssh/ssh_host_*\n\
          rm -f /etc/apt/sources.list.d/{local_repo}.list\n",
+        sudoers = build.sudo.sudoers_spec(),
         local_repo = LOCAL_REPO_NAME,
     );
+    s.push_str(&authorized_keys(user, &build.ssh_authorized_keys));
     // Boot artifacts: re-run the kernel postinst.d hooks for the installed kernel,
     // now that the overlay's hooks and the PARTUUID-rooted fstab are in place.
     // --exit-on-error fails the build rather than shipping a kernel with nothing
@@ -740,6 +847,50 @@ fn customize_script(user: &str, build: &ResolvedBuild, boot: Option<BootConfig>)
     if let Some(BootConfig::Depthcharge { board, .. }) = boot {
         s.push_str(&depthcharge_finalize(board));
     }
+    s
+}
+
+/// The `~/.ssh/authorized_keys` block, or the empty string when no config root
+/// authorized anyone.
+///
+/// Written by the customize script rather than staged as an overlay file, for the same
+/// reason the `sudoers` drop-in is: the modes matter and the overlay cannot carry them.
+/// `sshd` under its default `StrictModes` refuses a key whose file or containing
+/// directories are group- or world-writable, and the overlay staging pass normalizes
+/// every mode it copies to `0755`/`0644` — so a staged `.ssh` would arrive at `0755`
+/// and be ignored. Here the script runs as root inside the cage, after `useradd -m` has
+/// made the home directory, and can set `0700`/`0600` and the account's ownership
+/// directly.
+///
+/// The keys go in through a **quoted heredoc**, so nothing in a key line is expanded or
+/// word-split: a comment may contain a quote, a dollar sign, or a backtick with no
+/// escaping question. Resolution has already guaranteed each entry is one line, which
+/// is what keeps the heredoc's own delimiter unreachable.
+fn authorized_keys(user: &str, keys: &[String]) -> String {
+    if keys.is_empty() {
+        return String::new();
+    }
+    let mut s = String::new();
+    let _ = write!(
+        s,
+        "install -d -m 0700 /home/{user}/.ssh\n\
+         cat > /home/{user}/.ssh/authorized_keys <<'BOOT2DEB_AUTHORIZED_KEYS'\n",
+    );
+    for key in keys {
+        s.push_str(key);
+        s.push('\n');
+    }
+    // `chown user:` — a trailing colon with no group names the account's *login* group,
+    // whatever it is called. `useradd` derives that name from the target's
+    // `login.defs`, which is the target's policy and not something to restate here: a
+    // guessed group name would either fail the build or, worse, be a group that happens
+    // to exist and is not the account's.
+    let _ = write!(
+        s,
+        "BOOT2DEB_AUTHORIZED_KEYS\n\
+         chmod 0600 /home/{user}/.ssh/authorized_keys\n\
+         chown -R '{user}:' /home/{user}/.ssh\n",
+    );
     s
 }
 
@@ -868,8 +1019,9 @@ fn export_rootfs_tar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boot2deb_core::model::AptSource;
+    use boot2deb_core::model::{AptSource, InitramfsCompress, SudoPolicy};
     use boot2deb_core::{resolve_recipe, ConfigRoot, Overrides};
+    use std::process::Command;
 
     fn repo_root() -> ConfigRoot {
         ConfigRoot::new(
@@ -896,12 +1048,272 @@ mod tests {
         resolve_recipe(&repo_root(), "asus-c201/forky", &Overrides::default()).unwrap()
     }
 
+    /// A minimal plan document standing in for one [`Debian::resolve`] would return, so
+    /// the pinned-install configuration is exercisable with no archive to resolve
+    /// against. One archive and one package is enough: what is under test is which
+    /// *settings* the installing provisioner carries, not what it would install.
+    fn sample_plan(suite: &str, architecture: &str) -> Plan {
+        Plan::parse_document(&format!(
+            "Format: ferroday-cage-plan 1\n\
+             Suite: {suite}\n\
+             Architecture: {architecture}\n\
+             \n\
+             Archive: 0\n\
+             Mirror: https://deb.debian.org/debian\n\
+             Suite: {suite}\n\
+             Components: main\n\
+             Release-SHA256: {zeros}\n\
+             Signed-By:\n\
+             \n\
+             Package: base-files\n\
+             Version: 13\n\
+             Architecture: {architecture}\n\
+             SHA256: {zeros}\n\
+             Filename: pool/main/b/base-files/base-files_13_{architecture}.deb\n\
+             Archive: 0\n",
+            zeros = "0".repeat(64),
+        ))
+        .expect("the document is well-formed")
+    }
+
+    /// Options standing in for a build's, carrying only what [`build_debian`] reads:
+    /// the mirror list, the excludes/includes, and the paths. The rest is the struct's
+    /// own shape.
+    fn sample_options<'a>(
+        mirrors: &'a [String],
+        dir: &'a Path,
+        identity: &'a boot2deb_core::provenance::SystemIdentity,
+    ) -> RootfsOptions<'a> {
+        RootfsOptions {
+            repo_debs: &[],
+            overlay_dirs: &[],
+            preinstall_overlay_dirs: &[],
+            boot_config: None,
+            image_identity: identity,
+            rootfs_partuuid: uuid::Uuid::nil(),
+            out_dir: dir,
+            stem: "sample",
+            scratch_dir: dir,
+            keyring: None,
+            interpreter_id: None,
+            manifest_out: dir,
+            pinned_plan: None,
+            mirrors,
+            extra_packages: &[],
+            cache_dir: None,
+            refresh: false,
+            apt_sources: &[],
+            source_date_epoch: None,
+        }
+    }
+
+    /// A stand-in system identity: [`build_debian`] never reads it, and the options
+    /// struct requires one.
+    fn sample_identity() -> boot2deb_core::provenance::SystemIdentity {
+        use boot2deb_core::provenance::{IdentityImage, IdentityKernel, SystemIdentity};
+        SystemIdentity {
+            version: 1,
+            image: IdentityImage {
+                device: "sample".into(),
+                description: "sample".into(),
+                arch: "arm64".into(),
+                soc: "sample".into(),
+                boot_method: "rockchip-rkbin".into(),
+                board: None,
+                suite: "forky".into(),
+                features: Vec::new(),
+                layout: "combined".into(),
+                hostname: "sample".into(),
+            },
+            kernel: IdentityKernel {
+                id: "sample".into(),
+                flavor: "mainline".into(),
+                package: None,
+                reference: None,
+                commit: None,
+                patch_series: Vec::new(),
+            },
+        }
+    }
+
+    /// The build resolves once and installs what it resolved, which the provisioner
+    /// library enforces rather than trusts: a pinned plan already names every package,
+    /// so `include`, `exclude`, and `base_priority` contradict it and are refused at
+    /// `build()`. Constructing the installing provisioner successfully is therefore the
+    /// assertion that [`build_debian`] omits all three — and moving any of them out of
+    /// the `None` arm and into the shared chain fails this test rather than a build ten
+    /// minutes in.
+    ///
+    /// The resolving provisioner is built from the same options in the same test, so the
+    /// two modes are held to differ *only* in that: a change that broke the resolving
+    /// configuration would fail here too.
     #[test]
-    fn sanitize_repo_name_yields_a_portable_stem() {
-        assert_eq!(sanitize_repo_name("jellyfin"), "jellyfin");
-        assert_eq!(sanitize_repo_name("my repo/x"), "my-repo-x");
-        assert_eq!(sanitize_repo_name(".."), "feature");
-        assert_eq!(sanitize_repo_name(""), "feature");
+    fn the_installing_provisioner_drops_the_selectors_its_pinned_plan_replaces() {
+        let build = rk1();
+        let tmp = tempfile::tempdir().unwrap();
+        let mirrors = vec!["https://deb.debian.org/debian".to_string()];
+        let identity = sample_identity();
+        let opts = sample_options(&mirrors, tmp.path(), &identity);
+        let deb_cache = tmp.path().join("debs");
+        let preinstall = tmp.path().join("overlay-pre");
+        let local_url = "file:///nonexistent/localrepo";
+
+        // The build resolves excludes, so the resolving mode really does carry a
+        // selector the pinned mode must drop — without that this test would pass
+        // vacuously.
+        assert!(
+            !build.rootfs_exclude.is_empty(),
+            "the fixture must exercise the selectors the pinned mode omits"
+        );
+        build_debian(
+            &build,
+            &opts,
+            local_url,
+            Vec::new(),
+            &deb_cache,
+            &preinstall,
+            None,
+        )
+        .expect("the resolving provisioner carries the selectors");
+
+        let plan = sample_plan(build.image_suite(), build.arch.debian_arch());
+        build_debian(
+            &build,
+            &opts,
+            local_url,
+            Vec::new(),
+            &deb_cache,
+            &preinstall,
+            Some(plan),
+        )
+        .expect("a pinned plan is refused alongside include/exclude/base_priority");
+    }
+
+    /// A plan document is what a `reproduce` run is handed, so the read has to accept
+    /// what a build writes — round-tripped here through the real renderer rather than
+    /// against a hand-written string, which would only prove the fixture parses.
+    #[test]
+    fn a_published_plan_document_reads_back_as_the_plan_that_wrote_it() {
+        let plan = sample_plan("forky", "arm64");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sample.plan");
+        std::fs::write(&path, plan.to_document().unwrap()).unwrap();
+
+        let step = Step::start(&|_| {}, "test");
+        let (read_back, document) = read_pinned_plan(&path, &step).unwrap();
+        assert_eq!(read_back, plan, "the replayed plan is the published one");
+        assert_eq!(
+            document,
+            std::fs::read_to_string(&path).unwrap(),
+            "the document is carried verbatim, not re-rendered"
+        );
+    }
+
+    /// The provenance rows are the manifest's account of what the packages were selected
+    /// from. Two properties decide whether that account is portable: a `file://`
+    /// repository is the build host's own, so its path must not reach the record, and an
+    /// unsigned repository must read as unsigned rather than as unrecorded.
+    #[test]
+    fn the_archive_rows_drop_a_build_host_path_and_keep_an_empty_signer() {
+        let plan = Plan::parse_document(&format!(
+            "Format: ferroday-cage-plan 1\n\
+             Suite: forky\n\
+             Architecture: arm64\n\
+             \n\
+             Archive: 0\n\
+             Mirror: https://deb.debian.org/debian\n\
+             Suite: forky\n\
+             Components: main non-free-firmware\n\
+             Release-SHA256: {zeros}\n\
+             Date: Sun, 02 Aug 2026 08:12:34 UTC\n\
+             Signed-By: 4CB50190207B4758A3F73A796ED0E7B82643E131\n\
+             \n\
+             Archive: 1\n\
+             Mirror: file:///home/someone/.cache/provisioner-pool-4242\n\
+             Suite: forky\n\
+             Components: main\n\
+             Release-SHA256: {zeros}\n\
+             Signed-By:\n",
+            zeros = "0".repeat(64),
+        ))
+        .unwrap();
+        let rows = archive_records(&plan);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].index, 0);
+        assert!(!rows[0].local);
+        assert_eq!(
+            rows[0].mirror.as_deref(),
+            Some("https://deb.debian.org/debian")
+        );
+        assert_eq!(rows[0].components, ["main", "non-free-firmware"]);
+        assert_eq!(rows[0].signed_by.len(), 1);
+
+        assert_eq!(rows[1].index, 1);
+        assert!(
+            rows[1].local,
+            "a file:// repository is the build host's own"
+        );
+        assert_eq!(
+            rows[1].mirror, None,
+            "a per-run path on this machine must not reach the record"
+        );
+        assert!(
+            rows[1].signed_by.is_empty(),
+            "an unsigned repository is recorded as unsigned"
+        );
+    }
+
+    /// The digest recorded is of the file, not of a re-rendering of the plan it holds —
+    /// which is what keeps it comparable against a document written by a library version
+    /// that carried fields this one would re-emit elsewhere.
+    #[test]
+    fn the_plan_record_digests_the_published_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sample.plan");
+        let document = sample_plan("forky", "arm64").to_document().unwrap();
+        std::fs::write(&path, &document).unwrap();
+
+        let record = read_plan_record(&path).unwrap();
+        assert_eq!(record.sha256, crate::blobs::sha256_hex(document.as_bytes()));
+        assert_eq!(record.archives.len(), 1);
+    }
+
+    /// A source name is carried to the `sources.list.d` stem as authored, and one
+    /// that is not a portable stem fails the build of the repository rather than
+    /// being folded into a legal-looking neighbour. Resolution rejects such a name
+    /// first; this is the backstop at the boundary that writes the file.
+    #[test]
+    fn a_feature_repository_takes_its_name_verbatim_or_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keyring = tmp.path().join("jellyfin.gpg");
+        std::fs::write(&keyring, b"KEY-ONE").unwrap();
+        let source = AptSource {
+            name: "jellyfin".into(),
+            uri: "https://repo.jellyfin.org/debian".into(),
+            suite: "trixie".into(),
+            components: vec!["main".into()],
+            signed_by: "jellyfin.gpg".into(),
+        };
+        let build = |source: &AptSource| {
+            feature_repositories(&[AptRepo {
+                source,
+                keyring: keyring.clone(),
+            }])
+        };
+        assert!(build(&source).is_ok());
+
+        for bad in ["my repo/x", "..", "a:b"] {
+            let err = build(&AptSource {
+                name: bad.into(),
+                ..source.clone()
+            })
+            .expect_err("a name that is not a portable stem must not build a repository");
+            assert!(
+                err.to_string().contains(bad),
+                "the failure names the offending value, got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -997,6 +1409,12 @@ mod tests {
         assert!(!rkbin.contains("chpasswd"));
         assert!(!rkbin.contains("passwd -e"));
         assert!(rkbin.contains("usermod -aG video,render 'debian'"));
+        // The shipped default: root with no prompt, and nobody authorized by key.
+        assert!(rkbin.contains("printf '%s ALL=(ALL) NOPASSWD: ALL\\n' 'debian'"));
+        assert!(
+            !rkbin.contains("authorized_keys"),
+            "a config root that authorizes nobody must write no authorized_keys file"
+        );
         // The build-time-only local .deb repo's apt source is dropped: its `file://`
         // temp dir is gone by the time the image runs, so leaving it would fail every
         // on-device `apt-get update`.
@@ -1011,9 +1429,141 @@ mod tests {
             Some(BootConfig::Depthcharge {
                 board: "speedy",
                 cmdline: "console=tty1 ro",
+                initramfs_compress: InitramfsCompress::Xz,
             }),
         );
         assert_valid_shell("depthcharge", &depth);
+    }
+
+    /// The account block: the `sudoers` drop-in the resolved policy asks for, and an
+    /// `authorized_keys` file `sshd` will actually read.
+    #[test]
+    fn the_customize_script_writes_the_resolved_account_policy() {
+        const ED25519: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe operator@workstation";
+        const RSA: &str = "ssh-rsa AAAAB3NzaC1yc2EA laptop";
+
+        let build = resolve_recipe(
+            &repo_root(),
+            "turing-rk1/forky",
+            &Overrides {
+                sudo: Some(SudoPolicy::Password),
+                ssh_authorized_keys: Some(vec![ED25519.to_string(), RSA.to_string()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let script = customize_script(DEFAULT_USER, &build, None);
+        assert_valid_shell("account", &script);
+
+        // `password` writes the prompting spec, and must not leave NOPASSWD anywhere in
+        // the file: sudo takes the *last* matching rule, so a stale one is not inert.
+        assert!(script.contains("printf '%s ALL=(ALL) ALL\\n' 'debian'"));
+        assert!(!script.contains("NOPASSWD"));
+
+        // sshd's StrictModes refuses a key it can reach through a group-writable path,
+        // so the directory mode, the file mode, and the ownership are all load-bearing.
+        assert!(script.contains("install -d -m 0700 /home/debian/.ssh"));
+        assert!(script.contains("chmod 0600 /home/debian/.ssh/authorized_keys"));
+        // Trailing colon: the account's login group, whose name is the target's to decide.
+        assert!(script.contains("chown -R 'debian:' /home/debian/.ssh"));
+        assert!(
+            !script.contains("debian:debian"),
+            "the group name must not be guessed"
+        );
+
+        // Both keys land, one per line, in the order the config named them.
+        let body = script
+            .split_once("<<'BOOT2DEB_AUTHORIZED_KEYS'\n")
+            .expect("a quoted heredoc delimits the keys")
+            .1
+            .split_once("\nBOOT2DEB_AUTHORIZED_KEYS")
+            .expect("the heredoc is terminated")
+            .0;
+        assert_eq!(body, format!("{ED25519}\n{RSA}"));
+
+        // The `.ssh` directory is made after `useradd -m` has created the home it sits
+        // in — reversed, `install -d` would create a root-owned /home/debian and
+        // `useradd -m` would then decline to populate or chown it.
+        let useradd = script.find("useradd -m").expect("the account is created");
+        let ssh_dir = script.find("install -d").expect("the .ssh dir is made");
+        assert!(
+            useradd < ssh_dir,
+            "the home must exist before .ssh goes in it"
+        );
+    }
+
+    /// The block, executed. Two things are only true if the emitted commands actually
+    /// run: the file `sshd` reads carries the authored bytes *verbatim* — no expansion,
+    /// no word-splitting, no early end to the heredoc, whatever a key's comment holds —
+    /// and the modes it lands at are the ones `StrictModes` requires.
+    ///
+    /// Asserting on the script text cannot establish either: the failure mode is not a
+    /// broken build but a silently *different* file, and the only thing standing between
+    /// an authored comment and `sh` is the quoting.
+    ///
+    /// Run against the current account rather than `debian`, in a temp dir standing in
+    /// for the cage's `/`, so the real `install`/`chown`/`chmod` invocations are
+    /// exercised unprivileged — `chown "$me:"` to oneself needs no root, and it is the
+    /// same command string the cage runs as root over the rootfs.
+    #[test]
+    fn the_emitted_block_writes_the_keys_verbatim_at_the_modes_sshd_demands() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Every metacharacter that would matter in an unquoted context, plus the heredoc
+        // delimiter itself as a comment word.
+        let hostile = "ssh-ed25519 AAAAB3NzaC1yc2EA $(touch /pwned) `id` 'x' \"y\" \
+                       $HOME ${PATH} \\ BOOT2DEB_AUTHORIZED_KEYS";
+        let plain = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe second@key";
+
+        // The account this test can chown to. `id -un` rather than $USER, which a test
+        // runner need not set.
+        let me = Command::new("id").arg("-un").output().expect("id runs");
+        let me = String::from_utf8(me.stdout).unwrap().trim().to_string();
+
+        let script = authorized_keys(&me, &[hostile.to_string(), plain.to_string()]);
+        assert_valid_shell("authorized-keys", &script);
+
+        // Re-root the absolute paths at a temp dir; `useradd -m` makes the home in the
+        // real build, so create it here.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(format!("home/{me}"));
+        std::fs::create_dir_all(&home).unwrap();
+        let rooted = script.replace(
+            &format!("/home/{me}"),
+            &format!("{}/home/{me}", tmp.path().display()),
+        );
+        let status = Command::new("sh")
+            .arg("-eu")
+            .arg("-c")
+            .arg(&rooted)
+            .env("HOME", "/should-not-appear")
+            .status()
+            .expect("sh runs");
+        assert!(status.success(), "the block runs:\n{rooted}");
+
+        // Verbatim, in order, one key per line — nothing expanded and nothing executed.
+        let keyfile = home.join(".ssh/authorized_keys");
+        let written = std::fs::read_to_string(&keyfile).unwrap();
+        assert_eq!(written, format!("{hostile}\n{plain}\n"));
+        assert!(
+            !tmp.path().join("pwned").exists() && !std::path::Path::new("/pwned").exists(),
+            "a command substitution in a comment must not have run"
+        );
+
+        // The modes sshd's StrictModes checks before it will read a key at all: nothing
+        // group- or world-accessible on the directory, and no group/other write on the
+        // file.
+        let dir_mode = std::fs::metadata(home.join(".ssh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = std::fs::metadata(&keyfile).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "~/.ssh must be 0700, got {dir_mode:o}");
+        assert_eq!(
+            file_mode, 0o600,
+            "authorized_keys must be 0600, got {file_mode:o}"
+        );
     }
 
     #[test]
@@ -1024,6 +1574,7 @@ mod tests {
             Some(BootConfig::Depthcharge {
                 board: "speedy",
                 cmdline: "console=tty1 ro",
+                initramfs_compress: InitramfsCompress::Xz,
             }),
         );
         assert!(

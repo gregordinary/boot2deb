@@ -2,8 +2,8 @@
 
 The [Turing RK1](https://turingpi.com/product/turing-rk1/) is an RK3588 compute
 module that seats in a Turing Pi 2 cluster board. boot2deb ships it as a small family
-of recipes over one validated hardware base — kernel `v7.1.1` (linux-stable), u-boot
-`v2026.04`, and the RGA / VEPU / VDPU (and NPU) drivers carried in-kernel via the
+of recipes over one hardware base — kernel `v7.1.6` (linux-stable), u-boot
+`v2026.07`, and the RGA / VEPU / VDPU (and NPU) drivers carried in-kernel via the
 `rk3588-accel` patch series. It is a supported configuration in its own right and a
 good starting point for any RK3588 board.
 
@@ -16,6 +16,14 @@ Rockchip media **userspace** is built in:
 | `turing-rk1/trixie` | trixie | — (base) |
 | `turing-rk1/media-accel-forky` | forky | ffmpeg-rk + MPP + RGA |
 | `turing-rk1/media-accel-trixie` | trixie | ffmpeg-rk + MPP + RGA |
+| `turing-rk1/jellyfin-forky` | forky | ffmpeg-rk + MPP + RGA, plus Jellyfin |
+| `turing-rk1/jellyfin-trixie` | trixie | ffmpeg-rk + MPP + RGA, plus Jellyfin |
+
+The `jellyfin-*` pair is the media-server build — media-accel plus the Jellyfin
+server, pre-pointed at `ffmpeg-rk`; see
+[Accelerated Jellyfin](../jellyfin.md). `turing-rk1/util` is not an image along
+these axes at all but a u-boot-only recovery tool — see
+[Writing the NVMe from u-boot](#writing-the-nvme-from-u-boot).
 
 Every variant carries the **same accel kernel**: the VEPU / VDPU / RGA and NPU drivers
 are present in all of them, because the patches and kconfig live on the kernel axis. A
@@ -97,8 +105,73 @@ This writes `turing-rk1-forky-boot.img` (a few MiB, gap-sized) alongside the raw
 `-boot.img` to the eMMC with `tpi`/web UI; write the rootfs image to the target disk.
 
 Because `tpi`/web UI flash the eMMC only, the rootfs image goes onto the NVMe/USB disk
-by another route — typically `dd` from a running system on the node, or written on
-another machine.
+by another route. The bootloader itself is the shortest one — see below.
+
+## Writing the NVMe from u-boot
+
+The BMC writes eMMC and nothing else: the loader it streams into the module speaks
+eMMC, so the M.2 disk is invisible to `tpi flash`, to the web UI, and to gadget
+mode. The RK1's own u-boot has no such limit — it enumerates the disk over
+`pcie3x4` — so the shipped bootloader carries the two commands that let a host
+reach it. Build the tool variant for the full set:
+
+```sh
+boot2deb build turing-rk1/util --stage uboot     # writes turing-rk1-util-boot.img
+```
+
+Flash that to the eMMC with `tpi`, open the node's UART, and interrupt the
+countdown. Two routes from the prompt:
+
+**Export the disk to the BMC.** `ums` presents any block device u-boot can see as
+USB mass storage, so with the node's USB in device mode the BMC sees the NVMe as a
+normal disk:
+
+```
+=> nvme scan
+=> ums 0 nvme 0
+```
+
+then, from your machine, stream the image through the BMC — nothing is staged on
+the node or the BMC:
+
+```sh
+xzcat turing-rk1-forky-rootfs.img.xz | ssh root@<bmc> 'dd of=/dev/sdX bs=4M'
+```
+
+**Or pull the image in over the network** and let u-boot write it. This needs a
+gzip image, since u-boot has no xz decompressor:
+
+```sh
+boot2deb build turing-rk1/forky --layout split --compress gz
+```
+
+```
+=> dhcp
+=> tftp ${loadaddr} turing-rk1-forky-rootfs.img.gz
+=> gzwrite nvme 0 ${loadaddr} ${filesize}
+```
+
+`gzwrite` decompresses and writes in one pass. Hash the image first with `md5sum`
+if the link is one you do not trust — several GiB over TFTP has no integrity check
+of its own. Images at or above 4 GiB uncompressed need `gzwrite`'s explicit
+`outsize` argument; the shipped recipes are well under it.
+
+Either way the eMMC still needs a bootloader afterwards. `boot2deb build
+turing-rk1/forky --stage uboot` emits the shipping one, which also carries `ums` —
+so a node that boots from NVMe keeps a route back to its disks without reflashing
+the tool.
+
+## Or keep the OS on eMMC and use the NVMe for data
+
+Often the better answer, and it makes the whole errand above unnecessary: flash the
+**entire** system to the eMMC — which the BMC can do in one step — and let the M.2
+disk hold data only. Reimaging then never touches the data, because the new image
+finds the volume by label and adopts it.
+
+The RK1's 29 GB eMMC has room for any of the shipped images several times over, so
+nothing is given up by keeping the OS there. No shipped recipe assumes this layout —
+where the data lives is an installation's choice, not the board's — so you add it to
+your own recipe. See [Data volumes](../data-volumes.md).
 
 ## Serial console
 
@@ -132,3 +205,30 @@ variant — check for `/dev/dri` and `/dev/rga`. A **media-accel** image also in
 `ffmpeg-rk` userspace, so you can exercise the `rkmpp` / `rkrga` paths directly; on a base
 image the blocks are present but idle until you install the media-accel debs (or build a
 `turing-rk1/media-accel-*` image).
+
+### Running the accelerated FFmpeg
+
+`ffmpeg-rk` installs under `/opt/ffmpeg-rk` and is on `PATH` as **`ffmpeg-rk`** (and
+`ffprobe-rk`). The suffix is deliberate: the build ships the same library sonames as
+Debian's own FFmpeg, so it is kept out of the system's paths and out of the loader's
+search path, and the plain `ffmpeg` name stays with the distro package.
+
+```sh
+ffmpeg-rk -hide_banner -filters  | grep rkrga      # scale_rkrga, vpp_rkrga, overlay_rkrga
+ffmpeg-rk -hide_banner -encoders | grep rkmpp      # h264_rkmpp, hevc_rkmpp
+```
+
+Hardware **decode** is reached with `-hwaccel v4l2request`, not with the `*_rkmpp`
+decoders — those are compiled in but do not open on a mainline kernel, where `rkvdec`
+is a V4L2 stateless driver rather than an MPP service. A transcode that scales looks
+like this, and scales on the CPU:
+
+```sh
+ffmpeg-rk -hwaccel v4l2request -i in.mkv \
+          -vf "hwdownload,format=nv12,scale=1280:720" \
+          -c:v hevc_rkmpp out.mp4
+```
+
+Both of those limits are stated as caveats on the `media-accel-rockchip` feature, so
+they print at the end of a build of any recipe composing it; see
+[Support matrix](../reference/support-matrix.md#caveats).

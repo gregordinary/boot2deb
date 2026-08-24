@@ -3,24 +3,46 @@
 # `requires_soc` / `requires_arch` gate) and carries no transcode stack of its
 # own. Hardware-accelerated transcode comes from composing this with a capability
 # feature that matches the target — e.g. `media-accel-rockchip` on an RK35xx board
-# (see recipes/turing-rk1/jellyfin.toml). Without one, Jellyfin still installs and
-# runs; transcode falls back to software.
+# — plus the glue feature that points Jellyfin at that stack's encoder
+# (`jellyfin-rockchip`); see recipes/turing-rk1/jellyfin-forky.toml. Without them,
+# Jellyfin still installs and runs; transcode falls back to software.
 #
 # Jellyfin is not in the Debian mirror, so this feature adds its signed upstream
-# apt repository (`[[apt_sources]]`) — apt then resolves `jellyfin` and its
+# apt repository (`[[apt_sources]]`) — apt then resolves the packages and their
 # dependencies during the rootfs solve, rather than a post-install `dpkg -i` that
-# resolves nothing. The repo's signing key is a build-host prerequisite,
+# resolves nothing. The source persists on the device, so `apt upgrade` tracks
+# Jellyfin's releases: a network-facing server that could only be updated by
+# reflashing would be the worse system. The repo's signing key is a build-host prerequisite,
 # vendored under blobs/keyrings/ like the Debian archive keyring; see
 # blobs/keyrings/README.md. An overlay tree at features/jellyfin/overlay/ is
-# merged if present; this feature ships none today — Jellyfin runs with its
-# bundled ffmpeg, and pointing it at the system HW ffmpeg is a documented
-# refinement (see features/jellyfin/README.md).
+# merged if present; this feature ships none — configuration that presumes a
+# particular transcode stack belongs to the glue feature, not here.
 description = "Jellyfin media server (composes with a media-accel-* capability feature)"
-packages    = ["jellyfin"]
 
-# Jellyfin keys its pockets on the base OS codename. `forky` (the RK1's suite) is
-# not yet a published Jellyfin pocket; `trixie` is the closest published stable
-# base and installs cleanly on a forky rootfs. Retarget when a forky pocket ships.
+# The server and the web client, not the `jellyfin` metapackage. The metapackage's
+# Depends line is `jellyfin-server, jellyfin-web, jellyfin-ffmpeg8`, so it drags in
+# a second complete FFmpeg; `jellyfin-server` itself only *Recommends*
+# `jellyfin-ffmpeg8 | ffmpeg`, and this builder never installs Recommends. Naming
+# the two real packages keeps the bundled FFmpeg out, which is what an image that
+# supplies its own encoder wants: `jellyfin-ffmpeg8` is linked against library
+# sonames its own pocket carries, so pulling it onto a different Debian suite drags
+# that pocket's versions in behind it and perturbs the codec libraries the rest of
+# the image resolved against.
+#
+# The consequence is deliberate and worth stating: with no bundled FFmpeg there is
+# no fallback encoder. An image that composes this feature and gets the encoder
+# path wrong has no transcoding at all, rather than silently falling back to a
+# binary that cannot reach the hardware.
+packages = ["jellyfin-server", "jellyfin-web"]
+
+# Jellyfin keys its pockets on the base OS codename, and publishes no `forky`
+# pocket — `https://repo.jellyfin.org/debian/dists/forky/` is absent, while
+# `trixie` is current and lists `Architectures: amd64 arm64`. The trixie packages
+# install and run on a forky rootfs. Retarget when a forky pocket ships.
+#
+# `main` only. The repository also publishes an `unstable` component — Jellyfin's
+# pre-release channel, which their install instructions enable so that release
+# candidates are reachable. A shipped image tracks releases.
 [[apt_sources]]
 name       = "jellyfin"
 uri        = "https://repo.jellyfin.org/debian"

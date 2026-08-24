@@ -49,14 +49,47 @@ across future rebases.
 ### 2. The Debian archive (rootfs)
 
 The rootfs is the fast-moving layer: a testing suite like `forky` changes daily, and the
-exact package versions a build installs rotate off the live mirror as it advances. Two
+exact package versions a build installs rotate off the live mirror as it advances. Three
 mechanisms pin it:
 
 - The lock's solved manifest fixes **which bytes** install — every package name, version,
   and sha256. This is always present.
+- The published **plan document** (`<point>.plan`, beside the image) additionally fixes
+  *how to install exactly those bytes*, and records the archive state they were selected
+  from. `boot2deb reproduce` replays it. This is written by every build.
 - A captured `snapshot.debian.org` timestamp fixes **availability** of those bytes after
   they leave the live mirror. This is opt-in and dormant by default (`mode = off`), so
   day-to-day builds go straight to the live mirror.
+
+The manifest and the plan are not two spellings of one thing. The manifest is a *pin*
+the next build is verified against — a fresh solve that no longer reproduces it is an
+error. The plan is an *instruction*: hand it back and the rootfs installs that set
+without solving at all, which is the difference between detecting drift and not being
+subject to it. And the plan carries what neither the manifest nor the lock does — the
+mirror that answered, the suite and components, the sha256 of the release body that was
+verified, its `Date` and `Valid-Until`, and the fingerprint of the key that verified it.
+The provenance manifest repeats those as `[[archives]]`, one entry per repository, so an
+image's own record says what its packages were selected *from* and not only which they
+were.
+
+Replaying a plan **moves the trust anchor**, which is why it is `reproduce`'s to do and
+not something a `build` flag can turn on. A pinned install reads neither a release nor a
+package index, so the package digests no longer chain to an archive signature; they chain
+to the plan. Each `.deb` is still verified against the digest the plan records, so a
+mirror serving different bytes is caught — what is no longer checked is that the document
+describes a set the archive ever offered. For reproducing an image you published, whose
+plan you have alongside it, that is the right trade. For a routine build it is not, and a
+build that sets no plan resolves exactly as before.
+
+One consequence is worth stating plainly: **a recipe that compiles its own packages
+replays only if those compiles are byte-reproducible.** The kernel `.deb`, and on a
+media-accel recipe `ffmpeg-rk`/`librockchip-mpp1`/`librga2`, install from the build's own
+local pool and are pinned by digest like everything else. So a replay either matches
+them — which proves the whole image reproduced, compiles included — or fails naming the
+package that drifted. The failure is the honest outcome, not a defect in the mechanism: a
+build that cannot reproduce its own compiler output was never reproducible, and this is
+where that becomes visible instead of silent. A board that installs Debian's kernel and
+compiles nothing has no such dependency.
 
 Snapshot has three modes: `off` (live mirror only), `fallback` (live first, the snapshot
 backfills anything that 404s), and `pin` (the snapshot only — a fully deterministic
@@ -222,6 +255,23 @@ What is recorded, because it genuinely does reach the image:
   since the scan is one implementation checking its own output. That makes verification
   *depth* host-determined, so it is stated rather than left to a log line, and a release
   build can be gated on it.
+- **`[image].image_bytes`** — the whole-disk size the build laid out, beside the
+  `image_size` the recipe authored. The two agree for a stated size and the redundancy is
+  the point; they differ in kind for a measured one, where `fit+20%` states the rule and
+  only this says what it came to. Without it a fitted image's manifest could not answer
+  how large its own image is.
+- **`[[archives]]`** — the state each configured repository was in when the rootfs plan
+  resolved, in the order the resolve saw them, which is the index the `.plan` document's
+  packages name. Per entry: the mirror that answered, the suite and components, the sha256
+  of the release body that was verified, its `Date` and `Valid-Until`, and the fingerprint
+  of the key that verified it. `[rootfs]` says which package bytes shipped; this says what
+  they were selected *from*, which is the question a solved manifest cannot answer — the
+  same suite resolves to different versions a week apart. An empty `signed_by` is a fact
+  rather than a gap: it says that repository was trusted unsigned, which is how the
+  build's own `.deb` pool is configured. That pool's entry is marked `local` and carries
+  no mirror, because its URL is a per-run path under a per-run directory — a property of
+  the machine, kept out for the same reason the sandbox record carries no working or
+  artifact path.
 - **`[build_sandbox]`, `[cross_sandbox]` and `[packaging_root]`** — the package sets of the
   three provisioned roots that produced the build's `.deb`s: the target-arch base that
   *compiled* the media-accel packages, the host-arch base that *compiled* the kernel,
@@ -284,23 +334,42 @@ the result:
    `boot2deb verify-sources <recipe>` reports no `ORPHANED` pins.
 3. **Build from that clean, committed checkout**, so the image's `[built_with]` records a
    real commit with `dirty = false`.
-4. **Publish the image together with its `.provenance.toml`.** The manifest names the
-   builder that produced it; the committed lock — recoverable at that commit — carries the
-   snapshot timestamp and every source pin.
+4. **Publish the image together with its `.provenance.toml` and its `.plan`.** The
+   manifest names the builder that produced it and the archives it resolved against; the
+   plan is the document that replays them; the committed lock — recoverable at that
+   commit — carries the snapshot timestamp and every source pin.
+5. **Ship a bill of materials with it**, for the consumers who read one rather than a
+   provenance manifest: `--sbom spdx --sbom cyclonedx` on the build, or
+   [`boot2deb sbom`](cli.md#bill-of-materials) later from the manifest in step 4. It is
+   deterministic on the same terms as everything else here — its identity is derived
+   from the solved package set, so set `SOURCE_DATE_EPOCH` and two renderings of one
+   image are byte-identical.
 
 ## Reproducing a frozen image
 
-1. Read the published `.provenance.toml` for the `[built_with]` commit that produced it.
-2. `git checkout <built_with.commit>` in a boot2deb clone — this recovers the recipe and the
-   snapshot-pinned lock exactly as they were at build time.
-3. `boot2deb build <recipe>` — the lock's snapshot pin makes the userland deterministic, and
-   the pinned commits and blobs reproduce the compiled inputs.
+```sh
+boot2deb reproduce <recipe> --from <dir holding the published .plan>
+```
 
-The stamp is a floor, not a ceiling: a newer builder usually reproduces the image too and may
-carry fixes, so a current clone is the normal first attempt — step back toward the stamped
-commit only if it diverges. The builder stamp lives in the build's `.provenance.toml`, not on
-the image; the on-image `/etc/boot2deb/image.toml` (see [Image identity](image-identity.md))
-records the image and kernel identity, which a rescue tool reads without the provenance file.
+That is the whole flow. It runs the ordinary pipeline — the lock's pinned commits and
+blobs reproduce the compiled inputs — and replaces one step: the rootfs installs the
+plan's exact package set instead of solving for a new one. Point `--from` at wherever the
+image, its provenance manifest and its `.plan` were published; omit it to use this build
+point's own output directory, which is where a build on this machine already wrote them.
+
+The command reads the `[built_with]` stamp beside the plan and reports how the running
+checkout compares. That is advice, not a gate — the stamp is a floor, not a ceiling: a
+newer builder usually reproduces the image too and may carry fixes, so a current clone is
+the normal first attempt, and `git checkout <built_with.commit>` is the step to take only
+if it diverges. The builder stamp lives in the build's `.provenance.toml`, not on the
+image; the on-image `/etc/boot2deb/image.toml` (see [Image identity](image-identity.md))
+records the image and kernel identity, which a rescue tool reads without the provenance
+file.
+
+What each layer contributes to that one command: the **lock** reproduces the sources, the
+**plan** reproduces the package set, and the lock's **snapshot pin** keeps that set
+fetchable after the live mirror has moved on. Freeze all three and the replay is
+mechanical; freeze fewer and it is reproducible to whatever strength you chose.
 
 ## What is deliberately outside the claim
 

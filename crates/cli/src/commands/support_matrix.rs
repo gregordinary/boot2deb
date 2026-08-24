@@ -76,6 +76,15 @@ fn print_table(matrix: &Matrix) {
     for row in &cells {
         println!("{}", line(row));
     }
+    // Wrapped under the table, not inside it: a caveat is a sentence, and a sentence
+    // in a column makes the table unreadable. Printed only for the recipes that have
+    // any, so a matrix with none looks exactly as it did.
+    for r in matrix.rows.iter().filter(|r| !r.caveats.is_empty()) {
+        println!("\n{} — caveats:", r.recipe);
+        for c in &r.caveats {
+            println!("  - {c}");
+        }
+    }
 }
 
 #[cfg(test)]

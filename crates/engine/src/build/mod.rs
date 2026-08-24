@@ -1185,6 +1185,9 @@ pub(crate) fn restore_stage_outputs(
             None => return Ok(None),
         }
     }
+    // Every role restored, so the step compiled nothing: recorded here rather than at
+    // each caller, which is what keeps the claim identical across the stages.
+    step.restored();
     step.log(format!(
         "restored {node} outputs from the artifact cache (signature {})",
         sig.short()

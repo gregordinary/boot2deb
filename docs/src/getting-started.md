@@ -235,7 +235,12 @@ Artifacts land under the recipe's work dir, `build/turing-rk1/forky/artifacts/`:
 
 - **`turing-rk1-forky.img.xz`** — the compressed bootable image.
 - **`turing-rk1-forky.provenance.toml`** — exactly what went into the image: the
-  resolved pins, package count, toolchain identity, and the first-boot credential.
+  resolved pins, package count, toolchain identity, the archives the rootfs resolved
+  against, and the first-boot credential.
+- **`turing-rk1-forky.plan`** — the package set as an installable document: every
+  version and sha256, plus the state of each archive they came from. `boot2deb reproduce`
+  replays it to rebuild this exact userland later. See
+  [Reproducibility](reference/reproducibility.md).
 
 Every artifact is named for the whole build point — device and recipe
 (`turing-rk1/forky` → `turing-rk1-forky`) — so several recipes can share one
@@ -251,7 +256,12 @@ provenance    : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.provenance
 
 **Note the first-boot password down.** It is unique per image, shown once here, and
 stored only in the provenance file — it exists nowhere on the running system in
-recoverable form.
+recoverable form. It is also expired, so the first login has to replace it.
+
+If you would rather not transcribe a password at a console, authorize your SSH key in
+the recipe instead and `ssh debian@<board>` works on the first boot. That, and the sudo
+policy the image ships with, are in
+[The account, sudo, and SSH keys](access.md).
 
 Next: flash the image. That step is board-specific — for the RK1, see
 [Turing RK1](boards/turing-rk1.md).

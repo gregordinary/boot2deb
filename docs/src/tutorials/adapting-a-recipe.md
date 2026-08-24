@@ -12,7 +12,9 @@ already built a shipped recipe once ([Getting started](../getting-started.md)).
 | --- | --- | --- |
 | The artifact's geometry or where it lands (`--layout`, `--image-size`, `--out-dir`) | flags on `build` | nothing — the lock is untouched |
 | Which features are in the image | `update <recipe> --feature …`, then build the variant reference | a variant lock beside the recipe |
+| Adding an app or capability of your own | a `features/<name>.toml` of your own — no code | your feature, selectable at once |
 | Suite, kernel, u-boot series, board profile, locale, timezone, keymap | a recipe file of your own | your recipe plus its lock |
+| Who can log in: SSH keys, the sudo policy, the generated password's length | a recipe file of your own, or a `base.toml` in your overlay for every image | your recipe plus its lock |
 | A hardware fact of the board | a device file, usually `extends` another | your device plus a recipe |
 
 ## Where your files go
@@ -84,6 +86,54 @@ knowing before you rely on it:
 
 Reference: [A feature selection is a build
 point](../reference/config-model.md#a-feature-selection-is-a-build-point-not-a-new-recipe).
+
+### Authoring a feature of your own
+
+A feature is entirely configuration. Drop a `features/<name>.toml` into your overlay
+and it is selectable immediately — it appears in `list-features`, and
+`<recipe>+<name>` resolves. There is nothing to register and no code to change.
+
+```toml
+# ~/my-boards/features/navidrome.toml
+description = "Navidrome music server"
+packages    = ["navidrome"]
+
+[[apt_sources]]
+name       = "navidrome"
+uri        = "https://apt.example.com/debian"
+suite      = "trixie"
+components = ["main"]
+signed_by  = "navidrome.gpg"
+```
+
+```sh
+boot2deb build turing-rk1/forky+navidrome --overlay ~/my-boards
+```
+
+Config files ride alongside in `features/<name>/overlay/`, laid into the rootfs after
+every package so they win over what the packages shipped. Use
+`features/<name>/overlay-pre/` for the rarer case where a package's own maintainer
+scripts have to see the file *while they run* — see [Overlays](../reference/overlays.md).
+
+Four things a feature can declare beyond its packages:
+
+- **`[[apt_sources]]`** for an app that is not in the Debian mirror. Its signing key
+  must be vendored as `blobs/keyrings/<signed_by>` in your overlay or the shipped
+  tree; resolution refuses the build if it is missing rather than trusting the repo
+  blindly. The source **stays configured on the device**, so `apt upgrade` tracks the
+  vendor's releases.
+- **`requires_soc` / `requires_arch`** to gate a feature on hardware it needs. Empty
+  means any, which is right for a portable application.
+- **`conflicts`** for features that cannot coexist. The check is symmetric, so
+  declaring it on either side is enough.
+- **`caveats`** for what the feature does *not* deliver. These follow the feature into
+  every recipe that composes it and print at the end of a build, which is what a
+  limitation caused by a capability should do.
+
+The one thing you cannot do from config is teach the *recipe schema* a new block: the
+`[[data_volumes]]` list is paired with the `data-volume` feature by name in the
+builder, and it is the only feature the code knows by name. Everything else about the
+axis is discovered from the directory.
 
 ## Level 3: author your own recipe
 

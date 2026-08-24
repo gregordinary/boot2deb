@@ -35,6 +35,8 @@
 //! [`hosttool`].
 #![warn(missing_docs)]
 
+pub mod archfetch;
+pub mod archive;
 pub mod artstore;
 pub mod blobs;
 mod bootstrap;
@@ -52,6 +54,7 @@ pub mod kconfig;
 pub mod keyring;
 pub mod manifest;
 pub mod netfetch;
+pub mod patchdelta;
 pub mod patches;
 pub mod patchfetch;
 pub mod patchimport;

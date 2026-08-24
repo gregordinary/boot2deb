@@ -170,7 +170,8 @@ fn gpt_err(context: &str, e: impl std::fmt::Display) -> EngineError {
 mod tests {
     use super::*;
     use boot2deb_core::model::{
-        Kpart, Offsets, ResolvedBoot, ResolvedDepthchargeBoot, ResolvedRkbinBoot, Rkbin,
+        InitramfsCompress, Kpart, Offsets, ResolvedBoot, ResolvedDepthchargeBoot,
+        ResolvedRkbinBoot, Rkbin,
     };
 
     fn sized_image(dir: &Path, name: &str, size: u64) -> std::path::PathBuf {
@@ -221,6 +222,7 @@ mod tests {
             },
             cmdline: "console=tty1 rootwait ro".into(),
             rootfs_offset: "44MiB".into(),
+            initramfs_compress: InitramfsCompress::Xz,
         })
     }
 
@@ -241,7 +243,7 @@ mod tests {
     fn gpt_bytes_are_reproducible_with_fixed_guids() {
         let tmp = tempfile::tempdir().unwrap();
         let size = 192 * 1024 * 1024;
-        let geom = Geometry::resolve(&rkbin_boot(), "192MiB").unwrap();
+        let geom = Geometry::resolve(&rkbin_boot(), 192 << 20).unwrap();
 
         let a = sized_image(tmp.path(), "a.img", size);
         let b = sized_image(tmp.path(), "b.img", size);
@@ -276,6 +278,62 @@ mod tests {
         );
     }
 
+    /// A fitted image sizes the disk to the *exact* minimum that carries its rootfs plus
+    /// the backup table, so its last partition LBA is the last usable LBA and there is no
+    /// spare sector anywhere to absorb an off-by-one.
+    ///
+    /// [`Geometry::resolve`] cannot catch that: it starts from a disk size and floors the
+    /// partition into what is left, so it always lands at or below the ceiling however the
+    /// reservation is counted. Only the inverse direction puts the arithmetic against the
+    /// real GPT writer, which is the one that decides whether the range is legal.
+    ///
+    /// Both boot shapes, because they place the rootfs at different offsets and the
+    /// depthcharge one also has to fit its kernel entries into the same table.
+    #[test]
+    fn a_fitted_geometry_lands_exactly_on_the_last_usable_lba() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (name, boot) in [("rkbin", rkbin_boot()), ("depthcharge", depthcharge_boot())] {
+            let rootfs_bytes = 256 * 1024 * 1024;
+            let geom = Geometry::around_rootfs(&boot, rootfs_bytes).unwrap();
+            let img = sized_image(tmp.path(), &format!("{name}-fit.img"), geom.total_size);
+            // The writer refuses a partition past the usable range, so reaching here at
+            // all is the assertion: the disk is one sector-perfect fit.
+            write_table(&img, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS)
+                .unwrap_or_else(|e| {
+                    panic!("{name}: fitted geometry rejected by the GPT writer: {e}")
+                });
+
+            let disk = GptConfig::new()
+                .writable(false)
+                .logical_block_size(LogicalBlockSize::Lb512)
+                .open(&img)
+                .unwrap();
+            let rootfs = disk.partitions().values().last().unwrap().clone();
+            assert_eq!(
+                rootfs.first_lba, geom.rootfs_first_lba,
+                "{name}: rootfs starts where the geometry said"
+            );
+            assert_eq!(
+                (rootfs.last_lba - rootfs.first_lba + 1) * SECTOR,
+                rootfs_bytes,
+                "{name}: the partition is exactly the filesystem, with nothing floored away"
+            );
+            // The crate's own header is the independent statement of where the usable
+            // range ends; the fitted partition must reach it and not pass it.
+            let header = disk.primary_header().expect("a primary header was written");
+            assert_eq!(
+                rootfs.last_lba, header.last_usable,
+                "{name}: a fitted disk wastes no sector — the rootfs ends on the last usable LBA"
+            );
+            assert!(
+                rootfs.first_lba >= header.first_usable,
+                "{name}: the rootfs must clear the primary table ({} < {})",
+                rootfs.first_lba,
+                header.first_usable
+            );
+        }
+    }
+
     /// The depthcharge table is the whole boot mechanism, so every field the firmware
     /// reads is asserted: the ChromeOS kernel type GUID, the exact LBA range, and the
     /// attribute word that says "boot this". A wrong value here is a board that
@@ -290,7 +348,7 @@ mod tests {
     fn a_depthcharge_table_carries_a_bootable_kernel_slot_and_an_unbootable_spare() {
         let tmp = tempfile::tempdir().unwrap();
         let size = 512 * 1024 * 1024;
-        let geom = Geometry::resolve(&depthcharge_boot(), "512MiB").unwrap();
+        let geom = Geometry::resolve(&depthcharge_boot(), 512 << 20).unwrap();
         let img = sized_image(tmp.path(), "c201.img", size);
         write_table(&img, &geom, "rootfs", DISK_GUID, ROOTFS_GUID, &KPART_GUIDS).unwrap();
 

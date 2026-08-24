@@ -18,6 +18,16 @@ A feature that adds an `[[apt_sources]]` stanza names its keyring via
 `build` all preflight that existence, and the rootfs stage verifies the repo
 against the key during the package solve (an unsigned source is never accepted).
 
+**This directory is the whole of the search.** `signed_by` is a bare file name —
+`[A-Za-z0-9._-]`, no separators and no `.`/`..` — so a stanza cannot name a key
+anywhere else, and the resolved file is checked to still be *inside* a keyring
+directory after symlinks are followed, so a link planted here cannot make an
+arbitrary host file the anchor a repository is verified against. An overlay may
+vendor its own keyring in its own `blobs/keyrings/` for a repository it adds; the
+Debian archive keyring is the exception, resolved from the shipped tree only, and
+an overlay shipping a copy of *that* is refused as a swap rather than preferred
+(`--unsafe-overlay-keyring` is the explicit opt-in).
+
 ## Fingerprint manifests
 
 Each `<name>.gpg` ships a sibling **`<name>.fingerprints`** listing the primary

@@ -13,6 +13,8 @@
 //! independent nodes emit concurrently.
 
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
+use std::time::Instant;
 
 /// Which subprocess stream a [`Event::Log`] line came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +42,37 @@ pub enum LogOrigin {
     Stage,
     /// A subprocess the stage is relaying (`make`, `git`, `dpkg-buildpackage`).
     Subprocess,
+}
+
+/// Where a finished step's outputs came from.
+///
+/// The companion to a step's duration, and the reason the duration is worth reading:
+/// a thirty-second kernel step is a cache hit, and a reader who cannot tell the two
+/// apart has to guess. Reported by the step itself rather than inferred from how long
+/// it took, since that inference is exactly what this removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepOutcome {
+    /// This run produced the step's outputs. Also what a step with nothing to cache
+    /// reports — the image node assembles a disk every time.
+    Built,
+    /// Every output came back from the artifact cache; nothing was compiled.
+    Restored,
+    /// Some outputs were restored and some were built. Reachable only from a step
+    /// whose outputs are cached individually rather than as a set — the userspace
+    /// stage builds several `.deb`s, each with its own signature.
+    Mixed,
+}
+
+impl StepOutcome {
+    /// The outcome as a short human word, for a summary column.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StepOutcome::Built => "built",
+            StepOutcome::Restored => "restored",
+            StepOutcome::Mixed => "partly restored",
+        }
+    }
 }
 
 /// A single event in a build's structured stream.
@@ -78,6 +111,14 @@ pub enum Event {
     StepFinished {
         /// The step that finished.
         step: String,
+        /// How long it ran, measured monotonically from [`Step::start`]. Carried on
+        /// the event rather than left to each consumer's own clock, so a stream read
+        /// from a saved NDJSON log still says how long the build took, and a buffered
+        /// consumer does not time its own delivery.
+        duration_ms: u64,
+        /// Where the step's outputs came from — what makes [`duration_ms`](Self::StepFinished::duration_ms)
+        /// interpretable.
+        outcome: StepOutcome,
     },
     /// A produced artifact's location — the structured counterpart of the CLI's
     /// human `role : path` summary lines, so a `--json` consumer gets the paths
@@ -125,14 +166,46 @@ impl<F: Fn(Event)> EventSink for F {
 pub struct Step<'a> {
     sink: &'a dyn EventSink,
     name: String,
+    started: Instant,
+    /// Whether any output was restored from the artifact cache, and whether any was
+    /// produced by this run — together, the [`StepOutcome`] reported at
+    /// [`finish`](Step::finish). `Cell` because a stage holds the step by shared
+    /// reference while it works.
+    restored: Cell<bool>,
+    compiled: Cell<bool>,
 }
 
 impl<'a> Step<'a> {
-    /// Begin a step, emitting [`Event::StepStarted`].
+    /// Begin a step, emitting [`Event::StepStarted`] and starting its clock.
     pub fn start(sink: &'a dyn EventSink, name: impl Into<String>) -> Self {
         let name = name.into();
         sink.emit(Event::StepStarted { step: name.clone() });
-        Step { sink, name }
+        Step {
+            sink,
+            name,
+            started: Instant::now(),
+            restored: Cell::new(false),
+            compiled: Cell::new(false),
+        }
+    }
+
+    /// Record that one of this step's outputs came back from the artifact cache
+    /// instead of being produced by this run.
+    ///
+    /// A step that restores everything it produces needs only this call: with nothing
+    /// restored the outcome is [`StepOutcome::Built`], which is the honest default
+    /// because it claims the work was done. A step that restores *some* of its outputs
+    /// must also call [`compiled`](Step::compiled) for the rest, or it will claim to
+    /// have restored a set it partly compiled.
+    pub fn restored(&self) {
+        self.restored.set(true);
+    }
+
+    /// Record that one of this step's outputs was produced by this run. Only a step
+    /// that can also restore some of them needs to say so — see
+    /// [`restored`](Step::restored).
+    pub fn compiled(&self) {
+        self.compiled.set(true);
     }
 
     /// Emit an informational [`Event::Log`] line (stdout-tagged) from the stage
@@ -149,10 +222,18 @@ impl<'a> Step<'a> {
         });
     }
 
-    /// Emit [`Event::StepFinished`]. Consumes the handle so it cannot fire twice.
+    /// Emit [`Event::StepFinished`] with the elapsed time and the
+    /// [`StepOutcome`]. Consumes the handle so it cannot fire twice.
     pub fn finish(self) {
         self.sink.emit(Event::StepFinished {
             step: self.name.clone(),
+            duration_ms: self.started.elapsed().as_millis() as u64,
+            outcome: match (self.restored.get(), self.compiled.get()) {
+                (true, true) => StepOutcome::Mixed,
+                (true, false) => StepOutcome::Restored,
+                // Nothing was restored, so this run did whatever work there was.
+                (false, _) => StepOutcome::Built,
+            },
         });
     }
 
@@ -198,6 +279,16 @@ mod tests {
         })
         .unwrap();
         assert_eq!(started, r#"{"event":"step_started","step":"kernel"}"#);
+        let finished = serde_json::to_string(&Event::StepFinished {
+            step: "uboot".into(),
+            duration_ms: 3_412,
+            outcome: StepOutcome::Restored,
+        })
+        .unwrap();
+        assert_eq!(
+            finished,
+            r#"{"event":"step_finished","step":"uboot","duration_ms":3412,"outcome":"restored"}"#
+        );
         let artifact = serde_json::to_string(&Event::Artifact {
             step: "image".into(),
             role: "compressed".into(),
@@ -224,8 +315,8 @@ mod tests {
 
         let events = log.borrow();
         assert_eq!(
-            *events,
-            vec![
+            events[..3],
+            [
                 Event::StepStarted {
                     step: "kernel".into()
                 },
@@ -241,11 +332,53 @@ mod tests {
                     origin: LogOrigin::Stage,
                     line: "configuring".into(),
                 },
-                Event::StepFinished {
-                    step: "kernel".into()
-                },
             ]
         );
+        // The duration is the one field a test cannot assert a value for; what it can
+        // assert is that the step reports one, and that a step which restored nothing
+        // claims to have done the work.
+        assert!(matches!(
+            &events[3],
+            Event::StepFinished {
+                step,
+                outcome: StepOutcome::Built,
+                ..
+            } if step == "kernel"
+        ));
+        assert_eq!(events.len(), 4);
+    }
+
+    /// The outcome is what makes a duration readable, so each of the three states has
+    /// to come out of the calls a stage actually makes: nothing said (the step did its
+    /// own work), a restore alone (the artifact cache answered), and a restore beside a
+    /// compile (the userspace stage, whose `.deb`s cache one at a time).
+    #[test]
+    fn the_outcome_reports_what_the_step_says_it_did() {
+        let outcome_of = |mark: &dyn Fn(&Step)| {
+            let log = RefCell::new(Vec::new());
+            {
+                let sink = recorder(&log);
+                let step = Step::start(&sink, "userspace");
+                mark(&step);
+                step.finish();
+            }
+            match log.into_inner().pop().expect("a finish event") {
+                Event::StepFinished { outcome, .. } => outcome,
+                other => panic!("expected a finish event, got {other:?}"),
+            }
+        };
+        assert_eq!(outcome_of(&|_| {}), StepOutcome::Built);
+        assert_eq!(outcome_of(&|s: &Step| s.restored()), StepOutcome::Restored);
+        assert_eq!(
+            outcome_of(&|s: &Step| {
+                s.restored();
+                s.compiled();
+            }),
+            StepOutcome::Mixed
+        );
+        // A step that only compiled says the same thing as one that said nothing:
+        // `compiled` exists to qualify a restore, not to make the default correct.
+        assert_eq!(outcome_of(&|s: &Step| s.compiled()), StepOutcome::Built);
     }
 
     #[test]
@@ -253,7 +386,11 @@ mod tests {
         let seen = RefCell::new(0u32);
         let sink = |_: Event| *seen.borrow_mut() += 1;
         sink.emit(Event::StepStarted { step: "x".into() });
-        sink.emit(Event::StepFinished { step: "x".into() });
+        sink.emit(Event::StepFinished {
+            step: "x".into(),
+            duration_ms: 0,
+            outcome: StepOutcome::Built,
+        });
         assert_eq!(*seen.borrow(), 2);
     }
 

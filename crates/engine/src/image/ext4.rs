@@ -20,9 +20,11 @@
 //! The feature set is chosen here rather than left to the formatter's default, and it is
 //! expressed relative to that default, which is itself a fixed set — so the on-disk
 //! contract is stable across formatter releases. It is recorded rather than assumed
-//! either way: the format returns the geometry it realized, and that plus the
-//! formatter's own feature-set pin document becomes the provenance manifest's
-//! `[filesystem]` — see [`filesystem_provenance`].
+//! either way: the provenance manifest's `[filesystem]` carries the formatter's own
+//! policy pin (every format option by name), its geometry pin planned at a fixed
+//! reference size (what those options *lay out*, which is what catches a change to the
+//! formula behind an unchanged option name), and the geometry this image's own size
+//! realized — see [`filesystem_provenance`].
 //! `metadata_csum_seed` stores the checksum seed in the superblock, decoupled
 //! from the UUID, so an operator's `tune2fs -U` (rescue, cloning hygiene) never has to
 //! rewrite every metadata checksum.
@@ -60,9 +62,9 @@ use crate::image::geometry::EXT4_BLOCK;
 use boot2deb_core::provenance::{FilesystemGeometry, FilesystemProvenance};
 use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
-    format_to, ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions,
-    GrowReservation, InodeCount, Layout, Location, Reader, ReservedRatio, ScanReport, Source,
-    SourceEntry,
+    ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions, FormatPlan,
+    GrowReservation, InodeCount, Layout, Location, Reader, ReservedRatio, ScanReport, Slack,
+    Source, SourceEntry, TreeBuilder,
 };
 use sha2::{Digest, Sha256};
 use std::num::NonZeroU64;
@@ -79,6 +81,21 @@ const BYTES_PER_INODE: u64 = 16384;
 /// the disk, without 5%'s cost on a grown NVMe.
 const RESERVED_HUNDREDTHS: u16 = 100;
 
+/// The size the reference geometry pin is planned at
+/// ([`FilesystemProvenance::reference_geometry_pin`]) — 4 GiB.
+///
+/// **Chosen once; never move it.** Its whole value is that it is the *same* size in
+/// every build's record, so a difference between two records is a difference in what the
+/// formatter does rather than in what it was asked to make. Changing it would move every
+/// number in the pin at once and say nothing.
+///
+/// 4 GiB rather than something smaller because the pin should exercise the regime
+/// shipped images are formatted in. [`GrowReservation::Max`] is
+/// `min(map ceiling, descriptor ceiling, total_blocks / 64)`, so below about 256 MiB the
+/// proportional term binds and the reservation shrinks with the filesystem; past that
+/// knee the ceilings bind, which is where every real rootfs sits.
+const REFERENCE_PIN_BYTES: u64 = 4 << 30;
+
 /// Everything under `/dev` is dropped from the rootfs: `mknod`-style nodes are
 /// unnecessary because the kernel mounts devtmpfs over `/dev` at boot. The `/dev`
 /// directory entry itself is kept.
@@ -93,14 +110,14 @@ const DEV_PREFIX: &[u8] = b"/dev/";
 /// module's choices — so the two cannot be changed independently without the pin moving.
 pub const ROOTFS_FS_KIND: &str = "ext4";
 
-/// Format `dest` as an ext4 filesystem of exactly `size` bytes holding the rootfs
-/// `tarball`'s contents, then verify it.
+/// Format `dest` as an ext4 filesystem holding the rootfs `tarball`'s contents, then
+/// verify it.
 ///
-/// `size` must be a multiple of the ext4 block size (the caller's geometry guarantees
-/// it). `label` is the ext4 volume label (≤ 16 bytes) the rootfs's `/etc/fstab` mounts
-/// by. `uuid` is the deterministic superblock UUID the caller derived from the lock, so
-/// a rebuild reproduces it. `first_boot` is the per-image credential spliced into the
-/// rootfs's `/etc/shadow` before the filesystem is written.
+/// `size` either states the filesystem's size or asks for it to be found — see
+/// [`RootfsSize`]. `label` is the ext4 volume label (≤ 16 bytes) the rootfs's
+/// `/etc/fstab` mounts by. `uuid` is the deterministic superblock UUID the caller derived
+/// from the lock, so a rebuild reproduces it. `first_boot` is the per-image credential
+/// spliced into the rootfs's `/etc/shadow` before the filesystem is written.
 ///
 /// Unlike the old `mke2fs` path, the superblock's format times are deterministic too:
 /// they take the newest source mtime, which the rootfs export has already clamped to the
@@ -111,21 +128,30 @@ pub const ROOTFS_FS_KIND: &str = "ext4";
 /// [`RootfsFilesystem`].
 pub(crate) fn build_rootfs_ext4(
     dest: &Path,
-    size: u64,
+    size: RootfsSize,
     tarball: &Path,
     label: &str,
     uuid: Uuid,
     first_boot: FirstBoot,
     step: &Step,
 ) -> Result<RootfsFilesystem, EngineError> {
-    assert!(
-        size.is_multiple_of(EXT4_BLOCK),
-        "ext4 size must be block-aligned (geometry guarantees this)"
-    );
-    step.log(format!(
-        "formatting {size}-byte ext4 rootfs at {} (ferrosys, pure-Rust: no mke2fs, no userns)",
-        dest.display()
-    ));
+    if let RootfsSize::Exact(bytes) = size {
+        assert!(
+            bytes.is_multiple_of(EXT4_BLOCK),
+            "ext4 size must be block-aligned (geometry guarantees this)"
+        );
+    }
+    step.log(match size {
+        RootfsSize::Exact(bytes) => format!(
+            "formatting {bytes}-byte ext4 rootfs at {} (ferrosys, pure-Rust: no mke2fs, no userns)",
+            dest.display()
+        ),
+        RootfsSize::Fit(slack) => format!(
+            "fitting an ext4 rootfs to its contents ({}) at {} (ferrosys, pure-Rust)",
+            describe_slack(slack),
+            dest.display()
+        ),
+    });
 
     // 1. Parse the rootfs tar into an entry list in-process. `ArchiveSource` reads
     //    ownership, mode, times, xattrs, ACLs, and device nodes straight from the
@@ -158,18 +184,38 @@ pub(crate) fn build_rootfs_ext4(
     //    It returns the geometry it realized, which is the writer's own account of what
     //    it wrote — including a decision no superblock field states, like how far the
     //    reserved descriptor blocks let this filesystem grow.
+    //    The plan is taken before the destination is touched, so a rootfs that cannot be
+    //    written at all leaves the previous image file intact rather than truncated. A
+    //    fitted plan additionally *decides* the size here, by placing the source into
+    //    candidate geometries until it holds the smallest one that leaves the slack —
+    //    the same placement a format performs, so the size it returns is one that
+    //    formats. The model it built is kept, so the write walks the source once.
     let options = format_options(uuid, label, &entries);
+    let plan = match size {
+        RootfsSize::Exact(bytes) => FormatPlan::new(Entries(entries), bytes, options),
+        RootfsSize::Fit(slack) => FormatPlan::fit(Entries(entries), options, slack),
+    }
+    .map_err(|e| EngineError::Ext4Format {
+        detail: e.to_string(),
+    })?;
+    let size_bytes = plan.size_bytes();
+    if let RootfsSize::Fit(_) = size {
+        step.log(format!(
+            "fitted the rootfs into {size_bytes} bytes — one ext4 block less does not hold it"
+        ));
+    }
     let mut out = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .write(true)
         .truncate(true)
         .open(dest)
         .map_err(|s| EngineError::io(dest, s))?;
-    let layout = format_to(Entries(entries), size, options, &mut out).map_err(|e| {
-        EngineError::Ext4Format {
+    let layout = plan
+        .write_to(&mut out)
+        .map_err(|e| EngineError::Ext4Format {
             detail: e.to_string(),
-        }
-    })?;
+        })?;
     out.sync_all().map_err(|s| EngineError::io(dest, s))?;
     drop(out);
     step.log(format!(
@@ -181,9 +227,36 @@ pub(crate) fn build_rootfs_ext4(
     ));
 
     Ok(RootfsFilesystem {
-        provenance: filesystem_provenance(&layout),
+        size_bytes,
+        provenance: filesystem_provenance(&options, &layout)?,
         verified_with: verify_clean(dest, step)?,
     })
+}
+
+/// How large the rootfs filesystem is: stated by the geometry, or found from the rootfs.
+///
+/// The two are the same format performed in a different order. [`Exact`](Self::Exact) is
+/// the partition an authored `image_size` already laid out; [`Fit`](Self::Fit) searches
+/// for the smallest filesystem that holds the rootfs with the stated room left free, and
+/// the disk is then laid out around what it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootfsSize {
+    /// Exactly this many bytes, which must be a multiple of the ext4 block size.
+    Exact(u64),
+    /// The smallest filesystem holding the rootfs with this much of it left free.
+    Fit(Slack),
+}
+
+/// Render a slack for a log line, in the terms the recipe wrote it in.
+fn describe_slack(slack: Slack) -> String {
+    match slack {
+        Slack::Bytes(bytes) => format!("{bytes} bytes free"),
+        // Hundredths of one percent, so 2000 reads as 20% and 150 as 1.5%.
+        Slack::Share(hundredths) => format!("{}.{:02}% free", hundredths / 100, hundredths % 100),
+        // The formatter's slack is non-exhaustive: a variant it gains renders as its own
+        // Debug rather than being mistaken for one of these.
+        other => format!("{other:?}"),
+    }
 }
 
 /// What formatting the rootfs produced, beyond the image file itself: the record of what
@@ -195,6 +268,12 @@ pub(crate) fn build_rootfs_ext4(
 /// without repeating the format; the check list is host-dependent, so no caller can
 /// compute it without repeating the probe.
 pub(crate) struct RootfsFilesystem {
+    /// The filesystem's size in bytes, as the format realized it.
+    ///
+    /// Reported rather than echoed back from the request, because under
+    /// [`RootfsSize::Fit`] the caller did not state it: the search decided it, and the
+    /// rootfs partition is then laid out around this number.
+    pub size_bytes: u64,
     /// The on-disk contract, for the provenance manifest's `[filesystem]`.
     pub provenance: FilesystemProvenance,
     /// The checks the filesystem passed, in the order they ran, for the provenance
@@ -256,9 +335,9 @@ fn format_options(uuid: Uuid, label: &str, entries: &[SourceEntry]) -> FormatOpt
 /// any release; an image's layout must not, so it is not used here.)
 ///
 /// The set is still recorded rather than trusted: [`filesystem_provenance`] writes what
-/// this resolves to into the provenance manifest, and
-/// `the_pinned_feature_set_is_exactly_this_document` fails on any change to it, so drift
-/// — whether from this expression or from the baseline underneath it — is caught in CI
+/// this resolves to into the provenance manifest as part of the whole format policy, and
+/// `the_format_policy_is_exactly_this_document` fails on any change to it, so drift —
+/// whether from this expression or from the baseline underneath it — is caught in CI
 /// rather than discovered in an image.
 fn feature_set() -> FeatureSet {
     FeatureSet::DEFAULT
@@ -266,25 +345,48 @@ fn feature_set() -> FeatureSet {
         .expect("orphan_file is a known feature name")
 }
 
-/// The rootfs filesystem's on-disk contract as provenance data: the formatter's own pin
-/// document for the feature set this build resolves, plus the geometry the format
-/// realized.
+/// The rootfs filesystem's on-disk contract as provenance data: the formatter's own
+/// policy pin for the options this build formats with, the geometry that policy lays out
+/// at [`REFERENCE_PIN_BYTES`], and the geometry the format actually realized.
 ///
-/// Both halves are *resolved* values, not declared ones. The pin comes from the same
-/// expression the formatter is handed, so the manifest reports the words an image
+/// All three are *resolved* values, not declared ones. The pins come from the same
+/// [`FormatOptions`] the formatter was handed, so the manifest reports what an image
 /// actually carries — including a feature that arrived from the formatter's baseline
 /// rather than from anything in this file. The geometry comes from the format itself.
 ///
-/// The pin is taken whole rather than re-spelled field by field, and that is the point.
-/// The formatter builds it from an exhaustive destructure of its own feature set, so a
-/// field it gains is carried here with no change to this function. A record assembled
-/// here would keep compiling and silently stop covering it — which is exactly what a
-/// feature set gaining a size (bigalloc's cluster size is both a feature bit *and* a
-/// size) would do to a hand-written projection of three words and two sizes.
-fn filesystem_provenance(layout: &Layout) -> FilesystemProvenance {
-    FilesystemProvenance {
+/// The pins are taken whole rather than re-spelled field by field, and that is the point.
+/// The formatter builds each by destructuring its own options exhaustively, so a field it
+/// gains is carried here with no change to this function. A record assembled here would
+/// keep compiling and silently stop covering it — which is exactly what a feature set
+/// gaining a size (bigalloc's cluster size is both a feature bit *and* a size) would do
+/// to a hand-written projection of three words and two sizes.
+///
+/// The reference plan is over an **empty** source rather than the rootfs, because the
+/// geometry a size implies is a function of the policy options and the size alone: the
+/// source only has to fit in the inodes that geometry provides, and an empty tree needs
+/// none. So the pin describes the layout without describing the image.
+///
+/// # Errors
+///
+/// [`EngineError::Ext4Format`] if the reference size cannot be planned under these
+/// options — which means the policy itself is unrealizable, since the image it is about
+/// to describe formatted successfully.
+fn filesystem_provenance(
+    options: &FormatOptions,
+    layout: &Layout,
+) -> Result<FilesystemProvenance, EngineError> {
+    let reference =
+        FormatPlan::new(TreeBuilder::new(), REFERENCE_PIN_BYTES, *options).map_err(|e| {
+            EngineError::Ext4Format {
+                detail: format!(
+                    "planning the {REFERENCE_PIN_BYTES}-byte reference geometry pin: {e}"
+                ),
+            }
+        })?;
+    Ok(FilesystemProvenance {
         kind: ROOTFS_FS_KIND.to_string(),
-        pin: feature_set().pin(),
+        policy_pin: options.policy_pin(),
+        reference_geometry_pin: reference.geometry_pin(),
         geometry: FilesystemGeometry {
             block_size: layout.block_size,
             total_blocks: layout.total_blocks,
@@ -300,7 +402,7 @@ fn filesystem_provenance(layout: &Layout) -> FilesystemProvenance {
             reserved_blocks: layout.reserved_blocks,
             max_grow_blocks: layout.max_grow_blocks,
         },
-    }
+    })
 }
 
 /// The 16-byte `s_volume_name`: the label's bytes, truncated to sixteen and NUL-padded.
@@ -620,7 +722,7 @@ mod tests {
     /// rootfs stage produces, and a locked account for the first-boot splice to rewrite.
     fn format_fixture(
         dir: &Path,
-        size: u64,
+        size: RootfsSize,
         uuid: Uuid,
     ) -> Result<(PathBuf, RootfsFilesystem), EngineError> {
         let root = dir.join("tree");
@@ -662,6 +764,50 @@ mod tests {
     /// offsets by hand. Each field is then named by the format rather than located by
     /// this test's arithmetic, so an assertion cannot quietly pass by reading the wrong
     /// two bytes — and the feature words are checked as a feature set rather than as bit
+    /// A fitted size is decided by the format rather than stated to it, so the two
+    /// things worth asserting are that the size comes back reported — the geometry is
+    /// laid out around it, and a wrong number there is a filesystem that does not
+    /// mount — and that the slack was actually left. The fixture rootfs is a few
+    /// kilobytes, so a fitted image is orders of magnitude smaller than the stated
+    /// [`FIXTURE_SIZE`]; that gap is the feature.
+    #[test]
+    fn a_fitted_format_reports_the_size_it_chose_and_leaves_the_slack() {
+        if !tar_ready() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let uuid = Uuid::from_bytes([0x5a; 16]);
+        let (img, fs) =
+            format_fixture(tmp.path(), RootfsSize::Fit(Slack::Share(2000)), uuid).unwrap();
+
+        assert!(
+            fs.size_bytes.is_multiple_of(EXT4_BLOCK),
+            "a fitted size must still be whole ext4 blocks, got {}",
+            fs.size_bytes
+        );
+        assert!(
+            fs.size_bytes < FIXTURE_SIZE,
+            "fitting a few-kilobyte tree must beat the stated fixture size, got {}",
+            fs.size_bytes
+        );
+
+        let reader = Reader::open(std::fs::File::open(&img).unwrap()).unwrap();
+        let sb = reader.superblock();
+        assert_eq!(
+            sb.blocks_count,
+            fs.size_bytes / EXT4_BLOCK,
+            "the reported size is the one on disk — the geometry is laid out around it"
+        );
+        // A fifth of the filesystem free, as asked. The share is of the whole filesystem
+        // rather than of the source, so this is a statement about the finished image.
+        assert!(
+            sb.free_blocks_count * 5 >= sb.blocks_count,
+            "at least a fifth must be free: {} of {}",
+            sb.free_blocks_count,
+            sb.blocks_count
+        );
+    }
+
     /// masks this file would have to keep in step with the format's own.
     #[test]
     fn formats_resizable_filesystem_with_the_supplied_uuid() {
@@ -670,7 +816,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let uuid = Uuid::from_bytes([0x5a; 16]);
-        let (img, fs) = format_fixture(tmp.path(), FIXTURE_SIZE, uuid).unwrap();
+        let (img, fs) = format_fixture(tmp.path(), RootfsSize::Exact(FIXTURE_SIZE), uuid).unwrap();
 
         let reader = Reader::open(std::fs::File::open(&img).unwrap()).unwrap();
         let sb = reader.superblock();
@@ -748,8 +894,12 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let (img, _) = format_fixture(tmp.path(), FIXTURE_SIZE, Uuid::from_bytes([0x5a; 16]))
-            .expect("the fixture formats clean");
+        let (img, _) = format_fixture(
+            tmp.path(),
+            RootfsSize::Exact(FIXTURE_SIZE),
+            Uuid::from_bytes([0x5a; 16]),
+        )
+        .expect("the fixture formats clean");
 
         // `s_volume_name` runs 16 bytes from offset 0x78 of the superblock, which itself
         // begins 1024 bytes into the image. Nothing reads it to find anything else.
@@ -876,38 +1026,119 @@ mod tests {
         assert_eq!(f.inode_size, 256);
     }
 
-    /// The exact on-disk contract, pinned as the formatter's own document rather than as
+    /// The format options as the image stage really assembles them. The identity inputs
+    /// are stand-ins because neither pin under test carries any of them: the policy pin
+    /// is documented as holding nothing image-specific, and the geometry a size implies
+    /// is a function of the policy options and the size alone.
+    fn pinned_options() -> FormatOptions {
+        format_options(Uuid::nil(), "boot2deb", &[])
+    }
+
+    /// The exact format policy, pinned as the formatter's own document rather than as
     /// predicates.
     ///
-    /// The test above asserts what the set must *contain*, which by construction cannot
-    /// fail on a feature the formatter's baseline gains: [`feature_set`] is
+    /// The test above asserts what the feature set must *contain*, which by construction
+    /// cannot fail on a feature the formatter's baseline gains: [`feature_set`] is
     /// `FeatureSet::DEFAULT` minus one feature, and `DEFAULT` is documented as free to
     /// grow. So a formatter upgrade can change every image's layout while every
     /// predicate above still passes. This is the assertion that fails instead.
     ///
-    /// It is byte-exact against the whole document, which is what makes it complete: the
+    /// It is byte-exact against the whole document, which is what makes it complete. The
     /// document names every feature word twice over — as bits and as names, which
-    /// therefore cannot drift apart — plus the two sizes that are not features, plus any
-    /// bit the formatter does not name. And because the formatter builds it by
-    /// destructuring its own feature set exhaustively, a *field* it gains lands in this
-    /// string too, where a projection written here would have kept compiling and
-    /// silently stopped covering it.
+    /// therefore cannot drift apart — plus the two sizes that are not features, plus the
+    /// seven options outside the feature set entirely. `errors remount_read_only` is the
+    /// one that is *only* here: the error behaviour reaches neither a feature word nor
+    /// the geometry, so no other record in the tree would notice it changing. And because
+    /// the formatter builds the document by destructuring its own options exhaustively, a
+    /// *field* it gains lands in this string too, where a projection written here would
+    /// have kept compiling and silently stopped covering it.
     ///
-    /// A failure here is not necessarily a defect — it means the on-disk layout moved,
-    /// and the decision (adopt the change, or pin it off in [`feature_set`]) has to be
-    /// made deliberately. Update this document only together with that decision.
+    /// A failure here is not necessarily a defect — it means the contract images are
+    /// built to moved, and the decision (adopt the change, or pin it back in
+    /// [`format_options`]) has to be made deliberately. Update this document only
+    /// together with that decision.
     #[test]
-    fn the_pinned_feature_set_is_exactly_this_document() {
+    fn the_format_policy_is_exactly_this_document() {
         assert_eq!(
-            feature_set().pin(),
-            "ferrosys-feature-pin 1\n\
+            pinned_options().policy_pin(),
+            "ferrosys-policy-pin 1\n\
              compat 0x0000003c has_journal ext_attr resize_inode dir_index\n\
              incompat 0x000022c2 filetype extent 64bit flex_bg metadata_csum_seed\n\
              ro_compat 0x0000046b sparse_super large_file huge_file dir_nlink extra_isize \
              metadata_csum\n\
              block_size 4096\n\
-             inode_size 256\n"
+             inode_size 256\n\
+             grow max\n\
+             inodes bytes_per_inode 16384\n\
+             reserved 100\n\
+             errors remount_read_only\n\
+             journal auto\n\
+             hash_version half_md4\n\
+             hash_signedness unsigned\n\
+             timestamp_clamp none\n"
         );
+    }
+
+    /// What that policy lays out at [`REFERENCE_PIN_BYTES`], byte-exact.
+    ///
+    /// This is the half the policy pin cannot cover. A policy pin records options *by
+    /// name*, so it moves when an option is renamed, re-defaulted, or set differently
+    /// here — and not when the formula behind an unchanged name changes underneath it.
+    /// `grow max` reads identically before and after a change to what `Max` reserves;
+    /// `reserved_gdt_blocks 1024` does not. Planning at one fixed size is what turns that
+    /// class of change into a diff.
+    ///
+    /// The `groups` line is a crc32c over every field of every group in order rather than
+    /// one line per group, so a placement that moves changes this string while the string
+    /// stays a fixed size.
+    ///
+    /// Same rule as the policy pin on failure: the layout moved, and updating this
+    /// document is the second half of deciding that it should have.
+    #[test]
+    fn the_reference_geometry_is_exactly_this_document() {
+        let plan = FormatPlan::new(TreeBuilder::new(), REFERENCE_PIN_BYTES, pinned_options())
+            .expect("the reference size plans under the pinned policy");
+        assert_eq!(
+            plan.geometry_pin(),
+            "ferrosys-geometry-pin 1\n\
+             block_size 4096\n\
+             total_blocks 1048576\n\
+             blocks_per_group 32768\n\
+             first_data_block 0\n\
+             group_count 32\n\
+             inodes_per_group 8192\n\
+             inode_table_blocks 512\n\
+             total_inodes 262144\n\
+             gdt_blocks 1\n\
+             reserved_gdt_blocks 1024\n\
+             flex_bg_size 16\n\
+             max_grow_blocks 2149580800\n\
+             reserved_blocks 10485\n\
+             groups 32 crc32c 0xb1e58475\n\
+             journal_blocks 16384\n"
+        );
+    }
+
+    /// The reference pin describes the *policy*, not the image: it is planned over an
+    /// empty source, and the geometry a size implies does not answer to what goes in it.
+    /// So two builds whose rootfs contents differ record the same reference pin, which is
+    /// the property that makes comparing two builds' records mean anything.
+    #[test]
+    fn the_reference_geometry_pin_does_not_answer_to_the_rootfs() {
+        let empty = FormatPlan::new(TreeBuilder::new(), REFERENCE_PIN_BYTES, pinned_options())
+            .unwrap()
+            .geometry_pin();
+        let meta = |mode| Metadata::new(mode, Timestamp::from_secs(0));
+        let populated = FormatPlan::new(
+            TreeBuilder::new()
+                .directory(b"/etc".to_vec(), meta(0o755))
+                .file(b"/etc/hostname".to_vec(), b"rk1\n".as_slice(), meta(0o644)),
+            REFERENCE_PIN_BYTES,
+            pinned_options(),
+        )
+        .unwrap()
+        .geometry_pin();
+        assert_eq!(empty, populated);
     }
 
     #[test]
