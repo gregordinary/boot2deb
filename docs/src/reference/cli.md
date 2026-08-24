@@ -1112,6 +1112,12 @@ The still-pinned checkouts stay — they are what makes `verify-patches` and
 tree, a lock that will not parse aborts the sweep instead of narrowing it: nothing is
 removed until every lock in the config tree has been read.
 
+The one narrowing that rule cannot catch is a missing `--overlay`. The locks are read
+from the search paths, so a sweep invoked without the overlays your builds use never
+sees their pins and calls their checkouts dead. Pass the same `--overlay` flags you
+build with; the run reports how many locks it read, so a count short of the tree you
+know is the signal that something was left out.
+
 `--kconfig` empties `verify-config`'s scratch, one work dir per recipe. Each holds a
 provisioned cross root and an out-of-tree kbuild output dir, both re-created on the next
 run, and each is a base that ages against the archive exactly as a build root does — so

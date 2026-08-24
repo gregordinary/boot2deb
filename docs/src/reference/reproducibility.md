@@ -390,6 +390,28 @@ What is recorded, because it genuinely does reach the image:
   and boots its own firmware, no packaging root for a build whose artifacts all came back
   from the artifact cache. They are records, not contracts: nothing pins them in the lock
   and no later build is verified against them.
+
+  They describe the roots that stood up **for this run**. A build that restored some
+  node's outputs from the artifact cache did not compile that node here, so the three
+  blocks account for the compiled part alone — which is what `[[restored_nodes]]` below
+  makes legible.
+- **`[[restored_nodes]]`** — one row per build step whose outputs came back from the
+  Tier-2 artifact cache instead of being compiled, naming the step and whether *every*
+  one of its outputs was restored (`restored`) or only some (`partly restored`):
+
+  ```toml
+  [[restored_nodes]]
+  step = "userspace"
+  outcome = "partly restored"
+  ```
+
+  Omitted entirely by a build that compiled everything it shipped. It answers a question
+  no other section can: not what went into the image, but which parts of it *this* run
+  actually built. Without it the three root blocks above read as a claim about every
+  `.deb` in the image, which holds only for a build that compiled them all — a mixed
+  build restores some `.deb`s that an earlier run produced, in a root that need not be
+  the one named here. Pin a snapshot (`--snapshot pin`) when you need the stronger
+  claim, or build with `--no-artifact-cache` to make every `.deb` this run's own.
 - **`[sandbox]`, `[sandbox_env]` and `[[sandbox_mounts]]`** — the posture, the environment
   and the complete mount series every sandboxed build command runs under, as the sandbox
   library resolves them. All three sit outside that library's compatibility promise, so

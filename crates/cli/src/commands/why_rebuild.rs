@@ -223,7 +223,8 @@ fn scope_note(nodes: &[plan::NodePlan], cache_disabled: bool) -> String {
         s.push_str(&format!(
             " (<root>/cache/artifacts, keyed on\n      each node's full inputs): \
              {hits} of {} node(s) would restore stored `.deb`s and skip\n      \
-             compiling. That store is shared across work dirs and survives `clean`.",
+             compiling. That store is shared across work dirs; `boot2deb clean\n      \
+             --artifacts` is what empties it.",
             nodes.len()
         ));
     }

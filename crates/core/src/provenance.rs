@@ -102,6 +102,11 @@ pub struct BuildFacts<'a> {
     /// nothing is interpreted or where the registration named nothing readable. The
     /// engine owns it: reading a binfmt registration is a host side effect.
     pub qemu: Option<QemuProvenance>,
+    /// The build steps that restored their outputs from the artifact store rather than
+    /// compiling them, in build order. Engine-owned because it is a fact about what this
+    /// run did, read off the event stream rather than derived from the lock. See
+    /// [`RestoredNode`].
+    pub restored_nodes: &'a [RestoredNode],
     /// The parallelism the build ran at. See [`ToolchainProvenance::jobs`].
     pub jobs: usize,
     /// The environment and mounts every sandboxed build command ran under. The engine
@@ -134,7 +139,9 @@ pub struct BuildFacts<'a> {
 /// modules, and `[packaging_root]` the one whose `dpkg` *archived* the staged trees.
 ///
 /// The `[rootfs]` block records what the image *carries*; these record what *produced*
-/// the parts of it boot2deb built. All are Debian trees resolved from the same mirrors,
+/// the parts of it boot2deb built. They describe the roots that stood up **for this
+/// run**, so on a build that restored some node's outputs from the artifact store they
+/// account for the compiled part alone — [`RestoredNode`] is what names the rest. All are Debian trees resolved from the same mirrors,
 /// and no source pin covers these three — each base is a package set solved at bootstrap
 /// time, so without them the compilers and the archiver behind every `.deb` in the image
 /// are unstated. `[cross_sandbox]` in particular is where the compiler that produced the
@@ -459,11 +466,42 @@ pub struct ProvenanceManifest {
     /// reachability check is the `verify-sources` probe. Declared with the other
     /// arrays-of-tables so it serializes after every `[section]` table.
     pub source_durability: Vec<SourceDurability>,
+    /// One row per build step whose outputs this run restored from the Tier-2 artifact
+    /// store instead of compiling, in the order the build ran them. Empty when the build
+    /// compiled everything it shipped.
+    ///
+    /// Without it the three provisioned-root blocks read as a claim about every `.deb`
+    /// in the image, which holds only for a build that compiled them all. See
+    /// [`RestoredNode`]. Declared with the other arrays-of-tables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restored_nodes: Vec<RestoredNode>,
     /// Every mount a sandboxed build command runs under, in the order the sandbox
     /// establishes them — the half of the sandbox profile no other accessor reports,
     /// down to the `/dev` device nodes and symlinks. Declared last, with the other
     /// arrays-of-tables. See [`SandboxProvenance`].
     pub sandbox_mounts: Vec<SandboxMount>,
+}
+
+/// One build-graph node whose outputs this run did not produce, for the manifest's
+/// `[[restored_nodes]]` list.
+///
+/// Every other record here answers "what went into this image"; this one answers a
+/// question those cannot: *which parts of it this build actually made*. A node whose
+/// outputs came back whole from the Tier-2 artifact store was compiled by an earlier
+/// run, in a root that is not necessarily the one `[build_sandbox]`, `[cross_sandbox]`
+/// and `[packaging_root]` name — those describe the roots that stood up *for this run*.
+/// A build that restores every node omits the root blocks entirely, so the two agree by
+/// construction; a **mixed** build is why this list exists, since there the blocks are
+/// present and describe only the part that was compiled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoredNode {
+    /// The build step, as the event stream names it (`kernel`, `uboot`, `userspace`,
+    /// `ffmpeg`).
+    pub step: String,
+    /// `restored` when every one of the step's outputs came from the store, `partly
+    /// restored` when it restored some and compiled the rest. The distinction is the
+    /// point: only the second leaves the root blocks describing part of the step.
+    pub outcome: String,
 }
 
 /// The offline durability *form* of one pinned source, for the manifest's
@@ -1416,6 +1454,7 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
         // u-boot both drop out here, as does the ffmpeg `rockchip` pin (provenance
         // only — the graft ships as patches, so that tree is never cloned).
         source_durability: source_durability_rows(lock),
+        restored_nodes: facts.restored_nodes.to_vec(),
         sandbox_mounts: facts.sandbox.mounts.clone(),
     }
 }
@@ -1818,6 +1857,21 @@ pub(crate) mod tests {
     /// every optional section — compiled kernel and u-boot, a patch series, the
     /// media-accel trees, blobs, an extra `.deb` — so a renderer's every branch is
     /// reachable from one value.
+    /// The two shapes a restored row takes: a step that shipped nothing of its own,
+    /// and the mixed one that leaves the root blocks describing only part of a step.
+    fn sample_restored_nodes() -> Vec<RestoredNode> {
+        vec![
+            RestoredNode {
+                step: "uboot".into(),
+                outcome: "restored".into(),
+            },
+            RestoredNode {
+                step: "userspace".into(),
+                outcome: "partly restored".into(),
+            },
+        ]
+    }
+
     pub(crate) fn sample_manifest() -> ProvenanceManifest {
         let archives = sample_archives();
         let verified = sample_verified_with();
@@ -1832,6 +1886,7 @@ pub(crate) mod tests {
             build.as_image().expect("the fixture builds an image"),
             &lock,
             &BuildFacts {
+                restored_nodes: &sample_restored_nodes(),
                 host_arch: "x86_64",
                 cross: true,
                 manifest_sha256: "3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a",
@@ -1859,6 +1914,26 @@ pub(crate) mod tests {
         )
     }
 
+    #[test]
+    fn a_restored_step_is_named_in_the_document_and_an_all_compiled_build_has_no_list() {
+        // The three provisioned-root blocks describe the roots that stood up *for this
+        // run*. Where a step's outputs came from an earlier one, that has to be legible
+        // — otherwise the blocks read as a claim about every `.deb` in the image.
+        let text = sample_manifest().to_toml_string().unwrap();
+        assert!(text.contains("[[restored_nodes]]"), "{text}");
+        assert!(text.contains("step = \"uboot\""), "{text}");
+        assert!(text.contains("outcome = \"partly restored\""), "{text}");
+
+        // A build that compiled everything writes no list at all, rather than an empty
+        // one — there is nothing for a reader to reconcile against the root blocks.
+        let mut compiled_everything = sample_manifest();
+        compiled_everything.restored_nodes.clear();
+        assert!(!compiled_everything
+            .to_toml_string()
+            .unwrap()
+            .contains("restored_nodes"));
+    }
+
     /// The identity document ships **inside** the image, so the one thing it must never
     /// carry is the one thing the provenance manifest exists to record: the per-image
     /// first-boot password. The two documents are assembled from overlapping inputs, so
@@ -1870,6 +1945,7 @@ pub(crate) mod tests {
         // the credential arrives, and nothing else in the manifest is validated
         // — asserted by reading a document whose other tables are junk.
         let facts = BuildFacts {
+            restored_nodes: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -1940,6 +2016,7 @@ pub(crate) mod tests {
         // And it is genuinely a subset — the manifest *does* carry the secret, so the
         // two documents are being compared, not two spellings of the same thing.
         let facts = BuildFacts {
+            restored_nodes: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -2035,6 +2112,7 @@ pub(crate) mod tests {
     fn the_archive_list_records_what_the_rootfs_was_selected_from() {
         let archives = sample_archives();
         let facts = BuildFacts {
+            restored_nodes: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc123",
@@ -2100,6 +2178,7 @@ pub(crate) mod tests {
     fn a_fitted_image_records_the_size_it_realized_and_not_only_the_rule() {
         let archives = sample_archives();
         let facts = |image_bytes| BuildFacts {
+            restored_nodes: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc123",
@@ -2145,6 +2224,7 @@ pub(crate) mod tests {
     fn the_builder_stamp_reads_back_out_of_a_rendered_manifest() {
         let archives = sample_archives();
         let facts = BuildFacts {
+            restored_nodes: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc123",
@@ -2236,6 +2316,7 @@ pub(crate) mod tests {
             sample_build(),
             &lock,
             &BuildFacts {
+                restored_nodes: &[],
                 host_arch: "x86_64",
                 cross: true,
                 manifest_sha256: "abc123",
@@ -2276,6 +2357,7 @@ pub(crate) mod tests {
             depthcharge_build(),
             &bare_lock(),
             &BuildFacts {
+                restored_nodes: &[],
                 host_arch: "x86_64",
                 cross: true,
                 manifest_sha256: "abc123",
@@ -2368,6 +2450,7 @@ pub(crate) mod tests {
         let build = sample_build();
         let lock = sample_lock();
         let facts = BuildFacts {
+            restored_nodes: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc123",
@@ -2566,6 +2649,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let facts = BuildFacts {
+            restored_nodes: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -2630,6 +2714,7 @@ pub(crate) mod tests {
             sha256: "aa".repeat(32), // a well-formed 64-char hex pin
         }];
         let facts = BuildFacts {
+            restored_nodes: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -2690,6 +2775,7 @@ pub(crate) mod tests {
     #[test]
     fn the_sandbox_profile_is_recorded_on_both_sides_of_the_table_boundary() {
         let facts = BuildFacts {
+            restored_nodes: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -2772,6 +2858,7 @@ pub(crate) mod tests {
     fn the_build_sandbox_is_recorded_when_one_compiled_the_build() {
         let archives = sample_archives();
         let facts = |build_sandbox| BuildFacts {
+            restored_nodes: &[],
             cross_sandbox: None,
             packaging_root: None,
             host_arch: "x86_64",
@@ -2849,6 +2936,7 @@ pub(crate) mod tests {
     fn the_packaging_root_is_recorded_apart_from_the_sandbox_that_compiled() {
         let archives = sample_archives();
         let facts = |build_sandbox, packaging_root| BuildFacts {
+            restored_nodes: &[],
             cross_sandbox: None,
             host_arch: "x86_64",
             cross: true,
@@ -2936,6 +3024,7 @@ pub(crate) mod tests {
     fn the_cross_root_is_recorded_apart_from_the_target_arch_sandbox() {
         let archives = sample_archives();
         let facts = |cross_sandbox, build_sandbox| BuildFacts {
+            restored_nodes: &[],
             cross_sandbox,
             build_sandbox,
             packaging_root: None,

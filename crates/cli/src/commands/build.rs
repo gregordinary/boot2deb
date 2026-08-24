@@ -870,6 +870,7 @@ pub(crate) fn run(
             json,
             verbosity,
             sink: &sink,
+            timeline: &timeline,
         })?;
     }
     // Only the record above reads the stages' outputs as a whole; what is left is the
@@ -1016,6 +1017,9 @@ struct Provenance<'a> {
     verbosity: Verbosity,
     /// The event sink every stage streams to.
     sink: &'a dyn boot2deb_engine::event::EventSink,
+    /// What the build's steps did, for the manifest's `[[restored_nodes]]` list — the
+    /// one record of which parts of the image this run compiled rather than restored.
+    timeline: &'a crate::timing::Timeline,
 }
 
 /// Write the provenance manifest for the image this run assembled, and the SBOM beside
@@ -1180,6 +1184,7 @@ fn write_provenance(r: Provenance) -> Result<(), Box<dyn std::error::Error>> {
         let facts = boot2deb_core::provenance::BuildFacts {
             cross_sandbox,
             packaging_root,
+            restored_nodes: &r.timeline.restored_nodes(),
             host_arch: r.pf.host.arch,
             cross: r.pf.cross_toolchain,
             manifest_sha256: &manifest_sha256,

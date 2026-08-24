@@ -670,7 +670,34 @@ impl SandboxBase {
                 context: format!("configure the {} {} bootstrap", self.arch, self.suite),
                 message: source.to_string(),
             })?;
-        self.discard_if_the_archive_moved(&manifest, &mut debian, step)?;
+        // A base already standing is checked against the archive before it is reused,
+        // and a discard hands back the resolution that justified it.
+        if let Some(plan) = self.discard_if_the_archive_moved(&manifest, &mut debian, step)? {
+            // Install that resolution verbatim rather than resolving a second time. It
+            // is what makes the report, the installed set and the manifest one claim:
+            // a bootstrap left to resolve for itself could pick up an archive that
+            // published in between, and would then install a set the "these packages
+            // moved" lines above do not describe. It also drops the second resolve's
+            // release and index fetches, which are the bulk of what a resolve costs.
+            //
+            // The trust trade the library warns of — a plan, not the archive, as the
+            // anchor — is not taken here: this plan was archive-verified moments ago in
+            // this process and has not left memory. Every `.deb` is still verified
+            // against the digest it records.
+            //
+            // A fresh builder because a plan names every package, so the `include`
+            // selectors that would shape a resolution contradict it and are refused at
+            // `build()`. This is the two-mode shape [`crate::rootfs`] already uses.
+            debian = self.debian_builder().plan(plan).build().map_err(|source| {
+                EngineError::Bootstrap {
+                    context: format!(
+                        "configure the {} {} re-bootstrap from the checked resolution",
+                        self.arch, self.suite
+                    ),
+                    message: source.to_string(),
+                }
+            })?;
+        }
         // The sink is bound for this one run rather than for the provisioner's life,
         // so its borrow of `step` and of `installed` ends when `ensure` returns.
         //
@@ -721,6 +748,13 @@ impl SandboxBase {
     /// follows re-provisions it. A no-op when no base stands, and when the one that
     /// stands is still what the archive would give.
     ///
+    /// Returns the [`Plan`] the check resolved when it discarded, and `None` otherwise.
+    /// A discard is the one case where a resolution the caller already paid for
+    /// describes exactly what the bootstrap that follows must install, so handing it
+    /// back is what keeps the report, the installed set and the recorded manifest one
+    /// claim rather than three — and drops the second resolve's release and index
+    /// fetches, which are the bulk of what a resolve costs.
+    ///
     /// **Why the tree's name cannot answer this.** A base is keyed by
     /// [`build_sandbox_dir`] on the inputs that *request* it — mirrors, package set,
     /// recipe version — and those are the same before and after an archive moves. Two
@@ -738,10 +772,13 @@ impl SandboxBase {
     /// `--snapshot pin` the archive does not move at all, so this never fires.
     ///
     /// The cost is one resolve — indices, no downloads — on the reuse path, and it is
-    /// paid only where a base already stands. A build that bootstraps fresh, or that
-    /// discarded an unrecordable base just above, resolves once as it always has. This
-    /// is the same trade [`rootcache`](crate::rootcache) takes for the image rootfs,
-    /// where a solve is seconds against a bootstrap's minutes.
+    /// paid only where a base already stands, which is only where a stage missed the
+    /// artifact store and asked for a root at all. A build that bootstraps fresh, or
+    /// that discarded an unrecordable base just above, resolves once as it always has;
+    /// so does one that discards here, since the resolution is handed to the bootstrap
+    /// rather than repeated. This is the same trade [`rootcache`](crate::rootcache)
+    /// takes for the image rootfs, where a solve is seconds against a bootstrap's
+    /// minutes.
     ///
     /// Divergence is not an error. The base's manifest is a record, not a contract —
     /// only the *image* rootfs manifest is pinned in a lock and verified
@@ -752,9 +789,9 @@ impl SandboxBase {
         manifest: &Path,
         debian: &mut Debian<'_>,
         step: &Step,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Option<Plan>, EngineError> {
         if !self.rootfs.is_dir() || !manifest.is_file() {
-            return Ok(());
+            return Ok(None);
         }
         let plan = debian.resolve().map_err(|source| EngineError::Bootstrap {
             context: format!(
@@ -765,7 +802,7 @@ impl SandboxBase {
         })?;
         let moved = crate::manifest::diverged(manifest, &crate::manifest::packages(&plan))?;
         if moved.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         // Every package that moved, not the first: an archive step usually moves a
         // library and everything built against it at once, and the shape of the whole
@@ -784,7 +821,7 @@ impl SandboxBase {
         // `discard_unrecordable_base` refuses a tree without one: a record standing
         // beside no rootfs would be adopted by the fresh bootstrap's own reuse check.
         std::fs::remove_file(manifest).map_err(|s| EngineError::io(manifest, s))?;
-        Ok(())
+        Ok(Some(plan))
     }
 }
 
@@ -1197,9 +1234,12 @@ fn discard_upper(stage_dir: &Path) {
 /// would compile the image's target `.deb`s in a toolchain the provenance cannot
 /// describe, which is the thing the record exists to prevent.
 ///
-/// Every file in the tree is owned by the caller — the sandbox bootstraps under the
-/// single-identity map — so a plain recursive remove suffices, with no delegate to
-/// re-enter a subordinate map.
+/// Through [`reclaim_tree`], the single route by which a build's scratch is removable,
+/// rather than a plain recursive delete. Every file in the tree is the caller's — the
+/// sandbox bootstraps under the single-identity map — so the escalation it can perform
+/// is not what is needed here; what is, is that it also takes the publication lock the
+/// provisioner leaves beside a published tree, which a plain delete would strand beside
+/// no rootfs.
 ///
 /// Split out of [`BuildSandbox::ensure_ready`] so the condition is exercised without a
 /// bootstrap: the call that follows it in `ensure_ready` re-creates the tree, which
@@ -1208,7 +1248,7 @@ fn discard_unrecordable_base(rootfs: &Path, manifest: &Path) -> Result<bool, Eng
     if !rootfs.is_dir() || manifest.is_file() {
         return Ok(false);
     }
-    std::fs::remove_dir_all(rootfs).map_err(|source| EngineError::io(rootfs, source))?;
+    reclaim_tree(rootfs)?;
     Ok(true)
 }
 
@@ -1377,8 +1417,10 @@ const PACKAGING_ROLE: &str = "package";
 /// a base it actually is.
 ///
 /// The digest is what makes the path honest rather than merely unique:
-/// [`BuildSandbox::ensure_ready`] fast-paths on an existing directory and never re-checks
-/// its contents. So each ingredient stops a specific wrong answer.
+/// [`BuildSandbox::ensure_ready`] fast-paths on an existing directory, and the one thing
+/// it re-checks there is the package *versions* the tree's manifest records against the
+/// archive — never the ingredients below. So each ingredient stops a specific wrong
+/// answer.
 ///
 /// - **The mirrors.** Turning on `--snapshot pin` would otherwise reuse the sandbox a
 ///   previous live-mirror build left behind, while the output signature
@@ -2110,7 +2152,8 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&marker).unwrap().modified().unwrap(),
             before,
-            "a base the archive still agrees with was re-provisioned; the gate is              firing on something other than the solved set"
+            "a base the archive still agrees with was re-provisioned; the gate is \
+             firing on something other than the solved set"
         );
         assert!(
             !logs

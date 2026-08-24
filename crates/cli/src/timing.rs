@@ -6,8 +6,10 @@
 //! Those two together are the point: a thirty-second kernel step is a cache hit,
 //! and without the second column a reader has to infer that from the first.
 //!
-//! Nothing here is recorded in the provenance manifest. That document is
-//! reproducibility evidence, and a wall-clock duration is not reproducible.
+//! No *duration* here is recorded in the provenance manifest: that document is
+//! reproducibility evidence, and a wall clock is not reproducible. The outcome column
+//! is a different kind of fact — which parts of the image this run actually built — so
+//! [`Timeline::restored_nodes`] hands that half to the manifest.
 
 use boot2deb_engine::event::{Event, StepOutcome};
 use std::cell::RefCell;
@@ -37,6 +39,25 @@ impl Timeline {
             rows: RefCell::new(Vec::new()),
             started: Instant::now(),
         }
+    }
+
+    /// The steps that did not compile their outputs, in build order, as the provenance
+    /// manifest records them.
+    ///
+    /// The durations stay out: a wall clock is not reproducible, which is why nothing
+    /// else here reaches that document. *Where a step's outputs came from* is not a
+    /// timing fact at all — it is what this run did or did not build, and no other
+    /// record carries it.
+    pub(crate) fn restored_nodes(&self) -> Vec<boot2deb_core::provenance::RestoredNode> {
+        self.rows
+            .borrow()
+            .iter()
+            .filter(|r| r.outcome != StepOutcome::Built)
+            .map(|r| boot2deb_core::provenance::RestoredNode {
+                step: r.step.clone(),
+                outcome: r.outcome.as_str().to_string(),
+            })
+            .collect()
     }
 
     /// Record `event` if it is a step finishing; ignore it otherwise.
@@ -147,6 +168,27 @@ mod tests {
         // lose its last two characters on one row.
         assert_eq!(human_duration(120_000), "2m00s");
         assert_eq!(human_duration(0), "0.0s");
+    }
+
+    #[test]
+    fn the_provenance_rows_are_the_steps_this_run_did_not_compile() {
+        let t = Timeline::new();
+        t.record(&finished("kernel", 724_000, StepOutcome::Built));
+        t.record(&finished("uboot", 3_000, StepOutcome::Restored));
+        t.record(&finished("userspace", 60_000, StepOutcome::Mixed));
+
+        // A step that compiled everything it shipped contributes no row: the
+        // provisioned-root blocks already describe it, and a row saying "built" would
+        // restate them. The mixed row is the one that matters — there the blocks
+        // describe only part of the step.
+        let rows = t.restored_nodes();
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.step.as_str(), r.outcome.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("uboot", "restored"), ("userspace", "partly restored")]
+        );
+        // Durations stay out of the manifest; nothing here carries one.
     }
 
     #[test]

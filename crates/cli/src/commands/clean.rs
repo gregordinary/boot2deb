@@ -17,12 +17,26 @@
 //! not a fixed path: it sweeps the build roots and their overlay layers while sparing
 //! the packaging root, which is what a build root aged past the archive needs.
 //!
+//! Every removal goes through [`boot2deb_engine::sandbox::reclaim_tree`], which is the
+//! only route that gets past the mode-`0` work area an overlay leaves and past a
+//! subuid-owned tree. It carries one consequence worth stating: the provisioner's
+//! removal also takes the `<target>.lock` a published rootfs carries beside it. For a
+//! base tree that is right — the lock is the provisioner's own, and `--build-roots`
+//! names it as a target too. For a target that merely *contains* such trees (a work
+//! dir, `cache/`, `sandbox/`) the `.lock` sibling is someone else's file, and for the
+//! whole-tree default it sits outside the stamped directory. Nothing writes those paths
+//! today, so this costs nothing; closing it needs a seam in `ferroday-cage`'s `Remove`,
+//! which exposes only the identity map.
+//!
 //! `--verify-trees` is the only selector that prunes *within* a store rather than
 //! removing it. Both auto-fetch caches are commit-addressed, so liveness is decidable:
 //! a checkout whose commit no lock in the config tree names can only be re-fetched,
 //! never read back from, and is dead. That decision is only sound if the pinned set is
 //! complete, so an unreadable or unparseable lock aborts the sweep rather than
-//! narrowing it.
+//! narrowing it. The one narrowing this cannot detect is a missing `--overlay`: the
+//! locks are read from the search paths, so a sweep invoked without the overlays a
+//! build uses never sees their pins. The run reports how many locks it read for that
+//! reason — a count short of the tree the operator knows is the signal.
 
 use crate::args::CleanArgs;
 use crate::config::{artifact_cache, cache_dir, kconfig_cache, patches_cache, verify_trees_cache};
@@ -43,12 +57,21 @@ use std::path::{Path, PathBuf};
 /// `.toml` was deleted still pins its checkouts, and listing recipes would miss it and
 /// call those trees dead.
 ///
+/// Returns the commits and how many locks were read for them. The count is reported to
+/// the operator because the one way this set can be silently narrow is outside the
+/// command's reach: the search paths come from `--overlay`, so a sweep invoked without
+/// the overlays a build uses reads fewer locks and calls their checkouts dead. A count
+/// that does not match the tree the operator knows is the signal for that.
+///
 /// # Errors
 ///
 /// Any unreadable directory or unparseable lock — the sweep must not proceed on a
 /// partial answer, because a commit missing from this set is a live checkout deleted.
-fn pinned_commits(root: &ConfigRoot) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
+fn pinned_commits(
+    root: &ConfigRoot,
+) -> Result<(BTreeSet<String>, usize), Box<dyn std::error::Error>> {
     let mut pinned = BTreeSet::new();
+    let mut locks = 0usize;
     let mut visit = |path: &Path| -> Result<(), Box<dyn std::error::Error>> {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             return Ok(());
@@ -63,6 +86,7 @@ fn pinned_commits(root: &ConfigRoot) -> Result<BTreeSet<String>, Box<dyn std::er
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         let lock = boot2deb_core::lock::Lock::from_toml_str(&text, &path.display().to_string())?;
         pinned.extend(lock.pinned_commits().into_iter().map(str::to_owned));
+        locks += 1;
         Ok(())
     };
     for search_root in root.search_paths() {
@@ -91,7 +115,7 @@ fn pinned_commits(root: &ConfigRoot) -> Result<BTreeSet<String>, Box<dyn std::er
             }
         }
     }
-    Ok(pinned)
+    Ok((pinned, locks))
 }
 
 /// The dead entries of one commit-addressed checkout cache: those named for a commit
@@ -119,6 +143,18 @@ fn unpinned_checkouts(store: &Path, pinned: &BTreeSet<String>) -> Vec<PathBuf> {
     dead
 }
 
+/// The publication lock a provisioned rootfs at `path` carries — `<path>.lock`, beside
+/// the tree rather than inside it.
+///
+/// Named here because [`boot2deb_engine::sandbox::reclaim_tree`] removes it with the
+/// tree it belongs to, so a run that also names it as a target of its own has to know
+/// it is already gone rather than never present.
+fn publication_lock(path: &Path) -> Option<PathBuf> {
+    let mut name = path.file_name()?.to_os_string();
+    name.push(".lock");
+    Some(path.with_file_name(name))
+}
+
 /// Run `clean [RECIPE]`.
 pub(crate) fn run(
     root: &ConfigRoot,
@@ -134,8 +170,12 @@ pub(crate) fn run(
 
     if work_scoped {
         let Some(recipe) = recipe else {
-            return Err("clean needs a RECIPE to say whose build scratch to remove;                         `--artifacts`, `--verify-trees`, `--kconfig` and `--all-caches`                         sweep the shared caches without one"
-                .into());
+            return Err(
+                "clean needs a RECIPE to say whose build scratch to remove; \
+                        `--artifacts`, `--verify-trees`, `--kconfig` and `--all-caches` \
+                        sweep the shared caches without one"
+                    .into(),
+            );
         };
         // Validate the recipe-name shape (reject `..`/absolute/separators) before it is
         // joined into a filesystem path, consistent with the config write paths.
@@ -176,16 +216,35 @@ pub(crate) fn run(
     if args.verify_trees {
         // Resolved before anything is removed: a lock that will not parse must abort
         // the whole run, not leave it half-swept.
-        let pinned = pinned_commits(root)?;
+        let (pinned, locks) = pinned_commits(root)?;
+        // Said before any removal, because this is the one input to the liveness rule
+        // the command cannot check for itself: a sweep run without the `--overlay`
+        // flags a build uses reads fewer locks and calls their checkouts dead.
+        println!(
+            "  {} commit(s) pinned by {locks} lock(s) across {} config root(s)",
+            pinned.len(),
+            root.search_paths().len()
+        );
         for store in [verify_trees_cache(root), patches_cache(root)] {
             targets.extend(unpinned_checkouts(&store, &pinned));
         }
     }
 
     let mut removed_any = false;
+    // Every path an earlier removal in this run already took. `reclaim_tree` goes
+    // through the provisioner's own removal, which takes the `<tree>.lock` a published
+    // rootfs carries along with the tree — and `--build-roots` names that lock as a
+    // target in its own right. Reporting it "absent" would read as a target that was
+    // never there, and would contradict the `--dry-run` line that listed it.
+    let mut taken: BTreeSet<PathBuf> = BTreeSet::new();
     for target in &targets {
         if !target.exists() {
-            println!("  {} (absent)", target.display());
+            if taken.contains(target) {
+                println!("  removed {} (with its tree)", target.display());
+                removed_any = true;
+            } else {
+                println!("  {} (absent)", target.display());
+            }
             continue;
         }
         let size = human_size(dir_size(target));
@@ -206,6 +265,9 @@ pub(crate) fn run(
             boot2deb_engine::rootfs::sweep_provisioned(target);
             boot2deb_engine::sandbox::reclaim_tree(target)
                 .map_err(|e| format!("failed to remove {}: {e}", target.display()))?;
+            if let Some(lock) = publication_lock(target) {
+                taken.insert(lock);
+            }
             println!("  removed {} ({size})", target.display());
             removed_any = true;
         }
@@ -531,6 +593,18 @@ mod tests {
             let err = run(&root, None, args).unwrap_err();
             assert!(err.to_string().contains("needs a RECIPE"), "{err}");
         }
+    }
+
+    #[test]
+    fn a_trees_publication_lock_is_named_beside_it_not_inside_it() {
+        // What `reclaim_tree` takes along with a tree, and therefore what the removal
+        // report has to recognize as already gone rather than never present.
+        assert_eq!(
+            publication_lock(Path::new("/w/sandbox/build-arm64-forky-abc")),
+            Some(PathBuf::from("/w/sandbox/build-arm64-forky-abc.lock"))
+        );
+        // A path with no final component names no tree, so it carries no lock.
+        assert_eq!(publication_lock(Path::new("/")), None);
     }
 
     #[test]

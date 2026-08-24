@@ -55,6 +55,7 @@ fn facts<'a>(
     package_count: usize,
 ) -> BuildFacts<'a> {
     BuildFacts {
+        restored_nodes: &[],
         host_arch: "x86_64",
         cross: true,
         manifest_sha256,

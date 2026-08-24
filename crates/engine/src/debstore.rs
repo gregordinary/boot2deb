@@ -8,8 +8,9 @@
 //! written only after its bytes hash back to that name, so a store *hit* is trusted
 //! (the deb is re-verified again at install time against the solved manifest),
 //! and two layers pulling identical bytes share one entry. The store is durable — it
-//! is a build-host cache outside the per-recipe work dir, so it survives `clean` and
-//! the build "no longer depends on [the source] staying put".
+//! is a build-host cache outside the per-recipe work dir, so cleaning one leaves it and
+//! the build "no longer depends on [the source] staying put". `clean --all-caches` is
+//! what reaches it.
 
 use crate::blobs::sha256_hex;
 use crate::error::EngineError;

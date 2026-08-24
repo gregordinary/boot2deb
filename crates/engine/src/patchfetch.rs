@@ -29,8 +29,8 @@ const GIX_FETCH_TIMEOUT: Duration = Duration::from_secs(180);
 /// Materialize the `patches` repo at `commit` from `url` into a commit-addressed
 /// directory under `cache_root`, returning that checkout's path.
 ///
-/// The cache is durable (it lives outside any recipe work dir, so it survives
-/// `clean` and is shared across builds) and content-addressed by the commit, so a
+/// The cache is durable (it lives outside any recipe work dir, so cleaning one leaves
+/// it standing, and it is shared across builds) and content-addressed by the commit, so a
 /// present `cache_root/<commit>` is always a complete checkout at that commit —
 /// the fetch stages into a temporary sibling and atomically renames on success, so
 /// an interrupted clone never leaves a half-materialized tree a later run trusts.
@@ -55,7 +55,7 @@ pub fn fetch_series(
     }
     std::fs::create_dir_all(cache_root).map_err(|source| EngineError::io(cache_root, source))?;
     // Sweep `.fetch-*` staging dirs a hard-killed clone may have left before starting a
-    // fresh one; the durable patches cache survives `clean`, so leftovers
+    // fresh one; the patches cache outlives the work dirs that read it, so leftovers
     // would otherwise accrue.
     crate::gc::sweep_stale_temps(cache_root);
 

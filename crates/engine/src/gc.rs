@@ -10,7 +10,7 @@
 //! (SIGKILL, power loss) between stage and rename leaves that temp behind. It is
 //! harmless to correctness — hit checks require the *final* entry, never a temp — but
 //! it accumulates as disk clutter, since the durable stores under `<root>/cache`
-//! survive `clean`.
+//! outlive the work dirs that read them.
 //!
 //! [`sweep_stale_temps`] removes those leftovers best-effort at store-open and
 //! build-start. A temp is deleted only when it is both name-matched and older than

@@ -786,7 +786,10 @@ pub(crate) struct CleanArgs {
     /// `patches` checkouts beside them) down to what is still pinned: a checkout is
     /// commit-addressed, so one whose commit no `recipes/*/*.lock` names can only be
     /// re-fetched, never reconstructed from, and is dead. Root-scoped. Pinned
-    /// checkouts stay — `--all-caches` is what takes those too.
+    /// checkouts stay — `--all-caches` is what takes those too. Pass the same
+    /// `--overlay` flags a build of these recipes uses: the pinned set is read from the
+    /// search paths, so a sweep that omits an overlay calls its checkouts dead. The run
+    /// reports how many locks it read, which is what makes a narrow set visible.
     #[arg(long, conflicts_with = "all_caches")]
     pub(crate) verify_trees: bool,
     /// Remove `verify-config`'s scratch tree (`<root>/cache/kconfig`), one work dir

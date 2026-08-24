@@ -51,7 +51,7 @@ pub fn ensure_tree(
     }
     std::fs::create_dir_all(cache_root).map_err(|s| EngineError::io(cache_root, s))?;
     // Sweep `.fetch-*` staging dirs a hard-killed clone may have left; the cache is
-    // durable (it survives `clean`), so leftovers would otherwise accrue.
+    // durable (it outlives every work dir), so leftovers would otherwise accrue.
     crate::gc::sweep_stale_temps(cache_root);
 
     // Stage into a temp sibling on the same filesystem, then rename atomically so

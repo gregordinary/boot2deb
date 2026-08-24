@@ -470,8 +470,9 @@ pub(crate) fn artifact_cache(root: &ConfigRoot) -> PathBuf {
 
 /// The durable, shared cache of auto-fetched verify checkouts (`<root>/cache/verify-trees`),
 /// commit-addressed by [`boot2deb_engine::srcfetch::ensure_tree`]. Sibling to the
-/// patches and artifact caches; survives `clean` and is reused across recipes and
-/// verify runs.
+/// patches and artifact caches; it outlives every recipe work dir and is reused across
+/// recipes and verify runs. `clean --verify-trees` prunes it to the checkouts the locks
+/// still pin, and `clean --all-caches` takes it entire.
 pub(crate) fn verify_trees_cache(root: &ConfigRoot) -> PathBuf {
     cache_dir(root).join("verify-trees")
 }
@@ -517,8 +518,9 @@ pub(crate) fn fetch_verify_tree(
 
 /// The content-addressed store for pre-built `extra_debs`: a durable
 /// build-host cache under the config root, shared by `update` (which fills it) and
-/// `build` (which reads it). It sits outside any recipe work dir, so `clean` leaves
-/// it intact — the build no longer depends on the source staying put.
+/// `build` (which reads it). It sits outside any recipe work dir, so cleaning one leaves
+/// it intact — the build no longer depends on the source staying put. `clean
+/// --all-caches` is the only selector that reaches it.
 pub(crate) fn extra_debs_store(root: &ConfigRoot) -> PathBuf {
     cache_dir(root).join("extra-debs")
 }

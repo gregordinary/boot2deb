@@ -9,9 +9,10 @@
 //! set of inputs that determine the output, not just the tree. On a signature
 //! hit `build` restores the files instead of recompiling; on a miss it compiles and
 //! [`put`](ArtifactStore::put)s. Because the key covers every output-affecting input,
-//! a hit is sound; because the store lives outside any recipe work dir, it survives
-//! `clean` and is shared across work dirs — a rebuilt or freshly-cloned checkout
-//! restores rather than recompiles.
+//! a hit is sound; because the store lives outside any recipe work dir, it outlives
+//! them and is shared across work dirs — a rebuilt or freshly-cloned checkout
+//! restores rather than recompiles. `clean --artifacts` empties it, as does the
+//! `--all-caches` sweep of the tree it sits in.
 //!
 //! The store is self-verifying like [`crate::debstore`]: an entry is a directory
 //! `<node>/<signature>/` holding the artifact files plus a `manifest.toml`, written
