@@ -8,6 +8,8 @@ dt_dir      = "rockchip"                 # arch/arm64/boot/dts/<dt_dir>
 # they are guaranteed present on first boot.
 modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket"]
 
+# What every RK3588 image carries, regardless of board or feature selection.
+#
 # Non-free firmware the RK3588 loads at runtime, from Debian's non-free-firmware
 # component (already enabled in the rootfs sources.list) and snapshot-pinned like
 # every other package -- so no linux-firmware tarball is fetched or extracted.
@@ -19,7 +21,14 @@ modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket
 #     with a Realtek NIC does.
 # The RK3588 has no integrated wifi/BT radio, so no wireless firmware is staged
 # here; a board that adds a wifi module pulls its firmware on its device layer.
-packages = ["firmware-misc-nonfree", "firmware-realtek"]
+#
+# And the tooling for the devices the `modules` line above guarantees:
+#   v4l-utils -- v4l2-ctl and media-ctl. The decoder, encoder and RGA V4L2 nodes
+#     exist in every RK3588 image whether or not it selected a media-accel
+#     feature, so the tool that inspects them is homed beside the modules rather
+#     than with the userspace that drives them. ~5.6 MiB installed with its
+#     closure (libv4l-0t64, libv4lconvert0t64, libv4l2rds0t64, libjpeg62-turbo).
+packages = ["firmware-misc-nonfree", "firmware-realtek", "v4l-utils"]
 
 # rkbin defaults for RK3588 boards. ATF (BL31) is SoC-generic; the DDR TPL is a
 # common-memory default a board with different DRAM overrides on its device layer.

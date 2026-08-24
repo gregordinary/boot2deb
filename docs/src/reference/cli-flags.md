@@ -132,6 +132,7 @@ Resolve a device or recipe to a complete build (no build work)
 | `--locale` | `<LOCALE>` | System locale — the image's `LANG` (e.g. `de_DE.UTF-8`); default: the recipe/base `locale`. Always generated into the image, so it is safe to name a locale nothing else lists |
 | `--locale-gen` | `<LOCALES_GENERATE>`, repeatable | Extra locale to generate into the image, repeatable (`--locale-gen fr_FR.UTF-8`). When any is given, replaces the base `locales_generate` list; the system locale is generated regardless |
 | `--timezone` | `<TIMEZONE>` | System timezone (e.g. `America/New_York`); default: the recipe/base `timezone` |
+| `--ntp-server` | `<NTP_SERVERS>`, repeatable | NTP server the image prefers, repeatable (`--ntp-server ntp.lan`); default: the recipe/base `ntp_servers`. When any is given, replaces that list. Debian's fallback pool is kept either way, so this sets a preference rather than the only source — worth setting for a board that boots on a network the public pool cannot be reached from |
 | `--keymap` | `<KEYMAP>` | Console keyboard layout (e.g. `gb`); default: the recipe/device `keymap`, and none at all on a headless board. Sets `XKBLAYOUT`; the model, variant, and options keep their defaults — set those in the device's `[keymap]` table |
 | `--sudo` | `<SUDO>` | What `sudo` asks of the default account: `nopasswd` (root with no prompt) or `password` (prompts for the account's own); default: the recipe/base `sudo` |
 | `--password-length` | `<PASSWORD_LENGTH>` | Length of the generated per-image first-boot password; default: the recipe/base `first_boot_password_length`. Shorter is friendlier to transcribe at a console and weaker in exactly one way — an attack on the password hash inside a shared image — so authorize an SSH key (`ssh_authorized_keys`) rather than shortening this if the goal is to stop typing it |
@@ -159,6 +160,7 @@ Preflight the host: arch/OS facts, and whether every tool a build needs is prese
 | `--locale` | `<LOCALE>` | System locale — the image's `LANG` (e.g. `de_DE.UTF-8`); default: the recipe/base `locale`. Always generated into the image, so it is safe to name a locale nothing else lists |
 | `--locale-gen` | `<LOCALES_GENERATE>`, repeatable | Extra locale to generate into the image, repeatable (`--locale-gen fr_FR.UTF-8`). When any is given, replaces the base `locales_generate` list; the system locale is generated regardless |
 | `--timezone` | `<TIMEZONE>` | System timezone (e.g. `America/New_York`); default: the recipe/base `timezone` |
+| `--ntp-server` | `<NTP_SERVERS>`, repeatable | NTP server the image prefers, repeatable (`--ntp-server ntp.lan`); default: the recipe/base `ntp_servers`. When any is given, replaces that list. Debian's fallback pool is kept either way, so this sets a preference rather than the only source — worth setting for a board that boots on a network the public pool cannot be reached from |
 | `--keymap` | `<KEYMAP>` | Console keyboard layout (e.g. `gb`); default: the recipe/device `keymap`, and none at all on a headless board. Sets `XKBLAYOUT`; the model, variant, and options keep their defaults — set those in the device's `[keymap]` table |
 | `--sudo` | `<SUDO>` | What `sudo` asks of the default account: `nopasswd` (root with no prompt) or `password` (prompts for the account's own); default: the recipe/base `sudo` |
 | `--password-length` | `<PASSWORD_LENGTH>` | Length of the generated per-image first-boot password; default: the recipe/base `first_boot_password_length`. Shorter is friendlier to transcribe at a console and weaker in exactly one way — an attack on the password hash inside a shared image — so authorize an SSH key (`ssh_authorized_keys`) rather than shortening this if the goal is to stop typing it |
@@ -318,6 +320,7 @@ Drive the build stages (kernel, u-boot, userspace, ffmpeg, and the disk image) f
 | `--sbom` | `spdx` \| `cyclonedx`, repeatable | Also write a software bill of materials beside the image, in this format (repeatable — `--sbom spdx --sbom cyclonedx` writes both). Off by default, so a build never silently gains a file; the same documents can be produced later from the published provenance manifest with `boot2deb sbom`. Set `SOURCE_DATE_EPOCH` for a byte-reproducible document — everything else in it is derived from the image's own content |
 | `--refresh-rootfs` |  | Ignore a rootfs cache hit and re-bootstrap, refreshing the stored tree. The plan is still resolved — the rootfs cache keys on the *solved* set, so a moved mirror already rebuilds automatically; this is the manual escape when you want a clean bootstrap regardless |
 | `--no-artifact-cache` |  | Disable the Tier-2 artifact cache: always recompile the kernel / u-boot / userspace / ffmpeg `.deb`s instead of restoring a stored output on a signature hit, and do not store this build's outputs. The durable store at `<root>/cache/artifacts` is left untouched |
+| `--allow-stale-builder` |  | Build even though this `boot2deb` binary does not match the source checkout it is being run from — it was compiled before the checkout's current commit, or before edits under `crates/`. The image is built by the *running* binary either way; what the mismatch costs is the truth of the `[built_with]` stamp, which would name a commit that is not what ran. The fix is normally `cargo build`, which takes seconds; this is for the case where you mean it |
 
 
 ## reproduce
@@ -362,6 +365,7 @@ Rebuild an image from the plan document a previous build published, instead of r
 | `--sbom` | `spdx` \| `cyclonedx`, repeatable | Also write a software bill of materials beside the image, in this format (repeatable — `--sbom spdx --sbom cyclonedx` writes both). Off by default, so a build never silently gains a file; the same documents can be produced later from the published provenance manifest with `boot2deb sbom`. Set `SOURCE_DATE_EPOCH` for a byte-reproducible document — everything else in it is derived from the image's own content |
 | `--refresh-rootfs` |  | Ignore a rootfs cache hit and re-bootstrap, refreshing the stored tree. The plan is still resolved — the rootfs cache keys on the *solved* set, so a moved mirror already rebuilds automatically; this is the manual escape when you want a clean bootstrap regardless |
 | `--no-artifact-cache` |  | Disable the Tier-2 artifact cache: always recompile the kernel / u-boot / userspace / ffmpeg `.deb`s instead of restoring a stored output on a signature hit, and do not store this build's outputs. The durable store at `<root>/cache/artifacts` is left untouched |
+| `--allow-stale-builder` |  | Build even though this `boot2deb` binary does not match the source checkout it is being run from — it was compiled before the checkout's current commit, or before edits under `crates/`. The image is built by the *running* binary either way; what the mismatch costs is the truth of the `[built_with]` stamp, which would name a commit that is not what ran. The fix is normally `cargo build`, which takes seconds; this is for the case where you mean it |
 
 
 ## diff
@@ -392,6 +396,21 @@ Export an image's bill of materials as SPDX 2.3 or CycloneDX 1.6 JSON, from the 
 | `--format` | `spdx` \| `cyclonedx` (default `spdx`) | Document format to write |
 | `--out` | `<OUT>` | Write to this file instead of stdout |
 | `--feature` | `<FEATURES>`, repeatable | Rootfs feature the published image was built with, repeatable — the same selection `build --feature` used. It names which image's documents to read; passing the reference directly (`sbom turing-rk1/forky+jellyfin`) is equivalent. Ignored when a `.provenance.toml` path is given, which already names one image |
+
+
+## size
+
+Break down what an image's package set weighs, from the plan document a build published — per binary package, per source package, or per repository. The figures are the archives' own `Installed-Size` estimates in kibibytes, so they answer "what did the packages contribute" and not "how large is the image": they exclude filesystem overhead and everything the image gains after `dpkg`. Offline; builds nothing
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `target` | yes | Recipe whose published image to weigh (e.g. turing-rk1/forky), or a path to a `.plan` shipped with an image |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--by` | `package` \| `source` \| `archive` (default `package`) | Axis to roll up on: one row per binary package, per source package (which attributes a source's several outputs to the thing that was built), or per repository (which separates what Debian shipped from what this build compiled) |
+| `--top` | `<TOP>` (default `25`) | Show only the heaviest N rows; `0` shows every row. The totals always describe the whole set, so a truncated view still says what it is a view of |
+| `--feature` | `<FEATURES>`, repeatable | Rootfs feature the published image was built with, repeatable — the same selection `build --feature` used. It names which image's plan to read; passing the reference directly (`size turing-rk1/forky+jellyfin`) is equivalent. Ignored when a `.plan` path is given, which already names one image |
 
 
 ## outdated

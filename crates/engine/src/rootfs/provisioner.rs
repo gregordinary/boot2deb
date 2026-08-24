@@ -56,6 +56,7 @@ use crate::repo::LocalDistsRepo;
 use crate::rootcache::{self, RootfsStore};
 use crate::sandbox::{forward_bootstrap_event, StepObserver};
 use boot2deb_core::model::ResolvedBuild;
+use boot2deb_core::weight::PlannedWeight;
 use ferroday_cage::provision::debian::{Debian, DebianEvent, Plan, Priority, Repository};
 use ferroday_cage::provision::{self, Export};
 use ferroday_cage::IdentityMap;
@@ -342,8 +343,8 @@ pub fn build_rootfs(
 /// here — a mismatch surfaces as its own configuration error naming both values.
 fn read_pinned_plan(path: &Path, step: &Step) -> Result<(Plan, String), EngineError> {
     let document = std::fs::read_to_string(path).map_err(|s| EngineError::io(path, s))?;
-    let plan = Plan::parse_document(&document).map_err(|e| EngineError::Bootstrap {
-        context: format!("read the pinned plan {}", path.display()),
+    let plan = Plan::parse_document(&document).map_err(|e| EngineError::PlanDocument {
+        path: path.display().to_string(),
         message: e.to_string(),
     })?;
     step.log(format!(
@@ -364,12 +365,12 @@ fn read_pinned_plan(path: &Path, step: &Step) -> Result<(Plan, String), EngineEr
 /// the same way it records that stage's solved manifest.
 pub fn read_plan_record(path: &Path) -> Result<PlanRecord, EngineError> {
     let bytes = std::fs::read(path).map_err(|s| EngineError::io(path, s))?;
-    let text = String::from_utf8(bytes.clone()).map_err(|_| EngineError::Bootstrap {
-        context: format!("read the plan document {}", path.display()),
+    let text = String::from_utf8(bytes.clone()).map_err(|_| EngineError::PlanDocument {
+        path: path.display().to_string(),
         message: "the document is not valid UTF-8".into(),
     })?;
-    let plan = Plan::parse_document(&text).map_err(|e| EngineError::Bootstrap {
-        context: format!("read the plan document {}", path.display()),
+    let plan = Plan::parse_document(&text).map_err(|e| EngineError::PlanDocument {
+        path: path.display().to_string(),
         message: e.to_string(),
     })?;
     Ok(PlanRecord {
@@ -384,6 +385,54 @@ pub struct PlanRecord {
     /// Lowercase-hex sha256 of the document's bytes on disk.
     pub sha256: String,
     /// One row per repository the plan resolved against, in configuration order.
+    pub archives: Vec<boot2deb_core::provenance::ArchiveProvenance>,
+}
+
+/// Read a published plan document into what a size report rolls up.
+///
+/// The plan is the right file to read this from, and the solved manifest is the wrong
+/// one. That manifest is a **content pin** — its sha256 is committed in the lock's
+/// `RootfsPin.manifest_sha256`, and a mismatch is a hard `ManifestDrift` — so adding
+/// columns to it would invalidate every committed pin for a reason that has nothing to
+/// do with the package set. The plan carries the same rows plus the archive's own
+/// `Installed-Size` and `Source`, and nothing pins its shape.
+///
+/// A document written before those fields existed parses fine and reports every size as
+/// absent; a report says how many that was rather than presenting the result as
+/// complete.
+pub fn read_plan_weights(path: &Path) -> Result<PlanWeights, EngineError> {
+    let text = std::fs::read_to_string(path).map_err(|s| EngineError::io(path, s))?;
+    let plan = Plan::parse_document(&text).map_err(|e| EngineError::PlanDocument {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    Ok(PlanWeights {
+        packages: plan
+            .packages
+            .iter()
+            .map(|p| PlannedWeight {
+                name: p.name.clone(),
+                version: p.version.clone(),
+                source: p.source.clone(),
+                installed_kib: p.installed_size,
+                archive: p.archive,
+            })
+            .collect(),
+        archives: archive_records(&plan),
+    })
+}
+
+/// A published plan document's package rows and the repositories they name.
+///
+/// Both halves come from one read, so the labels a report puts on its archive rows are
+/// the ones that document's own packages index into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanWeights {
+    /// One row per package the plan installs, in document order.
+    pub packages: Vec<PlannedWeight>,
+    /// One row per repository, in configuration order — the same projection the
+    /// provenance manifest's `[[archives]]` carries, so a `file://` pool is marked
+    /// local and its build-host path is dropped here too.
     pub archives: Vec<boot2deb_core::provenance::ArchiveProvenance>,
 }
 
@@ -410,6 +459,7 @@ fn archive_records(plan: &Plan) -> Vec<boot2deb_core::provenance::ArchiveProvena
                 date: archive.date.clone(),
                 valid_until: archive.valid_until.clone(),
                 signed_by: archive.signed_by.clone(),
+                signing_key: archive.signing_key.clone(),
             }
         })
         .collect()
@@ -844,10 +894,45 @@ fn customize_script(user: &str, build: &ResolvedBuild, boot: Option<BootConfig>)
          run-parts --exit-on-error --arg=\"$kver\" /etc/kernel/postinst.d\n",
     );
     s.push_str(&l10n_asserts(build));
+    s.push_str(&enable_time_wait_sync());
     if let Some(BootConfig::Depthcharge { board, .. }) = boot {
         s.push_str(&depthcharge_finalize(board));
     }
     s
+}
+
+/// Enable `systemd-time-wait-sync`, so `time-sync.target` means what Debian's
+/// maintenance jobs already assume it means.
+///
+/// Those jobs — `apt-daily`, `logrotate`, `man-db`, `fstrim`, `e2scrub_all`,
+/// `dpkg-db-backup`, `anacron` — all order themselves `After=time-sync.target`. Nothing
+/// *reaches* that target unless this unit is enabled, so on a stock image the ordering
+/// is inert and they run against whatever the clock says at boot. On a board with no
+/// RTC that is the mtime of `/var/lib/systemd/timesync/clock`: plausible, and as stale
+/// as the last power-off.
+///
+/// Enabled here rather than by a `.wants` symlink in the base overlay because this unit
+/// ships inside the `systemd` package. A symlink laid down before that package installs
+/// is a symlink `deb-systemd-helper` may still have an opinion about when it applies
+/// the unit's preset; one written afterwards is the final word. The link is the exact
+/// one `systemctl enable` would create, written directly because `systemctl` in a cage
+/// with no running manager is a larger dependency than one `ln -s`.
+///
+/// The bound on the wait lives in the base overlay's drop-in, not here — see
+/// `base/overlay/etc/systemd/system/systemd-time-wait-sync.service.d/bounded.conf`,
+/// which explains why an unbounded wait strands an offline board short of
+/// `multi-user.target`. Both asserts guard that drop-in: it is inert if the unit is
+/// missing, and it fails closed — holding the boot for the full 45 seconds on every
+/// offline boot — if `timeout` is.
+fn enable_time_wait_sync() -> String {
+    "[ -f /usr/lib/systemd/system/systemd-time-wait-sync.service ] || \
+     { echo 'systemd ships no systemd-time-wait-sync.service: the bounded-wait drop-in would configure nothing' >&2; exit 1; }\n\
+     [ -x /usr/bin/timeout ] || \
+     { echo 'coreutils ships no /usr/bin/timeout: the bounded-wait drop-in would never release the boot' >&2; exit 1; }\n\
+     mkdir -p /etc/systemd/system/sysinit.target.wants\n\
+     ln -sf /usr/lib/systemd/system/systemd-time-wait-sync.service \
+     /etc/systemd/system/sysinit.target.wants/systemd-time-wait-sync.service\n"
+        .to_string()
 }
 
 /// The `~/.ssh/authorized_keys` block, or the empty string when no config root
@@ -1054,7 +1139,7 @@ mod tests {
     /// *settings* the installing provisioner carries, not what it would install.
     fn sample_plan(suite: &str, architecture: &str) -> Plan {
         Plan::parse_document(&format!(
-            "Format: ferroday-cage-plan 1\n\
+            "Format: ferroday-cage-plan 2\n\
              Suite: {suite}\n\
              Architecture: {architecture}\n\
              \n\
@@ -1064,6 +1149,7 @@ mod tests {
              Components: main\n\
              Release-SHA256: {zeros}\n\
              Signed-By:\n\
+             Signing-Key:\n\
              \n\
              Package: base-files\n\
              Version: 13\n\
@@ -1210,13 +1296,15 @@ mod tests {
     }
 
     /// The provenance rows are the manifest's account of what the packages were selected
-    /// from. Two properties decide whether that account is portable: a `file://`
-    /// repository is the build host's own, so its path must not reach the record, and an
-    /// unsigned repository must read as unsigned rather than as unrecorded.
+    /// from. Three properties decide whether that account is portable: a `file://`
+    /// repository is the build host's own, so its path must not reach the record; an
+    /// unsigned repository must read as unsigned rather than as unrecorded; and the
+    /// certificate and the key that signed under it are carried as the two separate
+    /// answers they are.
     #[test]
     fn the_archive_rows_drop_a_build_host_path_and_keep_an_empty_signer() {
         let plan = Plan::parse_document(&format!(
-            "Format: ferroday-cage-plan 1\n\
+            "Format: ferroday-cage-plan 2\n\
              Suite: forky\n\
              Architecture: arm64\n\
              \n\
@@ -1226,14 +1314,16 @@ mod tests {
              Components: main non-free-firmware\n\
              Release-SHA256: {zeros}\n\
              Date: Sun, 02 Aug 2026 08:12:34 UTC\n\
-             Signed-By: 4CB50190207B4758A3F73A796ED0E7B82643E131\n\
+             Signed-By: B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8\n\
+             Signing-Key: 4CB50190207B4758A3F73A796ED0E7B82643E131\n\
              \n\
              Archive: 1\n\
-             Mirror: file:///home/someone/.cache/provisioner-pool-4242\n\
+             Mirror: file:///build-host/cache/provisioner-pool-4242\n\
              Suite: forky\n\
              Components: main\n\
              Release-SHA256: {zeros}\n\
-             Signed-By:\n",
+             Signed-By:\n\
+             Signing-Key:\n",
             zeros = "0".repeat(64),
         ))
         .unwrap();
@@ -1247,7 +1337,17 @@ mod tests {
             Some("https://deb.debian.org/debian")
         );
         assert_eq!(rows[0].components, ["main", "non-free-firmware"]);
-        assert_eq!(rows[0].signed_by.len(), 1);
+        // The certificate primary, which is what `blobs/keyrings/*.fingerprints` pins,
+        // and the subkey that made the signature — carried side by side, because a
+        // certificate rotating its signing subkey moves the second and not the first.
+        assert_eq!(
+            rows[0].signed_by,
+            ["B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8"]
+        );
+        assert_eq!(
+            rows[0].signing_key,
+            ["4CB50190207B4758A3F73A796ED0E7B82643E131"]
+        );
 
         assert_eq!(rows[1].index, 1);
         assert!(
@@ -1259,8 +1359,8 @@ mod tests {
             "a per-run path on this machine must not reach the record"
         );
         assert!(
-            rows[1].signed_by.is_empty(),
-            "an unsigned repository is recorded as unsigned"
+            rows[1].signed_by.is_empty() && rows[1].signing_key.is_empty(),
+            "an unsigned repository is recorded as unsigned, in both fields"
         );
     }
 
@@ -1391,6 +1491,39 @@ mod tests {
             out.status.success(),
             "the {name} customize script is not valid shell:\n{}\n--- script ---\n{script}",
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn every_image_enables_the_bounded_clock_wait() {
+        let script = customize_script(DEFAULT_USER, &rk1(), None);
+
+        // The link `systemctl enable` would create. Without it nothing reaches
+        // time-sync.target, and Debian's After=time-sync.target ordering on apt-daily,
+        // logrotate, anacron and e2scrub is inert — they run against whatever the clock
+        // says at boot, which on an RTC-less board is the last power-off.
+        assert!(
+            script.contains(
+                "ln -sf /usr/lib/systemd/system/systemd-time-wait-sync.service \
+                 /etc/systemd/system/sysinit.target.wants/systemd-time-wait-sync.service"
+            ),
+            "the wait-sync unit must be enabled: {script}"
+        );
+
+        // Enabled from the customize script, which runs *after* the systemd package is
+        // installed. A .wants symlink staged in the base overlay would land before
+        // that package, where deb-systemd-helper may still apply the unit's preset.
+        assert!(
+            script.contains("[ -f /usr/lib/systemd/system/systemd-time-wait-sync.service ]"),
+            "assert the unit exists rather than enabling a name that does not: {script}"
+        );
+
+        // The drop-in that bounds the wait shells out to timeout(1). Missing, the wait
+        // fails closed — 45 seconds of held boot on every offline start — so the build
+        // is the right place to notice.
+        assert!(
+            script.contains("[ -x /usr/bin/timeout ]"),
+            "the bounded-wait drop-in depends on timeout(1): {script}"
         );
     }
 

@@ -98,7 +98,7 @@ use crate::error::EngineError;
 use crate::event::{Step, Stream};
 use boot2deb_core::provenance::{
     SandboxLandlockFs, SandboxLandlockNet, SandboxMount, SandboxPosture, SandboxProvenance,
-    SandboxRlimit,
+    SandboxRlimit, SandboxStreams,
 };
 use ferroday_cage::provision::debian::BuildLayer;
 use ferroday_cage::provision::debian::{
@@ -107,7 +107,7 @@ use ferroday_cage::provision::debian::{
 use ferroday_cage::provision::{self, Provisioned};
 use ferroday_cage::{
     Cage, IdentityMap, Network, Observer, ResolvedHardening, ResolvedIdentity, ResolvedMount,
-    ResolvedRoot,
+    ResolvedRoot, ResolvedStdio, ResolvedStreams, Stdio,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -1123,8 +1123,8 @@ pub(crate) fn baseline_overlay(lower: &Path, upper: &Path) -> ferroday_cage::Cag
 }
 
 /// The rootless profile with no root chosen yet: the declared environment, the network
-/// posture, and the `PATH` lookup posture that [`baseline`] and [`baseline_overlay`]
-/// share.
+/// and terminal postures, the lifetime, and the `PATH` lookup posture that [`baseline`]
+/// and [`baseline_overlay`] share.
 ///
 /// Split out so the two rooting modes cannot drift in anything but the root.
 fn profile() -> ferroday_cage::CageBuilder {
@@ -1137,6 +1137,24 @@ fn profile() -> ferroday_cage::CageBuilder {
         // — a value only the run sites set is a value [`resolved_inputs`] would report
         // the library's default for.
         .network(Network::Isolated)
+        // A build is non-interactive by construction, which is already what the host
+        // commands in `crate::build` state; this is the same statement for the
+        // sandboxed ones. `/dev/null` gives standard input immediate end-of-file, and
+        // — the reason it is here rather than a tidiness — puts the command in a
+        // *session of its own*. Inherited, it stays in the caller's, where a maintainer
+        // script or a build rule can open `/dev/tty` to read what is typed at the
+        // operator's terminal and push characters into its input queue with `TIOCSTI`
+        // for the operator's shell to run afterwards. Out of that session `/dev/tty`
+        // fails with ENXIO. It also makes `isatty` deterministically false, which is one
+        // fewer host property a compile's output can depend on. The output pair is
+        // untouched: `run_with` supplies pipes, so it was never the operator's terminal.
+        .stdin(Stdio::Null)
+        // The cost of the session above, paid back: outside the caller's session a `^C`
+        // no longer reaches the command, so the sandbox's lifetime is tied to boot2deb's
+        // through a held descriptor instead. `^C` kills boot2deb, which is still in the
+        // foreground process group, and the supervisor tears the sandbox down. Without
+        // it an abandoned sandbox runs its compile to completion with nobody waiting.
+        .stop_with_caller(true)
         // The stages pass bare tool names (`dpkg-buildpackage`, `make`, `apt-get`);
         // the cage resolves them against SANDBOX_ENV's `PATH` inside the root, like
         // a shell.
@@ -1343,17 +1361,22 @@ fn project(inputs: ferroday_cage::ResolvedInputs) -> SandboxProvenance {
     }
 }
 
-/// Project the resolved rooting, identity, network, limits and hardening onto the
-/// manifest's `[sandbox]`.
+/// Project the resolved rooting, identity, network, streams, limits and hardening onto
+/// the manifest's `[sandbox]`.
 ///
-/// Every arm below names every field of its variant, for the reason
-/// [`project_mount`]'s do: a field the sandbox library adds is a compile error here
-/// rather than a silent omission from every later manifest. Where a named field is bound
-/// to `_` that is a decision, not an oversight, and each such decision is the same one —
-/// the value is a path the build chose or an id range the host allocated, so it would
-/// make the record a property of the machine. The *kind* is what the record can state,
-/// and it is what a reader can act on: `overlay` versus `plain` is the difference between
-/// a layered build and a flat one whatever the paths were.
+/// Every *enum arm* below names every field of its variant, for the reason
+/// [`project_mount`]'s do: a field the sandbox library adds to a variant is a compile
+/// error here rather than a silent omission from every later manifest. Where a named
+/// field is bound to `_` that is a decision, not an oversight, and each such decision is
+/// the same one — the value is a path the build chose or an id range the host allocated,
+/// so it would make the record a property of the machine. The *kind* is what the record
+/// can state, and it is what a reader can act on: `overlay` versus `plain` is the
+/// difference between a layered build and a flat one whatever the paths were.
+///
+/// That promise covers the variants and not `ResolvedInputs` itself, which is a struct
+/// read field by field — a field added there compiles here and is simply absent from the
+/// manifest until this function reads it. Keeping the two apart is why the sentence
+/// names arms rather than the projection as a whole.
 fn project_posture(inputs: &ferroday_cage::ResolvedInputs) -> SandboxPosture {
     let root = match &inputs.root {
         ResolvedRoot::Host => "host",
@@ -1384,6 +1407,7 @@ fn project_posture(inputs: &ferroday_cage::ResolvedInputs) -> SandboxPosture {
         root: root.to_string(),
         identity: identity.to_string(),
         network: network.to_string(),
+        streams: project_streams(&inputs.streams),
         // Overwritten below when the layer is compiled in; `unavailable` is the honest
         // value when it is not, and it is written either way — an absent key could not
         // be told from one written before the key existed.
@@ -1433,6 +1457,32 @@ fn project_posture(inputs: &ferroday_cage::ResolvedInputs) -> SandboxPosture {
         _ => posture.hardening = "unknown".to_string(),
     }
     posture
+}
+
+/// Project the three standard streams onto the manifest's `[sandbox.streams]`.
+///
+/// A kind per stream and nothing more: [`ResolvedStdio::Fd`] names a descriptor the
+/// launch supplied, which is a live resource of this run's and not something a record
+/// can carry forward — the same rule the root and the identity map are recorded under.
+fn project_streams(streams: &ResolvedStreams) -> SandboxStreams {
+    SandboxStreams {
+        stdin: stdio_kind(streams.stdin),
+        stdout: stdio_kind(streams.stdout),
+        stderr: stdio_kind(streams.stderr),
+    }
+}
+
+/// One stream's disposition as the manifest spells it.
+fn stdio_kind(stdio: ResolvedStdio) -> String {
+    match stdio {
+        ResolvedStdio::Inherit => "inherit",
+        ResolvedStdio::Null => "null",
+        ResolvedStdio::Fd => "fd",
+        // `#[non_exhaustive]`, so a disposition this release cannot name is recorded as
+        // one it does not know rather than rendered as a kind it is not.
+        _ => "unknown",
+    }
+    .to_string()
 }
 
 /// One 64-bit kernel access mask in the manifest's form: `0x`-prefixed and 16 hex
@@ -1831,6 +1881,19 @@ mod tests {
         assert!(recorded.posture.landlock_net.is_empty());
         assert_eq!(recorded.posture.seccomp_instructions, None);
         assert_eq!(recorded.posture.keep_capabilities, None);
+        // Declared for the same reason `network` is, and load-bearing for a second: a
+        // `/dev/null` standard input puts the command in a session of its own, out of
+        // reach of the operator's controlling terminal. Inherited, a maintainer script
+        // could open `/dev/tty` and read from it — or push characters into its input
+        // queue for the operator's shell to run afterwards.
+        assert_eq!(
+            recorded.posture.streams.stdin, "null",
+            "a build is non-interactive by construction, and out of the caller's session"
+        );
+        // The profile's plan, not a claim about a compile: `run_with` attaches pipes at
+        // each launch, which supersedes this pair at that call site.
+        assert_eq!(recorded.posture.streams.stdout, "inherit");
+        assert_eq!(recorded.posture.streams.stderr, "inherit");
     }
 
     /// A tree is reused only for a base it actually is: the package set and the recipe

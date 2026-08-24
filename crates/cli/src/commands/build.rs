@@ -59,6 +59,33 @@ pub(crate) fn run(
     // Resolved before any work: a contradictory `--compress` is an argument error,
     // and discovering it after a multi-hour compile would waste the whole build.
     let compress = crate::args::image_compression(&args.compress)?;
+    // Checked here for the same reason, and it is the one preflight whose failure is
+    // otherwise invisible until the end: a stale binary compiles a perfectly good image
+    // and then stamps it with a commit that is not what ran. Two `git` reads now, or a
+    // wrong provenance record discovered after the compiles are paid for.
+    let freshness = crate::builder::freshness(root);
+    if freshness.is_stale() && !args.allow_stale_builder {
+        return Err(format!(
+            "{}\n\nBuilding now would stamp this image with a builder commit that is not \
+             what produced it. Rebuild and re-run, or pass --allow-stale-builder to \
+             accept the mismatch in the provenance record.",
+            freshness
+                .note()
+                .expect("a stale verdict always carries its explanation"),
+        )
+        .into());
+    }
+    // Everything the verdict has to say that is not a refusal: a builder compiled from
+    // an already-dirty tree, or a mismatch the operator chose to accept. Warned rather
+    // than gated, on the same footing as `--allow-manifest-drift` below — the record
+    // stays honest either way, and the operator is told what it will say.
+    if let Some(line) = freshness.note() {
+        eprintln!("warning: {line}");
+    }
+    // Read once, here, so the manifest records the tree as it was when the build was
+    // admitted rather than as it is tens of minutes later — an edit mid-build must not
+    // retroactively change what the image claims it was built from.
+    let config_stamp = crate::builder::config_stamp(root);
     let reference = point.reference();
     let recipe = reference.as_str();
     // Every artifact this build publishes is named for the point rather than the
@@ -1265,8 +1292,16 @@ pub(crate) fn run(
             // Stamped by build.rs from the boot2deb checkout; the commit is empty when
             // built outside a git tree (e.g. a source tarball), leaving only the version.
             builder_version: env!("CARGO_PKG_VERSION"),
-            builder_commit: option_env!("BOOT2DEB_GIT_COMMIT").filter(|s| !s.is_empty()),
-            builder_dirty: matches!(option_env!("BOOT2DEB_GIT_DIRTY"), Some("true")),
+            builder_commit: crate::builder::commit(),
+            builder_dirty: crate::builder::dirty(),
+            // The other half of "what produced this image": the config tree the layers,
+            // recipe and lock were read from. Probed here rather than stamped, because
+            // unlike the binary it is a run-time input — the same boot2deb resolves
+            // whatever `--root` names, and which tree that was is not knowable until it
+            // is named. Absent when the root is not a checkout, which a generated or
+            // unpacked config tree legitimately is not.
+            config_commit: config_stamp.as_ref().map(|(commit, _)| commit.as_str()),
+            config_dirty: config_stamp.as_ref().is_some_and(|(_, dirty)| *dirty),
             // Reported by the image stage that formatted it, so the manifest states the
             // contract the rootfs actually carries and the geometry that actually came
             // out — neither of them a value re-derived here from a declaration.

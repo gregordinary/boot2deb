@@ -60,7 +60,8 @@ pub(crate) fn run(
     })?;
     let packages = manifest::parse(&packages_text, &packages_path.display().to_string())?;
 
-    let sbom = Sbom::from_provenance(&provenance, &packages, &stem, &created()?);
+    let sources = source_index(&path.with_file_name(format!("{stem}.plan")));
+    let sbom = Sbom::from_provenance(&provenance, &packages, &sources, &stem, &created()?);
     let json = match format {
         FormatArg::Spdx => serde_json::to_string_pretty(&spdx::Document::render(&sbom))?,
         FormatArg::Cyclonedx => serde_json::to_string_pretty(&cyclonedx::Bom::render(&sbom))?,
@@ -129,7 +130,8 @@ pub(crate) fn write_beside(
         )
     })?;
     let packages = manifest::parse(&text, &packages_path.display().to_string())?;
-    let sbom = Sbom::from_provenance(provenance, &packages, stem, &created()?);
+    let sources = source_index(&out_dir.join(format!("{stem}.plan")));
+    let sbom = Sbom::from_provenance(provenance, &packages, &sources, stem, &created()?);
     let mut written = Vec::with_capacity(formats.len());
     for format in formats {
         let path = out_dir.join(format!("{stem}.{}.json", format.extension()));
@@ -142,6 +144,30 @@ pub(crate) fn write_beside(
         written.push(path);
     }
     Ok(written)
+}
+
+/// Which source package each binary package was built from, read from the plan document
+/// published beside the image.
+///
+/// **Best-effort, and deliberately so.** The attribution is an enrichment of an
+/// otherwise complete document, not a component of it: a plan that is absent — an image
+/// handed over without one — or written in a format version this boot2deb no longer
+/// reads should not cost the operator their SBOM. Both cases produce an empty index and
+/// one line on stderr, so the omission is visible without being fatal.
+fn source_index(plan: &Path) -> std::collections::BTreeMap<String, String> {
+    if !plan.is_file() {
+        return Default::default();
+    }
+    match boot2deb_engine::rootfs::read_plan_weights(plan) {
+        Ok(weights) => boot2deb_core::weight::source_index(&weights.packages),
+        Err(e) => {
+            eprintln!(
+                "warning: {e}\nThe document is complete without it; what is missing is which \
+                 source package each binary package was built from."
+            );
+            Default::default()
+        }
+    }
 }
 
 /// Resolve `target` to a provenance manifest path.

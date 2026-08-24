@@ -895,6 +895,18 @@ pub enum ConfigError {
         why: &'static str,
     },
 
+    /// An NTP server is not a bare host `systemd-timesyncd` could reach. The value
+    /// becomes part of a space-separated `NTP=` line, so anything carrying whitespace
+    /// would silently split into two servers — and a scheme or port would produce one
+    /// the resolver can never answer.
+    #[error("invalid NTP server '{value}': {why}")]
+    InvalidNtpServer {
+        /// The offending server.
+        value: String,
+        /// Why it cannot be used.
+        why: &'static str,
+    },
+
     /// A keymap field carries something `/etc/default/keyboard` cannot hold. That
     /// file is *sourced by shell* (`console-setup`, `keyboard-setup`), so a value with
     /// a quote or a substitution in it would execute rather than configure.

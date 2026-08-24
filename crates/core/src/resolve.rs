@@ -123,6 +123,7 @@ pub fn resolve_device(
             locale: String::new(),
             locales_generate: Vec::new(),
             timezone: String::new(),
+            ntp_servers: Vec::new(),
             keymap: None,
             // A u-boot-only build creates no account: there is no rootfs to hold one,
             // no `/etc/sudoers.d`, and no `/etc/shadow` to splice a password into. The
@@ -335,6 +336,9 @@ pub fn resolve_device(
     // with no codeset is a typed error at resolve, not a dangling /etc/localtime or an
     // ungenerated LANG discovered on the booted board.
     let (locale, locales_generate, timezone, keymap) = resolve_l10n(&base, &device, overrides)?;
+    // Time *sync* rather than localization: the zone above says how to render the
+    // clock, this says where the clock comes from.
+    let ntp_servers = resolve_ntp_servers(&base, overrides)?;
 
     // The account axis: who can log in to the finished image and what reaching root
     // costs them. Base-layer policy, each part overridable. Validated here for the same
@@ -368,6 +372,7 @@ pub fn resolve_device(
         locale,
         locales_generate,
         timezone,
+        ntp_servers,
         keymap,
         sudo: account.sudo,
         first_boot_password_length: account.password_length,
@@ -1223,6 +1228,7 @@ pub fn resolve_recipe(
         locale: cli.locale.clone().or(recipe.locale),
         locales_generate: cli.locales_generate.clone().or(recipe.locales_generate),
         timezone: cli.timezone.clone().or(recipe.timezone),
+        ntp_servers: cli.ntp_servers.clone().or(recipe.ntp_servers),
         keymap: cli.keymap.clone().or(recipe.keymap),
         sudo: cli.sudo.or(recipe.sudo),
         first_boot_password_length: cli
@@ -1367,7 +1373,7 @@ fn join<T: std::fmt::Display>(items: &[T]) -> String {
 ///
 /// Checked in flag order so the first-reported error is stable.
 fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(), ConfigError> {
-    let inapplicable: [(&'static str, bool); 11] = [
+    let inapplicable: [(&'static str, bool); 12] = [
         ("--kernel", overrides.kernel.is_some()),
         ("--suite", overrides.suite.is_some()),
         ("--feature", overrides.features.is_some()),
@@ -1375,6 +1381,7 @@ fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(
         ("--locale", overrides.locale.is_some()),
         ("--locale-gen", overrides.locales_generate.is_some()),
         ("--timezone", overrides.timezone.is_some()),
+        ("--ntp-server", overrides.ntp_servers.is_some()),
         ("--keymap", overrides.keymap.is_some()),
         ("--sudo", overrides.sudo.is_some()),
         (
@@ -1648,6 +1655,86 @@ fn validate_timezone(tz: &str) -> Result<(), ConfigError> {
                 why: "zone components are [A-Za-z0-9_+-] (e.g. 'Etc/GMT+5')",
             });
         }
+    }
+    Ok(())
+}
+
+/// Resolve the NTP servers the image prefers: the override when a recipe or flag names
+/// one, otherwise the base-layer list.
+///
+/// Base-layer rather than device-layer because which time source a board should ask is
+/// a property of the network it is deployed on, not of the hardware — the same board on
+/// two networks wants two answers, and no board wants a different answer than its
+/// neighbour on the same network.
+///
+/// An empty result is the normal one and means "write no configuration", leaving
+/// Debian's compiled-in `FallbackNTP` pool. See [`ResolvedBuild::ntp_servers`].
+fn resolve_ntp_servers(
+    base: &BaseLayer,
+    overrides: &Overrides,
+) -> Result<Vec<String>, ConfigError> {
+    let servers = overrides
+        .ntp_servers
+        .clone()
+        .unwrap_or_else(|| base.ntp_servers.clone());
+    for server in &servers {
+        validate_ntp_server(server)?;
+    }
+    Ok(servers)
+}
+
+/// Reject anything that is not a bare host: `timesyncd` splits `NTP=` on whitespace and
+/// hands each field to the resolver, so a value with a space in it becomes two servers
+/// and a value with a scheme or a port becomes none.
+///
+/// Deliberately permissive about the host itself — an IPv4 or IPv6 literal and a
+/// hostname are all legal, and this cannot know which resolve on the target network.
+/// It rejects only the shapes that are wrong regardless of network.
+fn validate_ntp_server(server: &str) -> Result<(), ConfigError> {
+    if server.is_empty() {
+        return Err(ConfigError::InvalidNtpServer {
+            value: server.to_string(),
+            why: "empty",
+        });
+    }
+    if server.chars().any(char::is_whitespace) {
+        return Err(ConfigError::InvalidNtpServer {
+            value: server.to_string(),
+            why: "must not contain whitespace (NTP= is a space-separated list, so one \
+                  entry with a space in it silently becomes two servers)",
+        });
+    }
+    if server.contains("://") {
+        return Err(ConfigError::InvalidNtpServer {
+            value: server.to_string(),
+            why: "must be a bare host, not a URL (e.g. 'ntp.example.org', not \
+                  'ntp://ntp.example.org')",
+        });
+    }
+    // A bracketed IPv6 literal is the URL form and carries a port; the bare address is
+    // what `timesyncd` wants.
+    if server.starts_with('[') || server.ends_with(']') {
+        return Err(ConfigError::InvalidNtpServer {
+            value: server.to_string(),
+            why: "IPv6 addresses go in unbracketed (e.g. 'fd00::1', not '[fd00::1]')",
+        });
+    }
+    // A colon is a port separator on everything except an IPv6 literal, which has at
+    // least two. `timesyncd` speaks port 123 and offers no way to say otherwise.
+    if server.matches(':').count() == 1 {
+        return Err(ConfigError::InvalidNtpServer {
+            value: server.to_string(),
+            why: "must not carry a port (timesyncd always uses 123)",
+        });
+    }
+    if server
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_')))
+    {
+        return Err(ConfigError::InvalidNtpServer {
+            value: server.to_string(),
+            why: "hosts are [A-Za-z0-9.:_-] (a hostname or a bare IP address)",
+        });
     }
     Ok(())
 }
@@ -2474,6 +2561,112 @@ mod tests {
         );
         assert_eq!(crate::model::locale_codeset("de_DE"), None);
         assert_eq!(crate::model::locale_codeset("de_DE."), None);
+    }
+
+    /// A [`BaseLayer`] with every key at the value a config root that omits it gets.
+    ///
+    /// Deserialized from an empty document rather than built field by field, so it
+    /// stays the *real* set of defaults: a new key with a `#[serde(default)]` lands
+    /// here automatically, and a new key without one fails this instead of silently
+    /// giving tests a value no config root would produce.
+    fn base_layer_fixture() -> BaseLayer {
+        toml::from_str("").expect("every base.toml key carries a default")
+    }
+
+    #[test]
+    fn validate_ntp_server_rejects_anything_that_is_not_a_bare_host() {
+        for ok in [
+            "ntp.example.org",
+            "0.debian.pool.ntp.org",
+            "192.168.1.1",
+            "fd00::1",
+            "time-a_g.nist.gov",
+        ] {
+            assert!(
+                validate_ntp_server(ok).is_ok(),
+                "{ok} should be a valid NTP server"
+            );
+        }
+        for bad in [
+            "",                      // empty
+            "ntp.example.org ntp2",  // whitespace: silently becomes two servers
+            "ntp://ntp.example.org", // a scheme the resolver can never answer
+            "https://ntp.example.org",
+            "ntp.example.org:123", // timesyncd always uses 123 and parses no port
+            "192.168.1.1:123",
+            "[fd00::1]",   // the bracketed form is for URLs and implies a port
+            "[fd00::1]:1", // both at once
+            "ntp.example.org/path",
+            "ntp,example.org", // a comma is not a list separator here, a space is
+        ] {
+            assert!(
+                matches!(
+                    validate_ntp_server(bad),
+                    Err(ConfigError::InvalidNtpServer { .. })
+                ),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn ntp_servers_default_to_the_base_list_and_an_override_replaces_it() {
+        let base = BaseLayer {
+            ntp_servers: vec!["ntp.base".to_string()],
+            ..base_layer_fixture()
+        };
+
+        // No override: the base list stands.
+        let none = Overrides::default();
+        assert_eq!(
+            resolve_ntp_servers(&base, &none).unwrap(),
+            vec!["ntp.base".to_string()]
+        );
+
+        // An override replaces rather than appends — the base entry is gone, not first.
+        let replaced = Overrides {
+            ntp_servers: Some(vec!["ntp.lan".to_string(), "192.168.1.1".to_string()]),
+            ..Overrides::default()
+        };
+        assert_eq!(
+            resolve_ntp_servers(&base, &replaced).unwrap(),
+            vec!["ntp.lan".to_string(), "192.168.1.1".to_string()]
+        );
+
+        // `Some([])` is distinguishable from `None`: it drops what the base named and
+        // returns the image to Debian's fallback pool, which is the whole reason the
+        // override is an `Option<Vec<_>>` rather than a `Vec<_>`.
+        let cleared = Overrides {
+            ntp_servers: Some(Vec::new()),
+            ..Overrides::default()
+        };
+        assert!(resolve_ntp_servers(&base, &cleared).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_invalid_ntp_server_fails_resolution_wherever_it_came_from() {
+        let base = BaseLayer {
+            ntp_servers: vec!["ntp.example.org:123".to_string()],
+            ..base_layer_fixture()
+        };
+        assert!(matches!(
+            resolve_ntp_servers(&base, &Overrides::default()),
+            Err(ConfigError::InvalidNtpServer { .. })
+        ));
+
+        // And from an override, over a base that is perfectly fine.
+        let good_base = BaseLayer {
+            ntp_servers: vec!["ntp.example.org".to_string()],
+            ..base_layer_fixture()
+        };
+        let bad_override = Overrides {
+            ntp_servers: Some(vec!["ntp with a space".to_string()]),
+            ..Overrides::default()
+        };
+        assert!(matches!(
+            resolve_ntp_servers(&good_base, &bad_override),
+            Err(ConfigError::InvalidNtpServer { .. })
+        ));
     }
 
     #[test]

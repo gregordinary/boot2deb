@@ -1169,6 +1169,22 @@ pub struct BaseLayer {
     /// still read — forky's `tzdata` deletes `/etc/timezone` outright.
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    /// NTP servers `systemd-timesyncd` reaches for first, as hostnames or IP
+    /// addresses. Deployment policy rather than a hardware property, so it lives here;
+    /// a recipe or `--ntp-server` overrides it.
+    ///
+    /// Empty — the default — writes no configuration at all, leaving Debian's
+    /// compiled-in `FallbackNTP` pool. Naming servers here sets `NTP=` and *keeps*
+    /// that pool as the fallback, so a LAN time source is tried first and the public
+    /// pool still covers the image when it is unreachable. That is why this never
+    /// replaces the fallback list: an image configured for a network it is not
+    /// currently on must still be able to find the time.
+    ///
+    /// Worth setting for a board that boots on an isolated network, which cannot reach
+    /// the public pool at all — see [`ResolvedBuild::ntp_servers`] for what a board
+    /// with no reachable time source does instead.
+    #[serde(default)]
+    pub ntp_servers: Vec<String>,
     /// Base Debian packages installed into every rootfs (the bootstrap
     /// `--include` set) — device- and feature-independent distro policy.
     #[serde(default)]
@@ -1788,6 +1804,11 @@ pub struct Recipe {
     /// Timezone override; `None` → base `timezone`.
     #[serde(default)]
     pub timezone: Option<String>,
+    /// NTP-server override; `None` → base `ntp_servers`. `Some` **replaces** the base
+    /// list rather than adding to it, and `Some([])` is how a recipe drops servers the
+    /// base names and returns to Debian's fallback pool.
+    #[serde(default)]
+    pub ntp_servers: Option<Vec<String>>,
     /// Keymap override; `None` → device `keymap`.
     #[serde(default)]
     pub keymap: Option<Keymap>,
@@ -1863,6 +1884,9 @@ pub struct Overrides {
     pub locales_generate: Option<Vec<String>>,
     /// Override the system timezone.
     pub timezone: Option<String>,
+    /// Override the NTP servers `systemd-timesyncd` prefers (`Some` replaces the base
+    /// list). `Some([])` returns the image to Debian's fallback pool.
+    pub ntp_servers: Option<Vec<String>>,
     /// Override the console keymap. Accepted even for a device that declares none:
     /// `console-setup` ships on every image, so a keymap is always actionable — a
     /// headless board simply has no reason to *default* one.
@@ -2271,6 +2295,20 @@ pub struct ResolvedBuild {
     /// System timezone (a `tzdata` zone name), materialized as the `/etc/localtime`
     /// symlink.
     pub timezone: String,
+    /// NTP servers the image prefers, in config order, materialized as the `NTP=` line
+    /// of a `/etc/systemd/timesyncd.conf.d` drop-in. Empty — the common case — writes
+    /// no drop-in and leaves Debian's compiled-in fallback pool as the only source.
+    ///
+    /// Resolution guarantees each entry is a bare host: a hostname or IP address with
+    /// no scheme, port, or whitespace, since `timesyncd` parses the line by splitting
+    /// on spaces.
+    ///
+    /// This never replaces `FallbackNTP`, so a configured server is a *preference* and
+    /// not a commitment. What it does not do is make the clock correct before
+    /// userspace needs it: every image bounds that wait instead, holding
+    /// `time-sync.target` until the clock is trustworthy but releasing it after 45
+    /// seconds so a board with no reachable time source still finishes booting.
+    pub ntp_servers: Vec<String>,
     /// Console keyboard layout, or `None` on a board with no keyboard — in which case
     /// the build writes no `/etc/default/keyboard` and Debian's own default stands.
     pub keymap: Option<Keymap>,

@@ -11,7 +11,7 @@ commit = "2609d60e2f6d0b8a96563baa08b56482962cebaa"
 series = ["rk3576-fixes", "rk3576-npu", "rk3576-rga"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "ced7afe82f85e7da3a87f8cb69d48bf33fb24805"
+commit = "a94470409cea5f63b3287f88c94c61cc5c0fa0f1"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,7 +22,7 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["rk3576-display"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "ced7afe82f85e7da3a87f8cb69d48bf33fb24805"
+commit = "a94470409cea5f63b3287f88c94c61cc5c0fa0f1"
 
 [userspace.librga]
 source = "https://github.com/tsukumijima/librga-rockchip.git"

@@ -7,11 +7,20 @@
 use std::process::Command;
 
 fn main() {
-    // Re-stamp when HEAD moves (a new commit/checkout) or the index changes (staging),
-    // so an incremental rebuild reflects the current checkout. The crate dir is
-    // crates/cli; the repo's .git sits two levels up. A path that does not exist (a
-    // tarball with no .git) is simply not watched.
-    for marker in ["../../.git/HEAD", "../../.git/index"] {
+    // Re-stamp whenever HEAD moves, so an incremental rebuild reflects the current
+    // checkout. The crate dir is crates/cli; the repo's .git sits two levels up. A path
+    // that does not exist (a tarball with no .git) is simply not watched.
+    //
+    // The reflog is the load-bearing one: `.git/HEAD`'s *contents* change only on a
+    // branch switch — an ordinary commit moves `refs/heads/<branch>` and leaves HEAD
+    // naming the same ref — while `.git/logs/HEAD` gains a line on every commit, amend,
+    // checkout and reset. The index is watched too, since staging alone changes what
+    // `git diff HEAD` reports and so flips the dirty flag below.
+    for marker in [
+        "../../.git/logs/HEAD",
+        "../../.git/HEAD",
+        "../../.git/index",
+    ] {
         println!("cargo:rerun-if-changed={marker}");
     }
 

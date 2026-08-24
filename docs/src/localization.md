@@ -176,6 +176,11 @@ sudo timedatectl set-timezone America/New_York
 sudo dpkg-reconfigure tzdata      # the menu-driven equivalent
 ```
 
+The zone decides how the clock is *rendered*, not whether it is right. These boards have
+no battery-backed RTC, so the clock is stale for the first seconds of every boot — see
+[The clock and time sync](clock.md) for what the image does about that and how to point
+it at a different NTP server.
+
 **Console keymap.**
 
 ```sh

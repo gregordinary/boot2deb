@@ -78,6 +78,18 @@ const FFMPEG_DEPS: &[&str] = &[
     "libfdk-aac-dev",
     "libssl-dev",
     "libfreetype-dev",
+    // Build-root only: headers and loader stub for the three Vulkan flags in
+    // [`BASE_CONFIGURE_FLAGS`]. `libvulkan-dev` is the largest entry in this list by
+    // an order of magnitude (~37 MB, nearly all of it the registry XML and the
+    // validation headers) and none of it reaches an image.
+    "libvulkan-dev",
+    "libplacebo-dev",
+    "libshaderc-dev",
+    // `libshaderc-dev` satisfies `spirv_library`, which is what gives us libplacebo and
+    // `overlay_vulkan`. The shader-compiling filters -- `scale_vulkan`, `bwdif_vulkan`,
+    // `avgblur_vulkan` -- gate on `spirv_compiler` instead, which `check_glslc` probes
+    // for a `glslc` binary at build time. Debian ships that binary in its own package.
+    "glslc",
 ];
 
 /// The userspace `.deb` name prefixes ffmpeg build-depends on for this build, in
@@ -199,6 +211,20 @@ fn assert_userspace_depends(depends: &str, userspace: &UserspacePins) -> Result<
 ///
 /// The Rockchip-specific flags are not here; they are decided per build by
 /// [`configure_flags`] from the userspace trees the SoC actually declares.
+///
+/// The three Vulkan flags are a set, not three independent choices:
+/// - `--enable-vulkan` compiles `libavutil/hwcontext_vulkan.c`, which is where a
+///   V4L2-request DRM PRIME frame becomes importable at all.
+/// - `--enable-libplacebo` adds `vf_libplacebo` — scale, tone-map, deinterlace and
+///   alpha compositing over that context.
+/// - `--enable-libshaderc` supplies `spirv_compiler`/`spirv_library`, without which
+///   `./configure` builds *neither* `scale_vulkan`/`overlay_vulkan` nor swscale's
+///   Vulkan compute backend, regardless of the other two.
+///
+/// Linking them costs the image the Vulkan runtime libraries through the deb's
+/// `Depends`, and nothing else: the GPU driver that actually executes the work is an
+/// ICD loaded at runtime, is not a dependency of anything here, and is opted into per
+/// image by the `vulkan` rootfs feature.
 const BASE_CONFIGURE_FLAGS: &[&str] = &[
     "--enable-gpl",
     "--enable-version3",
@@ -214,6 +240,9 @@ const BASE_CONFIGURE_FLAGS: &[&str] = &[
     "--enable-libass",
     "--enable-libfreetype",
     "--enable-openssl",
+    "--enable-vulkan",
+    "--enable-libplacebo",
+    "--enable-libshaderc",
 ];
 
 /// The linker flag that bakes the install `libdir` into every object this stage

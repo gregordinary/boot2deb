@@ -1,0 +1,38 @@
+# features/vulkan.toml — the GPU userspace: a Vulkan loader and Mesa's drivers.
+#
+# `ffmpeg-rk` is always linked against Vulkan, libplacebo and shaderc, so every image
+# carrying it already *has* `hwmap=derive_device=vulkan`, `vf_libplacebo`,
+# `scale_vulkan`/`overlay_vulkan` and swscale's Vulkan compute backend compiled in.
+# None of them can run without a driver, and the driver is an ICD loaded at runtime
+# rather than a library anything links — so no `Depends` pulls it in and it has to be
+# asked for. This feature is that ask.
+#
+# It is separate from the media-accel features because it is not free: see the size
+# note below. An image that wants hardware transcode does not automatically want a
+# GPU stack, and on a headless box the two are genuinely different decisions.
+#
+# `mesa-vulkan-drivers` supplies PanVk for the Mali in these SoCs. It also supplies
+# `lvp` (llvmpipe), a software Vulkan device that enumerates alongside PanVk — pin the
+# device explicitly in anything that measures, or a run can silently succeed on the
+# CPU while appearing to use the GPU.
+#
+# `vulkan-tools` is here for the same reason `v4l-utils` is on the RK3588 SoC layer:
+# this feature installs a driver, and without `vulkaninfo` nothing in the image can
+# say whether it loaded, which device it bound, or whether that device is the GPU.
+# The llvmpipe hazard above makes it load-bearing rather than nice to have -- "it
+# ran" and "it ran on the GPU" are different claims and only `vulkaninfo` separates
+# them. It costs ~5.8 MiB, of which ~3.9 MiB is the X11/Wayland WSI libraries
+# `vulkaninfo` links for surface enumeration and a headless box never uses.
+description  = "Vulkan GPU userspace (Mesa ICDs + loader) for the GPU filter path"
+packages     = ["mesa-vulkan-drivers", "libvulkan1", "vulkan-tools"]
+
+# arm64 only. PanVk targets Valhall and Bifrost; the armv7 boards here are RK3288
+# with a Midgard T760, which panfrost drives for GL and PanVk does not drive at all,
+# so the 147 MB would buy that board nothing but llvmpipe.
+requires_arch = ["arm64"]
+
+caveats = [
+  "This feature adds roughly 165 MB to the installed system, and about 147 MB of that is `mesa-vulkan-drivers` alone. Debian ships every Mesa Vulkan driver in that one package — the AMD, Intel, NVIDIA, virtio and software back ends as well as the Mali one this hardware can use — and offers no per-driver package, so an image that wants PanVk takes all of them.",
+  "Vulkan conformance is a per-GPU fact, not a per-feature one. PanVk is conformant on the RK3588's Mali-G610 and is not conformant on the RK3576's Mali-G52; the same package installs on both and only the first carries a conformance claim.",
+  "A software Vulkan device (`lvp`, llvmpipe) enumerates alongside the hardware one. Anything that leaves device selection to the default can bind it and run GPU work on the CPU, which is slower than not using this feature at all and does not announce itself.",
+]

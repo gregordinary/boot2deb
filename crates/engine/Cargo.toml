@@ -28,7 +28,7 @@ gpt = "4"
 # Deterministic ext4 UUID + GPT disk/partition GUIDs derived from the lock, so the
 # image carries no `/dev/urandom` identifiers. Same major as gpt.
 uuid.workspace = true
-lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "xz", "encoder"] }
+lzma-rust2 = { version = "0.18", default-features = false, features = ["std", "xz", "encoder"] }
 # `.gz` image compression, for the one consumer that cannot read `.xz`: u-boot's
 # `gzwrite` decompresses gzip only, so an image a board writes to its own disk from
 # the bootloader has to be in that container. `rust_backend` is miniz_oxide — pure
@@ -47,7 +47,7 @@ ferrosys = { version = "0.3", features = ["tar"] }
 # `debian` feature adds the in-process archive provisioner that bootstraps the
 # target suite/arch rootfs (pure Rust: tar extraction + OpenPGP release
 # verification, no external binary, no C dep).
-ferroday-cage = { version = "0.1.4", features = ["debian", "subid"] }
+ferroday-cage = { version = "0.2.0", features = ["debian", "subid"] }
 # Randomly-named, fail-if-exists staging dirs for the build's intermediate trees,
 # so a local user cannot pre-create and own one.
 tempfile.workspace = true

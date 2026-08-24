@@ -54,7 +54,9 @@ resolved from config rather than set at build time.
 
 The system locale, timezone, and console keymap are resolved the same way, and are split
 across two layers for a reason: see
-[Locale, timezone, and keyboard](../localization.md).
+[Locale, timezone, and keyboard](../localization.md). The NTP servers an image prefers
+resolve alongside them, from `base.toml` — see
+[The clock and time sync](../clock.md).
 
 ## Kernels are compiled, or installed
 
@@ -631,6 +633,7 @@ quietly wrong:
 | `kernel_cmdline` | no `root=`, nothing a shell would interpret | a line of `/etc/boot2deb/board.conf`, sourced at each kernel install |
 | `depthcharge.board` | bare identifier | a key in `/etc/depthcharge-tools/config`, written through a quoted heredoc |
 | `locale` / `timezone` / `keymap` | see [Locale, timezone, and keyboard](../localization.md) | `/etc/locale.gen`, the `/etc/localtime` target, shell-sourced `/etc/default/keyboard` |
+| `ntp_servers` | a bare host per entry: hostname or IP, no scheme, port, or whitespace — see [The clock and time sync](../clock.md) | the space-separated `NTP=` line of a `timesyncd.conf.d` drop-in |
 | `ssh_authorized_keys` | one line per entry: a known key type, a base64 blob whose own embedded type name agrees with it, an optional comment. Private key material and options prefixes are refused — see [The account, sudo, and SSH keys](../access.md) | a line of `~debian/.ssh/authorized_keys`, written through a quoted heredoc |
 
 The rule these share is that a value is **rejected, never repaired**. A hostname with a

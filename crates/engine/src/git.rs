@@ -114,6 +114,40 @@ pub(crate) fn is_clean(repo: &Path) -> Result<bool, EngineError> {
     Ok(!in_progress)
 }
 
+/// Whether `repo`'s tracked content differs from `HEAD`.
+///
+/// This is the *identity* notion of dirty — "does a commit still name what is on
+/// disk" — and it is deliberately narrower than this module's `is_clean`. Untracked
+/// files are not counted: they are not build input, so a scratch file beside a config
+/// tree must not make an otherwise-identified build report itself unidentifiable.
+/// `is_clean` answers a different question for a different caller, refusing untracked
+/// files and in-progress `am`/rebase state because it guards a tree about to be patched
+/// and reset.
+///
+/// Matches what the CLI's build script stamps as `BOOT2DEB_GIT_DIRTY`, so the binary's
+/// dirty flag and a config tree's mean the same thing in one provenance record.
+///
+/// `paths` narrows the question to the part of the tree the caller's identity depends
+/// on; empty asks about the whole checkout. Scoping matters where one repo holds both
+/// a program and its data: editing a device `.toml` does not change a compiled binary,
+/// so a check about the binary that answered "dirty" for it would fire on ordinary
+/// work.
+///
+/// Best-effort, and false on anything that is not a clean question: `git diff --quiet`
+/// exits 1 for "differences" but 128 for "not a repository", and only the former is
+/// dirtiness. A path that is not a checkout has no commit to differ from.
+pub fn has_tracked_changes(repo: &Path, paths: &[&str]) -> bool {
+    let ctx = format!("diff --quiet HEAD in {}", repo.display());
+    let mut args = vec!["diff", "--quiet", "HEAD"];
+    if !paths.is_empty() {
+        args.push("--");
+        args.extend_from_slice(paths);
+    }
+    run(Some(repo), &args, &ctx)
+        .map(|out| out.status.code() == Some(1))
+        .unwrap_or(false)
+}
+
 /// Whether `repo` holds `commit` as a commit object.
 ///
 /// The question a read-only query over a *historical* pin has to ask first: a

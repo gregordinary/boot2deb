@@ -46,6 +46,7 @@ pub mod sources;
 pub mod suite;
 pub mod support;
 pub mod version;
+pub mod weight;
 
 pub use buildpoint::BuildPoint;
 pub use error::ConfigError;

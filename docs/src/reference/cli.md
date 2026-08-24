@@ -91,6 +91,7 @@ recovery media) document it on their [board page](../boards/turing-rk1.md).
 | `verify-packages` | the present / provided / missing split, plus the names this build produces itself |
 | `diff` | every section's comparison as one document, with the per-series patch-file deltas under `patch_files` |
 | `outdated` | per recipe, every pin with its verdict flattened in — `status` plus the newer release or moved tip behind it |
+| `size` | the whole rollup: every row with its weight and package count, plus the totals. Untruncated, whatever `--top` says |
 | `build` | NDJSON — one object per line, tagged by its `event` field (`step_started`, `progress`, `log`, `artifact`, `step_finished`, `error`), with every produced artifact's path on an `artifact` event and each step's `duration_ms` + `outcome` (`built`/`restored`/`mixed`) on its `step_finished` |
 
 Errors are still plain text on stderr, and the exit code is the result either way.
@@ -696,10 +697,19 @@ documents state the same facts. What is in them:
 
 | component | how it is identified |
 | --- | --- |
-| every installed package | name, exact version, sha256, and a `pkg:deb/debian/...` purl |
+| every installed package | name, exact version, sha256, and a `pkg:deb/debian/...` purl — carrying `&upstream=<source>` where the source package is named separately |
 | every pinned source tree | the ref and the exact commit — kernel, u-boot, the patch series, and the media-accel trees |
 | every rkbin blob | its sha256, which is the only identity it has |
 | every externally-fetched `.deb` | its URL and sha256 |
+
+The `upstream` qualifier is what ties the several binary packages of one source back to
+the thing that was built — `libsystemd0`, `libsystemd-shared` and `systemd` are one
+source package, and nothing else in the document says so. It comes from the published
+plan beside the image, and it is emitted only where the source name *differs* from the
+binary package's own, because that absence is how the ecosystem spells "the source
+carries this name". An image handed over without its plan simply carries no attribution:
+the SBOM is complete without it, and a warning says what is missing rather than the
+command failing.
 
 The one distinction worth reading is between what the image **contains** and what it was
 **generated from**. A kernel source tree is compiled into the image, not installed in
@@ -721,6 +731,61 @@ It reads a *published build*, not a recipe's lock. A lock says what an image wou
 made of; only a build says what one is — so `sbom <recipe>` reads the
 `.provenance.toml` and `.pkgs.lock` beside that recipe's image, and says so if no build
 has produced them yet.
+
+## Where the size went
+
+```sh
+# The heaviest packages in a recipe's published image.
+boot2deb size turing-rk1/forky
+
+# Rolled up by the source package that produced them, all rows.
+boot2deb size turing-rk1/forky --by source --top 0
+
+# Debian's packages against the ones this build compiled into its own pool.
+boot2deb size turing-rk1/forky --by archive
+
+# Or from a plan someone handed you with an image.
+boot2deb size ./turing-rk1-forky.plan --json
+```
+
+Answers "why is this image 2.1 GiB" from the plan document a build published — the one
+file that carries each package's `Installed-Size` and `Source`.
+
+```
+size build/turing-rk1/forky/artifacts/turing-rk1-forky.plan — by source package
+
+  1. systemd       21.7 MiB   35.5%     3 pkg
+  2. glibc         19.2 MiB   31.4%     1 pkg
+  3. file          10.6 MiB   17.3%     1 pkg
+
+total 61.2 MiB across 8 packages in 6 source packages
+```
+
+Three axes, because three are answerable from a plan:
+
+| `--by` | one row per | what it is for |
+| --- | --- | --- |
+| `package` (default) | binary package | what is biggest |
+| `source` | source package | attributing a source's several outputs to the thing that was built |
+| `archive` | repository | separating what Debian shipped from what this build compiled |
+
+**A fourth — which config layer asked for a package — is not answerable**, and the
+command does not pretend otherwise. The plan records the *repository* a package came
+from, not the layer that named it, and most of an image is transitive dependencies no
+layer named at all.
+
+**The figures are the archives' own estimates, not measurements.** `Installed-Size` is
+what each package's builder computed over a staged tree, in the kibibytes Debian Policy
+defines it in. It counts no filesystem overhead, no inode shared by a hard link, and
+nothing the image gains after `dpkg` — the initramfs, the `/boot` artifacts an install
+hook produces, the ext4 metadata. So the total is smaller than the image, and the report
+is for comparing rows against each other rather than for predicting a card's occupancy.
+Policy also permits a package to state no size at all; those are counted apart rather
+than folded in as zero, and the report says how many there were.
+
+`--top` truncates the table and never the totals, so a partial view still states what it
+is a view of; `--top 0` shows every row. `--json` prints the whole report — a consumer
+that asked for structure can slice it itself.
 
 ## What has moved upstream
 

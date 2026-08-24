@@ -10,7 +10,8 @@
 //! normalize + slot a patch into a series); `build` (drive the compile / rootfs /
 //! image pipeline from the lock); `diff` (compare two build points, offline, from the
 //! documents a build already wrote); `sbom` (export an image's bill of materials as
-//! SPDX or CycloneDX); `why-rebuild` (explain, offline, which compile nodes the next
+//! SPDX or CycloneDX); `size` (break down what an image's package set weighs, from the
+//! published plan); `why-rebuild` (explain, offline, which compile nodes the next
 //! build reuses vs. rebuilds); and `clean` (remove a recipe's build scratch).
 //!
 //! This module is the entry point only: it parses the argument tree ([`crate::args`]),
@@ -19,6 +20,7 @@
 
 mod args;
 mod artifacts;
+mod builder;
 mod commands;
 mod config;
 mod fsutil;
@@ -159,6 +161,21 @@ fn run(
             out,
             features,
         } => commands::sbom::run(root, &target, format, out, features),
+        Command::Size {
+            target,
+            by,
+            top,
+            features,
+        } => commands::size::run(
+            root,
+            &target,
+            by,
+            // `--top 0` is "every row", which is what a `0` limit means to a reader;
+            // passing it through as a limit of zero would print a header and nothing.
+            (top > 0).then_some(top),
+            features,
+            json,
+        ),
         Command::Outdated { recipes } => commands::outdated::run(root, &recipes, json),
         Command::WhyRebuild { recipe, args } => commands::why_rebuild::run(root, &recipe, args),
         Command::Clean { recipe, args } => commands::clean::run(root, &recipe, args),
@@ -189,6 +206,7 @@ fn supports_json(command: &Command) -> bool {
             | Command::Build { .. }
             | Command::Reproduce { .. }
             | Command::Diff { .. }
+            | Command::Size { .. }
             | Command::Outdated { .. }
     )
 }
@@ -218,6 +236,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Reproduce { .. } => "reproduce",
         Command::Diff { .. } => "diff",
         Command::Sbom { .. } => "sbom",
+        Command::Size { .. } => "size",
         Command::Outdated { .. } => "outdated",
         Command::WhyRebuild { .. } => "why-rebuild",
         Command::Clean { .. } => "clean",

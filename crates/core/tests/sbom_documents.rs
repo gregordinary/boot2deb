@@ -16,10 +16,11 @@
 use boot2deb_core::model::Overrides;
 use boot2deb_core::provenance::{
     assemble, BuildFacts, FilesystemGeometry, FilesystemProvenance, SandboxPosture,
-    SandboxProvenance,
+    SandboxProvenance, SandboxStreams,
 };
 use boot2deb_core::sbom::{cyclonedx, spdx, Sbom};
 use boot2deb_core::{manifest, resolve_recipe, ConfigRoot};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// The recipe rendered: the media-accel RK1, which is the build point that exercises
@@ -67,6 +68,8 @@ fn facts<'a>(
         builder_version: env!("CARGO_PKG_VERSION"),
         builder_commit: None,
         builder_dirty: false,
+        config_commit: None,
+        config_dirty: false,
         filesystem: FilesystemProvenance {
             kind: "ext4".into(),
             policy_pin: "ferrosys-policy-pin 1\nblock_size 4096\n".into(),
@@ -95,6 +98,11 @@ fn facts<'a>(
                 root: "rootless".into(),
                 identity: "userns".into(),
                 network: "denied".into(),
+                streams: SandboxStreams {
+                    stdin: "null".into(),
+                    stdout: "inherit".into(),
+                    stderr: "inherit".into(),
+                },
                 hardening: "seccomp".into(),
                 seccomp_instructions: None,
                 keep_capabilities: None,
@@ -141,9 +149,15 @@ fn both_formats_render_from_the_shipped_configuration() {
             packages.len(),
         ),
     );
+    // Source attribution comes from the published plan, which this test has no build to
+    // produce — so the empty index is exercised here, which is also what an image handed
+    // over without its plan produces. The populated case is a unit test beside the
+    // model, where the assertion is about content rather than about the documents
+    // existing.
     let sbom = Sbom::from_provenance(
         &provenance,
         &packages,
+        &BTreeMap::new(),
         "turing-rk1-media-accel-forky",
         // Fixed, so re-running writes byte-identical documents — the property the
         // `SOURCE_DATE_EPOCH` path exists to give a real run.

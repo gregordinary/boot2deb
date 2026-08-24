@@ -110,7 +110,7 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | HDMI hotplug + EDID | works — unplug/replug re-reads EDID |
 | GPU (Mali-G52 / panfrost) + Mesa GL | works — GL 3.1 / GLES 3.1, full desktop composites on it |
 | Wi-Fi, 2.4 + 5 GHz | works (AIC8800D80) |
-| Bluetooth | works — `hci0` up, LE + classic scan |
+| Bluetooth | works — `hci0` up, LE + classic scan, A2DP audio |
 | Suspend / resume (s2idle) | works |
 | USB 2.0 host | works |
 | Bundled remote | works, zero-config |
@@ -132,6 +132,11 @@ Things the board needs that are worth knowing about:
   [kmods layer](../reference/config-model.md#out-of-tree-modules-are-their-own-layer)
   — declared by the device as `device_kmods = ["aic8800"]`, not carried as a kernel
   patch series, so an RK3576 board without the chip gets a lean kernel.
+- **Bluetooth audio needs `libspa-0.2-bluetooth` installed alongside a desktop.** The image ships
+  `bluez`, so `hci0` comes up on its own and a headset pairs — but sound only reaches it through
+  PipeWire's Bluetooth plugin, which `wireplumber` and `pipewire-pulse` merely *Suggest*. No
+  desktop metapackage brings it in, and a paired headset with no sink is what its absence looks
+  like. Images are headless and carry no PipeWire, so install it when you install the desktop.
 - **`cpuidle.off=1` is in the kernel command line.** A core suspended into the DT
   `CPU_SLEEP` state can miss its wakeup on this platform's BL31. It is a board-level
   workaround, stated in `devices/h96-max-m9.toml` with the condition to drop it.

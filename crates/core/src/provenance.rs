@@ -83,6 +83,13 @@ pub struct BuildFacts<'a> {
     /// Whether that checkout had uncommitted changes at build time. Only meaningful
     /// when `builder_commit` is `Some`.
     pub builder_dirty: bool,
+    /// Short git commit of the *config tree* the build resolved from, or `None` when
+    /// the config root is not a git checkout. A separate coordinate from
+    /// `builder_commit`: one names the program, this names the data it read.
+    pub config_commit: Option<&'a str>,
+    /// Whether that config tree had uncommitted changes at build time. Only meaningful
+    /// when `config_commit` is `Some`.
+    pub config_dirty: bool,
     /// The on-disk contract the rootfs filesystem was formatted to. The engine owns
     /// it because the values come from the formatter it links, which the pure core
     /// does not depend on.
@@ -235,6 +242,14 @@ pub struct SandboxPosture {
     /// `host` (the host's own namespace), or `none` (a fresh namespace with no interface
     /// at all, not even loopback).
     pub network: String,
+    /// Where the command's three standard streams are wired — the profile's plan, which
+    /// a capturing launch supersedes on the output pair.
+    ///
+    /// Recorded because a build's output depends on it: `isatty` steers debconf's
+    /// frontend, a compiler's colour diagnostics, and every progress display, so two
+    /// builds under two stream postures can differ with nothing else to show for it.
+    #[serde(default)]
+    pub streams: SandboxStreams,
     /// Whether the sandbox library's hardening layer is compiled in: `unavailable` when
     /// it is not, `applied` when it is — in which case the fields below are the controls
     /// in force, and all of them being empty is a build that *could* have hardened and
@@ -267,6 +282,31 @@ pub struct SandboxPosture {
     /// are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub landlock_net: Vec<SandboxLandlockNet>,
+}
+
+/// Where a sandboxed build command's three standard streams are wired, for
+/// `[sandbox.streams]`.
+///
+/// Each is a *kind* — `inherit`, `null`, or `fd` — for the reason
+/// [`SandboxPosture`]'s root and identity are: a descriptor names a live resource of
+/// the build's, and no record can carry that forward.
+///
+/// What this states is the profile every launch shares. A launch that attaches a
+/// conduit of its own supersedes it at that one call site, which is what a capturing
+/// launch does to the output pair — so `inherit` on [`stdout`](Self::stdout) is a true
+/// statement about the plan rather than a claim that a compile wrote to a terminal.
+/// Standard input is the one that is not superseded, and the one that decides whether
+/// the command holds the caller's controlling terminal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxStreams {
+    /// Standard input's disposition. `null` additionally puts the command in a session
+    /// of its own, where `/dev/tty` fails rather than reaching the operator's terminal.
+    pub stdin: String,
+    /// Standard output's disposition in the profile, before a capturing launch attaches
+    /// its own pipe.
+    pub stdout: String,
+    /// Standard error's disposition, on the same terms as [`stdout`](Self::stdout).
+    pub stderr: String,
 }
 
 /// One resource limit a sandboxed build command runs under, for `[[sandbox.rlimits]]`.
@@ -583,6 +623,12 @@ pub struct ImageProvenance {
     pub locales_generate: Vec<String>,
     /// The `tzdata` zone the image's `/etc/localtime` points at.
     pub timezone: String,
+    /// The NTP servers the image prefers. Empty — the common case — means the image
+    /// carries no `timesyncd` drop-in and uses Debian's fallback pool, which is worth
+    /// being able to tell apart from a configured server after the fact: a board that
+    /// came up with the wrong time was asking *something*, and this says what.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ntp_servers: Vec<String>,
     /// The console keyboard layout, when the board has a keyboard. Absent on a
     /// headless board, which ships Debian's default rather than a configured one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -745,7 +791,10 @@ pub struct ArchiveProvenance {
     /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_until: Option<String>,
-    /// Uppercase-hex fingerprints of the key that verified the release.
+    /// Uppercase-hex fingerprints of the **certificate** that verified the release —
+    /// its primary key, which is the identity a keyring entry is named by and the one
+    /// `blobs/keyrings/*.fingerprints` pins. Stable across a certificate rotating its
+    /// signing subkey, which [`signing_key`](Self::signing_key) is not.
     ///
     /// **Empty is a fact, not an absence:** it says the repository was trusted
     /// unsigned, which is how the build's own pool is configured and is the strongest
@@ -753,6 +802,19 @@ pub struct ArchiveProvenance {
     /// signatures and verification stops at the first valid one, so this names the key
     /// that was used rather than every key that could have been.
     pub signed_by: Vec<String>,
+    /// Uppercase-hex fingerprints of the key material that actually made the
+    /// signature. Debian's archive keys sign with a dedicated signing subkey, so this
+    /// is usually a subkey of the certificate [`signed_by`](Self::signed_by) names, and
+    /// equal to it only where a primary signed directly.
+    ///
+    /// Recorded beside rather than instead, because the two answer different questions:
+    /// which archive vouched for the release, and which key produced the signature. The
+    /// second is what a reader comparing against `gpg --list-keys` output sees.
+    ///
+    /// Empty exactly when `signed_by` is, so the two stay readable as one statement
+    /// about an entry's trust.
+    #[serde(default)]
+    pub signing_key: Vec<String>,
 }
 
 /// The rootfs filesystem's on-disk contract: the format policy it was written to, what
@@ -995,6 +1057,15 @@ pub struct QemuProvenance {
 /// this lock — a boundary that cannot be known at build time. So it records *when the
 /// build worked*, never a forward compatibility range, and a reproduce flow reads it to
 /// advise (warn on a mismatch), never to enforce.
+///
+/// Two commits, because "what produced this image" has two answers and they move
+/// independently. [`commit`](Self::commit) names the *program*: it is stamped into the
+/// binary when that binary is compiled, so it stays true for an installed `boot2deb`
+/// with no source tree in reach. [`config_commit`](Self::config_commit) names the
+/// *data*: the config tree the build resolved layers, recipes and locks from. One
+/// checkout can supply both, and in the layout boot2deb is developed in it does — but a
+/// released binary run against a config tree is the case that shows why one field
+/// cannot answer for the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuiltWithProvenance {
     /// boot2deb crate version, from `Cargo.toml` (e.g. `0.1.0`).
@@ -1007,6 +1078,20 @@ pub struct BuiltWithProvenance {
     /// `commit` alone does not identify the builder — the image is not reproducible from
     /// that commit.
     pub dirty: bool,
+    /// Short git commit of the config tree the build read its layers, recipes and lock
+    /// from. Absent when the config root is not a git checkout, which an unpacked or
+    /// generated config tree legitimately is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_commit: Option<String>,
+    /// Whether that config tree had uncommitted changes at build time. `true` means
+    /// [`config_commit`](Self::config_commit) does not identify the inputs — an edited
+    /// `.dts` or device layer is in the image and in no commit.
+    ///
+    /// Not folded into [`dirty`](Self::dirty), because the two disclaim different
+    /// things: a dirty builder means the *program* is unidentified, a dirty config tree
+    /// means the *inputs* are, and a build can easily be one without the other.
+    #[serde(default)]
+    pub config_dirty: bool,
 }
 
 /// The image's initial first-boot credential, and the rest of what can reach the
@@ -1135,6 +1220,7 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             locale: build.locale.clone(),
             locales_generate: build.locales_generate.clone(),
             timezone: build.timezone.clone(),
+            ntp_servers: build.ntp_servers.clone(),
             // The layout alone identifies the keymap for a reader; the XKB model,
             // variant, and options are build inputs, recoverable from the config.
             keymap: build.keymap.as_ref().map(|k| k.layout.clone()),
@@ -1209,6 +1295,8 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             version: facts.builder_version.to_string(),
             commit: facts.builder_commit.map(str::to_string),
             dirty: facts.builder_dirty,
+            config_commit: facts.config_commit.map(str::to_string),
+            config_dirty: facts.config_dirty,
         },
         credentials: CredentialsProvenance {
             user: facts.user.to_string(),
@@ -1443,6 +1531,10 @@ pub(crate) mod tests {
     /// the build's own pool, which is the pair every real build produces and the one that
     /// exercises both shapes — a recorded URL beside a dropped one, and a verified
     /// signature beside a deliberate absence of one.
+    ///
+    /// The key pair is a real one, and the two fields hold what a real resolve puts in
+    /// them: the certificate primary of `Debian Archive Automatic Signing Key`, and the
+    /// dedicated signing subkey that made the signature.
     fn sample_archives() -> Vec<ArchiveProvenance> {
         vec![
             ArchiveProvenance {
@@ -1454,7 +1546,8 @@ pub(crate) mod tests {
                 release_sha256: "a".repeat(64),
                 date: Some("Sun, 02 Aug 2026 08:12:34 UTC".into()),
                 valid_until: Some("Sun, 09 Aug 2026 08:12:34 UTC".into()),
-                signed_by: vec!["4CB50190207B4758A3F73A796ED0E7B82643E131".into()],
+                signed_by: vec!["B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8".into()],
+                signing_key: vec!["4CB50190207B4758A3F73A796ED0E7B82643E131".into()],
             },
             ArchiveProvenance {
                 index: 1,
@@ -1466,6 +1559,7 @@ pub(crate) mod tests {
                 date: Some("Sun, 02 Aug 2026 08:12:34 UTC".into()),
                 valid_until: None,
                 signed_by: Vec::new(),
+                signing_key: Vec::new(),
             },
         ]
     }
@@ -1528,6 +1622,11 @@ pub(crate) mod tests {
                 root: "plain".into(),
                 identity: "single".into(),
                 network: "isolated".into(),
+                streams: SandboxStreams {
+                    stdin: "null".into(),
+                    stdout: "inherit".into(),
+                    stderr: "inherit".into(),
+                },
                 hardening: "unavailable".into(),
                 seccomp_instructions: None,
                 keep_capabilities: None,
@@ -1629,6 +1728,8 @@ pub(crate) mod tests {
                 builder_version: "0.1.0",
                 builder_commit: Some("abc1234"),
                 builder_dirty: false,
+                config_commit: None,
+                config_dirty: false,
                 filesystem: sample_filesystem(),
                 rootfs_verified_with: &verified,
                 qemu: None,
@@ -1686,6 +1787,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: Some("deadbeef1234"),
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &sample_verified_with(),
             qemu: Some(QemuProvenance {
@@ -1779,6 +1882,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: None,
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &[],
             qemu: None,
@@ -1842,6 +1947,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: None,
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &[],
             qemu: None,
@@ -1885,6 +1992,8 @@ pub(crate) mod tests {
             builder_version: "0.4.2",
             builder_commit: Some("deadbeef1234"),
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &[],
             qemu: None,
@@ -1974,6 +2083,8 @@ pub(crate) mod tests {
                 builder_version: "0.4.2",
                 builder_commit: Some("deadbeef1234"),
                 builder_dirty: true,
+                config_commit: None,
+                config_dirty: false,
                 filesystem: sample_filesystem(),
                 rootfs_verified_with: &verified,
                 qemu: Some(QemuProvenance {
@@ -2012,6 +2123,8 @@ pub(crate) mod tests {
                 builder_version: "0.4.2",
                 builder_commit: None,
                 builder_dirty: false,
+                config_commit: None,
+                config_dirty: false,
                 filesystem: sample_filesystem(),
                 rootfs_verified_with: &[],
                 qemu: None,
@@ -2076,6 +2189,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: Some("cafef00dbabe"),
             builder_dirty: false,
+            config_commit: Some("0ddba11c0ffe"),
+            config_dirty: true,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &sample_verified_with(),
             qemu: Some(QemuProvenance {
@@ -2163,6 +2278,15 @@ pub(crate) mod tests {
             Some("cafef00dbabe")
         );
         assert_eq!(parsed["built_with"]["dirty"].as_bool(), Some(false));
+        // The config tree is the *other* half of the same question, and it is recorded
+        // separately because it moves separately: this fixture builds a config tree that
+        // is not the binary's own checkout, which is what an installed boot2deb does
+        // every time.
+        assert_eq!(
+            parsed["built_with"]["config_commit"].as_str(),
+            Some("0ddba11c0ffe")
+        );
+        assert_eq!(parsed["built_with"]["config_dirty"].as_bool(), Some(true));
         // The filesystem record: the on-disk contract the rootfs was formatted to, which
         // no source pin covers. Both of the formatter's pin documents survive the join
         // and the TOML round-trip whole — line breaks included, so each stays the
@@ -2263,6 +2387,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: None,
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &sample_verified_with(),
             qemu: None,
@@ -2327,6 +2453,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: None,
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &sample_verified_with(),
             qemu: Some(QemuProvenance {
@@ -2385,6 +2513,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: None,
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &sample_verified_with(),
             qemu: Some(QemuProvenance {
@@ -2467,6 +2597,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: None,
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &[],
             qemu: None,
@@ -2541,6 +2673,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: None,
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &[],
             qemu: None,
@@ -2628,6 +2762,8 @@ pub(crate) mod tests {
             builder_version: "0.0.0-test",
             builder_commit: None,
             builder_dirty: false,
+            config_commit: None,
+            config_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &[],
             qemu: None,

@@ -253,6 +253,34 @@ pub(crate) enum Command {
         #[arg(long = "feature")]
         features: Vec<String>,
     },
+    /// Break down what an image's package set weighs, from the plan document a build
+    /// published — per binary package, per source package, or per repository. The
+    /// figures are the archives' own `Installed-Size` estimates in kibibytes, so they
+    /// answer "what did the packages contribute" and not "how large is the image":
+    /// they exclude filesystem overhead and everything the image gains after `dpkg`.
+    /// Offline; builds nothing.
+    Size {
+        /// Recipe whose published image to weigh (e.g. turing-rk1/forky), or a path to
+        /// a `.plan` shipped with an image.
+        target: String,
+        /// Axis to roll up on: one row per binary package, per source package (which
+        /// attributes a source's several outputs to the thing that was built), or per
+        /// repository (which separates what Debian shipped from what this build
+        /// compiled).
+        #[arg(long, value_enum, default_value = "package")]
+        by: commands::size::ByArg,
+        /// Show only the heaviest N rows; `0` shows every row. The totals always
+        /// describe the whole set, so a truncated view still says what it is a view of.
+        #[arg(long, default_value = "25")]
+        top: usize,
+        /// Rootfs feature the published image was built with, repeatable — the same
+        /// selection `build --feature` used. It names which image's plan to read;
+        /// passing the reference directly (`size turing-rk1/forky+jellyfin`) is
+        /// equivalent. Ignored when a `.plan` path is given, which already names one
+        /// image.
+        #[arg(long = "feature")]
+        features: Vec<String>,
+    },
     /// Survey what has moved upstream since the locks were pinned: for each recipe's
     /// git source pins, whether a newer release tag exists (and how far behind the
     /// pin is), or whether a pinned branch's tip has moved. Read-only — one
@@ -528,6 +556,14 @@ pub(crate) struct BuildArgs {
     /// `<root>/cache/artifacts` is left untouched.
     #[arg(long)]
     pub(crate) no_artifact_cache: bool,
+    /// Build even though this `boot2deb` binary does not match the source checkout it
+    /// is being run from — it was compiled before the checkout's current commit, or
+    /// before edits under `crates/`. The image is built by the *running* binary either
+    /// way; what the mismatch costs is the truth of the `[built_with]` stamp, which
+    /// would name a commit that is not what ran. The fix is normally `cargo build`,
+    /// which takes seconds; this is for the case where you mean it.
+    #[arg(long)]
+    pub(crate) allow_stale_builder: bool,
 }
 
 /// `why-rebuild`'s flags: the work dir whose stamps are read, plus the build knobs
@@ -929,6 +965,13 @@ pub(crate) struct OverrideArgs {
     /// System timezone (e.g. `America/New_York`); default: the recipe/base `timezone`.
     #[arg(long)]
     pub(crate) timezone: Option<String>,
+    /// NTP server the image prefers, repeatable (`--ntp-server ntp.lan`); default: the
+    /// recipe/base `ntp_servers`. When any is given, replaces that list. Debian's
+    /// fallback pool is kept either way, so this sets a preference rather than the only
+    /// source — worth setting for a board that boots on a network the public pool
+    /// cannot be reached from.
+    #[arg(long = "ntp-server")]
+    pub(crate) ntp_servers: Vec<String>,
     /// Console keyboard layout (e.g. `gb`); default: the recipe/device `keymap`, and
     /// none at all on a headless board. Sets `XKBLAYOUT`; the model, variant, and
     /// options keep their defaults — set those in the device's `[keymap]` table.
@@ -964,6 +1007,7 @@ impl From<OverrideArgs> for Overrides {
             locale: a.locale,
             locales_generate: (!a.locales_generate.is_empty()).then_some(a.locales_generate),
             timezone: a.timezone,
+            ntp_servers: (!a.ntp_servers.is_empty()).then_some(a.ntp_servers),
             keymap: a.keymap.as_deref().map(Keymap::from_layout),
             sudo: a.sudo,
             first_boot_password_length: a.password_length,

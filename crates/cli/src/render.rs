@@ -375,6 +375,17 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             b.locales_generate.join(", ")
         );
         println!("timezone     : {}", b.timezone);
+        // Naming the pool on the empty case rather than printing nothing: "no servers
+        // configured" and "no time source" look identical otherwise, and only the
+        // first is true.
+        println!(
+            "ntp servers  : {}",
+            if b.ntp_servers.is_empty() {
+                "(Debian fallback pool)".to_string()
+            } else {
+                b.ntp_servers.join(", ")
+            }
+        );
         // A headless board has no keymap and prints none — an empty line would suggest
         // the knob exists and was left blank, when in fact Debian's default is what
         // ships.

@@ -52,6 +52,26 @@ locales_generate = [
 # where it sits; `timedatectl set-timezone` changes it on a running image.
 timezone = "UTC"
 
+# The NTP servers systemd-timesyncd reaches for first, as hostnames or bare IPs.
+#
+# Empty is the right default and writes no configuration at all: Debian compiles its
+# own pool into systemd as FallbackNTP, which is correct on any network with a route
+# out and assumes nothing about where a board is plugged in. Naming a server here does
+# not replace that pool -- it sets NTP=, which timesyncd prefers and falls back from --
+# so a value below is a preference, not a commitment, and an image configured for one
+# network still finds the time on another.
+#
+# Worth setting for a board deployed on a network that cannot reach the public pool at
+# all, and worth setting for one that can: a time server on the LAN answers in about a
+# millisecond, which shortens the window after boot in which the clock is still wrong.
+#
+# None of the boards here ships a battery-backed RTC, so every one of them boots with a
+# clock restored from the mtime of /var/lib/systemd/timesync/clock -- as stale as its
+# last power-off -- until NTP corrects it. Images hold the maintenance timers behind
+# time-sync.target until that lands (see the systemd-time-wait-sync drop-in in
+# base/overlay), so this setting decides how long that wait is, not whether it happens.
+ntp_servers = []
+
 # --- Account and access -------------------------------------------------------
 # Who can log in to a built image as the default `debian` account, and what reaching
 # root costs them. Every key here is overridable per recipe.

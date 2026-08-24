@@ -67,10 +67,27 @@ error. The plan is an *instruction*: hand it back and the rootfs installs that s
 without solving at all, which is the difference between detecting drift and not being
 subject to it. And the plan carries what neither the manifest nor the lock does — the
 mirror that answered, the suite and components, the sha256 of the release body that was
-verified, its `Date` and `Valid-Until`, and the fingerprint of the key that verified it.
-The provenance manifest repeats those as `[[archives]]`, one entry per repository, so an
-image's own record says what its packages were selected *from* and not only which they
-were.
+verified, its `Date` and `Valid-Until`, the fingerprint of the certificate that verified
+it, and the key under that certificate which made the signature. The provenance manifest
+repeats those as `[[archives]]`, one entry per repository, so an image's own record says
+what its packages were selected *from* and not only which they were.
+
+The plan document states its own format version in its first line, and a boot2deb reads
+exactly one. A plan written by an older boot2deb is **refused, naming both versions**,
+rather than being read on a guess about what its fields meant:
+
+```console
+$ boot2deb reproduce turing-rk1/forky --from published/
+error: read the pinned plan published/turing-rk1-forky.plan: the document is in format
+"ferroday-cage-plan 1", and this library reads "ferroday-cage-plan 2"
+```
+
+That is the correct failure and not a gap to work around. The version moved because a
+field changed *meaning*: `Signed-By` named the signing subkey and now names the
+certificate's primary key. Reading an old document under the new rule would silently
+report a different key for an archive that never rotated one — which is exactly the event
+a recorded fingerprint exists to catch. Rebuild the image from its lock to get a plan in
+the current format.
 
 Replaying a plan **moves the trust anchor**, which is why it is `reproduce`'s to do and
 not something a `build` flag can turn on. A pinned install reads neither a release nor a
@@ -115,9 +132,53 @@ exists; a frozen build turns it on.
 The same lock built by a different boot2deb can produce a different image, or fail to read
 an old lock — during active development, breaking changes are expected, and the project
 does not carry compatibility shims to read old locks forever. So the builder is an input
-like any other, and the provenance manifest records it: a `[built_with]` section with the
-boot2deb version, the git commit of the checkout that built the image, and whether that
-checkout was dirty.
+like any other, and the provenance manifest records it in `[built_with]`.
+
+That section carries **two** commits, because "what produced this image" has two answers
+that move independently:
+
+| field | names | captured |
+|---|---|---|
+| `commit` / `dirty` | the *program* — the boot2deb binary that ran | stamped into the binary when it is compiled |
+| `config_commit` / `config_dirty` | the *data* — the config tree it read layers, recipes and the lock from | read from `--root` when the build starts |
+
+One checkout can supply both, and in the layout boot2deb is developed in it does. They
+still cannot answer for each other: an installed `boot2deb` run against a config tree has
+a `commit` from wherever it was built and a `config_commit` from the tree in front of it,
+and a single binary building two different config trees is the ordinary case, not an
+exotic one.
+
+The binary's commit is stamped at **compile** time rather than read at run time, and that
+is deliberate. The binary *is* the builder, so its identity has to travel with it: an
+installed boot2deb has no source tree in reach, and reading whatever checkout happened to
+be nearby would record a different claim than the field makes. The cost is that a binary
+can fall behind the checkout it was built from — commit, forget to `cargo build`, and the
+next image is stamped with the commit *before* yours, or with one an amend left
+unreachable.
+
+So a build refuses to start when the running binary provably is not this checkout's
+source:
+
+```console
+$ boot2deb build h96-max-m9/forky
+error: this boot2deb was compiled from 7e6e2f02674c, but the checkout is at
+90ab9c660bc1. An image built now records 7e6e2f02674c as its builder — a commit
+that is not what is on disk, and that nobody else can resolve if it was amended
+away. Run `cargo build` (seconds) to re-stamp it.
+```
+
+Two cases are certain enough to refuse: the stamp names a different commit than `HEAD`,
+or it names `HEAD` but the sources under `crates/` have been edited since. Editing a
+device `.toml` or a `.dts` is *not* one of them — that is build input, recorded by the
+lock and by `config_commit`, and it leaves the binary's identity intact. A binary
+compiled from an already-dirty tree is reported and not refused: it records
+`dirty = true`, which is the honest answer rather than a false one.
+
+`--allow-stale-builder` proceeds anyway, for when you mean it. The check itself is two
+`git` reads, and it runs before any compile — the alternative is discovering the wrong
+stamp in a provenance file written at the *end* of the build. `boot2deb doctor` reports
+the same verdict standing still, and `why-rebuild` shows it as a `builder` row above the
+compile nodes.
 
 The builder also decides the environment a compile runs in. Every package build and the
 rootfs customize run in an unprivileged sandbox, and what they produce depends on the
@@ -263,15 +324,20 @@ What is recorded, because it genuinely does reach the image:
 - **`[[archives]]`** — the state each configured repository was in when the rootfs plan
   resolved, in the order the resolve saw them, which is the index the `.plan` document's
   packages name. Per entry: the mirror that answered, the suite and components, the sha256
-  of the release body that was verified, its `Date` and `Valid-Until`, and the fingerprint
-  of the key that verified it. `[rootfs]` says which package bytes shipped; this says what
-  they were selected *from*, which is the question a solved manifest cannot answer — the
-  same suite resolves to different versions a week apart. An empty `signed_by` is a fact
-  rather than a gap: it says that repository was trusted unsigned, which is how the
-  build's own `.deb` pool is configured. That pool's entry is marked `local` and carries
-  no mirror, because its URL is a per-run path under a per-run directory — a property of
-  the machine, kept out for the same reason the sandbox record carries no working or
-  artifact path.
+  of the release body that was verified, its `Date` and `Valid-Until`, and two key
+  fingerprints. `signed_by` is the **certificate** that verified the release — its primary
+  key, which is what a keyring entry is named by and what `blobs/keyrings/*.fingerprints`
+  pins, so the manifest is directly comparable against that list. `signing_key` is the key
+  that actually made the signature, usually a dedicated signing subkey of that
+  certificate; the two are separate because a certificate rotating its subkey moves the
+  second and leaves the first alone. `[rootfs]` says which package bytes shipped; this says
+  what they were selected *from*, which is the question a solved manifest cannot answer —
+  the same suite resolves to different versions a week apart. An empty `signed_by` is a
+  fact rather than a gap: it says that repository was trusted unsigned, which is how the
+  build's own `.deb` pool is configured, and `signing_key` is empty exactly when it is.
+  That pool's entry is marked `local` and carries no mirror, because its URL is a per-run
+  path under a per-run directory — a property of the machine, kept out for the same reason
+  the sandbox record carries no working or artifact path.
 - **`[build_sandbox]`, `[cross_sandbox]` and `[packaging_root]`** — the package sets of the
   three provisioned roots that produced the build's `.deb`s: the target-arch base that
   *compiled* the media-accel packages, the host-arch base that *compiled* the kernel,
@@ -296,11 +362,22 @@ What is recorded, because it genuinely does reach the image:
   `[sandbox]` states how the sandbox is rooted (`plain` or `overlay`), the identity the
   command holds (`single` — the calling user is root inside and nothing else is mapped),
   the network it can reach (`isolated` — a fresh namespace with loopback only, declared by
-  boot2deb rather than taken from a library default), any resource limits in force, and
-  whether the library's hardening layer is compiled in. `hardening = "unavailable"` is
-  written rather than omitted: an absent key cannot be told from one written before the key
-  existed, and a provenance record has to be readable without knowing which builder wrote
-  it.
+  boot2deb rather than taken from a library default), where the three standard streams go,
+  any resource limits in force, and whether the library's hardening layer is compiled in.
+  `hardening = "unavailable"` is written rather than omitted: an absent key cannot be told
+  from one written before the key existed, and a provenance record has to be readable
+  without knowing which builder wrote it.
+
+  `[sandbox.streams]` is there because a build's output depends on it: `isatty` on the
+  standard streams steers debconf's frontend, a compiler's colour diagnostics, and every
+  progress display, so two builds under two stream postures can differ with nothing else to
+  show for it. boot2deb declares `stdin = "null"`, which does more than state that a build
+  is non-interactive — it puts the sandboxed command in a **session of its own**. Inherited,
+  it would stay in yours, where a maintainer script could open `/dev/tty` to read what is
+  typed at your terminal and push characters into its input queue for your shell to run
+  afterwards. Out of that session `/dev/tty` fails. The output pair reads `inherit`, which
+  is a statement about the profile rather than about a compile: a capturing launch attaches
+  its own pipes, so build output never went to your terminal either.
 
 These identities also key the caches, so a `.deb` built with one toolchain is never
 restored for a build using another — and neither is a rootfs whose packages were configured
@@ -332,8 +409,11 @@ the result:
    of the release.
 2. **Keep sources durable:** tag the patch repo at its pinned commit, and confirm
    `boot2deb verify-sources <recipe>` reports no `ORPHANED` pins.
-3. **Build from that clean, committed checkout**, so the image's `[built_with]` records a
-   real commit with `dirty = false`.
+3. **Build from that clean, committed checkout**, so the image's `[built_with]` records
+   real commits with `dirty = false` and `config_dirty = false`. Run `cargo build` first:
+   the build refuses a binary that is behind the checkout, but nothing can make a
+   *dirty* one identify itself, and a release stamped `dirty = true` names no commit
+   anyone can return to.
 4. **Publish the image together with its `.provenance.toml` and its `.plan`.** The
    manifest names the builder that produced it and the archives it resolved against; the
    plan is the document that replays them; the committed lock — recoverable at that

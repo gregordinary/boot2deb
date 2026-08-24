@@ -52,6 +52,7 @@ const RECIPE_ONLY_AXES: &[(&str, &str)] = &[
     ("--locale", "locale"),
     ("--locale-gen", "locales_generate"),
     ("--timezone", "timezone"),
+    ("--ntp-server", "ntp_servers"),
     ("--keymap", "keymap"),
     ("--sudo", "sudo"),
     ("--password-length", "first_boot_password_length"),
@@ -110,6 +111,17 @@ fn unbuildable_note(target: &str, ov: &Overrides) -> Option<String> {
                 )
             }),
             "--timezone" => ov.timezone.clone(),
+            // An array like `locales_generate`, so it renders as TOML array syntax
+            // rather than being quoted as one string by the fallback below.
+            "--ntp-server" => ov.ntp_servers.as_ref().map(|s| {
+                format!(
+                    "[{}]",
+                    s.iter()
+                        .map(|s| format!("{s:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }),
             "--keymap" => ov.keymap.as_ref().map(|k| k.layout.clone()),
             "--sudo" => ov.sudo.map(|s| s.as_str().to_string()),
             "--password-length" => ov.first_boot_password_length.map(|n| n.to_string()),

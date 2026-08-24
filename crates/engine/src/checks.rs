@@ -396,23 +396,38 @@ fn exe(
 /// `newuidmap`/subuid range), the in-process build sandbox (its dpkg-configure
 /// waves), and the package builds all depend on them.
 ///
-/// Probed **functionally**: actually create one with `unshare --map-root-user
-/// --map-auto true` — the exact invocation the rootless bootstrap uses. A
-/// single-sysctl read (`unprivileged_userns_clone`) misses the other ways a
-/// host forbids namespaces — Ubuntu 24.04's
-/// `apparmor_restrict_unprivileged_userns=1` and `user.max_user_namespaces=0` —
-/// and a plain `--map-root-user` probe misses absent `/etc/subuid` ranges, so
-/// the actual syscall + mapping is the authoritative check.
+/// Probed **functionally**: actually create the namespaces with `unshare
+/// --map-root-user --map-auto unshare --user true`. A single-sysctl read
+/// (`unprivileged_userns_clone`) misses the other ways a host forbids namespaces —
+/// Ubuntu 24.04's `apparmor_restrict_unprivileged_userns=1` and
+/// `user.max_user_namespaces=0` — and a plain `--map-root-user` probe misses absent
+/// `/etc/subuid` ranges, so the actual syscall + mapping is the authoritative check.
 ///
-/// The probe answers *whether*; [`userns_blocker_detail`] answers *why*.
+/// **Two namespaces, not one**, because that is what a launch holds: the sandbox's own,
+/// and the nested one its command enters so the kernel locks the sandbox's mount flags.
+/// They are charged against `user.max_user_namespaces` at every level, so a host with a
+/// ceiling of 1 satisfies a single-namespace probe and then fails every build at launch.
+/// The probe's whole premise is that it performs the sequence a build performs.
+///
+/// The probe answers *whether*, and [`userns_blocker_detail`] answers *why* — but a
+/// blocker is consulted even when the probe passes, because the probe is necessary and
+/// not sufficient. A ceiling this process fits under is not one every build fits under:
+/// a host allowing four namespaces with three already live passes here and exhausts its
+/// budget at launch. Where the library names a condition, that condition is the answer
+/// regardless of what one successful `unshare` proved.
 fn userns_check() -> Check {
     let status = match Command::new("unshare")
-        .args(["--map-root-user", "--map-auto", "true"])
+        .args(["--map-root-user", "--map-auto", "unshare", "--user", "true"])
         .output()
     {
-        Ok(out) if out.status.success() => {
-            CheckStatus::Present("unshare --map-root-user --map-auto works".into())
-        }
+        Ok(out) if out.status.success() => match ferroday_cage::host::userns_blocker() {
+            Some(blocker) => CheckStatus::Missing(blocker.to_string()),
+            None => CheckStatus::Present(
+                "unshare --map-root-user --map-auto unshare --user works (two namespaces, as a \
+                 launch holds)"
+                    .into(),
+            ),
+        },
         Ok(_) => CheckStatus::Missing(userns_blocker_detail()),
         // `unshare` is util-linux, so its absence is a different problem from a host
         // that forbids namespaces — and one no blocker classifier will explain.
@@ -436,8 +451,9 @@ fn userns_check() -> Check {
 /// Two independent things must hold, and they fail for unrelated reasons, so both are
 /// consulted in the order the kernel needs them:
 ///
-///  1. **The namespace can be created at all** — three sysctls, one of them
-///     Ubuntu-specific ([`userns_blocker`](ferroday_cage::host::userns_blocker)).
+///  1. **The namespaces can be created at all** — three sysctls, one of them
+///     Ubuntu-specific, and the ceiling read against the *two* a launch holds rather
+///     than against zero ([`userns_blocker`](ferroday_cage::host::userns_blocker)).
 ///  2. **A subordinate *range* can be mapped into it**
 ///     ([`range_map_blocker`](ferroday_cage::host::range_map_blocker)). An
 ///     unprivileged process may write exactly one uid_map entry — itself to root —
@@ -459,10 +475,10 @@ fn userns_blocker_detail() -> String {
     if let Some(blocker) = ferroday_cage::host::range_map_blocker() {
         return blocker.to_string();
     }
-    "cannot create an unprivileged user namespace with a subordinate id map, and no \
-     known host condition explains it — a seccomp filter or an LSM policy may be \
-     denying the syscall; run `unshare --map-root-user --map-auto true` to see the \
-     kernel's own error"
+    "cannot create the two nested unprivileged user namespaces a launch holds, with a \
+     subordinate id map, and no known host condition explains it — a seccomp filter or \
+     an LSM policy may be denying the syscall; run `unshare --map-root-user --map-auto \
+     unshare --user true` to see the kernel's own error"
         .to_string()
 }
 

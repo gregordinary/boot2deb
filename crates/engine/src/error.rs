@@ -254,6 +254,22 @@ pub enum EngineError {
         message: String,
     },
 
+    /// A published plan document could not be read as one — malformed, or written in a
+    /// format version this boot2deb does not read. Distinct from
+    /// [`Bootstrap`](Self::Bootstrap) because no bootstrap is involved: the readers
+    /// that hit this are answering questions *about* a published image, and calling
+    /// that a failed bootstrap would name a stage the command never ran.
+    ///
+    /// The plan format is versioned and a mismatch is refused rather than guessed at, so
+    /// the provisioner's own message — which names both versions — is carried verbatim.
+    #[error("cannot read the plan document {path}: {message}")]
+    PlanDocument {
+        /// The document that could not be read.
+        path: String,
+        /// The provisioner's error, rendered.
+        message: String,
+    },
+
     /// A [`SandboxRun`](crate::sandbox::SandboxRun) carried an empty `argv`, so there
     /// is no program to run. The field's contract states it is non-empty and every
     /// in-tree call site honours it; this makes the invariant structural rather than

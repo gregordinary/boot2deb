@@ -113,6 +113,12 @@ pub(crate) fn run(
     });
 
     println!("why-rebuild {recipe} (work {})", work_dir.display());
+    // The builder leads, because it is the one input that governs every node at once
+    // and the only one a build will refuse to proceed on. It is not a compile node —
+    // nothing here is cached or restored — so it sits above the list rather than in it.
+    if let Some(row) = builder_row(root) {
+        println!("{row}");
+    }
     // A recipe can legitimately have no compile nodes at all — a board that installs
     // Debian's kernel and boots its own firmware compiles nothing, so there is nothing
     // to rebuild. Say that, rather than printing an empty list that reads as a bug.
@@ -158,6 +164,24 @@ pub(crate) fn run(
     }
     println!("{}", scope_note(&nodes, args.no_artifact_cache));
     Ok(())
+}
+
+/// The `builder` row, or `None` where there is no comparison to report — an installed
+/// binary run against a config tree raises no question, and a row saying so on every
+/// invocation would be noise in a listing whose job is to name what changed.
+///
+/// Phrased in this command's own vocabulary: a stale builder *blocks*, where a node
+/// merely rebuilds. Saying "rebuild" here would read as "recompiles the kernel", which
+/// is the one thing it does not mean.
+fn builder_row(root: &ConfigRoot) -> Option<String> {
+    let freshness = crate::builder::freshness(root);
+    let note = freshness.note()?;
+    let verb = if freshness.is_stale() {
+        "blocks"
+    } else {
+        "warns"
+    };
+    Some(format!("  {:<18} {verb}  ({note})", "builder"))
 }
 
 /// The closing scope note: what each verdict above does and does not cover.

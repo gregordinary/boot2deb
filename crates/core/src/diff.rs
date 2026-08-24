@@ -129,6 +129,12 @@ pub struct BuilderFacts {
     pub commit: Option<String>,
     /// Whether that checkout was dirty.
     pub dirty: bool,
+    /// The config tree's git commit, where the root was a checkout. Moves independently
+    /// of [`commit`](Self::commit): the same binary can build from two config trees, and
+    /// two binaries from one.
+    pub config_commit: Option<String>,
+    /// Whether that config tree was dirty.
+    pub config_dirty: bool,
     /// Build-host architecture.
     pub host_arch: String,
     /// Target architecture.
@@ -306,6 +312,8 @@ impl Side {
                 version: prov.built_with.version.clone(),
                 commit: prov.built_with.commit.clone(),
                 dirty: prov.built_with.dirty,
+                config_commit: prov.built_with.config_commit.clone(),
+                config_dirty: prov.built_with.config_dirty,
                 host_arch: prov.toolchain.host_arch.clone(),
                 target_arch: prov.toolchain.target_arch.clone(),
                 cross_compile: prov.toolchain.cross_compile.clone(),
@@ -645,6 +653,10 @@ pub struct BuilderChanges {
     pub commit: Option<Change>,
     /// Whether the checkout was dirty.
     pub dirty: Option<Change>,
+    /// The config tree's git commit.
+    pub config_commit: Option<Change>,
+    /// Whether the config tree was dirty.
+    pub config_dirty: Option<Change>,
     /// The build host's architecture.
     pub host_arch: Option<Change>,
     /// The target architecture.
@@ -661,6 +673,8 @@ impl IsEmpty for BuilderChanges {
         self.version.is_none()
             && self.commit.is_none()
             && self.dirty.is_none()
+            && self.config_commit.is_none()
+            && self.config_dirty.is_none()
             && self.host_arch.is_none()
             && self.target_arch.is_none()
             && self.cross_compile.is_none()
@@ -932,6 +946,11 @@ fn compare_builder(left: &Side, right: &Side) -> Section<BuilderChanges> {
             version: Change::between(Some(&l.version), Some(&r.version)),
             commit: Change::between(l.commit.as_deref(), r.commit.as_deref()),
             dirty: Change::between(Some(bool_str(l.dirty)), Some(bool_str(r.dirty))),
+            config_commit: Change::between(l.config_commit.as_deref(), r.config_commit.as_deref()),
+            config_dirty: Change::between(
+                Some(bool_str(l.config_dirty)),
+                Some(bool_str(r.config_dirty)),
+            ),
             host_arch: Change::between(Some(&l.host_arch), Some(&r.host_arch)),
             target_arch: Change::between(Some(&l.target_arch), Some(&r.target_arch)),
             cross_compile: Change::between(Some(&l.cross_compile), Some(&r.cross_compile)),
@@ -1289,6 +1308,8 @@ mod tests {
                 version: "0.4.2".into(),
                 commit: None,
                 dirty: false,
+                config_commit: None,
+                config_dirty: false,
                 host_arch: "x86_64".into(),
                 target_arch: "arm64".into(),
                 cross_compile: "aarch64-linux-gnu-".into(),
@@ -1315,6 +1336,8 @@ mod tests {
             version: "0.4.2".into(),
             commit: Some("deadbeef".into()),
             dirty: false,
+            config_commit: None,
+            config_dirty: false,
             host_arch: "x86_64".into(),
             target_arch: "arm64".into(),
             cross_compile: "aarch64-linux-gnu-".into(),

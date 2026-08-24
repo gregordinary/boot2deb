@@ -35,6 +35,7 @@ pub mod spdx;
 
 use crate::manifest::Package;
 use crate::provenance::ProvenanceManifest;
+use std::collections::BTreeMap;
 
 /// What a component is, which decides how each renderer types it and how it relates
 /// to the image.
@@ -135,27 +136,45 @@ impl Sbom {
     /// here re-checks that — the caller reads both files and is the only party that
     /// can — but a mismatch would make the document describe one image's packages
     /// under another's identity.
+    ///
+    /// `sources` maps a binary package name to the source package it was built from,
+    /// for the packages whose source is named separately
+    /// ([`weight::source_index`](crate::weight::source_index) builds it from the
+    /// published plan). It ties the several binary packages of one source back to the
+    /// thing that was built, which no other document boot2deb writes can answer. Empty
+    /// is legitimate — an image handed over without its plan — and simply leaves the
+    /// attribution out rather than guessing it from a name.
     pub fn from_provenance(
         manifest: &ProvenanceManifest,
         packages: &[Package],
+        sources: &BTreeMap<String, String>,
         name: &str,
         created: &str,
     ) -> Sbom {
         let mut components = Vec::with_capacity(packages.len() + 8);
         for (i, p) in packages.iter().enumerate() {
+            let source = sources.get(&p.name);
             components.push(Component {
                 id: format!("Package-{i}"),
                 name: p.name.clone(),
                 version: Some(p.version.clone()),
                 kind: ComponentKind::DebianPackage,
-                purl: Some(deb_purl(&p.name, &p.version, &p.architecture)),
+                purl: Some(deb_purl(
+                    &p.name,
+                    &p.version,
+                    &p.architecture,
+                    source.map(String::as_str),
+                )),
                 sha256: Some(p.sha256.clone()),
                 // The archive a package came from is recorded per *repository* in the
                 // provenance, and the per-package join lives in the plan document
                 // rather than here — so rather than guess a pool URL, the digest is
                 // the locator and the download location is not asserted.
                 download: None,
-                description: None,
+                // Said in prose as well as in the purl qualifier, because the two reach
+                // different readers: a scanner parses the purl, and a person reading a
+                // rendered SBOM sees the comment.
+                description: source.map(|s| format!("built from source package {s}")),
                 relation: Relation::Contains,
             });
         }
@@ -432,14 +451,27 @@ fn tool_identity(manifest: &ProvenanceManifest) -> Tool {
     }
 }
 
-/// A Debian binary package's purl: `pkg:deb/debian/<name>@<version>?arch=<arch>`.
-fn deb_purl(name: &str, version: &str, architecture: &str) -> String {
-    format!(
+/// A Debian binary package's purl: `pkg:deb/debian/<name>@<version>?arch=<arch>`, with
+/// `&upstream=<source>` where the source package is named separately.
+///
+/// `upstream` is the qualifier Debian-aware scanners read for that relationship, and it
+/// is emitted only where the source name differs — absence is how the ecosystem spells
+/// "the source carries this package's own name", so writing the redundant case would
+/// make the qualifier's absence ambiguous rather than informative.
+///
+/// Qualifiers are ordered alphabetically, which the purl specification requires of a
+/// canonical form and which also keeps two renderings of one package identical.
+fn deb_purl(name: &str, version: &str, architecture: &str, source: Option<&str>) -> String {
+    let mut purl = format!(
         "pkg:deb/debian/{}@{}?arch={}",
         percent_encode(name),
         percent_encode(version),
         percent_encode(architecture)
-    )
+    );
+    if let Some(source) = source {
+        purl.push_str(&format!("&upstream={}", percent_encode(source)));
+    }
+    purl
 }
 
 /// A source tree's purl: `pkg:generic/<name>@<commit>`. `generic` because no package
@@ -502,11 +534,21 @@ pub(crate) mod tests {
         crate::provenance::tests::sample_manifest()
     }
 
+    /// The source attribution a published plan supplies, covering one of the two
+    /// packages above and not the other — which is the real shape, since Debian names a
+    /// `Source` only where it differs from the binary package's own name.
+    pub(crate) fn sources() -> BTreeMap<String, String> {
+        [("libstdc++6".to_string(), "gcc-14".to_string())]
+            .into_iter()
+            .collect()
+    }
+
     /// The fixture SBOM, at a fixed timestamp so the documents are byte-stable.
     pub(crate) fn sbom() -> Sbom {
         Sbom::from_provenance(
             &manifest(),
             &packages(),
+            &sources(),
             "turing-rk1-media-accel-forky",
             "2026-08-05T00:00:00Z",
         )
@@ -553,6 +595,44 @@ pub(crate) mod tests {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.')));
     }
 
+    /// The several binary packages of one source have nothing tying them to the thing
+    /// that was built unless the document says so — which is the whole point of the
+    /// field, and the reason it is stated twice: a scanner reads the purl qualifier and
+    /// a person reads the comment.
+    #[test]
+    fn a_package_names_the_source_it_was_built_from_where_that_differs() {
+        let sbom = sbom();
+        let package = |name: &str| {
+            sbom.components
+                .iter()
+                .find(|c| c.name == name && c.kind == ComponentKind::DebianPackage)
+                .unwrap_or_else(|| panic!("a {name} component"))
+        };
+
+        let attributed = package("libstdc++6");
+        let purl = attributed.purl.as_deref().expect("a package has a purl");
+        assert!(
+            purl.ends_with("&upstream=gcc-14"),
+            "the source belongs in the purl a scanner reads: {purl}"
+        );
+        assert!(
+            purl.starts_with("pkg:deb/debian/libstdc%2B%2B6@1%3A14.2.0-19?arch=arm64"),
+            "the qualifier is appended to the canonical form, not spliced into it: {purl}"
+        );
+        assert_eq!(
+            attributed.description.as_deref(),
+            Some("built from source package gcc-14")
+        );
+
+        // `libc6`'s source carries its own name, which Debian encodes by omitting the
+        // field — so the qualifier must be absent rather than redundant, since absence
+        // is what a consumer reads as "the same name".
+        let plain = package("libc6");
+        let purl = plain.purl.as_deref().expect("a package has a purl");
+        assert!(!purl.contains("upstream="), "{purl}");
+        assert_eq!(plain.description, None);
+    }
+
     #[test]
     fn a_source_is_generated_from_and_everything_else_is_contained() {
         // The distinction is the one substantive claim in the relationship graph: a
@@ -581,9 +661,12 @@ pub(crate) mod tests {
                 .unwrap()
         };
         assert_eq!(purl("libc6"), "pkg:deb/debian/libc6@2.41-1?arch=arm64");
+        // The fixture attributes this one to a source package, so its purl carries the
+        // qualifier too — encoding is what is under test here, and the qualifier is part
+        // of the string that has to come out right.
         assert_eq!(
             purl("libstdc++6"),
-            "pkg:deb/debian/libstdc%2B%2B6@1%3A14.2.0-19?arch=arm64"
+            "pkg:deb/debian/libstdc%2B%2B6@1%3A14.2.0-19?arch=arm64&upstream=gcc-14"
         );
         // A source's version is its commit, which is what a consumer can act on.
         assert_eq!(purl("linux"), "pkg:generic/linux@kc");
@@ -617,7 +700,8 @@ pub(crate) mod tests {
         // A different package set is a different document.
         let mut other = manifest();
         other.rootfs.manifest_sha256 = "f".repeat(64);
-        let other = Sbom::from_provenance(&other, &packages(), "x", "2026-08-05T00:00:00Z");
+        let other =
+            Sbom::from_provenance(&other, &packages(), &sources(), "x", "2026-08-05T00:00:00Z");
         assert_ne!(other.serial_number(), sbom.serial_number());
     }
 
@@ -630,7 +714,7 @@ pub(crate) mod tests {
         let mut dirty = manifest();
         dirty.built_with.dirty = true;
         dirty.built_with.commit = None;
-        let sbom = Sbom::from_provenance(&dirty, &[], "x", "2026-08-05T00:00:00Z");
+        let sbom = Sbom::from_provenance(&dirty, &[], &sources(), "x", "2026-08-05T00:00:00Z");
         assert_eq!(sbom.tool.describe(), "boot2deb 0.1.0 (dirty)");
         assert_eq!(sbom.tool.version, "0.1.0");
     }

@@ -24,12 +24,27 @@ pub(crate) fn run(
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let host = boot2deb_core::HostInfo::detect();
+    // The builder is a host fact too — which boot2deb is about to run, and whether it
+    // still matches the checkout it would stamp images with. It belongs in the command
+    // people type before a build, so the mismatch is something you read rather than
+    // something you learn from a refused build.
+    let freshness = crate::builder::freshness(root);
     let mut doc = json!({
         "host": { "arch": host.arch.to_string(), "os": host.os.to_string() },
+        "builder": {
+            "version": crate::builder::version(),
+            "commit": crate::builder::commit(),
+            "dirty": crate::builder::dirty(),
+            "matches_checkout": freshness.note().is_none(),
+        },
     });
     if !json {
         println!("host arch : {}", host.arch);
         println!("host os   : {}", host.os);
+        println!("builder   : {}", crate::builder::identity());
+        if let Some(line) = freshness.note() {
+            println!("          ! {line}");
+        }
         if !host.is_linux() {
             println!("note      : builds require a Linux host; this is a client-only platform");
         }

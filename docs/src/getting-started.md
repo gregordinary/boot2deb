@@ -152,7 +152,7 @@ gain-root command at all. Nothing is faked because nothing needs to be.
 
 The rootless rootfs bootstrap, the sandbox, and the ext4 image staging all need
 **unprivileged user namespaces** with a subuid/subgid range for your user, which some
-hosts disable by default. `doctor` tests this by actually creating one (with the
+hosts disable by default. `doctor` tests this by actually creating them (with the
 subuid mapping), and if it fails it prints the fix for your host. The usual cases:
 
 - **Ubuntu 24.04+** ships an AppArmor restriction on by default:
@@ -164,7 +164,10 @@ subuid mapping), and if it fails it prints the fix for your host. The usual case
   sudo sysctl -w kernel.unprivileged_userns_clone=1
   ```
 - Either way, `kernel.max_user_namespaces` (or `user.max_user_namespaces`) must be
-  greater than 0.
+  **at least 2**. Every launch holds two nested user namespaces — the sandbox's own,
+  and the one its command enters so the kernel locks the sandbox's mount flags — and
+  each is charged against that ceiling. A host set to `1` creates one namespace
+  perfectly well and fails every build at launch, so `doctor` probes both.
 - Your user needs a subuid/subgid range (usually present by default):
   ```sh
   sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER

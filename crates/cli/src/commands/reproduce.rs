@@ -89,7 +89,7 @@ pub(crate) fn run(
     // missing advisory would make the record a requirement it was never meant to be.
     let provenance = published.join(format!("{stem}.provenance.toml"));
     let line = match builder_stamp(&provenance)? {
-        Some(stamp) => advice(&stamp),
+        Some(stamp) => advice(&stamp, crate::builder::config_stamp(root)),
         None => format!(
             "no provenance manifest at {} — replaying the plan without a builder \
              comparison",
@@ -101,14 +101,61 @@ pub(crate) fn run(
     super::build::run(root, recipe, args, Some(&plan), json, verbosity)
 }
 
-/// One line comparing the builder that produced the image with the running one.
+/// One line comparing the builder that produced the image with the running one, plus
+/// the config tree where both sides can answer for it.
 ///
 /// Advisory in both directions. A match is worth stating because it is the case that
 /// needs no action; a mismatch names the checkout to step back to without claiming the
 /// replay will fail, because a stamp is the commit at which the build *worked* and never
 /// the commit past which it breaks — that change is in the future and unknowable at
 /// build time.
-fn advice(stamp: &BuiltWithProvenance) -> String {
+///
+/// `current_config` is the running config tree's stamp, as
+/// [`config_stamp`](crate::builder::config_stamp) reads it. The config tree earns its
+/// own sentence here rather than a shared one: a replay reads the board's `.dts` and
+/// layers from disk, so a moved config tree changes what is rebuilt even when the
+/// binary is identical — the failure mode the builder comparison alone would miss.
+fn advice(stamp: &BuiltWithProvenance, current_config: Option<(String, bool)>) -> String {
+    match config_advice(stamp, current_config) {
+        Some(extra) => format!("{} {extra}", builder_advice(stamp)),
+        None => builder_advice(stamp),
+    }
+}
+
+/// The config-tree half of [`advice`], or `None` where there is nothing to compare —
+/// an image built before the field existed, or a replay from a config tree that is not
+/// a checkout. Silence beats a sentence that says only that it cannot answer.
+fn config_advice(stamp: &BuiltWithProvenance, current: Option<(String, bool)>) -> Option<String> {
+    let built = stamp.config_commit.as_deref()?;
+    let (running, running_dirty) = current?;
+    // The stamped side's own dirty flag disclaims the commit, so say that before
+    // comparing to it — "unchanged since" would be a false reassurance about a tree
+    // whose commit never described it.
+    if stamp.config_dirty {
+        return Some(format!(
+            "The config tree it was built from had uncommitted changes, so {built} does \
+             not describe the layers that went in."
+        ));
+    }
+    if running.starts_with(built) || built.starts_with(running.as_str()) {
+        return Some(if running_dirty {
+            format!(
+                "The config tree is the same commit ({built}) but has uncommitted \
+                 changes, so the replay reads layers the image was not built from."
+            )
+        } else {
+            format!("The config tree is unchanged at {built}.")
+        });
+    }
+    Some(format!(
+        "The config tree has moved {built} → {running}; the replay resolves layers from \
+         the tree on disk, so a board `.dts` or device layer that changed between them \
+         changes what is rebuilt."
+    ))
+}
+
+/// The builder half of [`advice`]: what produced the image, against what is running.
+fn builder_advice(stamp: &BuiltWithProvenance) -> String {
     let running_version = env!("CARGO_PKG_VERSION");
     let running_commit = option_env!("BOOT2DEB_GIT_COMMIT").filter(|s| !s.is_empty());
     let built = match (&stamp.commit, stamp.dirty) {
@@ -170,14 +217,23 @@ mod tests {
             version: version.to_string(),
             commit: commit.map(str::to_string),
             dirty,
+            config_commit: None,
+            config_dirty: false,
         }
+    }
+
+    /// A stamp that also names the config tree it resolved from.
+    fn with_config(mut s: BuiltWithProvenance, commit: &str, dirty: bool) -> BuiltWithProvenance {
+        s.config_commit = Some(commit.to_string());
+        s.config_dirty = dirty;
+        s
     }
 
     /// A dirty stamp is the one case where the commit says nothing, so the advice must
     /// not offer it as somewhere to step back to.
     #[test]
     fn a_dirty_stamp_does_not_offer_a_checkout_to_step_back_to() {
-        let advice = advice(&stamp("0.1.0", Some("abc1234"), true));
+        let advice = advice(&stamp("0.1.0", Some("abc1234"), true), None);
         assert!(
             advice.contains("uncommitted changes") && !advice.contains("git checkout"),
             "a dirty stamp must not name a commit to return to: {advice}"
@@ -188,7 +244,7 @@ mod tests {
     /// frames it as advice rather than as a requirement.
     #[test]
     fn a_differing_commit_names_it_and_stays_advisory() {
-        let advice = advice(&stamp("0.1.0", Some("abc1234"), false));
+        let advice = advice(&stamp("0.1.0", Some("abc1234"), false), None);
         assert!(
             advice.contains("git checkout abc1234"),
             "the advice must name the stamped commit: {advice}"
@@ -197,6 +253,45 @@ mod tests {
             advice.contains("only if it diverges"),
             "the advice must stay advisory: {advice}"
         );
+    }
+
+    /// An image built before the config stamp existed, or replayed from a tree that is
+    /// not a checkout, must not gain a sentence that only says it cannot answer.
+    #[test]
+    fn an_unanswerable_config_comparison_is_silent() {
+        let s = stamp("0.1.0", Some("abc1234"), false);
+        assert!(config_advice(&s, Some(("deadbeef".into(), false))).is_none());
+        assert!(config_advice(&with_config(s, "cafe1234", false), None).is_none());
+    }
+
+    /// The whole point of the field: a replay reads layers off disk, so a moved config
+    /// tree is named even when the builder is identical.
+    #[test]
+    fn a_moved_config_tree_is_named_with_both_commits() {
+        let s = with_config(stamp("0.1.0", Some("abc1234"), false), "cafe1234", false);
+        let line = config_advice(&s, Some(("beef5678".into(), false))).expect("a move to report");
+        assert!(line.contains("cafe1234"), "{line}");
+        assert!(line.contains("beef5678"), "{line}");
+    }
+
+    /// Same commit but an edited tree is not "unchanged" — saying so would reassure
+    /// about exactly the state that makes a replay diverge.
+    #[test]
+    fn a_dirty_config_tree_at_the_same_commit_is_not_reported_as_unchanged() {
+        let s = with_config(stamp("0.1.0", Some("abc1234"), false), "cafe1234", false);
+        let line = config_advice(&s, Some(("cafe1234".into(), true))).expect("a state to report");
+        assert!(line.contains("uncommitted changes"), "{line}");
+        assert!(!line.contains("unchanged"), "{line}");
+    }
+
+    /// A stamp whose own config tree was dirty disclaims its commit, so the comparison
+    /// must not present that commit as a baseline the tree still matches.
+    #[test]
+    fn a_stamp_with_a_dirty_config_tree_disclaims_its_commit() {
+        let s = with_config(stamp("0.1.0", Some("abc1234"), false), "cafe1234", true);
+        let line = config_advice(&s, Some(("cafe1234".into(), false))).expect("a caveat to report");
+        assert!(line.contains("does not describe"), "{line}");
+        assert!(!line.contains("unchanged"), "{line}");
     }
 
     /// A manifest that is present but unreadable is an error rather than a missing

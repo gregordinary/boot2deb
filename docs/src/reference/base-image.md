@@ -31,7 +31,11 @@ https URL.
 ## What `base.toml` adds
 
 Sizes are installed size on forky/arm64, including each package's own dependency
-closure where that closure is the interesting part.
+closure where that closure is the interesting part. They are hand-totalled from the
+archives' own `Installed-Size` figures, and
+[`boot2deb size`](cli.md#where-the-size-went) is how to re-check one against a build
+that exists — `--by source` groups a package with the rest of its source's output, which
+is the closure most of these parentheses are describing.
 
 | packages | why |
 |---|---|

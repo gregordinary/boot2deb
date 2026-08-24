@@ -24,23 +24,26 @@
   <EnableHardwareEncoding>true</EnableHardwareEncoding>
 
   <!--
-    Empty on purpose, and required rather than tuning.
+    Empty because a stock jellyfin-server can do nothing useful with it here.
 
     The *_rkmpp decoders are compiled into ffmpeg-rk, so Jellyfin's capability
     probe (which reads `ffmpeg -hwaccels` and `-filters`) sees them and believes
     hardware decoding works. It does not: on a mainline kernel rkvdec is a V4L2
-    stateless driver, MPP finds no decode client, and the decoder fails to open at
-    runtime. FFmpeg does not fall back to software when that happens and Jellyfin
-    does not retry, so the stream fails outright.
+    stateless driver, MPP finds no decode client, and the rkmpp hwaccel fails to
+    open. FFmpeg then decodes in software without saying so — measured on the RK1,
+    a 1080p HEVC transcode costs 50.4 CPU-seconds with `-hwaccel rkmpp` against
+    50.2 with no hwaccel at all. So listing codecs here is inert rather than
+    harmful; it buys nothing and hides a software decode behind a hardware label.
 
-    Jellyfin's default for this field is ["h264", "vc1"], which means the default
-    configuration would break every H.264 transcode on this hardware. Empty makes
-    Jellyfin emit no -hwaccel at all; decode happens in software, on eight cores,
-    and the encoder stays in hardware.
-
-    Hardware decode does reach FFmpeg here, via `-hwaccel v4l2request` — but
-    Jellyfin's HardwareAccelerationType is a closed enum with no v4l2request in
-    it, so it is not expressible in this file.
+    Hardware decode does reach FFmpeg here, via `-hwaccel v4l2request`, and it is
+    the largest single saving available on this board: the same transcode costs
+    17.0 CPU-seconds. Jellyfin cannot emit that flag on its own, because
+    HardwareAccelerationType is a closed enum with no v4l2request member.
+    `patches/jellyfin/0001` makes the rkmpp type emit it when the FFmpeg build
+    carries the hwaccel. With a server carrying that patch, fill this list with
+    the codecs rkvdec decodes on this SoC — h264, hevc, vp9 — and 10-bit content
+    keeps decoding in software on its own, because v4l2request cannot transfer
+    NV15 to system memory.
   -->
   <HardwareDecodingCodecs />
 

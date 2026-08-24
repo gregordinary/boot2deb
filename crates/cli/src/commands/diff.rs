@@ -482,6 +482,8 @@ fn print_builder(c: &BuilderChanges) {
         ("boot2deb", &c.version),
         ("commit", &c.commit),
         ("dirty", &c.dirty),
+        ("config commit", &c.config_commit),
+        ("config dirty", &c.config_dirty),
         ("host arch", &c.host_arch),
         ("target arch", &c.target_arch),
         ("CROSS_COMPILE", &c.cross_compile),

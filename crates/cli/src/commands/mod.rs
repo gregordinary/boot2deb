@@ -15,6 +15,7 @@ pub(crate) mod reproduce;
 pub(crate) mod resolve;
 pub(crate) mod sbom;
 pub(crate) mod shellenv;
+pub(crate) mod size;
 pub(crate) mod support_matrix;
 pub(crate) mod update;
 pub(crate) mod verify_config;
