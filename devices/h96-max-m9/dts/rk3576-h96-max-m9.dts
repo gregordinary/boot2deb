@@ -980,7 +980,8 @@
  * hardware flow control, so the port needs its CTS/RTS lines. The BT core has no
  * in-tree serdev driver; the aic8800-bluetooth.service attaches the H4 line
  * discipline to the resulting /dev/ttyS4 (hciattach ... any 1500000 flow nosleep)
- * once BT_REG_ON and HST_WAK_BT are asserted (see the &gpio1 hogs below).
+ * once BT_REG_ON and HST_WAK_BT are asserted -- which that same service does, not
+ * the device tree; see the note below on why the lines are left undriven here.
  */
 &uart4 {
 	pinctrl-names = "default";

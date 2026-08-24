@@ -37,7 +37,7 @@ normalizes it to canonical `git am`-ready mbox, writes it into the series' tree,
 slots it into the series manifest at the right position:
 
 ```sh
-cargo run -p boot2deb-cli -- patch import \
+boot2deb patch import \
   https://patchwork.kernel.org/project/linux-rockchip/patch/NNNN/mbox/ \
   --series rk3588-accel --scope kernel
 ```
@@ -93,7 +93,7 @@ dirty patches checkout (see [failure modes](#failure-modes)).
 Confirm the series still applies cleanly to the pinned tree:
 
 ```sh
-cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky
+boot2deb verify-patches turing-rk1/forky
 ```
 
 With no `--kernel-path`, `verify-patches` **auto-fetches the locked kernel at its pin** —
@@ -101,7 +101,7 @@ no hand-cloned tree needed. The first run on a cold cache clones linux-stable (l
 you already have a checkout, point `--kernel-src` at it to skip the clone:
 
 ```sh
-cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky --kernel-src ../linux
+boot2deb verify-patches turing-rk1/forky --kernel-src ../linux
 ```
 
 A `--scope uboot` import verifies the same way, against the recipe that carries the
@@ -109,7 +109,7 @@ u-boot series — the locked u-boot is auto-fetched at its pin, and the run repo
 `uboot` series at the u-boot tag rather than a kernel one:
 
 ```sh
-cargo run -p boot2deb-cli -- verify-patches rk3576-generic/loader
+boot2deb verify-patches rk3576-generic/loader
 ```
 
 You can verify before or after committing — the series on disk is what is checked.
@@ -122,7 +122,7 @@ set.
 `update` re-pins the patches commit (and re-resolves the other refs) into the lock:
 
 ```sh
-cargo run -p boot2deb-cli -- update turing-rk1/forky
+boot2deb update turing-rk1/forky
 ```
 
 You do **not** need `--kernel-ref` for a patch-only re-pin: with a lock already present,
@@ -130,7 +130,7 @@ You do **not** need `--kernel-ref` for a patch-only re-pin: with a lock already 
 updated `recipes/<device>/<leaf>.lock`, then build:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1/forky
+boot2deb build turing-rk1/forky
 ```
 
 The build reads the series at the pinned commit and applies it with `git am --3way`.
@@ -160,7 +160,7 @@ While iterating on a patch you may not want to commit-and-re-pin on every change
 `build` (and `verify-patches`) at your working checkout instead:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1/forky --patches-path ../patches
+boot2deb build turing-rk1/forky --patches-path ../patches
 ```
 
 An explicit `--patches-path` **downgrades a pin mismatch from an error to a loud

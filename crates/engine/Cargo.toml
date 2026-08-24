@@ -29,20 +29,25 @@ gpt = "4"
 # image carries no `/dev/urandom` identifiers. Same major as gpt.
 uuid.workspace = true
 lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "xz", "encoder"] }
+# `.gz` image compression, for the one consumer that cannot read `.xz`: u-boot's
+# `gzwrite` decompresses gzip only, so an image a board writes to its own disk from
+# the bootloader has to be in that container. `rust_backend` is miniz_oxide — pure
+# Rust, no zlib, and already in the tree transitively.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Pure-Rust ext2/3/4 formatter (see the engine's image::ext4): builds the resize-safe
 # rootfs filesystem directly from the rootfs tar, replacing host mke2fs/e2fsprogs and
 # the userns staging they required. The `tar` feature carries the archive source that
 # reads the rootfs tarball's ownership, xattrs, ACLs, and device nodes, and reads each
 # member's bytes out of the archive as that file is placed rather than buffering the
 # whole rootfs.
-ferrosys = { version = "0.2", features = ["tar"] }
+ferrosys = { version = "0.3", features = ["tar"] }
 # Pure-Rust build sandbox (see the engine's sandbox module): enters the
 # target-arch rootfs and runs each package-build command in fresh namespaces
 # with the caller mapped to root, replacing the external `bwrap` binary. The
 # `debian` feature adds the in-process archive provisioner that bootstraps the
 # target suite/arch rootfs (pure Rust: tar extraction + OpenPGP release
 # verification, no external binary, no C dep).
-ferroday-cage = { version = "0.1.2", features = ["debian", "subid"] }
+ferroday-cage = { version = "0.1.4", features = ["debian", "subid"] }
 # Randomly-named, fail-if-exists staging dirs for the build's intermediate trees,
 # so a local user cannot pre-create and own one.
 tempfile.workspace = true

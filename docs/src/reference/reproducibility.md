@@ -64,12 +64,15 @@ userland). Capture a timestamp with `--save-snapshot`; activate a mode with `--s
 fallback|pin`. A `fallback`/`pin` with no captured timestamp is refused rather than
 silently downgraded.
 
-The mirror list a mode resolves to is used **twice**: for the image's own userland, and
-for the target-arch sandbox the media-accel packages compile inside. That sandbox holds
-the `gcc` those `.deb`s are built with, so pinning one without the other would fix the
-runtime and leave the compiler free to move. The sandbox identity is folded into those
-packages' artifact-cache keys too, so a snapshot-pinned build never restores a
-live-mirror build's `.deb`s.
+The mirror list a mode resolves to is used for **every root a build provisions**, not
+only for the image's own userland: the target-arch sandbox the media-accel packages
+compile inside, the host-arch cross root the kernel, u-boot and modules compile inside,
+and the packaging root whose `dpkg-deb` archives them. Those roots hold the compilers and
+the archiver, so pinning the runtime without them would fix what ships and leave what
+produced it free to move. Each root's identity is folded into the artifact-cache keys of
+what it built, so a snapshot-pinned build never restores a live-mirror build's `.deb`s —
+and so is the build-dependency set layered over it, because a compile probes for what is
+present.
 
 This is why forky's churn is **not** at odds with the model: the tool to freeze against it
 exists; a frozen build turns it on.
@@ -85,16 +88,20 @@ checkout was dirty.
 
 The builder also decides the environment a compile runs in. Every package build and the
 rootfs customize run in an unprivileged sandbox, and what they produce depends on the
-variables they carry and the filesystem they see — neither of which any source pin covers,
-and both of which move with the sandbox library boot2deb links. So the manifest records
-them as data rather than leaving them to be inferred from a version: `[sandbox_env]` is the
-command's complete environment, and `[[sandbox_mounts]]` is every mount the sandbox
-establishes, in order, down to the `/dev` device nodes and symlinks. Two images built from
-one lock that differ can be compared on the inputs that could explain it.
+variables they carry, the filesystem they see, the identity they hold, whether they can
+reach a network, and which syscalls succeed — none of which any source pin covers, and all
+of which move with the sandbox library boot2deb links. So the manifest records them as data
+rather than leaving them to be inferred from a version: `[sandbox]` is the launch posture,
+`[sandbox_env]` is the command's complete environment, and `[[sandbox_mounts]]` is every
+mount the sandbox establishes, in order, down to the `/dev` device nodes and symlinks. Two
+images built from one lock that differ can be compared on the inputs that could explain it.
 
 That record is the series every command *starts from*. A run's own working and artifact
-binds are per-build paths, and the `/etc/resolv.conf` an `apt` run binds comes from the
-build host, so neither is recorded — the section describes the builder, not the machine.
+binds are per-build paths, its root is a per-build path, and the subordinate identity map
+the rootfs customize adds is its own — so none of them is recorded. The rooting mode
+contributes its *kind* (`plain` or `overlay`) and nothing else, for the same reason: a
+record carrying an overlay's lower stack or a range map's id extents would be a property of
+the machine rather than of the builder.
 
 That stamp is an **as-built record, not a requirement.** The stamped commit is a *floor*:
 it, and later commits up to the next change that alters the output for this lock, will
@@ -126,10 +133,24 @@ What is kept out:
   lock exists to fix. `core.hooksPath`, `am.threeWay`, `apply.whitespace`, and a system
   `gitattributes` are the same class. Transport settings are the cost: express a proxy or
   credentials through the environment (`http_proxy`, `https_proxy`), which git still reads.
-- **Your distro's `dpkg` defaults.** The host-built `.deb`s state their compressor (`xz`,
-  level 6) rather than inheriting it, so the same recipe at the same lock produces the same
-  archive on a Debian host and an Ubuntu-derived one — the latter defaults `dpkg-deb` to
-  `zstd`.
+- **Your distro's `dpkg`.** No `.deb` is archived by a tool from your host, the kernel's
+  included. The u-boot and kmod packages are staged, then archived by a `dpkg-deb` from a
+  **packaging root**; the kernel's `make bindeb-pkg` runs `dpkg-buildpackage` and
+  `dh_builddeb` inside the **cross root**. Both are Debian userlands resolved from the
+  same mirror list as the image itself, so the archiver's version and its `liblzma` are
+  sha256-pinned inputs the lock describes rather than a property of the distribution that
+  ran the build. The compressor for what boot2deb archives itself (`xz`, level 6) is
+  stated rather than inherited on top of that, so the archive's structure is a property of
+  boot2deb and not of the suite. No `fakeroot` on any path either — every root maps the
+  caller to uid 0, so a staged tree is already root-owned where it is archived and
+  `dpkg-buildpackage` needs no gain-root command.
+- **Your compiler.** Every compile runs in a provisioned root: the kernel, u-boot and the
+  out-of-tree modules in a host-arch **cross root** carrying `crossbuild-essential-<target>`,
+  and the media-accel `.deb`s in a target-arch **build sandbox**. Neither your `gcc` nor
+  your `make` is on any build path, and the host cross toolchain is not either. Each stage
+  additionally *declares* the build-dependencies it layers over that base, and the
+  declaration is folded into the artifact key — because a compile probes for what is
+  present, and a package added to the layer is a different build.
 - **Your `TMPDIR`.** The provisioned rootfs — the whole target userland, carrying xattrs
   and mapped ownership — is staged in the build's work dir. On `/tmp` it would land on a
   RAM-backed `tmpfs` on most desktops, making "does the build fit" a property of your
@@ -142,35 +163,94 @@ What is kept out:
 
 What is recorded, because it genuinely does reach the image:
 
-- **`[toolchain]`** — beyond the host/target arch and cross prefix, the version lines of the
-  `gcc`, `as`, and `ld` that compiled the kernel, u-boot, and out-of-tree modules, and the
-  `qemu-user` that, on a host that cannot execute target binaries, ran the target compiler
-  for the sandbox-built packages *and* every maintainer script that configured the rootfs.
-  (An arm64 host building armhf cross-compiles and then runs the result natively, so it
-  records no interpreter at all.) The compiler
-  is the largest host input to the kernel bytes and no source pin covers it, so an image's
-  provenance can answer "which gcc built this". Each is absent when the build compiles
-  nothing that needs it. `jobs` records the parallelism: it is recorded but deliberately not
-  keyed, since a build whose output depends on its job count has a bug, and keying it would
-  fragment the artifact cache by machine size.
+- **`[toolchain]`** — the host/target arch and the cross prefix. `jobs` records the
+  parallelism: recorded but deliberately not keyed, since a build whose output depends on
+  its job count has a bug, and keying it would fragment the artifact cache by machine
+  size. The compilers are not here; they are named, sha256-pinned, in the root sections
+  below.
+- **`[toolchain.qemu]`** — the `qemu-user` interpreter that, on a host that cannot
+  execute target binaries, ran the target compiler for the sandbox-built packages *and*
+  every maintainer script that configured the rootfs. Absent where nothing is
+  interpreted; an arm64 host building armhf cross-compiles and then runs the result
+  natively, so it records none. This is the one compile input still probed on the host,
+  because it is registered with the host kernel's binfmt handler and no provisioned root
+  can carry it.
+
+  It is taken from **the kernel's binfmt registration**, not from a `PATH` lookup, and
+  the difference is not academic: the registered path is normally a wrapper under
+  `/usr/libexec/qemu-binfmt/` rather than the `qemu-<arch>-static` on your `PATH`, and
+  nothing requires the two to name the same file. A build with no interpreter on `PATH`
+  at all still runs every target binary through the registered one. So `interpreter` is
+  the path the kernel recorded, `resolved` is that path with symlinks followed — the two
+  are separate facts, because repointing the wrapper symlink swaps the interpreter with
+  the registration unchanged — and `sha256` is the content, which is also what the
+  artifact cache keys on. A digest rather than a version line because it moves when the
+  binary is rebuilt at an unchanged version, and because it can be taken from a binary
+  that refuses to run, which the wrapper name does. `version` is read from the resolved
+  path for a reader, and may be absent.
+- **`[filesystem]`** — the on-disk contract the rootfs was formatted to. Every other pin
+  answers "which sources went in"; this one answers "what shape were they written into",
+  and it is the only such determinant that moves independently of the lock, since the
+  format options are builder constants rather than resolved config values. It is three
+  records, because three things move for three different reasons:
+
+  - `policy_pin` is the **intent** — the formatter's own policy document, carried whole:
+    every feature word twice over, as exact bits and as names, plus the block and inode
+    sizes, plus the seven options outside the feature set entirely (the grow reservation,
+    the inode ratio, the reserved share, the error behaviour, the journal size, and the
+    two directory-hash choices). Every one of those moves bytes, and `errors` is the sharp
+    case: it reaches neither a feature word nor the geometry, so no other record here
+    would notice it changing. Nothing image-specific is in it — no UUID, no timestamp, no
+    label, no block count — so two images built from these constants carry byte-identical
+    policy pins, and a difference always means the contract changed.
+  - `reference_geometry_pin` is what that policy **lays out**, planned at one size chosen
+    once (4 GiB) and never moved. It closes the gap the policy pin cannot see: a change to
+    the *formula* behind an option whose name did not change. `grow max` reads the same
+    before and after a change to what `Max` reserves; the blocks it reserves do not. It is
+    a function of the options and the reference size alone, so it says nothing about what
+    went into the image.
+  - `[filesystem.geometry]` is what the format **realized for this image** — block and
+    inode counts, group layout, and `max_grow_blocks`, the ceiling the reserved descriptor
+    blocks buy, which is how large a disk the image can still grow onto at first boot. It
+    answers to the image's size as well as to the policy, so a larger partition moves
+    every number in it with both pins unchanged.
 - **`[verification]`** — which checks the finished rootfs filesystem passed. The built-in
-  reader check (every metadata checksum) always runs; the independent `e2fsck -fn`
-  cross-check runs only where the host carries `e2fsprogs`. That makes verification *depth*
-  host-determined, so it is stated rather than left to a log line, and a release build can
-  be gated on it.
-- **`[build_sandbox]`** — the package set of the sandbox base that compiled the build's
-  target `.deb`s (the media-accel packages). `[rootfs]` records what the image *carries*;
-  this records what *produced* the parts of it boot2deb compiled — a second Debian tree,
-  resolved from the same mirrors, that no source pin covers. It names a
-  `<recipe>.sandbox.pkgs` manifest published beside the image, sha256-pinned per package
-  exactly as the rootfs manifest is, and is absent from a build that compiles no target
-  `.deb`s and therefore stands up no sandbox. It is a record, not a contract: nothing pins
-  it in the lock and no later build is verified against it.
-- **`[sandbox_env]` and `[[sandbox_mounts]]`** — the environment and the complete mount
-  series every sandboxed build command runs under, as the sandbox library resolves them.
-  Both sit outside that library's compatibility promise, so they are recorded rather than
-  inferred from its version, and the mounts have no other accessor at all — down to the
-  `/dev` device nodes and symlinks.
+  scan always runs — every metadata checksum, each group's metadata placement, and every
+  in-use inode's block map, directory records and attributes — and any finding at all
+  fails the build. The independent `e2fsck -fn` cross-check runs only where the host
+  carries `e2fsprogs`; its value is not extra depth (the scan is deeper) but independence,
+  since the scan is one implementation checking its own output. That makes verification
+  *depth* host-determined, so it is stated rather than left to a log line, and a release
+  build can be gated on it.
+- **`[build_sandbox]`, `[cross_sandbox]` and `[packaging_root]`** — the package sets of the
+  three provisioned roots that produced the build's `.deb`s: the target-arch base that
+  *compiled* the media-accel packages, the host-arch base that *compiled* the kernel,
+  u-boot and out-of-tree modules, and the host-arch root whose `dpkg` *archived* the staged
+  ones. `[rootfs]` records what the image *carries*; these record what *produced* the parts
+  of it boot2deb built — further Debian trees, resolved from the same mirrors, that no
+  source pin covers. Each names a manifest published beside the image
+  (`<recipe>.sandbox.pkgs`, `<recipe>.cross.pkgs`, `<recipe>.packaging.pkgs`), sha256-pinned
+  per package exactly as the rootfs manifest is. `[cross_sandbox]` in particular is where
+  the compiler is named, by package and sha256 rather than by the version string it
+  prints — which is why `[toolchain]` above carries no `cc`. Each is absent when the build
+  produced nothing of its kind — no cross root for a board that installs Debian's kernel
+  and boots its own firmware, no packaging root for a build whose artifacts all came back
+  from the artifact cache. They are records, not contracts: nothing pins them in the lock
+  and no later build is verified against them.
+- **`[sandbox]`, `[sandbox_env]` and `[[sandbox_mounts]]`** — the posture, the environment
+  and the complete mount series every sandboxed build command runs under, as the sandbox
+  library resolves them. All three sit outside that library's compatibility promise, so
+  they are recorded rather than inferred from its version, and most of what they hold has
+  no other accessor at all — down to the `/dev` device nodes and symlinks.
+
+  `[sandbox]` states how the sandbox is rooted (`plain` or `overlay`), the identity the
+  command holds (`single` — the calling user is root inside and nothing else is mapped),
+  the network it can reach (`isolated` — a fresh namespace with loopback only, declared by
+  boot2deb rather than taken from a library default), any resource limits in force, and
+  whether the library's hardening layer is compiled in. `hardening = "unavailable"` is
+  written rather than omitted: an absent key cannot be told from one written before the key
+  existed, and a provenance record has to be readable without knowing which builder wrote
+  it.
 
 These identities also key the caches, so a `.deb` built with one toolchain is never
 restored for a build using another — and neither is a rootfs whose packages were configured

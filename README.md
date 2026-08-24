@@ -21,7 +21,7 @@ x86_64 Pop!_OS laptop and a few on a Turing RK1 running an image boot2deb built.
 the locks rather than written by hand — so read it from the tool, not from prose:
 
 ```sh
-cargo run -p boot2deb-cli -- support-matrix
+boot2deb support-matrix
 ```
 
 Each recipe carries a status — `validated` (an image from these exact pins booted on the
@@ -73,14 +73,22 @@ its userspace building, but no boot2deb image has been measured transcoding on i
 Build the base Turing RK1 image on an x86_64 or arm64 Debian/Ubuntu host. The build is
 rootless — no `sudo`.
 
-1. Install Rust ([rustup.rs](https://rustup.rs)) and clone this repo.
+1. Install Rust ([rustup.rs](https://rustup.rs)), clone this repo, and install the binary:
+
+   ```sh
+   cd boot2deb
+   cargo install --path crates/cli    # puts `boot2deb` on your PATH
+   ```
+
+   The crate is `boot2deb-cli`; the binary it installs is `boot2deb`. Every command below
+   — and every hint the tool itself prints — assumes it is on `PATH`. Working from a
+   checkout without installing, prefix them with `cargo run -p boot2deb-cli --`.
 
 2. Ask `doctor` what your host is missing. It probes for every build tool the recipe will
    actually invoke and prints the exact install command for *your* distro:
 
    ```sh
-   cd boot2deb
-   cargo run -p boot2deb-cli -- doctor turing-rk1/forky
+   boot2deb doctor turing-rk1/forky
    ```
 
    Run the lines it reports, then re-run until every check passes.
@@ -89,7 +97,7 @@ rootless — no `sudo`.
    bootable disk image (tens of minutes cold; cached after):
 
    ```sh
-   cargo run -p boot2deb-cli -- build turing-rk1/forky
+   boot2deb build turing-rk1/forky
    ```
 
    The final lines print the image path under `build/turing-rk1/forky/artifacts/` and a
@@ -110,8 +118,8 @@ most changes need no new file at all.
 built as its own point, with its own lock, beside the recipe it starts from:
 
 ```sh
-cargo run -p boot2deb-cli -- update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
-cargo run -p boot2deb-cli -- build  turing-rk1/forky+media-accel-rockchip+jellyfin
+boot2deb update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
+boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin
 ```
 
 **Keep your own work out-of-tree.** An overlay directory holds your devices, kernels, and

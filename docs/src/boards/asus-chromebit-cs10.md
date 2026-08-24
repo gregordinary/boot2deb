@@ -6,7 +6,7 @@ ASUS Chromebit CS10 (`google,veyron-mickey`) — an RK3288 Veyron, like the
 laptop. `asus-chromebit-cs10/trixie` is the same board on the stable suite.
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-chromebit-cs10/forky
+boot2deb build asus-chromebit-cs10/forky
 ```
 
 That produces `build/asus-chromebit-cs10/forky/artifacts/asus-chromebit-cs10-forky.img.xz` — a
@@ -156,10 +156,24 @@ The question `keymap` answers is "does a console layout configure anything here?
 the only way to type at, so a layout means exactly what it means on a laptop; it just
 describes a keyboard you bring. The default is `us`.
 
-```sh
-cargo run -p boot2deb-cli -- build asus-chromebit-cs10/forky --keymap gb
-sudo dpkg-reconfigure keyboard-configuration && sudo setupcon   # or, on the board
-```
+There are two ways to get another layout, and neither is a `build` flag — an image's
+keymap comes from the config its lock was resolved against:
+
+- **Change it on the running board**, offline, like any Debian system:
+
+  ```sh
+  sudo dpkg-reconfigure keyboard-configuration && sudo setupcon
+  ```
+
+- **Bake it into an image** by writing a recipe that sets `keymap`. `resolve` shows what
+  a choice resolves to before you commit it, and names the file to write:
+
+  ```sh
+  boot2deb resolve asus-chromebit-cs10/forky --keymap gb
+  ```
+
+  See [Adapting a shipped recipe](../tutorials/adapting-a-recipe.md) and
+  [Locale, timezone, and keyboard](../localization.md).
 
 This has no bearing on the firmware screens. Depthcharge reads Ctrl+U with its own USB
 HID driver and its own fixed layout, long before Linux exists.

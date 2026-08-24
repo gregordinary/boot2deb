@@ -45,16 +45,18 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
       # Engine tests that shell out to an absent host tool skip themselves rather
-      # than fail, so an uninstalled dependency silently costs coverage. fakeroot
-      # is the only one ubuntu-latest lacks; the rest (dpkg-deb, git, tar, xz,
-      # openssl, e2fsprogs, util-linux) are already on the image.
-      - name: Install host tools the engine tests exercise
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fakeroot
+      # than fail, so an unavailable dependency silently costs coverage. The tools
+      # they exercise (git, tar, xz, openssl, e2fsprogs, util-linux) are already on
+      # the image, so nothing is installed here — and nothing needs to be for the
+      # packaging tests either, since the `dpkg` those use comes from a root the test
+      # provisions rather than from the runner.
+      #
       # `BOOT2DEB_REQUIRE_HOST_TOOLS` turns a self-skip into a panic. The end-to-end
-      # image tests skip themselves on a tool-minimal dev host; this job installs the
-      # tools above and therefore claims they are present, so a skip here is a
-      # coverage regression (a changed runner image) and must fail rather than pass
-      # quietly. It has happened before.
+      # tests skip themselves on a dev host that lacks a prerequisite; this runner has
+      # all of them — the tools above, unprivileged user namespaces, and a reachable
+      # Debian mirror for the packaging root — and therefore claims they are present,
+      # so a skip here is a coverage regression (a changed runner image, a network
+      # policy) and must fail rather than pass quietly. It has happened before.
       - name: Run tests
         run: cargo test --workspace
         env:
@@ -89,3 +91,31 @@ jobs:
           rustup toolchain install "$msrv" --profile minimal --no-self-update
       - name: Build at the MSRV floor
         run: cargo "+$MSRV" check --workspace --all-targets
+
+  # The dependency half of the gate: a RustSec advisory against any crate in
+  # `Cargo.lock` fails here, so a new one arrives as a red build rather than as
+  # something nobody ran `cargo audit` to find. Which advisories are *accepted*, and the
+  # reachability argument for each, live in `.cargo/audit.toml` — checked in, so the
+  # reasoning is reviewed alongside the code instead of being typed into a workflow
+  # input where no one reads it.
+  #
+  # It needs no compile, only the lockfile, so it runs beside `fmt` rather than in the
+  # build job — and it does not share that job's cache, whose key is the lockfile hash:
+  # advisories are published against a lockfile that did not change, which is exactly
+  # the case a hit-on-unchanged-input cache would hide.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Building cargo-audit is most of this job's wall clock and it changes only when
+      # its own version does; the advisory database is fetched fresh at run time either
+      # way, so caching the binary cannot stale the result.
+      - name: Cache the cargo-audit binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Audit the dependency tree
+        run: cargo audit

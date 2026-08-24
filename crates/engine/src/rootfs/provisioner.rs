@@ -48,10 +48,9 @@ use crate::sandbox::{forward_bootstrap_event, StepObserver};
 use boot2deb_core::model::ResolvedBuild;
 use ferroday_cage::provision::debian::{Debian, DebianEvent, Plan, Priority, Repository};
 use ferroday_cage::provision::{self, Export};
-use ferroday_cage::{IdentityMap, Network};
+use ferroday_cage::IdentityMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The name of the build's own `.deb` pool as a provisioner [`Repository`], and so
 /// the stem of the `/etc/apt/sources.list.d/<name>.list` entry ferroday-cage writes
@@ -59,7 +58,11 @@ use std::process::Command;
 /// temp dir that is gone by the time the image runs, so [`customize_script`] deletes
 /// its sources entry before export — unlike the feature repositories, whose entries
 /// are meant to persist for on-device updates.
-const LOCAL_REPO_NAME: &str = "boot2deb-local";
+///
+/// The pool's own `Release` publishes this as its `Label`, because it *is* that
+/// constant: the sources entry, `apt policy`'s rendering, and a `Pin: release l=…` name
+/// one archive by construction rather than by two strings staying in step.
+const LOCAL_REPO_NAME: &str = crate::repo::POOL_LABEL;
 
 /// Header line of the solved rootfs manifest — the lock's `[rootfs].manifest`, whose
 /// sha256 covers this line too, so it is part of the pinned identity.
@@ -107,6 +110,7 @@ pub fn build_rootfs(
         opts.preinstall_overlay_dirs,
         build,
         opts.boot_config,
+        opts.source_date_epoch,
         &step,
     )?;
     let overlay = work.path().join("overlay");
@@ -116,6 +120,7 @@ pub fn build_rootfs(
         build,
         opts.rootfs_partuuid,
         opts.image_identity,
+        opts.source_date_epoch,
         &step,
     )?;
 
@@ -142,38 +147,69 @@ pub fn build_rootfs(
         None => work.path().join("localrepo"),
     };
     let _pool = PoolDir(pool_dir.clone());
-    let localrepo =
-        LocalDistsRepo::assemble(&pool_dir, opts.repo_debs, build.image_suite(), arch, &step)?;
+    let localrepo = LocalDistsRepo::assemble(
+        &pool_dir,
+        opts.repo_debs,
+        build.image_suite(),
+        arch,
+        opts.source_date_epoch,
+        &step,
+    )?;
 
     let tarball = opts.out_dir.join(format!("{}-rootfs.tar", opts.stem));
 
-    // 4. Build the provisioner and resolve the plan. The plan is both the
-    //    cache key and the manifest, so it is taken up front, before the
-    //    cache is even consulted. The progress sink is bound per call, so
-    //    its borrow of `step` lasts one run and never outlives the
-    //    provisioner into the logging below.
-    let mut sink_fn = |event: DebianEvent<'_>| forward_bootstrap_event(&step, event);
-    let mut debian = build_debian(
-        build,
-        opts,
-        localrepo.file_url(),
-        feature_repositories(opts.apt_sources)?,
-        &deb_cache,
-        &preinstall,
-    )?;
-    step.log("resolving the rootfs package plan (ferroday-cage provisioner)");
-    let plan = debian
-        .observe(&mut sink_fn)
-        .resolve()
-        .map_err(|e| EngineError::Bootstrap {
-            context: "resolve the rootfs plan".into(),
-            message: e.to_string(),
-        })?;
+    // 4. Obtain the plan: read the one a `reproduce` run handed in, or resolve one
+    //    against the mirrors. The plan is the cache key, the install set, and the
+    //    manifest, so it is taken up front, before the cache is even consulted. The
+    //    progress sink is bound per call, so its borrow of `step` lasts one run and
+    //    never outlives the provisioner into the logging below.
+    let (plan, plan_document) =
+        match opts.pinned_plan {
+            Some(path) => read_pinned_plan(path, &step)?,
+            None => {
+                let mut sink_fn = |event: DebianEvent<'_>| forward_bootstrap_event(&step, event);
+                let mut resolver = build_debian(
+                    build,
+                    opts,
+                    localrepo.file_url(),
+                    feature_repositories(opts.apt_sources)?,
+                    &deb_cache,
+                    &preinstall,
+                    None,
+                )?;
+                step.log("resolving the rootfs package plan (ferroday-cage provisioner)");
+                let plan = resolver.observe(&mut sink_fn).resolve().map_err(|e| {
+                    EngineError::Bootstrap {
+                        context: "resolve the rootfs plan".into(),
+                        message: e.to_string(),
+                    }
+                })?;
+                drop(resolver);
+                step.log(format!(
+                    "resolved {} packages ({} mirror(s), {} local .deb(s))",
+                    plan.packages.len(),
+                    opts.mirrors.len(),
+                    opts.repo_debs.len()
+                ));
+                let document = plan.to_document().map_err(|e| EngineError::Bootstrap {
+                    context: "render the rootfs plan document".into(),
+                    message: e.to_string(),
+                })?;
+                (plan, document)
+            }
+        };
+    // The plan document is published beside the tar whether the plan was resolved or
+    // replayed, so every build's artifact set has the same shape and a replay's own
+    // output is itself replayable. It is written outside the cache branch because a
+    // cache hit skips the bootstrap, not the plan — the resolve above already happened.
+    let plan_out = opts.out_dir.join(format!("{}.plan", opts.stem));
+    std::fs::write(&plan_out, plan_document.as_bytes())
+        .map_err(|s| EngineError::io(&plan_out, s))?;
     step.log(format!(
-        "resolved {} packages ({} mirror(s), {} local .deb(s))",
+        "wrote the plan document ({} packages, {} archive(s)) to {}",
         plan.packages.len(),
-        opts.mirrors.len(),
-        opts.repo_debs.len()
+        plan.archives.len(),
+        plan_out.display()
     ));
 
     // 5. Early-cutoff cache, keyed by the plan's solved set plus the overlay
@@ -564,9 +600,14 @@ fn write_plan_manifest(plan: &Plan, out: &Path, step: &Step) -> Result<(), Engin
     Ok(())
 }
 
-/// Customize the provisioned tree: lay the post-install overlay in, then run the
-/// account, kernel-`postinst.d`, l10n, and depthcharge steps as commands in a
-/// subordinate cage over the finished tree.
+/// Customize the provisioned tree: lay the post-install overlay in with
+/// [`provision::CopyIn`], then run the account, kernel-`postinst.d`, l10n, and
+/// depthcharge steps as commands in a subordinate cage over the finished tree.
+///
+/// The copy is the mirror of [`export_rootfs_tar`]'s [`Export`]: both enter the
+/// subordinate map, one to write the tree at the ownership it intends and one to read it
+/// back. That leaves no host tool on this path, which is the same argument that removed
+/// `mke2fs` and the external bootstrap.
 fn customize(
     rootfs: &Path,
     overlay: &Path,
@@ -576,19 +617,42 @@ fn customize(
     step: &Step,
 ) -> Result<(), EngineError> {
     // Lay the customize overlay (layer trees + generated config) into the rootfs
-    // host-side. Under the subordinate map, `/etc` and the other config paths are
-    // root inside — the calling user outside — so a caller-side copy writes them
-    // correctly, landing them root-owned (preserve mode, not owner). --remove-
-    // destination replaces base files even through a dangling symlink; -dR keeps
-    // symlinks and directory structure.
+    // through the same subordinate map the tree was provisioned under, so each entry
+    // is created at the ownership the rootfs intends: the copy forks a child into the
+    // map and reads each source id *backwards* through it, so a caller-owned staged
+    // file lands as root inside — and a file the host stores at `100000 + n` would land
+    // as uid n, which is the thing a caller-side `cp` structurally cannot express.
+    // A directory already in the rootfs is kept and descended into; a file or symlink
+    // at an existing path is replaced.
     step.log("laying the customize overlay into the provisioned rootfs");
-    let mut cp = Command::new("cp");
-    cp.arg("-dR")
-        .arg("--remove-destination")
-        .arg("--preserve=mode")
-        .arg(format!("{}/.", overlay.display()))
-        .arg(format!("{}/", rootfs.display()));
-    crate::build::run(cp, "cp", "lay customize overlay into rootfs", step)?;
+    let report = provision::CopyIn::new(overlay, rootfs)
+        .map(IdentityMap::Subordinate)
+        .run()
+        .map_err(|e| EngineError::Bootstrap {
+            context: "lay the customize overlay into the rootfs".into(),
+            message: e.to_string(),
+        })?;
+    // A device node or socket the copy could not create is not something these trees
+    // hold — they are git-tracked config, and the runtime supplies its own `/dev` — so
+    // a non-empty list means the staged tree gained something unexpected, and a rootfs
+    // quietly missing a file it was told to carry is exactly the failure the report
+    // exists to prevent. Fail rather than log it past.
+    if !report.skipped.is_empty() {
+        let listed = report
+            .skipped
+            .iter()
+            .map(|entry| format!("{} ({})", entry.path.display(), entry.kind))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(EngineError::Bootstrap {
+            context: "lay the customize overlay into the rootfs".into(),
+            message: format!(
+                "the staged overlay holds {} entry/entries the copy cannot create, so the \
+                 rootfs would be missing them: {listed}",
+                report.skipped.len()
+            ),
+        });
+    }
 
     // Run the target-side config in one cage over the rootfs (rootfs = `/`), under
     // the same subordinate map the tree was built with. Target binaries
@@ -599,7 +663,8 @@ fn customize(
 }
 
 /// Run one `sh -c` script in a subordinate-mapped cage rooted at `rootfs`,
-/// streaming output to `step`. Customize needs no network.
+/// streaming output to `step`. Customize needs no network, and the profile's
+/// [`Network::Isolated`] gives it none.
 ///
 /// It runs under the same [`baseline`](crate::sandbox::baseline) profile as the package
 /// stages, and adds only the subordinate map its ownership-preserving tree needs. The
@@ -611,7 +676,6 @@ fn run_customize_cage(rootfs: &Path, script: &str, step: &Step) -> Result<(), En
         .identity_map(IdentityMap::Subordinate)
         .command("sh")
         .args(["-c", script])
-        .network(Network::Isolated)
         .current_dir("/")
         .build()
         .map_err(|source| EngineError::Sandbox {

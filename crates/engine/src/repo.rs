@@ -48,6 +48,29 @@ pub struct LocalDistsRepo {
     mirror_url: String,
 }
 
+/// The emitted `Release`'s `Origin`: who produced the archive.
+///
+/// It is the field apt's own documentation leads with for pinning
+/// (`Pin: release o=boot2deb`) and one of the two an `apt policy` renders a repository
+/// under, so leaving it unset would show the build's own packages under blanks on the
+/// running board.
+const POOL_ORIGIN: &str = "boot2deb";
+
+/// The emitted `Release`'s `Label`: a short name for the archive itself.
+///
+/// Where [`POOL_ORIGIN`] names who produced the archive, this names the archive, and it
+/// pins as `Pin: release l=boot2deb-local`.
+///
+/// It is also the name the rootfs registers this repository under — see
+/// `rootfs`'s `LOCAL_REPO_NAME`, which is this constant — so the
+/// `sources.list.d` entry, `apt policy`'s rendering, and a release pin all name one
+/// thing by construction rather than by two constants staying in step.
+pub(crate) const POOL_LABEL: &str = "boot2deb-local";
+
+/// The emitted `Release`'s `Description`: one line, purely informational — nothing
+/// resolves or pins on it — for a reader who asks what this repository is.
+const POOL_DESCRIPTION: &str = "Packages boot2deb built for this image";
+
 impl LocalDistsRepo {
     /// Assemble a `dists/`-structured trusted repo at `dir` from `debs` for
     /// `suite`/`arch`, emitting progress to `step`.
@@ -58,6 +81,16 @@ impl LocalDistsRepo {
     /// with the suite, the `main` component, and `<arch>` so the provisioner's
     /// release check accepts it — `trust_unsigned` skips the signature and the
     /// freshness bound, so no `Valid-Until` is needed.
+    ///
+    /// `source_date_epoch` pins the `Date` the `Release` carries, and pinning it is what
+    /// makes the publish byte-reproducible: the indexes are a function of the package
+    /// set, and the release is then a function of the indexes and this number — without
+    /// it the release takes the wall clock and no two publishes of one package set agree.
+    /// It is the same value the rootfs tar export clamps member mtimes to, so one
+    /// lock-derived number dates everything the build emits. `None` is a build with no
+    /// kernel tree to take an epoch from, where the release falls back to the publish
+    /// time and this repository is simply not reproducible — the same amount of
+    /// determinism the rest of that build has.
     ///
     /// Any prior contents of `dir` are removed first, so the repo reflects exactly
     /// `debs`: `Pool::publish` is incremental by design, and this repo is a
@@ -70,6 +103,7 @@ impl LocalDistsRepo {
         debs: &[PathBuf],
         suite: &str,
         arch: &str,
+        source_date_epoch: Option<u64>,
         step: &Step,
     ) -> Result<LocalDistsRepo, EngineError> {
         let _ = std::fs::remove_dir_all(dir);
@@ -78,10 +112,19 @@ impl LocalDistsRepo {
             debs.len(),
             dir.display()
         ));
-        let pool = Pool::at(dir)
+        let mut pool = Pool::at(dir)
             .suite(suite)
             .component("main")
-            .architecture(arch);
+            .architecture(arch)
+            .origin(POOL_ORIGIN)
+            .label(POOL_LABEL)
+            .description(POOL_DESCRIPTION);
+        if let Some(epoch) = source_date_epoch {
+            // `Pool::date` takes signed Unix seconds; a lock epoch past 2038-in-u64 is
+            // not a thing any kernel commit carries, and saturating is the only sane
+            // reading of one that did.
+            pool = pool.date(i64::try_from(epoch).unwrap_or(i64::MAX));
+        }
         let fail = |e: ferroday_cage::provision::debian::DebianError| EngineError::Bootstrap {
             context: format!("publish the local .deb pool at {}", dir.display()),
             message: e.to_string(),
@@ -121,11 +164,25 @@ impl LocalDistsRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
+    use crate::sandbox::{PackagingSandbox, SandboxRun};
 
-    /// Build a minimal `.deb` (`<pkg>_<version>_arm64.deb`) under `dir` via
-    /// `dpkg-deb --build`, returning its path.
-    fn make_deb(dir: &Path, pkg: &str, version: &str) -> PathBuf {
+    /// A stand-in `SOURCE_DATE_EPOCH`, as a lock's kernel commit date would supply.
+    const EPOCH: u64 = 1_700_000_000;
+
+    /// Build a minimal `.deb` (`<pkg>_<version>_arm64.deb`) under `dir` in the build's
+    /// own packaging root, returning its path.
+    ///
+    /// Through the root rather than a host `dpkg-deb`, so the whole of this module's
+    /// coverage runs on a host with no dpkg installed — which is the same thing the
+    /// build itself now claims. `--nocheck` because the fixture's control stanza names
+    /// only the fields the pool layout reads.
+    fn make_deb(
+        root: &PackagingSandbox,
+        dir: &Path,
+        pkg: &str,
+        version: &str,
+        step: &Step,
+    ) -> PathBuf {
         let tree = dir.join(format!("{pkg}-tree"));
         std::fs::create_dir_all(tree.join("DEBIAN")).unwrap();
         std::fs::write(
@@ -137,31 +194,45 @@ mod tests {
         )
         .unwrap();
         let out = dir.join(format!("{pkg}_{version}_arm64.deb"));
-        let status = Command::new("dpkg-deb")
-            .args(["--build", "--nocheck"])
-            .arg(&tree)
-            .arg(&out)
-            .status()
-            .unwrap();
-        assert!(status.success(), "dpkg-deb --build failed");
+        let argv = vec![
+            "dpkg-deb".to_string(),
+            "--build".to_string(),
+            "--nocheck".to_string(),
+            tree.to_string_lossy().into_owned(),
+            out.to_string_lossy().into_owned(),
+        ];
+        root.run(
+            &SandboxRun {
+                work: &tree,
+                binds: &[dir.to_path_buf()],
+                env: &[],
+                argv: &argv,
+                context: "build a fixture deb",
+            },
+            step,
+        )
+        .expect("the packaging root builds the fixture deb");
         out
     }
 
     #[test]
     fn dists_repo_has_the_mirror_layout_the_provisioner_reads() {
-        // Only the fixture needs a host tool: the pool itself is written by
-        // ferroday-cage, so this runs on a host with no apt archive tooling.
-        if !crate::hosttool::require(&["dpkg-deb"]) {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let a = make_deb(tmp.path(), "librockchip-mpp1", "1.5.0-1");
-        let b = make_deb(tmp.path(), "ffmpeg-rk", "3e53143");
-        let repo_dir = tmp.path().join("localdists");
+        // Only the fixture needs a `.deb` at all: the pool itself is written by
+        // ferroday-cage, and the fixture's dpkg comes from the packaging root — so no
+        // part of this needs apt archive tooling on the host.
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "repo");
+        let Some(root) = crate::sandbox::packaging_root_for_tests(&step) else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let a = make_deb(&root, tmp.path(), "librockchip-mpp1", "1.5.0-1", &step);
+        let b = make_deb(&root, tmp.path(), "ffmpeg-rk", "3e53143", &step);
+        let repo_dir = tmp.path().join("localdists");
 
-        let repo = LocalDistsRepo::assemble(&repo_dir, &[a, b], "forky", "arm64", &step).unwrap();
+        let repo =
+            LocalDistsRepo::assemble(&repo_dir, &[a, b], "forky", "arm64", Some(EPOCH), &step)
+                .unwrap();
 
         // The debs live at their archive pool paths (a `lib*` package under its
         // `lib` + fourth letter), and the file:// URL bases at the repo root.
@@ -190,6 +261,51 @@ mod tests {
         assert!(release.contains("Architectures: arm64"));
         assert!(release.contains("SHA256:"));
         assert!(release.contains("main/binary-arm64/Packages"));
+
+        // And it declares who produced it. Without these an in-image `apt policy` shows
+        // the build's own packages under blanks, and `Pin: release o=…` — the pinning
+        // form apt's documentation leads with — has nothing to name.
+        assert!(release.contains(&format!("Origin: {POOL_ORIGIN}")));
+        assert!(release.contains(&format!("Label: {POOL_LABEL}")));
+        assert!(release.contains(&format!("Description: {POOL_DESCRIPTION}")));
+    }
+
+    /// A publish of one package set is byte-identical however many times it runs.
+    ///
+    /// The indexes are a function of the package set and the release is a function of
+    /// the indexes and the `Date`, so the date is the only thing between this repository
+    /// and reproducibility — unpinned it takes the wall clock, and two builds of one
+    /// lock disagree on a file that ships nothing but still gets recorded.
+    ///
+    /// Published with **no** `.deb`s, deliberately: the property under test belongs to
+    /// the release rather than to the packages, and the fixture `.deb` the layout tests
+    /// use needs a provisioned packaging root that a host without one skips. This
+    /// assertion is the one that must run everywhere.
+    #[test]
+    fn a_pinned_date_makes_the_publish_byte_reproducible() {
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "repo");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let publish = |dir: &Path, epoch: Option<u64>| {
+            LocalDistsRepo::assemble(dir, &[], "forky", "arm64", epoch, &step).unwrap();
+            std::fs::read(dir.join("dists/forky/Release")).unwrap()
+        };
+        let first = publish(&tmp.path().join("a"), Some(EPOCH));
+        let second = publish(&tmp.path().join("b"), Some(EPOCH));
+        assert_eq!(first, second, "a pinned date publishes the same bytes");
+
+        // The pinned value is the one that lands, not merely *a* fixed one — so the
+        // release dates with the lock rather than with whatever this run inherited.
+        let text = String::from_utf8(first).unwrap();
+        let date = text
+            .lines()
+            .find_map(|l| l.strip_prefix("Date: "))
+            .expect("the release carries a Date");
+        assert!(
+            date.contains("2023"),
+            "the pinned epoch is what dates the release, got {date:?}"
+        );
     }
 
     #[test]
@@ -199,13 +315,13 @@ mod tests {
         // absolute path, so a relative repo dir has to be resolved before it can be
         // handed to the provisioner — otherwise the base is `file://build/…` and the
         // fetcher opens a path relative to whatever directory it happens to run in.
-        if !crate::hosttool::require(&["dpkg-deb"]) {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let deb = make_deb(tmp.path(), "ffmpeg-rk", "3e53143");
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "repo");
+        let Some(root) = crate::sandbox::packaging_root_for_tests(&step) else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let deb = make_deb(&root, tmp.path(), "ffmpeg-rk", "3e53143", &step);
         // Relative to the process's own directory, which is where the fetcher would
         // otherwise resolve the un-absolutized base from.
         let repo_dir = std::env::current_dir()
@@ -213,7 +329,9 @@ mod tests {
             .join(tmp.path().file_name().unwrap());
         let relative = pathdiff(&repo_dir);
 
-        let repo = LocalDistsRepo::assemble(&relative, &[deb], "forky", "arm64", &step).unwrap();
+        let repo =
+            LocalDistsRepo::assemble(&relative, &[deb], "forky", "arm64", Some(EPOCH), &step)
+                .unwrap();
         assert_eq!(repo.file_url(), format!("file://{}", repo_dir.display()));
         let _ = std::fs::remove_dir_all(&repo_dir);
     }
@@ -235,15 +353,17 @@ mod tests {
         // working path into a literal `%20` lookup, so this is what stops that from
         // ever looking like a fix.
         use ferroday_cage::provision::debian::{Fetch, FetchRequest, HttpFetch};
-        if !crate::hosttool::require(&["dpkg-deb"]) {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let deb = make_deb(tmp.path(), "ffmpeg-rk", "3e53143");
-        let repo_dir = tmp.path().join("My Projects/build #1/localdists");
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "repo");
-        let repo = LocalDistsRepo::assemble(&repo_dir, &[deb], "forky", "arm64", &step).unwrap();
+        let Some(root) = crate::sandbox::packaging_root_for_tests(&step) else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let deb = make_deb(&root, tmp.path(), "ffmpeg-rk", "3e53143", &step);
+        let repo_dir = tmp.path().join("My Projects/build #1/localdists");
+        let repo =
+            LocalDistsRepo::assemble(&repo_dir, &[deb], "forky", "arm64", Some(EPOCH), &step)
+                .unwrap();
         assert!(repo.file_url().contains("My Projects/build #1"));
         assert!(!repo.file_url().contains('%'));
 

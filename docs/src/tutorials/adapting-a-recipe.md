@@ -12,7 +12,7 @@ already built a shipped recipe once ([Getting started](../getting-started.md)).
 | --- | --- | --- |
 | The artifact's geometry or where it lands (`--layout`, `--image-size`, `--out-dir`) | flags on `build` | nothing — the lock is untouched |
 | Which features are in the image | `update <recipe> --feature …`, then build the variant reference | a variant lock beside the recipe |
-| Suite, kernel, locale, timezone, keymap | a recipe file of your own | your recipe plus its lock |
+| Suite, kernel, u-boot series, board profile, locale, timezone, keymap | a recipe file of your own | your recipe plus its lock |
 | A hardware fact of the board | a device file, usually `extends` another | your device plus a recipe |
 
 ## Where your files go
@@ -21,7 +21,7 @@ Put anything you author in a directory of your own and pass `--overlay`:
 
 ```sh
 mkdir -p ~/my-boards/recipes/asus-c201
-cargo run -p boot2deb-cli -- --overlay ~/my-boards resolve asus-c201/forky
+boot2deb --overlay ~/my-boards resolve asus-c201/forky
 ```
 
 An overlay holds the same `devices/ socs/ kernels/ features/ recipes/` structure as the
@@ -37,14 +37,14 @@ input, so two axes are overridable at build time:
 
 ```sh
 # A bootloader-only image plus a separate rootfs image, for a two-medium install.
-cargo run -p boot2deb-cli -- build turing-rk1/forky --layout split
+boot2deb build turing-rk1/forky --layout split
 
 # A bigger artifact. The rootfs grows to fill its medium on first boot regardless, so
 # this bounds the file you flash, not the installed system.
-cargo run -p boot2deb-cli -- build turing-rk1/forky --image-size 4G
+boot2deb build turing-rk1/forky --image-size 4G
 
 # Keep the raw image beside the .xz, and put artifacts somewhere else.
-cargo run -p boot2deb-cli -- build turing-rk1/forky --keep-raw --out-dir /mnt/scratch
+boot2deb build turing-rk1/forky --keep-raw --out-dir /mnt/scratch
 ```
 
 Artifacts are named for the whole build point — device and recipe
@@ -64,9 +64,9 @@ selection as a *variant* of the recipe, and the variant is then a build referenc
 other:
 
 ```sh
-cargo run -p boot2deb-cli -- list-features
-cargo run -p boot2deb-cli -- update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
-cargo run -p boot2deb-cli -- build  turing-rk1/forky+media-accel-rockchip+jellyfin
+boot2deb list-features
+boot2deb update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
+boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin
 ```
 
 The variant gets its own lock, its own solved package manifest, and its own work directory
@@ -88,9 +88,16 @@ point](../reference/config-model.md#a-feature-selection-is-a-build-point-not-a-n
 ## Level 3: author your own recipe
 
 Any axis that is *not* a feature — the suite, the kernel definition, the u-boot series,
-the locale, timezone, and keymap — is pinned by the recipe file, so changing one means a
-recipe of your own. That is deliberately cheap: a recipe states its deltas from the
-device's defaults and nothing else.
+the depthcharge board profile, the locale, timezone, and keymap — is pinned by the recipe
+file, so changing one means a recipe of your own. That is deliberately cheap: a recipe
+states its deltas from the device's defaults and nothing else.
+
+This is also what `resolve` tells you to do. Preview a choice with the matching flag and
+it prints the recipe to write, with the keys already filled in:
+
+```sh
+boot2deb resolve asus-c201/forky --suite trixie --keymap de
+```
 
 The worked example is the ASUS C201 on `trixie`, localized for Germany.
 `~/my-boards/recipes/asus-c201/trixie-de.toml`:
@@ -109,14 +116,14 @@ for this board), the boot method, the layout, the image size — comes from
 from where:
 
 ```sh
-cargo run -p boot2deb-cli -- --overlay ~/my-boards resolve asus-c201/trixie-de
+boot2deb --overlay ~/my-boards resolve asus-c201/trixie-de
 ```
 
 ```
 device       : asus-c201 — ASUS Chromebook C201 (RK3288, google,veyron-speedy)
 kernel       : debian-armmp (distro-package)
 suite        : trixie
-locale       : de_DE.UTF-8 (generated: de_DE.UTF-8, en_US.UTF-8)
+locale       : de_DE.UTF-8 (generated: de_DE.UTF-8, en_US.UTF-8, en_GB.UTF-8, fr_FR.UTF-8, ...)
 timezone     : Europe/Berlin
 keymap       : de [pc105]
 board profile: speedy
@@ -128,8 +135,8 @@ compatibility, apt keyrings — so a green resolve means the point is buildable,
 parseable. Then pin it and build:
 
 ```sh
-cargo run -p boot2deb-cli -- --overlay ~/my-boards update asus-c201/trixie-de
-cargo run -p boot2deb-cli -- --overlay ~/my-boards build  asus-c201/trixie-de
+boot2deb --overlay ~/my-boards update asus-c201/trixie-de
+boot2deb --overlay ~/my-boards build  asus-c201/trixie-de
 ```
 
 `update` writes `trixie-de.lock` next to your recipe, inside your overlay. It needs no

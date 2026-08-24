@@ -118,24 +118,32 @@ fn resolve_redirect(base: &str, loc: &str) -> Result<String, FetchError> {
         // Network-path reference (RFC 3986 section 4.2): same scheme, new authority.
         format!("{}{rest}", &base[..scheme_end])
     } else {
-        // Split scheme://authority from the path portion.
-        let authority_len = base[scheme_end..]
-            .find('/')
-            .map(|i| scheme_end + i)
-            .unwrap_or(base.len());
-        let scheme_authority = &base[..authority_len];
-        if loc.starts_with('/') {
-            format!("{scheme_authority}{loc}")
-        } else {
-            // Path-relative: replace the last path segment of the base.
-            let dir_end = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
-            // Never let the relative join fall back into the authority separator.
-            let dir = if dir_end < authority_len {
-                authority_len
-            } else {
-                dir_end
-            };
-            format!("{}{loc}", &base[..dir])
+        // A reference carrying a path never inherits the base's query or fragment
+        // (RFC 3986 section 5.2.2), and a `/` inside either is not a path separator —
+        // so both are cut away before anything is measured against the base.
+        let hierarchical = match base[scheme_end..].find(['?', '#']) {
+            Some(i) => &base[..scheme_end + i],
+            None => base,
+        };
+        // Split scheme://authority from the path portion. No `/` after the authority
+        // means the base path is empty, which merges as if it were `/` — both branches
+        // below depend on knowing that, so it is the one thing measured up front.
+        let path_start = hierarchical[scheme_end..].find('/').map(|i| scheme_end + i);
+        let authority_end = path_start.unwrap_or(hierarchical.len());
+        match (loc.starts_with('/'), path_start) {
+            // Root-relative: the authority is kept and the whole path replaced.
+            (true, _) => format!("{}{loc}", &hierarchical[..authority_end]),
+            // Path-relative onto a base that has a path: `loc` replaces the base's
+            // last segment (RFC 3986 section 5.2.3). Searching from `path_start`
+            // always lands on at least the `/` that begins the path, so the cut can
+            // never reach back into the authority.
+            (false, Some(path_start)) => {
+                let last_slash = path_start + hierarchical[path_start..].rfind('/').unwrap_or(0);
+                format!("{}{loc}", &hierarchical[..last_slash + 1])
+            }
+            // Path-relative onto an empty base path: merge at the root, so
+            // `https://h` + `c` is `https://h/c` and not the different host `hc`.
+            (false, None) => format!("{}/{loc}", &hierarchical[..authority_end]),
         }
     };
     normalize_url_path(&absolute)
@@ -266,8 +274,41 @@ mod tests {
             resolve_redirect("https://h/a/b", "c").unwrap(),
             "https://h/a/c"
         );
-        // No path on the base → authority preserved for a root-relative target.
+        // No path on the base → authority preserved for a root-relative target...
         assert_eq!(resolve_redirect("https://h", "/c").unwrap(), "https://h/c");
+        // ...and an empty base path merges at the root for a path-relative one, so
+        // the segment joins the path instead of extending the host name.
+        assert_eq!(resolve_redirect("https://h", "c").unwrap(), "https://h/c");
+        assert_eq!(
+            resolve_redirect("https://h/", "c").unwrap(),
+            "https://h/c",
+            "a bare trailing slash is the same base path by another spelling"
+        );
+    }
+
+    /// The base's query and fragment are not part of its path: a reference carrying a
+    /// path does not inherit them (RFC 3986 section 5.2.2), and a `/` inside one is
+    /// not a segment separator — so neither may be measured as though it were path.
+    #[test]
+    fn resolve_redirect_ignores_the_bases_query_and_fragment() {
+        assert_eq!(
+            resolve_redirect("https://h/a/b?x=1", "c").unwrap(),
+            "https://h/a/c"
+        );
+        assert_eq!(
+            resolve_redirect("https://h/a/b?x=/y/z", "c").unwrap(),
+            "https://h/a/c",
+            "a slash inside the query is not the last path segment's separator"
+        );
+        assert_eq!(
+            resolve_redirect("https://h?x=1", "c").unwrap(),
+            "https://h/c",
+            "a query on an empty base path leaves the merge base at the root"
+        );
+        assert_eq!(
+            resolve_redirect("https://h/a/b#frag", "/c").unwrap(),
+            "https://h/c"
+        );
     }
 
     #[test]

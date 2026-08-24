@@ -24,7 +24,7 @@ The base image carries the NPU — see [The NPU](#the-npu) below.
 Build the shipped image as in [Getting started](../getting-started.md):
 
 ```sh
-cargo run -p boot2deb-cli -- build h96-max-m9/forky
+boot2deb build h96-max-m9/forky
 ```
 
 That writes `build/h96-max-m9/forky/artifacts/h96-max-m9-forky.img.xz` — GPT, u-boot in the

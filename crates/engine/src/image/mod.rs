@@ -28,12 +28,13 @@ mod ext4;
 mod geometry;
 mod gpt;
 
-pub use ext4::rootfs_filesystem_pin;
+pub use ext4::ROOTFS_FS_KIND;
 
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use boot2deb_core::chromeos::MAX_KPART_SLOTS;
 use boot2deb_core::model::{Layout, ResolvedBoot};
+use boot2deb_core::provenance::FilesystemProvenance;
 use boot2deb_core::ResolvedBuild;
 use geometry::{BootGeometry, Geometry};
 use lzma_rust2::{XzOptions, XzWriterMt};
@@ -213,6 +214,12 @@ pub struct ImageArtifacts {
     /// node that actually ran it. Recorded in the provenance manifest's
     /// `[verification]`.
     pub rootfs_verified_with: Vec<String>,
+    /// The on-disk contract the rootfs filesystem was formatted to, and the geometry
+    /// that came out. Reported for the same reason as the checks above: the geometry is
+    /// a function of the image's size as well as of the formatter's settings, so it
+    /// cannot be computed without repeating the format. Recorded in the provenance
+    /// manifest's `[filesystem]`.
+    pub rootfs_filesystem: FilesystemProvenance,
 }
 
 /// Validate the resolved build's image geometry (offsets, size, GPT/rootfs fit)
@@ -298,7 +305,7 @@ pub fn build_image(
 
     // The ext4 rootfs partition is identical across layouts — build it once.
     let ext4 = opts.work_dir.join("rootfs.ext4");
-    let rootfs_verified_with = ext4::build_rootfs_ext4(
+    let rootfs_fs = ext4::build_rootfs_ext4(
         &ext4,
         geom.rootfs_bytes,
         opts.rootfs_tar,
@@ -381,7 +388,8 @@ pub fn build_image(
         compressed,
         raw_removed,
         password,
-        rootfs_verified_with,
+        rootfs_verified_with: rootfs_fs.verified_with,
+        rootfs_filesystem: rootfs_fs.provenance,
     })
 }
 

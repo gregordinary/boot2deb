@@ -28,6 +28,7 @@
 - [Config model](reference/config-model.md)
 - [What the base image contains](reference/base-image.md)
 - [CLI](reference/cli.md)
+- [Every flag](reference/cli-flags.md)
 - [Support matrix](reference/support-matrix.md)
 - [RK3576 u-boot images](reference/rk3576-uboot-images.md)
 - [Overlays](reference/overlays.md)

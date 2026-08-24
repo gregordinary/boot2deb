@@ -85,6 +85,32 @@ pub(crate) fn require(tools: &[&str]) -> bool {
     false
 }
 
+/// The same gate as [`require`], for a *capability* a test needs rather than a binary
+/// it invokes: `Some(value)` when `outcome` succeeded, `None` (with a printed note)
+/// when it failed on a host that is allowed to lack it, and a panic when
+/// `BOOT2DEB_REQUIRE_HOST_TOOLS` says this host is not.
+///
+/// Some prerequisites are not answerable by a `--version` probe. Provisioning a
+/// packaging root needs unprivileged namespaces *and* a reachable mirror, and the only
+/// way to ask is to try — so the attempt itself becomes the gate, and this keeps its
+/// failure under the same rule: a dev host may skip, a CI job that claims the
+/// capability may not. `what` names the prerequisite in both messages.
+#[cfg(test)]
+pub(crate) fn require_ok<T, E: std::fmt::Display>(what: &str, outcome: Result<T, E>) -> Option<T> {
+    match outcome {
+        Ok(value) => Some(value),
+        Err(err) => {
+            assert!(
+                std::env::var_os("BOOT2DEB_REQUIRE_HOST_TOOLS").is_none(),
+                "BOOT2DEB_REQUIRE_HOST_TOOLS is set but {what} failed: {err} — this CI job \
+                 must be able to do this so these assertions do not skip"
+            );
+            eprintln!("skipping: {what} failed: {err}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

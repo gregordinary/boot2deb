@@ -1,0 +1,31 @@
+# `cargo audit` configuration — the dependency half of the CI gate.
+#
+# Every advisory against a crate in `Cargo.lock` fails the build unless it is listed
+# here with the reasoning that made it acceptable. An entry is a claim about *this*
+# tree's call paths, not a blanket dismissal, and it is removed the moment a fixed
+# version exists.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack: potential key recovery through timing
+    # sidechannels" in `rsa`, reached as `rsa <- pgp <- ferroday-cage <- boot2deb-engine`.
+    #
+    # Not reachable as a vulnerability here. The attack recovers an RSA *private* key
+    # from the timing of PKCS#1 v1.5 *decryption* performed by the key's holder, as
+    # measured by a party that can send chosen ciphertexts and observe the response
+    # time. boot2deb's only use of `pgp` is `ferroday-cage` verifying the clearsigned
+    # Debian `Release` file during the rootfs solve — a public-key signature check.
+    # There is no RSA private key in the process to recover, no decryption, and no
+    # remote party timing anything: the verification runs locally on the build host
+    # against bytes already fetched.
+    #
+    # Nor is there a version to move to. The advisory carries no patched release, and
+    # the 0.10 pre-releases do not change that — `rsa` 0.10.0-rc.18 still states in its
+    # own README that the crate is vulnerable to the Marvin Attack. `pgp` 0.20, the
+    # latest release and the one `ferroday-cage` 0.1.4 requires, depends on `rsa`
+    # "0.9.10", which a pre-release of 0.10 does not satisfy — so the pin could not be
+    # forced past `pgp` even if the newer line fixed it.
+    #
+    # Drop this entry when `rsa` ships a constant-time release and `pgp` picks it up.
+    "RUSTSEC-2023-0071",
+]

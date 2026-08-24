@@ -4,42 +4,46 @@
 //! adds the concrete tool/capability checks the build needs, with per-platform
 //! remediation. It reports exactly what is present or missing *before* any build
 //! work starts — the same "typed error before any work starts" contract as config
-//! validation. What is checked depends on the target and on **two** separate
-//! host questions — whether target binaries must be *produced* by a cross toolchain,
-//! and whether they must be *run* under an interpreter:
+//! validation.
 //!
-//! - **Always:** host `git` (`git am --3way`), `make` + the target C
-//!   toolchain (native `cc`, else the `<triple>gcc` cross toolchain), the kernel's
-//!   `bc`/`flex`/`bison`/openssl build deps, and unprivileged user namespaces. Both
-//!   the OS rootfs and the target-arch *build sandbox* — where the media-accel
-//!   `.deb`s compile — are bootstrapped and entered in-process through the
-//!   ferroday-cage library, so neither adds a tool beyond the user namespaces
-//!   already listed here.
-//! - **Where the host cannot emit target binaries**
-//!   ([`needs_cross_toolchain`](HostInfo::needs_cross_toolchain)): the
-//!   `<triple>gcc` cross toolchain, named from the arch layer's `cross_compile`.
-//! - **Where the host cannot execute target binaries**
-//!   ([`needs_interpreter`](HostInfo::needs_interpreter)): a `qemu-<arch>`
-//!   interpreter and a registered+enabled binfmt handler for the target.
+//! The list is short, and its shortness is the design rather than an omission. Every
+//! compiler, packaging tool and build-dependency a build runs is a *package of a
+//! provisioned Debian root* ([`crate::sandbox`]): resolved from the build's own mirror
+//! list and sha256-pinned in that root's manifest, so it is an input the lock names
+//! rather than a fact about the machine. What is asked of the host is what no root can
+//! carry:
 //!
-//!   The second is strictly weaker than the first, and the gap is load-bearing: an
-//!   arm64 host building armhf needs `arm-linux-gnueabihf-gcc` and needs no qemu at
-//!   all, because `CONFIG_COMPAT=y` runs those binaries natively. Asking one question
-//!   for both put a blocking qemu requirement on that host for tooling the build
-//!   never invokes.
+//! - **Every build:** unprivileged user namespaces. Each root a build provisions — the
+//!   OS rootfs, the target-arch build sandbox, the host-arch cross root, the packaging
+//!   root — is bootstrapped and entered in-process through the ferroday-cage library,
+//!   which needs the capability and no binary at all. No `dpkg`, no `fakeroot`, no
+//!   external sandbox helper.
+//! - **A build that compiles**
+//!   ([`compiles_from_source`](boot2deb_core::model::ResolvedBuild::compiles_from_source)):
+//!   host `git`, which clones the pinned trees and applies the patch series before any
+//!   root sees them, and an unprivileged **overlay**, which is how a compile root layers
+//!   a stage's build-dependencies over its base.
+//! - **A build that enters a target-arch root** on a host that cannot execute the
+//!   target's binaries ([`needs_interpreter`](HostInfo::needs_interpreter)): a
+//!   `qemu-<arch>` interpreter and a registered+enabled binfmt handler. That is the
+//!   image path — the OS rootfs runs the target's maintainer scripts, and the media-accel
+//!   `.deb`s compile in a target-arch sandbox. The cross root and the packaging root are
+//!   the *host's* architecture and interpret nothing, so a bootloader-only deliverable
+//!   needs no qemu even when it builds for a foreign target.
 //! - **Image path:** `tar` and `cp`, the two POSIX tools the rootfs and image stages
-//!   invoke directly. No filesystem tooling — the rootfs ext4 is formatted and every
-//!   metadata checksum verified in-process by the pure-Rust `ferrosys` formatter;
-//!   `e2fsck`, when present, runs as an optional cross-check.
+//!   invoke directly. No filesystem tooling — the rootfs ext4 is formatted and then
+//!   scanned back in-process by the pure-Rust `ferrosys` formatter; `e2fsck`, when
+//!   present, runs as an optional independent cross-check.
 //!
-//! Detection is a side effect (PATH scan, `/proc` + `/etc/os-release` reads,
-//! `pkg-config` shell-out), so it lives in the engine, not `core`.
+//! Detection is a side effect (PATH scan, `/proc` + `/etc/os-release` reads, an `unshare`
+//! probe), so it lives in the engine, not `core`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use boot2deb_core::host::HostInfo;
 use boot2deb_core::model::Arch;
+use ferroday_cage::provision::debian::foreign_interpreter;
 
 /// One host requirement and whether it is satisfied.
 #[derive(Debug, Clone)]
@@ -131,77 +135,14 @@ impl PkgManager {
 
     /// Concrete package name for a canonical [`Pkg`] on this manager.
     fn package(self, pkg: Pkg) -> String {
-        use PkgManager::*;
         match pkg {
             // Same name across managers.
             Pkg::Git => "git".into(),
-            Pkg::Make => "make".into(),
-            Pkg::Bc => "bc".into(),
-            Pkg::Flex => "flex".into(),
-            Pkg::Bison => "bison".into(),
             Pkg::E2fsprogs => "e2fsprogs".into(),
             Pkg::Tar => "tar".into(),
             Pkg::Coreutils => "coreutils".into(),
-            Pkg::Fakeroot => "fakeroot".into(),
-            // Kernel `bindeb-pkg` deps. rsync/cpio/kmod share the name across managers;
-            // debhelper is Debian's, and elfutils' dev libs split by distro.
-            Pkg::Rsync => "rsync".into(),
-            Pkg::Cpio => "cpio".into(),
-            Pkg::Kmod => "kmod".into(),
-            // u-boot pylibfdt/binman deps. swig shares its name; the Python packages
-            // are Debian's `python3-*` and split by manager elsewhere.
-            Pkg::Swig => "swig".into(),
-            Pkg::Python3Dev => match self {
-                Dnf => "python3-devel".into(),
-                Pacman | Brew => "python".into(),
-                _ => "python3-dev".into(),
-            },
-            Pkg::Python3Setuptools => match self {
-                Dnf => "python3-setuptools".into(),
-                Pacman => "python-setuptools".into(),
-                Brew => "python-setuptools".into(),
-                _ => "python3-setuptools".into(),
-            },
-            Pkg::Pyelftools => match self {
-                Dnf => "python3-pyelftools".into(),
-                Pacman => "python-pyelftools".into(),
-                Brew => "python-pyelftools".into(),
-                _ => "python3-pyelftools".into(),
-            },
-            Pkg::Debhelper => match self {
-                Pacman => "debhelper (AUR)".into(),
-                _ => "debhelper".into(),
-            },
-            Pkg::Libelf => match self {
-                Dnf => "elfutils-libelf-devel".into(),
-                Pacman | Brew => "elfutils".into(),
-                _ => "libelf-dev".into(),
-            },
-            Pkg::Libdw => match self {
-                Dnf => "elfutils-devel".into(),
-                Pacman | Brew => "elfutils".into(),
-                _ => "libdw-dev".into(),
-            },
-            // dpkg is Debian's own tool; on non-Debian hosts it comes from the
-            // distro's dpkg port (or AUR).
-            Pkg::Dpkg => match self {
-                Pacman => "dpkg (AUR)".into(),
-                _ => "dpkg".into(),
-            },
-            Pkg::Openssl => match self {
-                Dnf => "openssl-devel".into(),
-                Pacman | Brew => "openssl".into(),
-                _ => "libssl-dev".into(),
-            },
-            Pkg::NativeToolchain => match self {
-                Apt => "build-essential".into(),
-                Dnf => "gcc make".into(),
-                Pacman => "base-devel".into(),
-                Brew => "gcc".into(),
-                Unknown => "gcc".into(),
-            },
             Pkg::QemuUser => match self {
-                Pacman => "qemu-user-static-binfmt (AUR)".into(),
+                PkgManager::Pacman => "qemu-user-static-binfmt (AUR)".into(),
                 _ => "qemu-user-static".into(),
             },
         }
@@ -211,68 +152,28 @@ impl PkgManager {
     fn remedy(self, pkg: Pkg) -> String {
         format!("{} {}", self.install_cmd(), self.package(pkg))
     }
-
-    /// A one-line remediation for the missing cross C toolchain, named from `triple`.
-    ///
-    /// Separate from [`package`](Self::package) because its package name is the only
-    /// one derived from *config* rather than fixed here: `triple` comes from the arch
-    /// layer's `cross_compile`, which is also what the build passes as `CROSS_COMPILE`.
-    /// A second table of triples in this file would let `doctor` suggest installing a
-    /// toolchain the build then does not use.
-    fn cross_toolchain_remedy(self, triple: &str) -> String {
-        use PkgManager::*;
-        let pkg = match self {
-            // Fedora names the package by the bare arch token, not the full triple.
-            Dnf => format!(
-                "gcc-{}-linux-gnu",
-                triple.split('-').next().unwrap_or(triple)
-            ),
-            Pacman => format!("{triple}-gcc (AUR)"),
-            _ => format!("gcc-{triple}"),
-        };
-        format!("{} {pkg}", self.install_cmd())
-    }
 }
 
 /// Canonical host packages the build depends on, mapped to per-manager names.
+///
+/// Short, and every entry earns its place by being something no provisioned root can
+/// supply — see the [module docs](self). A compiler or a build-dependency does not
+/// belong here: it belongs in a root's package set, where the lock pins its version.
 #[derive(Debug, Clone, Copy)]
 enum Pkg {
+    /// `git` — clones the pinned kernel/u-boot/userspace trees and applies the patch
+    /// series with `git am --3way`, both on the host and before any root sees the tree.
     Git,
-    Make,
-    Bc,
-    Flex,
-    Bison,
-    Openssl,
-    NativeToolchain,
+    /// `qemu-user-static` — interprets the target's binaries where the host cannot
+    /// execute them, under the host kernel's binfmt handler.
     QemuUser,
+    /// `e2fsprogs` (`e2fsck`) — the optional `-fn` cross-check of the formatted rootfs.
     E2fsprogs,
-    /// `dpkg-deb` — host-side `.deb` packaging (the u-boot and kmod debs).
-    Dpkg,
-    /// `fakeroot` — the root-owned staging `dpkg-deb` packages those debs from.
-    Fakeroot,
-    /// `debhelper` (`dh`) — the kernel `make bindeb-pkg` `dpkg-buildpackage` dep.
-    Debhelper,
-    /// `libelf-dev` — kernel objtool/BTF build dep (`pkg-config libelf`).
-    Libelf,
-    /// `libdw-dev` — kernel objtool build dep (`pkg-config libdw`).
-    Libdw,
-    /// `rsync` — kernel `bindeb-pkg` staging dep.
-    Rsync,
-    /// `cpio` — kernel `bindeb-pkg` dep.
-    Cpio,
-    /// `kmod` (`depmod`) — kernel module tooling.
-    Kmod,
-    /// `swig` — u-boot `pylibfdt` binding generator.
-    Swig,
-    /// `python3-dev` — Python headers for the `pylibfdt` C extension.
-    Python3Dev,
-    /// `python3-setuptools` — u-boot `pylibfdt` `setup.py`.
-    Python3Setuptools,
-    /// `python3-pyelftools` — u-boot `binman` ELF parsing.
-    Pyelftools,
     /// `tar` — unpacking and verifying the rootfs tarball and a signed kernel partition.
     Tar,
-    /// `coreutils` (`cp`) — staging the layer overlay trees into the rootfs.
+    /// `coreutils` (`cp`) — merging the layer overlay trees into the build's staging
+    /// tree. Laying that tree into the provisioned rootfs is in-process, through the
+    /// identity map the rootfs is owned under, so it needs no host tool.
     Coreutils,
 }
 
@@ -285,39 +186,36 @@ enum Pkg {
 /// compiles nothing at all, and should not be told to install a cross compiler.
 #[derive(Debug, Clone)]
 pub struct ToolNeeds {
-    /// The target architecture.
+    /// The target architecture, which decides *which* `qemu-<arch>` interpreter and
+    /// binfmt handler are asked for on a host that cannot execute the target's binaries.
     pub target: Arch,
-    /// `CROSS_COMPILE` prefix for the target (e.g. `aarch64-linux-gnu-`), used only
-    /// when the host arch differs.
-    pub cross_compile: String,
-    /// The build compiles a kernel and/or a bootloader from source: it needs a C
-    /// toolchain for the target, the kernel's build-time helpers, and `git` to fetch
-    /// the trees and apply the patch series.
-    pub compiles_sources: bool,
-    /// The build compiles a kernel specifically (a subset of `compiles_sources`).
-    /// The kernel's `make bindeb-pkg` runs `dpkg-buildpackage`, which enforces the
-    /// generated `debian/control` build-deps — `debhelper`, `libelf-dev`/`libdw-dev`
-    /// (objtool/BTF), plus `rsync`/`cpio`/`kmod` — none of which the plain compile
-    /// toolchain above pulls in. A bootloader-only build does not package a kernel and
-    /// needs none of them.
-    pub compiles_kernel: bool,
-    /// The build compiles u-boot from source (a `rockchip-rkbin` boot method). u-boot's
-    /// build generates its device-tree Python bindings (`pylibfdt`) and runs `binman`,
-    /// which need `swig`, the Python dev headers, `setuptools`, and `pyelftools` — a
-    /// distinct dep set from the kernel's. A board that boots its own firmware compiles
-    /// no u-boot and needs none of them.
-    pub builds_uboot: bool,
-    /// Where this build's disposable build roots put their overlay upper layers
-    /// ([`build_root_uppers`](crate::sandbox::build_root_uppers)), for the host's
-    /// overlay capability to be probed on the filesystem that will actually carry
-    /// them. `None` for a build that stands up no build root — one that compiles no
-    /// packages in the target-arch sandbox — which needs no overlay at all.
-    pub build_root_uppers: Option<PathBuf>,
-    /// The build assembles a rootfs and a disk image, so it shells out to the two
-    /// POSIX tools the image path uses directly: `cp` stages the layer overlay trees
-    /// and lays the customize tree into the provisioned rootfs, and `tar` verifies the
-    /// rootfs tarball (and, on a depthcharge board, extracts the signed kernel
-    /// partition). A u-boot-only deliverable assembles neither and needs neither.
+    /// Where this build's compile roots put their overlay upper layers
+    /// ([`build_root_uppers`](crate::sandbox::build_root_uppers)), or `None` for a build
+    /// that compiles nothing at all
+    /// ([`compiles_from_source`](boot2deb_core::model::ResolvedBuild::compiles_from_source)).
+    ///
+    /// One field, because the two things compiling asks of a host are asked together:
+    /// host `git`, which fetches the pinned trees and applies the patch series, and an
+    /// unprivileged overlay, which is how every compile root layers a stage's
+    /// build-dependencies over its base. A board that installs Debian's kernel and boots
+    /// its own firmware needs neither, and telling its operator to install a compiler
+    /// would be noise a genuinely missing tool could hide in.
+    ///
+    /// The path is the build's own work dir rather than the host temp dir, so the
+    /// capability is probed on the filesystem that will actually carry the uppers — an
+    /// operator whose work dir is on another volume can get a different answer there.
+    pub compiles: Option<PathBuf>,
+    /// The build assembles a rootfs and a disk image.
+    ///
+    /// Two consequences, both keyed on this one fact. It shells out to the two POSIX
+    /// tools the image path uses directly: `cp` merges the layer overlay trees into the
+    /// build's staging tree, and `tar` verifies the rootfs tarball (and, on a
+    /// depthcharge board, extracts the signed kernel partition). And
+    /// it is the only path that enters a **target-arch** root — the rootfs runs the
+    /// target's maintainer scripts, and the media-accel `.deb`s compile in a target-arch
+    /// sandbox — so it is what makes a `qemu-user` interpreter a requirement on a host
+    /// that cannot execute those binaries. A bootloader-only deliverable assembles
+    /// nothing and compiles in a host-arch cross root, so it needs none of the three.
     pub assembles_image: bool,
 }
 
@@ -326,216 +224,82 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
     tool_checks_on(HostInfo::detect(), needs)
 }
 
+/// The requirements **every** build has, whatever board it targets — the answerable
+/// half of a `doctor` with no target named.
+///
+/// Membership is decided by one question: does the answer change with the recipe? Host
+/// `git` does (a board installing Debian's kernel and booting its own firmware clones
+/// nothing), so it is not here. Unprivileged user namespaces do not: every build
+/// provisions at least one Debian root through them — the userland its `.deb`s are
+/// compiled in, the one whose `dpkg` archives them, or the one that becomes the image —
+/// and none of that needs a binary on the host. This is the whole of what boot2deb asks
+/// of a host it does not resolve a recipe for.
+///
+/// [`tool_checks_on`] emits exactly this set unconditionally, by calling it, so a bare
+/// `doctor` and a targeted one can never report a different verdict for the same
+/// requirement.
+pub fn host_checks() -> Vec<Check> {
+    host_checks_on(HostInfo::detect())
+}
+
+/// [`host_checks`] against an explicit host.
+///
+/// The shared set happens not to consult the host today — every check it holds is a
+/// kernel capability, and kernels do not have package managers. The parameter stays
+/// because the seam is what [`tool_checks_on`] composes this through, and because a
+/// shared check that *did* need a per-manager install hint would otherwise have to
+/// change this signature and every caller at once.
+pub fn host_checks_on(_host: HostInfo) -> Vec<Check> {
+    // Every provisioned root is bootstrapped and entered in-process through
+    // ferroday-cage — the *OS* rootfs that becomes the image ([`crate::rootfs`]), the
+    // target-arch *build sandbox*, the host-arch *cross root* and the *packaging root*
+    // ([`crate::sandbox`]) — so none of them needs a binary of its own. What all four
+    // need is unprivileged user namespaces, and that is the one thing every build
+    // requires of every host.
+    vec![userns_check()]
+}
+
 /// [`tool_checks`] against an explicit host.
 ///
-/// The host decides which checks exist at all, and the interesting split — a host that
-/// needs a cross toolchain but no interpreter — occurs on exactly one host/target pair
-/// (arm64 building armhf). Taking the host as a parameter is what makes that decision
-/// assertable from a CI machine that is not one.
+/// The host decides one thing here — whether an interpreter is asked for — and the
+/// interesting case is the host that provisions a cross root and still needs none: an
+/// arm64 one building armhf, where `CONFIG_COMPAT=y` runs the result natively. Taking the
+/// host as a parameter is what makes that assertable from a CI machine that is not one,
+/// and it is why the tests below fix the host rather than detecting it.
 pub fn tool_checks_on(host: HostInfo, needs: &ToolNeeds) -> Vec<Check> {
     let target = needs.target;
-    let cross_toolchain = host.needs_cross_toolchain(target);
     let interpreter = host.needs_interpreter(target);
     let pm = PkgManager::detect(&host);
     let mut checks = Vec::new();
 
-    // The compile toolchain, only where something is compiled. A distro-package kernel
-    // on a board with no bootloader of its own needs none of this.
-    if needs.compiles_sources {
-        checks.extend([
-            exe(
-                pm,
-                "git",
-                &["git"],
-                "fetch pinned sources + git am the patch series",
-                true,
-                Pkg::Git,
-            ),
-            exe(
-                pm,
-                "make",
-                &["make"],
-                "kernel/u-boot compile",
-                true,
-                Pkg::Make,
-            ),
-            exe(pm, "bc", &["bc"], "kernel build dependency", true, Pkg::Bc),
-            exe(
-                pm,
-                "flex",
-                &["flex"],
-                "kernel build dependency",
-                true,
-                Pkg::Flex,
-            ),
-            exe(
-                pm,
-                "bison",
-                &["bison"],
-                "kernel build dependency",
-                true,
-                Pkg::Bison,
-            ),
-            openssl_check(pm),
-        ]);
-        // Target C toolchain: native cc when the host can emit target binaries, else
-        // the cross gcc. This is the toolchain question, not the interpreter one: an
-        // arm64 host building armhf needs `arm-linux-gnueabihf-gcc` even though it runs
-        // the result natively.
-        if cross_toolchain {
-            // Both the probed binary and the suggested package come from the arch
-            // layer's `cross_compile` — the same value the build exports as
-            // `CROSS_COMPILE` — so `doctor` can never name a toolchain the build then
-            // does not invoke.
-            let cc = format!("{}gcc", needs.cross_compile);
-            let triple = needs.cross_compile.trim_end_matches('-');
-            checks.push(exe_with_remedy(
-                &cc,
-                &[&cc],
-                "cross C toolchain for the target",
-                true,
-                pm.cross_toolchain_remedy(triple),
-            ));
-        } else {
-            checks.push(exe(
-                pm,
-                "cc",
-                &["cc", "gcc"],
-                "native C toolchain for the target",
-                true,
-                Pkg::NativeToolchain,
-            ));
-        }
-    }
-
-    // Kernel `.deb` packaging: `make bindeb-pkg` shells out to `dpkg-buildpackage`,
-    // which hard-fails on the generated `debian/control`'s build-deps before it
-    // compiles a thing. These are separate from the compile toolchain above and are
-    // easy to be missing on a fresh host — a bare `doctor` that skipped them would pass
-    // and then the build would die minutes in on `dpkg-checkbuilddeps`. Gated on
-    // `compiles_kernel`: a bootloader-only build packages no kernel and needs none.
-    if needs.compiles_kernel {
+    // The one host binary a compile still reaches for. Everything else it needs — the
+    // toolchain, `make`, the kernel's and u-boot's build-deps — is resolved into a
+    // provisioned root from the build's own mirror list, so it is pinned by the lock
+    // rather than installed on the machine. `git` is not, and cannot be: it fetches the
+    // pinned trees over the network and applies the patch series *before* there is a
+    // root for them to enter.
+    if needs.compiles.is_some() {
         checks.push(exe(
             pm,
-            "dh",
-            &["dh"],
-            "kernel .deb build (debhelper)",
+            "git",
+            &["git"],
+            "fetch pinned sources + git am the patch series",
             true,
-            Pkg::Debhelper,
-        ));
-        checks.push(pkgconfig_check(
-            pm,
-            "libelf",
-            "libelf",
-            "objtool/BTF — kernel .deb build",
-            Pkg::Libelf,
-        ));
-        checks.push(pkgconfig_check(
-            pm,
-            "libdw",
-            "libdw",
-            "objtool — kernel .deb build",
-            Pkg::Libdw,
-        ));
-        checks.push(exe(
-            pm,
-            "rsync",
-            &["rsync"],
-            "kernel .deb build dependency",
-            true,
-            Pkg::Rsync,
-        ));
-        checks.push(exe(
-            pm,
-            "cpio",
-            &["cpio"],
-            "kernel .deb build dependency",
-            true,
-            Pkg::Cpio,
-        ));
-        checks.push(exe(
-            pm,
-            "depmod",
-            &["depmod"],
-            "kernel module tooling (kmod)",
-            true,
-            Pkg::Kmod,
+            Pkg::Git,
         ));
     }
 
-    // u-boot's build generates its `pylibfdt` device-tree bindings and runs `binman`.
-    // That needs `swig` + the Python dev headers to compile the extension, plus the
-    // `setuptools`/`pyelftools` modules — a fresh host has none by default, and the
-    // failure is a mid-build Python traceback rather than a clear "missing dep".
-    if needs.builds_uboot {
-        checks.push(exe(
-            pm,
-            "swig",
-            &["swig"],
-            "u-boot pylibfdt bindings",
-            true,
-            Pkg::Swig,
-        ));
-        checks.push(pkgconfig_check(
-            pm,
-            "python3",
-            "python3-dev",
-            "u-boot pylibfdt extension headers",
-            Pkg::Python3Dev,
-        ));
-        checks.push(python_module_check(
-            pm,
-            "setuptools",
-            "python3-setuptools",
-            "u-boot pylibfdt build",
-            Pkg::Python3Setuptools,
-        ));
-        checks.push(python_module_check(
-            pm,
-            "elftools",
-            "python3-pyelftools",
-            "u-boot binman image assembly",
-            Pkg::Pyelftools,
-        ));
-    }
+    // The requirements no board can opt out of, in one shared block so a bare
+    // `doctor` and a targeted one can never disagree about them.
+    checks.extend(host_checks_on(host));
 
-    // Rootless namespaces — needed on every build. Both bootstraps (the *OS* rootfs
-    // that becomes the image, [`crate::rootfs`], and the target-arch *build sandbox*)
-    // run in-process through ferroday-cage, so neither needs a binary of its own;
-    // what they do need, along with the package builds, is unprivileged user
-    // namespaces ([`userns_check`]).
-    checks.push(userns_check());
-
-    // A build that compiles packages in the target-arch sandbox roots each component's
-    // build on an unprivileged overlay, which not every host can establish — so the
-    // capability is preflighted like a tool. A build that compiles no such packages
-    // stands up no build root and is unaffected.
-    if let Some(uppers) = &needs.build_root_uppers {
+    // Every compile root layers its stage's build-dependencies over a shared base, and
+    // an unprivileged overlay is what makes that layer disposable — so the capability is
+    // preflighted like a tool. Not every host can establish one, and a build that
+    // compiles nothing never asks it to.
+    if let Some(uppers) = &needs.compiles {
         checks.push(overlay_check(uppers));
     }
-
-    // Host-side `.deb` packaging: the u-boot and kmod `.deb`s are assembled with
-    // `fakeroot dpkg-deb`. Both halves are checked, because the failure modes differ
-    // and only one of them is loud — a missing `dpkg-deb` fails to spawn, while
-    // `fakeroot` is what makes the staged tree package as `root:root`, so without it
-    // the debs would carry the build user's ownership. Missing either, `doctor` would
-    // pass and the build then die mid-package on a non-Debian host.
-    checks.push(exe(
-        pm,
-        "fakeroot",
-        &["fakeroot"],
-        "root-owned staging for the u-boot and kmod .debs",
-        true,
-        Pkg::Fakeroot,
-    ));
-    checks.push(exe(
-        pm,
-        "dpkg-deb",
-        &["dpkg-deb"],
-        "assemble the u-boot and kmod .debs",
-        true,
-        Pkg::Dpkg,
-    ));
 
     // The two POSIX tools the image path invokes directly. Both are effectively
     // universal, which is exactly why they are easy to leave off a list built from
@@ -561,16 +325,20 @@ pub fn tool_checks_on(host: HostInfo, needs: &ToolNeeds) -> Vec<Check> {
         ));
     }
 
-    // Emulated execution: the target's maintainer scripts and compiles run under the
-    // host's qemu-user binfmt handler — during the rootfs bootstrap whatever else the
-    // build does, so this is needed even by a board that compiles nothing.
+    // Emulated execution, on the image path alone: the OS rootfs runs the target's
+    // maintainer scripts, and the media-accel `.deb`s compile in a target-arch sandbox,
+    // both under the host's qemu-user binfmt handler. Every other root a build
+    // provisions — the cross root that compiles the kernel, u-boot and the modules, and
+    // the packaging root that archives them — is the *host's* architecture and
+    // interprets nothing, so a bootloader-only deliverable consults no interpreter even
+    // when it builds for a foreign target.
     //
-    // Keyed on the *interpreter* question, which is weaker than the toolchain one. A
-    // host that executes the target's binaries directly needs no qemu at all, and that
-    // includes an arm64 host building armhf: CONFIG_COMPAT=y runs those binaries
-    // natively. Asking for qemu there would report a blocking requirement for tooling
-    // the build never invokes -- the exact noise ToolNeeds exists to eliminate.
-    if interpreter {
+    // Keyed additionally on the *interpreter* question, which is weaker than "is this
+    // build cross": a host that executes the target's binaries directly needs no qemu at
+    // all, and that includes an arm64 host building armhf, where CONFIG_COMPAT=y runs
+    // those binaries natively. Either over-ask would report a blocking requirement for
+    // tooling the build never invokes — the exact noise ToolNeeds exists to eliminate.
+    if interpreter && needs.assembles_image {
         let qa = target.qemu_arch();
         let qnames = [format!("qemu-{qa}-static"), format!("qemu-{qa}")];
         let qrefs: Vec<&str> = qnames.iter().map(String::as_str).collect();
@@ -582,12 +350,13 @@ pub fn tool_checks_on(host: HostInfo, needs: &ToolNeeds) -> Vec<Check> {
             true,
             Pkg::QemuUser,
         ));
-        checks.push(binfmt_check(pm, qa));
+        checks.push(binfmt_check(pm, target.debian_arch(), qa));
     }
 
-    // Image assembly is pure Rust (ferrosys): the rootfs ext4 is formatted and every
-    // metadata checksum verified in-process, so no `mke2fs`/`e2fsprogs` is required.
-    // `e2fsck` is an optional `-fn` cross-check the image stage runs only when present.
+    // Image assembly is pure Rust (ferrosys): the rootfs ext4 is formatted and scanned
+    // back in-process, so no `mke2fs`/`e2fsprogs` is required. `e2fsck` is an optional
+    // `-fn` cross-check the image stage runs only when present — valuable because it is
+    // an independent implementation, not because it checks more.
     checks.push(exe(
         pm,
         "e2fsck",
@@ -610,100 +379,14 @@ fn exe(
     required: bool,
     pkg: Pkg,
 ) -> Check {
-    exe_with_remedy(name, candidates, purpose, required, pm.remedy(pkg))
-}
-
-/// [`exe`] with the remediation supplied directly, for the one check whose package
-/// name is derived from config rather than from a [`Pkg`] table: the cross toolchain.
-fn exe_with_remedy(
-    name: &str,
-    candidates: &[&str],
-    purpose: &'static str,
-    required: bool,
-    remedy: String,
-) -> Check {
     let status = match candidates.iter().find_map(|c| which(c)) {
         Some(path) => CheckStatus::Present(path.display().to_string()),
-        None => CheckStatus::Missing(remedy),
+        None => CheckStatus::Missing(pm.remedy(pkg)),
     };
     Check {
         name: name.to_string(),
         purpose,
         required,
-        status,
-    }
-}
-
-/// openssl headers, probed via `pkg-config` (a dev lib, not an executable).
-fn openssl_check(pm: PkgManager) -> Check {
-    pkgconfig_check(
-        pm,
-        "openssl",
-        "libssl (openssl)",
-        "kernel/u-boot certificate + TLS build dep",
-        Pkg::Openssl,
-    )
-}
-
-/// A `-dev` library the build probes with `pkg-config --exists <module>` — present
-/// only when its development package is installed. `name` is the display label and
-/// `purpose` its role; a miss maps `pkg` to the host's package name. The same shape as
-/// [`exe`] but for a library rather than an executable. If `pkg-config` itself is
-/// absent the module reads as missing (its remedy still names the `-dev` package —
-/// `pkg-config` rides in as a dependency of the toolchain check).
-fn pkgconfig_check(
-    pm: PkgManager,
-    module: &str,
-    name: &str,
-    purpose: &'static str,
-    pkg: Pkg,
-) -> Check {
-    let present = which("pkg-config").is_some()
-        && Command::new("pkg-config")
-            .args(["--exists", module])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-    let status = if present {
-        CheckStatus::Present(format!("pkg-config {module}"))
-    } else {
-        CheckStatus::Missing(pm.remedy(pkg))
-    };
-    Check {
-        name: name.to_string(),
-        purpose,
-        required: true,
-        status,
-    }
-}
-
-/// A Python module the build imports at runtime — probed with `python3 -c "import
-/// <module>"`, so it catches a package installed under the wrong interpreter, which a
-/// dpkg presence test would miss. Named after the *distro package* (`name`) since that
-/// is what a miss tells the user to install. When `python3` itself is absent the module
-/// reads as missing.
-fn python_module_check(
-    pm: PkgManager,
-    module: &str,
-    name: &str,
-    purpose: &'static str,
-    pkg: Pkg,
-) -> Check {
-    let present = which("python3").is_some()
-        && Command::new("python3")
-            .args(["-c", &format!("import {module}")])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-    let status = if present {
-        CheckStatus::Present(format!("python3 import {module}"))
-    } else {
-        CheckStatus::Missing(pm.remedy(pkg))
-    };
-    Check {
-        name: name.to_string(),
-        purpose,
-        required: true,
         status,
     }
 }
@@ -739,7 +422,8 @@ fn userns_check() -> Check {
     };
     Check {
         name: "unprivileged user namespaces".into(),
-        purpose: "rootless rootfs bootstrap + sandbox + ext4 image staging",
+        purpose:
+            "every provisioned root (rootfs, build sandbox, packaging root) + ext4 image staging",
         required: true,
         status,
     }
@@ -825,30 +509,48 @@ fn nearest_existing(path: &Path) -> Option<PathBuf> {
     path.ancestors().find(|p| p.is_dir()).map(Path::to_path_buf)
 }
 
-/// A registered *and enabled* `qemu-<arch>` binfmt handler. Reads
-/// `/proc/sys/fs/binfmt_misc/qemu-<arch>`; reports the handler flags and notes
-/// when the `F` (fix-binary) flag the rootless sandbox relies on is absent.
-fn binfmt_check(pm: PkgManager, qemu_arch: &str) -> Check {
-    let path = format!("/proc/sys/fs/binfmt_misc/qemu-{qemu_arch}");
+/// A registered *and enabled* `qemu-<arch>` binfmt handler for the Debian architecture
+/// `arch`, reported with the interpreter it will actually run.
+///
+/// Reads the registration through
+/// [`foreign_interpreter`](ferroday_cage::provision::debian::foreign_interpreter) — the
+/// same reader [`HostToolchain`](crate::toolchain::HostToolchain) identifies the
+/// interpreter from, and the same one the rootfs provisioner's own preflight uses. One
+/// reader of one `/proc` file, so what `doctor` reports, what a build folds into its
+/// cache key, and what the bootstrap refuses on cannot disagree.
+///
+/// The interpreter is worth printing rather than assumed: it is generally a wrapper
+/// under `/usr/libexec` rather than the `qemu-<arch>-static` on `PATH`, and an operator
+/// diagnosing an emulation problem is otherwise looking at the wrong binary. Where the
+/// wrapper resolves elsewhere, both paths are printed — repointing that symlink swaps
+/// the interpreter with the registration unchanged.
+///
+/// A registered-but-*disabled* handler is reported as present and not enabled rather
+/// than as absent, because the remedies differ: one is "turn it on", the other "install
+/// it".
+fn binfmt_check(pm: PkgManager, arch: &str, qemu_arch: &str) -> Check {
     let name = format!("{qemu_arch} binfmt handler");
-    let status = match std::fs::read_to_string(&path) {
-        Ok(body) if body.lines().next() == Some("enabled") => {
-            let flags = body
-                .lines()
-                .find_map(|l| l.strip_prefix("flags:"))
-                .map(|f| f.trim())
-                .unwrap_or("");
-            let mut detail = format!("registered, enabled (flags: {flags})");
-            if !flags.contains('F') {
+    let status = match foreign_interpreter(arch) {
+        Some(interpreter) if interpreter.enabled => {
+            let mut detail = format!("registered, enabled (flags: {})", interpreter.flags);
+            detail.push_str(&format!(" — runs {}", interpreter.path.display()));
+            match &interpreter.resolved {
+                Some(resolved) if resolved != &interpreter.path => {
+                    detail.push_str(&format!(" -> {}", resolved.display()));
+                }
+                Some(_) => {}
+                None => detail.push_str(" — WARNING: that path does not resolve"),
+            }
+            if !interpreter.flags.contains('F') {
                 detail.push_str(" — WARNING: no F flag; the sandbox needs fix-binary");
             }
             CheckStatus::Present(detail)
         }
-        Ok(_) => CheckStatus::Missing(format!(
+        Some(_) => CheckStatus::Missing(format!(
             "handler present but disabled — run: {}",
             pm.remedy(Pkg::QemuUser)
         )),
-        Err(_) => CheckStatus::Missing(format!(
+        None => CheckStatus::Missing(format!(
             "not registered — install {} and register binfmt (needs root, one-time)",
             pm.package(Pkg::QemuUser)
         )),
@@ -939,44 +641,26 @@ mod tests {
 
     #[test]
     fn remedy_is_manager_specific() {
+        // The whole table, because it is now small enough to assert whole — and a
+        // package that reappears in it is a host requirement that came back unannounced.
+        assert_eq!(PkgManager::Apt.remedy(Pkg::Git), "sudo apt install git");
+        assert_eq!(PkgManager::Dnf.remedy(Pkg::Tar), "sudo dnf install tar");
         assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Openssl),
-            "sudo apt install libssl-dev"
+            PkgManager::Pacman.remedy(Pkg::Coreutils),
+            "sudo pacman -S coreutils"
         );
         assert_eq!(
-            PkgManager::Dnf.remedy(Pkg::Openssl),
-            "sudo dnf install openssl-devel"
+            PkgManager::Brew.remedy(Pkg::E2fsprogs),
+            "brew install e2fsprogs"
+        );
+        // The one entry that is not spelled the same everywhere.
+        assert_eq!(
+            PkgManager::Apt.remedy(Pkg::QemuUser),
+            "sudo apt install qemu-user-static"
         );
         assert_eq!(
-            PkgManager::Pacman.remedy(Pkg::NativeToolchain),
-            "sudo pacman -S base-devel"
-        );
-        // Kernel bindeb-pkg deps: the exact package a user installs on a miss.
-        assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Debhelper),
-            "sudo apt install debhelper"
-        );
-        assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Libelf),
-            "sudo apt install libelf-dev"
-        );
-        assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Libdw),
-            "sudo apt install libdw-dev"
-        );
-        assert_eq!(
-            PkgManager::Dnf.remedy(Pkg::Libelf),
-            "sudo dnf install elfutils-libelf-devel"
-        );
-        // u-boot pylibfdt/binman deps.
-        assert_eq!(PkgManager::Apt.remedy(Pkg::Swig), "sudo apt install swig");
-        assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Python3Setuptools),
-            "sudo apt install python3-setuptools"
-        );
-        assert_eq!(
-            PkgManager::Apt.remedy(Pkg::Pyelftools),
-            "sudo apt install python3-pyelftools"
+            PkgManager::Pacman.remedy(Pkg::QemuUser),
+            "sudo pacman -S qemu-user-static-binfmt (AUR)"
         );
     }
 
@@ -1011,64 +695,12 @@ mod tests {
         }
     }
 
-    /// `doctor` suggests the toolchain the build will actually invoke.
-    ///
-    /// The suggested package is derived from the arch layer's `cross_compile` — the
-    /// same value the build exports as `CROSS_COMPILE` — so the two cannot drift.
-    /// Asserted through [`tool_checks`], not just the formatter, because the point is
-    /// that the *check* reads the config: a second triple table here would pass a
-    /// formatter test and still tell the user to install the wrong package.
-    #[test]
-    fn the_cross_toolchain_hint_follows_the_configured_prefix() {
-        // Whichever target is cross-arch for this host — the check only exists then.
-        let target = [Arch::Arm64, Arch::Armv7, Arch::Riscv64]
-            .into_iter()
-            .find(|a| crate::preflight(*a).cross_toolchain)
-            .expect("at least two of the three targets differ from any one host arch");
-        // A deliberately unusual prefix: a hardcoded triple table would answer with the
-        // arch's conventional triple and pass, which is exactly what must not happen.
-        let needs = ToolNeeds {
-            target,
-            cross_compile: "boot2deb-probe-linux-gnu-".into(),
-            compiles_sources: true,
-            compiles_kernel: false,
-            builds_uboot: false,
-            build_root_uppers: None,
-            assembles_image: true,
-        };
-        let check = tool_checks(&needs)
-            .into_iter()
-            .find(|c| c.purpose == "cross C toolchain for the target")
-            .expect("a cross build asks for a cross toolchain");
-        assert_eq!(check.name, "boot2deb-probe-linux-gnu-gcc");
-        match check.status {
-            CheckStatus::Missing(remedy) => assert!(
-                remedy.ends_with("gcc-boot2deb-probe-linux-gnu"),
-                "the hint must name the configured triple, got {remedy:?}"
-            ),
-            CheckStatus::Present(p) => panic!("no such toolchain exists to be found: {p}"),
-        }
-        // Fedora spells the same toolchain by the bare arch token, not the full triple.
-        assert_eq!(
-            PkgManager::Dnf.cross_toolchain_remedy("aarch64-linux-gnu"),
-            "sudo dnf install gcc-aarch64-linux-gnu"
-        );
-        assert_eq!(
-            PkgManager::Apt.cross_toolchain_remedy("aarch64-linux-gnu"),
-            "sudo apt install gcc-aarch64-linux-gnu"
-        );
-    }
-
-    /// The RK1 shape: compiles a kernel and a bootloader, and builds the media-accel
-    /// stack in the sandbox.
+    /// The RK1 shape: compiles a kernel, a bootloader and the media-accel stack, and
+    /// assembles an image.
     fn compiling_build() -> ToolNeeds {
         ToolNeeds {
             target: Arch::Arm64,
-            cross_compile: "aarch64-linux-gnu-".into(),
-            compiles_sources: true,
-            compiles_kernel: true,
-            builds_uboot: true,
-            build_root_uppers: Some(std::env::temp_dir()),
+            compiles: Some(std::env::temp_dir()),
             assembles_image: true,
         }
     }
@@ -1078,75 +710,125 @@ mod tests {
     fn assembling_build() -> ToolNeeds {
         ToolNeeds {
             target: Arch::Armv7,
-            cross_compile: "arm-linux-gnueabihf-".into(),
-            compiles_sources: false,
-            compiles_kernel: false,
-            builds_uboot: false,
-            build_root_uppers: None,
+            compiles: None,
             assembles_image: true,
         }
     }
 
-    #[test]
-    fn an_arm64_host_building_armhf_needs_the_cross_toolchain_and_no_interpreter() {
-        // The one host/target pair where the two answers differ, and the reason the
-        // predicate was split. An arm64 kernel with CONFIG_COMPAT=y runs armhf binaries
-        // natively, so no qemu-arm-static and no binfmt handler is consulted — but an
-        // aarch64 gcc cannot emit armhf, so the cross toolchain is genuinely required.
-        //
-        // Asserted against an explicit host rather than the running one: no CI machine
-        // here is arm64, and reporting a blocking qemu requirement on the user's only
-        // native-arm64 box is exactly the noise ToolNeeds exists to eliminate.
-        let arm64 = HostInfo {
-            arch: "aarch64",
-            os: "linux",
-        };
-        let checks = tool_checks_on(arm64, &assembling_build());
-        assert!(
-            !checks
-                .iter()
-                .any(|c| c.name == "qemu-arm-static" || c.name.contains("binfmt")),
-            "an arm64 host runs armhf binaries directly: {:?}",
-            checks.iter().map(|c| &c.name).collect::<Vec<_>>()
-        );
-        // A build that compiles nothing asks for no toolchain either way; the one that
-        // does compile asks for the cross gcc, named from the configured prefix.
-        let compiling = ToolNeeds {
-            compiles_sources: true,
-            ..assembling_build()
-        };
-        let checks = tool_checks_on(arm64, &compiling);
-        assert!(
-            checks
-                .iter()
-                .any(|c| c.name == "arm-linux-gnueabihf-gcc" && c.required),
-            "an aarch64 gcc cannot emit armhf: {:?}",
-            checks.iter().map(|c| &c.name).collect::<Vec<_>>()
-        );
-        assert!(!checks.iter().any(|c| c.name == "qemu-arm-static"));
+    /// The `deliverable = uboot` shape: compiles a bootloader and assembles no image.
+    fn bootloader_build() -> ToolNeeds {
+        ToolNeeds {
+            target: Arch::Arm64,
+            compiles: Some(std::env::temp_dir()),
+            assembles_image: false,
+        }
+    }
 
-        // The same host building for itself needs neither, and building arm64 from
-        // x86_64 needs both — the two ends the split has to keep intact.
-        let native = tool_checks_on(arm64, &compiling_build());
-        assert!(!native.iter().any(|c| c.name.contains("qemu")));
-        assert!(!native.iter().any(|c| c.name.ends_with("-gcc")));
-        let x86 = HostInfo {
-            arch: "x86_64",
-            os: "linux",
-        };
-        let emulated = tool_checks_on(x86, &compiling_build());
-        assert!(emulated.iter().any(|c| c.name == "qemu-aarch64-static"));
-        assert!(emulated.iter().any(|c| c.name == "aarch64-linux-gnu-gcc"));
+    /// An x86_64 host, which executes neither arm64 nor armhf binaries — so every
+    /// interpreter-gated check is emitted and the fixtures differ only in what they
+    /// build. Fixed rather than detected, because a native-arm64 host answers
+    /// differently and the assertions below are about the *needs*, not about the machine
+    /// running the test.
+    const X86: HostInfo = HostInfo {
+        arch: "x86_64",
+        os: "linux",
+    };
+
+    /// The names of the checks `needs` emits on [`X86`], in report order, with the two
+    /// prose-worded checks reduced to a stable token.
+    ///
+    /// The user-namespace and binfmt checks name themselves in a sentence; an assertion
+    /// that transcribed the sentence would be about the wording rather than about which
+    /// requirements exist.
+    fn check_names(needs: &ToolNeeds) -> Vec<String> {
+        tool_checks_on(X86, needs)
+            .into_iter()
+            .map(|c| {
+                if c.name.contains("user namespace") {
+                    "user namespaces".to_string()
+                } else if c.name.contains("binfmt") {
+                    "binfmt".to_string()
+                } else {
+                    c.name
+                }
+            })
+            .collect()
+    }
+
+    /// The whole of what a build that compiles asks of its host, asserted as a set.
+    ///
+    /// A membership test would pass while a retired requirement quietly came back, and
+    /// the set is small enough for the exact list to be the assertion — so this names
+    /// every check the most demanding build emits, and a new one has to be added here
+    /// deliberately.
+    #[test]
+    fn a_compiling_build_asks_for_git_a_namespace_and_an_overlay() {
+        assert_eq!(
+            check_names(&compiling_build()),
+            [
+                "git",
+                "user namespaces",
+                "unprivileged overlay",
+                "tar",
+                "cp",
+                "qemu-aarch64-static",
+                "binfmt",
+                "e2fsck",
+            ],
+            "the host requirement list is a documented claim; a new entry belongs in \
+             docs/src/getting-started.md too"
+        );
     }
 
     #[test]
-    fn a_compiling_build_asks_for_the_toolchain() {
+    fn no_build_asks_for_a_compiler_or_a_packaging_tool() {
+        // "Your host supplies no compiler and no packaging tool" is a claim about an
+        // absence, so it is asserted as one: every compiler, packaging tool and
+        // build-dependency is a package of a provisioned root, resolved from the build's
+        // own mirror list and sha256-pinned in that root's manifest.
+        //
+        // Worth a test of its own because the failure mode is silent. A host requirement
+        // can return without anyone adding a check for it — a tool the build invokes
+        // execs another, and the second one is only reached at the end of a 30-minute
+        // compile. `make bindeb-pkg` ending in `dh_builddeb` execing `dpkg-deb` is the
+        // shape of it. Naming each absent tool is what makes that visible here rather
+        // than on a fresh host.
+        //
+        // Asserted against the build that compiles the most: a kernel, u-boot,
+        // out-of-tree modules and the media-accel stack.
         let checks = tool_checks(&compiling_build());
-        for needed in ["git", "make", "bc", "flex", "bison", "fakeroot", "dpkg-deb"] {
-            assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
+        // The compile toolchain and the kernel's and u-boot's generators; then `make
+        // bindeb-pkg`'s chain at both the depths it can fail at; then u-boot's
+        // pylibfdt/binman set; and last the wrapper that never did anything.
+        for gone in [
+            "cc",
+            "gcc",
+            "make",
+            "bc",
+            "flex",
+            "bison",
+            "libssl",
+            "dpkg-buildpackage",
+            "dpkg-deb",
+            "dh",
+            "libelf",
+            "libdw",
+            "rsync",
+            "cpio",
+            "depmod",
+            "swig",
+            "python3",
+            "setuptools",
+            "pyelftools",
+            "fakeroot",
+        ] {
+            assert!(
+                !checks.iter().any(|c| c.name.contains(gone)),
+                "{gone} is a package of a provisioned root, not a host requirement"
+            );
         }
-        // Image assembly needs no host filesystem tool now; `e2fsck` rides along as the
-        // sole optional cross-check, and every other tool is a hard requirement.
+        // Every remaining check is a hard requirement but one: `e2fsck` is the optional
+        // cross-check of a filesystem ferrosys already scanned in-process.
         assert!(
             checks
                 .iter()
@@ -1162,31 +844,6 @@ mod tests {
     }
 
     #[test]
-    fn a_kernel_build_asks_for_the_bindeb_pkg_deps() {
-        // `make bindeb-pkg` runs `dpkg-buildpackage`, which enforces the generated
-        // control's build-deps before compiling. doctor must list them or it passes and
-        // the build dies on `dpkg-checkbuilddeps` minutes in (the fresh-host trap).
-        let checks = tool_checks(&compiling_build());
-        for needed in ["dh", "libelf", "libdw", "rsync", "cpio", "depmod"] {
-            assert!(
-                checks.iter().any(|c| c.name == needed && c.required),
-                "a kernel build must require {needed}"
-            );
-        }
-        // A kernel-less build packages no kernel, so it must NOT ask for the deb deps.
-        let no_kernel = ToolNeeds {
-            compiles_kernel: false,
-            ..compiling_build()
-        };
-        for absent in ["dh", "libelf", "libdw", "depmod"] {
-            assert!(
-                !tool_checks(&no_kernel).iter().any(|c| c.name == absent),
-                "{absent} is a kernel-deb dep; a kernel-less build should not ask for it"
-            );
-        }
-    }
-
-    #[test]
     fn an_image_build_asks_for_the_two_tools_the_image_path_shells_out_to() {
         // `doctor`'s contract is what *this build* will invoke, not what a Linux host
         // usually has. Both are effectively universal, which is why they are the two
@@ -1199,65 +856,29 @@ mod tests {
                 "an image build must require {needed}"
             );
         }
-        // A u-boot-only deliverable assembles no rootfs and stages no overlay.
-        let uboot_only = ToolNeeds {
-            assembles_image: false,
-            ..compiling_build()
-        };
+        // A u-boot-only deliverable assembles no rootfs and stages no overlay tree.
         for absent in ["tar", "cp"] {
             assert!(
-                !tool_checks(&uboot_only).iter().any(|c| c.name == absent),
+                !tool_checks(&bootloader_build())
+                    .iter()
+                    .any(|c| c.name == absent),
                 "{absent} is an image-path tool; a u-boot-only build should not ask for it"
             );
         }
     }
 
     #[test]
-    fn a_uboot_build_asks_for_the_pylibfdt_deps() {
-        // u-boot compiles its pylibfdt bindings + runs binman; a fresh host has none of
-        // this and fails on a mid-build Python traceback, not a clear missing-dep error.
-        let checks = tool_checks(&compiling_build());
-        for needed in [
-            "swig",
-            "python3-dev",
-            "python3-setuptools",
-            "python3-pyelftools",
-        ] {
-            assert!(
-                checks.iter().any(|c| c.name == needed && c.required),
-                "a u-boot build must require {needed}"
-            );
-        }
-        // A board that boots its own firmware compiles no u-boot and skips them.
-        let no_uboot = ToolNeeds {
-            builds_uboot: false,
-            ..compiling_build()
-        };
-        for absent in [
-            "swig",
-            "python3-dev",
-            "python3-setuptools",
-            "python3-pyelftools",
-        ] {
-            assert!(
-                !tool_checks(&no_uboot).iter().any(|c| c.name == absent),
-                "{absent} is a u-boot dep; a firmware-boot board should not ask for it"
-            );
-        }
-    }
-
-    #[test]
-    fn the_sandbox_adds_no_external_tool_and_qemu_stays_cross_only() {
-        // The package stages enter their target-arch sandbox through the in-process
-        // ferroday-cage library, not an external sandbox binary, so a sandbox build
-        // asks for no `bwrap`/`bubblewrap` — only the unprivileged user namespaces
-        // that every build already requires.
+    fn the_provisioned_roots_add_no_external_tool() {
+        // Every root a build stands up is bootstrapped and entered through the
+        // in-process ferroday-cage library rather than an external sandbox binary, so
+        // none of them asks for `bwrap`/`bubblewrap` — only the unprivileged user
+        // namespaces every build already requires.
         let checks = tool_checks(&compiling_build());
         assert!(
             !checks
                 .iter()
                 .any(|c| c.name == "bwrap" || c.name == "bubblewrap"),
-            "the in-process sandbox needs no external sandbox binary"
+            "the in-process cage needs no external sandbox binary"
         );
         assert!(
             checks
@@ -1265,64 +886,85 @@ mod tests {
                 .any(|c| c.name.contains("user namespace") && c.required),
             "every build requires unprivileged user namespaces"
         );
-        // The overlay behind each component's build root is the sandbox's one host
-        // requirement beyond those namespaces, and it is asked for only by a build that
-        // compiles packages in there.
-        assert!(
-            checks
-                .iter()
-                .any(|c| c.name == "unprivileged overlay" && c.required),
-            "a sandbox build requires an unprivileged overlay"
-        );
+        // The overlay each compile root layers its stage's build-deps on is the one host
+        // capability beyond those namespaces, and it belongs to compiling rather than to
+        // the sandbox: a bootloader-only build layers u-boot's deps and needs it too.
+        for compiles in [compiling_build(), bootloader_build()] {
+            assert!(
+                tool_checks(&compiles)
+                    .iter()
+                    .any(|c| c.name == "unprivileged overlay" && c.required),
+                "a build that compiles layers a build root over an overlay"
+            );
+        }
         assert!(
             !tool_checks(&assembling_build())
                 .iter()
                 .any(|c| c.name == "unprivileged overlay"),
-            "a build that compiles no packages stands up no build root"
-        );
-        // qemu-user keys on the interpreter question, not the toolchain one: a host
-        // that runs the target's binaries directly never consults a binfmt handler,
-        // whether or not it can compile for that target.
-        let host = HostInfo::detect();
-        assert_eq!(
-            checks.iter().any(|c| c.name == "qemu-aarch64-static"),
-            host.needs_interpreter(Arch::Arm64),
-            "qemu-user is needed exactly when the host cannot run the target's binaries"
+            "a build that compiles nothing stands up no build root"
         );
     }
 
     #[test]
-    fn a_build_that_compiles_nothing_asks_for_no_compiler() {
-        // The payoff of a needs-driven list: this board installs Debian's kernel and
-        // boots its own firmware, so a cross compiler is not merely unused — telling
-        // the operator to install one is noise a genuinely missing tool could hide in.
-        let checks = tool_checks(&assembling_build());
-        for absent in ["git", "make", "bc", "flex", "bison", "openssl"] {
-            assert!(
-                !checks.iter().any(|c| c.name.contains(absent)),
-                "{absent} is not needed by a build that compiles nothing"
-            );
-        }
-        assert!(!checks.iter().any(|c| c.name.ends_with("gcc")));
+    fn an_interpreter_is_a_requirement_of_the_image_path_alone() {
+        // qemu-user answers two questions at once, and both have to hold. *Can* the host
+        // execute the target's binaries, and *does* this build ask it to — which only
+        // the image path does: the OS rootfs runs the target's maintainer scripts and
+        // the media-accel `.deb`s compile in a target-arch sandbox. The cross root and
+        // the packaging root are the host's own architecture.
+        let image = check_names(&compiling_build());
+        assert!(image.iter().any(|n| n == "qemu-aarch64-static"));
+        assert!(image.iter().any(|n| n == "binfmt"));
 
-        // What it *does* still need: the OS rootfs is bootstrapped and content-pinned
-        // the same way, and its armhf maintainer scripts still run under qemu — so a
-        // missing binfmt handler is still a blocking failure, and it is the *arm* one,
-        // not aarch64.
-        for needed in ["fakeroot", "dpkg-deb"] {
-            assert!(checks.iter().any(|c| c.name == needed), "missing {needed}");
-        }
-        // On an arm64 host neither is asked for: CONFIG_COMPAT=y runs armhf binaries
-        // natively, so the interpreter is genuinely not a requirement there even though
-        // the cross toolchain still is.
-        let host = HostInfo::detect();
-        assert_eq!(
-            checks.iter().any(|c| c.name == "qemu-arm-static"),
-            host.needs_interpreter(Arch::Armv7)
+        // Same host, same foreign target, no image: nothing arm64 is ever executed.
+        let loader = check_names(&bootloader_build());
+        assert!(
+            !loader.iter().any(|n| n.contains("qemu") || n == "binfmt"),
+            "a bootloader-only build compiles in a host-arch root and runs nothing \
+             foreign: {loader:?}"
         );
+
+        // The one host/target pair where "cross" and "interpreted" disagree, and the
+        // reason the predicate is `needs_interpreter` rather than "is this build cross".
+        // An arm64 kernel with CONFIG_COMPAT=y runs armhf binaries natively, so an arm64
+        // host assembling an armhf image consults no binfmt handler at all.
+        //
+        // Asserted against an explicit host rather than the running one: no CI machine
+        // here is arm64, and reporting a blocking qemu requirement on the user's only
+        // native-arm64 box is exactly the noise ToolNeeds exists to eliminate.
+        let arm64 = HostInfo {
+            arch: "aarch64",
+            os: "linux",
+        };
+        let armhf = tool_checks_on(arm64, &assembling_build());
+        assert!(
+            !armhf
+                .iter()
+                .any(|c| c.name.contains("qemu") || c.name.contains("binfmt")),
+            "an arm64 host runs armhf binaries directly: {:?}",
+            armhf.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_build_that_compiles_nothing_asks_for_neither_git_nor_an_overlay() {
+        // The payoff of a needs-driven list: this board installs Debian's kernel and
+        // boots its own firmware, so it clones nothing and layers nothing. Naming those
+        // requirements anyway would be noise a genuinely missing tool could hide in.
+        //
+        // It is also the case that makes "boot2deb needs no dpkg-family host" a plain
+        // claim rather than a technicality: for this recipe the whole host list is
+        // `tar`, `cp`, user namespaces, and — on a host that cannot run armhf — qemu.
         assert_eq!(
-            checks.iter().any(|c| c.name.contains("arm binfmt")),
-            host.needs_interpreter(Arch::Armv7)
+            check_names(&assembling_build()),
+            [
+                "user namespaces",
+                "tar",
+                "cp",
+                "qemu-arm-static",
+                "binfmt",
+                "e2fsck",
+            ]
         );
     }
 

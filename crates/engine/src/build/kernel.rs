@@ -20,11 +20,11 @@ use crate::build::{
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::kconfig;
+use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, CompileRoot};
 use boot2deb_core::lock::Lock;
 use boot2deb_core::model::ResolvedCompiledKernel;
 use boot2deb_core::ResolvedBuild;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Debian package build revision baked into `LOCALVERSION` and the changelog.
 /// Fixed at 1: a boot2deb build is a fresh reproduction, not an incrementing
@@ -43,6 +43,25 @@ const CLONE_STAGE_VERSION: u32 = 1;
 /// Covers everything `bindeb-pkg` emits, not just the two `collect` stages.
 const KERNEL_DEB_PREFIXES: &[&str] = &["linux-image-", "linux-headers-", "linux-libc-dev"];
 
+/// Build-dependencies this stage layers over the cross root's base — what a kernel
+/// build wants that the toolchain, `make`, `bc`, `bison`, `flex` and `libssl-dev`
+/// already in that base do not supply.
+///
+/// `debhelper` because `bindeb-pkg` ends in `dh_builddeb`; `libelf-dev` and `libdw-dev`
+/// for `objtool` and BTF; `rsync` and `cpio` for the headers package and the initramfs
+/// staging; `kmod` for `depmod`. Declared rather than folded into the base because only
+/// this stage needs them: a u-boot-only build has no reason to carry `libdw-dev`, and a
+/// declaration is what makes an undeclared dependency fail loudly instead of compiling
+/// against a leftover.
+pub const BUILD_DEPS: &[&str] = &[
+    "debhelper",
+    "libelf-dev",
+    "libdw-dev",
+    "rsync",
+    "cpio",
+    "kmod",
+];
+
 /// Stage-recipe version for the kernel **output** signature (Tier-2 artifact cache):
 /// this stage's own logic, folded in as an input.
 ///
@@ -50,7 +69,7 @@ const KERNEL_DEB_PREFIXES: &[&str] = &["linux-image-", "linux-headers-", "linux-
 /// compile or package logic changes the produced `.deb`s in a way the folded inputs do
 /// not already capture — a changed `make` invocation, a `.config` generated under
 /// different toolchain variables, a different archive compressor.
-const OUTPUT_STAGE_VERSION: u32 = 3;
+const OUTPUT_STAGE_VERSION: u32 = 4;
 
 /// Filesystem inputs for the kernel stage (the lock and resolved build carry the
 /// pins and axes; these are the on-disk locations).
@@ -72,6 +91,15 @@ pub struct KernelOptions<'a> {
     /// Scratch directory holding the kernel clone (`<work>/linux`) and the `.deb`s
     /// `bindeb-pkg` drops beside it.
     pub work_dir: &'a Path,
+    /// The host-arch cross root every `make` in this stage runs in
+    /// ([`SandboxRole::Cross`](crate::sandbox::SandboxRole::Cross)).
+    ///
+    /// The compiler, `dpkg-buildpackage` and `dh_builddeb` are all packages of this
+    /// root, so the host needs none of them and what they resolved to is a property of
+    /// the lock's mirror list. Bootstrapped lazily: a Tier-2 cache hit returns before
+    /// the stage asks for a build root, so a build that restores its kernel provisions
+    /// nothing.
+    pub cross: &'a dyn BuildSandbox,
     /// Directory the produced `.deb`s are staged into.
     pub out_dir: &'a Path,
     /// Root of the Tier-2 artifact store ([`crate::artstore`]), or `None` to
@@ -156,7 +184,7 @@ pub fn build_kernel(
     // Tier-2 output cache: if the full output signature (tree inputs +
     // config + toolchain) is already stored, restore the `.deb`s and skip the
     // clone/patch/configure/compile entirely — the whole payoff of the store.
-    let out_man = output_manifest(build, kernel, lock, opts, env, patches, &dts_fp)?;
+    let out_man = output_manifest(build, kernel, lock, opts.fragments, env, patches, &dts_fp)?;
     if let Some([image_deb, headers_deb]) = build::restore_stage_outputs(
         opts.store,
         "kernel",
@@ -183,7 +211,15 @@ pub fn build_kernel(
     })?;
     step.progress(30);
 
-    configure(build, kernel, opts, env, &tree, &step)?;
+    // Everything from here compiles, so the cross root is stood up here rather than at
+    // the top of the stage: the Tier-2 hit above returns without ever provisioning one.
+    let (root, binds) = compile_root(opts, &step)?;
+    let cr = CompileRoot {
+        root: &root,
+        binds: &binds,
+    };
+
+    configure(build, kernel, opts, env, &cr, &tree, &step)?;
     step.progress(40);
 
     // Sweep kernel `.deb`s a previous build left in the work dir: `remove_dir_all`
@@ -195,7 +231,7 @@ pub fn build_kernel(
     // Deterministic build timestamp from the locked base commit, not the tree's
     // README mtime (= clone time) or HEAD (a patch commit stamped now).
     let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
-    compile(build, env, &tree, epoch, &step)?;
+    compile(build, env, &cr, &tree, epoch, &step)?;
 
     let artifacts = collect(opts, &step)?;
 
@@ -272,9 +308,14 @@ pub fn ensure_module_tree(
         clone_and_patch(build, lock, opts, &tree, step)?;
         crate::signature::write_manifest(&tree, &man)?;
     }
-    configure(build, kernel, opts, env, &tree, step)?;
+    let (root, binds) = compile_root(opts, step)?;
+    let cr = CompileRoot {
+        root: &root,
+        binds: &binds,
+    };
+    configure(build, kernel, opts, env, &cr, &tree, step)?;
     let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
-    compile(build, env, &tree, epoch, step)?;
+    compile(build, env, &cr, &tree, epoch, step)?;
     Ok(tree)
 }
 
@@ -320,25 +361,28 @@ pub fn build_dtb(
     }
     step.progress(40);
 
-    configure(build, kernel, opts, env, &tree, &step)?;
+    let (root, binds) = compile_root(opts, &step)?;
+    let cr = CompileRoot {
+        root: &root,
+        binds: &binds,
+    };
+    configure(build, kernel, opts, env, &cr, &tree, &step)?;
 
     // `kernel_dtb` is already `<dt_dir>/<board>.dtb`, which is exactly how kbuild's
     // `%.dtb` rule names a DTB (relative to `arch/<arch>/boot/dts`).
     build::reject_unsafe_make_target("kernel_dtb", &build.kernel_dtb)?;
-    let mut make = Command::new("make");
-    make.arg("-C")
-        .arg(&tree)
-        .arg(format!("-j{}", env.jobs()))
-        .arg("--")
-        .arg(&build.kernel_dtb);
+    let argv = vec![
+        "make".to_string(),
+        "-C".to_string(),
+        tree.display().to_string(),
+        format!("-j{}", env.jobs()),
+        "--".to_string(),
+        build.kernel_dtb.clone(),
+    ];
     let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
-    for (key, value) in kbuild_env(build, epoch) {
-        make.env(key, value);
-    }
-    if let Some(prefix) = &env.cross_compile {
-        make.env("CROSS_COMPILE", prefix);
-    }
-    build::run(make, "make", "make <board>.dtb", &step)?;
+    let mut vars = kbuild_env(build, epoch);
+    vars.extend(cross_env(env));
+    build::run_in_root(&cr, &tree, &argv, &vars, "make <board>.dtb", &step)?;
 
     let built = dt_source_dir(build, &tree)
         .join(Path::new(&build.kernel_dtb).file_name().unwrap_or_default());
@@ -365,30 +409,38 @@ pub fn build_dtb(
 /// the artifact store restores the `.deb`s instead of rebuilding, so the key must
 /// cover everything that can change them. `SOURCE_DATE_EPOCH` derives from the
 /// kernel commit, already folded via the tree dependency.
-fn output_manifest(
+///
+/// Public so `why-rebuild` ([`crate::plan`]) asks the artifact store the same
+/// question this stage does, rather than reimplementing the key it is asking under.
+pub fn output_manifest(
     build: &ResolvedBuild,
     kernel: &ResolvedCompiledKernel,
     lock: &Lock,
-    opts: &KernelOptions,
+    fragments: &[PathBuf],
     env: &BuildEnv,
     patches: SeriesIdentity,
     device_dts: &[String],
 ) -> Result<crate::signature::SignatureManifest, EngineError> {
     let tree_sig = clone_manifest(lock, patches, device_dts)?.signature();
-    let mut fragments = Vec::with_capacity(opts.fragments.len());
-    for frag in opts.fragments {
+    let mut frag_fps = Vec::with_capacity(fragments.len());
+    for frag in fragments {
         let name = frag.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        fragments.push(format!("{name}={}", crate::build::file_fingerprint(frag)?));
+        frag_fps.push(format!("{name}={}", crate::build::file_fingerprint(frag)?));
     }
     let mut b = crate::signature::SignatureBuilder::new("kernel:out", OUTPUT_STAGE_VERSION);
     b.fold_dep(&tree_sig)
-        .fold_ordered("fragments", &fragments)
+        .fold_ordered("fragments", &frag_fps)
         .fold_scalar("base_defconfig", &kernel.base_defconfig)
         .fold_scalar("kernel_arch", &build.kernel_arch)
         .fold_scalar("kbuild_image", &build.kbuild_image)
         .fold_scalar("localversion", &localversion(build))
         .fold_scalar("cross", env.cross_compile.as_deref().unwrap_or(""))
-        .fold_scalar("toolchain", &env.toolchain_id);
+        .fold_scalar("toolchain", &env.toolchain_id)
+        // The base root's identity above covers what the toolchain is; this covers what
+        // was layered over it. Both reach the compile, so both reach the key — kbuild
+        // probes for what is present (`libelf` decides whether objtool builds BTF), so a
+        // package added to or removed from this list is a different kernel.
+        .fold_set("build_deps", BUILD_DEPS);
     Ok(b.manifest())
 }
 
@@ -574,6 +626,37 @@ fn dtb_config_symbol(makefile: &str) -> Option<&str> {
     })
 }
 
+/// Stand up the build root this stage compiles in, and the host paths its commands
+/// must see.
+///
+/// The work dir covers the source tree, the generated-config scratch and where
+/// `bindeb-pkg` drops its `.deb`s — one bind for all three, since they are one tree.
+/// The fragments are bound individually because they live in the config root, outside
+/// the work dir, and `merge_config.sh` reads them from inside by absolute path.
+fn compile_root(
+    opts: &KernelOptions,
+    step: &Step,
+) -> Result<(BuildRoot, Vec<PathBuf>), EngineError> {
+    opts.cross.ensure_ready(step)?;
+    let root = opts.cross.build_root(
+        &BuildRootSpec {
+            packages: BUILD_DEPS,
+            // Nothing this build produced: a kernel build-depends only on the archive.
+            pool: None,
+            stage: "kernel",
+        },
+        step,
+    )?;
+    // Absolute, because a bind is established inside the root at its own path and the
+    // cage has no CWD to resolve a relative one against. `--root .` is the default, so
+    // config-root-relative fragment paths are the normal case rather than the odd one.
+    let mut binds = vec![opts.work_dir.to_path_buf()];
+    for fragment in opts.fragments {
+        binds.push(std::path::absolute(fragment).map_err(|s| EngineError::io(fragment, s))?);
+    }
+    Ok((root, binds))
+}
+
 /// Generate the fragment-merged `.config` (identical to the parity check's)
 /// and copy it into the tree as `.config`.
 fn configure(
@@ -581,10 +664,11 @@ fn configure(
     kernel: &ResolvedCompiledKernel,
     opts: &KernelOptions,
     env: &BuildEnv,
+    cr: &CompileRoot,
     tree: &Path,
     step: &Step,
 ) -> Result<(), EngineError> {
-    mrproper_if_dirty(build, env, tree, step)?;
+    mrproper_if_dirty(build, env, cr, tree, step)?;
     let inputs = kconfig::ConfigInputs {
         tree,
         arch: &build.kernel_arch,
@@ -594,12 +678,14 @@ fn configure(
         cross_compile: env.cross_compile.as_deref(),
         base_defconfig: &kernel.base_defconfig,
         fragments: opts.fragments,
+        cr,
     };
     let config_out = opts.work_dir.join("config-gen");
     let generated = kconfig::generate(&inputs, &config_out, step)?;
     for sym in &generated.unmet {
         step.emit(
             crate::event::Stream::Stderr,
+            crate::event::LogOrigin::Stage,
             format!("warning: fragment symbol not in final .config: {sym}"),
         );
     }
@@ -641,6 +727,7 @@ fn in_tree_build_state(build: &ResolvedBuild, tree: &Path) -> [PathBuf; 3] {
 fn mrproper_if_dirty(
     build: &ResolvedBuild,
     env: &BuildEnv,
+    cr: &CompileRoot,
     tree: &Path,
     step: &Step,
 ) -> Result<(), EngineError> {
@@ -648,15 +735,26 @@ fn mrproper_if_dirty(
         return Ok(());
     }
     step.log("kernel tree carries a previous in-tree build — mrproper before configuring");
-    let mut make = Command::new("make");
-    make.arg("-C")
-        .arg(tree)
-        .arg(format!("ARCH={}", build.kernel_arch))
-        .arg("mrproper");
-    if let Some(prefix) = &env.cross_compile {
-        make.env("CROSS_COMPILE", prefix);
-    }
-    build::run(make, "make", "make mrproper", step)
+    let argv = vec![
+        "make".to_string(),
+        "-C".to_string(),
+        tree.display().to_string(),
+        format!("ARCH={}", build.kernel_arch),
+        "mrproper".to_string(),
+    ];
+    build::run_in_root(cr, tree, &argv, &cross_env(env), "make mrproper", step)
+}
+
+/// `CROSS_COMPILE` as a one-entry environment, or empty where the cross root is already
+/// the target's architecture and the compile is native.
+///
+/// A `Vec` rather than an `Option` because every caller concatenates it onto the
+/// invocation's own variables, and an empty list concatenates without a branch.
+fn cross_env(env: &BuildEnv) -> Vec<(String, String)> {
+    env.cross_compile
+        .iter()
+        .map(|prefix| ("CROSS_COMPILE".to_string(), prefix.clone()))
+        .collect()
 }
 
 /// Run `make bindeb-pkg` with the resolved kbuild env and cross settings.
@@ -664,36 +762,43 @@ fn mrproper_if_dirty(
 fn compile(
     build: &ResolvedBuild,
     env: &BuildEnv,
+    cr: &CompileRoot,
     tree: &Path,
     source_date_epoch: Option<u64>,
     step: &Step,
 ) -> Result<(), EngineError> {
-    let mut make = Command::new("make");
-    make.arg("-C")
-        .arg(tree)
-        .arg(format!("-j{}", env.jobs()))
-        .arg("bindeb-pkg")
-        .arg(format!("KBUILD_IMAGE={}", build.kbuild_image))
-        .arg(format!("LOCALVERSION={}", localversion(build)));
-    // Cross builds skip dpkg's build-dep check for target-arch -dev packages we
-    // don't need at compile time (no module signing in this config): otherwise
-    // `dpkg-checkbuilddeps` would demand `libssl-dev:arm64` on an x86_64 host.
+    let mut argv = vec![
+        "make".to_string(),
+        "-C".to_string(),
+        tree.display().to_string(),
+        format!("-j{}", env.jobs()),
+        "bindeb-pkg".to_string(),
+        format!("KBUILD_IMAGE={}", build.kbuild_image),
+        format!("LOCALVERSION={}", localversion(build)),
+    ];
+    // `dpkg-checkbuilddeps` asks a question this build answers elsewhere, and better.
+    // Its oracle is a *dpkg database*, and the database it reads is the
+    // cross root's — while what the root holds is decided by [`BUILD_DEPS`], resolved and
+    // installed before `make` starts. So the gate can only disagree with the declaration,
+    // and the declaration is the stronger statement: a missing build-dependency fails at
+    // layer-staging time with the package named, rather than here.
     //
-    // The native path keeps the gate, and it is an oracle `doctor` cannot reproduce:
-    // it asks the *dpkg database*, while `doctor` scans `PATH` and `pkg-config`. A
-    // host whose build deps are present but not dpkg-registered therefore passes
-    // preflight and fails here. `doctor` says so in a note on this exact path rather
-    // than re-implementing dpkg's dependency solve.
-    if env.cross_compile.is_some() {
-        make.arg("DPKG_FLAGS=-d");
-    }
-    for (key, value) in kbuild_env(build, source_date_epoch) {
-        make.env(key, value);
-    }
-    if let Some(prefix) = &env.cross_compile {
-        make.env("CROSS_COMPILE", prefix);
-    }
-    build::run(make, "make", "make bindeb-pkg", step)
+    // The disagreement is not hypothetical. The generated `debian/control`
+    // build-depends on `libssl-dev` unqualified — which resolves to the *target*
+    // architecture — while the only openssl this build links is the one its host tools
+    // (`sign-file`, `extract-cert`) use, and that is `libssl-dev:native`, which the base
+    // carries. It also build-depends on `python3:native` and on `gcc-<target-triple>`,
+    // neither of which this configuration invokes. Satisfying any of them would mean
+    // multi-arch-enabling the root and installing packages nothing reads.
+    //
+    // Unconditional, not cross-only: the root is a provisioned root on both paths, so a
+    // native build reads exactly the same database and hits the same unmet
+    // `python3:native`. Gating on `cross_compile` would leave an arm64 host building an
+    // arm64 board failing a check about packages its compile never opens.
+    argv.push("DPKG_FLAGS=-d".to_string());
+    let mut vars = kbuild_env(build, source_date_epoch);
+    vars.extend(cross_env(env));
+    build::run_in_root(cr, tree, &argv, &vars, "make bindeb-pkg", step)
 }
 
 /// Locate and stage the produced kernel `.deb`s from beside the tree.
@@ -732,7 +837,7 @@ pub fn kbuild_env(build: &ResolvedBuild, source_date_epoch: Option<u64>) -> Vec<
         ("ARCH".to_string(), build.kernel_arch.clone()),
         ("KDEB_CHANGELOG_DIST".to_string(), "stable".to_string()),
         // The kernel packages itself, so it needs the compressor stated the same way
-        // [`dpkg_deb_build`](crate::build::dpkg_deb_build) states it. Left unset, the
+        // [`archive_deb`](crate::build::archive_deb) states it. Left unset, the
         // kernel's `debian/rules` expands `-Z$(KDEB_COMPRESS)` to nothing and
         // `dh_builddeb` falls through to whatever the host distro patched into its
         // `dpkg` default — `xz` on Debian, `zstd` on Ubuntu-derived. These are the
@@ -759,7 +864,7 @@ pub fn kbuild_env(build: &ResolvedBuild, source_date_epoch: Option<u64>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::rk1_build;
+    use crate::test_support::{rk1_build, UnusedSandbox};
     use boot2deb_core::lock::{
         BlobsPin, FfmpegPins, GitPin, KernelPin, Lock, PatchesPin, RootfsPin, UbootPin,
         UserspacePins,
@@ -926,6 +1031,11 @@ mod tests {
             fragments: &[],
             device_dts: &[],
             work_dir: &work,
+            // `collect` reads only the staged `.deb`s beside the tree, so it never asks
+            // for a root. The stub makes that a compile-time fact rather than a comment:
+            // a change that made this path compile would panic here instead of silently
+            // provisioning a Debian userland inside a unit test.
+            cross: &UnusedSandbox,
             out_dir: &out,
             store: None,
         };
@@ -945,24 +1055,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tree = tmp.path();
         let build = rk1_build();
-        let sink = |_e: crate::event::Event| {};
-        let step = Step::start(&sink, "configure");
-
-        // A freshly-cloned tree carries none of the three, so nothing is cleaned and
-        // no `make` runs (this test never shells out).
+        // A freshly-cloned tree carries none of the three, so `mrproper_if_dirty`
+        // returns before it asks for a build root — which is what lets this test run
+        // without provisioning one.
         assert!(!in_tree_build_state(&build, tree).iter().any(|p| p.exists()));
-        mrproper_if_dirty(
-            &build,
-            &BuildEnv {
-                cross_compile: None,
-                jobs: None,
-                toolchain_id: String::new(),
-                sandbox_id: String::new(),
-            },
-            tree,
-            &step,
-        )
-        .unwrap();
 
         // Each of kbuild's three markers, alone, makes the tree dirty. `configure`
         // itself creates the first by copying the generated `.config` in, which is why
@@ -1120,6 +1216,7 @@ mod tests {
             fragments: &frags,
             device_dts: &[],
             work_dir: tmp.path(),
+            cross: &UnusedSandbox,
             out_dir: tmp.path(),
             store: None,
         };
@@ -1128,13 +1225,14 @@ mod tests {
             jobs: None,
             toolchain_id: tc.to_string(),
             sandbox_id: String::new(),
+            packaging_id: String::new(),
         };
         let sig = |lock: &Lock, env: &BuildEnv| {
             output_manifest(
                 &build,
                 build.kernel.as_ref().unwrap().compiled().unwrap(),
                 lock,
-                &opts,
+                opts.fragments,
                 env,
                 SeriesIdentity::Pinned,
                 &[],
@@ -1175,8 +1273,8 @@ mod tests {
     }
 
     /// The kernel `.deb`s state their compressor rather than inheriting the host
-    /// distro's `dpkg` default, matching the host-side packaging in
-    /// [`crate::build::dpkg_deb_build`].
+    /// distro's `dpkg` default, matching the u-boot and kmod packaging in
+    /// [`crate::build::archive_deb`].
     ///
     /// The kernel packages itself through its own `debian/rules`, which never sees
     /// that function — so this env var is the whole of the guarantee for the two

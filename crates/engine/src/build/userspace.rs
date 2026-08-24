@@ -14,7 +14,7 @@
 //! full variant matrix.
 
 use crate::build::{
-    self, deb_names, stage_artifact, BuildEnv, PatchScope, PatchSource, SeriesIdentity,
+    self, deb_names, probe, stage_artifact, BuildEnv, PatchScope, PatchSource, SeriesIdentity,
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
@@ -29,7 +29,12 @@ const FETCH_STAGE_VERSION: u32 = 1;
 /// Stage-recipe version for a userspace **output** signature (Tier-2 artifact cache):
 /// bump when the build/package logic changes a package's `.deb`s in a way the
 /// folded inputs do not already capture.
-const OUTPUT_STAGE_VERSION: u32 = 1;
+const OUTPUT_STAGE_VERSION: u32 = 2;
+
+/// Where the lookup probe appends, relative to the stage root — a bound host path, so
+/// the record outlives the cage that wrote it and is not itself in the overlay under
+/// investigation.
+const LOOKUP_PROBE_REPORT: &str = "lookup-probe.log";
 
 /// Debian build-deps installed in the sandbox for MPP + RGA.
 const USERSPACE_DEPS: &[&str] = &[
@@ -51,6 +56,24 @@ const LIBMALI_DEPS: &[&str] = &[
     "libxdamage-dev",
     "libxext-dev",
 ];
+
+/// The build-dependency set this stage layers over the sandbox base.
+///
+/// One function, read by the [`BuildRootSpec`] that stages the layer *and* by
+/// [`output_manifest_for`], which keys every package of the stage on it — so a package
+/// cannot reach a `./configure` without reaching the key.
+///
+/// The `build_libmali` increment is one layer for the *whole stage*, not one per
+/// package, which is why it is an input to MPP's and librga's signatures as much as to
+/// Mali's: those X11 and Wayland `.pc` files are present in the root their `cmake` and
+/// `meson` runs probe, whether or not Mali is the thing being built.
+pub fn layer_packages(build_libmali: bool) -> Vec<&'static str> {
+    let mut deps: Vec<&'static str> = USERSPACE_DEPS.to_vec();
+    if build_libmali {
+        deps.extend_from_slice(LIBMALI_DEPS);
+    }
+    deps
+}
 
 /// `DEB_CFLAGS_APPEND` for the MPP/RGA builds. The tsukumijima forks pre-date
 /// gcc-14's stricter defaults and trip `-Werror` on K&R empty-paren prototypes;
@@ -202,10 +225,17 @@ pub fn build_userspace(
         .iter()
         .map(|p| {
             let pi = patch_ctx.inputs_for(p.name);
-            package_output_manifest(p, suite, arch, &env.sandbox_id, pi.as_ref())
-                .signature()
-                .as_str()
-                .to_string()
+            package_output_manifest(
+                p,
+                suite,
+                arch,
+                &env.sandbox_id,
+                opts.build_libmali,
+                pi.as_ref(),
+            )
+            .signature()
+            .as_str()
+            .to_string()
         })
         .collect();
     let cached: Vec<bool> = packages
@@ -226,10 +256,7 @@ pub fn build_userspace(
     } else {
         sandbox.ensure_ready(&step)?;
         step.progress(15);
-        let mut deps: Vec<&str> = USERSPACE_DEPS.to_vec();
-        if opts.build_libmali {
-            deps.extend_from_slice(LIBMALI_DEPS);
-        }
+        let deps = layer_packages(opts.build_libmali);
         Some(sandbox.build_root(
             &BuildRootSpec {
                 packages: &deps,
@@ -342,10 +369,14 @@ fn build_one(
     // read the base pin explicitly (still reachable after `git am`), not HEAD.
     let epoch = crate::git::commit_epoch(&tree, &pkg.pin.commit).ok();
     let dpkg_env = dpkg_env(env.jobs(), epoch);
-    let argv: Vec<String> = ["dpkg-buildpackage", "-us", "-uc", "-b"]
+    let build: Vec<String> = ["dpkg-buildpackage", "-us", "-uc", "-b"]
         .iter()
         .map(|s| s.to_string())
         .collect();
+    // The stage that has never lost a header, instrumented on the same terms as the one
+    // that has: this root is layered and emulated exactly as ffmpeg's is, and it stays
+    // a control only for as long as something is watching it.
+    let argv = probe::wrap(&build, &stage_root.join(LOOKUP_PROBE_REPORT));
     let binds = [stage_root.to_path_buf()];
     let context = format!("dpkg-buildpackage {}", pkg.name);
     let spec = SandboxRun {
@@ -535,6 +566,7 @@ pub fn output_manifest_for(
     suite: &str,
     arch: &str,
     sandbox_id: &str,
+    build_libmali: bool,
     patches: Option<&PatchInputs>,
 ) -> crate::signature::SignatureManifest {
     let tree_sig = signature_manifest(name, commit, patches).signature();
@@ -546,7 +578,12 @@ pub fn output_manifest_for(
         .fold_scalar("relax_cflags", RELAX_CFLAGS)
         .fold_scalar("suite", suite)
         .fold_scalar("arch", arch)
-        .fold_scalar("sandbox", sandbox_id);
+        .fold_scalar("sandbox", sandbox_id)
+        // The base root's identity above covers what the sandbox is; this covers what
+        // was layered over it. Both reach the compile, so both reach the key — see
+        // [`layer_packages`] for why `build_libmali` is an input to every package of the
+        // stage rather than to Mali's alone.
+        .fold_set("build_deps", &layer_packages(build_libmali));
     if name == "libmali" {
         b.fold_scalar("libmali_variant", LIBMALI_VARIANT);
     }
@@ -560,9 +597,18 @@ fn package_output_manifest(
     suite: &str,
     arch: &str,
     sandbox_id: &str,
+    build_libmali: bool,
     patches: Option<&PatchInputs>,
 ) -> crate::signature::SignatureManifest {
-    output_manifest_for(pkg.name, &pkg.pin.commit, suite, arch, sandbox_id, patches)
+    output_manifest_for(
+        pkg.name,
+        &pkg.pin.commit,
+        suite,
+        arch,
+        sandbox_id,
+        build_libmali,
+        patches,
+    )
 }
 
 /// Store the package's freshly-built `.deb`s (selected from `stage_root` by its name
@@ -644,6 +690,7 @@ fn filter_libmali_targets(targets: &Path, variant: &str, step: &Step) -> Result<
     if filtered.trim().is_empty() {
         step.emit(
             crate::event::Stream::Stderr,
+            crate::event::LogOrigin::Stage,
             format!("warning: libmali variant '{variant}' matched no targets; building all"),
         );
         return Ok(());
@@ -992,7 +1039,7 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         };
         let p1 = pin("c1");
         let sig = |pkg: &Package, suite: &str, arch: &str| {
-            package_output_manifest(pkg, suite, arch, SANDBOX, None).signature
+            package_output_manifest(pkg, suite, arch, SANDBOX, false, None).signature
         };
         let base = sig(&mpp(&p1), "forky", "arm64");
         // Stable under identical inputs.
@@ -1016,7 +1063,8 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
         };
         assert_ne!(
             base,
-            package_output_manifest(&mpp(&p1), "forky", "arm64", SANDBOX, Some(&patches)).signature
+            package_output_manifest(&mpp(&p1), "forky", "arm64", SANDBOX, false, Some(&patches))
+                .signature
         );
         // Distinct packages never share an output entry (their node names differ).
         let rga = Package {
@@ -1044,7 +1092,8 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
             commit: "c1".into(),
         };
         let sig = |sandbox: &str| {
-            output_manifest_for("mpp", &pin.commit, "forky", "arm64", sandbox, None).signature
+            output_manifest_for("mpp", &pin.commit, "forky", "arm64", sandbox, false, None)
+                .signature
         };
         let base = sig(SANDBOX);
         assert_eq!(base, sig(SANDBOX), "stable under an identical sandbox");
@@ -1058,5 +1107,34 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
             base,
             sig("http://deb.debian.org/debian | qemu-aarch64 version 10.0.0")
         );
+    }
+
+    /// What was *layered over* the sandbox splits the key too, for every package of the
+    /// stage rather than for the one the layer was widened for.
+    ///
+    /// `--build-libmali` adds X11 and Wayland `.pc` files to the one build root the whole
+    /// stage shares, so MPP's and librga's `cmake`/`meson` probes see them whether or not
+    /// Mali is what is being built. Without this fold, turning the flag on would change
+    /// what the compile detects while leaving the artifact store answering the same
+    /// question — which is how a `.deb` built in one environment gets restored into
+    /// another.
+    #[test]
+    fn the_layer_over_that_sandbox_splits_it_for_every_package_in_the_stage() {
+        let sig = |name: &str, build_libmali: bool| {
+            output_manifest_for(name, "c1", "forky", "arm64", SANDBOX, build_libmali, None)
+                .signature
+        };
+        for name in ["mpp", "librga", "libmali"] {
+            assert_ne!(
+                sig(name, false),
+                sig(name, true),
+                "{name} compiles in the widened root too"
+            );
+        }
+        // And the fold is of the resolved set, not of the flag: the same declaration
+        // yields the same key.
+        assert_eq!(sig("mpp", true), sig("mpp", true));
+        assert_eq!(layer_packages(false), USERSPACE_DEPS.to_vec());
+        assert!(layer_packages(true).ends_with(LIBMALI_DEPS));
     }
 }

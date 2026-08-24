@@ -1,19 +1,76 @@
 //! Output rendering: the one stdout contract for every command.
 //!
-//! A build streams [`Event`]s, rendered either for a human ([`print_event`]) or as
-//! NDJSON under `--json` ([`print_event_json`]); artifact locations travel on that
-//! same stream ([`emit_artifact`]) rather than as stray prints, and status lines go
-//! through [`note`] so both modes carry the same facts. The remaining helpers format
-//! the non-streaming commands' output.
+//! A build streams [`Event`]s, rendered either for a human ([`print_event_at`], at the
+//! caller's [`Verbosity`]) or as NDJSON under `--json` ([`print_event_json`]); artifact
+//! locations travel on that same stream ([`emit_artifact`]) rather than as stray
+//! prints, and status lines go through [`note`] so both modes carry the same facts. The
+//! remaining helpers format the non-streaming commands' output — [`print_columns`]
+//! sizing every `list-*` table from its own data.
 
 use boot2deb_core::model::{ResolvedBoot, ResolvedBuild, ResolvedKernel};
-use boot2deb_engine::event::{Event, Stream};
+use boot2deb_engine::event::{Event, LogOrigin, Stream};
 use boot2deb_engine::EventSink;
 use std::path::Path;
 
+/// How much of the [`Event`] stream a human rendering shows.
+///
+/// The levels exist because the stream carries two very different volumes: what a
+/// stage *decided* is tens of lines, and what its subprocesses *printed* is tens of
+/// thousands. Showing both by default made a documented tens-of-minutes kernel
+/// compile unreadable, and showing neither would hide the one thing a stuck build has
+/// to say — so the split is on [`LogOrigin`], not on a line budget.
+///
+/// `--json` is unaffected: NDJSON is the whole stream by definition, and filtering it
+/// would hand a scripted consumer a partial record of the build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Verbosity {
+    /// `--quiet`: artifacts and errors only — the result of the build and nothing
+    /// about its progress. For a scripted caller that wants the paths.
+    Quiet,
+    /// The default: step boundaries, coarse progress, each stage's own decisions, the
+    /// artifacts, and errors. Enough to follow a build, without the compile chatter.
+    #[default]
+    Normal,
+    /// `--verbose`: the above plus every relayed subprocess line — what `make`, `git`,
+    /// and `dpkg-buildpackage` actually printed. The level to reach for when a stage
+    /// fails or hangs.
+    Verbose,
+}
+
+impl Verbosity {
+    /// Resolve the two flags into a level. They are mutually exclusive at the clap
+    /// layer, so both set cannot reach here.
+    pub(crate) fn from_flags(quiet: bool, verbose: bool) -> Self {
+        match (quiet, verbose) {
+            (true, _) => Verbosity::Quiet,
+            (_, true) => Verbosity::Verbose,
+            _ => Verbosity::Normal,
+        }
+    }
+
+    /// Whether this level renders `event`.
+    ///
+    /// Errors and artifacts pass at every level: an error is why the command failed,
+    /// and an artifact path is the thing the command was run to produce.
+    fn shows(self, event: &Event) -> bool {
+        match event {
+            Event::Error { .. } | Event::Artifact { .. } => true,
+            Event::Log {
+                origin: LogOrigin::Subprocess,
+                ..
+            } => self == Verbosity::Verbose,
+            _ => self != Verbosity::Quiet,
+        }
+    }
+}
+
 /// Render one build [`Event`] to the terminal: step boundaries as `==>` headers,
-/// subprocess lines indented (stderr to stderr), progress and errors called out.
-pub(crate) fn print_event(event: &Event) {
+/// log lines indented (stderr to stderr), progress and errors called out — showing
+/// only what `verbosity` admits.
+pub(crate) fn print_event_at(verbosity: Verbosity, event: &Event) {
+    if !verbosity.shows(event) {
+        return;
+    }
     match event {
         Event::StepStarted { step } => println!("==> [{step}] started"),
         Event::Progress { step, pct } => println!("--> [{step}] {pct}%"),
@@ -52,15 +109,63 @@ pub(crate) fn emit_artifact(sink: &dyn EventSink, step: &str, role: &str, path: 
 /// A build status line: printed for a human, or carried on the `--json` stream
 /// as a stdout-tagged [`Event::Log`] under `step` — scripted consumers see the
 /// same facts without stdout mixing plain text into the NDJSON.
-pub(crate) fn note(json: bool, sink: &dyn EventSink, step: &str, line: String) {
+///
+/// `verbosity` gates the human side only; the `--json` stream carries the line
+/// regardless, since it is part of the record of the build. Tagged
+/// [`LogOrigin::Stage`], because it is the command speaking rather than a subprocess.
+pub(crate) fn note(
+    json: bool,
+    verbosity: Verbosity,
+    sink: &dyn EventSink,
+    step: &str,
+    line: String,
+) {
     if json {
         sink.emit(Event::Log {
             step: step.to_string(),
             stream: Stream::Stdout,
+            origin: LogOrigin::Stage,
             line,
         });
-    } else {
+    } else if verbosity != Verbosity::Quiet {
         println!("{line}");
+    }
+}
+
+/// Print `rows` as aligned columns, each width taken from the widest cell in it.
+///
+/// Every column but the last is padded and separated by two spaces; the last is
+/// written bare, so no line carries trailing whitespace into a reader's terminal or
+/// their copy-paste. A row shorter than the widest is padded with empty cells rather
+/// than truncating the table.
+///
+/// Widths come from the data because names do not fit a constant: a hardcoded
+/// `{:<24}` renders `asus-chromebit-cs10/forky` and `turing-rk1/media-accel-forky`
+/// pushed out of their column, which is precisely when a listing is hardest to read.
+///
+/// Character counts rather than byte lengths, so a description with a non-ASCII
+/// character still aligns.
+pub(crate) fn print_columns(rows: &[Vec<String>]) {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0usize; cols];
+    for row in rows {
+        for (w, c) in widths.iter_mut().zip(row) {
+            *w = (*w).max(c.chars().count());
+        }
+    }
+    for row in rows {
+        let mut line = String::new();
+        for i in 0..row.len() {
+            let cell = &row[i];
+            if i + 1 == row.len() {
+                line.push_str(cell);
+            } else {
+                let pad = widths[i].saturating_sub(cell.chars().count());
+                line.push_str(cell);
+                line.extend(std::iter::repeat_n(' ', pad + 2));
+            }
+        }
+        println!("{}", line.trim_end());
     }
 }
 
@@ -184,6 +289,17 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     }
     if let Some(s) = &b.suite {
         println!("suite        : {s}");
+    }
+    // Which suite's `dpkg` archives this build's `.deb`s. Printed only where it is not
+    // the image's own — that is the common case and would just restate the line above.
+    // Where it differs, it is the only suite this build has, and it decides both which
+    // root gets provisioned and the artifact-cache key of every `.deb` archived in it.
+    if b.suite.as_deref() != Some(b.packaging_suite.as_str()) {
+        println!(
+            "packaged by  : {} (the device default — this deliverable resolves no suite \
+             of its own)",
+            b.packaging_suite
+        );
     }
     if image {
         println!(
@@ -323,6 +439,63 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbosity_splits_the_stream_on_who_wrote_the_line() {
+        let stage = Event::Log {
+            step: "kernel".into(),
+            stream: Stream::Stdout,
+            origin: LogOrigin::Stage,
+            line: "reusing kernel tree".into(),
+        };
+        let subprocess = Event::Log {
+            step: "kernel".into(),
+            stream: Stream::Stdout,
+            origin: LogOrigin::Subprocess,
+            line: "  CC drivers/foo.o".into(),
+        };
+        let started = Event::StepStarted {
+            step: "kernel".into(),
+        };
+        let artifact = Event::Artifact {
+            step: "image".into(),
+            role: "compressed".into(),
+            path: "/out/x.img.xz".into(),
+        };
+        let error = Event::Error {
+            step: "kernel".into(),
+            context: "make failed".into(),
+        };
+
+        // The default is the whole build minus the compile chatter — which is the
+        // distinction the level exists to draw.
+        assert!(Verbosity::Normal.shows(&stage));
+        assert!(!Verbosity::Normal.shows(&subprocess));
+        assert!(Verbosity::Normal.shows(&started));
+
+        // Verbose adds the relayed output and takes nothing away.
+        for e in [&stage, &subprocess, &started, &artifact, &error] {
+            assert!(Verbosity::Verbose.shows(e), "{e:?}");
+        }
+
+        // Quiet keeps exactly what the command produced and why it stopped: an
+        // artifact path is the reason it was run, and an error is why it failed.
+        assert!(Verbosity::Quiet.shows(&artifact));
+        assert!(Verbosity::Quiet.shows(&error));
+        for e in [&stage, &subprocess, &started] {
+            assert!(!Verbosity::Quiet.shows(e), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn the_two_flags_resolve_to_one_level() {
+        assert_eq!(Verbosity::from_flags(false, false), Verbosity::Normal);
+        assert_eq!(Verbosity::from_flags(true, false), Verbosity::Quiet);
+        assert_eq!(Verbosity::from_flags(false, true), Verbosity::Verbose);
+        // clap rejects both, so this pairing never reaches here; resolving it to the
+        // quieter level keeps the function total rather than panicking.
+        assert_eq!(Verbosity::from_flags(true, true), Verbosity::Quiet);
+    }
 
     #[test]
     fn short_truncates_on_character_boundaries() {

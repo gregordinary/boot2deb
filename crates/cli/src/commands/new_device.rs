@@ -10,7 +10,7 @@
 use crate::args::NewDeviceArgs;
 use crate::fsutil::write_scaffold_file;
 use crate::prompt::{ask_choice, ask_features, ask_value};
-use boot2deb_core::model::{BootMethod, Layout, Overrides, Soc};
+use boot2deb_core::model::{BootMethod, KernelDef, Layout, Overrides, Soc};
 use boot2deb_core::scaffold::DeviceScaffold;
 use boot2deb_core::{resolve_device, ConfigRoot};
 
@@ -191,8 +191,17 @@ pub(crate) fn run(
     // includes `out_dir` in its search path). The scaffold's placeholder values are
     // structurally valid, so this should pass — proving the layer composition — while
     // the research notes below name what still fails at build time if left as-is.
+    //
+    // Name the tree it actually resolved against: saying "the config root" for a
+    // scaffold that landed in an overlay would credit the wrong tree, and the whole
+    // point of the check is that the composition across the two works.
+    let wrote_into = if out_dir == root.path() {
+        "the config root".to_string()
+    } else {
+        format!("overlay {}", out_dir.display())
+    };
     match resolve_device(root, name, &Overrides::default()) {
-        Ok(_) => println!("\nresolves cleanly against the config root."),
+        Ok(_) => println!("\nresolves cleanly against {wrote_into}."),
         Err(e) => println!(
             "\nnote: resolve reported: {e}\n  (fix the flagged values, then re-run `boot2deb resolve {name}`)"
         ),
@@ -206,16 +215,65 @@ pub(crate) fn run(
         }
     }
 
-    println!("\nnext steps:");
+    // A distro-package kernel pins no commit, so its first `update` needs no ref; a
+    // compiled one does, and omitting it is the error the user would otherwise meet.
+    let compiles_kernel = matches!(root.kernel(&scaffold.kernel), Ok(KernelDef::Compiled(_)));
     println!(
-        "  1. edit {} and replace the TODO values",
+        "\n{}",
+        next_steps(
+            &device_path,
+            (out_dir != *root.path()).then_some(out_dir.as_path()),
+            (!args.no_recipe).then_some(&recipe_ref),
+            compiles_kernel.then_some(scaffold.kernel.as_str()),
+        )
+    );
+    Ok(())
+}
+
+/// The closing handoff: the ordered commands that take the scaffold to an image.
+///
+/// It has to be runnable exactly as printed, which is why it takes more than the
+/// recipe reference. Two things that reference does not carry, and both are known
+/// here rather than being the user's to rediscover from an error:
+///
+/// - `overlay` — the `--overlay` without which nothing finds the files just written.
+/// - `compiled_kernel` — for a kernel this board compiles, the first `update` has no
+///   previous lock to inherit a ref from, so the line shows the `--kernel-ref`
+///   placeholder and says what goes in it.
+///
+/// `recipe` is `None` under `--no-recipe`, where there is nothing to update or build
+/// yet and the handoff stops at the edit.
+///
+/// Pure, so the handoff is unit-testable without scaffolding a tree.
+fn next_steps(
+    device_path: &std::path::Path,
+    overlay: Option<&std::path::Path>,
+    recipe: Option<&str>,
+    compiled_kernel: Option<&str>,
+) -> String {
+    let overlay_flag = overlay.map_or(String::new(), |o| format!("--overlay {} ", o.display()));
+    let kernel_ref = if compiled_kernel.is_some() {
+        " --kernel-ref <tag>"
+    } else {
+        ""
+    };
+    let mut s = format!(
+        "next steps:\n  1. edit {} and replace the TODO values",
         device_path.display()
     );
-    if !args.no_recipe {
-        println!("  2. boot2deb update {recipe_ref}    # resolve pins into the lock");
-        println!("  3. boot2deb build  {recipe_ref}    # build the image");
+    let Some(recipe) = recipe else { return s };
+    s.push_str(&format!(
+        "\n  2. boot2deb {overlay_flag}update {recipe}{kernel_ref}    # resolve pins into the lock\
+         \n  3. boot2deb {overlay_flag}build {recipe}    # build the image"
+    ));
+    if let Some(kernel) = compiled_kernel {
+        s.push_str(&format!(
+            "\n\n<tag> is the kernel version to pin (e.g. v7.1.1) — '{kernel}' compiles from \
+             source, so\nthe first update has no previous lock to inherit a ref from. Later \
+             updates may omit it."
+        ));
     }
-    Ok(())
+    s
 }
 
 #[cfg(test)]
@@ -241,6 +299,45 @@ mod tests {
             force: false,
             non_interactive: true,
         }
+    }
+
+    #[test]
+    fn the_handoff_is_runnable_exactly_as_printed() {
+        let dev = std::path::Path::new("/o/devices/my-board.toml");
+        let ovl = std::path::Path::new("/o");
+
+        // The overlay case: without the flag, step 2 cannot find the file step 1 names.
+        // A compiled kernel additionally shows the ref its first update cannot inherit.
+        let s = next_steps(
+            dev,
+            Some(ovl),
+            Some("my-board/forky"),
+            Some("rk3588-mainline-7.1"),
+        );
+        assert!(
+            s.contains("boot2deb --overlay /o update my-board/forky --kernel-ref <tag>"),
+            "{s}"
+        );
+        assert!(
+            s.contains("boot2deb --overlay /o build my-board/forky"),
+            "{s}"
+        );
+        assert!(s.contains("rk3588-mainline-7.1"), "{s}");
+
+        // Scaffolded into the primary root: no flag to carry, and a distro-package
+        // kernel pins no commit, so no ref placeholder either.
+        let s = next_steps(dev, None, Some("my-board/forky"), None);
+        assert!(s.contains("boot2deb update my-board/forky    #"), "{s}");
+        assert!(!s.contains("--overlay"), "{s}");
+        assert!(!s.contains("--kernel-ref"), "{s}");
+        assert!(!s.contains("<tag>"), "{s}");
+
+        // --no-recipe: nothing has been written that could be updated or built, so the
+        // handoff stops rather than naming a reference that does not exist.
+        let s = next_steps(dev, None, None, Some("rk3588-mainline-7.1"));
+        assert!(s.contains("1. edit"), "{s}");
+        assert!(!s.contains("update"), "{s}");
+        assert!(!s.contains("build"), "{s}");
     }
 
     #[test]

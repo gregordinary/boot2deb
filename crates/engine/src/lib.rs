@@ -76,9 +76,43 @@ pub use event::{Event, EventSink, Step, Stream};
 /// rather than copied into each stage module.
 #[cfg(test)]
 pub(crate) mod test_support {
+    use crate::error::EngineError;
+    use crate::event::Step;
+    use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox};
     use boot2deb_core::model::ResolvedBuild;
     use boot2deb_core::{resolve_recipe, ConfigRoot, Overrides};
     use std::path::PathBuf;
+
+    /// A [`BuildSandbox`] for the stage options of tests that never compile.
+    ///
+    /// Several stage tests exercise a step that runs no command — staging the produced
+    /// `.deb`s, computing a signature — but must still fill in the options struct the
+    /// stage takes. This stands in for the root those tests never reach, and panics if
+    /// one ever does: a unit test must not provision a Debian userland, and a change
+    /// that made it try should say so loudly rather than start downloading.
+    pub(crate) struct UnusedSandbox;
+
+    impl BuildSandbox for UnusedSandbox {
+        fn describe(&self) -> String {
+            "unused (test)".into()
+        }
+
+        fn ensure_ready(&self, _step: &Step) -> Result<(), EngineError> {
+            unreachable!("this test reaches no command, so it provisions no root")
+        }
+
+        fn base_manifest(&self) -> Option<PathBuf> {
+            None
+        }
+
+        fn build_root(
+            &self,
+            _spec: &BuildRootSpec,
+            _step: &Step,
+        ) -> Result<BuildRoot, EngineError> {
+            unreachable!("this test reaches no command, so it stages no build root")
+        }
+    }
 
     /// The boot2deb repo root — two levels up from the engine crate manifest
     /// (`crates/engine` → `crates` → repo root), where the config layers live.
@@ -109,20 +143,26 @@ use boot2deb_core::model::Arch;
 
 /// Host identity + the two cross-arch answers for a given target arch.
 ///
-/// This is the coarse "can this host build this target at all" summary. The
-/// concrete tool/capability checks (git/make/toolchain/qemu-user binfmt/
-/// e2fsprogs, with remediation) are [`checks::tool_checks`].
+/// This is the coarse "can this host build this target at all" summary. The concrete
+/// tool/capability checks (`git`, user namespaces, an overlay, `qemu-user` binfmt, the
+/// image path's `tar`/`cp`, with remediation) are [`checks::tool_checks`].
 ///
-/// The two booleans are kept apart because they come apart: see
+/// Only one of the two booleans is a host *requirement*. `cross_toolchain` decides what a
+/// provisioned root is given, not what the host must carry — the compiler is a package
+/// either way. They are kept apart because they come apart: see
 /// [`HostInfo::needs_cross_toolchain`] and [`HostInfo::needs_interpreter`].
 #[derive(Debug, Clone)]
 pub struct Preflight {
     /// Detected build host.
     pub host: HostInfo,
-    /// Producing target binaries needs a cross toolchain → pass `CROSS_COMPILE`.
+    /// Producing target binaries needs a cross toolchain → the cross root is
+    /// bootstrapped with `crossbuild-essential-<target>` and the compile is passed
+    /// `CROSS_COMPILE`. Not a host requirement: the toolchain is a package of that root.
     pub cross_toolchain: bool,
-    /// Running target binaries needs a `qemu-user` interpreter and a registered
-    /// binfmt handler → the sandbox's maintainer scripts and compiles are emulated.
+    /// Running target binaries needs a `qemu-user` interpreter and a registered binfmt
+    /// handler → the target-arch sandbox's compiles and the rootfs's maintainer scripts
+    /// are emulated. This one *is* a host requirement, since the interpreter runs on the
+    /// host kernel's binfmt handler and no root can carry it.
     pub interpreter: bool,
 }
 

@@ -5,7 +5,7 @@ Chromebook Flip C100P/C100PA (`google,veyron-minnie`) — the 10.1" convertible 
 RK3288 Veyron family. `asus-c100p/trixie` is the same board on the stable suite.
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-c100p/forky
+boot2deb build asus-c100p/forky
 ```
 
 That produces `build/asus-c100p/forky/artifacts/asus-c100p-forky.img.xz` — a whole-disk image
@@ -121,12 +121,24 @@ an SBS one, which Debian does build, and it has no touchscreen.
 
 A laptop, so it declares a console keymap — `keymap = "us"`, the layout the C100PA ships.
 
-```sh
-cargo run -p boot2deb-cli -- build asus-c100p/forky --keymap gb
-sudo dpkg-reconfigure keyboard-configuration && sudo setupcon   # or, on the board
-```
+There are two ways to get another layout, and neither is a `build` flag — an image's
+keymap comes from the config its lock was resolved against:
 
-See [Locale, timezone, and keyboard](../localization.md).
+- **Change it on the running board**, offline, like any Debian system:
+
+  ```sh
+  sudo dpkg-reconfigure keyboard-configuration && sudo setupcon
+  ```
+
+- **Bake it into an image** by writing a recipe that sets `keymap`. `resolve` shows what
+  a choice resolves to before you commit it, and names the file to write:
+
+  ```sh
+  boot2deb resolve asus-c100p/forky --keymap gb
+  ```
+
+  See [Adapting a shipped recipe](../tutorials/adapting-a-recipe.md) and
+  [Locale, timezone, and keyboard](../localization.md).
 
 ## Getting online
 

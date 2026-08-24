@@ -2,26 +2,34 @@
 //! engine subprocess stages that read the resolved [`Lock`] and emit the
 //! structured [`Event`](crate::event::Event) stream.
 //!
-//! These stages build the device's kernel, bootloader, and media stack: [`kernel`]
-//! (`git am` series + `make bindeb-pkg`), [`uboot`], the [`userspace`] MPP/RGA
-//! `.deb`s, and the [`ffmpeg`] `ffmpeg-rk` `.deb`. The userspace and ffmpeg stages
-//! compile arm64 `.deb`s in a target-arch
-//! [`BuildSandbox`](crate::sandbox::BuildSandbox). These stages drive the compile
-//! invocations directly rather than reimplementing them: the value here is
-//! the typed orchestration, the lock-driven pins, and the event stream, not a new
-//! build system.
+//! These stages build the device's kernel, bootloader, out-of-tree modules, and media
+//! stack: [`kernel`] (`git am` series + `make bindeb-pkg`), [`uboot`], [`kmod`], the
+//! [`userspace`] MPP/RGA `.deb`s, and the [`ffmpeg`] `ffmpeg-rk` `.deb`. These stages
+//! drive the compile invocations directly rather than reimplementing them: the value
+//! here is the typed orchestration, the lock-driven pins, and the event stream, not a
+//! new build system.
+//!
+//! **No `.deb` is archived on the host.** The userspace and ffmpeg stages compile *and*
+//! package inside a target-arch [`BuildSandbox`](crate::sandbox::BuildSandbox); the
+//! u-boot and kmod stages stage their trees on the host — layout, control text and mode
+//! normalization are pure and testable there — and archive them through one
+//! `dpkg-deb --build` in the host-arch [`PackagingSandbox`]. Only the kernel is still
+//! packaged host-side, by its own `make bindeb-pkg`.
 //!
 //! [`Lock`]: boot2deb_core::lock::Lock
 
+mod elf;
 pub mod ffmpeg;
 pub mod kernel;
 pub mod kmod;
+mod probe;
 pub mod rkboot;
 pub mod uboot;
 pub mod userspace;
 
 use crate::error::EngineError;
 use crate::event::{Step, Stream};
+use crate::sandbox::{CompileRoot, PackagingSandbox, SandboxRole, SandboxRun};
 use crate::{git, patches};
 use boot2deb_core::lock::Lock;
 use boot2deb_core::PatchSeries;
@@ -58,24 +66,34 @@ pub struct BuildEnv {
     /// in the provenance manifest instead, where a difference between two images from
     /// one lock can be seen without being paid for on every cache lookup.
     pub jobs: Option<usize>,
-    /// Identity of the host cross toolchain that compiles **on the host**
-    /// ([`HostToolchain::compiler_identity`](crate::toolchain::HostToolchain::compiler_identity)),
-    /// folded into the kernel, u-boot, and kmod Tier-2 output signatures so an
-    /// artifact built with one compiler is not restored for a build using another.
+    /// Identity of the **cross root** that compiles the kernel, u-boot and the
+    /// out-of-tree modules ([`cross_identity`]), folded into those three stages' Tier-2
+    /// output signatures so an artifact built with one compiler is not restored for a
+    /// build using another.
+    ///
+    /// The compiler is a package of that root rather than a host binary, so this is the
+    /// root's own identity — its architecture, the target it emits for, its suite and
+    /// its mirror list, as the name of its tree. Nothing about the build host is in it,
+    /// which is the point: two hosts resolving one lock resolve one compiler.
     pub toolchain_id: String,
     /// Identity of everything host-side that shapes a **sandbox-built** `.deb` — the
     /// userspace and ffmpeg nodes — folded into their output signatures.
     ///
     /// Two inputs, because two things outside the source pins decide those bytes:
     ///
-    ///  - The **userland the sandbox bootstraps from** (its ordered mirror list). The
-    ///    sandbox's `gcc` is the compiler for these packages, and the suite alone does
-    ///    not identify it — a testing suite's toolchain moves under a fixed suite
-    ///    name. What pins it is the mirror: under `--snapshot pin` the sandbox
-    ///    bootstraps from a point-in-time archive, so two builds at different
-    ///    snapshots key differently. Against a *live* mirror the compiler can still
-    ///    move under an unchanged key; that residual is what the snapshot exists to
-    ///    close, and it cannot be closed from here.
+    ///  - The **base the sandbox is provisioned as** — its architecture, suite, ordered
+    ///    mirror list and package set, taken as the name of its own tree. The sandbox's
+    ///    `gcc` is the compiler for these packages, and the suite alone does not identify
+    ///    it: a testing suite's toolchain moves under a fixed suite name. What pins it is
+    ///    the mirror, so under `--snapshot pin` two builds at different snapshots key
+    ///    differently. Against a *live* mirror the compiler can still move under an
+    ///    unchanged key; that residual is what the snapshot exists to close, and it
+    ///    cannot be closed from here.
+    ///
+    ///    Empty for a build that stands up no sandbox at all, which is every build that
+    ///    resolves no suite. Such a build runs neither node, so the field is unread
+    ///    rather than defaulted — and an empty string is no tree's name, so it cannot
+    ///    collide with one.
     ///  - The **`qemu-user` interpreter**, where the host cannot execute the target's
     ///    binaries, which is what then executes that compiler
     ///    ([`qemu_identity`](crate::toolchain::HostToolchain::qemu_identity)). A host
@@ -88,22 +106,126 @@ pub struct BuildEnv {
     ///    folds no interpreter. Keying on the toolchain question instead would name a
     ///    binary that never ran.
     pub sandbox_id: String,
+    /// Identity of the [`PackagingSandbox`] that archives the u-boot and kmod `.deb`s
+    /// ([`packaging_identity`]), folded into their output signatures.
+    ///
+    /// `dpkg-deb`'s version and its `liblzma` shape the archive bytes, and both are
+    /// packages of that root — so what it resolved to is an input to the output, in the
+    /// way [`sandbox_id`](Self::sandbox_id) is for a compiled `.deb`. Two roots with the
+    /// same identity hold the same `dpkg`, so their archives are interchangeable and
+    /// the cache may serve one for the other; two that differ may not.
+    ///
+    /// Distinct from `sandbox_id` rather than folded into it because the two roots move
+    /// independently: they carry different package sets, at different architectures,
+    /// and the packaging root's suite is not always the image's.
+    pub packaging_id: String,
 }
 
-/// Compose a [`BuildEnv::sandbox_id`] from the sandbox's ordered mirror list and the
-/// probed host toolchain.
+/// Compose a [`BuildEnv::sandbox_id`] from the build sandbox's architecture, suite and
+/// ordered mirror list, plus the interpreter that executes what it compiles.
 ///
-/// Lives here, beside the field it fills, rather than at the one call site: it decides
-/// when two sandbox-built `.deb`s may be restored for each other, and that is a
-/// property of the signature, not of the CLI. A build that runs target binaries
-/// directly contributes no interpreter segment at all — not an empty one — so it can
-/// never key alike with an emulated build whose `qemu-user` is merely missing.
-pub fn sandbox_identity(mirrors: &[String], toolchain: &crate::toolchain::HostToolchain) -> String {
-    let userland = mirrors.join(" ");
+/// The first segment is the tree name the sandbox is provisioned under
+/// ([`build_sandbox_dir`](crate::sandbox::build_sandbox_dir)), which is the identity of
+/// the base: its digest covers the mirror list, the base package set and the base recipe
+/// version, and its prefix carries the arch and suite. Deriving the signature input from
+/// the function that *names the directory* is what keeps the two from disagreeing — a
+/// build keyed on one claim while compiling in a differently-provisioned tree is exactly
+/// the failure that digest exists to prevent. A package added to or removed from the base
+/// changes what `./configure` detects, so it has to change the key as well as the path.
+///
+/// The interpreter segment follows where the host cannot execute the target's binaries,
+/// because it then runs every compiler invocation. A build that runs them directly folds
+/// no segment at all — not an empty one — so it can never key alike with an emulated
+/// build whose `qemu-user` is merely missing. [`packaging_identity`] has no counterpart
+/// for it: that root is host-arch, so nothing is ever interpreted there.
+///
+/// Lives here, beside the field it fills, rather than at the call sites: it decides when
+/// two sandbox-built `.deb`s may be restored for each other, and that is a property of
+/// the signature, not of the CLI.
+pub fn sandbox_identity(
+    arch: &str,
+    suite: &str,
+    mirrors: &[String],
+    toolchain: &crate::toolchain::HostToolchain,
+) -> String {
+    let base = root_identity(crate::sandbox::build_sandbox_dir(
+        Path::new(""),
+        SandboxRole::Target,
+        arch,
+        suite,
+        mirrors,
+    ));
     match toolchain.qemu_identity() {
-        Some(qemu) => format!("{userland} | {qemu}"),
-        None => userland,
+        Some(qemu) => format!("{base} | {qemu}"),
+        None => base,
     }
+}
+
+/// Compose a [`BuildEnv::toolchain_id`] from the cross sandbox's own architecture, the
+/// `target` its toolchain emits for, the suite and the ordered mirror list.
+///
+/// The tree name the cross root is provisioned under
+/// ([`build_sandbox_dir`](crate::sandbox::build_sandbox_dir) at
+/// [`SandboxRole::Cross`]), for the reason the other two identities are their trees'
+/// names: the compiler that produces the kernel, u-boot and module bytes *is* a package
+/// of that root, so what the root resolved to is what shapes the output, and deriving
+/// the key from the function that names the directory is what stops a claim and a tree
+/// from disagreeing.
+///
+/// `target` reaches the name through the toolchain package
+/// (`crossbuild-essential-<target>`), so two targets never share a key any more than
+/// they share a root.
+///
+/// No interpreter segment, for the same reason [`packaging_identity`] has none: a cross
+/// root is host-arch, so `qemu-user` is never in the path. That it is *derived* rather
+/// than probed is what lets `why-rebuild` ask the artifact store this question offline,
+/// with no root provisioned and none to provision — and what backs it with a
+/// sha256-pinned package manifest instead of a `--version` line.
+pub fn cross_identity(arch: &str, target: &'static str, suite: &str, mirrors: &[String]) -> String {
+    root_identity(crate::sandbox::build_sandbox_dir(
+        Path::new(""),
+        SandboxRole::Cross { target },
+        arch,
+        suite,
+        mirrors,
+    ))
+}
+
+/// The identity of a provisioned root: the leaf name of the directory it lives in.
+///
+/// The work dir is where a tree *lives*, not part of what it *is*, so only the leaf is
+/// taken — an empty stand-in work dir gives the same answer every real one would, which
+/// is what makes two machines building one lock key alike.
+fn root_identity(dir: PathBuf) -> String {
+    dir.file_name()
+        .expect("the tree name is the path's last component")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Compose a [`BuildEnv::packaging_id`] from the packaging root's architecture, suite
+/// and ordered mirror list.
+///
+/// The tree name the root is provisioned under
+/// ([`packaging_root_dir`](crate::sandbox::packaging_root_dir)), which is the identity
+/// of the base: its digest already covers the mirrors, the package set and the recipe
+/// version, and its prefix carries the arch and suite. Deriving the signature input from
+/// the same function that names the directory is what keeps the two from disagreeing —
+/// a claim keyed on one while the tree is provisioned under the other is exactly the
+/// failure the tree name's own digest exists to prevent.
+///
+/// No interpreter segment, unlike [`sandbox_identity`]: the packaging root is host-arch,
+/// so `qemu-user` is never in the path.
+///
+/// Takes the pieces rather than a [`PackagingSandbox`], because `why-rebuild` asks the
+/// artifact store this question offline, with no root provisioned and none to provision.
+pub fn packaging_identity(arch: &str, suite: &str, mirrors: &[String]) -> String {
+    root_identity(crate::sandbox::packaging_root_dir(
+        Path::new(""),
+        arch,
+        suite,
+        mirrors,
+    ))
 }
 
 impl BuildEnv {
@@ -153,6 +275,41 @@ pub(crate) fn blob_pins(lock: &Lock) -> Result<&boot2deb_core::lock::BlobsPin, E
     })
 }
 
+/// Run one command inside a provisioned build root, with `work` as its working directory
+/// and `binds` the host paths it must see.
+///
+/// The compile counterpart of [`run`], and the choke point every kernel, u-boot and
+/// out-of-tree-module invocation goes through. It exists as a named function rather than
+/// as three hand-built [`SandboxRun`]s so those three stages cannot drift in what a
+/// compile is: the same root, the same cage profile, the same isolated network, and the
+/// same rule that a host path is visible inside at its own absolute path — which is what
+/// lets `make` write its output back beside the source tree on the host.
+///
+/// Nothing normalizes the environment here, unlike [`run`], because there is nothing to
+/// normalize: the cage composes the command's environment from
+/// [`SANDBOX_ENV`](crate::sandbox) alone, so a variable exported in the build user's
+/// shell cannot reach a compile in the first place. `env` is exactly what the stage
+/// declares.
+pub(crate) fn run_in_root(
+    cr: &CompileRoot,
+    work: &Path,
+    argv: &[String],
+    env: &[(String, String)],
+    context: &str,
+    step: &Step,
+) -> Result<(), EngineError> {
+    cr.root.run(
+        &SandboxRun {
+            work,
+            binds: cr.binds,
+            env,
+            argv,
+            context,
+        },
+        step,
+    )
+}
+
 /// Run `command` to completion, relaying every stdout/stderr line to `step` as a
 /// [`Event::Log`](crate::event::Event) as it is produced, and mapping a non-zero
 /// exit to [`EngineError::CommandFailed`] (with a tail of stderr for context).
@@ -162,11 +319,12 @@ pub(crate) fn blob_pins(lock: &Lock) -> Result<&boot2deb_core::lock::BlobsPin, E
 /// need not be `Send`. `tool` names the program for errors (`make`, `git`),
 /// `context` describes the invocation.
 ///
-/// This is the single host-side command choke point (native compiles, kernel/u-boot
-/// `make`, `git`, `tar`, `dpkg-deb`), so it
-/// normalizes the determinism-relevant environment here — `TZ=UTC` and
-/// `LC_ALL=C.UTF-8`, matching the cross sandbox's built-from-scratch `SANDBOX_ENV`
-/// discipline so a host's timezone/locale cannot leak into packaged output,
+/// This is the single host-side command choke point, and what still comes through it is
+/// the *git* work — the clone and the `git am` of a patch series — plus `tar` on the
+/// image path. Every compile runs in a provisioned root instead and does not pass
+/// through here at all. It normalizes the determinism-relevant environment —
+/// `TZ=UTC` and `LC_ALL=C.UTF-8`, matching the sandbox's built-from-scratch
+/// `SANDBOX_ENV` discipline so a host's timezone/locale cannot leak into packaged output,
 /// and the kbuild-honored flag variables (`KCFLAGS`/`KAFLAGS`/`KCPPFLAGS`) plus
 /// `MAKEFLAGS`/`GNUMAKEFLAGS` are removed, so a flag exported in the host shell
 /// cannot silently shape the kernel/u-boot bytes a lock-keyed cache entry claims
@@ -221,7 +379,7 @@ pub fn run(
                 }
                 stderr_tail.push_back(line.clone());
             }
-            step.emit(stream, line);
+            step.relay(stream, line);
         }
     });
 
@@ -935,6 +1093,7 @@ fn verify_patches_pin(
     if dev {
         step.emit(
             Stream::Stderr,
+            crate::event::LogOrigin::Stage,
             format!(
                 "warning: {} — applying the working tree's series (--patches-path override)",
                 crate::pins::describe_patches_drift(patches_root, &head, expected, clean),
@@ -1295,53 +1454,95 @@ pub(crate) fn set_mode(path: &Path, mode: u32) -> Result<(), EngineError> {
         .map_err(|s| EngineError::io(path, s))
 }
 
-/// The compressor every host-side `.deb` is built with, stated rather than inherited.
+/// The compressor the `.deb`s boot2deb archives *itself* are built with, stated rather
+/// than inherited: the u-boot and kmod packages through [`archive_deb`], and the kernel
+/// through its `KDEB_COMPRESS` (see [`kernel::kbuild_env`]).
 ///
-/// `dpkg-deb`'s default is a *distro* choice, not a `dpkg` constant: Debian's dpkg
-/// defaults to `xz`, Ubuntu-derived dpkg to `zstd`. Inheriting it would make the same
-/// recipe at the same lock produce a structurally different archive depending on which
-/// host ran the build, undoing the [`normalize_data_tree`] + `SOURCE_DATE_EPOCH` work
-/// these packages do specifically to be byte-identical across hosts. `xz` is also the
-/// compressor every dpkg since 1.15.6 can read, so a stated `xz` is the portable choice
-/// as well as the reproducible one.
-const DEB_COMPRESSOR: &str = "xz";
+/// `dpkg-deb`'s default compressor is a *distribution* choice, not a `dpkg` constant:
+/// Debian's dpkg defaults to `xz`, Ubuntu-derived dpkg to `zstd`. Stating it is what
+/// makes the archive's structure a property of this file rather than of whichever suite
+/// supplies the `dpkg`, alongside the [`normalize_data_tree`] + `SOURCE_DATE_EPOCH` work
+/// these packages do to be byte-identical. `xz` is also the compressor every dpkg since
+/// 1.15.6 can read, so a stated `xz` is the portable choice as well as the reproducible
+/// one.
+///
+/// **Not** every `.deb` in the image: the userspace and ffmpeg packages are archived by
+/// `dpkg-buildpackage`/`dpkg-deb` inside the build sandbox without these flags, so they
+/// take that root's own default. That is a weaker guarantee but not a host-dependent
+/// one — the root is provisioned from the build's pinned mirror list like any other
+/// input.
+pub(crate) const DEB_COMPRESSOR: &str = "xz";
 /// Compression level for [`DEB_COMPRESSOR`]. Stated for the same reason as the
 /// compressor: it is a `dpkg-deb` default, and a default is a thing that can move.
 const DEB_COMPRESS_LEVEL: &str = "6";
 
-/// A `fakeroot dpkg-deb --build <pkg_stage> <deb_out>` command for a host-side `.deb`,
-/// with the compressor and level stated and `source_date_epoch` exported when known.
+/// Archive an already-staged package tree into `deb_out`, running `dpkg-deb --build` in
+/// the build's [`PackagingSandbox`].
 ///
-/// `fakeroot` is what makes the staged tree package as `root:root` without the build
-/// running as root. `SOURCE_DATE_EPOCH` (a locked commit's committer date) makes
-/// `dpkg-deb` clamp every archive member's mtime to it, so the `.deb` carries the
-/// lock's timestamp rather than the build clock. Together with [`normalize_data_tree`]
-/// and [`DEB_COMPRESSOR`] that is every input to the archive bytes that is not the
-/// staged content itself.
+/// Everything that shapes the archive bytes beyond the staged content itself is nailed
+/// down here:
 ///
-/// The kernel's own `.deb` does not come through here — `make bindeb-pkg` runs
-/// `dpkg-buildpackage` inside the kernel tree — and neither does the ffmpeg deb, which
-/// is built by the sandbox's own `dpkg`.
-pub(crate) fn dpkg_deb_build(
+/// - **The tool.** `dpkg-deb` and its `liblzma` come from the packaging root — a
+///   sha256-pinned package resolved from the build's own mirror list — so the archiver
+///   is an input the lock describes rather than whatever the build host installed.
+/// - **Ownership.** The root maps the caller to uid 0, so the host-staged tree stats as
+///   `root:root` inside and is archived with the ownership a `.deb` must carry. No
+///   `fakeroot`: there is nothing left to fake.
+/// - **Time.** `source_date_epoch` (a locked commit's committer date) makes `dpkg-deb`
+///   clamp every member's mtime to it, so the `.deb` carries the lock's timestamp rather
+///   than the build clock. Passed as an environment variable because that is the only
+///   interface `dpkg-deb` has for it.
+/// - **The compression.** [`DEB_COMPRESSOR`] and [`DEB_COMPRESS_LEVEL`], stated rather
+///   than left to the root's own default.
+///
+/// `binds` are the host paths the run needs to see — the staged tree and wherever
+/// `deb_out` is written — exposed inside at their host path. Mode normalization
+/// ([`normalize_data_tree`]) and the control text stay on the host side, in the stage
+/// that knows what it is packaging.
+///
+/// Neither the kernel's `.deb` nor ffmpeg's comes through here: `make bindeb-pkg` runs
+/// `dpkg-buildpackage` inside the kernel tree, and the ffmpeg deb is archived by the
+/// *build* sandbox's own `dpkg`, in the target-arch root it was compiled in.
+pub(crate) fn archive_deb(
+    root: &PackagingSandbox,
     pkg_stage: &Path,
     deb_out: &Path,
+    binds: &[PathBuf],
     source_date_epoch: Option<u64>,
-) -> Command {
-    let mut cmd = Command::new("fakeroot");
-    cmd.args([
-        "dpkg-deb",
-        "--build",
-        "-Z",
-        DEB_COMPRESSOR,
-        "-z",
-        DEB_COMPRESS_LEVEL,
-    ])
-    .arg(pkg_stage)
-    .arg(deb_out);
-    if let Some(epoch) = source_date_epoch {
-        cmd.env("SOURCE_DATE_EPOCH", epoch.to_string());
-    }
-    cmd
+    context: &str,
+    step: &Step,
+) -> Result<(), EngineError> {
+    let argv = vec![
+        "dpkg-deb".to_string(),
+        "--build".to_string(),
+        "-Z".to_string(),
+        DEB_COMPRESSOR.to_string(),
+        "-z".to_string(),
+        DEB_COMPRESS_LEVEL.to_string(),
+        pkg_stage.to_string_lossy().into_owned(),
+        deb_out.to_string_lossy().into_owned(),
+    ];
+    let env: Vec<(String, String)> = source_date_epoch
+        .map(|epoch| ("SOURCE_DATE_EPOCH".to_string(), epoch.to_string()))
+        .into_iter()
+        .collect();
+    // Which root archived it, on the line before it happens: the whole point of the
+    // move is that this is an input to the output, so a build log that does not name it
+    // cannot answer what produced the `.deb` it just published. The compile stages log
+    // their sandbox the same way.
+    step.log(format!("archiving in the {} root", root.describe()));
+    root.run(
+        &SandboxRun {
+            // The staged tree, which every bind already covers and which `dpkg-deb`
+            // never writes into.
+            work: pkg_stage,
+            binds,
+            env: &env,
+            argv: &argv,
+            context,
+        },
+        step,
+    )
 }
 
 /// The umask every boot2deb build runs under, declared rather than inherited.
@@ -2236,26 +2437,89 @@ mod tests {
         let snapshot = vec!["https://snapshot.debian.org/archive/debian/20260628T083000Z/".into()];
         // A cross build whose interpreter cannot be run still folds a fallback naming
         // it; a native build folds nothing, so the two are never equal.
-        let cross = HostToolchain::probe(None, Some("boot2deb-no-such-arch"));
-        let native = HostToolchain::probe(None, None);
-        assert_ne!(
-            sandbox_identity(&live, &cross),
-            sandbox_identity(&live, &native)
-        );
-        assert_eq!(sandbox_identity(&live, &native), live[0]);
+        let cross = HostToolchain::probe(Some("boot2deb-no-such-arch"));
+        let native = HostToolchain::probe(None);
+        let id = |mirrors: &[String], tc: &HostToolchain| {
+            sandbox_identity("arm64", "forky", mirrors, tc)
+        };
+        assert_ne!(id(&live, &cross), id(&live, &native));
         // A snapshot-pinned userland is a different compiler than the live mirror's.
-        assert_ne!(
-            sandbox_identity(&live, &cross),
-            sandbox_identity(&snapshot, &cross)
-        );
+        assert_ne!(id(&live, &cross), id(&snapshot, &cross));
         // A fallback list is neither of the two single-mirror identities.
         let fallback = [live.clone(), snapshot.clone()].concat();
         for one in [&live, &snapshot] {
-            assert_ne!(
-                sandbox_identity(&fallback, &cross),
-                sandbox_identity(one, &cross)
-            );
+            assert_ne!(id(&fallback, &cross), id(one, &cross));
         }
+        // And the arch and suite separate too: the same mirrors bootstrap a different
+        // compiler for each, and only the tree name carries that.
+        assert_ne!(
+            id(&live, &native),
+            sandbox_identity("armhf", "forky", &live, &native)
+        );
+        assert_ne!(
+            id(&live, &native),
+            sandbox_identity("arm64", "trixie", &live, &native)
+        );
+    }
+
+    /// Both identities are the name of the tree they describe, so a claim can never be
+    /// keyed on a base the build did not actually provision.
+    ///
+    /// The property that matters is the coupling, not the string: asserting a literal
+    /// would pass just as well if the two functions computed it independently, which is
+    /// the failure mode. So each is compared against the directory function it must
+    /// track — including the base package set, which reaches the digest and which
+    /// nothing else in either signature covers.
+    #[test]
+    fn each_identity_is_the_name_of_the_tree_it_describes() {
+        use crate::toolchain::HostToolchain;
+        let mirrors = vec![crate::DEFAULT_MIRROR.to_string()];
+        let native = HostToolchain::probe(None);
+        let leaf = |p: std::path::PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+
+        assert_eq!(
+            sandbox_identity("arm64", "forky", &mirrors, &native),
+            leaf(crate::sandbox::build_sandbox_dir(
+                Path::new("/some/work/dir"),
+                SandboxRole::Target,
+                "arm64",
+                "forky",
+                &mirrors
+            )),
+            "the build sandbox's identity is its tree's name, whatever work dir holds it"
+        );
+        assert_eq!(
+            packaging_identity("amd64", "forky", &mirrors),
+            leaf(crate::sandbox::packaging_root_dir(
+                Path::new("/some/work/dir"),
+                "amd64",
+                "forky",
+                &mirrors
+            )),
+            "and so is the packaging root's"
+        );
+        assert_eq!(
+            cross_identity("amd64", "arm64", "forky", &mirrors),
+            leaf(crate::sandbox::build_sandbox_dir(
+                Path::new("/some/work/dir"),
+                SandboxRole::Cross { target: "arm64" },
+                "amd64",
+                "forky",
+                &mirrors
+            )),
+            "and so is the cross root's"
+        );
+        // No two roles key alike even at one arch, suite and mirror list: they are
+        // different trees holding different packages. Asserted as a set, because the
+        // defect this guards against is two identities computed independently and
+        // agreeing by accident.
+        let at_amd64 = [
+            sandbox_identity("amd64", "forky", &mirrors, &native),
+            packaging_identity("amd64", "forky", &mirrors),
+            cross_identity("amd64", "arm64", "forky", &mirrors),
+        ];
+        let distinct: std::collections::BTreeSet<&String> = at_amd64.iter().collect();
+        assert_eq!(distinct.len(), at_amd64.len(), "{at_amd64:?}");
     }
 
     /// The declared umask is what keeps a directory the *build itself* creates at

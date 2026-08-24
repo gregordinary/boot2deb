@@ -8,7 +8,7 @@
 
 use crate::args::UpdateArgs;
 use crate::config::{default_patches_checkout, extra_debs_store, preflight_config, source_axes};
-use crate::render::{print_event, short};
+use crate::render::{print_event_at, short, Verbosity};
 use boot2deb_core::model::Overrides;
 use boot2deb_core::series::Scope;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
@@ -21,6 +21,7 @@ pub(crate) fn run(
     root: &ConfigRoot,
     recipe: &str,
     args: UpdateArgs,
+    verbosity: Verbosity,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // A `--feature` selection makes this a *variant* of the recipe. Every path below
     // is derived from the reference rather than the recipe name, so the variant's
@@ -203,7 +204,7 @@ pub(crate) fn run(
     // a dead URL, a missing file, or a wrong hash fails now rather than at the next
     // build. Fills the durable content store `build` later reads.
     if !lock.extra_debs.is_empty() {
-        let sink = |e: Event| print_event(&e);
+        let sink = move |e: Event| print_event_at(verbosity, &e);
         let step = Step::start(&sink, "extra-debs");
         let store = DebStore::open(&extra_debs_store(root))?;
         extradebs::materialize(root, &lock.extra_debs, &store, &step)?;

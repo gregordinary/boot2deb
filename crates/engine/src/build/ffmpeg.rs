@@ -22,8 +22,9 @@
 //!
 //! [`userspace`]: crate::build::userspace
 
+use crate::build::elf;
 use crate::build::{
-    self, deb_names, pick_deb, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope,
+    self, deb_names, pick_deb, probe, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope,
     PatchSource, SeriesIdentity,
 };
 use crate::error::EngineError;
@@ -34,8 +35,14 @@ use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, SandboxRun};
 use boot2deb_core::lock::{FfmpegPins, Lock, UserspacePins};
 use std::path::{Path, PathBuf};
 
-/// Install prefix baked into the build; keeps `ffmpeg-rk` out of the system
-/// FFmpeg's paths so both can coexist (Jellyfin points at `/opt/ffmpeg-rk/bin/ffmpeg`).
+/// Install prefix baked into the build; keeps `ffmpeg-rk` out of the system FFmpeg's
+/// paths so both can coexist. The coexistence is load-bearing rather than tidy: this
+/// tree's `libav*`/`libsw*` carry the same sonames as the suite's own FFmpeg packages,
+/// so the two sets must never meet on one search path — see [`rpath_ldflag`], which is
+/// what makes the separation hold at runtime.
+///
+/// A caller reaches the programs either by absolute path under this prefix or through
+/// the `-rk`-suffixed links [`stage_path_symlinks`] puts in `/usr/bin`.
 const INSTALL_PREFIX: &str = "/opt/ffmpeg-rk";
 
 /// Stage-recipe version for the ffmpeg tree signature: bump when the
@@ -45,10 +52,15 @@ const CLONE_STAGE_VERSION: u32 = 1;
 /// Stage-recipe version for the ffmpeg **output** signature (Tier-2 artifact cache):
 /// bump when the configure/compile/package logic changes the produced `.deb`
 /// in a way the folded inputs do not already capture.
-const OUTPUT_STAGE_VERSION: u32 = 1;
+const OUTPUT_STAGE_VERSION: u32 = 2;
 
 /// Debian package name.
 const PKG_NAME: &str = "ffmpeg-rk";
+
+/// Where the lookup probe appends, relative to the stage root — a bound host path, so
+/// the record outlives the cage that wrote it and is not itself in the overlay under
+/// investigation.
+const LOOKUP_PROBE_REPORT: &str = "lookup-probe.log";
 
 /// ffmpeg build-deps layered into its build root. The base tooling
 /// (`build-essential`, `pkg-config`) is already in the sandbox base set; these are
@@ -114,6 +126,19 @@ fn userspace_layer_packages(userspace: &UserspacePins) -> Vec<&'static str> {
     if userspace.librga.is_some() {
         packages.extend(["librga2", "librga-dev"]);
     }
+    packages
+}
+
+/// The whole build-dependency set this stage layers over the sandbox base: the suite's
+/// codec libraries plus this build's own userspace `.deb`s.
+///
+/// One function, read by the [`BuildRootSpec`] that stages the layer *and* by the output
+/// signature that keys on it, so a package cannot reach `./configure` without reaching
+/// the key. Which matters here more than anywhere: ffmpeg's `./configure` is a probe
+/// suite, and every entry decides whether a codec is compiled in.
+fn layer_packages(userspace: &UserspacePins) -> Vec<&'static str> {
+    let mut packages: Vec<&'static str> = FFMPEG_DEPS.to_vec();
+    packages.extend(userspace_layer_packages(userspace));
     packages
 }
 
@@ -191,8 +216,26 @@ const BASE_CONFIGURE_FLAGS: &[&str] = &[
     "--enable-openssl",
 ];
 
-/// The `./configure` flags for this build: [`BASE_CONFIGURE_FLAGS`] plus one flag
-/// per Rockchip userspace tree the SoC declares.
+/// The linker flag that bakes the install `libdir` into every object this stage
+/// builds, so each finds its siblings without help from the environment.
+///
+/// The bundled `libav*`/`libsw*` carry the *same* sonames as Debian's own FFmpeg
+/// packages — `libavcodec.so.62`, `libavutil.so.60`, `libavfilter.so.11` and the rest
+/// — so the one thing this deb must never do is put its `libdir` on the system-wide
+/// search path. An `/etc/ld.so.conf.d` drop-in would silently re-point every program
+/// on the box that links `libavcodec.so.62` at this build, which is exactly the
+/// shadowing [`INSTALL_PREFIX`] exists to prevent; a per-object `RUNPATH` keeps the
+/// resolution local to these binaries and leaves the system FFmpeg alone.
+///
+/// It is spelled as an explicit linker flag rather than configure's `--enable-rpath`
+/// so the emitted tag does not depend on how a given tree spells that option.
+/// [`assert_runpath`] then proves it landed, rather than trusting that it did.
+fn rpath_ldflag() -> String {
+    format!("--extra-ldflags=-Wl,-rpath,{INSTALL_PREFIX}/lib")
+}
+
+/// The `./configure` flags for this build: [`BASE_CONFIGURE_FLAGS`] plus the
+/// [`rpath_ldflag`] and one flag per Rockchip userspace tree the SoC declares.
 ///
 /// The SoC's declared sources *are* the capability statement, so the configure
 /// surface is derived from them rather than fixed: a part with no vendor
@@ -209,6 +252,7 @@ fn configure_flags(userspace: &UserspacePins) -> Vec<String> {
         .iter()
         .map(|s| (*s).to_string())
         .collect();
+    flags.push(rpath_ldflag());
     if userspace.mpp.is_some() {
         flags.push("--enable-rkmpp".to_string());
         if userspace.librga.is_some() {
@@ -229,6 +273,14 @@ pub struct FfmpegOptions<'a> {
     /// Directory holding the userspace `.deb`s ffmpeg build-depends on — the output
     /// dir of a prior [`userspace`](crate::build::userspace) run.
     pub userspace_debs: &'a Path,
+    /// Whether the userspace stage of this build also built Mali.
+    ///
+    /// Nothing here compiles Mali, and ffmpeg does not link it. It is carried because
+    /// the flag decides what the *userspace* stage layered over the shared sandbox base
+    /// ([`layer_packages`](crate::build::userspace::layer_packages)), and this stage's
+    /// key folds the userspace packages' output signatures — so recomputing them here
+    /// with a different answer would name `.deb`s that were never built.
+    pub build_libmali: bool,
     /// Scratch directory; the ffmpeg tree, `pkg-stage`, and the built `.deb` live
     /// under `<work>/ffmpeg/`.
     pub work_dir: &'a Path,
@@ -301,6 +353,7 @@ pub fn build_ffmpeg(
         userspace,
         arch,
         &env.sandbox_id,
+        opts.build_libmali,
         ffmpeg_patches,
         us_patches,
     );
@@ -347,10 +400,14 @@ pub fn build_ffmpeg(
     // packages it build-depends on: the rootfs node's pool is a per-build snapshot of the
     // whole artifact ledger that it clears and rewrites after every stage, so it cannot
     // carry anything forward.
+    // Deterministic build timestamp from the locked base commit; the tree's HEAD is a
+    // `git am` patch commit stamped now, so read the base explicitly. It dates both the
+    // pool's `Release` — without which a publish takes the wall clock and is not
+    // byte-reproducible — and the compile itself.
+    let source_date_epoch = git::commit_epoch(&tree, &ffmpeg.base.commit).ok();
     let pool_dir = stage_root.join("build-pool");
-    let pool = LocalDistsRepo::assemble(&pool_dir, &debs, suite, arch, &step)?;
-    let mut packages: Vec<&str> = FFMPEG_DEPS.to_vec();
-    packages.extend(userspace_layer_packages(userspace));
+    let pool = LocalDistsRepo::assemble(&pool_dir, &debs, suite, arch, source_date_epoch, &step)?;
+    let packages = layer_packages(userspace);
     let root = sandbox.build_root(
         &BuildRootSpec {
             packages: &packages,
@@ -368,10 +425,7 @@ pub fn build_ffmpeg(
     // A stale pkg-stage from an interrupted run would poison `make install`.
     let _ = std::fs::remove_dir_all(&pkg_stage);
 
-    // Deterministic build timestamp from the locked base commit; the
-    // tree's HEAD is a `git am` patch commit stamped now, so read the base explicitly.
-    let build_env: Vec<(String, String)> = git::commit_epoch(&tree, &ffmpeg.base.commit)
-        .ok()
+    let build_env: Vec<(String, String)> = source_date_epoch
         .map(|e| vec![("SOURCE_DATE_EPOCH".to_string(), e.to_string())])
         .unwrap_or_default();
 
@@ -384,9 +438,22 @@ pub fn build_ffmpeg(
         &step,
     )?;
     step.progress(55);
-    compile(&root, env, &tree, &binds, &build_env, &step)?;
+    compile(
+        &root,
+        env,
+        &tree,
+        &stage_root.join(LOOKUP_PROBE_REPORT),
+        &binds,
+        &build_env,
+        &step,
+    )?;
     step.progress(85);
     install_to_stage(&root, &tree, &pkg_stage, &binds, &step)?;
+    // The staged tree must be able to run from where it will be installed before it is
+    // worth archiving: a missing RUNPATH is invisible to `make install` and fatal on
+    // the board. Checked here, so the stage fails rather than shipping.
+    assert_runpath(&pkg_stage, &step)?;
+    stage_path_symlinks(&pkg_stage, &step)?;
     step.progress(88);
 
     // Derive the runtime Depends from what the built binaries actually link
@@ -441,12 +508,16 @@ pub fn build_ffmpeg(
 /// MPP carries the `userspace` patch scope, so its dep folds `us_patches`
 /// while RGA is unpatched. Folding the lock-derived dep *signatures* (not the built
 /// deb bytes) keeps the key computable without the userspace `.deb`s present.
-fn output_manifest(
+/// Public so `why-rebuild` ([`crate::plan`]) asks the artifact store the same
+/// question this stage does, rather than reimplementing the key it is asking under.
+#[allow(clippy::too_many_arguments)]
+pub fn output_manifest(
     lock: &Lock,
     ffmpeg: &FfmpegPins,
     userspace: &UserspacePins,
     arch: &str,
     sandbox_id: &str,
+    build_libmali: bool,
     patches: SeriesIdentity,
     us_patches: SeriesIdentity,
 ) -> crate::signature::SignatureManifest {
@@ -472,6 +543,10 @@ fn output_manifest(
         // from, and which `qemu-user` runs its compiler. See
         // [`BuildEnv::sandbox_id`](crate::build::BuildEnv::sandbox_id).
         .fold_scalar("sandbox", sandbox_id)
+        // What was layered over that sandbox, from the same function that stages it.
+        // `./configure` is a probe suite, so every entry decides whether a codec is
+        // compiled in.
+        .fold_set("build_deps", &layer_packages(userspace))
         .fold_scalar("base.reference", &ffmpeg.base.reference)
         .fold_scalar("pkg_name", PKG_NAME);
     // Fold a dependency only for a tree this build has. Folding the absent ones as
@@ -485,6 +560,7 @@ fn output_manifest(
             suite,
             arch,
             sandbox_id,
+            build_libmali,
             Some(&mpp_inputs),
         )
         .signature();
@@ -497,6 +573,7 @@ fn output_manifest(
             suite,
             arch,
             sandbox_id,
+            build_libmali,
             None,
         )
         .signature();
@@ -595,16 +672,24 @@ fn configure(
 
 /// Run `make -j` inside the sandbox. The build is target-native there (the sandbox
 /// is a target-arch userland, reached via qemu-user on a cross host), so no
-/// `CROSS_COMPILE` — unlike the host-cross-compiled kernel/u-boot nodes.
+/// `CROSS_COMPILE` — unlike the kernel and u-boot stages, which cross-compile in a
+/// host-arch root.
+///
+/// This is the build's one parallel command in a freshly mounted overlay, and the only
+/// place a header has ever gone missing that was not, so it runs under
+/// [`probe::wrap`](crate::build::probe::wrap) — free on success, and the difference
+/// between a transient and a durably wrong mount when it is not.
 fn compile(
     root: &BuildRoot,
     env: &BuildEnv,
     tree: &Path,
+    report: &Path,
     binds: &[PathBuf],
     run_env: &[(String, String)],
     step: &Step,
 ) -> Result<(), EngineError> {
-    let argv = vec!["make".to_string(), format!("-j{}", env.jobs())];
+    let make = vec!["make".to_string(), format!("-j{}", env.jobs())];
+    let argv = probe::wrap(&make, report);
     let spec = SandboxRun {
         work: tree,
         binds,
@@ -639,8 +724,14 @@ fn install_to_stage(
     root.run(&spec, step)
 }
 
-/// Build the `.deb` from the staged install tree with `fakeroot dpkg-deb`, run in
-/// the sandbox so the packaged file ownership is correct on either path.
+/// Build the `.deb` from the staged install tree with `dpkg-deb`, run in the build
+/// root — the same root that compiled the tree, so the archiver is the suite's rather
+/// than the host's.
+///
+/// No `fakeroot`: the root maps the caller to uid 0
+/// ([`sandbox`](crate::sandbox) module docs), so a tree `make install` staged is
+/// already `root:root` where it is archived, and `dpkg-deb` records the ownership a
+/// `.deb` must carry with nothing faking anything.
 ///
 /// `build_env` carries `SOURCE_DATE_EPOCH` (the locked base commit's committer
 /// date), so `dpkg-deb` clamps every archive member's mtime to it — the `.deb`
@@ -654,7 +745,6 @@ fn package_deb(
     step: &Step,
 ) -> Result<(), EngineError> {
     let argv = vec![
-        "fakeroot".to_string(),
         "dpkg-deb".to_string(),
         "--build".to_string(),
         pkg_stage.to_string_lossy().into_owned(),
@@ -779,6 +869,114 @@ fn resolve_depends(
     let _ = std::fs::remove_dir_all(&work);
     step.log(format!("resolved runtime Depends: {depends}"));
     Ok(depends)
+}
+
+/// Assert every staged executable and private library resolves its siblings through
+/// the install prefix, before the tree is archived into a `.deb`.
+///
+/// A `make install` that produces a *runnable* tree is not the same as one that
+/// produces a **self-sufficient** one. With no `RUNPATH`, `/opt/ffmpeg-rk/bin/ffmpeg`
+/// starts only for a caller that has already set `LD_LIBRARY_PATH` — so the binary
+/// the media-accel image exists to ship dies with `libavdevice.so.62: cannot open
+/// shared object file`, and the failure surfaces on the board instead of in the build
+/// that caused it.
+///
+/// Every object is checked, not just the executables: `DT_RUNPATH` is consulted only
+/// for the object that carries it and is **not** inherited by that object's own
+/// dependencies, so an `ffmpeg` binary that resolves perfectly proves nothing about
+/// whether `libavcodec` can find `libavutil`.
+fn assert_runpath(pkg_stage: &Path, step: &Step) -> Result<(), EngineError> {
+    let libdir = format!("{INSTALL_PREFIX}/lib");
+    let objects = scan_binaries(pkg_stage)?;
+    let mut found: Vec<(String, Option<String>)> = Vec::new();
+    for path in &objects {
+        let bytes = std::fs::read(path).map_err(|source| EngineError::io(path, source))?;
+        let name = path.file_name().unwrap_or(path.as_os_str());
+        found.push((name.to_string_lossy().into_owned(), elf::runpath(&bytes)));
+    }
+    let missing = objects_missing_runpath(&found, &libdir);
+    if missing.is_empty() {
+        step.log(format!(
+            "verified RUNPATH {libdir} on {} staged object(s)",
+            objects.len()
+        ));
+        return Ok(());
+    }
+    Err(EngineError::ArtifactMissing {
+        what: format!(
+            "RUNPATH {libdir} on {} of {} staged object(s) — {} — so the built tree \
+             would resolve its own libraries only under LD_LIBRARY_PATH; the \
+             `--extra-ldflags=-Wl,-rpath` passed to ./configure did not reach the link",
+            missing.len(),
+            objects.len(),
+            missing.join(", ")
+        ),
+        location: pkg_stage.display().to_string(),
+    })
+}
+
+/// The staged objects whose search path does not name `libdir`, rendered as
+/// `name (what it carries instead)` for the failure message. Pure, so the policy is
+/// testable without staging a build tree.
+///
+/// The search path is field-split on `:` rather than substring-matched: a `RUNPATH` of
+/// `/opt/ffmpeg-rk/lib-old` contains the libdir as a prefix but does not resolve to
+/// it, and would otherwise pass.
+fn objects_missing_runpath(found: &[(String, Option<String>)], libdir: &str) -> Vec<String> {
+    found
+        .iter()
+        .filter(|(_, path)| {
+            !path
+                .iter()
+                .any(|r| r.split(':').any(|entry| entry == libdir))
+        })
+        .map(|(name, path)| format!("{name} ({})", path.as_deref().unwrap_or("no RUNPATH")))
+        .collect()
+}
+
+/// Stage a `/usr/bin/<name>-rk` symlink for each program under the install prefix, so
+/// the build is reachable without typing an absolute path.
+///
+/// The `-rk` suffix is not decoration. Debian's own `ffmpeg` package owns
+/// `/usr/bin/ffmpeg`, so claiming that path would be a dpkg file conflict *and* would
+/// put this build in front of the distro's for every caller on the box — the same
+/// shadowing [`rpath_ldflag`] keeps out of the loader. A distinct name coexists.
+///
+/// The links are staged into the `.deb` rather than shipped in a feature overlay so
+/// that dpkg owns them: an overlay file belongs to no package and would outlive a
+/// purge of `ffmpeg-rk` as a dangling link.
+fn stage_path_symlinks(pkg_stage: &Path, step: &Step) -> Result<(), EngineError> {
+    let bin_dir = pkg_stage.join(&INSTALL_PREFIX[1..]).join("bin");
+    let mut names: Vec<String> = read_dir_entries(&bin_dir)?
+        .iter()
+        .filter(|e| e.path().is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        return Ok(());
+    }
+    let usr_bin = pkg_stage.join("usr/bin");
+    std::fs::create_dir_all(&usr_bin).map_err(|source| EngineError::io(&usr_bin, source))?;
+    // Mode-normalized like the control metadata: the host umask must not decide the
+    // permissions of a directory that ships in the archive.
+    build::set_mode(&usr_bin, 0o755)?;
+    for name in &names {
+        let link = usr_bin.join(format!("{name}-rk"));
+        // A stale link from an interrupted run would make `symlink` fail with EEXIST.
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(format!("{INSTALL_PREFIX}/bin/{name}"), &link)
+            .map_err(|source| EngineError::io(&link, source))?;
+    }
+    step.log(format!(
+        "linked {} into /usr/bin",
+        names
+            .iter()
+            .map(|n| format!("{n}-rk"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    Ok(())
 }
 
 /// The executables and private shared libraries under the install prefix that
@@ -981,6 +1179,59 @@ mod tests {
         for flags in [&full, &rga, &configure_flags(&no_trees())] {
             assert!(flags.contains(&"--enable-v4l2-request".to_string()));
         }
+    }
+
+    #[test]
+    fn the_runpath_check_names_every_object_that_would_ship_unresolvable() {
+        let libdir = "/opt/ffmpeg-rk/lib";
+        let staged = [
+            ("ffmpeg".to_string(), Some(libdir.to_string())),
+            // The shape the deb shipped before the flag existed.
+            ("ffprobe".to_string(), None),
+            // Present but pointing elsewhere: a tag alone is not the guarantee.
+            (
+                "libavcodec.so.62".to_string(),
+                Some("/usr/lib/aarch64-linux-gnu".to_string()),
+            ),
+            // A prefix of the libdir is not the libdir.
+            (
+                "libavutil.so.60".to_string(),
+                Some("/opt/ffmpeg-rk/lib-old".to_string()),
+            ),
+            // One entry among several still satisfies it.
+            (
+                "libavfilter.so.11".to_string(),
+                Some(format!("/some/other/dir:{libdir}")),
+            ),
+        ];
+        assert_eq!(
+            objects_missing_runpath(&staged, libdir),
+            vec![
+                "ffprobe (no RUNPATH)".to_string(),
+                "libavcodec.so.62 (/usr/lib/aarch64-linux-gnu)".to_string(),
+                "libavutil.so.60 (/opt/ffmpeg-rk/lib-old)".to_string(),
+            ]
+        );
+        // A fully-linked tree is silent.
+        assert!(objects_missing_runpath(
+            &[("ffmpeg".to_string(), Some(libdir.to_string()))],
+            libdir
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn every_build_bakes_the_install_libdir_into_its_objects() {
+        // Unconditional, and named exactly: the deb is unusable without it, and an
+        // ld.so.conf.d drop-in is not an alternative — these sonames collide with the
+        // suite's own FFmpeg, so a global search path would shadow it system-wide.
+        let want = "--extra-ldflags=-Wl,-rpath,/opt/ffmpeg-rk/lib".to_string();
+        for trees in [all_trees(), rga_only(), no_trees()] {
+            assert!(configure_flags(&trees).contains(&want));
+        }
+        // The flag must name the same prefix the tree installs to, or the objects
+        // would resolve against a directory the deb never ships.
+        assert!(rpath_ldflag().ends_with(&format!("{INSTALL_PREFIX}/lib")));
     }
 
     #[test]
@@ -1213,6 +1464,7 @@ mod tests {
                 us,
                 arch,
                 SANDBOX,
+                false,
                 SeriesIdentity::Pinned,
                 SeriesIdentity::Pinned,
             )
@@ -1242,6 +1494,7 @@ mod tests {
                 lock.userspace.as_ref().unwrap(),
                 "arm64",
                 "https://snapshot.debian.org/archive/debian/20260628T083000Z/",
+                false,
                 SeriesIdentity::Pinned,
                 SeriesIdentity::Pinned,
             )
@@ -1257,6 +1510,7 @@ mod tests {
                 dev_lock.userspace.as_ref().unwrap(),
                 "arm64",
                 SANDBOX,
+                false,
                 SeriesIdentity::Dev(&[]),
                 SeriesIdentity::Dev(&[]),
             )
@@ -1277,6 +1531,7 @@ mod tests {
                 us,
                 "arm64",
                 SANDBOX,
+                false,
                 SeriesIdentity::Pinned,
                 SeriesIdentity::Pinned,
             )

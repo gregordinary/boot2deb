@@ -14,16 +14,40 @@ use crate::build::{
 };
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
+use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, CompileRoot, PackagingSandbox};
 use boot2deb_core::lock::Lock;
 use boot2deb_core::model::ResolvedRkbinBoot;
 use boot2deb_core::size::parse_size;
 use boot2deb_core::ResolvedBuild;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Stage-recipe version for the u-boot tree signature: bump when the
 /// clone/patch logic that shapes the reused tree changes.
 const CLONE_STAGE_VERSION: u32 = 1;
+
+/// Build-dependencies this stage layers over the cross root's base — what a u-boot
+/// build wants that the toolchain, `make`, `bc`, `bison`, `flex` and `libssl-dev`
+/// already in that base do not supply.
+///
+/// Four of them serve one step: u-boot generates Python bindings for libfdt and then
+/// runs `binman` to assemble the image. `swig` and the Python dev headers compile the
+/// `pylibfdt` extension, `setuptools` builds it, and `pyelftools` is what `binman`
+/// imports. Absent, the failure is a mid-build Python traceback rather than a missing
+/// dependency — which is exactly why they are declared here rather than left to be
+/// present by accident.
+///
+/// `libgnutls28-dev` is the fifth and serves a different one: `tools/mkeficapsule`
+/// includes `<gnutls/gnutls.h>` and is built whenever the board's defconfig sets
+/// `CONFIG_TOOLS_MKEFICAPSULE`, which every EFI-loader configuration does. It is a host
+/// tool rather than something the payloads link, but `make tools` is on the path to
+/// them, so its absence stops the build outright.
+const UBOOT_BUILD_DEPS: &[&str] = &[
+    "swig",
+    "python3-dev",
+    "python3-setuptools",
+    "python3-pyelftools",
+    "libgnutls28-dev",
+];
 
 /// Stage-recipe version for the u-boot **output** signature (Tier-2 artifact cache):
 /// this stage's own logic, folded in as an input.
@@ -33,7 +57,7 @@ const CLONE_STAGE_VERSION: u32 = 1;
 /// folded inputs do not already capture — a defconfig generated with different `make`
 /// variables, a change to which artifacts the stage emits, a different archive
 /// compressor.
-const OUTPUT_STAGE_VERSION: u32 = 4;
+const OUTPUT_STAGE_VERSION: u32 = 6;
 
 /// Filesystem inputs for the u-boot stage.
 pub struct UbootOptions<'a> {
@@ -48,8 +72,25 @@ pub struct UbootOptions<'a> {
     pub blobs_dir: &'a Path,
     /// Scratch directory holding the u-boot clone (`<work>/u-boot`).
     pub work_dir: &'a Path,
+    /// The host-arch cross root every `make` in this stage runs in
+    /// ([`SandboxRole::Cross`](crate::sandbox::SandboxRole::Cross)).
+    ///
+    /// u-boot's build compiles host tools (`mkimage`, `dtc`) as well as target ones,
+    /// generates its `pylibfdt` device-tree bindings, and runs `binman` — so the
+    /// toolchain, `swig`, the Python dev headers and `pyelftools` all come from this
+    /// root, and the host carries none of them. Bootstrapped lazily, like
+    /// [`packaging`](Self::packaging) and for the same reason.
+    pub cross: &'a dyn BuildSandbox,
     /// Directory the produced boot payloads are staged into.
     pub out_dir: &'a Path,
+    /// The root the `u-boot-<device>` `.deb` is archived in.
+    ///
+    /// Provisioned lazily by this stage rather than by the caller: a build that
+    /// restores its u-boot artifacts from the cache never archives anything and should
+    /// not pay for a bootstrap. Its identity is folded into
+    /// [`output_manifest`] for the same reason the toolchain's is — it decides the
+    /// output bytes.
+    pub packaging: &'a PackagingSandbox,
     /// The build point's
     /// [artifact stem](boot2deb_core::buildpoint::BuildPoint::artifact_stem) — every
     /// payload is published as `<stem>-<name>`. Two recipes on one board can pin
@@ -244,13 +285,20 @@ pub fn build_uboot(
     step.progress(30);
 
     let blobs = BlobPaths { atf, tpl, bl32 };
-    configure(boot, env, &tree, &blobs, reused, &step)?;
+    // Everything from here compiles, so the cross root is stood up here rather than at
+    // the top of the stage: a Tier-2 hit returns without ever provisioning one.
+    let (root, binds) = compile_root(opts, &step)?;
+    let cr = CompileRoot {
+        root: &root,
+        binds: &binds,
+    };
+    configure(boot, env, &cr, &tree, &blobs, reused, &step)?;
     step.progress(40);
 
     // Deterministic build timestamp from the locked commit, so `u-boot.itb` does
     // not embed wall-clock time.
     let epoch = crate::git::commit_epoch(&tree, &uboot.commit).ok();
-    compile(env, &tree, &blobs, epoch, &step)?;
+    compile(env, &cr, &tree, &blobs, epoch, &step)?;
 
     let (idbloader, uboot_itb) = collect(opts, &tree, &step)?;
     let maskrom = collect_maskrom(opts, &tree, &step)?;
@@ -301,10 +349,13 @@ pub fn build_uboot(
 /// blob hashes (a blob change → new signature → rebuild, so a hit implies the same
 /// verified blobs), the deb's packaged fields (device, description, SoC, arch, the
 /// raw offsets, the u-boot ref that becomes the deb version), whether the build is
-/// cross, and the host toolchain identity. On a signature hit the artifact store
+/// cross, the host toolchain identity, and the identity of the packaging root that
+/// archives the deb. On a signature hit the artifact store
 /// restores the payloads + deb rather than rebuilding, so the key must cover
 /// everything that can change them.
-fn output_manifest(
+/// Public so `why-rebuild` ([`crate::plan`]) asks the artifact store the same
+/// question this stage does, rather than reimplementing the key it is asking under.
+pub fn output_manifest(
     build: &ResolvedBuild,
     boot: &ResolvedRkbinBoot,
     lock: &Lock,
@@ -331,7 +382,17 @@ fn output_manifest(
         .fold_scalar("offset.uboot_itb", &boot.offsets.uboot_itb)
         .fold_scalar("uboot.reference", &build::uboot_pin(lock)?.reference)
         .fold_scalar("cross", env.cross_compile.as_deref().unwrap_or(""))
-        .fold_scalar("toolchain", &env.toolchain_id);
+        .fold_scalar("toolchain", &env.toolchain_id)
+        // The base root's identity above covers what the toolchain is; this covers what
+        // was layered over it. Both reach the compile, so both reach the key — u-boot's
+        // makefiles probe for what is present (`pkg-config --cflags gnutls` decides how
+        // `mkeficapsule` is built), so a package added to or removed from this list is a
+        // different build.
+        .fold_set("build_deps", UBOOT_BUILD_DEPS)
+        // The root that archives the deb decides its bytes as surely as the compiler
+        // decides the payloads' — a different `dpkg-deb`, or the same one resolved from
+        // a different point in the archive, is a different output.
+        .fold_scalar("packaging", &env.packaging_id);
     Ok(b.manifest())
 }
 
@@ -401,28 +462,37 @@ fn clone_and_patch(
 fn configure(
     boot: &ResolvedRkbinBoot,
     env: &BuildEnv,
+    cr: &CompileRoot,
     tree: &Path,
     blobs: &BlobPaths,
     reused: bool,
     step: &Step,
 ) -> Result<(), EngineError> {
     if reused {
-        let mut clean = Command::new("make");
-        clean.arg("-C").arg(tree).arg("distclean");
-        cross(&mut clean, env);
-        build::run(clean, "make", "make distclean", step)?;
+        let argv = vec![
+            "make".to_string(),
+            "-C".to_string(),
+            tree.display().to_string(),
+            "distclean".to_string(),
+        ];
+        build::run_in_root(cr, tree, &argv, &cross(env), "make distclean", step)?;
     }
     // The defconfig comes from config; validate it and pass it after `--` so make
     // cannot read it as an option or a `FOO=bar` variable assignment.
     build::reject_unsafe_make_target("uboot_defconfig", &boot.uboot_defconfig)?;
-    let mut defconfig = Command::new("make");
-    defconfig.arg("-C").arg(tree);
-    blob_vars(&mut defconfig, blobs);
-    defconfig.arg("--").arg(&boot.uboot_defconfig);
-    cross(&mut defconfig, env);
-    build::run(
-        defconfig,
-        "make",
+    let mut argv = vec![
+        "make".to_string(),
+        "-C".to_string(),
+        tree.display().to_string(),
+    ];
+    blob_vars(&mut argv, blobs);
+    argv.push("--".to_string());
+    argv.push(boot.uboot_defconfig.clone());
+    build::run_in_root(
+        cr,
+        tree,
+        &argv,
+        &cross(env),
         &format!("make {}", boot.uboot_defconfig),
         step,
     )
@@ -436,19 +506,24 @@ fn configure(
 /// the OP-TEE image; the vendor tree's `BL32=` name is not used here.
 fn compile(
     env: &BuildEnv,
+    cr: &CompileRoot,
     tree: &Path,
     blobs: &BlobPaths,
     source_date_epoch: Option<u64>,
     step: &Step,
 ) -> Result<(), EngineError> {
-    let mut make = Command::new("make");
-    make.arg("-C").arg(tree).arg(format!("-j{}", env.jobs()));
-    blob_vars(&mut make, blobs);
+    let mut argv = vec![
+        "make".to_string(),
+        "-C".to_string(),
+        tree.display().to_string(),
+        format!("-j{}", env.jobs()),
+    ];
+    blob_vars(&mut argv, blobs);
+    let mut vars = cross(env);
     if let Some(epoch) = source_date_epoch {
-        make.env("SOURCE_DATE_EPOCH", epoch.to_string());
+        vars.push(("SOURCE_DATE_EPOCH".to_string(), epoch.to_string()));
     }
-    cross(&mut make, env);
-    build::run(make, "make", "make u-boot", step)
+    build::run_in_root(cr, tree, &argv, &vars, "make u-boot", step)
 }
 
 /// The verified rkbin payloads a u-boot build consumes, as absolute paths.
@@ -472,11 +547,11 @@ pub struct BlobPaths {
 /// The two invocations must therefore see one environment. (`TEE` is also what makes
 /// u-boot copy OP-TEE's reserved-memory nodes into the FDT it hands the kernel, so
 /// having it at config time is the correct behaviour, not a workaround.)
-fn blob_vars(cmd: &mut Command, blobs: &BlobPaths) {
-    cmd.arg(format!("BL31={}", blobs.atf.display()))
-        .arg(format!("ROCKCHIP_TPL={}", blobs.tpl.display()));
+fn blob_vars(argv: &mut Vec<String>, blobs: &BlobPaths) {
+    argv.push(format!("BL31={}", blobs.atf.display()));
+    argv.push(format!("ROCKCHIP_TPL={}", blobs.tpl.display()));
     if let Some(bl32) = &blobs.bl32 {
-        cmd.arg(format!("TEE={}", bl32.display()));
+        argv.push(format!("TEE={}", bl32.display()));
     }
 }
 
@@ -614,11 +689,34 @@ fn maskrom_in(dir: &Path) -> Option<MaskromImages> {
     })
 }
 
-/// Add `CROSS_COMPILE` to a `make` invocation when cross-building.
-fn cross(cmd: &mut Command, env: &BuildEnv) {
-    if let Some(prefix) = &env.cross_compile {
-        cmd.env("CROSS_COMPILE", prefix);
-    }
+/// Stand up the build root this stage compiles in, and the host paths its commands must
+/// see: the work dir (the tree and everything the build writes beside it) and the
+/// verified blob payloads, which `make` reads by absolute path from a staging directory
+/// under that same work dir.
+fn compile_root(
+    opts: &UbootOptions,
+    step: &Step,
+) -> Result<(BuildRoot, Vec<PathBuf>), EngineError> {
+    opts.cross.ensure_ready(step)?;
+    let root = opts.cross.build_root(
+        &BuildRootSpec {
+            packages: UBOOT_BUILD_DEPS,
+            // Nothing this build produced: u-boot build-depends only on the archive.
+            pool: None,
+            stage: "uboot",
+        },
+        step,
+    )?;
+    Ok((root, vec![opts.work_dir.to_path_buf()]))
+}
+
+/// `CROSS_COMPILE` as a one-entry environment, or empty where the cross root is already
+/// the target's architecture and the compile is native.
+fn cross(env: &BuildEnv) -> Vec<(String, String)> {
+    env.cross_compile
+        .iter()
+        .map(|prefix| ("CROSS_COMPILE".to_string(), prefix.clone()))
+        .collect()
 }
 
 /// Canonicalize a blob path so `make -C <tree>` (which changes directory) still
@@ -639,10 +737,12 @@ fn package_name(device: &str) -> String {
 /// manual `dd` in `README.Debian`. It carries **no** maintainer script: the
 /// bootloader lives in a raw gap outside any filesystem, so flashing is the image
 /// build's job (or a documented manual step), never an `apt` side effect that
-/// could brick a board by writing to the wrong device. Built host-side
-/// with [`build::dpkg_deb_build`] — a data-only archive needs no target-arch sandbox,
-/// and that helper is what makes the archive byte-identical across build hosts
-/// (stated compressor, `source_date_epoch` mtime ceiling).
+/// could brick a board by writing to the wrong device.
+///
+/// The tree is staged on the host — a data-only archive resolves no dependencies, so
+/// nothing here needs a target-arch root — and archived by
+/// [`build::archive_deb`] in the build's host-arch packaging root, which is what
+/// makes the `.deb` a function of the lock rather than of the build host's `dpkg`.
 #[allow(clippy::too_many_arguments)]
 fn package_deb(
     build: &ResolvedBuild,
@@ -671,8 +771,18 @@ fn package_deb(
 
     let deb_name = format!("{pkg}_{version}_{arch}.deb");
     let deb_in_stage = opts.work_dir.join(&deb_name);
-    let cmd = build::dpkg_deb_build(&pkg_stage, &deb_in_stage, source_date_epoch);
-    build::run(cmd, "fakeroot", "dpkg-deb --build u-boot", step)?;
+    opts.packaging.ensure_ready(step)?;
+    // One bind covers both ends: the staged tree and the archive are both under the
+    // stage's work dir, exposed inside at their host path.
+    build::archive_deb(
+        opts.packaging,
+        &pkg_stage,
+        &deb_in_stage,
+        &[opts.work_dir.to_path_buf()],
+        source_date_epoch,
+        "dpkg-deb --build u-boot",
+        step,
+    )?;
 
     let deb = stage_artifact(opts.out_dir, &deb_in_stage)?;
     step.log(format!("staged {deb_name}"));
@@ -830,10 +940,50 @@ fn dd_command(payload: &str, offset: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::rk1_build;
+    use crate::sandbox::SandboxRun;
+    use crate::test_support::{rk1_build, UnusedSandbox};
     use boot2deb_core::lock::{
         BlobsPin, FfmpegPins, GitPin, KernelPin, PatchesPin, RootfsPin, UbootPin, UserspacePins,
     };
+    use std::cell::RefCell;
+
+    /// An [`EventSink`] retaining every log line, so a command run inside the packaging
+    /// root can be asserted on — `dpkg-deb`'s own report of the archive it built is the
+    /// only place that answer exists, and it arrives as events rather than as a
+    /// captured stdout.
+    #[derive(Default)]
+    struct Recorder(RefCell<Vec<String>>);
+
+    impl Recorder {
+        /// Drain the retained lines, so consecutive commands are read apart.
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut self.0.borrow_mut())
+        }
+    }
+
+    impl EventSink for Recorder {
+        fn emit(&self, event: crate::event::Event) {
+            if let crate::event::Event::Log { line, .. } = event {
+                self.0.borrow_mut().push(line);
+            }
+        }
+    }
+
+    /// A packaging root for the tests that never archive anything — every stage
+    /// fixture needs one, and only the end-to-end test provisions a real one.
+    ///
+    /// Pointed at a path that does not exist, deliberately: a test that reached
+    /// `ensure_ready` through this would fail rather than quietly bootstrap a tree.
+    fn unused_packaging() -> PackagingSandbox {
+        PackagingSandbox::new(
+            PathBuf::from("/nonexistent/packaging-root"),
+            "forky",
+            "amd64",
+            Vec::new(),
+            None,
+            None,
+        )
+    }
 
     // The `patches_commit` names the *u-boot* patch pin, since that is what the u-boot
     // tree signature tracks. The kernel `[patches]` pin is held fixed so the tests can
@@ -904,11 +1054,9 @@ mod tests {
                 tpl: PathBuf::from("/b/ddr.bin"),
                 bl32: bl32.map(PathBuf::from),
             };
-            let mut cmd = Command::new("make");
-            blob_vars(&mut cmd, &blobs);
-            cmd.get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
+            let mut argv = Vec::new();
+            blob_vars(&mut argv, &blobs);
+            argv
         };
         // A BL31-only SoC (RK3588/RK1) passes no `TEE`, so its Kconfig sees none.
         assert_eq!(vars(None), ["BL31=/b/bl31.elf", "ROCKCHIP_TPL=/b/ddr.bin"]);
@@ -978,6 +1126,7 @@ mod tests {
             jobs: None,
             toolchain_id: tc.to_string(),
             sandbox_id: String::new(),
+            packaging_id: String::new(),
         };
         let boot = build.rkbin_boot().unwrap();
         let man = |lock: &Lock, env: &BuildEnv, patches| {
@@ -1145,110 +1294,37 @@ mod tests {
         assert!(!pkg_stage.join("DEBIAN/postinst").exists());
     }
 
+    /// End-to-end through a real packaging root: the staged tree becomes a `.deb`, that
+    /// root's own `dpkg` reads it back and accepts the control stanza, and two
+    /// packagings at one epoch produce identical bytes.
+    ///
+    /// One test rather than three, because the expensive part is provisioning the root
+    /// and all three assertions want the same one.
+    ///
+    /// Nothing here touches a host `dpkg-deb`: the archive is built *and* inspected
+    /// inside the root, which is what makes this an assertion about the tool a build
+    /// actually uses rather than about whatever the test machine has installed.
     #[test]
-    fn dpkg_deb_accepts_the_staged_package() {
-        // End-to-end: stage the real tree, then build + inspect the .deb with the
-        // host packaging tools, confirming dpkg-deb accepts our control stanza.
-        // Engine is Linux-only; skip where the tools are absent.
-        let have = |t: &str| {
-            Command::new(t)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        };
-        if !have("dpkg-deb") || !have("fakeroot") {
-            eprintln!(
-                "skipping dpkg_deb_accepts_the_staged_package: dpkg-deb/fakeroot unavailable"
-            );
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let build = rk1_build();
-        let idb = tmp.path().join("idbloader.img");
-        let itb = tmp.path().join("u-boot.itb");
-        std::fs::write(&idb, b"IDB").unwrap();
-        std::fs::write(&itb, b"ITB").unwrap();
-        let pkg_stage = tmp.path().join("pkg-stage");
-        let boot = build.rkbin_boot().unwrap();
-        stage_tree(
-            &pkg_stage,
-            &build,
-            boot,
-            "u-boot-turing-rk1",
-            "2026.04",
-            "arm64",
-            &idb,
-            &itb,
-        )
-        .unwrap();
-
-        let deb = tmp.path().join("u-boot-turing-rk1_2026.04_arm64.deb");
-        let built = Command::new("fakeroot")
-            .args(["dpkg-deb", "--build"])
-            .arg(&pkg_stage)
-            .arg(&deb)
-            .output()
-            .unwrap();
-        assert!(
-            built.status.success(),
-            "dpkg-deb --build failed: {}",
-            String::from_utf8_lossy(&built.stderr)
-        );
-
-        // dpkg-deb parses our control and reports the fields back.
-        let info = Command::new("dpkg-deb")
-            .arg("-I")
-            .arg(&deb)
-            .output()
-            .unwrap();
-        let info = String::from_utf8_lossy(&info.stdout);
-        assert!(
-            info.contains("Package: u-boot-turing-rk1"),
-            "info was: {info}"
-        );
-        assert!(info.contains("Version: 2026.04"));
-        assert!(info.contains("Architecture: arm64"));
-
-        // The payloads + install.conf ship at the documented path.
-        let contents = Command::new("dpkg-deb")
-            .arg("-c")
-            .arg(&deb)
-            .output()
-            .unwrap();
-        let contents = String::from_utf8_lossy(&contents.stdout);
-        assert!(contents.contains("/usr/lib/u-boot/turing-rk1/idbloader.img"));
-        assert!(contents.contains("/usr/lib/u-boot/turing-rk1/u-boot.itb"));
-        assert!(contents.contains("/usr/lib/u-boot/turing-rk1/install.conf"));
-    }
-
-    #[test]
-    fn uboot_deb_is_byte_reproducible_with_a_fixed_epoch() {
-        // Two independent packagings with the same SOURCE_DATE_EPOCH must yield a
-        // byte-identical .deb — dpkg-deb clamps the staged files' (build-clock)
-        // mtimes to the epoch, so nothing wall-clock leaks into the archive.
-        let have = |t: &str| {
-            Command::new(t)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        };
-        if !have("dpkg-deb") || !have("fakeroot") {
-            eprintln!("skipping uboot_deb_is_byte_reproducible: dpkg-deb/fakeroot unavailable");
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let build = rk1_build();
-        let idb = tmp.path().join("idbloader.img");
-        let itb = tmp.path().join("u-boot.itb");
-        std::fs::write(&idb, b"IDB").unwrap();
-        std::fs::write(&itb, b"ITB").unwrap();
-        let sink = |_: crate::event::Event| {};
+    fn the_packaging_root_archives_a_deb_dpkg_accepts_and_reproduces() {
+        let sink = Recorder::default();
         let step = Step::start(&sink, "uboot");
+        let Some(packaging) = crate::sandbox::packaging_root_for_tests(&step) else {
+            return;
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let build = rk1_build();
+        let idb = tmp.path().join("idbloader.img");
+        let itb = tmp.path().join("u-boot.itb");
+        std::fs::write(&idb, b"IDB").unwrap();
+        std::fs::write(&itb, b"ITB").unwrap();
         let dummy = tmp.path().join("dummy");
 
-        let package = |tag: &str| -> Vec<u8> {
+        // Two independent packagings of the same inputs at the same epoch. `dpkg-deb`
+        // clamps the staged files' build-clock mtimes to it, so no wall clock reaches
+        // the archive and the two runs must agree byte for byte — no sleep needed,
+        // since both stage far newer than the 2020 epoch and both clamp to it.
+        let package = |tag: &str| -> PathBuf {
             let work = tmp.path().join(tag);
             std::fs::create_dir_all(&work).unwrap();
             let opts = UbootOptions {
@@ -1256,12 +1332,14 @@ mod tests {
                 patches: None,
                 blobs_dir: &dummy,
                 work_dir: &work,
+                cross: &UnusedSandbox,
                 out_dir: &work,
+                packaging: &packaging,
                 stem: "turing-rk1-forky",
                 store: None,
             };
             let boot = build.rkbin_boot().unwrap();
-            let deb = package_deb(
+            package_deb(
                 &build,
                 boot,
                 "2026.04",
@@ -1271,13 +1349,70 @@ mod tests {
                 &itb,
                 &step,
             )
-            .unwrap();
-            std::fs::read(&deb).unwrap()
+            .unwrap()
+        };
+        let (a, b) = (package("run-a"), package("run-b"));
+        assert_eq!(
+            std::fs::read(&a).unwrap(),
+            std::fs::read(&b).unwrap(),
+            "two packagings at one epoch differ"
+        );
+        assert!(
+            a.file_name().unwrap().to_str().unwrap() == "u-boot-turing-rk1_2026.04_arm64.deb",
+            "unexpected deb name: {}",
+            a.display()
+        );
+
+        // Read the archive back with the root's own dpkg. `-I` reports the control
+        // stanza it parsed, `-c` the data members with their ownership and paths.
+        let inspect = |flag: &str| -> String {
+            sink.take();
+            let argv = vec![
+                "dpkg-deb".to_string(),
+                flag.to_string(),
+                a.to_string_lossy().into_owned(),
+            ];
+            packaging
+                .run(
+                    &SandboxRun {
+                        work: a.parent().unwrap(),
+                        binds: &[tmp.path().to_path_buf()],
+                        env: &[],
+                        argv: &argv,
+                        context: "inspect the packaged deb",
+                    },
+                    &step,
+                )
+                .unwrap();
+            sink.take().join("\n")
         };
 
-        // Sleep-free: the two runs stage files at (possibly different) build-clock
-        // times, both far newer than the 2020 epoch, so both clamp to it identically.
-        assert_eq!(package("run-a"), package("run-b"));
+        let info = inspect("-I");
+        assert!(
+            info.contains("Package: u-boot-turing-rk1"),
+            "info was: {info}"
+        );
+        assert!(info.contains("Version: 2026.04"), "info was: {info}");
+        assert!(info.contains("Architecture: arm64"), "info was: {info}");
+
+        let contents = inspect("-c");
+        for path in [
+            "/usr/lib/u-boot/turing-rk1/idbloader.img",
+            "/usr/lib/u-boot/turing-rk1/u-boot.itb",
+            "/usr/lib/u-boot/turing-rk1/install.conf",
+        ] {
+            assert!(contents.contains(path), "{path} missing from: {contents}");
+        }
+        // The `fakeroot`-less claim, asserted rather than assumed: the root maps the
+        // caller to uid 0, so a tree the build user staged on the host is archived with
+        // the ownership a `.deb` must carry. A member owned by anyone else would install
+        // files owned by whoever happened to run the build.
+        for line in contents.lines().filter(|l| l.contains("/usr/lib/u-boot/")) {
+            assert!(
+                line.contains("root/root"),
+                "archive member is not root-owned: {line}"
+            );
+        }
     }
 
     #[test]
@@ -1294,7 +1429,9 @@ mod tests {
             patches: None,
             blobs_dir: tmp.path(),
             work_dir: tmp.path(),
+            cross: &UnusedSandbox,
             out_dir: &out,
+            packaging: &unused_packaging(),
             stem: "turing-rk1-forky",
             store: None,
         };

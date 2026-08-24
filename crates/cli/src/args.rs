@@ -6,6 +6,7 @@ use boot2deb_core::lock::SnapshotMode;
 use boot2deb_core::model::{BootMethod, Keymap, Layout, Overrides};
 use boot2deb_core::series::Scope;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use std::path::PathBuf;
 
 /// The `boot2deb` binary's argument tree: the global config-root/overlay/output
@@ -25,12 +26,26 @@ pub(crate) struct Cli {
     #[arg(long = "overlay", global = true)]
     pub(crate) overlay: Vec<PathBuf>,
 
-    /// Machine-readable output: `list-*` and `resolve` print a JSON document;
-    /// `build` streams NDJSON events (one JSON object per line, tagged by its
-    /// `event` field, artifacts included) instead of the human rendering.
-    /// Other commands are unaffected. Errors still go to stderr as text.
+    /// Machine-readable output: `list-*`, `resolve`, `doctor`, and the `verify-*`
+    /// commands print a JSON document; `build` streams NDJSON events (one JSON object
+    /// per line, tagged by its `event` field, artifacts included) instead of the human
+    /// rendering. A command with no machine form rejects the flag rather than ignoring
+    /// it. Errors still go to stderr as text.
     #[arg(long, global = true)]
     pub(crate) json: bool,
+
+    /// Print only what a command produced — artifact paths and errors — and none of
+    /// its progress. Conflicts with `--verbose`; ignored under `--json`, where the
+    /// stream is the record.
+    #[arg(long, short, global = true, conflicts_with = "verbose")]
+    pub(crate) quiet: bool,
+
+    /// Print every line the build's subprocesses emit (`make`, `git`,
+    /// `dpkg-buildpackage`) as well as the step boundaries and each stage's own
+    /// decisions. The default shows the latter only, which keeps a tens-of-minutes
+    /// compile readable; reach for this when a stage fails or hangs.
+    #[arg(long, short, global = true)]
+    pub(crate) verbose: bool,
 
     #[command(subcommand)]
     pub(crate) command: Command,
@@ -58,6 +73,27 @@ pub(crate) enum Command {
         #[arg(long)]
         markdown: bool,
     },
+    /// Print the complete flag reference: every command's positional arguments and
+    /// flags, generated from this command tree so it cannot drift from the binary.
+    /// `--help` answers this per command; this answers it for all of them at once.
+    CliReference {
+        /// Emit the `docs/src/reference/cli-flags.md` page verbatim, for regenerating
+        /// it after a flag is added, removed, or re-described.
+        #[arg(long)]
+        markdown: bool,
+    },
+    /// Print a shell completion script on stdout, for the shell named. Install it
+    /// where your shell looks (e.g. `boot2deb completions bash > \
+    /// ~/.local/share/bash-completion/completions/boot2deb`); boot2deb writes no files
+    /// itself, since where they belong is the packager's call.
+    Completions {
+        /// Shell to generate for.
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Print the `boot2deb(1)` man page (roff) on stdout, e.g.
+    /// `boot2deb man > /usr/share/man/man1/boot2deb.1`.
+    Man,
     /// Scaffold a new `devices/<name>.toml` (and, by default, a matching recipe)
     /// from the typed model: it offers the valid SoC/boot-method/kernel/feature
     /// choices, fills every derivable value, and marks the researched values
@@ -77,9 +113,14 @@ pub(crate) enum Command {
         #[command(flatten)]
         overrides: OverrideArgs,
     },
-    /// Report host arch/OS and whether a target build is cross-arch.
+    /// Preflight the host: arch/OS facts, and whether every tool a build needs is
+    /// present — with the exact per-distro install command for anything missing. With
+    /// a target it asks only for what *that* recipe will invoke; bare, it runs the
+    /// requirements every board shares. A missing required tool is a non-zero exit.
     Doctor {
-        /// Optional device/recipe to report cross-arch status against.
+        /// Device/recipe to preflight. Omit to check only the requirements no board
+        /// can opt out of (user namespaces, the `.deb` packaging tools, the vendored
+        /// apt trust anchors) — the answerable half before a board is chosen.
         target: Option<String>,
         /// Scratch dir the target would build in; default: `<root>/build/<target>`. Only the
         /// overlay check reads it — it probes the filesystem that dir lands on, so
@@ -139,9 +180,11 @@ pub(crate) enum Command {
         #[command(flatten)]
         args: BuildArgs,
     },
-    /// Explain, per compile node, whether the next `build` will reuse or rebuild its
-    /// cached source tree — and which pinned inputs changed if it will rebuild.
-    /// Offline: reads the lock and the on-disk build stamps, runs no build.
+    /// Explain, per compile node, what the next `build` will actually redo: whether it
+    /// reuses or rebuilds the cached source tree (naming the pinned input that moved),
+    /// and whether the durable artifact cache lets it skip the compile entirely.
+    /// Offline: reads the lock, the build stamps, and the artifact store; runs no
+    /// build.
     WhyRebuild {
         /// Recipe to inspect (e.g. turing-rk1/forky); its `.lock` must exist.
         recipe: String,
@@ -252,9 +295,10 @@ pub(crate) struct BuildArgs {
     /// Vendored rkbin blob directory (default: blobs/SOC under the config root).
     #[arg(long)]
     pub(crate) blobs_dir: Option<PathBuf>,
-    /// Debian archive keyring for the cross sandbox bootstrap (default: the
-    /// vendored blobs/keyrings/debian-archive-keyring.gpg; omit on a Debian host
-    /// to use its apt trust store).
+    /// Debian archive keyring every root this build provisions is verified
+    /// against (default: the vendored
+    /// blobs/keyrings/debian-archive-keyring.gpg; omit on a Debian host to use
+    /// its apt trust store).
     #[arg(long)]
     pub(crate) keyring: Option<PathBuf>,
     /// Trust an overlay-shipped copy of the archive keyring. By default an overlay
@@ -335,8 +379,8 @@ pub(crate) struct BuildArgs {
     pub(crate) no_artifact_cache: bool,
 }
 
-/// `why-rebuild`'s flags: the work dir whose stamps are read, plus the two build
-/// knobs that change what the prediction should assume.
+/// `why-rebuild`'s flags: the work dir whose stamps are read, plus the build knobs
+/// that change what the prediction should assume.
 #[derive(Args)]
 pub(crate) struct WhyRebuildArgs {
     /// Build scratch dir to inspect (default: `<root>/build/RECIPE`) — must match the dir the
@@ -352,6 +396,11 @@ pub(crate) struct WhyRebuildArgs {
     /// `--build-libmali`).
     #[arg(long)]
     pub(crate) build_libmali: bool,
+    /// The build being reasoned about passes `--no-artifact-cache`. The Tier-2
+    /// artifact cache is then off, so no node restores a stored `.deb` and every one
+    /// recompiles — pass it here to see that prediction rather than the cached one.
+    #[arg(long)]
+    pub(crate) no_artifact_cache: bool,
 }
 
 /// `clean`'s flags: which subtree to remove, and the two safety knobs
@@ -365,8 +414,8 @@ pub(crate) struct CleanArgs {
     /// compiled source trees and artifacts.
     #[arg(long)]
     pub(crate) cache: bool,
-    /// Remove only the bootstrapped cross-build sandbox (WORK_DIR/sandbox) — the
-    /// largest single reclaimable tree.
+    /// Remove only the provisioned roots (WORK_DIR/sandbox: the target-arch build
+    /// sandbox and the host-arch packaging root) — the largest reclaimable tree.
     #[arg(long)]
     pub(crate) sandbox: bool,
     /// Remove the durable Tier-2 artifact store (`<root>/cache/artifacts`).

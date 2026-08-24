@@ -217,28 +217,32 @@ refused rather than silently shadowing it.
 
 ## Bring it up
 
-With the layers written, use the CLI's checks as guardrails, in order:
+With the layers written, use the CLI's checks as guardrails. This is the same sequence
+[Authoring a recipe](../tutorials/authoring-a-recipe.md#bring-the-recipe-up) uses — a
+new board only differs in having written the device file first:
 
 ```sh
 # 1. Does it resolve to a coherent build point? Also runs the geometry / fragment /
 #    keyring preflight, so this is a real coherence gate, not just a merge print.
-cargo run -p boot2deb-cli -- resolve <recipe>
+boot2deb resolve <recipe>
 
-# 2. Resolve upstream refs + hash blobs into the lock.
-cargo run -p boot2deb-cli -- update <recipe> --kernel-ref <ref>
+# 2. Is the host equipped to build it? Before `update`, so a missing host requirement
+#    costs nothing but a re-run rather than a network round trip.
+boot2deb doctor <recipe>
 
-# 3. Is the host equipped to build it?
-cargo run -p boot2deb-cli -- doctor <recipe>
+# 3. Resolve upstream refs + hash blobs into the lock. The only command that consults
+#    the network for pins; the verify gates below all read the lock it writes.
+boot2deb update <recipe> --kernel-ref <ref>
 
 # 4. Does the patch series apply cleanly to the pinned kernel? Auto-fetches the locked
 #    kernel — no hand-cloned tree — or add --kernel-src ../linux if you have a checkout.
-cargo run -p boot2deb-cli -- verify-patches <recipe>
+boot2deb verify-patches <recipe>
 
 # 5. Does the .config generate (and, with --reference-config, match a reference)?
-cargo run -p boot2deb-cli -- verify-config <recipe>
+boot2deb verify-config <recipe>
 
 # 6. Build.
-cargo run -p boot2deb-cli -- build <recipe>
+boot2deb build <recipe>
 ```
 
 `resolve`, `update`, and the two `verify-*` commands fail with a typed error before any
@@ -304,7 +308,7 @@ It pins kernel `<ver>`, u-boot `<ver>`, and <features>.
 
 Build it as in [Getting started](../getting-started.md):
 
-    cargo run -p boot2deb-cli -- build <recipe>
+    boot2deb build <recipe>
 
 ## Flash
 <how this board takes an image: card reader, BMC, maskrom, UEFI…>

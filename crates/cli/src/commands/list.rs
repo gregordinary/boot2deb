@@ -3,8 +3,12 @@
 //! Each renders one row per entry (or a JSON array under `--json`) and collects the
 //! entries that failed to parse, so a corrupt layer file is reported rather than
 //! silently dropped. An unreadable entry never fails the listing.
+//!
+//! The human rendering goes through [`print_columns`], which sizes every column from
+//! the data. A listing whose widest name decides its own column stays readable as
+//! names grow; a hardcoded width silently breaks the day one does.
 
-use crate::render::{constraint, finish_listing};
+use crate::render::{constraint, finish_listing, print_columns};
 use boot2deb_core::ConfigRoot;
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
@@ -13,21 +17,23 @@ type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 pub(crate) fn devices(root: &ConfigRoot, json: bool) -> Result {
     let mut broken = Vec::new();
     let mut rows = Vec::new();
+    let mut table = Vec::new();
     for name in root.list("devices")? {
         match root.device(&name) {
             Ok(d) if json => {
                 rows.push(serde_json::json!({"name": name, "description": d.description}));
             }
-            Ok(d) => println!("{name:<20} {}", d.description),
+            Ok(d) => table.push(vec![name, d.description.clone()]),
             Err(e) if json => {
                 rows.push(serde_json::json!({"name": name, "error": e.to_string()}));
             }
             Err(e) => {
-                println!("{name:<20} (unreadable)");
+                table.push(vec![name.clone(), "(unreadable)".into()]);
                 broken.push((name, e.to_string()));
             }
         }
     }
+    print_columns(&table);
     finish_listing(json, rows, "device", &broken)
 }
 
@@ -41,14 +47,15 @@ pub(crate) fn devices(root: &ConfigRoot, json: bool) -> Result {
 pub(crate) fn recipes(root: &ConfigRoot, json: bool) -> Result {
     let mut broken = Vec::new();
     let mut rows = Vec::new();
+    let mut table = Vec::new();
     for name in root.list_recipes()? {
         let (lock_state, lock_note) = match root.lock(&name) {
             Ok(_) => ("ok", ""),
             Err(boot2deb_core::ConfigError::NotFound { .. }) => (
                 "missing",
-                "  [no lock — run `boot2deb update` to make it buildable]",
+                "[no lock — run `boot2deb update` to make it buildable]",
             ),
-            Err(_) => ("unreadable", "  [lock unreadable]"),
+            Err(_) => ("unreadable", "[lock unreadable]"),
         };
         match root.recipe(&name) {
             Ok(r) if json => {
@@ -61,23 +68,23 @@ pub(crate) fn recipes(root: &ConfigRoot, json: bool) -> Result {
             }
             Ok(r) => {
                 let support = r.support.as_ref().map_or("-", |s| s.status.as_str());
-                // Trimmed: the support column is padded to align an absent lock note,
-                // which on the common path leaves every line ending in blanks.
-                let line = format!(
-                    "{name:<24} device={:<14} support={support:<13}{lock_note}",
-                    r.device
-                );
-                println!("{}", line.trim_end());
+                table.push(vec![
+                    name,
+                    format!("device={}", r.device),
+                    format!("support={support}"),
+                    lock_note.to_string(),
+                ]);
             }
             Err(e) if json => {
                 rows.push(serde_json::json!({"name": name, "error": e.to_string()}));
             }
             Err(e) => {
-                println!("{name:<24} (unreadable)");
+                table.push(vec![name.clone(), "(unreadable)".into()]);
                 broken.push((name, e.to_string()));
             }
         }
     }
+    print_columns(&table);
     finish_listing(json, rows, "recipe", &broken)
 }
 
@@ -88,6 +95,7 @@ pub(crate) fn recipes(root: &ConfigRoot, json: bool) -> Result {
 pub(crate) fn kernels(root: &ConfigRoot, json: bool) -> Result {
     let mut broken = Vec::new();
     let mut rows = Vec::new();
+    let mut table = Vec::new();
     for name in root.list("kernels")? {
         match root.kernel(&name) {
             Ok(k) if json => {
@@ -120,17 +128,24 @@ pub(crate) fn kernels(root: &ConfigRoot, json: bool) -> Result {
                         format!("package={}", track.as_deref().unwrap_or("-"))
                     }
                 };
-                println!("{name:<24} {flavor:<15} {version:<28} socs={socs:<12} patches={patches}");
+                table.push(vec![
+                    name,
+                    flavor,
+                    version,
+                    format!("socs={socs}"),
+                    format!("patches={patches}"),
+                ]);
             }
             Err(e) if json => {
                 rows.push(serde_json::json!({"name": name, "error": e.to_string()}));
             }
             Err(e) => {
-                println!("{name:<24} (unreadable)");
+                table.push(vec![name.clone(), "(unreadable)".into()]);
                 broken.push((name, e.to_string()));
             }
         }
     }
+    print_columns(&table);
     finish_listing(json, rows, "kernel", &broken)
 }
 
@@ -167,6 +182,7 @@ fn kernel_fields(k: &boot2deb_core::model::KernelDef) -> (String, Option<String>
 pub(crate) fn features(root: &ConfigRoot, json: bool) -> Result {
     let mut broken = Vec::new();
     let mut rows = Vec::new();
+    let mut table = Vec::new();
     for name in root.list("features")? {
         match root.feature(&name) {
             Ok(f) if json => {
@@ -181,23 +197,31 @@ pub(crate) fn features(root: &ConfigRoot, json: bool) -> Result {
                 }));
             }
             Ok(f) => {
-                let socs = constraint(&f.requires_soc);
-                let arches = constraint(&f.requires_arch);
-                print!("{name:<24} soc={socs:<20} arch={arches:<12}");
-                if !f.conflicts.is_empty() {
-                    print!(" conflicts={}", f.conflicts.join(","));
-                }
-                println!("  {}", f.description);
+                // The conflicts cell is empty rather than absent for a feature with
+                // none, so every row's description still lands in one column.
+                let conflicts = if f.conflicts.is_empty() {
+                    String::new()
+                } else {
+                    format!("conflicts={}", f.conflicts.join(","))
+                };
+                table.push(vec![
+                    name,
+                    format!("soc={}", constraint(&f.requires_soc)),
+                    format!("arch={}", constraint(&f.requires_arch)),
+                    conflicts,
+                    f.description.clone(),
+                ]);
             }
             Err(e) if json => {
                 rows.push(serde_json::json!({"name": name, "error": e.to_string()}));
             }
             Err(e) => {
-                println!("{name:<24} (unreadable)");
+                table.push(vec![name.clone(), "(unreadable)".into()]);
                 broken.push((name, e.to_string()));
             }
         }
     }
+    print_columns(&table);
     finish_listing(json, rows, "feature", &broken)
 }
 
@@ -207,6 +231,7 @@ pub(crate) fn features(root: &ConfigRoot, json: bool) -> Result {
 pub(crate) fn kmods(root: &ConfigRoot, json: bool) -> Result {
     let mut broken = Vec::new();
     let mut rows = Vec::new();
+    let mut table = Vec::new();
     for name in root.list("kmods")? {
         match root.kmod(&name) {
             Ok(k) if json => {
@@ -224,20 +249,23 @@ pub(crate) fn kmods(root: &ConfigRoot, json: bool) -> Result {
                 } else {
                     k.modules.join(",")
                 };
-                println!(
-                    "{name:<16} ref={:<12} modules={modules:<28}  {}",
-                    k.git_ref, k.description
-                );
+                table.push(vec![
+                    name,
+                    format!("ref={}", k.git_ref),
+                    format!("modules={modules}"),
+                    k.description.clone(),
+                ]);
             }
             Err(e) if json => {
                 rows.push(serde_json::json!({"name": name, "error": e.to_string()}));
             }
             Err(e) => {
-                println!("{name:<16} (unreadable)");
+                table.push(vec![name.clone(), "(unreadable)".into()]);
                 broken.push((name, e.to_string()));
             }
         }
     }
+    print_columns(&table);
     finish_listing(json, rows, "kmod", &broken)
 }
 

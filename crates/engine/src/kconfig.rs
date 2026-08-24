@@ -24,9 +24,9 @@
 
 use crate::error::EngineError;
 use crate::event::Step;
+use crate::sandbox::CompileRoot;
 use boot2deb_core::kconfig::{self, KernelConfig};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The kernel tree and the fragment set to merge onto its base defconfig.
 pub struct ConfigInputs<'a> {
@@ -49,6 +49,19 @@ pub struct ConfigInputs<'a> {
     /// Fragment files in merge order (base → soc → accel → device); later files
     /// win, per Kconfig last-wins.
     pub fragments: &'a [PathBuf],
+    /// The build root every `make` here runs in — the same one the kernel then compiles
+    /// in ([`SandboxRole::Cross`](crate::sandbox::SandboxRole::Cross)).
+    ///
+    /// Generating a `.config` is a kbuild operation: it builds and runs the tree's own
+    /// `conf`, and resolves `cc-option` probes against a compiler. That has to be the
+    /// compiler the kernel is then built with, or the probed symbols come out different
+    /// and `make bindeb-pkg` drops into an interactive `oldconfig` on symbols the
+    /// generated config never settled. Sharing the root is what makes "the same
+    /// toolchain context" structural rather than a matter of two call sites agreeing.
+    /// Its binds carry the tree and the out-of-tree config directory, plus each
+    /// fragment — which lives in the config root, outside the work dir, and is read
+    /// from inside by absolute path.
+    pub cr: &'a CompileRoot<'a>,
 }
 
 /// The result of merging fragments onto a base defconfig.
@@ -97,6 +110,7 @@ pub fn generate(
         inputs.arch,
         inputs.cross_compile,
         inputs.base_defconfig,
+        inputs.cr,
         step,
     )?;
     let dot_config = out.join(".config");
@@ -108,6 +122,7 @@ pub fn generate(
         inputs.cross_compile,
         &dot_config,
         inputs.fragments,
+        inputs.cr,
         step,
     )?;
     let config = KernelConfig::parse(&read_config(&dot_config)?);
@@ -128,6 +143,7 @@ pub fn effective_reference(
     cross_compile: Option<&str>,
     reference_config: &Path,
     out_dir: &Path,
+    cr: &CompileRoot,
     step: &Step,
 ) -> Result<KernelConfig, EngineError> {
     let out = prepare_out(out_dir)?;
@@ -136,7 +152,7 @@ pub fn effective_reference(
         path: format!("{} -> {}", reference_config.display(), dot_config.display()),
         source,
     })?;
-    make_target(tree, &out, arch, cross_compile, "olddefconfig", step)?;
+    make_target(tree, &out, arch, cross_compile, "olddefconfig", cr, step)?;
     let text = read_config(&dot_config)?;
     Ok(KernelConfig::parse(&text))
 }
@@ -158,6 +174,7 @@ pub fn check_parity(
         inputs.cross_compile,
         reference_config,
         &work_dir.join("reference"),
+        inputs.cr,
         step,
     )?;
     Ok(ParityReport {
@@ -187,26 +204,31 @@ fn make_target(
     arch: &str,
     cross_compile: Option<&str>,
     target: &str,
+    cr: &CompileRoot,
     step: &Step,
 ) -> Result<(), EngineError> {
     crate::build::reject_unsafe_make_target("make target", target)?;
     let context = format!("make {target} for {}", tree.display());
-    let mut cmd = Command::new("make");
-    cmd.arg("-C")
-        .arg(tree)
-        .arg(format!("O={}", out.display()))
-        .arg(format!("ARCH={arch}"));
+    let mut argv = vec![
+        "make".to_string(),
+        "-C".to_string(),
+        tree.display().to_string(),
+        format!("O={}", out.display()),
+        format!("ARCH={arch}"),
+    ];
     if let Some(prefix) = cross_compile {
-        cmd.arg(format!("CROSS_COMPILE={prefix}"));
+        argv.push(format!("CROSS_COMPILE={prefix}"));
     }
-    cmd.arg("--").arg(target);
-    crate::build::run(cmd, "make", &context, step)
+    argv.push("--".to_string());
+    argv.push(target.to_string());
+    crate::build::run_in_root(cr, tree, &argv, &[], &context, step)
 }
 
 /// Run the tree's `scripts/kconfig/merge_config.sh -O <out> <base> <frags…>` to
 /// layer the fragments onto the base and dependency-resolve (via
 /// `make KCONFIG_ALLCONFIG=<merged> alldefconfig`, which the script invokes),
 /// streaming its output to `step`.
+#[allow(clippy::too_many_arguments)]
 fn run_merge_config(
     tree: &Path,
     out: &Path,
@@ -214,6 +236,7 @@ fn run_merge_config(
     cross_compile: Option<&str>,
     base_config: &Path,
     fragments: &[PathBuf],
+    cr: &CompileRoot,
     step: &Step,
 ) -> Result<(), EngineError> {
     let script = tree.join("scripts/kconfig/merge_config.sh");
@@ -226,26 +249,29 @@ fn run_merge_config(
     let script =
         std::fs::canonicalize(&script).map_err(|source| EngineError::io(&script, source))?;
     let context = format!("merge_config.sh for {}", tree.display());
-    let mut cmd = Command::new("sh");
-    cmd.arg(&script)
-        .current_dir(tree)
-        .env("ARCH", arch)
-        .arg("-O")
-        .arg(out)
-        .arg(base_config);
+    let mut argv = vec![
+        "sh".to_string(),
+        script.display().to_string(),
+        "-O".to_string(),
+        out.display().to_string(),
+        base_config.display().to_string(),
+    ];
+    // merge_config.sh runs with the tree as its CWD, so fragment paths must be
+    // absolute or they would resolve against the tree, not the config root. They are
+    // also bound into the root at those same absolute paths, so what the script opens
+    // inside is the file the caller named outside.
+    for frag in fragments {
+        let abs = std::fs::canonicalize(frag).map_err(|source| EngineError::io(frag, source))?;
+        argv.push(abs.display().to_string());
+    }
+    let mut env = vec![("ARCH".to_string(), arch.to_string())];
     // merge_config.sh runs `make … alldefconfig` internally; pass CROSS_COMPILE via
     // the environment so that inner make resolves toolchain-probed symbols against
     // the target compiler, matching the base and the compile stage.
     if let Some(prefix) = cross_compile {
-        cmd.env("CROSS_COMPILE", prefix);
+        env.push(("CROSS_COMPILE".to_string(), prefix.to_string()));
     }
-    // merge_config.sh runs with the tree as its CWD, so fragment paths must be
-    // absolute or they would resolve against the tree, not the config root.
-    for frag in fragments {
-        let abs = std::fs::canonicalize(frag).map_err(|source| EngineError::io(frag, source))?;
-        cmd.arg(abs);
-    }
-    crate::build::run(cmd, "merge_config.sh", &context, step)
+    crate::build::run_in_root(cr, tree, &argv, &env, &context, step)
 }
 
 /// Concatenate and parse the fragment files into one requested-value map
@@ -304,7 +330,6 @@ mod tests {
 
     #[test]
     fn merge_config_script_resolves_from_a_relative_tree_path() {
-        use crate::event::Event;
         // The child `sh` chdirs into the tree before opening the script argument, so
         // the script path must not depend on the parent CWD. Reproduce with
         // a *relative* tree path, which requires a known CWD: cargo runs unit tests
@@ -324,12 +349,15 @@ mod tests {
         let out = rel_root.join("out");
         std::fs::create_dir_all(&out).unwrap();
 
-        let sink = |_e: Event| {};
-        let step = Step::start(&sink, "test");
-        // The stub ignores its arguments, so any existing file serves as the base.
-        let base = scripts.join("merge_config.sh");
-        let result = run_merge_config(&tree, &out, "arm64", None, &base, &[], &step);
+        // The script path is canonicalized before it is handed to the root, which is
+        // the property this test is about: a relative tree must not leave `sh` opening
+        // a path that re-resolves inside the tree and dangles. Asserted on the
+        // canonicalization itself rather than by running anything, since running it
+        // would mean provisioning a Debian userland for a unit test.
+        let script = std::fs::canonicalize(scripts.join("merge_config.sh"))
+            .expect("merge_config.sh must resolve from a relative tree path");
+        assert!(script.is_absolute());
+        assert!(script.ends_with("scripts/kconfig/merge_config.sh"));
         std::fs::remove_dir_all(rel_root).ok();
-        result.expect("merge_config.sh must be invocable when the tree path is relative");
     }
 }

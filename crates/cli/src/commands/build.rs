@@ -16,7 +16,7 @@ use crate::config::{
     overlay_dirs, preflight_config, resolve_patches_source, OverlayStage,
 };
 use crate::fsutil::absolutize;
-use crate::render::{emit_artifact, note, print_event, print_event_json, short};
+use crate::render::{emit_artifact, note, print_event_at, print_event_json, short, Verbosity};
 use crate::workdir::mark_work_dir;
 use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
 use boot2deb_core::model::{Overrides, ResolvedBoot, ResolvedBuild};
@@ -27,7 +27,7 @@ use boot2deb_engine::debstore::DebStore;
 use boot2deb_engine::event::{Event, Step};
 use boot2deb_engine::image::{self, ImageOutput};
 use boot2deb_engine::rootfs;
-use boot2deb_engine::sandbox::{BuildSandbox, RootlessSandbox};
+use boot2deb_engine::sandbox::{BuildSandbox, PackagingSandbox, RootlessSandbox, SandboxRole};
 use boot2deb_engine::{extradebs, pins};
 use std::path::PathBuf;
 
@@ -37,6 +37,7 @@ pub(crate) fn run(
     recipe: &str,
     args: BuildArgs,
     json: bool,
+    verbosity: Verbosity,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // `build` reads only the lock for pinned sources; the resolved build
     // supplies the axes. Only the lock-independent image knobs (layout, size) are
@@ -209,46 +210,97 @@ pub(crate) fn run(
     // only exist for a media-accel build; a base build has no such sources and skips
     // those stages, so these are computed inside the stage blocks below.
 
-    // The host cannot emit target binaries → pass CROSS_COMPILE; it can → none.
     let pf = boot2deb_engine::preflight(resolved.arch);
     // Every stage past here assumes Linux, and the answer is already in hand.
     pf.ensure_can_build()?;
-    let cross_compile = pf.cross_toolchain.then(|| resolved.cross_compile.clone());
+    // Every root a build provisions that is not the target's is provisioned for the
+    // *host's* Debian architecture, so its commands run natively: the cross root
+    // compiles there, and the packaging root archives payloads that may be a hundred
+    // megabytes. Refused up front rather than at the first stage that needs one: a host
+    // this cannot name has no architecture to provision a root at, and every deliverable
+    // both compiles and packages.
+    let host_deb_arch = pf
+        .host
+        .debian_arch()
+        .ok_or_else(|| -> Box<dyn std::error::Error> {
+            format!(
+                "cannot name a Debian architecture for this host ({}) — boot2deb \
+                 provisions host-arch roots to compile and archive in, and has no name \
+                 to provision one under",
+                pf.host.arch
+            )
+            .into()
+        })?;
+    // The cross root emits the target's objects → pass CROSS_COMPILE; it *is* the
+    // target's architecture → none. The question is about the root the compile happens
+    // in rather than about the host's own `cc`, which no stage invokes any more.
+    let cross_compile =
+        (host_deb_arch != resolved.arch.debian_arch()).then(|| resolved.cross_compile.clone());
     // The Tier-2 artifact store, unless disabled: a durable content-addressed
     // cache of the compile nodes' output `.deb`s under <root>/cache/artifacts, keyed
     // by each node's output signature.
     let artifact_store: Option<PathBuf> =
         (!args.no_artifact_cache).then(|| absolutize(root.path().join("cache").join("artifacts")));
-    // The host tools that produce this build's compiled bytes, probed once. Two
-    // consumers: the output signatures (so an artifact is never restored across a
-    // toolchain change) and the provenance manifest (so an image can answer which
-    // compiler built its kernel). Probed unconditionally — the manifest states it
-    // whether or not the cache is on, and it is three `--version` calls.
+    // The one host binary that still shapes a compiled byte: the `qemu-user` interpreter
+    // that executes the *target-arch* sandbox's compiler. It runs on the host's binfmt
+    // handler, not inside any root, so it is probed rather than resolved. The compilers
+    // themselves are packages of their roots and are identified by the roots' names.
     let toolchain = boot2deb_engine::toolchain::HostToolchain::probe(
-        cross_compile.as_deref(),
         // The interpreter, not the toolchain: an arm64 host building armhf compiles
         // through a cross gcc and then runs the result natively, so folding a
         // qemu-arm-static identity into the sandbox key would name a binary nothing
         // executes.
-        pf.interpreter.then(|| resolved.arch.qemu_arch()),
+        pf.interpreter.then(|| resolved.arch.debian_arch()),
     );
     let build_env = BuildEnv {
-        toolchain_id: toolchain.compiler_identity(),
-        // What the sandbox's own compiler is: the userland it bootstraps from, plus
-        // the interpreter that runs it.
-        sandbox_id: boot2deb_engine::build::sandbox_identity(&mirrors, &toolchain),
+        // What compiles the kernel, u-boot and the out-of-tree modules: the cross root's
+        // own identity, derived from the same function that names its tree. Not a probe
+        // of a host binary — there is none to probe, and the root's manifest
+        // states its compiler sha256-pinned.
+        toolchain_id: boot2deb_engine::build::cross_identity(
+            host_deb_arch,
+            resolved.arch.debian_arch(),
+            &resolved.packaging_suite,
+            &mirrors,
+        ),
+        // What the sandbox's own compiler is: the base it is provisioned as, named by
+        // the same function that names its tree, plus the interpreter that runs it.
+        // Empty where the build resolves no suite and so stands up no sandbox — the
+        // nodes that read this never run on such a build.
+        sandbox_id: resolved.suite.as_deref().map_or_else(String::new, |suite| {
+            boot2deb_engine::build::sandbox_identity(
+                resolved.arch.debian_arch(),
+                suite,
+                &mirrors,
+                &toolchain,
+            )
+        }),
+        // What archives the u-boot and kmod `.deb`s: the packaging root's own identity,
+        // derived from the same function that names its tree so the key and the tree
+        // cannot disagree.
+        packaging_id: boot2deb_engine::build::packaging_identity(
+            host_deb_arch,
+            &resolved.packaging_suite,
+            &mirrors,
+        ),
         cross_compile,
         jobs: args.jobs,
     };
     // The one stdout contract for a build: human rendering, or NDJSON under
     // --json — artifact locations travel as Event::Artifact either way.
-    let sink: fn(Event) = if json {
-        |e| print_event_json(&e)
-    } else {
-        |e| print_event(&e)
+    // A closure rather than a `fn` pointer: the human renderer has to carry the
+    // verbosity, and `--json` deliberately ignores it (the NDJSON stream is the
+    // record of the build, and a filtered record is a wrong one).
+    let sink = move |e: Event| {
+        if json {
+            print_event_json(&e)
+        } else {
+            print_event_at(verbosity, &e)
+        }
     };
     note(
         json,
+        verbosity,
         &sink,
         "build",
         format!(
@@ -299,14 +351,16 @@ pub(crate) fn run(
     let sandbox: Option<Box<dyn BuildSandbox>> = resolved.suite.as_ref().map(|suite| {
         // The mirror list is in the path as well as in the sandbox, because
         // `ensure_ready` reuses an existing tree without re-checking its origin — see
-        // `sandbox_rootfs_dir`.
-        let rootfs = boot2deb_engine::sandbox::sandbox_rootfs_dir(
+        // `build_sandbox_dir`.
+        let rootfs = boot2deb_engine::sandbox::build_sandbox_dir(
             &work_dir,
+            SandboxRole::Target,
             resolved.arch.debian_arch(),
             suite,
             &mirrors,
         );
         Box::new(RootlessSandbox::new(
+            SandboxRole::Target,
             rootfs,
             // The same directory `doctor`'s overlay check probes, so a build root is
             // established where the host was cleared to establish one.
@@ -321,6 +375,58 @@ pub(crate) fn run(
             Some(deb_cache.clone()),
         )) as Box<dyn BuildSandbox>
     });
+
+    // The root the kernel, u-boot and kmod stages *compile* in: host-arch, carrying a
+    // cross toolchain that emits the target's objects, so the compile runs natively and
+    // a multi-minute kernel build never passes through `qemu-user`.
+    //
+    // Unconditional and lazily bootstrapped, like the packaging root and for the same
+    // reasons — a `deliverable = uboot` build compiles without resolving an image suite,
+    // so this reads `packaging_suite` too, and a build whose artifacts all restore from
+    // the cache never provisions it. It shares that board's tree with its image builds
+    // rather than standing up a second one.
+    let cross_role = SandboxRole::Cross {
+        target: resolved.arch.debian_arch(),
+    };
+    let cross = RootlessSandbox::new(
+        cross_role,
+        boot2deb_engine::sandbox::build_sandbox_dir(
+            &work_dir,
+            cross_role,
+            host_deb_arch,
+            &resolved.packaging_suite,
+            &mirrors,
+        ),
+        boot2deb_engine::sandbox::build_root_uppers(&work_dir),
+        resolved.packaging_suite.clone(),
+        host_deb_arch,
+        mirrors.clone(),
+        keyring.clone(),
+        Some(deb_cache.clone()),
+    );
+
+    // The root the u-boot and kmod `.deb`s are archived in. Unconditional, unlike the
+    // build sandbox above: every deliverable packages something, including a
+    // `deliverable = uboot` build that resolves no image suite at all — which is why
+    // it reads `packaging_suite` (its own suite where it has one, the device's default
+    // otherwise) rather than `suite`. Constructing one costs nothing; the stages that
+    // archive call `ensure_ready` and pay for the bootstrap only if they reach it.
+    let packaging = PackagingSandbox::new(
+        boot2deb_engine::sandbox::packaging_root_dir(
+            &work_dir,
+            host_deb_arch,
+            &resolved.packaging_suite,
+            &mirrors,
+        ),
+        resolved.packaging_suite.clone(),
+        host_deb_arch,
+        // The same mirror list, for the same reason the build sandbox takes it: under
+        // `--snapshot pin` the tool that archives the `.deb`s comes from the same
+        // point-in-time archive their contents do.
+        mirrors.clone(),
+        keyring.clone(),
+        Some(deb_cache.clone()),
+    );
 
     // Resolve the patches source only when there is a series to apply: the lock pins
     // one (its kernel names a patch series) *and* this run includes a stage that
@@ -459,6 +565,11 @@ pub(crate) fn run(
     // by that stage rather than re-probed here, since one of them depends on a host
     // tool being present. Recorded in the provenance manifest.
     let mut rootfs_verified_with: Vec<String> = Vec::new();
+    // The on-disk contract that stage formatted the rootfs to, likewise reported rather
+    // than re-derived: its geometry answers to the image's size, so nothing outside the
+    // format itself knows it. `None` until the image stage runs — which is also when the
+    // provenance manifest becomes writable at all.
+    let mut rootfs_filesystem: Option<boot2deb_core::provenance::FilesystemProvenance> = None;
     // The freshly-solved manifest's sha256, set by the rootfs stage — verified
     // against the committed pin and recorded into the lock by `--save-manifest`.
     let mut solved_manifest_digest: Option<String> = None;
@@ -523,6 +634,7 @@ pub(crate) fn run(
             fragments,
             device_dts,
             work_dir: &work_dir,
+            cross: &cross,
             out_dir: &out_dir,
             store: artifact_store.as_deref(),
         });
@@ -575,6 +687,7 @@ pub(crate) fn run(
             local_patches: &local_patches,
             work_dir: &work_dir,
             out_dir: &out_dir,
+            packaging: &packaging,
             store: artifact_store.as_deref(),
         };
         let artifacts = kmod::build_kmods(&resolved, &lock, &opts, &build_env, &sink)?;
@@ -591,7 +704,9 @@ pub(crate) fn run(
             patches: uboot_patches,
             blobs_dir: &blobs_dir,
             work_dir: &work_dir,
+            cross: &cross,
             out_dir: &out_dir,
+            packaging: &packaging,
             stem: &stem,
             store: artifact_store.as_deref(),
         };
@@ -697,6 +812,10 @@ pub(crate) fn run(
             base_src: &ffmpeg_base_src,
             patches: kernel_patches,
             userspace_debs: &out_dir,
+            // The same flag the userspace stage above ran under, so this stage
+            // recomputes the userspace packages' keys for the layer they were actually
+            // built in rather than for a default.
+            build_libmali: args.build_libmali,
             work_dir: &work_dir,
             out_dir: &out_dir,
             store: artifact_store.as_deref(),
@@ -841,6 +960,7 @@ pub(crate) fn run(
                 match boot2deb_engine::manifest::verify_reproduced(pinned, &solved_digest) {
                     Ok(()) => note(
                         json,
+                        verbosity,
                         &sink,
                         "rootfs",
                         "manifest OK  : reproduces the committed pin".into(),
@@ -936,6 +1056,7 @@ pub(crate) fn run(
         // the operator can read it except the provenance manifest.
         note(
             json,
+            verbosity,
             &sink,
             "image",
             format!(
@@ -946,6 +1067,7 @@ pub(crate) fn run(
         );
         first_boot_password = Some(artifacts.password);
         rootfs_verified_with = artifacts.rootfs_verified_with;
+        rootfs_filesystem = Some(artifacts.rootfs_filesystem);
     }
 
     // The solved manifest describing the rootfs inside the image this run assembled:
@@ -979,6 +1101,7 @@ pub(crate) fn run(
                 .map_err(|e| format!("remove stale provenance {}: {e}", prov_path.display()))?;
             note(
                 json,
+                verbosity,
                 &sink,
                 "image",
                 format!(
@@ -989,7 +1112,13 @@ pub(crate) fn run(
             );
         }
     }
-    if let (Some(manifest_path), Some(password)) = (&image_manifest, &first_boot_password) {
+    // All three come from the image stage, so the manifest is writable exactly when that
+    // stage ran. Naming them together makes that structural rather than a comment: a
+    // build stopping before the image writes no provenance, because the record it would
+    // describe does not exist.
+    if let (Some(manifest_path), Some(password), Some(filesystem)) =
+        (&image_manifest, &first_boot_password, &rootfs_filesystem)
+    {
         let manifest_bytes = std::fs::read(manifest_path)
             .map_err(|e| format!("read solved manifest {}: {e}", manifest_path.display()))?;
         let manifest_sha256 = boot2deb_engine::blobs::sha256_hex(&manifest_bytes);
@@ -997,45 +1126,66 @@ pub(crate) fn run(
             .lines()
             .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
             .count();
-        // The sandbox base compiled this build's target `.deb`s, and its manifest lives
-        // in the work dir beside the tree it describes. Publish a copy beside the image
-        // so the record travels with what it describes, rather than staying behind in a
-        // scratch tree `clean` removes.
+        // The three provisioned roots that produced this build's `.deb`s — the
+        // target-arch base that compiled the media-accel ones, the host-arch cross root
+        // that compiled the kernel, u-boot and modules, and the host-arch root whose
+        // `dpkg` archived the staged trees. Each keeps its manifest in the work dir
+        // beside the tree it describes; publish a copy beside the image so the record
+        // travels with what it describes rather than staying behind in a scratch tree
+        // `clean` removes.
+        //
+        // Any can be absent, and each for its own reason: no target-arch sandbox is
+        // stood up by a build that compiles no media-accel `.deb`s, no cross root by one
+        // that compiles no kernel, u-boot or module, and no packaging root by one whose
+        // archived artifacts all came back from the artifact cache. A `None` here is
+        // therefore "nothing of this kind was produced", never "not recorded".
         let build_sandbox = match (
             resolved.suite.as_ref(),
             sandbox.as_ref().and_then(|s| s.base_manifest()),
         ) {
             // Paired, not defaulted: the sandbox is bootstrapped *for* the resolved
             // suite, so a base without one is not a state this can reach.
-            (Some(suite), Some(base_manifest)) => {
-                let name = format!("{stem}.sandbox.pkgs");
-                let published = out_dir.join(&name);
-                std::fs::copy(&base_manifest, &published).map_err(|e| {
-                    format!(
-                        "publish the sandbox base manifest {} to {}: {e}",
-                        base_manifest.display(),
-                        published.display()
-                    )
-                })?;
-                emit_artifact(&sink, "image", "sandbox-manifest", &published);
-                let bytes = std::fs::read(&published)
-                    .map_err(|e| format!("read {}: {e}", published.display()))?;
-                Some(boot2deb_core::provenance::BuildSandboxProvenance {
-                    suite: suite.clone(),
-                    architecture: resolved.arch.debian_arch().to_string(),
-                    manifest: name,
-                    manifest_sha256: boot2deb_engine::blobs::sha256_hex(&bytes),
-                    package_count: String::from_utf8_lossy(&bytes)
-                        .lines()
-                        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-                        .count(),
-                })
-            }
-            // No sandbox was stood up: this build compiled no target `.deb`s, so there
-            // is no compiling toolchain to record.
+            (Some(suite), Some(base_manifest)) => Some(publish_root_manifest(
+                &out_dir,
+                &format!("{stem}.sandbox.pkgs"),
+                "sandbox-manifest",
+                suite,
+                resolved.arch.debian_arch(),
+                &base_manifest,
+                &sink,
+            )?),
             _ => None,
         };
+        let cross_sandbox = match cross.base_manifest() {
+            // Recorded at the *host's* architecture, beside a `[build_sandbox]` recording
+            // the target's — which is the whole distinction between the two compile roots
+            // and the one a reader most needs the record to make.
+            Some(base_manifest) => Some(publish_root_manifest(
+                &out_dir,
+                &format!("{stem}.cross.pkgs"),
+                "cross-manifest",
+                &resolved.packaging_suite,
+                host_deb_arch,
+                &base_manifest,
+                &sink,
+            )?),
+            None => None,
+        };
+        let packaging_root = match packaging.base_manifest() {
+            Some(base_manifest) => Some(publish_root_manifest(
+                &out_dir,
+                &format!("{stem}.packaging.pkgs"),
+                "packaging-manifest",
+                &resolved.packaging_suite,
+                host_deb_arch,
+                &base_manifest,
+                &sink,
+            )?),
+            None => None,
+        };
         let facts = boot2deb_core::provenance::BuildFacts {
+            cross_sandbox,
+            packaging_root,
             host_arch: pf.host.arch,
             cross: pf.cross_toolchain,
             manifest_sha256: &manifest_sha256,
@@ -1047,20 +1197,17 @@ pub(crate) fn run(
             builder_version: env!("CARGO_PKG_VERSION"),
             builder_commit: option_env!("BOOT2DEB_GIT_COMMIT").filter(|s| !s.is_empty()),
             builder_dirty: matches!(option_env!("BOOT2DEB_GIT_DIRTY"), Some("true")),
-            // Resolved from the image stage's own feature expression, so the manifest
-            // reports the on-disk contract the rootfs actually carries rather than a
-            // declared one.
-            filesystem: boot2deb_engine::image::rootfs_filesystem_pin(),
+            // Reported by the image stage that formatted it, so the manifest states the
+            // contract the rootfs actually carries and the geometry that actually came
+            // out — neither of them a value re-derived here from a declaration.
+            filesystem: filesystem.clone(),
             // Reported by the image stage that ran them: the external cross-check is
             // present only where the host carries e2fsprogs, so verification depth is
             // host-determined and belongs in the record.
             rootfs_verified_with: &rootfs_verified_with,
-            // The concrete host tools behind the arch selection above — the compiler
-            // is the largest host input to the kernel bytes, and no source pin covers
-            // it. Absent per tool when a build compiles nothing that needs it.
-            cc: toolchain.cc(),
-            assembler: toolchain.assembler(),
-            linker: toolchain.linker(),
+            // The one host binary behind the arch selection above. The compilers are
+            // not here: each is a package of a provisioned root, and the root records
+            // it sha256-pinned in its own manifest below.
             qemu: toolchain.qemu(),
             jobs: build_env.jobs(),
             // Resolved from the sandbox's own profile, likewise: the environment and
@@ -1098,6 +1245,7 @@ pub(crate) fn run(
             });
             note(
                 json,
+                verbosity,
                 &sink,
                 "build",
                 format!("saved snapshot: {ts} (mode off — activate with --snapshot fallback|pin)"),
@@ -1120,6 +1268,7 @@ pub(crate) fn run(
             rootfs_pin.manifest_sha256 = Some(digest.clone());
             note(
                 json,
+                verbosity,
                 &sink,
                 "build",
                 format!(
@@ -1133,6 +1282,7 @@ pub(crate) fn run(
         pins::write_lock(&path, &new_lock)?;
         note(
             json,
+            verbosity,
             &sink,
             "build",
             format!("updated lock  : {}", path.display()),
@@ -1155,4 +1305,49 @@ pub(crate) fn run(
 /// lived with by hand ("never insert both cards at once") and this removes.
 fn image_identity(recipe: &str, build: &ResolvedBuild) -> image::ImageIdentity {
     image::ImageIdentity::derive(recipe, &build.device)
+}
+
+/// Publish a provisioned root's package manifest beside the image and describe it for
+/// the provenance document.
+///
+/// Copies `base_manifest` — which lives in the work dir, beside the tree it describes —
+/// into `out_dir` as `name`, emits it as an artifact of kind `kind`, and returns the
+/// record naming it, its sha256 and its package count.
+///
+/// One implementation for both roots, because a divergence would show up as two
+/// sections of one document disagreeing about what a `[…_sandbox]` block means, which
+/// is the kind of drift a reader has no way to detect.
+fn publish_root_manifest(
+    out_dir: &std::path::Path,
+    name: &str,
+    kind: &str,
+    suite: &str,
+    architecture: &str,
+    base_manifest: &std::path::Path,
+    sink: &dyn boot2deb_engine::event::EventSink,
+) -> Result<boot2deb_core::provenance::ProvisionedRootProvenance, Box<dyn std::error::Error>> {
+    let published = out_dir.join(name);
+    std::fs::copy(base_manifest, &published).map_err(|e| {
+        format!(
+            "publish the base manifest {} to {}: {e}",
+            base_manifest.display(),
+            published.display()
+        )
+    })?;
+    emit_artifact(sink, "image", kind, &published);
+    // Re-read rather than reuse the source bytes: the digest must describe the file a
+    // reader of the provenance will open, not the one it was copied from.
+    let bytes =
+        std::fs::read(&published).map_err(|e| format!("read {}: {e}", published.display()))?;
+    Ok(boot2deb_core::provenance::ProvisionedRootProvenance {
+        suite: suite.to_string(),
+        architecture: architecture.to_string(),
+        manifest: name.to_string(),
+        manifest_sha256: boot2deb_engine::blobs::sha256_hex(&bytes),
+        // Comments and blank lines are the manifest's own framing, not packages.
+        package_count: String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .count(),
+    })
 }

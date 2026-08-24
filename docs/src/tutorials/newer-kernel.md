@@ -37,20 +37,20 @@ the config or the series changes — only the pin.
 
 ```sh
 # 1. Re-pin. This is the only command that consults upstream.
-cargo run -p boot2deb-cli -- update turing-rk1/forky --kernel-ref v7.1.5
+boot2deb update turing-rk1/forky --kernel-ref v7.1.5
 
 # 2. Does the series still apply to the new tree? (--kernel-src makes the fetch
 #    near-instant if you have a checkout; omit it and the tree is auto-fetched.)
-cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky --kernel-src ../linux
+boot2deb verify-patches turing-rk1/forky --kernel-src ../linux
 
 # 3. Does the .config still generate cleanly on the patched tree?
-cargo run -p boot2deb-cli -- verify-config turing-rk1/forky
+boot2deb verify-config turing-rk1/forky
 
 # 4. What will actually recompile? Offline, reads the lock and the build stamps.
-cargo run -p boot2deb-cli -- why-rebuild turing-rk1/forky
+boot2deb why-rebuild turing-rk1/forky
 
 # 5. Build.
-cargo run -p boot2deb-cli -- build turing-rk1/forky
+boot2deb build turing-rk1/forky
 ```
 
 Step 1 says two things worth reading rather than scrolling past. Because
@@ -98,7 +98,7 @@ exactly what this path is for.
 ### Step 2: measure, and change nothing
 
 ```sh
-cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky \
+boot2deb verify-patches turing-rk1/forky \
     --kernel v7.2 --kernel-path ../linux --keep-going
 ```
 
@@ -198,7 +198,7 @@ Check the point resolves before pinning anything — `--kernel` selects the defi
 resolve without touching a file:
 
 ```sh
-cargo run -p boot2deb-cli -- resolve turing-rk1/forky --kernel rk3588-mainline-7.2
+boot2deb resolve turing-rk1/forky --kernel rk3588-mainline-7.2
 ```
 
 ### Step 5: adopt it in a recipe
@@ -224,10 +224,10 @@ Then run the same sequence as shape 1 against the new leaf, on the locked path t
 no `--kernel`, because the lock now names 7.2 itself:
 
 ```sh
-cargo run -p boot2deb-cli -- update         turing-rk1/forky-7.2 --kernel-ref v7.2
-cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky-7.2 --kernel-src ../linux
-cargo run -p boot2deb-cli -- verify-config  turing-rk1/forky-7.2
-cargo run -p boot2deb-cli -- build          turing-rk1/forky-7.2
+boot2deb update         turing-rk1/forky-7.2 --kernel-ref v7.2
+boot2deb verify-patches turing-rk1/forky-7.2 --kernel-src ../linux
+boot2deb verify-config  turing-rk1/forky-7.2
+boot2deb build          turing-rk1/forky-7.2
 ```
 
 If you skipped ahead and pinned 7.2 before widening the envelope, nothing is broken: the
@@ -244,7 +244,7 @@ naming one that no longer exists silently stops setting anything. `verify-config
 the merge, and with a reference config it asserts byte-identical `CONFIG_*` parity:
 
 ```sh
-cargo run -p boot2deb-cli -- verify-config turing-rk1/forky-7.2 \
+boot2deb verify-config turing-rk1/forky-7.2 \
     --reference-config build/turing-rk1/forky/linux/.config
 ```
 
@@ -267,12 +267,12 @@ A kernel bump is not finished when the image builds:
 2. **Regenerate the matrix**, which is generated from the locks and therefore stale the
    moment a pin moves:
    ```sh
-   cargo run -p boot2deb-cli -- support-matrix --markdown > docs/src/reference/support-matrix.md
+   boot2deb support-matrix --markdown > docs/src/reference/support-matrix.md
    ```
 3. **Check the pins are durable.** `verify-sources` grades every pin in the lock — a tag is
    durable, a branch tip is ephemeral, a force-pushed branch is orphaned:
    ```sh
-   cargo run -p boot2deb-cli -- verify-sources turing-rk1/forky-7.2
+   boot2deb verify-sources turing-rk1/forky-7.2
    ```
 4. **Retire the old definition** once the new one is validated: delete the superseded
    recipe leaf and kernel file, and drop the id from `supported_kernels`. Old locks name old

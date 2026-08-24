@@ -14,7 +14,7 @@ The first two are the board as Debian ships it. The third is the seam for changi
 kernel — see [A kernel of your own](#a-kernel-of-your-own) below.
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-c201/forky
+boot2deb build asus-c201/forky
 ```
 
 That produces `build/asus-c201/forky/artifacts/asus-c201-forky.img.xz` — a whole-disk image
@@ -67,7 +67,7 @@ identical: the same signed-kernel boot payload, the same board profiles, the sam
 `combined` layout.
 
 ```sh
-cargo run -p boot2deb-cli -- build asus-c201/mainline-forky
+boot2deb build asus-c201/mainline-forky
 ```
 
 That series currently carries one patch, and it is a good illustration of why the recipe
@@ -76,11 +76,12 @@ so any user of the shash export/import path gets a truncated state; the fix is f
 and nothing about it is board-specific — it is simply not in a released kernel yet. A
 compiled recipe is where a fix like that lives until it is.
 
-The trade is what you would expect. This recipe compiles a kernel, so a cold build wants a
-cross toolchain and real time, where `asus-c201/forky` is a rootfs bootstrap and an image
-assembly. It also takes on the maintenance Debian was doing for you: a `7.1.y` point
-release is an `update --kernel-ref` and a rebuild, not an `apt upgrade`. Take it when you
-need a kernel change; stay on `asus-c201/forky` when you do not.
+The trade is what you would expect. This recipe compiles a kernel, so a cold build
+provisions a cross root and takes real time, where `asus-c201/forky` is a rootfs
+bootstrap and an image assembly. It also takes on the maintenance Debian was doing for
+you: a `7.1.y` point release is an `update --kernel-ref` and a rebuild, not an
+`apt upgrade`. Take it when you need a kernel change; stay on `asus-c201/forky` when you
+do not.
 
 ## Board profiles
 
@@ -151,15 +152,24 @@ Note that a USB keyboard is *not* an option at the firmware screens on this boar
 keyboard and nothing else. (The [Chromebit](asus-chromebit-cs10.md), which has no EC, is
 the one board in the family built the other way.)
 
-For a unit with another layout, either override at build time or change it on the
-running board (offline, like any Debian system):
+There are two ways to get another layout, and neither is a `build` flag — an image's
+keymap comes from the config its lock was resolved against:
 
-```sh
-cargo run -p boot2deb-cli -- build asus-c201/forky --keymap gb
-sudo dpkg-reconfigure keyboard-configuration && sudo setupcon   # on the board
-```
+- **Change it on the running board**, offline, like any Debian system:
 
-See [Locale, timezone, and keyboard](../localization.md).
+  ```sh
+  sudo dpkg-reconfigure keyboard-configuration && sudo setupcon
+  ```
+
+- **Bake it into an image** by writing a recipe that sets `keymap`. `resolve` shows what
+  a choice resolves to before you commit it, and names the file to write:
+
+  ```sh
+  boot2deb resolve asus-c201/forky --keymap gb
+  ```
+
+  See [Adapting a shipped recipe](../tutorials/adapting-a-recipe.md) and
+  [Locale, timezone, and keyboard](../localization.md).
 
 ## Getting online
 

@@ -20,8 +20,9 @@
 //! The feature set is chosen here rather than left to the formatter's default, and it is
 //! expressed relative to that default, which is itself a fixed set — so the on-disk
 //! contract is stable across formatter releases. It is recorded rather than assumed
-//! either way: [`rootfs_filesystem_pin`] writes what the image was formatted to into the
-//! provenance manifest, and a test pins it.
+//! either way: the format returns the geometry it realized, and that plus the
+//! formatter's own feature-set pin document becomes the provenance manifest's
+//! `[filesystem]` — see [`filesystem_provenance`].
 //! `metadata_csum_seed` stores the checksum seed in the superblock, decoupled
 //! from the UUID, so an operator's `tune2fs -U` (rescue, cloning hygiene) never has to
 //! rewrite every metadata checksum.
@@ -32,11 +33,14 @@
 //! filesystem is written, leaving the entry's ownership and mtime untouched (DET).
 //!
 //! The finished image is verified two ways: always by re-reading it with the crate's
-//! own [`Reader`] and checking every metadata checksum (a failure means the formatter
-//! wrote an image its own reader rejects), and — when a new enough `e2fsck` is present
-//! — by a read-only `e2fsck -fn` cross-check whose any correction fails the build.
-//! `e2fsprogs` is no longer required; where it is absent the pure-Rust gate stands
-//! alone.
+//! own [`Reader`] and scanning it whole (a finding means the formatter wrote an image
+//! its own reader disagrees with), and — when a new enough `e2fsck` is present — by a
+//! read-only `e2fsck -fn` cross-check whose any correction fails the build. The two are
+//! not redundant, and the second is not a weaker copy of the first: the scan is deeper
+//! but it is one implementation checking itself, so a wrong shared assumption passes it,
+//! and `e2fsck` is the only reader here that does not share the writer's code.
+//! `e2fsprogs` is not required; where it is absent the pure-Rust gate stands alone and
+//! the image's provenance records that only it ran.
 //!
 //! "New enough" is [`E2FSCK_MIN`], and the floor is not a formality. The pinned feature
 //! set includes `metadata_csum_seed`, which e2fsprogs only learned in 1.43 — an older
@@ -53,11 +57,12 @@ use crate::error::EngineError;
 use crate::event::Step;
 use crate::hosttool;
 use crate::image::geometry::EXT4_BLOCK;
-use boot2deb_core::provenance::FilesystemProvenance;
+use boot2deb_core::provenance::{FilesystemGeometry, FilesystemProvenance};
 use ferrosys::ext::ondisk::Timestamp;
 use ferrosys::ext::{
     format_to, ArchiveSource, EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions,
-    GrowReservation, InodeCount, Reader, ReservedRatio, Source, SourceEntry,
+    GrowReservation, InodeCount, Layout, Location, Reader, ReservedRatio, ScanReport, Source,
+    SourceEntry,
 };
 use sha2::{Digest, Sha256};
 use std::num::NonZeroU64;
@@ -79,6 +84,15 @@ const RESERVED_HUNDREDTHS: u16 = 100;
 /// directory entry itself is kept.
 const DEV_PREFIX: &[u8] = b"/dev/";
 
+/// The filesystem the rootfs partition carries.
+///
+/// A constant rather than a value read back off a formatted image, because two consumers
+/// need it *before* the image node runs: the rootfs node writes it into the initramfs
+/// configuration (`FSTYPE=`, which decides the fsck helper the initramfs carries), and
+/// its own test asserts that. `feature_set` selects it — the ext4 baseline plus this
+/// module's choices — so the two cannot be changed independently without the pin moving.
+pub const ROOTFS_FS_KIND: &str = "ext4";
+
 /// Format `dest` as an ext4 filesystem of exactly `size` bytes holding the rootfs
 /// `tarball`'s contents, then verify it.
 ///
@@ -93,8 +107,8 @@ const DEV_PREFIX: &[u8] = b"/dev/";
 /// lock's `SOURCE_DATE_EPOCH`. The per-image first-boot password is still unique per
 /// build, so the image as a whole is not byte-for-byte reproducible.
 ///
-/// Returns the checks the filesystem passed, in order, for the provenance manifest's
-/// `[verification]` — see [`verify_clean`], where one of them is host-dependent.
+/// Returns what the format realized and what it was checked with — see
+/// [`RootfsFilesystem`].
 pub(crate) fn build_rootfs_ext4(
     dest: &Path,
     size: u64,
@@ -103,7 +117,7 @@ pub(crate) fn build_rootfs_ext4(
     uuid: Uuid,
     first_boot: FirstBoot,
     step: &Step,
-) -> Result<Vec<String>, EngineError> {
+) -> Result<RootfsFilesystem, EngineError> {
     assert!(
         size.is_multiple_of(EXT4_BLOCK),
         "ext4 size must be block-aligned (geometry guarantees this)"
@@ -141,6 +155,9 @@ pub(crate) fn build_rootfs_ext4(
     // 4. Format straight into `dest`. `format_to` streams only the blocks it uses into
     //    the (sparse) file and extends it to the full size, so the whole image never
     //    lives in memory; a freshly truncated file gives it the zeroed holes it needs.
+    //    It returns the geometry it realized, which is the writer's own account of what
+    //    it wrote — including a decision no superblock field states, like how far the
+    //    reserved descriptor blocks let this filesystem grow.
     let options = format_options(uuid, label, &entries);
     let mut out = std::fs::OpenOptions::new()
         .create(true)
@@ -148,13 +165,41 @@ pub(crate) fn build_rootfs_ext4(
         .truncate(true)
         .open(dest)
         .map_err(|s| EngineError::io(dest, s))?;
-    format_to(Entries(entries), size, options, &mut out).map_err(|e| EngineError::Ext4Format {
-        detail: e.to_string(),
+    let layout = format_to(Entries(entries), size, options, &mut out).map_err(|e| {
+        EngineError::Ext4Format {
+            detail: e.to_string(),
+        }
     })?;
     out.sync_all().map_err(|s| EngineError::io(dest, s))?;
     drop(out);
+    step.log(format!(
+        "formatted {} blocks in {} groups; grows in place to {} blocks ({} GiB)",
+        layout.total_blocks,
+        layout.group_count,
+        layout.max_grow_blocks,
+        layout.max_grow_blocks * u64::from(layout.block_size) / (1 << 30),
+    ));
 
-    verify_clean(dest, step)
+    Ok(RootfsFilesystem {
+        provenance: filesystem_provenance(&layout),
+        verified_with: verify_clean(dest, step)?,
+    })
+}
+
+/// What formatting the rootfs produced, beyond the image file itself: the record of what
+/// was written, and the record of what checked it.
+///
+/// Both are *reported by the node that did the work* rather than re-derived by the
+/// caller, and for the same reason in each case. The geometry is a function of the
+/// image's size as well as of this module's constants, so no caller can compute it
+/// without repeating the format; the check list is host-dependent, so no caller can
+/// compute it without repeating the probe.
+pub(crate) struct RootfsFilesystem {
+    /// The on-disk contract, for the provenance manifest's `[filesystem]`.
+    pub provenance: FilesystemProvenance,
+    /// The checks the filesystem passed, in the order they ran, for the provenance
+    /// manifest's `[verification]` — see [`verify_clean`].
+    pub verified_with: Vec<String>,
 }
 
 /// The per-image first-boot credential spliced into the rootfs before it is formatted.
@@ -210,9 +255,9 @@ fn format_options(uuid: Uuid, label: &str, entries: &[SourceEntry]) -> FormatOpt
 /// (Its counterpart `LATEST` tracks whatever `mke2fs` currently writes and may move in
 /// any release; an image's layout must not, so it is not used here.)
 ///
-/// The set is still recorded rather than trusted: [`rootfs_filesystem_pin`] projects
-/// what this resolves to into the provenance manifest, and
-/// `the_pinned_feature_set_is_exactly_these_words` fails on any change to it, so drift
+/// The set is still recorded rather than trusted: [`filesystem_provenance`] writes what
+/// this resolves to into the provenance manifest, and
+/// `the_pinned_feature_set_is_exactly_this_document` fails on any change to it, so drift
 /// — whether from this expression or from the baseline underneath it — is caught in CI
 /// rather than discovered in an image.
 fn feature_set() -> FeatureSet {
@@ -221,23 +266,40 @@ fn feature_set() -> FeatureSet {
         .expect("orphan_file is a known feature name")
 }
 
-/// The rootfs filesystem's on-disk contract as provenance data: the feature set this
-/// build resolves, projected into the record the manifest carries.
+/// The rootfs filesystem's on-disk contract as provenance data: the formatter's own pin
+/// document for the feature set this build resolves, plus the geometry the format
+/// realized.
 ///
-/// This is a *resolved* value, not a declared one. It is computed from the same
+/// Both halves are *resolved* values, not declared ones. The pin comes from the same
 /// expression the formatter is handed, so the manifest reports the words an image
 /// actually carries — including a feature that arrived from the formatter's baseline
-/// rather than from anything in this file.
-pub fn rootfs_filesystem_pin() -> FilesystemProvenance {
-    let f = feature_set();
+/// rather than from anything in this file. The geometry comes from the format itself.
+///
+/// The pin is taken whole rather than re-spelled field by field, and that is the point.
+/// The formatter builds it from an exhaustive destructure of its own feature set, so a
+/// field it gains is carried here with no change to this function. A record assembled
+/// here would keep compiling and silently stop covering it — which is exactly what a
+/// feature set gaining a size (bigalloc's cluster size is both a feature bit *and* a
+/// size) would do to a hand-written projection of three words and two sizes.
+fn filesystem_provenance(layout: &Layout) -> FilesystemProvenance {
     FilesystemProvenance {
-        kind: "ext4".to_string(),
-        features: f.names().into_iter().map(str::to_string).collect(),
-        compat: format!("{:#010x}", f.compat.bits()),
-        incompat: format!("{:#010x}", f.incompat.bits()),
-        ro_compat: format!("{:#010x}", f.ro_compat.bits()),
-        block_size: f.block_size,
-        inode_size: f.inode_size,
+        kind: ROOTFS_FS_KIND.to_string(),
+        pin: feature_set().pin(),
+        geometry: FilesystemGeometry {
+            block_size: layout.block_size,
+            total_blocks: layout.total_blocks,
+            total_inodes: layout.total_inodes,
+            blocks_per_group: layout.blocks_per_group,
+            inodes_per_group: layout.inodes_per_group,
+            group_count: layout.group_count,
+            first_data_block: layout.first_data_block,
+            flex_bg_size: layout.flex_bg_size,
+            gdt_blocks: layout.gdt_blocks,
+            reserved_gdt_blocks: layout.reserved_gdt_blocks,
+            inode_table_blocks: layout.inode_table_blocks,
+            reserved_blocks: layout.reserved_blocks,
+            max_grow_blocks: layout.max_grow_blocks,
+        },
     }
 }
 
@@ -326,35 +388,51 @@ impl Source for Entries {
 /// completes. An optional cross-check must never be worse than absent.
 const E2FSCK_MIN: (u32, u32) = (1, 43);
 
-/// Verify the finished image: always with the crate's own [`Reader`] (every metadata
-/// checksum), and additionally with `e2fsck -fn` where a new enough one is available.
+/// Verify the finished image: always by scanning it with the crate's own [`Reader`],
+/// and additionally with `e2fsck -fn` where a new enough one is available.
 ///
-/// A checksum failure means the formatter wrote an image its own reader rejects; an
+/// A scan finding means the formatter wrote an image its own reader disagrees with; an
 /// `e2fsck` correction means the formatter and an independent checker disagree about the
 /// layout. Either fails the build — a disagreement that must never ship inside an image.
 ///
-/// The reader check is compiled in and always runs; the `e2fsck` cross-check runs only
-/// where the host carries an `e2fsprogs` of at least [`E2FSCK_MIN`], which makes
-/// verification *depth* host-dependent. That is a difference in strength rather than a
-/// hole, and it is one the build host decides, so the checks that ran are returned and
-/// recorded in the image's provenance (`[verification]`) rather than left to a log
-/// line. `doctor` lists `e2fsck` as an optional tool for the same reason.
+/// The scan is the full one, not a checksum pass: every metadata checksum, plus the
+/// placement of each group's own metadata, each in-use inode's block map, its directory
+/// records and its extended attributes, the journal superblock, and the coherence of
+/// what an inode's bytes claim against what the feature words promise. It reports
+/// everything it finds rather than stopping at the first, which is what makes a
+/// formatter defect diagnosable from one build's output.
+///
+/// **Any** anomaly fails, at any severity, including a cosmetic one. The general-purpose
+/// threshold does not apply here: this image was written seconds ago by the formatter
+/// whose reader is now judging it, so there is no such thing as a benign disagreement
+/// between the two — a cosmetic finding on a fresh image is a formatter defect that
+/// happens to be harmless *this* time.
+///
+/// The scan is compiled in and always runs; the `e2fsck` cross-check runs only where the
+/// host carries an `e2fsprogs` of at least [`E2FSCK_MIN`], which makes verification
+/// *depth* host-dependent. Its value is not that it is deeper — the scan is deeper — but
+/// that it is *independent*: the scan is one implementation checking its own output, so
+/// an assumption the writer and the reader share passes it unchallenged, and `e2fsck` is
+/// the only reader in the build that does not share that code. So the checks that ran
+/// are returned and recorded in the image's provenance (`[verification]`) rather than
+/// left to a log line. `doctor` lists `e2fsck` as an optional tool for the same reason.
 ///
 /// Below the floor the check is skipped with a log line rather than run: an e2fsprogs
 /// that predates `metadata_csum_seed` would reject the image over a feature it does not
 /// know, which is a disagreement about the *checker*, not about the layout.
 fn verify_clean(dest: &Path, step: &Step) -> Result<Vec<String>, EngineError> {
-    step.log("verifying ext4 image (ferrosys reader: every metadata checksum)");
+    step.log("verifying ext4 image (ferrosys scan: checksums, placement, every inode)");
     let file = std::fs::File::open(dest).map_err(|s| EngineError::io(dest, s))?;
     let mut reader = Reader::open(file).map_err(|e| EngineError::Ext4Format {
         detail: format!("re-reading the formatted image: {e}"),
     })?;
-    reader
-        .verify_checksums()
-        .map_err(|e| EngineError::Ext4Format {
-            detail: format!("metadata checksum verification failed: {e}"),
-        })?;
-    let mut ran = vec!["ferrosys-reader".to_string()];
+    let report = reader.scan();
+    if !report.is_clean() {
+        return Err(EngineError::Ext4Format {
+            detail: scan_failure(&report),
+        });
+    }
+    let mut ran = vec!["ferrosys-scan".to_string()];
 
     // `-V`, not `--version`: e2fsck rejects the long form (exit 16) and prints its
     // banner on stderr under the short one.
@@ -367,11 +445,69 @@ fn verify_clean(dest: &Path, step: &Step) -> Result<Vec<String>, EngineError> {
             ran.push("e2fsck".to_string());
         }
         E2fsck::Skip(why) => step.log(format!(
-            "{why}; skipping the external cross-check (ferrosys reader verified) \
+            "{why}; skipping the independent cross-check (the ferrosys scan passed) \
              — the image's provenance records which checks ran"
         )),
     }
     Ok(ran)
+}
+
+/// How many of a failing scan's findings the error message carries.
+///
+/// A scan reports everything it finds, which for a systematically wrong write is one
+/// finding per inode. The first few identify the defect; the rest restate it. The count
+/// is always reported, so a truncated list never reads as the whole of it.
+const REPORTED_ANOMALIES: usize = 8;
+
+/// Render a failing scan as the error text the build stops with.
+///
+/// Pure, so the rendering is unit-testable against a constructed report rather than
+/// against a deliberately corrupted image.
+fn scan_failure(report: &ScanReport) -> String {
+    let found = report.anomalies().len();
+    let at_least = if report.is_truncated() {
+        "at least "
+    } else {
+        ""
+    };
+    let mut detail = format!(
+        "the formatter wrote an image its own reader disagrees with: {at_least}{found} \
+         anomal{} found scanning it back",
+        if found == 1 { "y" } else { "ies" },
+    );
+    for anomaly in report.anomalies().iter().take(REPORTED_ANOMALIES) {
+        detail.push_str(&format!(
+            "\n  [{}/{}] {}{}",
+            anomaly.severity.as_str(),
+            anomaly.category.as_str(),
+            anomaly.detail,
+            at(&anomaly.location),
+        ));
+    }
+    if found > REPORTED_ANOMALIES {
+        detail.push_str(&format!("\n  ... and {} more", found - REPORTED_ANOMALIES));
+    }
+    detail
+}
+
+/// One anomaly's location as a trailing ` (inode N, group N, block N)`, empty when the
+/// finding names none — a superblock fault is located by being one.
+fn at(location: &Location) -> String {
+    let mut parts = Vec::new();
+    if let Some(inode) = location.inode {
+        parts.push(format!("inode {inode}"));
+    }
+    if let Some(group) = location.group {
+        parts.push(format!("group {group}"));
+    }
+    if let Some(block) = location.block {
+        parts.push(format!("block {block}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
 }
 
 /// Whether the host's `e2fsck` is one this cross-check will run.
@@ -408,6 +544,7 @@ fn e2fsck_usable(banner: Option<&str>) -> E2fsck {
 mod tests {
     use super::*;
     use ferrosys::ext::Metadata;
+    use std::path::PathBuf;
 
     /// True when `tar` is runnable — needed only to build the fixture archive, not to
     /// format it (the formatter is pure Rust). Panics under `BOOT2DEB_REQUIRE_HOST_TOOLS`.
@@ -456,14 +593,6 @@ mod tests {
         );
     }
 
-    /// Little-endian field readers over the superblock (1024 bytes into the image).
-    fn sb_u16(img: &[u8], off: usize) -> u16 {
-        u16::from_le_bytes(img[1024 + off..1024 + off + 2].try_into().unwrap())
-    }
-    fn sb_u32(img: &[u8], off: usize) -> u32 {
-        u32::from_le_bytes(img[1024 + off..1024 + off + 4].try_into().unwrap())
-    }
-
     /// A shadow entry as `ArchiveSource` would parse it: a `0640` regular file.
     fn shadow_entry(content: &[u8], mtime: Timestamp) -> SourceEntry {
         SourceEntry {
@@ -474,20 +603,27 @@ mod tests {
         }
     }
 
-    /// The formatted image must carry the supplied UUID, the resize-critical layout
-    /// (`sparse_super` + `resize_inode` with reserved GDT blocks reaching the format
-    /// ceiling), the pinned `remount-ro` error policy, and exactly the requested size —
-    /// and pass the in-formatter checksum verification `build_rootfs_ext4` runs.
-    #[test]
-    fn formats_resizable_filesystem_with_the_supplied_uuid() {
-        if !tar_ready() {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        // A small rootfs tree with root ownership recorded in the tar, as the rootfs
-        // stage produces. The account is locked; the image stage splices the first-boot
-        // hash into it.
-        let root = tmp.path().join("tree");
+    /// The size every fixture image below is formatted at.
+    ///
+    /// 512 MiB, not the smallest filesystem that would exercise the code: the grow
+    /// reservation is `min(map ceiling, descriptor ceiling, blocks / 64)`, so only at
+    /// 256 MiB and above does the map's 1024 blocks become the binding term. A real
+    /// rootfs is always in that regime, and it is the regime the assertions below
+    /// describe; a smaller fixture would pin the proportional share instead and say
+    /// nothing about what a shipped image gets.
+    const FIXTURE_SIZE: u64 = 512 * 1024 * 1024;
+
+    /// Format a fixture rootfs image in `dir`, exactly as the image node does, and
+    /// return it beside what the format reported.
+    ///
+    /// The tree is small but rootfs-shaped: root ownership recorded in the tar, as the
+    /// rootfs stage produces, and a locked account for the first-boot splice to rewrite.
+    fn format_fixture(
+        dir: &Path,
+        size: u64,
+        uuid: Uuid,
+    ) -> Result<(PathBuf, RootfsFilesystem), EngineError> {
+        let root = dir.join("tree");
         std::fs::create_dir_all(root.join("etc")).unwrap();
         std::fs::write(root.join("etc/hostname"), b"turing-rk1\n").unwrap();
         std::fs::write(
@@ -495,7 +631,7 @@ mod tests {
             b"root:*:19000:0:99999:7:::\ndebian:!:19000:0:99999:7:::\n",
         )
         .unwrap();
-        let tar = tmp.path().join("rootfs.tar");
+        let tar = dir.join("rootfs.tar");
         let status = Command::new("tar")
             .args(["--owner=0", "--group=0", "--numeric-owner", "-C"])
             .arg(&root)
@@ -506,53 +642,134 @@ mod tests {
             .unwrap();
         assert!(status.success(), "tar failed");
 
-        let img = tmp.path().join("rootfs.ext4");
-        let uuid = Uuid::from_bytes([0x5a; 16]);
-        // 512 MiB, not the smallest filesystem that would exercise the code: the grow
-        // reservation is `min(map ceiling, descriptor ceiling, blocks / 64)`, so only at
-        // 256 MiB and above does the map's 1024 blocks become the binding term. A real
-        // rootfs is always in that regime, and this is the regime the assertion below
-        // describes; a smaller fixture would pin the proportional share instead and say
-        // nothing about what a shipped image gets.
-        let size: u64 = 512 * 1024 * 1024;
+        let img = dir.join("rootfs.ext4");
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "image");
         let first_boot = FirstBoot {
             user: "debian",
             password_hash: "$6$saltsalt$0123456789abcdef",
         };
-        build_rootfs_ext4(&img, size, &tar, "rootfs", uuid, first_boot, &step).unwrap();
+        let fs = build_rootfs_ext4(&img, size, &tar, "rootfs", uuid, first_boot, &step)?;
+        Ok((img, fs))
+    }
 
-        let bytes = std::fs::read(&img).unwrap();
-        // s_uuid at superblock offset 0x68.
-        assert_eq!(&bytes[1024 + 0x68..1024 + 0x78], uuid.as_bytes());
-        // s_blocks_count_lo at 0x04: exactly the requested size.
-        assert_eq!(sb_u32(&bytes, 0x04) as u64, size / EXT4_BLOCK);
-        // s_feature_compat at 0x5C: RESIZE_INODE (0x0010) + HAS_JOURNAL (0x0004).
-        let compat = sb_u32(&bytes, 0x5C);
-        assert_ne!(compat & 0x0010, 0, "resize_inode must be set");
-        assert_ne!(compat & 0x0004, 0, "has_journal must be set");
-        // s_feature_ro_compat at 0x64: SPARSE_SUPER (0x0001).
-        assert_ne!(sb_u32(&bytes, 0x64) & 0x0001, 0, "sparse_super must be set");
-        // s_feature_incompat at 0x60: CSUM_SEED (0x2000) — the checksum seed lives in
-        // the superblock, decoupled from the UUID, so a UUID change never rewrites
-        // every metadata checksum.
-        assert_ne!(
-            sb_u32(&bytes, 0x60) & 0x2000,
-            0,
-            "metadata_csum_seed must be set"
+    /// The formatted image must carry the supplied UUID, the resize-critical layout
+    /// (`sparse_super` + `resize_inode` with reserved GDT blocks reaching the format
+    /// ceiling), the pinned `remount-ro` error policy, and exactly the requested size —
+    /// and pass the scan `build_rootfs_ext4` runs over it.
+    ///
+    /// Read back through the formatter's own reader rather than by indexing superblock
+    /// offsets by hand. Each field is then named by the format rather than located by
+    /// this test's arithmetic, so an assertion cannot quietly pass by reading the wrong
+    /// two bytes — and the feature words are checked as a feature set rather than as bit
+    /// masks this file would have to keep in step with the format's own.
+    #[test]
+    fn formats_resizable_filesystem_with_the_supplied_uuid() {
+        if !tar_ready() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let uuid = Uuid::from_bytes([0x5a; 16]);
+        let (img, fs) = format_fixture(tmp.path(), FIXTURE_SIZE, uuid).unwrap();
+
+        let reader = Reader::open(std::fs::File::open(&img).unwrap()).unwrap();
+        let sb = reader.superblock();
+        assert_eq!(&sb.uuid, uuid.as_bytes());
+        assert_eq!(
+            sb.blocks_count,
+            FIXTURE_SIZE / EXT4_BLOCK,
+            "exactly the size asked for"
         );
-        // s_errors at 0x3c: 2 (remount-ro), the safety policy pinned for the image.
-        assert_eq!(sb_u16(&bytes, 0x3c), 2, "errors must be remount-ro");
-        // s_reserved_gdt_blocks at 0xCE: the online-resize headroom reaches the format
-        // ceiling — 1024 GDT blocks (8 TiB) under this feature set, one of which this
-        // filesystem already uses, so at least 1023 are reserved. This is what lets a
-        // small image grow onto a large disk at first boot without relocating its
-        // descriptor table.
+        // `s_errors = 2` is remount-ro. A literal because the format's own spelling of
+        // the policy is not readable back as the typed value that set it.
+        assert_eq!(sb.errors, 2, "errors must be remount-ro");
+        // The online-resize headroom reaches the format ceiling — 1024 GDT blocks
+        // (8 TiB) under this feature set, one of which this filesystem already uses, so
+        // at least 1023 are reserved. This is what lets a small image grow onto a large
+        // disk at first boot without relocating its descriptor table.
         assert!(
-            sb_u16(&bytes, 0xCE) >= 1023,
+            sb.reserved_gdt_blocks >= 1023,
             "reserved GDT blocks must reach the resize ceiling, got {}",
-            sb_u16(&bytes, 0xCE)
+            sb.reserved_gdt_blocks
+        );
+
+        // The features the image came out with, as the reader classifies them — not as
+        // bit masks restated here.
+        let feature = reader.feature();
+        assert!(feature.has_resize_inode(), "resize_inode");
+        assert!(feature.has_journal(), "has_journal");
+        assert!(feature.is_sparse_super(), "sparse_super");
+        // The checksum seed lives in the superblock, decoupled from the UUID, so a UUID
+        // change never rewrites every metadata checksum.
+        assert!(feature.has_csum_seed(), "metadata_csum_seed");
+
+        // The formatter's own account of what it wrote must describe the image that is
+        // actually on the disk. Recording a geometry the image does not have would be a
+        // provenance manifest asserting something false, which no amount of checking the
+        // image alone would catch.
+        let geom = &fs.provenance.geometry;
+        assert_eq!(geom.block_size, EXT4_BLOCK as u32);
+        assert_eq!(geom.total_blocks, sb.blocks_count);
+        assert_eq!(geom.total_inodes, sb.inodes_count);
+        assert_eq!(geom.blocks_per_group, sb.blocks_per_group);
+        assert_eq!(geom.inodes_per_group, sb.inodes_per_group);
+        assert_eq!(geom.reserved_blocks, sb.r_blocks_count);
+        assert_eq!(geom.first_data_block, sb.first_data_block);
+        assert_eq!(geom.group_count, reader.group_count());
+        assert_eq!(
+            geom.reserved_gdt_blocks,
+            u32::from(sb.reserved_gdt_blocks),
+            "the recorded headroom is the headroom the image carries"
+        );
+        // The one number no superblock field states: what those reserved blocks buy.
+        // The floor is a 2 TiB disk — a size a board this image ships to can plausibly
+        // be given, and one a filesystem built at 512 MiB must still be able to fill.
+        assert!(
+            geom.max_grow_blocks >= 2 * 1024 * 1024 * 1024 * 1024 / EXT4_BLOCK,
+            "must grow onto a large disk in place, ceiling is {} blocks",
+            geom.max_grow_blocks
+        );
+        // And the record says which checks it passed, the in-process one first.
+        assert_eq!(fs.verified_with.first().unwrap(), "ferrosys-scan");
+    }
+
+    /// The scan gate must actually stop a bad image, which a test over good input cannot
+    /// show: a `verify_clean` that inspected nothing would pass every assertion above.
+    ///
+    /// The damage is a byte of the volume label, which changes what the superblock
+    /// checksum covers without changing anything the reader needs to parse it — so the
+    /// image still opens, and the disagreement is exactly the kind a formatter defect
+    /// would produce: bytes that describe themselves inconsistently rather than bytes
+    /// that cannot be read at all. That is the case a gate has to catch, because it is
+    /// the one that would otherwise ship.
+    #[test]
+    fn the_scan_gate_fails_an_image_whose_superblock_disagrees_with_itself() {
+        if !tar_ready() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (img, _) = format_fixture(tmp.path(), FIXTURE_SIZE, Uuid::from_bytes([0x5a; 16]))
+            .expect("the fixture formats clean");
+
+        // `s_volume_name` runs 16 bytes from offset 0x78 of the superblock, which itself
+        // begins 1024 bytes into the image. Nothing reads it to find anything else.
+        let mut bytes = std::fs::read(&img).unwrap();
+        bytes[1024 + 0x78] ^= 0xff;
+        std::fs::write(&img, &bytes).unwrap();
+
+        let sink = |_: crate::event::Event| {};
+        let step = Step::start(&sink, "image");
+        let err = verify_clean(&img, &step).expect_err("a corrupted image must not pass");
+        let EngineError::Ext4Format { detail } = err else {
+            panic!("expected an ext4 format error, got {err:?}");
+        };
+        assert!(
+            detail.contains("its own reader disagrees with"),
+            "the message must say what went wrong: {detail}"
+        );
+        assert!(
+            detail.contains("superblock"),
+            "and name the structure at fault: {detail}"
         );
     }
 
@@ -659,7 +876,8 @@ mod tests {
         assert_eq!(f.inode_size, 256);
     }
 
-    /// The exact on-disk contract, pinned as bytes rather than as predicates.
+    /// The exact on-disk contract, pinned as the formatter's own document rather than as
+    /// predicates.
     ///
     /// The test above asserts what the set must *contain*, which by construction cannot
     /// fail on a feature the formatter's baseline gains: [`feature_set`] is
@@ -667,74 +885,29 @@ mod tests {
     /// grow. So a formatter upgrade can change every image's layout while every
     /// predicate above still passes. This is the assertion that fails instead.
     ///
+    /// It is byte-exact against the whole document, which is what makes it complete: the
+    /// document names every feature word twice over — as bits and as names, which
+    /// therefore cannot drift apart — plus the two sizes that are not features, plus any
+    /// bit the formatter does not name. And because the formatter builds it by
+    /// destructuring its own feature set exhaustively, a *field* it gains lands in this
+    /// string too, where a projection written here would have kept compiling and
+    /// silently stopped covering it.
+    ///
     /// A failure here is not necessarily a defect — it means the on-disk layout moved,
-    /// and the decision (adopt the new feature, or pin it off in [`feature_set`]) has to
-    /// be made deliberately. Update these words only together with that decision.
+    /// and the decision (adopt the change, or pin it off in [`feature_set`]) has to be
+    /// made deliberately. Update this document only together with that decision.
     #[test]
-    fn the_pinned_feature_set_is_exactly_these_words() {
-        let pin = rootfs_filesystem_pin();
-        assert_eq!(pin.kind, "ext4");
-        assert_eq!(pin.compat, "0x0000003c");
-        assert_eq!(pin.incompat, "0x000022c2");
-        assert_eq!(pin.ro_compat, "0x0000046b");
-        assert_eq!(pin.block_size, 4096);
-        assert_eq!(pin.inode_size, 256);
+    fn the_pinned_feature_set_is_exactly_this_document() {
         assert_eq!(
-            pin.features,
-            [
-                // compat
-                "has_journal",
-                "ext_attr",
-                "resize_inode",
-                "dir_index",
-                // incompat
-                "filetype",
-                "extent",
-                "64bit",
-                "flex_bg",
-                "metadata_csum_seed",
-                // ro_compat
-                "sparse_super",
-                "large_file",
-                "huge_file",
-                "dir_nlink",
-                "extra_isize",
-                "metadata_csum",
-            ]
+            feature_set().pin(),
+            "ferrosys-feature-pin 1\n\
+             compat 0x0000003c has_journal ext_attr resize_inode dir_index\n\
+             incompat 0x000022c2 filetype extent 64bit flex_bg metadata_csum_seed\n\
+             ro_compat 0x0000046b sparse_super large_file huge_file dir_nlink extra_isize \
+             metadata_csum\n\
+             block_size 4096\n\
+             inode_size 256\n"
         );
-    }
-
-    /// The names and the raw words are two spellings of one set, so they cannot be
-    /// allowed to drift apart: a name the formatter renames would change `features`
-    /// while every word stayed put, and the pin above would still pass on the half a
-    /// human reads. This checks they agree by round-tripping the names back to bits.
-    #[test]
-    fn the_pinned_names_and_raw_words_describe_the_same_set() {
-        let pin = rootfs_filesystem_pin();
-        // Start from no features at all, so the result is what the names say and
-        // nothing the formatter's baseline contributed. `EMPTY` carries the formatter's
-        // default block and inode sizes, which the recorded pin must agree with — the
-        // names alone say nothing about either.
-        assert_eq!(
-            FeatureSet::EMPTY.block_size,
-            pin.block_size,
-            "block size matches the baseline"
-        );
-        assert_eq!(
-            FeatureSet::EMPTY.inode_size,
-            pin.inode_size,
-            "inode size matches the baseline"
-        );
-        // Every recorded name is one the formatter still knows...
-        let rebuilt = pin
-            .features
-            .iter()
-            .try_fold(FeatureSet::EMPTY, |acc, name| acc.with_feature(name, true))
-            .expect("every pinned feature name is known to the formatter");
-        // ...and the set they name is the set the words pin.
-        assert_eq!(format!("{:#010x}", rebuilt.compat.bits()), pin.compat);
-        assert_eq!(format!("{:#010x}", rebuilt.incompat.bits()), pin.incompat);
-        assert_eq!(format!("{:#010x}", rebuilt.ro_compat.bits()), pin.ro_compat);
     }
 
     #[test]

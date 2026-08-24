@@ -73,36 +73,49 @@ pub struct BuildFacts<'a> {
     /// reported by the node that ran them rather than re-probed here, so the record
     /// cannot disagree with what happened. See [`VerificationProvenance`].
     pub rootfs_verified_with: &'a [String],
-    /// `<cross>gcc`'s version line, `None` when the tool could not be run.
-    pub cc: Option<&'a str>,
-    /// `<cross>as`'s version line, `None` as for [`cc`](Self::cc).
-    pub assembler: Option<&'a str>,
-    /// `<cross>ld`'s version line, `None` as for [`cc`](Self::cc).
-    pub linker: Option<&'a str>,
-    /// The `qemu-user` version line, `None` on a native build (nothing is interpreted)
-    /// or where the interpreter could not be run.
-    pub qemu: Option<&'a str>,
+    /// The `qemu-user` interpreter the kernel's binfmt registration names, `None` where
+    /// nothing is interpreted or where the registration named nothing readable. The
+    /// engine owns it: reading a binfmt registration is a host side effect.
+    pub qemu: Option<QemuProvenance>,
     /// The parallelism the build ran at. See [`ToolchainProvenance::jobs`].
     pub jobs: usize,
     /// The environment and mounts every sandboxed build command ran under. The engine
     /// owns it for the same reason as [`filesystem`](Self::filesystem): the values are
     /// resolved by the sandbox library it links.
     pub sandbox: SandboxProvenance,
-    /// The package set of the build sandbox's base — the toolchain that compiled this
-    /// build's target `.deb`s. `None` when the build stood up no sandbox, which is
-    /// every build with no media-accel packages to compile. Engine-owned, as
-    /// [`sandbox`](Self::sandbox) is.
-    pub build_sandbox: Option<BuildSandboxProvenance>,
+    /// The package set of the target-arch sandbox's base — the toolchain that compiled
+    /// this build's media-accel `.deb`s. `None` when the build stood up no such
+    /// sandbox, which is every build with no media-accel packages to compile.
+    /// Engine-owned, as [`sandbox`](Self::sandbox) is.
+    pub build_sandbox: Option<ProvisionedRootProvenance>,
+    /// The package set of the cross root's base — the toolchain that compiled this
+    /// build's kernel, u-boot and out-of-tree modules. `None` when the build compiled
+    /// none of them, which is a board that installs Debian's kernel and boots its own
+    /// firmware, or a rebuild whose every such artifact came back from the artifact
+    /// cache. Engine-owned, as [`build_sandbox`](Self::build_sandbox) is.
+    pub cross_sandbox: Option<ProvisionedRootProvenance>,
+    /// The package set of the packaging root — the `dpkg` that archived the u-boot and
+    /// kmod `.deb`s. `None` when the build archived none, which is a build whose every
+    /// such artifact came back from the artifact cache. Engine-owned, as
+    /// [`build_sandbox`](Self::build_sandbox) is.
+    pub packaging_root: Option<ProvisionedRootProvenance>,
 }
 
-/// The build sandbox base's identity and package set: what compiled this build's
-/// target `.deb`s.
+/// A provisioned root's identity and package set: what produced this build's `.deb`s.
 ///
-/// The `[rootfs]` block records what the image *carries*; this records what *produced*
-/// the parts of it boot2deb compiled. The two are different Debian trees resolved from
-/// the same mirrors, and no source pin covers the second — the base is a package set
-/// solved at bootstrap time, so without this the compiler behind every `.deb` in the
-/// image is unstated.
+/// One shape, three records, because the question is the same one asked of three trees —
+/// `[build_sandbox]` is the target-arch userland that *compiled* the media-accel
+/// `.deb`s, `[cross_sandbox]` the host-arch one that compiled the kernel, u-boot and
+/// modules, and `[packaging_root]` the one whose `dpkg` *archived* the staged trees.
+///
+/// The `[rootfs]` block records what the image *carries*; these record what *produced*
+/// the parts of it boot2deb built. All are Debian trees resolved from the same mirrors,
+/// and no source pin covers these three — each base is a package set solved at bootstrap
+/// time, so without them the compilers and the archiver behind every `.deb` in the image
+/// are unstated. `[cross_sandbox]` in particular is where the compiler that produced the
+/// kernel's bytes is named, which is why [`ToolchainProvenance`] carries no `cc`: a
+/// package and its sha256 say more than a `--version` line, and cannot drift from the
+/// tree they describe.
 ///
 /// The package list itself lives in the referenced manifest rather than inline: it runs
 /// to a few hundred entries, which as an array-of-tables would be the bulk of a document
@@ -113,11 +126,17 @@ pub struct BuildFacts<'a> {
 /// in the lock and no later build is verified against it. A base is discarded and
 /// re-bootstrapped whenever its manifest is absent, so the two never disagree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BuildSandboxProvenance {
-    /// Debian suite the base was bootstrapped for — the build's own, so the `.deb`s it
-    /// produces carry `Depends` resolved against the suite they install into.
+pub struct ProvisionedRootProvenance {
+    /// Debian suite the base was bootstrapped for. The build's own for every root,
+    /// though they need not agree: the target-arch sandbox exists only where there is an
+    /// image suite, while the cross and packaging roots fall back to the device's
+    /// default for a build that resolves none.
     pub suite: String,
-    /// Debian architecture of the base, which is the target's rather than the host's.
+    /// Debian architecture of the base — the **target's** only for the target-arch
+    /// sandbox, whose `dpkg-shlibdeps` must see the target's libraries; the **host's**
+    /// for the cross root, which emits the target's objects but links nothing against
+    /// its libraries, and for the packaging root, which archives a staged tree. Both of
+    /// the latter therefore run natively.
     pub architecture: String,
     /// Manifest filename, beside this document in the artifact directory.
     pub manifest: String,
@@ -127,33 +146,143 @@ pub struct BuildSandboxProvenance {
     pub package_count: usize,
 }
 
-/// The environment and mounts every sandboxed build command runs under, as the
+/// The posture, environment and mounts every sandboxed build command runs under, as the
 /// sandbox library resolves them.
 ///
-/// What a compiled package contains depends on the environment its build ran in and
-/// the filesystem that build saw. Neither is stated by a source pin, and neither is
-/// stable across sandbox-library releases — the base environment and the mount profile
-/// are both outside that library's compatibility promise — so the values are recorded
-/// rather than inferred from a version. Two images built from one lock that differ can
-/// then be compared on the inputs that could explain it.
+/// What a compiled package contains depends on the environment its build ran in, the
+/// filesystem that build saw, the identity it held, whether it could reach a network,
+/// and which syscalls succeeded. None of that is stated by a source pin, and none of it
+/// is stable across sandbox-library releases — the base environment, the mount profile
+/// and the defaults behind every posture are all outside that library's compatibility
+/// promise — so the values are recorded rather than inferred from a version. Two images
+/// built from one lock that differ can then be compared on the inputs that could explain
+/// it.
 ///
 /// This is the profile every command *starts from*: what the sandbox establishes before
 /// a run adds anything of its own. A run appends its own working and artifact directories
-/// as binds, and an `apt` run additionally shares the host network, which binds the host's
-/// `/etc/resolv.conf` read-only — both are per-run and host-specific, so neither is part
-/// of the record.
+/// as binds and pivots into its own root — a plain provisioned tree for the rootfs
+/// customize, an overlay of a sandbox base plus one stage's increment for a package
+/// build — and the customize additionally swaps in the subordinate identity map its
+/// ownership-preserving tree needs. All of those are per-run and host-specific paths, so
+/// none of them is part of the record; what is recorded is the profile they start from.
 ///
 /// Carried through [`BuildFacts`] as one value because it is one fact, and split across
-/// two manifest keys — [`sandbox_env`](ProvenanceManifest::sandbox_env) and
+/// three manifest keys — [`sandbox`](ProvenanceManifest::sandbox),
+/// [`sandbox_env`](ProvenanceManifest::sandbox_env) and
 /// [`sandbox_mounts`](ProvenanceManifest::sandbox_mounts) — because TOML requires every
 /// array-of-tables after every table. It is therefore not a section of its own, and
 /// carries no `Serialize` of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxProvenance {
+    /// How the sandbox is rooted, who the command is, what it can reach, and what it is
+    /// confined by — the manifest's `[sandbox]`.
+    pub posture: SandboxPosture,
     /// The command's complete environment, keyed by variable name.
     pub env: BTreeMap<String, String>,
     /// Every mount the sandbox establishes, in the order it establishes them.
     pub mounts: Vec<SandboxMount>,
+}
+
+/// The sandbox profile's posture, for the manifest's `[sandbox]`: everything about a
+/// sandboxed command that is neither its environment nor a mount.
+///
+/// Each field is a first-order build input in its own right. The rooting mode decides
+/// what filesystem the command sees; the identity decides whether it sees uid 0, which is
+/// what a Debian build's `Rules-Requires-Root` handling turns on and what a file's
+/// recorded ownership follows from; the network is what a reproducibility claim is most
+/// often challenged on; a limit a build adapts its parallelism to changes what it
+/// produces; and a seccomp policy changes which syscalls succeed, so a configure test
+/// that probes one reads the refusal as an absent feature and two builds differ with
+/// nothing else to show for it.
+///
+/// # Kinds, not paths
+///
+/// [`root`](Self::root) and [`identity`](Self::identity) record *which kind* rather than
+/// the values inside it: an overlay's lower stack and a range map's id extents are
+/// per-build paths and host subuid allocations respectively, and a record that carried
+/// them would be a property of the machine rather than of the builder — the same reason
+/// the mount list omits a run's own binds. The engine's projection still names every
+/// field of every variant, so a field the library adds is a compile error there rather
+/// than a silent omission here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxPosture {
+    /// How the command's root filesystem is composed: `host` (no root swap), `plain` (a
+    /// rootfs pivoted into), or `overlay` (an overlay assembled and pivoted into).
+    pub root: String,
+    /// The identity the command holds inside: `caller` (no user namespace), `single`
+    /// (the calling user is root inside and nothing else is mapped), or `ranged` (a
+    /// range map written by a delegate).
+    pub identity: String,
+    /// What the command can reach: `isolated` (a fresh namespace with loopback only),
+    /// `host` (the host's own namespace), or `none` (a fresh namespace with no interface
+    /// at all, not even loopback).
+    pub network: String,
+    /// Whether the sandbox library's hardening layer is compiled in: `unavailable` when
+    /// it is not, `applied` when it is — in which case the fields below are the controls
+    /// in force, and all of them being empty is a build that *could* have hardened and
+    /// did not.
+    ///
+    /// Recorded even when unavailable, and that is the point: an absent key cannot be
+    /// told from one written before the key existed, so a record that simply omitted it
+    /// would stop being readable without knowing which builder wrote it.
+    pub hardening: String,
+    /// The installed seccomp filter's length in BPF instructions, which is what
+    /// distinguishes one policy from another at a glance. Absent where no filter is
+    /// installed — including whenever [`hardening`](Self::hardening) is `unavailable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_instructions: Option<usize>,
+    /// The capability bits retained across the drop, `0x`-prefixed 16-digit hex — hex
+    /// for the reason [`SandboxMount::flags`] is. Absent where the namespaced capability
+    /// set is left untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_capabilities: Option<String>,
+    /// The resource limits applied to the command process, in the order they are
+    /// applied. Omitted when the profile applies none, which leaves the caller's own in
+    /// force.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rlimits: Vec<SandboxRlimit>,
+    /// The Landlock filesystem grants, in the order they were declared. Omitted when
+    /// there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub landlock_fs: Vec<SandboxLandlockFs>,
+    /// The Landlock network grants, in the order they were declared. Omitted when there
+    /// are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub landlock_net: Vec<SandboxLandlockNet>,
+}
+
+/// One resource limit a sandboxed build command runs under, for `[[sandbox.rlimits]]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxRlimit {
+    /// The kernel resource the limit governs, as the sandbox library spells it
+    /// (`open-files`, `processes`, `address-space`, …).
+    pub resource: String,
+    /// The soft limit — what the kernel enforces — as a decimal count, or `unlimited`.
+    pub soft: String,
+    /// The hard limit: the ceiling the command may raise its soft limit to. Same
+    /// spelling as [`soft`](Self::soft).
+    pub hard: String,
+}
+
+/// One Landlock filesystem grant, for `[[sandbox.landlock_fs]]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxLandlockFs {
+    /// The granted path, as the command sees it after the root swap.
+    pub path: String,
+    /// The `LANDLOCK_ACCESS_FS_*` rights allowed beneath it, as the kernel spells them
+    /// and unmasked — before the command stage narrows them to the running kernel's ABI.
+    /// `0x`-prefixed 16-digit hex, since it is a bit set.
+    pub access: String,
+}
+
+/// One Landlock network grant, for `[[sandbox.landlock_net]]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxLandlockNet {
+    /// The TCP port the grant governs.
+    pub port: u16,
+    /// The `LANDLOCK_ACCESS_NET_*` rights allowed on the port, rendered as
+    /// [`SandboxLandlockFs::access`] is.
+    pub access: String,
 }
 
 /// One mount a sandboxed build command runs under, for the manifest's
@@ -161,7 +290,7 @@ pub struct SandboxProvenance {
 ///
 /// One flat shape covers every kind, so the list diffs a line at a time; a field the
 /// kind does not have is absent rather than empty.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxMount {
     /// What the mount is: `tmpfs`, `procfs`, `devpts`, `bind`, `symlink`, or `raw`.
     pub kind: String,
@@ -201,10 +330,20 @@ pub struct ProvenanceManifest {
     pub sources: SourcesProvenance,
     /// Rootfs suite + the content-pinned solved-manifest reference.
     pub rootfs: RootfsProvenance,
-    /// The build sandbox base that compiled this build's target `.deb`s. Absent when
-    /// the build compiled none, so no sandbox was stood up.
+    /// The target-arch sandbox base that compiled this build's media-accel `.deb`s.
+    /// Absent when the build compiled none, so no such sandbox was stood up.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub build_sandbox: Option<BuildSandboxProvenance>,
+    pub build_sandbox: Option<ProvisionedRootProvenance>,
+    /// The cross root base that compiled this build's kernel, u-boot and out-of-tree
+    /// modules. Absent when the build compiled none of them, so no such root was stood
+    /// up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_sandbox: Option<ProvisionedRootProvenance>,
+    /// The packaging root whose `dpkg` archived this build's u-boot and kmod `.deb`s.
+    /// Absent when the build archived none — every such artifact restored from the
+    /// artifact cache, so no root was provisioned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packaging_root: Option<ProvisionedRootProvenance>,
     /// The on-disk contract the rootfs filesystem was formatted to — the one
     /// determinant of the image's bytes that no source pin covers.
     pub filesystem: FilesystemProvenance,
@@ -501,41 +640,96 @@ pub struct RootfsProvenance {
     pub package_count: usize,
 }
 
-/// The rootfs filesystem's on-disk contract: the exact ext4 feature words, block
-/// size, and inode size the rootfs was formatted with.
+/// The rootfs filesystem's on-disk contract: the feature set it was formatted to, and
+/// the geometry that came out.
 ///
 /// Every other pin in this manifest answers "which sources went in." This one answers
 /// "what shape were they written into," and it is the only such determinant that moves
 /// independently of the lock: the feature set is a builder constant chosen by the image
 /// stage, not a value resolved from config, so a formatter whose baseline set gains a
-/// feature relays a different on-disk layout for an unchanged lock. Recording the
-/// *resolved* words makes that a visible difference between two builds rather than a
+/// feature relays a different on-disk layout for an unchanged lock. Recording what the
+/// format *resolved* makes that a visible difference between two builds rather than a
 /// silent one.
 ///
-/// Both spellings are kept, and neither is redundant. [`features`](Self::features)
-/// is readable and diffable by a human; the three raw words pin exactly, including a
-/// bit whose name the formatter has changed or that it does not name at all.
-/// [`block_size`](Self::block_size) and [`inode_size`](Self::inode_size) are not
-/// features and appear in no feature word, but change the layout comprehensively — a
-/// record of the feature words alone would not be a pin.
+/// The two halves are the two things that can move independently. [`pin`](Self::pin) is
+/// the intent — the feature set the formatter was handed — and
+/// [`geometry`](Self::geometry) is the outcome, which also answers to the image's size.
+/// One can change while the other does not: a larger partition moves every geometry
+/// number with an identical pin, and a formatter that gains a baseline feature moves the
+/// pin at an unchanged size.
+///
+/// # What this does not cover
+///
+/// The feature set is not the whole of what a format is a function of: the grow
+/// reservation, the inode ratio, the reserved-block ratio and the error behaviour are
+/// format options outside it, and the formatter publishes no pin over those. Their
+/// effects reach [`geometry`](Self::geometry) — a changed grow reservation moves
+/// `reserved_gdt_blocks` — but the error behaviour reaches neither field and is recorded
+/// nowhere. The image stage's own tests hold it instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FilesystemProvenance {
-    /// The filesystem type the words below describe (`ext4`).
+    /// The filesystem type (`ext4`).
     pub kind: String,
-    /// On-disk feature names, in the formatter's canonical order: `compat`, then
-    /// `incompat`, then `ro_compat`, each ascending by bit.
-    pub features: Vec<String>,
-    /// The raw `compat` feature word, `0x`-prefixed 8-digit hex. Hex rather than a
-    /// decimal integer because it is a bit set, and only hex diffs one bit at a time.
-    pub compat: String,
-    /// The raw `incompat` feature word, in the same form as [`compat`](Self::compat).
-    pub incompat: String,
-    /// The raw `ro_compat` feature word, in the same form as [`compat`](Self::compat).
-    pub ro_compat: String,
-    /// Filesystem block size in bytes.
+    /// The formatter's own feature-set pin document, verbatim.
+    ///
+    /// Carried whole rather than re-spelled field by field, and that is the point: the
+    /// formatter builds it from an exhaustive destructure of its own feature set, so a
+    /// field it gains appears here without this crate being changed. A record assembled
+    /// here would keep compiling and silently stop covering it.
+    ///
+    /// Self-describing and versioned by its own first line, so it is readable without
+    /// this documentation and a reader can tell one revision of the format from another.
+    /// It states every feature word twice — as exact bits and as names — plus the block
+    /// and inode sizes, which are not features and appear in no feature word but change
+    /// the layout comprehensively.
+    pub pin: String,
+    /// The geometry the format realized.
+    pub geometry: FilesystemGeometry,
+}
+
+/// The geometry a format realized: what the formatter reports having written, in
+/// filesystem blocks.
+///
+/// Every scalar the formatter's layout carries, projected mechanically. Two of its
+/// values are deliberately absent: the feature set, which [`FilesystemProvenance::pin`]
+/// states in full, and the per-group table, which is O(image size) — thousands of rows
+/// for a real rootfs — and derivable from the scalars here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FilesystemGeometry {
+    /// Block size in bytes — the unit every other count here is in.
     pub block_size: u32,
-    /// Inode size in bytes (`s_inode_size`).
-    pub inode_size: u16,
+    /// Total blocks in the filesystem, so `block_size * total_blocks` is its size.
+    pub total_blocks: u64,
+    /// Total inodes, the ceiling on the file count the image can ever hold. Fixed at
+    /// format time for every block group the image starts with, so an image that grows
+    /// gains inodes only in the groups the growth adds.
+    pub total_inodes: u32,
+    /// Blocks per block group.
+    pub blocks_per_group: u32,
+    /// Inodes per block group.
+    pub inodes_per_group: u32,
+    /// Number of block groups.
+    pub group_count: u32,
+    /// The first block the filesystem's own data occupies (0 at a 4096-byte block,
+    /// where the superblock's 1024-byte offset falls inside block 0).
+    pub first_data_block: u32,
+    /// Block groups per flex group — how far apart the allocator spreads metadata.
+    pub flex_bg_size: u32,
+    /// Blocks the group-descriptor table occupies.
+    pub gdt_blocks: u32,
+    /// Blocks held in reserve for the group-descriptor table to grow into. This is the
+    /// online-resize headroom: an image can grow in place only until the table needs a
+    /// block past these, and relocating the table is what an in-place grow cannot do.
+    pub reserved_gdt_blocks: u32,
+    /// Blocks one group's inode table occupies.
+    pub inode_table_blocks: u32,
+    /// Blocks held back for the super-user, from the reserved-block ratio.
+    pub reserved_blocks: u64,
+    /// The largest block count this filesystem can be grown to in place, which is what
+    /// [`reserved_gdt_blocks`](Self::reserved_gdt_blocks) buys. First boot resizes the
+    /// root onto the whole of whatever disk it lands on, so an image whose ceiling fell
+    /// below that disk would come up at its built size and stay there.
+    pub max_grow_blocks: u64,
 }
 
 /// Verified rkbin blob pins (`"<filename>@sha256:<hex>"`).
@@ -560,20 +754,28 @@ pub struct BlobsProvenance {
 /// say so; with it, a release build can be gated on the list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerificationProvenance {
-    /// Every check the rootfs filesystem passed, in the order it ran. `ferrosys-reader`
-    /// is the in-process re-read of every metadata checksum; `e2fsck` is the
-    /// independent `-fn` cross-check, present only when the host carried the tool.
+    /// Every check the rootfs filesystem passed, in the order it ran. `ferrosys-scan`
+    /// is the in-process full scan of the finished image — every metadata checksum, the
+    /// placement of every group's metadata, and every inode's block map, directory
+    /// records and attributes; `e2fsck` is the independent `-fn` cross-check, present
+    /// only when the host carried the tool.
     pub rootfs: Vec<String>,
 }
 
-/// Build host / toolchain identity: which toolchain was *selected* (host+target arch
-/// and the cross prefix), and which concrete tools that selection resolved to.
+/// Which toolchain the build *selected* — host and target architecture, and the
+/// `CROSS_COMPILE` prefix that follows from them — plus the one host binary that still
+/// shapes a compiled byte.
 ///
-/// The compiler is the single largest host input to the kernel's bytes and no source
-/// pin covers it, so the versions are recorded rather than left to be inferred from
-/// the host. Each version field is absent when its tool could not be run — the honest
-/// report for a build that compiles nothing from source (a distro kernel on a board
-/// whose firmware is its own), which needs no compiler and should not claim one.
+/// The compilers themselves are **not** here, and deliberately: every one a build runs
+/// is a package of a provisioned root, so `[build_sandbox]` and `[cross_sandbox]` state
+/// them sha256-pinned per package
+/// ([`ProvisionedRootProvenance`]). Recording a `--version` line beside a manifest that
+/// already names the package and its digest would be the weaker of two statements about
+/// the same thing, and the one that can drift.
+///
+/// What is left is `qemu-user`, which no root can carry — it is registered with the host
+/// kernel's binfmt handler and executes from the host filesystem — and the parallelism,
+/// which is a property of the machine rather than of any tree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolchainProvenance {
     /// Build-host architecture.
@@ -582,25 +784,9 @@ pub struct ToolchainProvenance {
     pub target_arch: String,
     /// Whether the build was cross-arch.
     pub cross: bool,
-    /// `CROSS_COMPILE` prefix (empty on a native build).
+    /// `CROSS_COMPILE` prefix (empty where the cross root *is* the target's
+    /// architecture and the compile is native).
     pub cross_compile: String,
-    /// `<cross>gcc`'s version line — the compiler that produced the kernel, u-boot,
-    /// and out-of-tree module `.deb`s.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cc: Option<String>,
-    /// `<cross>as`'s version line. Recorded beside the compiler because the emitted
-    /// bytes come from the assembler as much as from `gcc`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assembler: Option<String>,
-    /// `<cross>ld`'s version line, recorded for the same reason as
-    /// [`assembler`](Self::assembler).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub linker: Option<String>,
-    /// The `qemu-user` version line. On a cross build this interpreter executes the
-    /// target-arch compiler for every sandbox-built package, so it is an input to
-    /// those `.deb`s. Absent on a native build, where nothing is interpreted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub qemu: Option<String>,
     /// The parallelism the build ran at — `make -j` and the `parallel=` a
     /// `dpkg-buildpackage` saw.
     ///
@@ -610,6 +796,44 @@ pub struct ToolchainProvenance {
     /// nothing and is what makes that bug diagnosable if it ever appears — two images
     /// from one lock that differ can be compared on it.
     pub jobs: usize,
+    /// The `qemu-user` interpreter, where the host cannot execute the target's binaries
+    /// — it then executes the target-arch compiler for every media-accel package, so it
+    /// is an input to those `.deb`s. Absent where the host runs them directly and
+    /// nothing is interpreted, which includes every kernel, u-boot and module build,
+    /// since those compile natively in the cross root.
+    ///
+    /// Serializes as a `[toolchain.qemu]` table, so it is declared after every scalar
+    /// above it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qemu: Option<QemuProvenance>,
+}
+
+/// The `qemu-user` interpreter a build's target-arch commands ran under.
+///
+/// Taken from the **kernel's binfmt registration**, not from a `PATH` lookup, because
+/// the registration is what decides which file executes: a build whose `PATH` carries no
+/// interpreter still runs every target binary through the registered one, and the two
+/// paths are not required to name the same file. A record derived from `PATH` can
+/// therefore name a binary that never ran, or report an absence that is not one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QemuProvenance {
+    /// The file the registration resolves to, with symlinks followed — the binary that
+    /// actually executes, rather than the wrapper path the registration names.
+    pub interpreter: String,
+    /// sha256 of that file, lowercase hex. The identity, and what the artifact cache
+    /// keys on: it moves when the binary is rebuilt at an unchanged version, and it can
+    /// be taken from a binary that refuses to run.
+    ///
+    /// Read at build time from the path the registration names. The `F` flag means the
+    /// kernel opened and holds the interpreter at *registration* time, so a file
+    /// replaced since registration is one this digest describes and the kernel is not
+    /// running. Nothing outside the kernel can do better; the assumption is recorded
+    /// rather than hidden.
+    pub sha256: String,
+    /// First line of its `--version` output, for a reader. Absent where the binary could
+    /// not be run, which does not affect the digest above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// Which boot2deb built the image — the builder axis of "exactly what went into this
@@ -773,6 +997,8 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             package_count: facts.package_count,
         },
         build_sandbox: facts.build_sandbox.clone(),
+        cross_sandbox: facts.cross_sandbox.clone(),
+        packaging_root: facts.packaging_root.clone(),
         filesystem: facts.filesystem.clone(),
         verification: VerificationProvenance {
             rootfs: facts.rootfs_verified_with.to_vec(),
@@ -787,11 +1013,8 @@ pub fn assemble(build: &ResolvedBuild, lock: &Lock, facts: &BuildFacts) -> Prove
             target_arch: build.arch.to_string(),
             cross: facts.cross,
             cross_compile: build.cross_compile.clone(),
-            cc: facts.cc.map(str::to_string),
-            assembler: facts.assembler.map(str::to_string),
-            linker: facts.linker.map(str::to_string),
-            qemu: facts.qemu.map(str::to_string),
             jobs: facts.jobs,
+            qemu: facts.qemu.clone(),
         },
         built_with: BuiltWithProvenance {
             version: facts.builder_version.to_string(),
@@ -958,30 +1181,45 @@ mod tests {
     /// The checks a build on a host carrying `e2fsprogs` runs — both of them, so the
     /// join is exercised against the fuller of the two shapes it can be handed.
     fn sample_verified_with() -> Vec<String> {
-        vec!["ferrosys-reader".to_string(), "e2fsck".to_string()]
+        vec!["ferrosys-scan".to_string(), "e2fsck".to_string()]
     }
 
-    /// The filesystem pin as the image stage resolves it — the engine's real values, so
-    /// the join is exercised against the shape that actually ships.
+    /// The filesystem record as the image stage reports it — the engine's real pin
+    /// document and a real image's geometry, so the join is exercised against the shape
+    /// that actually ships. The pin is multi-line, which is the case that decides how
+    /// the manifest renders it.
     fn sample_filesystem() -> FilesystemProvenance {
         FilesystemProvenance {
             kind: "ext4".into(),
-            features: ["has_journal", "extent", "metadata_csum_seed"]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-            compat: "0x0000003c".into(),
-            incompat: "0x000022c2".into(),
-            ro_compat: "0x0000046b".into(),
-            block_size: 4096,
-            inode_size: 256,
+            pin: "ferrosys-feature-pin 1\n\
+                  compat 0x0000003c has_journal ext_attr resize_inode dir_index\n\
+                  block_size 4096\n\
+                  inode_size 256\n"
+                .into(),
+            geometry: FilesystemGeometry {
+                block_size: 4096,
+                total_blocks: 520_187,
+                total_inodes: 130_048,
+                blocks_per_group: 32768,
+                inodes_per_group: 8128,
+                group_count: 16,
+                first_data_block: 0,
+                flex_bg_size: 16,
+                gdt_blocks: 1,
+                reserved_gdt_blocks: 1023,
+                inode_table_blocks: 508,
+                reserved_blocks: 5201,
+                max_grow_blocks: 2_147_483_648,
+            },
         }
     }
 
     /// The sandbox profile as the engine resolves it, trimmed to the entries that
     /// exercise every optional field — a bind with a host source, a symlink whose
     /// source is its content, a flagged tmpfs with a data string, and a mount with
-    /// neither. The real profile is longer; the shape is the same.
+    /// neither. The posture is the real one: boot2deb selects no hardening feature and
+    /// applies no resource limit, so `unavailable` and an empty list are what a build
+    /// records. The real mount profile is longer; the shape is the same.
     fn sample_sandbox() -> SandboxProvenance {
         let mount = |kind: &str, target: &str| SandboxMount {
             kind: kind.into(),
@@ -993,6 +1231,17 @@ mod tests {
             read_only: None,
         };
         SandboxProvenance {
+            posture: SandboxPosture {
+                root: "plain".into(),
+                identity: "single".into(),
+                network: "isolated".into(),
+                hardening: "unavailable".into(),
+                seccomp_instructions: None,
+                keep_capabilities: None,
+                rlimits: Vec::new(),
+                landlock_fs: Vec::new(),
+                landlock_net: Vec::new(),
+            },
             env: [
                 ("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"),
                 ("HOME", "/root"),
@@ -1096,13 +1345,17 @@ mod tests {
             builder_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &sample_verified_with(),
-            cc: Some("aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"),
-            assembler: Some("GNU assembler (GNU Binutils for Debian) 2.44"),
-            linker: Some("GNU ld (GNU Binutils for Debian) 2.44"),
-            qemu: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)"),
+            qemu: Some(QemuProvenance {
+                resolved: None,
+                interpreter: "/usr/bin/qemu-aarch64-static".into(),
+                sha256: "d1e8a70b5ccab1dc2f56bbf7e99f064a7ef7d3e7f0b9b26a20a4b0c7e5c0a911".into(),
+                version: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)".into()),
+            }),
             jobs: 8,
             sandbox: sample_sandbox(),
             build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
         };
         let manifest = assemble(&sample_build(), &lock, &facts)
             .to_toml_string()
@@ -1177,13 +1430,17 @@ mod tests {
             builder_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &sample_verified_with(),
-            cc: Some("aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"),
-            assembler: Some("GNU assembler (GNU Binutils for Debian) 2.44"),
-            linker: Some("GNU ld (GNU Binutils for Debian) 2.44"),
-            qemu: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)"),
+            qemu: Some(QemuProvenance {
+                resolved: None,
+                interpreter: "/usr/bin/qemu-aarch64-static".into(),
+                sha256: "d1e8a70b5ccab1dc2f56bbf7e99f064a7ef7d3e7f0b9b26a20a4b0c7e5c0a911".into(),
+                version: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)".into()),
+            }),
             jobs: 8,
             sandbox: sample_sandbox(),
             build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.sources.kernel_commit.as_deref(), Some("kc"));
@@ -1258,24 +1515,33 @@ mod tests {
             Some("cafef00dbabe")
         );
         assert_eq!(parsed["built_with"]["dirty"].as_bool(), Some(false));
-        // The filesystem pin: the on-disk contract the rootfs was formatted to, which no
-        // source pin covers. Both spellings survive the join and the TOML round-trip —
-        // the raw words as hex strings (a bit set, not a quantity) and the readable names.
+        // The filesystem record: the on-disk contract the rootfs was formatted to, which
+        // no source pin covers. The formatter's pin document survives the join and the
+        // TOML round-trip whole — line breaks included, so it stays the document the
+        // formatter emitted rather than a re-spelling of it.
         assert_eq!(parsed["filesystem"]["kind"].as_str(), Some("ext4"));
-        assert_eq!(parsed["filesystem"]["compat"].as_str(), Some("0x0000003c"));
         assert_eq!(
-            parsed["filesystem"]["incompat"].as_str(),
-            Some("0x000022c2")
+            parsed["filesystem"]["pin"].as_str(),
+            Some(sample_filesystem().pin.as_str())
+        );
+        // And it renders as a readable multi-line string rather than one line of
+        // escapes, which is the whole reason it is worth carrying verbatim.
+        assert!(
+            text.contains("pin = \"\"\"\nferrosys-feature-pin 1\n"),
+            "the pin document must render multi-line:\n{text}"
+        );
+        // The realized geometry lands in its own subtable, after the scalars above.
+        assert_eq!(
+            parsed["filesystem"]["geometry"]["total_blocks"].as_integer(),
+            Some(520_187)
         );
         assert_eq!(
-            parsed["filesystem"]["ro_compat"].as_str(),
-            Some("0x0000046b")
+            parsed["filesystem"]["geometry"]["reserved_gdt_blocks"].as_integer(),
+            Some(1023)
         );
-        assert_eq!(parsed["filesystem"]["block_size"].as_integer(), Some(4096));
-        assert_eq!(parsed["filesystem"]["inode_size"].as_integer(), Some(256));
         assert_eq!(
-            parsed["filesystem"]["features"][0].as_str(),
-            Some("has_journal")
+            parsed["filesystem"]["geometry"]["max_grow_blocks"].as_integer(),
+            Some(2_147_483_648)
         );
         // No extra_debs in this build → the array-of-tables is omitted entirely.
         assert!(!text.contains("extra_debs"));
@@ -1331,13 +1597,17 @@ mod tests {
             builder_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &sample_verified_with(),
-            cc: Some("aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"),
-            assembler: Some("GNU assembler (GNU Binutils for Debian) 2.44"),
-            linker: Some("GNU ld (GNU Binutils for Debian) 2.44"),
-            qemu: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)"),
+            qemu: Some(QemuProvenance {
+                resolved: None,
+                interpreter: "/usr/bin/qemu-aarch64-static".into(),
+                sha256: "d1e8a70b5ccab1dc2f56bbf7e99f064a7ef7d3e7f0b9b26a20a4b0c7e5c0a911".into(),
+                version: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)".into()),
+            }),
             jobs: 8,
             sandbox: sample_sandbox(),
             build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
         };
         let prov = assemble(&build, &lock, &facts);
         assert_eq!(prov.extra_debs.len(), 1);
@@ -1381,13 +1651,17 @@ mod tests {
             builder_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &sample_verified_with(),
-            cc: Some("aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"),
-            assembler: Some("GNU assembler (GNU Binutils for Debian) 2.44"),
-            linker: Some("GNU ld (GNU Binutils for Debian) 2.44"),
-            qemu: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)"),
+            qemu: Some(QemuProvenance {
+                resolved: None,
+                interpreter: "/usr/bin/qemu-aarch64-static".into(),
+                sha256: "d1e8a70b5ccab1dc2f56bbf7e99f064a7ef7d3e7f0b9b26a20a4b0c7e5c0a911".into(),
+                version: Some("qemu-aarch64 version 9.2.0 (Debian 1:9.2.0+ds-1)".into()),
+            }),
             jobs: 8,
             sandbox: sample_sandbox(),
             build_sandbox: None,
+            cross_sandbox: None,
+            packaging_root: None,
         };
         let text = assemble(&sample_build(), &sample_lock(), &facts)
             .to_toml_string()
@@ -1441,6 +1715,8 @@ mod tests {
     #[test]
     fn the_build_sandbox_is_recorded_when_one_compiled_the_build() {
         let facts = |build_sandbox| BuildFacts {
+            cross_sandbox: None,
+            packaging_root: None,
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -1452,9 +1728,6 @@ mod tests {
             builder_dirty: false,
             filesystem: sample_filesystem(),
             rootfs_verified_with: &[],
-            cc: None,
-            assembler: None,
-            linker: None,
             qemu: None,
             jobs: 8,
             sandbox: sample_sandbox(),
@@ -1466,7 +1739,7 @@ mod tests {
                 .unwrap()
         };
 
-        let text = render(Some(BuildSandboxProvenance {
+        let text = render(Some(ProvisionedRootProvenance {
             suite: "forky".into(),
             architecture: "arm64".into(),
             manifest: "media-accel-forky.sandbox.pkgs".into(),
@@ -1500,5 +1773,164 @@ mod tests {
             .unwrap()
             .get("build_sandbox")
             .is_none());
+    }
+
+    /// The root that *archived* the build's `.deb`s is recorded the same way the one
+    /// that compiled them is, and the two are told apart by what they say rather than by
+    /// which section they sit in.
+    ///
+    /// They share a shape, so the risk is that a reader — or a later change — treats
+    /// them as interchangeable. They are not: this one is host-arch and its suite need
+    /// not be the image's, both of which show up here.
+    #[test]
+    fn the_packaging_root_is_recorded_apart_from_the_sandbox_that_compiled() {
+        let facts = |build_sandbox, packaging_root| BuildFacts {
+            cross_sandbox: None,
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc",
+            package_count: 1,
+            user: "debian",
+            password: "pw",
+            builder_version: "0.0.0-test",
+            builder_commit: None,
+            builder_dirty: false,
+            filesystem: sample_filesystem(),
+            rootfs_verified_with: &[],
+            qemu: None,
+            jobs: 8,
+            sandbox: sample_sandbox(),
+            build_sandbox,
+            packaging_root,
+        };
+        let render = |bs, pr| {
+            assemble(&sample_build(), &sample_lock(), &facts(bs, pr))
+                .to_toml_string()
+                .unwrap()
+        };
+        let root = |arch: &str, suite: &str, manifest: &str| ProvisionedRootProvenance {
+            suite: suite.into(),
+            architecture: arch.into(),
+            manifest: manifest.into(),
+            manifest_sha256: "f00d".into(),
+            package_count: 77,
+        };
+
+        let text = render(
+            Some(root("arm64", "forky", "x.sandbox.pkgs")),
+            // A bootloader-only build's packaging suite is the device's default, which
+            // need not be the image suite beside it — so the two sections can legitimately
+            // disagree, and a reader has to be able to see that they do.
+            Some(root("amd64", "trixie", "x.packaging.pkgs")),
+        );
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        let pr = parsed["packaging_root"].as_table().unwrap();
+        // Host-arch, because archiving a staged tree is architecture-independent work
+        // and runs natively. This is the field the two roots differ on by construction.
+        assert_eq!(pr["architecture"].as_str(), Some("amd64"));
+        assert_eq!(pr["suite"].as_str(), Some("trixie"));
+        assert_eq!(pr["manifest"].as_str(), Some("x.packaging.pkgs"));
+        assert_ne!(
+            pr["manifest"].as_str(),
+            parsed["build_sandbox"]["manifest"].as_str(),
+            "the two roots must publish separate manifests"
+        );
+        // Both are tables, so both must still precede every array-of-tables.
+        let arrays = text.find("[[").expect("an array-of-tables");
+        assert!(text.find("[packaging_root]").expect("the section") < arrays);
+        assert!(text.find("[build_sandbox]").expect("the section") < arrays);
+
+        // Each is absent on its own terms: a build can archive without compiling (a
+        // bootloader-only deliverable) and compile without archiving (every u-boot and
+        // kmod artifact restored from the cache).
+        let archived_only = render(None, Some(root("amd64", "forky", "x.packaging.pkgs")));
+        assert!(!archived_only.contains("[build_sandbox]"));
+        assert!(archived_only.contains("[packaging_root]"));
+        let compiled_only = render(Some(root("arm64", "forky", "x.sandbox.pkgs")), None);
+        assert!(compiled_only.contains("[build_sandbox]"));
+        assert!(!compiled_only.contains("[packaging_root]"));
+        let neither = render(None, None);
+        assert!(!neither.contains("[build_sandbox]"));
+        assert!(!neither.contains("[packaging_root]"));
+        toml::from_str::<toml::Value>(&neither).expect("still valid TOML with both absent");
+    }
+
+    /// `[cross_sandbox]` names the root that compiled the kernel, and does so on its own
+    /// terms — present or absent independently of the other two.
+    ///
+    /// The case worth asserting is the asymmetric one, because it is the common one: a
+    /// board that compiles a kernel and no media-accel packages publishes a
+    /// `[cross_sandbox]` and no `[build_sandbox]`, so a reader must not take either
+    /// section's presence as standing in for the other's.
+    #[test]
+    fn the_cross_root_is_recorded_apart_from_the_target_arch_sandbox() {
+        let facts = |cross_sandbox, build_sandbox| BuildFacts {
+            cross_sandbox,
+            build_sandbox,
+            packaging_root: None,
+            host_arch: "x86_64",
+            cross: true,
+            manifest_sha256: "abc",
+            package_count: 1,
+            user: "debian",
+            password: "pw",
+            builder_version: "0.0.0-test",
+            builder_commit: None,
+            builder_dirty: false,
+            filesystem: sample_filesystem(),
+            rootfs_verified_with: &[],
+            qemu: None,
+            jobs: 8,
+            sandbox: sample_sandbox(),
+        };
+        let render = |cs, bs| {
+            assemble(&sample_build(), &sample_lock(), &facts(cs, bs))
+                .to_toml_string()
+                .unwrap()
+        };
+        let root = |arch: &str, manifest: &str| ProvisionedRootProvenance {
+            suite: "forky".into(),
+            architecture: arch.into(),
+            manifest: manifest.into(),
+            manifest_sha256: "f00d".into(),
+            package_count: 168,
+        };
+
+        // A kernel-compiling board with no accel stack: the cross root alone.
+        let kernel_only = render(Some(root("amd64", "x.cross.pkgs")), None);
+        assert!(!kernel_only.contains("[build_sandbox]"));
+        let parsed: toml::Value = toml::from_str(&kernel_only).unwrap();
+        let cs = parsed["cross_sandbox"].as_table().unwrap();
+        // The host's arch, beside a `[rootfs]` recording the target's: the cross root
+        // emits the target's objects but is not provisioned at its architecture, and
+        // that distinction is the whole reason the compile is not emulated.
+        assert_eq!(cs["architecture"].as_str(), Some("amd64"));
+        assert_eq!(cs["manifest"].as_str(), Some("x.cross.pkgs"));
+        assert!(kernel_only.find("[cross_sandbox]") < kernel_only.find("[["));
+
+        // And both together, each keeping its own architecture and manifest — the two
+        // compile roots of a build that has a kernel *and* an accel stack.
+        let both = render(
+            Some(root("amd64", "x.cross.pkgs")),
+            Some(root("arm64", "x.sandbox.pkgs")),
+        );
+        let parsed: toml::Value = toml::from_str(&both).unwrap();
+        assert_eq!(
+            parsed["cross_sandbox"]["architecture"].as_str(),
+            Some("amd64")
+        );
+        assert_eq!(
+            parsed["build_sandbox"]["architecture"].as_str(),
+            Some("arm64")
+        );
+        assert_ne!(
+            parsed["cross_sandbox"]["manifest"].as_str(),
+            parsed["build_sandbox"]["manifest"].as_str(),
+            "the two compile roots must publish separate manifests"
+        );
+
+        // Absent for a board that installs Debian's kernel and boots its own firmware,
+        // which compiles neither of the two.
+        assert!(!render(None, None).contains("[cross_sandbox]"));
     }
 }

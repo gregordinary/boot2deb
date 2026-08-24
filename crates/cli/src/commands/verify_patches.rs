@@ -19,13 +19,14 @@
 
 use crate::args::VerifyArgs;
 use crate::config::{fetch_verify_tree, resolve_patches_source, verify_trees_cache};
-use crate::render::print_event;
+use crate::render::{print_event_at, Verbosity};
 use boot2deb_core::model::{Overrides, ResolvedBuild};
 use boot2deb_core::series::Scope;
 use boot2deb_core::{load_series, resolve_recipe, ConfigRoot, PatchSeries, RangeMatch};
 use boot2deb_engine::event::Event;
 use boot2deb_engine::patches::VerifyTree;
 use boot2deb_engine::{patches, pins, EventSink};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -45,19 +46,41 @@ struct ResolvedTree {
 }
 
 /// Run `verify-patches <recipe>`.
-pub(crate) fn run(root: &ConfigRoot, recipe: &str, args: VerifyArgs) -> Result<()> {
+///
+/// Under `--json` the *verdict* is one document on stdout — per axis, how many
+/// patches applied and every one that did not. The `git am` runs still stream to the
+/// terminal like a build stage, because what `git` said is the evidence a failing CI
+/// log has to carry.
+pub(crate) fn run(
+    root: &ConfigRoot,
+    recipe: &str,
+    args: VerifyArgs,
+    json_out: bool,
+    verbosity: Verbosity,
+) -> Result<()> {
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
     let lock = root.lock(recipe)?;
-    let sink = |e: Event| print_event(&e);
+    let sink = move |e: Event| print_event_at(verbosity, &e);
 
     // Both axes read the same `patches` checkout at the same commit, so resolve it
     // once from whichever pin this recipe has. Nothing to verify when it has
     // neither: report it and succeed, rather than failing on a checkout the build
     // would never read.
     let Some(checkout_pin) = lock.patches.as_ref().or(lock.uboot_patches.as_ref()) else {
-        println!(
-            "verify-patches {recipe}: this recipe applies no patch series (nothing to verify)"
-        );
+        if json_out {
+            // A recipe with no series is a pass over an empty axis list, not a
+            // different document: the same fields, all empty.
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "recipe": recipe, "axes": [], "failures": [], "result": "pass",
+                }))?
+            );
+        } else {
+            println!(
+                "verify-patches {recipe}: this recipe applies no patch series (nothing to verify)"
+            );
+        }
         return Ok(());
     };
     let (patches_root, _dev) = resolve_patches_source(
@@ -134,6 +157,41 @@ pub(crate) fn run(root: &ConfigRoot, recipe: &str, args: VerifyArgs) -> Result<(
         .collect();
 
     let (report, failures) = patches::verify_series(&patches_root, &borrowed, on_failure)?;
+    if json_out {
+        let axes: Vec<_> = report
+            .iter()
+            .zip(&trees)
+            .map(|((label, n), tree)| {
+                json!({
+                    "axis": label,
+                    "target": tree.target,
+                    "applied": n,
+                    "failed": failures.iter().filter(|f| &f.tree == label).count(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "recipe": recipe,
+                "axes": axes,
+                "failures": failures.iter().map(|f| json!({
+                    "axis": f.tree, "patch": f.patch, "detail": f.detail,
+                })).collect::<Vec<_>>(),
+                "result": if failures.is_empty() { "pass" } else { "fail" },
+            }))?
+        );
+        return if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} patch(es) do not apply — each failing patch was skipped, so a rework may \
+                 change the results after it",
+                failures.len()
+            )
+            .into())
+        };
+    }
     for ((label, n), tree) in report.iter().zip(&trees) {
         let failed = failures.iter().filter(|f| &f.tree == label).count();
         if failed == 0 {

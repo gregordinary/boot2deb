@@ -127,24 +127,27 @@ Whether the recipe lives in your `--overlay` or in-tree, the sequence is the sam
 step fails with a typed error before any compile starts:
 
 ```sh
-# Is it a coherent build point? Also runs the geometry / fragment / keyring preflight.
-cargo run -p boot2deb-cli -- resolve <recipe>
+# 1. Is it a coherent build point? Also runs the geometry / fragment / keyring preflight.
+boot2deb resolve <recipe>
 
-# Is the host equipped to build it? Prints install commands for your distro.
-cargo run -p boot2deb-cli -- doctor <recipe>
+# 2. Is the host equipped to build it? Prints install commands for your distro.
+boot2deb doctor <recipe>
 
-# Resolve upstream refs + hash blobs into the lock. The only command that touches
-# the network for pins; --kernel-ref is required on the first update of a recipe
-# that compiles a kernel.
-cargo run -p boot2deb-cli -- update <recipe> --kernel-ref <tag>
+# 3. Resolve upstream refs + hash blobs into the lock. The only command that touches
+#    the network for pins; --kernel-ref is required on the first update of a recipe
+#    that compiles a kernel.
+boot2deb update <recipe> --kernel-ref <tag>
 
-# Do the patch series apply, and does the kernel .config generate?
-cargo run -p boot2deb-cli -- verify-patches <recipe>
-cargo run -p boot2deb-cli -- verify-config  <recipe>
+# 4-5. Do the patch series apply, and does the kernel .config generate?
+boot2deb verify-patches <recipe>
+boot2deb verify-config  <recipe>
 
-# Build.
-cargo run -p boot2deb-cli -- build <recipe>
+# 6. Build.
+boot2deb build <recipe>
 ```
+
+[Adding a board](../contributing/adding-a-board.md#bring-it-up) runs the same six steps
+after writing the device file, so a new board and a new recipe share one bring-up loop.
 
 `update` writes `recipes/<device>/<leaf>.lock` beside the recipe — into your overlay when
 that is where the recipe lives. **Commit the lock.** It is what makes the point
@@ -159,12 +162,12 @@ Three things beyond the file itself:
 2. **Regenerate the support matrix**, which is generated from the recipes and their locks
    and is compared by a test:
    ```sh
-   cargo run -p boot2deb-cli -- support-matrix --markdown > docs/src/reference/support-matrix.md
+   boot2deb support-matrix --markdown > docs/src/reference/support-matrix.md
    ```
 3. **Check the pins are durable** — a lock naming an unpushed commit builds for you and
    nobody else:
    ```sh
-   cargo run -p boot2deb-cli -- verify-sources <recipe>
+   boot2deb verify-sources <recipe>
    ```
 
 If the recipe is the board's first, give the board a page under

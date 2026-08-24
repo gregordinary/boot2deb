@@ -22,6 +22,10 @@ sha2 = "0.10"
 # 16 bytes, so it imposes no version constraint of its own.)
 uuid = "1"
 clap = { version = "4", features = ["derive"] }
+# Shell completions and the man page, both rendered from the same `clap::Command` the
+# binary parses with — so neither can describe a flag the tool does not have.
+clap_complete = "4"
+clap_mangen = "0.3"
 tempfile = "3"
 boot2deb-core = { path = "crates/core" }
 boot2deb-engine = { path = "crates/engine" }

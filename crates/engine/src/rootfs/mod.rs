@@ -231,9 +231,7 @@ pub struct RootfsArtifacts {
 /// layer may legitimately ship. `cp` opens an existing destination for writing, so
 /// overriding a file an earlier layer shipped without the owner-write bit — a key, a
 /// `sudoers.d` drop-in — would fail with `Permission denied` instead of replacing it;
-/// unlinking first sidesteps the destination's mode entirely. The customize copy
-/// downstream passes the same flag, for the adjacent case of replacing a base file
-/// through a dangling symlink.
+/// unlinking first sidesteps the destination's mode entirely.
 fn copy_overlay_trees(
     staging: &Path,
     overlay_dirs: &[PathBuf],
@@ -264,8 +262,8 @@ fn copy_overlay_trees(
 /// the developer's umask applied to git's two bits. Restating those bits is therefore
 /// the identity function on everything the repository actually expresses, while
 /// discarding the one thing it does not: under a `002` umask a checkout materializes
-/// `0664`/`0775` files and `0775` directories, and `cp -a` into the staging tree
-/// followed by `cp --preserve=mode` into the rootfs would stamp a group-writable
+/// `0664`/`0775` files and `0775` directories, and a `cp -a` into the staging tree
+/// followed by a mode-preserving copy into the rootfs would stamp a group-writable
 /// `/etc`, `/usr`, and `/boot` into every image. Under `077` it would stamp `0700`
 /// `/etc` and the image would not work at all.
 ///
@@ -303,6 +301,82 @@ fn normalize_overlay_modes(root: &Path) -> Result<(), EngineError> {
         set_mode(root, if exec { 0o755 } else { 0o644 })?;
     }
     Ok(())
+}
+
+/// Force every modification time in a staged overlay tree to `epoch`, so the build
+/// host's *checkout* time cannot reach the rootfs any more than its umask can
+/// ([`normalize_overlay_modes`] is the same pass for the same reason).
+///
+/// A layer's `overlay/` files are merged with `cp -a`, which preserves their times, and
+/// those times say when this working copy was cloned or last edited — a property of the
+/// machine, not of the build. They matter because the tree is laid into the rootfs by
+/// [`provision::CopyIn`](ferroday_cage::provision::CopyIn), which *does* preserve times,
+/// and the tar export's clamp is `min(mtime, SOURCE_DATE_EPOCH)` — so a checkout older
+/// than the epoch would ship its own mtime and two hosts would export different bytes.
+/// Stamping the epoch here makes the clamp a no-op and the tree a function of the lock.
+///
+/// `None` is a rootfs-only build with no kernel tree to date, where the export clamps
+/// nothing either; the tree keeps whatever times it has, which is the same amount of
+/// determinism that build had to begin with.
+///
+/// Applied to symlinks too — `tar` records a symlink's own mtime — which is why this
+/// does not go through `std::fs`: `filetime`-style helpers there follow the link and
+/// would stamp its target instead.
+fn normalize_overlay_times(root: &Path, epoch: Option<u64>) -> Result<(), EngineError> {
+    let Some(epoch) = epoch else {
+        return Ok(());
+    };
+    let secs = i64::try_from(epoch).unwrap_or(i64::MAX);
+    stamp_times(root, secs)
+}
+
+/// Recursive worker for [`normalize_overlay_times`]: stamp `path`, then descend into it
+/// when it is a real directory (never through a symlink, which would leave the tree and
+/// stamp whatever it points at).
+fn stamp_times(path: &Path, secs: i64) -> Result<(), EngineError> {
+    let meta = std::fs::symlink_metadata(path).map_err(|s| EngineError::io(path, s))?;
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        for entry in std::fs::read_dir(path).map_err(|s| EngineError::io(path, s))? {
+            let entry = entry.map_err(|s| EngineError::io(path, s))?;
+            stamp_times(&entry.path(), secs)?;
+        }
+    }
+    // The directory itself is stamped after its children, whose creation would
+    // otherwise move its mtime back to now.
+    set_times(path, secs)
+}
+
+/// Set one path's access and modification times to `secs`, without following a symlink.
+fn set_times(path: &Path, secs: i64) -> Result<(), EngineError> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        EngineError::io(path, std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    })?;
+    let times = [
+        libc::timespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        },
+    ];
+    // SAFETY: `c_path` is a NUL-terminated path owned for the duration of the call, and
+    // `times` is a two-element array as `utimensat` requires.
+    let rc = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(EngineError::io(path, std::io::Error::last_os_error()))
+    }
 }
 
 /// Merge the layer `overlay-pre/` trees into `staging` and write the boot method's
@@ -374,6 +448,7 @@ fn stage_preinstall_overlay(
     }
 
     normalize_overlay_modes(staging)?;
+    normalize_overlay_times(staging, source_date_epoch)?;
     step.log(format!(
         "staged pre-install overlay at {} (laid in before any package)",
         staging.display()
@@ -383,25 +458,37 @@ fn stage_preinstall_overlay(
 
 /// Merge the layer `overlay/` trees into `staging` (each existing dir, in order,
 /// via `cp -a` so symlinks and the executable bit survive), then write the
-/// *generated* config into it and normalize every mode
-/// ([`normalize_overlay_modes`]). Later layers and the generated config win.
+/// *generated* config into it and normalize every mode and modification time
+/// ([`normalize_overlay_modes`], [`normalize_overlay_times`]) so neither the build
+/// host's umask nor its checkout time reaches the image. Later layers and the generated
+/// config win.
 fn stage_overlay(
     staging: &Path,
     overlay_dirs: &[PathBuf],
     build: &ResolvedBuild,
     rootfs_partuuid: uuid::Uuid,
     image_identity: &boot2deb_core::provenance::SystemIdentity,
+    source_date_epoch: Option<u64>,
     step: &Step,
 ) -> Result<(), EngineError> {
     copy_overlay_trees(staging, overlay_dirs, step)?;
     // Generated config, mirroring rootfs paths.
     write_staged(staging, "etc/fstab", &config::fstab(build, rootfs_partuuid))?;
+    // Only written when the build declares volumes: an image with none should not
+    // ship a config file suggesting the mechanism is live.
+    if !build.data_volumes.is_empty() {
+        write_staged(
+            staging,
+            boot2deb_core::datavolume::CONFIG_PATH,
+            &boot2deb_core::datavolume::render_config(&build.data_volumes),
+        )?;
+    }
     write_staged(staging, "etc/hostname", &config::hostname(&build.hostname))?;
     write_staged(staging, "etc/hosts", &config::hosts(&build.hostname))?;
     write_staged(
         staging,
         "etc/apt/sources.list",
-        &config::apt_sources(build.image_suite()),
+        &config::apt_sources(build.image_suite(), crate::bootstrap::components(build)),
     )?;
     write_staged(staging, "etc/kernel-img.conf", &config::kernel_img_conf())?;
     // Two files that exist because the build host is not the board. `dhcpcd` cannot
@@ -412,9 +499,9 @@ fn stage_overlay(
     write_staged(
         staging,
         "etc/initramfs-tools/conf.d/boot2deb.conf",
-        // From the formatter's own resolved contract, so the helper the initramfs
-        // carries is the one the filesystem the image node writes actually needs.
-        &config::initramfs_conf(&crate::image::rootfs_filesystem_pin().kind),
+        // From the image node's own declaration of what it formats, so the helper the
+        // initramfs carries is the one the filesystem the image node writes needs.
+        &config::initramfs_conf(crate::image::ROOTFS_FS_KIND),
     )?;
     // Board boot params the kernel postinst.d/postrm.d hooks + mk_extlinux source,
     // so the boot-method overlay scripts stay board-agnostic (driven by the
@@ -440,6 +527,7 @@ fn stage_overlay(
     // not staged here: at mode 0440 it would be unreadable to the hook's mapped uid
     // when it copies the overlay in.
     normalize_overlay_modes(staging)?;
+    normalize_overlay_times(staging, source_date_epoch)?;
     step.log(format!(
         "staged overlay + generated config at {}",
         staging.display()
@@ -919,6 +1007,51 @@ mod tests {
         );
     }
 
+    /// A staged overlay's modification times are the lock's, not the checkout's.
+    ///
+    /// This is load-bearing rather than cosmetic. The tree is laid into the rootfs by a
+    /// copy that *preserves* times, and the tar export clamps each member to
+    /// `min(mtime, SOURCE_DATE_EPOCH)` — so a working copy older than the epoch would
+    /// ship its own mtimes and two hosts building one lock would export different bytes.
+    /// The symlink is the case that needs the raw `utimensat`: a helper that followed the
+    /// link would stamp its target and leave the link's own mtime — which `tar` records —
+    /// at whatever the checkout gave it.
+    #[test]
+    fn a_staged_overlay_is_stamped_with_the_lock_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("overlay");
+        std::fs::create_dir_all(root.join("etc/kernel")).unwrap();
+        let file = root.join("etc/hostname");
+        std::fs::write(&file, "board\n").unwrap();
+        let link = root.join("etc/localtime");
+        std::os::unix::fs::symlink("/usr/share/zoneinfo/UTC", &link).unwrap();
+
+        const EPOCH: u64 = 1_700_000_000;
+        normalize_overlay_times(&root, Some(EPOCH)).unwrap();
+
+        let mtime = |p: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            p.symlink_metadata().unwrap().mtime()
+        };
+        for path in [
+            root.as_path(),
+            &root.join("etc"),
+            &root.join("etc/kernel"),
+            &file,
+            &link,
+        ] {
+            assert_eq!(mtime(path), EPOCH as i64, "{}", path.display());
+        }
+        // The link's target was not touched — the stamp went to the link itself.
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // A rootfs-only build has no kernel tree to date, so nothing is stamped and the
+        // tree keeps the determinism it already had — which is none either way.
+        let before = mtime(&file);
+        normalize_overlay_times(&root, None).unwrap();
+        assert_eq!(mtime(&file), before);
+    }
+
     /// "Later layers win" has to hold for every file a layer may legitimately ship,
     /// including one with no owner-write bit — a key, a `sudoers.d` drop-in. `cp` opens
     /// an existing destination for writing, so without `--remove-destination` a device
@@ -1303,10 +1436,7 @@ mod tests {
         // and ships an initramfs with no fsck — so root goes unchecked at every boot.
         // The type is the formatter's, not a literal, so the helper matches the image.
         assert!(
-            conf.contains(&format!(
-                "FSTYPE={}",
-                crate::image::rootfs_filesystem_pin().kind
-            )),
+            conf.contains(&format!("FSTYPE={}", crate::image::ROOTFS_FS_KIND)),
             "{conf}"
         );
     }

@@ -7,10 +7,17 @@ axis — and drives the whole pipeline: kernel, u-boot, media-accel userspace, f
 the Debian rootfs, and a bootable disk image, all from a single committed lockfile.
 
 The image assembly is pure Rust: GPT partitioning, ext4 formatting, and `.xz`
-compression with no C dependencies and no `sudo`. The Debian bootstrap and the
-cross-architecture package builds run in a rootless, in-process user-namespace
-sandbox (plus `qemu-user` when cross-building), so an x86_64 host builds an arm64
-image without root.
+compression with no C dependencies and no `sudo`. The Debian bootstrap, every compile,
+and every `.deb` archiving run in rootless, in-process user-namespace roots, so an
+x86_64 host builds an arm64 image without root and without `fakeroot` at all.
+
+**Your host supplies no compiler and no packaging tool.** Both are packages of a
+provisioned Debian root, resolved from the build's own mirror list and sha256-pinned in
+that root's manifest — so what compiled and archived an image is stated by its lock
+rather than by whichever `gcc` and `dpkg` your distribution happens to ship. What is
+left on the host is `git`, unprivileged user namespaces, an unprivileged overlay for a
+build that compiles, and `qemu-user` for one that assembles a foreign-architecture
+image. boot2deb does not need to run on a Debian-family machine.
 
 **Not every board needs every stage.** A build compiles a kernel only if the board needs
 one of its own, and builds a bootloader only if the board's firmware is ours to make. The

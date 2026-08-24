@@ -28,13 +28,13 @@ installed onto a running base image later. `forky` is the RK1's validated suite.
 Build the base image as in [Getting started](../getting-started.md):
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1/forky
+boot2deb build turing-rk1/forky
 ```
 
 or, for a ready hardware-transcode host, the media-accel variant:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1/media-accel-forky
+boot2deb build turing-rk1/media-accel-forky
 ```
 
 Either produces a whole-disk image (GPT, u-boot in the reserved gap ahead of the first
@@ -77,7 +77,7 @@ disk. The builder produces the two pieces for this directly.
 of one:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1/forky --layout split
+boot2deb build turing-rk1/forky --layout split
 ```
 
 - `turing-rk1-forky-boot.img` — u-boot only (idbloader + `u-boot.itb` at their
@@ -89,7 +89,7 @@ bootloader across nodes) without building a whole OS, the u-boot stage emits it 
 own:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1/forky --stage uboot
+boot2deb build turing-rk1/forky --stage uboot
 ```
 
 This writes `turing-rk1-forky-boot.img` (a few MiB, gap-sized) alongside the raw

@@ -1,7 +1,9 @@
 /target
 /build
-# Ad-hoc build logs captured at the config root (e.g. tee'd full-build output).
+# Ad-hoc build logs captured at the config root (e.g. tee'd full-build output),
+# and the per-image logs an out-of-tree validation pass tees beside them.
 /build-*.log
+/gate-logs
 # Rendered mdBook output; the sources live in docs/src/.
 /docs/book
 # Durable build-host caches, not committed config: the content-addressed store for

@@ -10,18 +10,27 @@ use crate::args::ConfigArgs;
 use crate::config::{
     fetch_verify_tree, fragment_paths, resolve_patches_source, verify_trees_cache,
 };
-use crate::render::print_event;
+use crate::fsutil::absolutize;
+use crate::render::{print_event_at, Verbosity};
 use boot2deb_core::model::Overrides;
 use boot2deb_core::{load_series, resolve_recipe, ConfigRoot};
 use boot2deb_engine::event::{Event, Step};
+use boot2deb_engine::sandbox::{BuildSandbox, RootlessSandbox, SandboxRole};
 use boot2deb_engine::{kconfig, pins, EventSink};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 /// Run `verify-config <recipe>`.
+///
+/// Under `--json` the *verdict* is one document on stdout; the config `make` runs
+/// still stream to the terminal as they do for a build, because a wedged
+/// `olddefconfig` is something a CI log has to show.
 pub(crate) fn run(
     root: &ConfigRoot,
     recipe: &str,
     args: ConfigArgs,
+    json_out: bool,
+    verbosity: Verbosity,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
     // There is a kernel config to verify only where a kernel is configured. A distro
@@ -43,10 +52,44 @@ pub(crate) fn run(
     let fragments = fragment_paths(root, &build)?;
     // Resolve the config in the same toolchain context the kernel build uses, so the
     // gate validates the config the build actually ships (cross-toolchain-probed
-    // symbols included), not a host-probed variant.
+    // symbols included), not a host-probed variant. That means the same *root* a build
+    // would compile in, not merely the same `CROSS_COMPILE` string: `cc-option` probes
+    // are answered by whichever compiler is on the path, and here that is a package of
+    // the cross root rather than anything the host installed.
     let pf = boot2deb_engine::preflight(build.arch);
-    let cross = pf.cross_toolchain.then(|| build.cross_compile.clone());
-    let sink = |e: Event| print_event(&e);
+    let host_deb_arch = pf.host.debian_arch().ok_or_else(|| {
+        format!(
+            "cannot name a Debian architecture for this host ({}) — generating a kernel \
+             config runs kbuild in a host-arch root, and there is no name to provision \
+             one under",
+            pf.host.arch
+        )
+    })?;
+    let cross = (host_deb_arch != build.arch.debian_arch()).then(|| build.cross_compile.clone());
+    // The same archive a build would resolve the root from: the lock's captured
+    // snapshot mode where it has one, else the live mirror. A gate that generated its
+    // config with a different toolchain than the build would use is not a gate.
+    let gate_lock = root.lock(recipe).ok();
+    let mirrors = boot2deb_engine::snapshot::resolve_mirrors(
+        boot2deb_engine::DEFAULT_MIRROR,
+        gate_lock.as_ref().and_then(|l| l.snapshot.as_ref()),
+        gate_lock
+            .as_ref()
+            .and_then(|l| l.snapshot.as_ref())
+            .map(|s| s.mode)
+            .unwrap_or(boot2deb_core::lock::SnapshotMode::Off),
+    )?;
+    // The vendored archive keyring, held to its fingerprint manifest, as a build uses
+    // it; `None` falls back to the host apt trust store.
+    let keyring = {
+        let vendored =
+            root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", false)?;
+        if let Some(path) = &vendored {
+            boot2deb_engine::keyring::verify(path)?;
+        }
+        vendored
+    };
+    let sink = move |e: Event| print_event_at(verbosity, &e);
 
     // Resolve the kernel tree to configure. An explicit `--kernel-path` is used as-is
     // (assumed at the locked ref with the patch series applied). Otherwise the locked
@@ -138,25 +181,82 @@ pub(crate) fn run(
         }
     };
 
+    let work_dir = absolutize(args.work_dir.unwrap_or_else(|| {
+        // Under the config root's cache, and deliberately **not** under `TMPDIR`. The
+        // out-of-tree config builds happen inside the cross root, and every cage mounts
+        // its own `/tmp` — so a scratch dir in the host's temp dir is shadowed by that
+        // tmpfs, and everything kbuild writes there is discarded when the run ends. The
+        // slash-free recipe identity (device included) keeps two boards' verifies from
+        // colliding on one dir.
+        let slug = recipe.replace('/', "-");
+        root.path().join("cache").join("kconfig").join(slug)
+    }));
+    std::fs::create_dir_all(&work_dir)
+        .map_err(|e| format!("failed to create {}: {e}", work_dir.display()))?;
+
+    // The root kbuild runs in, provisioned exactly as a build would provision it —
+    // same role, same host arch, same suite, same mirrors — so the gate answers
+    // `cc-option` probes with the compiler the build will use. Bootstrapped here rather
+    // than lazily because every path below this point runs `make`.
+    let cross_role = SandboxRole::Cross {
+        target: build.arch.debian_arch(),
+    };
+    let cross_sandbox = RootlessSandbox::new(
+        cross_role,
+        boot2deb_engine::sandbox::build_sandbox_dir(
+            &work_dir,
+            cross_role,
+            host_deb_arch,
+            &build.packaging_suite,
+            &mirrors,
+        ),
+        boot2deb_engine::sandbox::build_root_uppers(&work_dir),
+        build.packaging_suite.clone(),
+        host_deb_arch,
+        mirrors,
+        keyring,
+        Some(work_dir.join("cache").join("provisioner-debs")),
+    );
+    let gate_step = Step::start(&sink, "config-root");
+    cross_sandbox.ensure_ready(&gate_step)?;
+    let config_root = cross_sandbox.build_root(
+        &boot2deb_engine::sandbox::BuildRootSpec {
+            packages: boot2deb_engine::build::kernel::BUILD_DEPS,
+            pool: None,
+            stage: "verify-config",
+        },
+        &gate_step,
+    )?;
+    gate_step.finish();
+
+    // The tree, plus each fragment: `merge_config.sh` opens the fragments from inside
+    // the root by the absolute path this side hands it. Absolute throughout — a bind is
+    // established inside at its own path, and `--root .` makes both of these relative by
+    // default.
+    let tree = absolutize(tree);
+    // The work dir is bound too: the `O=` out-of-tree builds write into it, and a path
+    // the cage cannot see is a path `make` reports as missing.
+    let mut binds = vec![tree.clone(), work_dir.clone()];
+    binds.extend(fragments.iter().map(|f| absolutize(f.clone())));
+
     let inputs = kconfig::ConfigInputs {
         tree: &tree,
         arch: &build.kernel_arch,
         cross_compile: cross.as_deref(),
         base_defconfig: &kernel.base_defconfig,
         fragments: &fragments,
+        cr: &boot2deb_engine::sandbox::CompileRoot {
+            root: &config_root,
+            binds: &binds,
+        },
     };
-    let work_dir = args.work_dir.unwrap_or_else(|| {
-        // A slash-free scratch label in the shared temp dir: the full recipe identity
-        // (device included) keeps two boards' verifies from colliding on one dir.
-        let slug = recipe.replace('/', "-");
-        std::env::temp_dir().join(format!("boot2deb-{slug}-kconfig"))
-    });
 
     let result = run_config_gate(
         &inputs,
         args.reference_config.as_deref(),
         &work_dir,
         recipe,
+        json_out,
         &sink,
     );
     // Restore the shared cache tree to a clean base regardless of the gate's outcome,
@@ -176,12 +276,39 @@ fn run_config_gate(
     reference_config: Option<&Path>,
     work_dir: &Path,
     recipe: &str,
+    json_out: bool,
     sink: &dyn EventSink,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let step = Step::start(sink, "verify-config");
     match reference_config {
         Some(reference) => {
             let report = kconfig::check_parity(inputs, reference, work_dir, &step)?;
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "recipe": recipe,
+                        "mode": "parity",
+                        "reference": reference.display().to_string(),
+                        "generated_symbols": report.generated_symbols,
+                        "reference_symbols": report.reference_symbols,
+                        "unmet": report.unmet,
+                        "differences": report.differences.iter().map(|d| json!({
+                            "symbol": d.symbol,
+                            // Rendered through Display: a kconfig value is the
+                            // verbatim text after the `=`, and "not set" is a value.
+                            "generated": d.left.to_string(), "reference": d.right.to_string(),
+                        })).collect::<Vec<_>>(),
+                        "result": if report.is_match() { "pass" } else { "fail" },
+                    }))?
+                );
+                step.finish();
+                return if report.is_match() {
+                    Ok(())
+                } else {
+                    Err("kernel config parity check failed".into())
+                };
+            }
             for sym in &report.unmet {
                 println!("warning: fragment symbol not in final .config: {sym}");
             }
@@ -207,6 +334,24 @@ fn run_config_gate(
         }
         None => {
             let generated = kconfig::generate(inputs, &work_dir.join("gen"), &step)?;
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "recipe": recipe,
+                        "mode": "merge",
+                        "generated_symbols": generated.config.len(),
+                        "unmet": generated.unmet,
+                        "result": if generated.unmet.is_empty() { "pass" } else { "fail" },
+                    }))?
+                );
+                step.finish();
+                return if generated.unmet.is_empty() {
+                    Ok(())
+                } else {
+                    Err("kernel config merge left symbols unmet".into())
+                };
+            }
             if generated.unmet.is_empty() {
                 println!(
                     "verify-config {recipe}: clean merge ({} symbols); no reference config given",

@@ -1,11 +1,17 @@
 # CLI
 
-The binary is `boot2deb`; during development run it with `cargo run -p boot2deb-cli --`.
-It defaults `--root .`, so run it from inside `boot2deb/` (or pass `--root`).
+This page explains what the commands are *for*. For the exhaustive list of every
+flag on every command — generated from the binary, so it cannot drift — see
+[Every flag](cli-flags.md), or run `boot2deb <command> --help`.
 
-Three global flags apply to every command: `--root <dir>` (the config root),
+The binary is `boot2deb`, installed with `cargo install --path crates/cli` (see
+[Getting started](../getting-started.md)); working from a checkout without installing,
+prefix each command with `cargo run -p boot2deb-cli --`. It defaults `--root .`, so run
+it from inside `boot2deb/` (or pass `--root`).
+
+Five global flags apply to every command: `--root <dir>` (the config root),
 `--overlay <dir>` (an out-of-tree config overlay, repeatable — see
-[Overlays](overlays.md)), and `--json` (machine-readable output).
+[Overlays](overlays.md)), `--json` (machine-readable output), and `--quiet`/`--verbose`.
 
 `--root` moves everything, not just where config is read from. A run's durable
 state is anchored to the config root: the build scratch (`<root>/build/<recipe>`),
@@ -15,13 +21,43 @@ boot2deb why-rebuild turing-rk1/forky` from the parent directory inspects the sa
 trees a run from inside `boot2deb/` builds into. An explicit `--work-dir` or
 `--patches-path` is taken as given, relative to the current directory.
 
-Under `--json`, the `list-*` commands print one JSON array (unreadable entries
-become `{"name", "error"}` objects), `resolve` prints the fully resolved build as
-one JSON document, and `build` streams NDJSON — one JSON object per line, tagged
-by its `event` field (`step_started`, `progress`, `log`, `artifact`,
-`step_finished`, `error`), with every produced artifact's path carried by an
-`artifact` event. Errors are still plain text on stderr, and the exit code is the
-result either way. Other commands print their human form regardless.
+## How much a build prints
+
+A build's event stream carries two very different volumes: what each stage *decided*
+(tens of lines) and what its subprocesses *printed* (tens of thousands). The default
+shows the first, so a tens-of-minutes kernel compile stays readable:
+
+| level | what you see |
+| --- | --- |
+| `--quiet` | artifact paths and errors only — what the command produced, nothing about getting there |
+| *(default)* | step boundaries, coarse progress, each stage's own decisions, artifacts, errors |
+| `--verbose` | the above plus every line `make`, `git`, and `dpkg-buildpackage` emit |
+
+Reach for `--verbose` when a stage fails or hangs: it is the level that shows what the
+failing subprocess actually said.
+
+## Machine-readable output
+
+`--json` gives a machine form to the commands a script consumes:
+
+| command | `--json` form |
+| --- | --- |
+| `list-*` | one JSON array; an unreadable entry rides along as `{"name", "error"}` |
+| `resolve` | the fully resolved build as one JSON document |
+| `doctor` | host facts, every check with its status and remedy, the trust anchors, and a `result` |
+| `verify-patches` | per axis: how many patches applied, and every one that did not |
+| `verify-config` | the merge or parity verdict, with each differing `CONFIG_*` |
+| `verify-sources` | per pin: its durability class and the detail behind it |
+| `build` | NDJSON — one object per line, tagged by its `event` field (`step_started`, `progress`, `log`, `artifact`, `step_finished`, `error`), with every produced artifact's path on an `artifact` event |
+
+Errors are still plain text on stderr, and the exit code is the result either way.
+`--quiet`/`--verbose` do not apply under `--json`: the stream *is* the record of the
+build, and a filtered record would be a wrong one.
+
+A command with no machine form — `update`, `clean`, `why-rebuild`, `new-device`,
+`support-matrix`, `patch import` — **rejects** `--json` rather than ignoring it, naming
+the structured route to the same information where one exists. A global flag that
+silently did nothing would be a trap for exactly the scripted caller it exists for.
 
 The two commands that split reproducibility from upstream are `update` (the only one
 that consults the network) and `build` (reads only the lock). See
@@ -30,15 +66,15 @@ that consults the network) and `build` (reads only the lock). See
 ## Inspection
 
 ```sh
-cargo run -p boot2deb-cli -- list-devices
-cargo run -p boot2deb-cli -- list-recipes
-cargo run -p boot2deb-cli -- list-kernels
-cargo run -p boot2deb-cli -- list-features
-cargo run -p boot2deb-cli -- list-kmods
-cargo run -p boot2deb-cli -- support-matrix
-cargo run -p boot2deb-cli -- resolve turing-rk1/forky
-cargo run -p boot2deb-cli -- resolve turing-rk1 --suite sid --layout split
-cargo run -p boot2deb-cli -- doctor turing-rk1/forky
+boot2deb list-devices
+boot2deb list-recipes
+boot2deb list-kernels
+boot2deb list-features
+boot2deb list-kmods
+boot2deb support-matrix
+boot2deb resolve turing-rk1/forky
+boot2deb resolve turing-rk1 --suite trixie --layout split
+boot2deb doctor turing-rk1/forky
 ```
 
 - **`list-devices` / `list-recipes`** enumerate the buildable targets; `list-recipes`
@@ -59,30 +95,61 @@ cargo run -p boot2deb-cli -- doctor turing-rk1/forky
   declaration of it.
 - **`resolve`** prints the fully merged build point without building, and runs the same
   local `preflight_config` coherence check the build does (geometry, fragment-file
-  existence, feature compatibility, apt keyrings). Selectable axes (`--kernel`,
+  existence, feature compatibility, apt keyrings). Every selectable axis (`--kernel`,
   `--suite`, `--feature`, `--layout`, `--boot-method`, `--board`, `--image-size`,
-  `--locale`, `--locale-gen`, `--timezone`, `--keymap`) can be overridden on the command
-  line.
-- **`doctor`** reports the host's tool-presence preflight for a target and, for anything
-  missing, the exact per-distro install command. It asks only for what *that build* will
-  invoke: a board that installs Debian's kernel and boots its own firmware compiles
+  `--locale`, `--locale-gen`, `--timezone`, `--keymap`) can be overridden, so you can
+  see what a choice resolves to before committing it to config.
+
+  It accepts a wider set than any command that can *build* the result, and says so when
+  that matters: an override `build` does not take closes the printout with the recipe
+  file to write, ready to paste.
+
+  ```
+  note: --suite is resolve-only — `build` reads that axis from the config its lock was
+  resolved against, not from a flag. To build this point, write it down:
+  recipes/turing-rk1/<leaf>.toml with
+      device = "turing-rk1"
+      suite  = "trixie"
+  then `boot2deb update turing-rk1/<leaf>` to pin it.
+  ```
+
+  `--boot-method` is the one axis a recipe cannot express — how a board boots is a
+  property of the hardware — so its note names a device file instead. See
+  [Adapting a shipped recipe](../tutorials/adapting-a-recipe.md).
+- **`doctor`** reports the host's tool-presence preflight and, for anything missing, the
+  exact per-distro install command. With a target it asks only for what *that build*
+  will invoke: a board that installs Debian's kernel and boots its own firmware compiles
   nothing, so it is not told to install a cross compiler — which keeps a genuinely
-  missing tool from getting lost among requirements that do not apply. See
+  missing tool from getting lost among requirements that do not apply. Bare, it runs the
+  requirements every board shares (user namespaces, the `.deb` packaging tools, the
+  vendored apt trust anchors), so it is useful before a recipe is chosen. Either way a
+  missing required tool is a non-zero exit, so it gates CI. See
   [Getting started](../getting-started.md).
+- **`cli-reference`** prints [Every flag](cli-flags.md) — the whole argument surface,
+  generated from the command tree. `--markdown` regenerates the committed page, and a
+  test fails when it goes stale.
+- **`completions <shell>`** and **`man`** print a shell completion script and the
+  `boot2deb(1)` man page on stdout, generated from the same command tree. They install
+  nothing: where those files belong is the packager's call.
+
+  ```sh
+  boot2deb completions bash > ~/.local/share/bash-completion/completions/boot2deb
+  boot2deb man > ~/.local/share/man/man1/boot2deb.1
+  ```
 
 ## Scaffolding
 
 ```sh
 # Interactive on a terminal: menus over the valid SoC / boot-method / kernel / feature
 # choices, then writes devices/<name>.toml + recipes/<name>/<suite>.toml.
-cargo run -p boot2deb-cli -- new-device my-board
+boot2deb new-device my-board
 
 # Scriptable: take every value from flags (required: --soc), no prompts.
-cargo run -p boot2deb-cli -- new-device my-board --soc rk3588 \
+boot2deb new-device my-board --soc rk3588 \
   --feature media-accel-rockchip --non-interactive
 
 # Scaffold into your own overlay tree instead of the shipped root:
-cargo run -p boot2deb-cli -- --overlay ~/my-boards new-device my-board --soc rk3588
+boot2deb --overlay ~/my-boards new-device my-board --soc rk3588
 ```
 
 **`new-device`** generates a device (and, unless `--no-recipe`, a matching recipe) from
@@ -102,7 +169,7 @@ so verify them before `update`/`build`. See [Adding a board](../contributing/add
 ## update
 
 ```sh
-cargo run -p boot2deb-cli -- update turing-rk1/forky --kernel-ref v7.1.1
+boot2deb update turing-rk1/forky --kernel-ref v7.1.1
 ```
 
 Resolves upstream refs to commits and hashes the vendored blobs, writing
@@ -116,14 +183,14 @@ reads only the lock, so a build is reproducible from its committed pins.
   `update` inherits the recipe's pins, so it needs no `--kernel-ref`.
 
 ```sh
-cargo run -p boot2deb-cli -- update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
+boot2deb update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
 # wrote recipes/turing-rk1/forky+media-accel-rockchip+jellyfin.lock
 ```
 
 ## build
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1/forky
+boot2deb build turing-rk1/forky
 ```
 
 Builds the recipe from its lock: compiles the kernel, u-boot, userspace, and ffmpeg,
@@ -135,7 +202,7 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   equivalent:
 
   ```sh
-  cargo run -p boot2deb-cli -- build turing-rk1/forky+media-accel-rockchip+jellyfin
+  boot2deb build turing-rk1/forky+media-accel-rockchip+jellyfin
   ```
 
   A variant builds in its own work directory under its own image identity, so it never
@@ -155,18 +222,12 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   for a two-medium install. This is lock-independent — it changes only how the image is
   packaged, not any pinned source. Only a boot method that *has* a bootloader can split
   it off.
-- **`--board <profile>`** selects the depthcharge board profile — which *firmware* the
-  signed kernel is built for, not which board. The default is the device's, which is the
-  stock profile; `--board speedy-libreboot` targets a C201 running libreboot. Ignored by
-  boot methods with no board profile.
-- **`--locale`, `--locale-gen`, `--timezone`, `--keymap`** override the localization
-  axes: the image's `LANG`, any extra locales compiled into it, the `/etc/localtime`
-  zone, and the console keyboard layout. Lock-independent — they change only generated
-  rootfs config, not any pinned source. The system locale is *always* generated, so
-  `--locale de_DE.UTF-8` needs no matching `--locale-gen`. See
-  [Locale, timezone, and keyboard](../localization.md).
+- **`--image-size <size>`** overrides the image size the same way. The rootfs grows to
+  fill its medium on first boot, so this bounds the *artifact*, not the installed system.
 - **`--refresh-rootfs`** forces a clean rootfs bootstrap instead of restoring the
-  content cache.
+  content cache; **`--no-artifact-cache`** forces every compile node to rebuild instead
+  of restoring stored `.deb`s (see [Two caches](#two-caches-and-what-each-one-keys-on)).
+
 - **`--kernel-src`, `--uboot-src`, `--mpp-src`, `--librga-src`, `--libmali-src`,
   `--ffmpeg-base-src`, `--kmod-src`** redirect where a tree is *cloned from*, without
   changing what is built: the commit still comes from the lock, so a local checkout
@@ -175,12 +236,42 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   `--kmod-src aic8800=../aic8800`, repeatable. A name the recipe does not build is an
   error rather than a silently ignored flag.
 
-The rootfs stage is content-cached: the resolved package plan keys a store,
-so a rebuild whose *solved* package set is unchanged restores the bootstrapped tree
-instead of re-running the multi-minute bootstrap. Because the key is the solved set, a
-moved mirror resolves new versions and rebuilds automatically — a cache hit is never
-stale. The unique per-image first-boot password is applied on restore, not cached, so
-every image still gets its own credential.
+`build` takes no `--kernel`, `--suite`, `--board`, `--locale`, `--timezone`, or
+`--keymap`. Those axes come from the config the recipe's lock was resolved against, not
+from a flag: `resolve` accepts them so you can see what a choice resolves to, and then
+says so — naming the recipe file to write if you want to build it. See
+[Adapting a shipped recipe](../tutorials/adapting-a-recipe.md) for that path, and
+[Locale, timezone, and keyboard](../localization.md) for the localization axes in
+particular.
+
+### Two caches, and what each one keys on
+
+Nothing about a rebuild is obvious from the outside, so it is worth knowing which of
+the two caches answers which question. `why-rebuild` reports both, per node.
+
+**The rootfs cache** keys on the *solved package set*. A rebuild whose solve is
+unchanged restores the bootstrapped tree instead of re-running the multi-minute
+bootstrap. Because the key is the solved set and not the requested one, a moved mirror
+resolves new versions and rebuilds automatically — a hit is never stale. The unique
+per-image first-boot password is applied on restore rather than cached, so every image
+still gets its own credential. `--refresh-rootfs` forces a clean bootstrap.
+
+**The artifact cache** keys on each compile node's *full set of output-determining
+inputs* — the source pins and patch series, the kconfig fragments' contents, the
+defconfig, the identity of the root the stage compiled in, and the build-dependencies it
+layered over that root. On a hit, `build` restores that node's stored
+`.deb`s and **skips the compile entirely**: the single largest lever there is, since it
+is the difference between restoring a file and a 30-minute kernel cross-compile or a
+70-minute emulated ffmpeg build.
+
+It lives at `<root>/cache/artifacts`, outside any recipe's work dir — so it survives
+`clean`, and is shared across work dirs and recipes. A freshly cloned checkout with no
+build tree at all can still restore every `.deb` and compile nothing. `clean --artifacts`
+empties it (for *every* recipe, since the store is shared); `--no-artifact-cache` on a
+build ignores it and stores nothing.
+
+Because the key covers every input that can change the output, a hit is sound: two
+builds that would produce different `.deb`s cannot share an entry.
 
 ### Rebuilding only the board DTB
 
@@ -272,22 +363,22 @@ written.
 # Dry-run every locked patch series against its source tree with `git am --3way`,
 # hard-erroring on the first patch that does not apply. Omit the checkouts and each
 # tree is auto-fetched at its pin.
-cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky
+boot2deb verify-patches turing-rk1/forky
 
 # Both patch axes are covered. A u-boot-only recipe verifies its u-boot series...
-cargo run -p boot2deb-cli -- verify-patches rk3576-generic/loader
+boot2deb verify-patches rk3576-generic/loader
 
 # ...and a recipe carrying both reports each at its own version:
 #   kernel series applies (4 patches) against rk3576-mainline-7.1 @ v7.1.3
 #   uboot  series applies (6 patches) against u-boot @ v2026.04
-cargo run -p boot2deb-cli -- verify-patches rk3576-evb1-v10/forky
+boot2deb verify-patches rk3576-evb1-v10/forky
 
 # Fast path when you already have a local kernel checkout:
-cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky --kernel-src ../linux
+boot2deb verify-patches turing-rk1/forky --kernel-src ../linux
 
 # "Would this series survive 7.2?" -- asked against a kernel you have not adopted,
 # reporting every boundary at once rather than stopping at the first.
-cargo run -p boot2deb-cli -- verify-patches turing-rk1/forky \
+boot2deb verify-patches turing-rk1/forky \
     --kernel v7.2 --kernel-path ../linux --keep-going
 ```
 
@@ -345,10 +436,10 @@ nothing.
 # Generate the kernel .config (base defconfig + fragments, via merge_config.sh) on the
 # patched kernel tree and report the merge. Omit --kernel-path and the tree is fetched
 # and the kernel patch series applied for you.
-cargo run -p boot2deb-cli -- verify-config turing-rk1/forky
+boot2deb verify-config turing-rk1/forky
 
 # Assert byte-identical CONFIG_* parity against a reference config as well:
-cargo run -p boot2deb-cli -- verify-config turing-rk1/forky --reference-config /path/to/.config
+boot2deb verify-config turing-rk1/forky --reference-config /path/to/.config
 ```
 
 `--kernel-path` is optional; omitted, the kernel is auto-fetched at its pin and the kernel
@@ -363,7 +454,7 @@ any `CONFIG_*` difference from the reference.
 # upstream and report whether the commit is a durable tag, an ephemeral branch, or
 # ORPHANED (no longer re-fetchable). Read-only: `git ls-remote` plus a bounded ancestry
 # check -- no build, no checkout, no hardware.
-cargo run -p boot2deb-cli -- verify-sources turing-rk1/forky
+boot2deb verify-sources turing-rk1/forky
 ```
 
 `verify-sources` answers "will this lock still build a year from now?" An orphaned pin
@@ -379,27 +470,49 @@ full workflow (commit, re-pin, verify) on
 [Adding a patch](../contributing/adding-a-patch.md):
 
 ```sh
-cargo run -p boot2deb-cli -- patch import https://patchwork.kernel.org/project/linux-rockchip/patch/NNNN/mbox/ \
+boot2deb patch import https://patchwork.kernel.org/project/linux-rockchip/patch/NNNN/mbox/ \
   --series rk3588-accel --scope kernel
 ```
 
 ## Rebuild planning and cleanup
 
 ```sh
-# Explain, offline, whether the next build reuses or rebuilds each compile node's source
-# tree -- and which pinned input changed if it will rebuild.
-cargo run -p boot2deb-cli -- why-rebuild turing-rk1/forky
+# Explain, offline, what the next build will actually redo.
+boot2deb why-rebuild turing-rk1/forky
 
 # Remove a recipe's build scratch to reclaim disk or force a clean rebuild. --dry-run
-# previews; --cache / --sandbox clean only that subtree.
-cargo run -p boot2deb-cli -- clean turing-rk1/forky --dry-run
+# previews; --cache / --sandbox / --artifacts clean only that subtree.
+boot2deb clean turing-rk1/forky --dry-run
 ```
+
+`why-rebuild` answers the question that decides how long a build takes, and it answers
+it for [both caches](#two-caches-and-what-each-one-keys-on). Per compile node it reports:
+
+- whether the cloned-and-patched **source tree** is reused or rebuilt, naming the pinned
+  input that moved when it will rebuild; and
+- whether the **artifact cache** already holds that node's output, in which case the
+  compile is skipped entirely.
+
+The two are independent, and the second dominates. A node can rebuild its tree and still
+compile nothing — the artifact store lives outside the work dir, so a fresh clone with no
+tree at all can restore every `.deb`. Each verdict is computed by calling the same
+function the build keys its own decision on, so the prediction cannot drift from what
+happens next. It runs no build and touches no network.
+
+```
+why-rebuild turing-rk1/forky (work .../build/turing-rk1/forky)
+  kernel             rebuild  (kernel.commit: kc1 → kc2)  [artifact cache hit — compile skipped]
+  uboot              reuse
+note: the per-node verdict is the *source tree*: whether the clone and patch run again.
+      The compile itself is governed by the artifact cache ...
+```
+
+Pass `--no-artifact-cache` to see the prediction for a build that will not use the
+store, and `--patches-path` / `--build-libmali` to match a build that will use those.
 
 `clean` removes only directories `build` created: every work dir is stamped with a
 `.boot2deb-work` marker, and an unmarked target is refused — so a mistyped
 `--work-dir` cannot recursively delete an arbitrary tree. `--force` overrides the
-check for a directory you are sure about.
-
-`why-rebuild` reads the lock and each compile node's signature stamp and reports, per node,
-whether the next `build` reuses or rebuilds the cloned-and-patched tree, naming the pinned
-input that moved when it will rebuild. It runs no build and touches no network.
+check for a directory you are sure about. `--artifacts` empties the durable artifact
+store instead; unlike the other selectors that store is shared, so it clears cached
+outputs for every recipe.

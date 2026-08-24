@@ -24,6 +24,24 @@ pub enum Stream {
     Stderr,
 }
 
+/// Who wrote a [`Event::Log`] line.
+///
+/// The two are the same variant because they belong to the same step and the same
+/// ordering, but they are not the same *kind* of information: a stage's own lines
+/// summarize what it decided ("reusing the kernel tree", "restored from the artifact
+/// cache") in tens of lines, while relayed output is the tens of thousands of lines
+/// `make` emits. Without the distinction a renderer has to choose between showing
+/// everything and showing nothing; with it, a default verbosity can show what the
+/// build decided and leave the compile chatter behind `--verbose`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogOrigin {
+    /// The stage itself, via [`Step::log`] — a decision or a summary.
+    Stage,
+    /// A subprocess the stage is relaying (`make`, `git`, `dpkg-buildpackage`).
+    Subprocess,
+}
+
 /// A single event in a build's structured stream.
 ///
 /// Consumers render or forward these; they are the whole observable surface of a
@@ -45,12 +63,14 @@ pub enum Event {
         /// Percent complete, phase-based.
         pct: u8,
     },
-    /// One line of subprocess output.
+    /// One line of output attributed to a step.
     Log {
         /// The step that produced the line.
         step: String,
         /// Whether it came from stdout or stderr.
         stream: Stream,
+        /// Who wrote it — the stage itself, or a subprocess it is relaying.
+        origin: LogOrigin,
         /// The line, with its trailing newline stripped.
         line: String,
     },
@@ -118,7 +138,7 @@ impl<'a> Step<'a> {
     /// Emit an informational [`Event::Log`] line (stdout-tagged) from the stage
     /// itself, as opposed to relayed subprocess output.
     pub fn log(&self, line: impl Into<String>) {
-        self.emit(Stream::Stdout, line.into());
+        self.emit(Stream::Stdout, LogOrigin::Stage, line.into());
     }
 
     /// Emit a coarse [`Event::Progress`] update.
@@ -138,10 +158,16 @@ impl<'a> Step<'a> {
 
     /// Relay one line of subprocess output on `stream`. Used by the streaming
     /// runner ([`run`](crate::build::run)).
-    pub(crate) fn emit(&self, stream: Stream, line: String) {
+    pub(crate) fn relay(&self, stream: Stream, line: String) {
+        self.emit(stream, LogOrigin::Subprocess, line);
+    }
+
+    /// Emit one [`Event::Log`], tagged with who wrote it.
+    pub(crate) fn emit(&self, stream: Stream, origin: LogOrigin, line: String) {
         self.sink.emit(Event::Log {
             step: self.name.clone(),
             stream,
+            origin,
             line,
         });
     }
@@ -210,6 +236,9 @@ mod tests {
                 Event::Log {
                     step: "kernel".into(),
                     stream: Stream::Stdout,
+                    // `Step::log` is the stage speaking, which is what makes it
+                    // survive the default verbosity while `make` output does not.
+                    origin: LogOrigin::Stage,
                     line: "configuring".into(),
                 },
                 Event::StepFinished {
@@ -234,6 +263,7 @@ mod tests {
         let e = Event::Log {
             step: "uboot".into(),
             stream: Stream::Stderr,
+            origin: LogOrigin::Subprocess,
             line: "  CC drivers/foo.o".into(),
         };
         let text = toml::to_string(&e).unwrap();

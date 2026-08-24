@@ -27,13 +27,26 @@ Each is overridable in a recipe. `resolve` and `doctor` additionally take `--loc
 different choice resolves to before committing it to config:
 
 ```sh
-cargo run -p boot2deb-cli -- resolve asus-c201/forky \
+boot2deb resolve asus-c201/forky \
     --locale de_DE.UTF-8 --timezone Europe/Berlin --keymap de
 ```
 
 `build` takes none of them, and that is the design: an image's localization comes from
 the config its lock was resolved against, so changing what an image ships means changing
-`base.toml` or the recipe — not a flag at build time.
+`base.toml` or the recipe — not a flag at build time. `resolve` closes the loop rather
+than leaving you to find that out: when an override it accepts is one `build` does not,
+it prints the recipe to write, with the keys already filled in.
+
+```
+note: --locale, --timezone, --keymap are resolve-only — `build` reads those axes from
+the config its lock was resolved against, not from a flag. To build this point, write it
+down: recipes/asus-c201/<leaf>.toml with
+    device   = "asus-c201"
+    locale   = "de_DE.UTF-8"
+    timezone = "Europe/Berlin"
+    keymap   = "de"
+then `boot2deb update asus-c201/<leaf>` to pin it.
+```
 
 `resolve` shows what a build will bake in:
 
@@ -219,7 +232,7 @@ Budget roughly 1 MiB of image per added language, and check the result with
 `resolve` before building:
 
 ```sh
-cargo run -p boot2deb-cli -- resolve h96-max-m9/forky | grep locale
+boot2deb resolve h96-max-m9/forky | grep locale
 ```
 
 There is no `locales-all` option here, and that is on purpose: it carries every locale

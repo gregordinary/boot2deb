@@ -2,7 +2,7 @@
 
 A build is a single point across the axes a user selects:
 
-**device × kernel × suite × layout, plus composable features**
+**device × kernel × u-boot × suite × layout, plus composable features**
 
 - **device** — the target hardware. It resolves through a layered hardware stack (see
   below).

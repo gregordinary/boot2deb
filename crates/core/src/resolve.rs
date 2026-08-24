@@ -82,6 +82,14 @@ pub fn resolve_device(
         // — a misspelled `--feature`, an `--image-size 1M` — would otherwise be
         // accepted in silence and exit 0.
         reject_rootfs_overrides(device_name, overrides)?;
+        // This deliverable resolves no image suite, but it still produces a `.deb`, and
+        // the root that archives it has to be provisioned for some suite. The board's
+        // own declared default is that suite: it is the one this board's image builds
+        // resolve, so they share a packaging root rather than provisioning two. Shape-
+        // validated like any suite that reaches the archive — `supported_suites` is not
+        // consulted, since that list constrains which suites this board is *imaged*
+        // for, and nothing here is imaged.
+        validate_suite(&device.default_suite)?;
         return Ok(ResolvedBuild {
             device: device_name.to_string(),
             device_lineage,
@@ -91,6 +99,7 @@ pub fn resolve_device(
             boot_method,
             kernel: None,
             suite: None,
+            packaging_suite: device.default_suite,
             features: Vec::new(),
             rootfs_packages: Vec::new(),
             rootfs_exclude: Vec::new(),
@@ -291,6 +300,10 @@ pub fn resolve_device(
         soc: device.soc,
         boot_method,
         kernel: Some(kernel),
+        // The image's own suite archives the image's own `.deb`s: one `dpkg` for the
+        // whole build, so a `--suite sid` image does not carry a u-boot deb that
+        // forky's `dpkg` produced.
+        packaging_suite: suite.clone(),
         suite: Some(suite),
         features,
         rootfs_packages,
@@ -1535,6 +1548,13 @@ mod tests {
         assert!(b.suite.is_none(), "a u-boot-only build resolves no suite");
         assert!(b.kernel.is_none(), "a u-boot-only build resolves no kernel");
         assert!(!b.produces_image());
+        // It still produces a `.deb`, so it still names the suite that archives it —
+        // the device's own default, which is what this board's image builds resolve.
+        // Sharing that answer is what lets the two share a provisioned packaging root.
+        assert_eq!(
+            b.packaging_suite,
+            root.device("rk3576-generic").unwrap().default_suite
+        );
         let boot = b.rkbin_boot().expect("a rockchip-rkbin boot");
         // The u-boot series lives on its own axis, paired with its patches source.
         assert_eq!(boot.uboot_series.as_deref(), Some("rk3576-loader"));
@@ -1546,6 +1566,8 @@ mod tests {
         let img = resolve_recipe(&root, "h96-max-m9/forky", &Overrides::default()).unwrap();
         assert!(img.produces_image());
         assert_eq!(img.suite.as_deref(), Some("forky"));
+        // An image build archives its own `.deb`s with its own suite's `dpkg`.
+        assert_eq!(img.packaging_suite, "forky");
         // The kernel carries the SoC-wide `rk3576-fixes` and the board's own
         // `rk3576-npu`, in that order — a device's series compose after its kernel's.
         // The H96's AIC8800 Wi-Fi driver is *not* among them: it is an out-of-tree
@@ -2433,6 +2455,15 @@ mod tests {
 
         let base = resolve_recipe(&root, "turing-rk1/trixie", &Overrides::default()).unwrap();
         assert_eq!(base.suite.as_deref(), Some("trixie"));
+        // The suite that archives the build's `.deb`s follows the image's own, so this
+        // image's u-boot deb is produced by trixie's `dpkg` rather than by whatever the
+        // device happens to default to — the board's default is forky.
+        assert_eq!(base.packaging_suite, "trixie");
+        assert_eq!(
+            root.device("turing-rk1").unwrap().default_suite,
+            "forky",
+            "the assertion above only distinguishes the two while these differ"
+        );
         assert!(base.features.is_empty());
         assert!(base.userspace.is_none());
         assert!(base
@@ -2540,6 +2571,32 @@ mod tests {
         // The RK3288 has no Rockchip media-accel stack, so nothing pulls those sources.
         assert!(b.userspace.is_none());
         assert!(b.ffmpeg.is_none());
+    }
+
+    #[test]
+    fn compiling_from_source_is_the_union_of_the_three_things_a_build_can_compile() {
+        // The predicate the host preflight is driven by, asserted over the shipped
+        // recipes rather than a fixture — the three shapes it has to separate all exist.
+        let root = repo_root();
+        let compile = |r: &str| {
+            resolve_recipe(&root, r, &Overrides::default())
+                .unwrap()
+                .compiles_from_source()
+        };
+
+        // A kernel and a bootloader and the accel stack: every clause true.
+        assert!(compile("turing-rk1/media-accel-forky"));
+        // No image at all, so no kernel and no userspace — but a bootloader is compiled,
+        // which is why this is a union rather than `compiles_kernel`. Getting it wrong
+        // here would tell a `deliverable = uboot` operator that their host needs nothing
+        // while the build reached for `git` and an overlay.
+        let loader = resolve_recipe(&root, "rk3576-generic/loader", &Overrides::default()).unwrap();
+        assert!(!loader.compiles_kernel());
+        assert!(loader.userspace.is_none());
+        assert!(loader.compiles_from_source());
+        // Debian's kernel, the board's own firmware, no accel stack: the one shape that
+        // asks its host for neither `git` nor an unprivileged overlay.
+        assert!(!compile("asus-c201/forky"));
     }
 
     #[test]

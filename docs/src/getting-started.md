@@ -24,6 +24,18 @@ once.
   and Ubuntu are the primary targets; Fedora and Arch work too (`doctor` knows their
   package names). macOS can run the read-only commands but cannot build.
 - **A recent stable Rust toolchain**, installed via [rustup](https://rustup.rs).
+- **`boot2deb` on your `PATH`.** From a clone of this repo:
+
+  ```sh
+  cd boot2deb
+  cargo install --path crates/cli    # the crate is boot2deb-cli; the binary is boot2deb
+  ```
+
+  Every command on this site is written as `boot2deb …`, which is also how the tool
+  writes its own hints — so anything it suggests can be pasted back. Developing from a
+  checkout without installing? Prefix each command with `cargo run -p boot2deb-cli --`.
+  Either way, run it from inside `boot2deb/` (or pass `--root <dir>`), since the config
+  root defaults to the current directory.
 - **Disk and time.** A cold build bootstraps a Debian rootfs, and — for a board that
   needs one — compiles a kernel and a bootloader. Budget a few GB of scratch space and
   tens of minutes the first time; later builds reuse cached trees. A board that compiles
@@ -37,17 +49,19 @@ your distro** — so you never guess a package name. `doctor` itself needs nothi
 Rust, so it is the first thing to run after cloning:
 
 ```sh
-cd boot2deb
-cargo run -p boot2deb-cli -- doctor turing-rk1/forky
+boot2deb doctor turing-rk1/forky
 ```
+
+Run it bare — `boot2deb doctor` — and it checks the requirements every board shares
+(user namespaces and the vendored apt trust anchors) without needing a recipe chosen yet.
 
 It reports your host arch, the two cross answers, and one line per requirement:
 
 ```
 host arch : x86_64
 target    : turing-rk1/forky (arch arm64)
-toolchain : cross — arm64 cannot be emitted by this host's native cc
-execution : emulated — needs qemu-user binfmt for arm64 maintainer scripts/compiles
+toolchain : cross — the build root carries a toolchain emitting arm64
+execution : emulated — needs qemu-user binfmt for arm64 maintainer scripts and sandbox compiles
 
   ok      git                          /usr/bin/git
   ok      unprivileged user namespaces unshare --map-root-user --map-auto works
@@ -62,31 +76,37 @@ Run the install lines it reports, then re-run `doctor` until it prints
 requirements, it is always current — this page does not repeat the package names, so
 there is nothing here to drift out of date.
 
-For orientation, the checks fall into a few groups:
+The list is short, and that is the design rather than an omission. **Every compiler,
+packaging tool and build dependency a build runs is a package of a provisioned Debian
+root**, resolved from your build's own mirror list and sha256-pinned in that root's
+manifest — so it is an input your lock names, not a fact about your machine. There is
+no host `gcc`, no `make`, no `dpkg`, no `fakeroot` in the list, because none of them is
+what compiles or archives anything. What remains is the handful of things no root can
+carry:
 
 | Group | What it covers | When |
 | --- | --- | --- |
-| Rootfs bootstrap | unprivileged user namespaces with a subuid/subgid range — the bootstrap itself is in-process | always |
-| Packaging | `fakeroot` + `dpkg-deb` (the u-boot and kmod `.deb`s) | always |
-| Image assembly | none — the rootfs ext4 is formatted and checksum-verified in pure Rust; `e2fsck` is an optional independent cross-check when present, and the image's provenance records whether it ran | optional |
-| Compile toolchain | `git`, `make`, `bc`, `flex`, `bison`, `libssl`, and a C compiler (native, or the `<triple>gcc` cross compiler) | only if the recipe compiles a kernel or a bootloader |
-| Build roots | an unprivileged overlay whose upper layer sits on the work dir's filesystem | only if the recipe compiles the media-accel packages |
-| Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | only if this host cannot execute target binaries |
+| Provisioned roots | unprivileged user namespaces with a subuid/subgid range — every root is bootstrapped and entered in-process, so this is the whole requirement | always |
+| Sources | `git`, which clones your pinned trees and applies the patch series before there is a root for them to enter | only if the recipe compiles something |
+| Build roots | an unprivileged overlay whose upper layer sits on the work dir's filesystem, which is how each compile root layers a stage's build dependencies | only if the recipe compiles something |
+| Image assembly | `tar` and `cp`. No filesystem tooling — the rootfs ext4 is formatted and then scanned back in pure Rust; `e2fsck` is an optional independent cross-check when present, and the image's provenance records whether it ran | only if the recipe assembles an image |
+| Emulation | `qemu-<arch>-static` + a registered binfmt handler, so the target's maintainer scripts run | only if the recipe assembles an image *and* this host cannot execute target binaries |
 
 **`doctor` asks only for what *your recipe* will actually invoke**, so the table above
-is a superset. `doctor turing-rk1/media-accel-forky` on an x86_64 host wants the whole
-list — the compile toolchain and cross emulation both; `doctor asus-c201/forky` wants
-no compiler at all, because that board installs Debian's kernel and boots its own
-firmware. That is deliberate: a requirement you do not need is somewhere a requirement
-you *do* need can hide.
+is a superset. `doctor turing-rk1/media-accel-forky` on an x86_64 host wants every row;
+`doctor asus-c201/forky` wants no `git` and no overlay at all, because that board
+installs Debian's kernel and boots its own firmware and so compiles nothing. That is
+deliberate: a requirement you do not need is somewhere a requirement you *do* need can
+hide.
 
-Note that the last two rows answer different questions, and they come apart. The
-compile toolchain is about *producing* target binaries — needed whenever your host's
-native `cc` cannot emit them. Emulation is about *running* them, and an arm64 host runs
-armhf binaries directly (its kernel is built with `CONFIG_COMPAT=y`). So an arm64 host
-building the armhf C201 image needs `arm-linux-gnueabihf-gcc` and needs no `qemu-arm`
-at all, and `doctor` asks for exactly that. Any x86_64 host building arm64 or armhf
-needs both.
+Note that the last row's two conditions are both real, and each one alone would
+over-ask. Emulation is about *running* target binaries, which only the image path does —
+the rootfs runs the target's maintainer scripts, and the media-accel packages compile in
+a target-arch sandbox. A bootloader-only build like `rk3576-generic/loader` compiles in
+a **host-arch** root and executes nothing foreign, so it needs no qemu even though it
+builds for arm64. And an arm64 host runs armhf binaries directly (its kernel is built
+with `CONFIG_COMPAT=y`), so building the armhf C201 image there needs no `qemu-arm`
+either. Any x86_64 host building an arm64 or armhf *image* needs both.
 
 The target-arch sandbox is **not** a cross-only concern. Packages like `ffmpeg-rk` and
 `librga2` are built inside a userland bootstrapped for the target *suite*, never on your
@@ -96,6 +116,37 @@ libraries would stamp your host's package names and versions into a `.deb` bound
 Debian `forky` image. That sandbox runs entirely in-process through unprivileged user
 namespaces — it needs no external sandbox tool — but it does run on every host, same-arch
 included, so those namespaces are a hard requirement even when nothing is cross.
+
+### The roots a build provisions
+
+A build stands up as many as four Debian roots, each for one job, each bootstrapped and
+entered in-process through unprivileged user namespaces. They live in your work dir and
+`boot2deb clean --sandbox` reclaims them.
+
+| Root | Architecture | What it holds | What runs in it |
+| --- | --- | --- | --- |
+| `sandbox/cross-<arch>-<suite>-<digest>/` | **host's** | a cross toolchain emitting the target's objects, plus each stage's build deps layered on (~800 MB) | the kernel, u-boot and out-of-tree module compiles — and the kernel's own `make bindeb-pkg`, which packages itself |
+| `sandbox/build-<arch>-<suite>-<digest>/` | target's | `build-essential`, `dpkg-dev`, `debhelper` | the media-accel `.deb`s (`ffmpeg-rk`, `librga2`, MPP) |
+| `sandbox/package-<arch>-<suite>-<digest>/` | **host's** | `dpkg` and `xz-utils` and nothing else (~130 MB) | archiving the u-boot and kmod `.deb`s, which boot2deb stages itself |
+| the rootfs | target's | your image's solved package set | the image itself |
+
+The two host-arch roots are host-arch on purpose. Neither compiling a freestanding
+kernel nor archiving a staged tree needs to *link* against the target's libraries, so
+both run natively — which is what keeps a multi-minute kernel build and a hundred-megabyte
+`xz` off `qemu-user` entirely. The target-arch sandbox is the one that genuinely cannot
+be: `dpkg-shlibdeps` derives each media-accel `.deb`'s runtime `Depends` from the
+libraries present at build time.
+
+Each root is provisioned for your build's suite — the image's, or for a bootloader-only
+build the board's declared default — and each publishes a sha256-pinned manifest of its
+own packages beside your image, so "what compiled this" and "what archived this" are
+answered by name and version rather than by a `--version` line off your `PATH`. See
+[Reproducibility](reference/reproducibility.md).
+
+There is no `fakeroot` anywhere in boot2deb, in any root or on your host. Every root maps
+you to uid 0, and uid 0 is what a Debian packaging tool actually wants: your staged tree
+is already `root:root` where `dpkg-deb` archives it, and `dpkg-buildpackage` picks no
+gain-root command at all. Nothing is faked because nothing needs to be.
 
 ### The user-namespace check (common blocker on Ubuntu 24.04)
 
@@ -122,34 +173,22 @@ subuid mapping), and if it fails it prints the fix for your host. The usual case
 `sysctl -w` lasts until reboot; drop the same line in `/etc/sysctl.d/` to make it
 persist.
 
-Where the target's binaries have to be emulated, `doctor` also checks that the
-`qemu-<arch>` **binfmt handler is registered and enabled with the `F` (fix-binary)
-flag** — the sandbox relies on it. Installing `qemu-user-static` (with
-`binfmt-support` / systemd's binfmt) normally registers this; `doctor` warns if the
-flag is missing.
-
-### The one prerequisite `doctor` cannot probe
-
-On a **native** kernel build — your host arch already matches the target, so no cross
-toolchain is involved — `make bindeb-pkg` runs `dpkg-checkbuilddeps`, which consults the
-**dpkg database**. Everything `doctor` checks is a `PATH` scan or a `pkg-config` query,
-and those are different oracles: a host where `libelf-dev` or `debhelper` is present but
-not dpkg-registered passes `doctor` and then fails the build minutes in.
-
-Cross builds skip that gate (`DPKG_FLAGS=-d`), because `dpkg-checkbuilddeps` would
-otherwise demand the target-arch `-dev` packages, which the compile does not need. So
-this applies only to the native path — an arm64 host building an arm64 image.
-
-On an ordinary Debian or Ubuntu host that installed its build deps with `apt`, this is
-already satisfied and there is nothing to do. `doctor` prints a note on exactly this
-path rather than re-implementing dpkg's dependency solve.
+On a build that assembles an image for an architecture your host cannot execute,
+`doctor` also checks that the `qemu-<arch>` **binfmt handler is registered and enabled
+with the `F` (fix-binary) flag** — the rootfs bootstrap relies on it. Installing
+`qemu-user-static` (with `binfmt-support` / systemd's binfmt) normally registers this;
+`doctor` warns if the flag is missing.
 
 ### The overlay check
 
-A recipe that compiles the media-accel packages gives each component a **build root**:
-the shared sandbox base plus that component's own packages, layered on with an
-unprivileged overlay and discarded afterwards. `doctor` probes whether your host can
-establish one, and prints the directory it probed.
+Every stage that compiles gets a **build root**: the shared base plus that stage's own
+build-dependencies, layered on with an unprivileged overlay and discarded afterwards.
+`doctor` probes whether your host can establish one, and prints the directory it probed.
+
+That is why the overlay is a requirement of *compiling* rather than of every build. A
+board that installs Debian's kernel and boots its own firmware layers nothing and needs
+only user namespaces — and so does a rebuild whose artifacts all restore from the cache,
+which never stands a build root up at all.
 
 The probe is pointed at the **work dir's** filesystem, not at `/tmp`, because that is
 where the overlay's upper layer goes and the two can answer differently. An unprivileged
@@ -167,7 +206,7 @@ arrived.
 With `doctor` green:
 
 ```sh
-cargo run -p boot2deb-cli -- build turing-rk1/forky
+boot2deb build turing-rk1/forky
 ```
 
 This resolves the recipe's committed lockfile and runs the pipeline end to end. For

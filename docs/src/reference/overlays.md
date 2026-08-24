@@ -6,7 +6,7 @@ own repo — versioned, private, and never a fork of the vendored config. Pass o
 several) with the global `--overlay <dir>` flag, on any command:
 
 ```sh
-cargo run -p boot2deb-cli -- --overlay ~/my-boards build my-tablet-forky
+boot2deb --overlay ~/my-boards build my-tablet/forky
 ```
 
 Each `--overlay` must name an existing directory. An empty or mistyped path is a

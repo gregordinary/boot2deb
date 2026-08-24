@@ -1909,6 +1909,21 @@ pub struct ResolvedBuild {
     /// [`kernel`](Self::kernel) is — the two absences travel together, and
     /// [`produces_image`](Self::produces_image) reads this.
     pub suite: Option<String>,
+    /// The suite whose `dpkg` archives this build's `.deb`s — the suite the packaging
+    /// root is provisioned for.
+    ///
+    /// Present unconditionally, unlike [`suite`](Self::suite): every deliverable
+    /// packages something, including a [`Deliverable::Uboot`] build that resolves no
+    /// image axis at all. It is the resolved [`suite`](Self::suite) where there is one,
+    /// so an image and the `.deb`s inside it are archived by the same `dpkg`, and the
+    /// device's `default_suite` otherwise — the board's own declared suite, which is
+    /// also the one its image builds resolve, so a bootloader-only build reuses their
+    /// cached packaging root instead of provisioning a second one.
+    ///
+    /// It reaches the output: `dpkg-deb`'s version and `liblzma` decide the archive
+    /// bytes, so this names an input to them and is folded into the u-boot and kmod
+    /// output signatures.
+    pub packaging_suite: String,
     /// Composable rootfs features, in recipe order; empty means a plain
     /// base image. Validated at resolution: each is known, compatible with the
     /// resolved SoC, and non-conflicting.
@@ -2033,6 +2048,21 @@ impl ResolvedBuild {
     /// are all skipped, and the lock pins no kernel commit.
     pub fn compiles_kernel(&self) -> bool {
         matches!(self.kernel, Some(ResolvedKernel::Compiled(_)))
+    }
+
+    /// Whether this build compiles **anything** from source: a kernel, a bootloader, or
+    /// the media-accel userspace stack. The out-of-tree modules ride with the kernel —
+    /// a module is built by the compiler that produced the `Module.symvers` it links
+    /// against, so a build with no kernel compile builds none of them either.
+    ///
+    /// The question a *host* cares about, and the only one it still cares about. A build
+    /// that compiles clones its pinned trees with the host's `git` and layers each
+    /// stage's build-dependencies over a provisioned root through an unprivileged
+    /// overlay; a build that compiles nothing — Debian's kernel, the board's own
+    /// firmware, no accel stack — needs neither, and installs every byte it ships from
+    /// the mirror. The engine's host preflight is driven by exactly this predicate.
+    pub fn compiles_from_source(&self) -> bool {
+        self.compiles_kernel() || self.rkbin_boot().is_some() || self.userspace.is_some()
     }
 
     /// Whether this build produces a full image (kernel + rootfs + `.img`), as

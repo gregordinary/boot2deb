@@ -282,6 +282,8 @@ dependencies = [
  "boot2deb-core",
  "boot2deb-engine",
  "clap",
+ "clap_complete",
+ "clap_mangen",
  "serde_json",
  "tempfile",
 ]
@@ -304,6 +306,7 @@ dependencies = [
  "boot2deb-core",
  "ferroday-cage",
  "ferrosys",
+ "flate2",
  "gix",
  "gpt",
  "libc",
@@ -444,6 +447,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f84a88507dbd05c695f2cb5e8558e747179134005e9893882dec964190ed89"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -460,6 +472,16 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "clap_mangen"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d82842b45bf9f6a3be090dd860095ac30728042c08e0d6261ca7259b5d850f07"
+dependencies = [
+ "clap",
+ "roff",
+]
 
 [[package]]
 name = "clru"
@@ -995,7 +1017,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1016,9 +1038,9 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ferroday-cage"
-version = "0.1.2"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b7cae1d8cb2f2c761885904aa00b44d2158f40c23a68dde4155ac0ed410926"
+checksum = "94a9b3a876ca0c562a29c59766f3c40970d03423d8a61449967fee7234712ca3"
 dependencies = [
  "flate2",
  "lzma-rust2",
@@ -1031,9 +1053,9 @@ dependencies = [
 
 [[package]]
 name = "ferrosys"
-version = "0.2.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2304408792a6f9cf0c16219038b658503762dbd999b8c1f86c8c0ccf73d1ccb"
+checksum = "c49dbd7db19c41507412846219456d8eadbcee2afaa35af4ad45cacff6dd4662"
 dependencies = [
  "tar",
  "thiserror",
@@ -3287,6 +3309,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "roff"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3331,7 +3359,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3390,7 +3418,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3829,7 +3857,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4309,7 +4337,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
