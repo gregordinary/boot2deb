@@ -137,11 +137,20 @@ jobs:
       # its own version does; the advisory database is fetched fresh at run time either
       # way, so caching the binary cannot stale the result.
       - name: Cache the cargo-audit binary
+        id: cargo-audit-cache
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-audit
           key: cargo-audit-${{ runner.os }}
+      # `cargo install` refuses a destination that already holds the binary
+      # ("binary `cargo-audit` already exists in destination") rather than
+      # treating it as satisfied, so a restored cache fails the step it was
+      # meant to skip. That only surfaces on the *second* run: the first
+      # populates the cache and installs cleanly. Skipping the install on a hit
+      # is what the cache is for; `--force` would reinstall every time and buy
+      # nothing.
       - name: Install cargo-audit
+        if: steps.cargo-audit-cache.outputs.cache-hit != 'true'
         run: cargo install --locked cargo-audit
       - name: Audit the dependency tree
         run: cargo audit
