@@ -37,6 +37,22 @@ use uuid::Uuid;
 /// slot count above it, so indexing here cannot run off the end.
 const KPART_NAMES: [&str; MAX_KPART_SLOTS as usize] = ["KERN-A", "KERN-B", "KERN-C", "KERN-D"];
 
+/// GPT attribute bit 2, "legacy BIOS bootable" — the flag a scanning bootloader
+/// reads to decide which partitions are boot candidates.
+///
+/// Load-bearing under `rockchip-rkbin`. U-Boot's `bootflow scan`, which is
+/// `bootcmd` on every board this builds, considers **only** partitions carrying
+/// this bit, and when no partition on the medium carries it falls back to
+/// scanning partition 1 alone. The rootfs is what holds
+/// `/boot/extlinux/extlinux.conf`, and it is not partition 1 — the seed is — so
+/// an unmarked table is a board that reaches its prompt and finds no bootflow.
+///
+/// Set on the rootfs of every image, whatever the boot method. It survives the
+/// first-boot grow (`sfdisk -N` leaves fields the descriptor does not name
+/// alone), and depthcharge firmware ignores it: there the selection is the type
+/// GUID plus the ChromeOS attribute bits on the kernel slots.
+const LEGACY_BIOS_BOOTABLE: u64 = 1 << 2;
+
 /// One partition to write: everything the GPT entry needs.
 struct PartitionSpec<'a> {
     /// Entry index (1-based), and the order the partitions appear in the table.
@@ -49,8 +65,8 @@ struct PartitionSpec<'a> {
     length_lba: u64,
     /// Type GUID.
     part_type: partition_types::Type,
-    /// The 64-bit attribute word. Zero except on a ChromeOS kernel partition,
-    /// where it *is* the boot selection.
+    /// The 64-bit attribute word: [`LEGACY_BIOS_BOOTABLE`] on the rootfs, the
+    /// boot selection itself on a ChromeOS kernel partition, zero on the seed.
     flags: u64,
     /// The deterministic partition GUID (a rootfs partition's is its PARTUUID).
     guid: Uuid,
@@ -61,10 +77,11 @@ struct PartitionSpec<'a> {
 ///
 /// The rootfs partition spans `[rootfs_first_lba, rootfs_first_lba +
 /// rootfs_length_lba)` — the exact range the ext4 filesystem is spliced into —
-/// typed `LINUX_FS`, carrying `rootfs_guid` as its PARTUUID. Under `depthcharge` a
-/// ChromeOS kernel partition precedes it, carrying the attribute bits the firmware
-/// selects on; under `rockchip-rkbin` the bootloader payloads live in the raw gap
-/// ahead of the table and are not GPT entries at all.
+/// typed `LINUX_FS`, carrying `rootfs_guid` as its PARTUUID and the
+/// [`LEGACY_BIOS_BOOTABLE`] attribute that points a scanning bootloader at it.
+/// Under `depthcharge` a ChromeOS kernel partition precedes it, carrying the
+/// attribute bits the firmware selects on; under `rockchip-rkbin` the bootloader
+/// payloads live in the raw gap ahead of the table and are not GPT entries at all.
 ///
 /// `disk_guid` and `rootfs_guid` are the deterministic identifiers the caller
 /// derived from the lock: the `gpt` crate otherwise draws both from
@@ -121,7 +138,8 @@ pub(crate) fn write_table(
         first_lba: geom.rootfs_first_lba,
         length_lba: geom.rootfs_length_lba,
         part_type: partition_types::LINUX_FS,
-        flags: 0,
+        // The partition a scanning bootloader must look inside — see the constant.
+        flags: LEGACY_BIOS_BOOTABLE,
         guid: rootfs_guid,
     });
     // Table order = disk order, whatever the boot method: an operator reading
@@ -330,6 +348,66 @@ mod tests {
         );
     }
 
+    /// The rootfs entry carries the legacy-BIOS-bootable attribute and the seed does
+    /// not — the difference between a board that boots and one that stops at its
+    /// prompt.
+    ///
+    /// U-Boot's `bootflow scan` narrows to the partitions marked bootable as soon as
+    /// any partition is, and scans partition 1 alone when none is. The seed is
+    /// partition 1 on every image, so an unmarked rootfs is never opened and no
+    /// bootflow is ever found. Asserted on both boot shapes because the seed precedes
+    /// the rootfs under each of them.
+    #[test]
+    fn the_rootfs_is_the_bootable_partition_and_the_seed_is_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (name, boot) in [("rkbin", rkbin_boot()), ("depthcharge", depthcharge_boot())] {
+            let geom = Geometry::resolve(&boot, 192 << 20).unwrap();
+            let img = sized_image(
+                tmp.path(),
+                &format!("{name}-boot-flag.img"),
+                geom.total_size,
+            );
+            write_table(
+                &img,
+                &geom,
+                "rootfs",
+                DISK_GUID,
+                ROOTFS_GUID,
+                SEED_GUID,
+                &KPART_GUIDS,
+            )
+            .unwrap();
+
+            let disk = GptConfig::new()
+                .writable(false)
+                .logical_block_size(LogicalBlockSize::Lb512)
+                .open(&img)
+                .unwrap();
+            let parts = disk.partitions().clone();
+            let seed = parts
+                .values()
+                .find(|p| p.name == SEED_PARTLABEL)
+                .unwrap_or_else(|| panic!("{name}: no seed partition"));
+            let rootfs = parts
+                .values()
+                .find(|p| p.name == "rootfs")
+                .unwrap_or_else(|| panic!("{name}: no rootfs partition"));
+            assert_eq!(
+                rootfs.flags & LEGACY_BIOS_BOOTABLE,
+                LEGACY_BIOS_BOOTABLE,
+                "{name}: the rootfs must be the partition a bootloader scans"
+            );
+            assert_eq!(
+                seed.flags, 0,
+                "{name}: the seed holds personalization, never a bootflow"
+            );
+            assert!(
+                seed.first_lba < rootfs.first_lba,
+                "{name}: the seed precedes the rootfs, which is why the flag is needed"
+            );
+        }
+    }
+
     /// A fitted image sizes the disk to the *exact* minimum that carries its rootfs plus
     /// the backup table, so its last partition LBA is the last usable LBA and there is no
     /// spare sector anywhere to absorb an off-by-one.
@@ -484,7 +562,11 @@ mod tests {
         let root = parts.get(&4).unwrap();
         assert_eq!(root.part_type_guid, partition_types::LINUX_FS);
         assert_eq!(root.first_lba, 90_112, "the rootfs sits behind both slots");
-        assert_eq!(root.flags, 0, "an ordinary rootfs carries no attributes");
+        assert_eq!(
+            root.flags, LEGACY_BIOS_BOOTABLE,
+            "the rootfs is marked bootable and carries nothing else — none of the \
+             selection bits, which live on the kernel slots the firmware picks among"
+        );
         assert_eq!(
             root.part_guid, ROOTFS_GUID,
             "the PARTUUID the signed kernel cmdline roots on"

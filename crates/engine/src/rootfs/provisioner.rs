@@ -944,10 +944,10 @@ fn run_customize_cage(
 }
 
 /// Export the provisioned tree to the ownership-preserving `tar` the image node
-/// formats. [`provision::export_tar`] re-enters the subordinate map, so the
-/// on-host offset ids round-trip to the ids the rootfs intends, and the setcap
-/// `security.*` xattrs and setgid ownerships come through; device nodes are
-/// excluded, as the runtime provides its own.
+/// formats. [`Export`] re-enters the subordinate map, so the on-host offset ids
+/// round-trip to the ids the rootfs intends, and the setcap `security.*` xattrs and
+/// setgid ownerships come through. Everything under `/dev` is left out — see the
+/// filter below — as are device nodes anywhere, which the export never carries.
 ///
 /// `source_date_epoch` is the `SOURCE_DATE_EPOCH` ceiling: each member's mtime is
 /// recorded as `min(mtime, epoch)`, pulling the bootstrap's wall-clock stamps down
@@ -967,6 +967,18 @@ fn export_rootfs_tar(
     let file = std::fs::File::create(tarball).map_err(|s| EngineError::io(tarball, s))?;
     let writer = std::io::BufWriter::new(file);
     let mut export = Export::new(rootfs).map(IdentityMap::Subordinate);
+    // Everything under /dev is left out of the archive: the kernel mounts devtmpfs over
+    // /dev at boot, so an image needs the mount point and nothing inside it. The rule
+    // lives here rather than in the image formatter because it is a statement about what
+    // this artifact holds, and the export is where the tree is read.
+    //
+    // The path an entry is offered under is absolute inside the tree -- `/dev`, not
+    // `./dev` -- and comparing it as a `Path` matches whole components, so `/devices` is
+    // not `/dev`. Excluding a directory excludes its subtree, so naming `/dev`'s children
+    // is enough and the mount point itself is the one entry kept.
+    let dev = Path::new("/dev");
+    export = export.filter(move |entry| entry.path() == dev || !entry.path().starts_with(dev));
+
     // The tar encoder applies the clamp as it writes: under the subordinate map the
     // provisioned files sit at ids the host user cannot set times on, so the encoder
     // is the one place that can pull an mtime down to the epoch.

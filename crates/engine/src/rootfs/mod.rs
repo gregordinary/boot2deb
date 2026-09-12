@@ -877,8 +877,9 @@ mod config {
     /// or the device layer already owns, and a layer restating it could drift:
     ///
     ///  - `kernel-release` — from the pinned kernel ref, for a compiled kernel
-    ///    whose ref reads as a version tag (`v7.1.6` → `7.1.6`, matched as a
-    ///    prefix of `uname -r`). A distro kernel's version belongs to the suite,
+    ///    whose ref reads as a version tag, normalized to the release the kernel
+    ///    itself reports (`v7.1.6` → `7.1.6`, `v7.2` → `7.2.0`) and matched as a
+    ///    prefix of `uname -r`. A distro kernel's version belongs to the suite,
     ///    and a vendor branch or bare commit names no version — neither emits
     ///    the line.
     ///  - `kernel-flavor` — the `uname -r` suffix: the arch tail `bindeb-pkg`
@@ -907,12 +908,12 @@ mod config {
             .kernel
             .reference
             .as_deref()
-            .and_then(version_from_ref)
+            .and_then(kernel_release_from_ref)
         {
             let _ = writeln!(
                 out,
                 "{}",
-                boot2deb_core::expect::render_line("kernel-release", release)
+                boot2deb_core::expect::render_line("kernel-release", &release)
             );
         }
         if let Some(flavor) = kernel_flavor(identity) {
@@ -937,14 +938,26 @@ mod config {
         out
     }
 
-    /// The version a pinned kernel ref names, when it names one: a leading `v`
-    /// stripped, accepted only when the remainder starts with a digit and
-    /// carries a dot (`v7.1.6` → `7.1.6`). A branch name or a bare commit fails
-    /// the shape and yields no `kernel-release` check — a prefix match against
-    /// `uname -r` would be meaningless for either.
-    fn version_from_ref(reference: &str) -> Option<&str> {
-        let bare = reference.strip_prefix('v').unwrap_or(reference);
-        (bare.starts_with(|c: char| c.is_ascii_digit()) && bare.contains('.')).then_some(bare)
+    /// The kernel release a pinned ref names, spelled the way the built kernel
+    /// will spell it — which is what the runner prefix-matches `uname -r`
+    /// against.
+    ///
+    /// [`parse_tag`](boot2deb_core::version::parse_tag) is the only thing that
+    /// decides what a tag means, and its normalization *is* the kernel's own:
+    /// upstream drops the patch component on a `.0` release (`v7.2`), and the
+    /// Makefile's `SUBLEVEL` is 0 there, so the kernel reports `7.2.0`. A ref
+    /// read literally would be compared against a release it can never equal.
+    /// The same call handles the Linux-libre namespace (`sources/v7.1.6-gnu` →
+    /// `7.1.6`, its `-gnu` carried in `uname -r`'s suffix) and preserves a
+    /// prerelease (`v7.2-rc3` → `7.2.0-rc3`).
+    ///
+    /// A branch name or a bare commit parses as no version and yields no
+    /// `kernel-release` check — a prefix match against `uname -r` would be
+    /// meaningless for either.
+    pub(super) fn kernel_release_from_ref(reference: &str) -> Option<String> {
+        boot2deb_core::version::parse_tag(reference)
+            .ok()
+            .map(|v| v.to_string())
     }
 
     /// The `uname -r` flavor suffix this image's kernel boots with: the arch
@@ -1881,6 +1894,58 @@ mod tests {
         assert!(!rk_text.contains("board ="));
     }
 
+    /// A pinned ref becomes the release the *kernel* reports, not the ref read
+    /// literally — the two differ on exactly the tags upstream publishes for a
+    /// `.0` release.
+    ///
+    /// `v7.2` is the whole reason this test exists. The on-image runner matches
+    /// the emitted value against `uname -r` as a prefix ending at a `-`, so a
+    /// literal `7.2` is compared against `7.2.0-1-arm64`, finds `.` where it
+    /// needs `-`, and fails a correct kernel. Padding to the Makefile's
+    /// `SUBLEVEL` is what makes the prefix rule true, and it belongs to
+    /// `parse_tag` rather than being re-decided here.
+    #[test]
+    fn a_pinned_ref_becomes_the_release_the_kernel_reports() {
+        for (reference, want, unamer) in [
+            // A `.0` release: upstream drops the patch component, the kernel does not.
+            ("v7.2", "7.2.0", "7.2.0-1-arm64"),
+            // A point release already spells all three.
+            ("v7.1.6", "7.1.6", "7.1.6-1-arm64"),
+            // Linux-libre: namespaced tag, and `-gnu` lands in the release suffix.
+            ("sources/v7.1.6-gnu", "7.1.6", "7.1.6-gnu-1-arm64"),
+            // A prerelease survives, and still pads.
+            ("v7.2-rc3", "7.2.0-rc3", "7.2.0-rc3-1-arm64"),
+        ] {
+            let got = config::kernel_release_from_ref(reference)
+                .unwrap_or_else(|| panic!("{reference} names a version"));
+            assert_eq!(got, want, "{reference}");
+            // The property the runner actually relies on: equal, or a prefix
+            // ending at a `-`. Asserting it here is what keeps the emitted
+            // spelling and the matcher from drifting apart again.
+            assert!(
+                unamer == got
+                    || unamer
+                        .strip_prefix(&got)
+                        .is_some_and(|t| t.starts_with('-')),
+                "{reference}: {got:?} is not a `-`-bounded prefix of {unamer:?}"
+            );
+        }
+
+        // Naming no version emits no check: a prefix match would be meaningless,
+        // and a check that cannot be right is worse than one that is absent.
+        for reference in [
+            "master",
+            "linux-7.1.y",
+            "8d3ae59288f1e7d58d76558a6ee96d533bc5019f",
+        ] {
+            assert_eq!(
+                config::kernel_release_from_ref(reference),
+                None,
+                "{reference} names no version"
+            );
+        }
+    }
+
     /// The selftest check files reach the image: the derived `identity.checks`
     /// plus one file per layer-declared expectation group, all under the
     /// directory the on-device runner globs.
@@ -1890,8 +1955,8 @@ mod tests {
     /// a distro-kernel depthcharge board states the package's flavor and no DTB
     /// (its DTB rides inside the signed FIT, invisible to a file check). Neither
     /// states a `kernel-release` here because the fixture lock pins no kernel —
-    /// exactly the distro case, and the compiled case is covered by the
-    /// `version_from_ref` unit test below.
+    /// exactly the distro case, and the compiled case is covered by
+    /// [`a_pinned_ref_becomes_the_release_the_kernel_reports`].
     #[test]
     fn the_staged_overlay_carries_the_selftest_checks() {
         let rk = rk1();

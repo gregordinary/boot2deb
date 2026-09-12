@@ -59,10 +59,16 @@ pub fn rootfs_partition(artifact: &Path) -> Result<RootfsPartition, EngineError>
         start: entry.first_lba * 512,
         // Inclusive last LBA, so the length is one sector more than the difference.
         bytes: (entry.last_lba - entry.first_lba + 1) * 512,
+        bootable: entry.flags & LEGACY_BIOS_BOOTABLE != 0,
     })
 }
 
-/// Where an image's rootfs partition sits and how large it is, in bytes.
+/// GPT attribute bit 2, "legacy BIOS bootable" — read back here as the writer's
+/// [`gpt`](super::gpt) side set it.
+const LEGACY_BIOS_BOOTABLE: u64 = 1 << 2;
+
+/// Where an image's rootfs partition sits, how large it is, and whether a scanning
+/// bootloader will look inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RootfsPartition {
     /// Byte offset of the partition's first sector.
@@ -70,6 +76,14 @@ pub struct RootfsPartition {
     /// The partition's length. The filesystem inside must be exactly this: larger and
     /// it will not mount, smaller and the difference is wasted.
     pub bytes: u64,
+    /// Whether the entry carries the legacy-BIOS-bootable attribute.
+    ///
+    /// U-Boot's `bootflow scan` narrows to the partitions marked with it as soon as
+    /// any partition on the medium is, and scans partition 1 alone when none is —
+    /// and partition 1 is the seed. An unmarked rootfs is therefore a board that
+    /// reaches its prompt and finds nothing to boot, which no filesystem-level check
+    /// can see.
+    pub bootable: bool,
 }
 
 /// The free-block count in the rootfs filesystem's superblock.

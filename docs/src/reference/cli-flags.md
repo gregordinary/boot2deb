@@ -241,7 +241,7 @@ This command takes no flags of its own.
 
 ## verify-image
 
-Hold a finished image artifact to the invariants that are checkable without a board: the artifact set is present, the plan document parses and its digest matches what the provenance records, `[[archives]]` is well formed, the ext4 filesystem is exactly its GPT partition, and a fitted `--image-size` left the slack it asked for. Read-only, no root: only the head of the artifact is decompressed. The off-board half of the hardware gate
+Hold a finished image artifact to the invariants that are checkable without a board: the artifact set is present, the plan document parses and its digest matches what the provenance records, `[[archives]]` is well formed, the ext4 filesystem is exactly its GPT partition, the rootfs partition is marked bootable, and a fitted `--image-size` left the slack it asked for. Read-only, no root: only the head of the artifact is decompressed. The off-board half of the hardware gate
 
 | argument | required | what it is |
 | --- | --- | --- |

@@ -163,9 +163,10 @@ pub enum BootPayload<'a> {
 /// Filesystem inputs for the image node.
 pub struct ImageOptions<'a> {
     /// Rootfs as a `tar` archive — the artifact of the rootfs backend, staged
-    /// and formatted by the `ext4` submodule. Device nodes under `./dev/` are not
-    /// materialized (the kernel mounts devtmpfs over `/dev` at boot). Under
-    /// `depthcharge` it also carries the signed kernel partition image.
+    /// and formatted by the `ext4` submodule. It holds `./dev/` and nothing under
+    /// it: the export filters the tree's `/dev` contents out, because the kernel
+    /// mounts devtmpfs over the mount point at boot. Under `depthcharge` it also
+    /// carries the signed kernel partition image.
     pub rootfs_tar: &'a Path,
     /// The boot payload to place, per the resolved boot method.
     pub boot: BootPayload<'a>,

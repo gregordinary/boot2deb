@@ -95,8 +95,10 @@ target_kver() {
 
 check_kernel_release() {
     if [ "$mode" = hardware ]; then
-        # A prefix match: the pin says 7.1.6, the running kernel says
-        # 7.1.6-1-arm64. The flavor check owns the suffix.
+        # A prefix match. The generated value is the release the kernel
+        # itself reports (7.1.6, and 7.2.0 for a tag spelled v7.2), so what
+        # follows it in uname -r is always the ABI/flavor tail the flavor
+        # check owns -- hence the boundary is a literal '-'.
         case "$unamer" in
             "$1" | "$1"-*) report ok kernel-release "$1" ;;
             *) report fail kernel-release "$1" "running $unamer" ;;

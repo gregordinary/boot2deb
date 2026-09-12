@@ -1039,9 +1039,9 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ferroday-cage"
-version = "0.4.1"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "545b257f955ca535c179db7b76b3c8e40485d5a7c8c521d19352ecf0f815f009"
+checksum = "792830cf11a1dc56d83c8a30ca04968f359ade05f8a57c390b269358fa9abe0e"
 dependencies = [
  "flate2",
  "lzma-rust2",
@@ -2610,9 +2610,9 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lzma-rust2"
-version = "0.18.1"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "243cb2271683c2855cad62142cbf38199db439b1b1e1ccdd5a011342894dd7cc"
+checksum = "e6effa5c575f68109664a511f378c0e170888e33a426694ee0910a673762bd47"
 dependencies = [
  "sha2 0.11.0",
 ]

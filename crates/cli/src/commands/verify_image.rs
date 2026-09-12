@@ -15,7 +15,12 @@
 //!     mount at all; smaller and the difference is wasted. This is the invariant the
 //!     fit ordering exists to preserve, so it is checked on every image and not only on
 //!     the fitted one.
-//!  5. A fitted `image_size` left the slack it asked for.
+//!  5. **The rootfs GPT entry is marked bootable.** U-Boot's `bootflow scan` narrows
+//!     to the partitions carrying the legacy-BIOS-bootable attribute as soon as any
+//!     partition on the medium carries it, and scans partition 1 alone when none
+//!     does — and partition 1 is the seed. Nothing about the filesystem's contents
+//!     says whether the bootloader will ever open it.
+//!  6. A fitted `image_size` left the slack it asked for.
 //!
 //! Every structure is read by the code that writes it —
 //! [`image::inspect`](boot2deb_engine::image::inspect) for the GPT and the superblock,
@@ -146,6 +151,23 @@ pub(crate) fn run(
         ok: part.as_ref().is_ok_and(|p| p.bytes == fs_bytes),
     });
 
+    // 3b. The rootfs is the partition a bootloader will look inside. U-Boot's
+    //     `bootflow scan` considers only partitions marked bootable once any is
+    //     marked, and only partition 1 when none is — and partition 1 is the seed.
+    //     Nothing about the filesystem's contents says whether the bootloader will
+    //     ever open it, so the attribute is its own check.
+    checks.push(Check {
+        what: "rootfs bootable",
+        detail: match &part {
+            Err(e) => format!("could not read the rootfs partition: {e}"),
+            Ok(p) if p.bootable => "the GPT entry carries the bootable attribute".into(),
+            Ok(_) => "the rootfs GPT entry is not marked bootable — a scanning \
+                      bootloader will never open it"
+                .into(),
+        },
+        ok: part.as_ref().is_ok_and(|p| p.bootable),
+    });
+
     // 4. The size, as authored and as realized. They differ in kind for a fitted image:
     //    the recipe names a rule, and only the record says what it came to.
     checks.push(Check {
@@ -209,7 +231,7 @@ pub(crate) fn run(
         println!("{}  {}", reference.as_str(), image.display());
         for c in &checks {
             println!(
-                "  {:<14} {}",
+                "  {:<15} {}",
                 if c.ok { c.what } else { "FAIL" },
                 if c.ok {
                     c.detail.clone()

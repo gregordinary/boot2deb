@@ -96,11 +96,6 @@ const RESERVED_HUNDREDTHS: u16 = 100;
 /// knee the ceilings bind, which is where every real rootfs sits.
 const REFERENCE_PIN_BYTES: u64 = 4 << 30;
 
-/// Everything under `/dev` is dropped from the rootfs: `mknod`-style nodes are
-/// unnecessary because the kernel mounts devtmpfs over `/dev` at boot. The `/dev`
-/// directory entry itself is kept.
-const DEV_PREFIX: &[u8] = b"/dev/";
-
 /// The filesystem the rootfs partition carries.
 ///
 /// A constant rather than a value read back off a formatted image, because two consumers
@@ -175,11 +170,7 @@ pub(crate) fn build_rootfs_ext4(
         })?
         .into_entries();
 
-    // 2. Drop everything under /dev (devtmpfs covers it at boot), keeping the /dev
-    //    directory itself — matching what the build has always materialized.
-    entries.retain(|e| !e.path.starts_with(DEV_PREFIX));
-
-    // 3. A press re-assembly's tree additions, merged before the password splice
+    // 2. A press re-assembly's tree additions, merged before the password splice
     //    below so the per-image credential always wins over anything copied in.
     if let Some(additions) = additions {
         additions.apply(&mut entries)?;
@@ -189,12 +180,12 @@ pub(crate) fn build_rootfs_ext4(
         ));
     }
 
-    // 4. Splice the unique per-image first-boot password into /etc/shadow: the one
+    // 3. Splice the unique per-image first-boot password into /etc/shadow: the one
     //    per-build-unique step, done on the parsed entry rather than a staged file.
     splice_first_boot_password(&mut entries, first_boot)?;
     step.log("spliced the unique per-image first-boot password into /etc/shadow");
 
-    // 5. Format straight into `dest`. `format_to` streams only the blocks it uses into
+    // 4. Format straight into `dest`. `format_to` streams only the blocks it uses into
     //    the (sparse) file and extends it to the full size, so the whole image never
     //    lives in memory; a freshly truncated file gives it the zeroed holes it needs.
     //    It returns the geometry it realized, which is the writer's own account of what

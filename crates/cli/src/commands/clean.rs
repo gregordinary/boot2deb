@@ -19,14 +19,14 @@
 //!
 //! Every removal goes through [`boot2deb_engine::sandbox::reclaim_tree`], which is the
 //! only route that gets past the mode-`0` work area an overlay leaves and past a
-//! subuid-owned tree. It carries one consequence worth stating: the provisioner's
-//! removal also takes the `<target>.lock` a published rootfs carries beside it. For a
-//! base tree that is right — the lock is the provisioner's own, and `--build-roots`
-//! names it as a target too. For a target that merely *contains* such trees (a work
-//! dir, `cache/`, `sandbox/`) the `.lock` sibling is someone else's file, and for the
-//! whole-tree default it sits outside the stamped directory. Nothing writes those paths
-//! today, so this costs nothing; closing it needs a seam in `ferroday-cage`'s `Remove`,
-//! which exposes only the identity map.
+//! subuid-owned tree. Each target names its own [`PublicationLock`], because the
+//! removal can take the `<target>.lock` a published rootfs carries beside it and only
+//! this module knows which targets are such trees. `--build-roots` names base trees, so
+//! its targets are [`PublicationLock::Take`] — and it names each lock as a target in
+//! its own right besides. Every other selector names a directory that merely *contains*
+//! published trees (a work dir, `cache/`, `sandbox/`, a shared store), where the
+//! `.lock` sibling is an unrelated path the caller never asked about — and for the
+//! whole-tree default it sits outside the stamped directory the ownership guard checks.
 //!
 //! `--verify-trees` is the only selector that prunes *within* a store rather than
 //! removing it. Both auto-fetch caches are commit-addressed, so liveness is decidable:
@@ -44,6 +44,7 @@ use crate::fsutil::dir_size;
 use crate::render::human_size;
 use crate::workdir::{check_work_dir_removable, work_dir_for};
 use boot2deb_core::ConfigRoot;
+use boot2deb_engine::sandbox::PublicationLock;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -166,7 +167,10 @@ pub(crate) fn run(
     // With no selector at all the target is the whole work dir, which is work-scoped.
     let work_scoped = work_scoped || !root_scoped;
 
-    let mut targets: Vec<PathBuf> = Vec::new();
+    // Each target carries what its removal may take beside it: only this module knows
+    // which of them are rootfs trees the provisioner published and which merely hold
+    // some, and `reclaim_tree` cannot tell them apart from the path.
+    let mut targets: Vec<(PathBuf, PublicationLock)> = Vec::new();
 
     if work_scoped {
         let Some(recipe) = recipe else {
@@ -186,32 +190,43 @@ pub(crate) fn run(
         // paths come from `--root`, not from a caller-supplied directory name.
         check_work_dir_removable(&work_dir, args.force)?;
         if !(args.cache || args.sandbox || args.build_roots) {
-            targets.push(work_dir);
+            targets.push((work_dir, PublicationLock::Keep));
         } else {
             if args.cache {
-                targets.push(work_dir.join("cache"));
+                targets.push((work_dir.join("cache"), PublicationLock::Keep));
             }
             if args.sandbox {
-                targets.push(work_dir.join("sandbox"));
+                targets.push((work_dir.join("sandbox"), PublicationLock::Keep));
             }
             // Enumerated by the module that names these trees rather than reconstructed
             // here, so what is swept and what is spared cannot drift from how they are
             // named. It answers with the trees that exist, which is why this extends
             // rather than pushes.
+            //
+            // The one selector whose targets are published rootfs trees, so the one
+            // that takes the lock beside each: it names those locks as targets of its
+            // own too, which is what the `taken` bookkeeping below is for.
             if args.build_roots {
-                targets.extend(boot2deb_engine::sandbox::build_root_trees(&work_dir));
+                targets.extend(
+                    boot2deb_engine::sandbox::build_root_trees(&work_dir)
+                        .into_iter()
+                        .map(|tree| (tree, PublicationLock::Take)),
+                );
             }
         }
     }
 
+    // Every root-scoped store holds published trees rather than being one — the kconfig
+    // cache holds a work dir with a provisioned cross root under it, the checkout caches
+    // hold git trees — so none of their `.lock` siblings is this removal's to take.
     if args.all_caches {
-        targets.push(cache_dir(root));
+        targets.push((cache_dir(root), PublicationLock::Keep));
     }
     if args.artifacts {
-        targets.push(artifact_cache(root));
+        targets.push((artifact_cache(root), PublicationLock::Keep));
     }
     if args.kconfig {
-        targets.push(kconfig_cache(root));
+        targets.push((kconfig_cache(root), PublicationLock::Keep));
     }
     if args.verify_trees {
         // Resolved before anything is removed: a lock that will not parse must abort
@@ -226,18 +241,22 @@ pub(crate) fn run(
             root.search_paths().len()
         );
         for store in [verify_trees_cache(root), patches_cache(root)] {
-            targets.extend(unpinned_checkouts(&store, &pinned));
+            targets.extend(
+                unpinned_checkouts(&store, &pinned)
+                    .into_iter()
+                    .map(|checkout| (checkout, PublicationLock::Keep)),
+            );
         }
     }
 
     let mut removed_any = false;
-    // Every path an earlier removal in this run already took. `reclaim_tree` goes
-    // through the provisioner's own removal, which takes the `<tree>.lock` a published
-    // rootfs carries along with the tree — and `--build-roots` names that lock as a
-    // target in its own right. Reporting it "absent" would read as a target that was
+    // Every path an earlier removal in this run already took. A `PublicationLock::Take`
+    // removal takes the `<tree>.lock` a published rootfs carries along with the tree —
+    // and `--build-roots`, the one selector that asks for that, names each such lock as
+    // a target in its own right. Reporting it "absent" would read as a target that was
     // never there, and would contradict the `--dry-run` line that listed it.
     let mut taken: BTreeSet<PathBuf> = BTreeSet::new();
-    for target in &targets {
+    for (target, lock) in &targets {
         if !target.exists() {
             if taken.contains(target) {
                 println!("  removed {} (with its tree)", target.display());
@@ -263,10 +282,14 @@ pub(crate) fn run(
             // same route, which is what makes `clean` proof against both. The kconfig
             // scratch needs exactly this: each work dir holds a provisioned cross root.
             boot2deb_engine::rootfs::sweep_provisioned(target);
-            boot2deb_engine::sandbox::reclaim_tree(target)
+            boot2deb_engine::sandbox::reclaim_tree(target, *lock)
                 .map_err(|e| format!("failed to remove {}: {e}", target.display()))?;
-            if let Some(lock) = publication_lock(target) {
-                taken.insert(lock);
+            // Only a removal that was asked to take the lock did; recording one that
+            // was not would report a still-standing file as already gone.
+            if *lock == PublicationLock::Take {
+                if let Some(lock) = publication_lock(target) {
+                    taken.insert(lock);
+                }
             }
             println!("  removed {} ({size})", target.display());
             removed_any = true;
@@ -592,6 +615,51 @@ mod tests {
         }] {
             let err = run(&root, None, args).unwrap_err();
             assert!(err.to_string().contains("needs a RECIPE"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_container_target_leaves_the_lock_sibling_beside_it() {
+        // The distinction `PublicationLock` exists to make. A work dir and the
+        // `sandbox/` subtree under it *hold* published rootfs trees rather than being
+        // one, so `<target>.lock` is an unrelated path — plausibly someone else's file
+        // — that the caller never named. It is not a target, and for the whole-tree
+        // default it sits one level up from the stamped directory the ownership guard
+        // checks, which is where a mistyped `--work-dir` would land.
+        //
+        // The `.pkgs` sibling is the control: nothing ever took it, and both files are
+        // ours in exactly the same sense.
+        for sandbox_only in [false, true] {
+            let outer = tempfile::tempdir().unwrap();
+            let work_dir = outer.path().join("work");
+            std::fs::create_dir_all(work_dir.join("sandbox/build-arm64-forky-abc")).unwrap();
+            mark_work_dir(&work_dir).unwrap();
+            let (removed, sibling_of) = if sandbox_only {
+                (work_dir.join("sandbox"), work_dir.clone())
+            } else {
+                (work_dir.clone(), outer.path().to_path_buf())
+            };
+            let name = removed.file_name().unwrap().to_str().unwrap().to_string();
+            let lock = sibling_of.join(format!("{name}.lock"));
+            let pkgs = sibling_of.join(format!("{name}.pkgs"));
+            std::fs::write(&lock, "someone else's").unwrap();
+            std::fs::write(&pkgs, "someone else's").unwrap();
+
+            run(
+                &repo_root(),
+                Some("turing-rk1/forky"),
+                args(&work_dir, false, sandbox_only),
+            )
+            .unwrap();
+
+            assert!(!removed.exists(), "the target itself goes either way");
+            assert_eq!(
+                std::fs::read(&lock).unwrap(),
+                b"someone else's",
+                "the lock beside {} is not this removal's to take",
+                removed.display(),
+            );
+            assert!(pkgs.exists(), "nor is anything else beside it");
         }
     }
 

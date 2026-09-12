@@ -816,7 +816,7 @@ impl SandboxBase {
         for m in &moved {
             step.log(format!("  {}", m.describe()));
         }
-        reclaim_tree(&self.rootfs)?;
+        reclaim_tree(&self.rootfs, PublicationLock::Take)?;
         // The manifest goes with the tree it describes, for the reason
         // `discard_unrecordable_base` refuses a tree without one: a record standing
         // beside no rootfs would be adopted by the fresh bootstrap's own reuse check.
@@ -1191,6 +1191,25 @@ fn run_cage(cage: Cage, spec: &SandboxRun, step: &Step) -> Result<(), EngineErro
     }
 }
 
+/// Whether a reclaim also takes the `<path>.lock` a provisioned rootfs carries beside
+/// it.
+///
+/// Only the caller knows which of the two kinds of directory it named. The provisioner
+/// writes that lock beside a rootfs it publishes, but a published tree and a directory
+/// *holding* published trees are both just directories, so the path cannot be asked —
+/// and a missing lock is no answer either, since a container that has none today looks
+/// exactly like a published tree whose lock was already cleared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationLock {
+    /// The target is a rootfs the provisioner published, so the lock beside it is its
+    /// own and the two round-trip: create and destroy leave nothing behind.
+    Take,
+    /// The target merely *contains* published rootfs trees — a work dir, a cache, a
+    /// stage directory holding an overlay upper. There the `.lock` sibling is a path
+    /// this removal never created and was never asked to take.
+    Keep,
+}
+
 /// Remove a tree the sandbox wrote, whatever it holds — the single route by which a
 /// build's scratch is always removable.
 ///
@@ -1198,18 +1217,24 @@ fn run_cage(cage: Cage, spec: &SandboxRun, step: &Step) -> Result<(), EngineErro
 /// routinely leaves behind: an unprivileged overlay's work area, which the kernel
 /// leaves as a mode-`0` directory nothing can descend into, and any subtree a
 /// subordinate id-map owns, whose files belong to subuids outside the caller's own.
-/// [`provision::remove`] re-enters the map and handles both, and is idempotent on a
-/// missing path and correct on a non-directory — so callers need not distinguish the
-/// cases.
+/// The provisioner's own removal re-enters the map and handles both, and is idempotent
+/// on a missing path and correct on a non-directory — so callers need not distinguish
+/// the cases.
+///
+/// `lock` says whether the publication lock goes with the tree; see
+/// [`PublicationLock`] for why that is the caller's to answer and not this function's.
 ///
 /// A caller that must not fail on a stale tree — discarding a build root's previous
 /// increment before staging a fresh one — drops the result; `clean`, whose whole
 /// purpose is the removal, reports it.
-pub fn reclaim_tree(path: &Path) -> Result<(), EngineError> {
-    provision::remove(path).map_err(|source| EngineError::Bootstrap {
-        context: format!("remove {}", path.display()),
-        message: source.to_string(),
-    })
+pub fn reclaim_tree(path: &Path, lock: PublicationLock) -> Result<(), EngineError> {
+    provision::Remove::new(path)
+        .remove_lock(lock == PublicationLock::Take)
+        .run()
+        .map_err(|source| EngineError::Bootstrap {
+            context: format!("remove {}", path.display()),
+            message: source.to_string(),
+        })
 }
 
 /// Reclaim a stage's build-root directory — its overlay upper and the work area beside
@@ -1219,9 +1244,13 @@ pub fn reclaim_tree(path: &Path) -> Result<(), EngineError> {
 /// disposable by construction, so the only thing a failure costs is the disk the stale
 /// increment occupies, and the fresh `stage_layer` that follows reports any real problem
 /// with the directory.
+///
+/// A stage directory holds an overlay upper and the work area beside it; nothing
+/// published it, so [`PublicationLock::Keep`] — `<stage_dir>.lock` would be a sibling
+/// in the uppers directory that no build ever wrote.
 fn discard_upper(stage_dir: &Path) {
     if stage_dir.exists() {
-        let _ = reclaim_tree(stage_dir);
+        let _ = reclaim_tree(stage_dir, PublicationLock::Keep);
     }
 }
 
@@ -1237,9 +1266,9 @@ fn discard_upper(stage_dir: &Path) {
 /// Through [`reclaim_tree`], the single route by which a build's scratch is removable,
 /// rather than a plain recursive delete. Every file in the tree is the caller's — the
 /// sandbox bootstraps under the single-identity map — so the escalation it can perform
-/// is not what is needed here; what is, is that it also takes the publication lock the
-/// provisioner leaves beside a published tree, which a plain delete would strand beside
-/// no rootfs.
+/// is not what is needed here. What is needed is [`PublicationLock::Take`]: the base is
+/// a rootfs the provisioner published, so its lock goes with it, where a plain delete
+/// would strand that lock beside no rootfs.
 ///
 /// Split out of [`BuildSandbox::ensure_ready`] so the condition is exercised without a
 /// bootstrap: the call that follows it in `ensure_ready` re-creates the tree, which
@@ -1248,7 +1277,7 @@ fn discard_unrecordable_base(rootfs: &Path, manifest: &Path) -> Result<bool, Eng
     if !rootfs.is_dir() || manifest.is_file() {
         return Ok(false);
     }
-    reclaim_tree(rootfs)?;
+    reclaim_tree(rootfs, PublicationLock::Take)?;
     Ok(true)
 }
 

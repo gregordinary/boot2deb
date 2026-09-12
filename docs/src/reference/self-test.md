@@ -80,7 +80,7 @@ and no escaping; the build validates at config load that no argument needs any.
 | `devnode` | the node exists under `/dev` (globs allowed) | `devnode /dev/dri/renderD128` |
 | `sound-card` | the name appears in `/proc/asound/cards` | `sound-card H96 Analog` |
 | `no-dmesg-match` | the POSIX ERE does **not** match the kernel log | `no-dmesg-match SError\|Synchronous External Abort` |
-| `kernel-release` | `uname -r` starts with the pinned version (generated only) | `kernel-release 7.2.0` |
+| `kernel-release` | `uname -r` starts with the release the pinned ref names, normalized as the kernel spells it (`v7.2` names `7.2.0`) (generated only) | `kernel-release 7.2.0` |
 | `kernel-flavor` | `uname -r` ends in the flavor and is not its `-rt-` variant (generated only) | `kernel-flavor arm64` |
 | `single-kernel` | `/boot` holds exactly one kernel and its module tree is that kernel's (generated only; takes no argument) | `single-kernel` |
 
