@@ -15,7 +15,7 @@ layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
 # The suite sibling of turing-rk1/media-accel-forky, re-assessed with it over the
-# v7.2 kernel and over the added `vulkan` feature; the media userspace is built from
+# v7.2 generation and over the added `vulkan` feature; the media userspace is built from
 # source and so suite-independent, and Mesa's Vulkan drivers come from each suite.
 [support]
 status = "expected"

@@ -27,7 +27,7 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 
 # turing-rk1/media-accel-forky plus the application layer, and still under bring-up:
 # the transcode path this recipe exists to serve has not been exercised through
-# Jellyfin. Re-assessed over the v7.2 kernel: the encode path this recipe uses is the
+# Jellyfin. Re-assessed over the v7.2 generation: the encode path this recipe uses is the
 # VEPU580 out-of-tree driver, which 7.2 does not touch — mainline still has no Rockchip
 # video encoder. See turing-rk1/forky for the full delta.
 [support]

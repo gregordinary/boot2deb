@@ -25,8 +25,9 @@ image_size = "2G"
 # board description: 5 Gbps, ~154 MB/s over 92 GB of continuous reads, no link error.
 # A device that lands at 480 Mb/s there is a seating problem — see the `.dts`.
 #
-# What the move from v7.1.7 to v7.2 changes on this SoC's paths. v7.2 is a .0
-# release, so it carries no stable point release yet.
+# What the move from v7.1.7 to the v7.2 generation changes on this SoC's paths. The pin
+# is v7.2.2, the current stable point release; 7.2 -> 7.2.2 touches no Rockchip driver,
+# no device tree and no defconfig.
 #
 # The `rk3576-fixes` series crosses unchanged -- all six patches read the same on both
 # generations, so nothing in it was rebased. `rockchip-iommu` clears the AUTO_GATING

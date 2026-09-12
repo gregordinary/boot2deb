@@ -4,14 +4,14 @@
 [kernel]
 id = "rk3288-mainline-7.2"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.2"
-commit = "8d3ae59288f1e7d58d76558a6ee96d533bc5019f"
+ref = "v7.2.2"
+commit = "52c36105f76e96b638152a42e735f2e7767ed946"
 
 [patches]
 series = ["rk3288-fixes"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "ddc856cdd91e135ba792e16a6fc1edc2a279c36a"
+commit = "9a3a33bd18887a6bf243bc1d32e838271f46e12a"
 
 [rootfs]
 suite = "forky"

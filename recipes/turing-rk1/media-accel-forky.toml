@@ -24,7 +24,7 @@ layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
 # Derived from turing-rk1/forky along the userspace axis, and re-assessed over the v7.2
-# kernel: see that recipe for what the bump moves. Two of its items land on this
+# generation: see that recipe for what the bump moves. Two of its items land on this
 # recipe's own path rather than the base's. The RGA the `/dev/rga` consumers here talk
 # to is still the multicore vendor driver — 7.2's in-tree V4L2 RGA3 driver is left
 # unbuilt, because it exposes one core per video node, does scale and colour conversion
@@ -33,8 +33,19 @@ image_size = "2G"
 # IOMMU fetch-DTE change upstream ties to RGA3 hangs is on exactly this image's filter
 # path. `rkvdec`'s move to a shared bitwriter writes the same register payloads. The
 # `vulkan` feature is unaffected: it is a userspace package set over panthor, which
-# takes fixes this recipe cannot distinguish. This configuration was built and measured
-# on the previous kernel; not booted from this recipe on this one.
+# takes fixes this recipe cannot distinguish.
+#
+# An image from this recipe was booted and measured on the board on 2026-08-30, on the
+# v7.2 kernel with the `076-080` media series: VP9 decodes bit-exact against libvpx at
+# both profiles and scores 224/305 on Fluster, the 10-bit NV15 filter path works at
+# width 1920, and the tone-map and burn-in tables were re-earned. The claim stays
+# `expected` rather than `validated` because the lock now pins `patches` past that
+# image, and this time the intervening commits are real build inputs rather than
+# comment churn: kernel 081 pads the AV1 NV15 capture stride, ffmpeg 0016 sends the
+# HEVC SPS RPS tables, and ffmpeg 0017-0019 add the V4L2 JPEG encoder. Each was
+# validated on hardware in its own right, but not from an image this recipe produced,
+# so what stands between here and `validated` is a build at the current pin, flashed
+# and re-measured.
 [support]
 status = "expected"
-date   = "2026-08-21"
+date   = "2026-08-30"

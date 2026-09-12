@@ -33,28 +33,28 @@ commit = "750e76ec2d9287babfaf08c8bf395ebc5e8778ea"
 [[userspace]]
 name = "librga"
 source = "https://github.com/tsukumijima/librga-rockchip.git"
-ref = "2cffdf6f332c3ddb93eb087841d78e8b487db2a3"
+ref = "master"
 commit = "2cffdf6f332c3ddb93eb087841d78e8b487db2a3"
 
 [[userspace]]
 name = "libmali"
 source = "https://github.com/tsukumijima/libmali-rockchip.git"
-ref = "bd33ee262f47fd936b831afccaa0759b3ecc2482"
+ref = "master"
 commit = "bd33ee262f47fd936b831afccaa0759b3ecc2482"
 
 [ffmpeg.base]
 source = "https://code.ffmpeg.org/Kwiboo/FFmpeg.git"
-ref = "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935"
+ref = "v4l2-request-n8.1"
 commit = "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935"
 
 [ffmpeg.rockchip]
 source = "https://github.com/nyanmisaka/ffmpeg-rockchip.git"
-ref = "f66f2f804627e4464c2d1b10181772b5437bb991"
-commit = "f66f2f804627e4464c2d1b10181772b5437bb991"
+ref = "8.1"
+commit = "d90e3a1c18d7929383cf88c1b3da2e2d1c966cbf"
 
 [rootfs]
 suite = "forky"
-manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan.pkgs.lock"
+manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode.pkgs.lock"
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"
@@ -63,3 +63,23 @@ tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin@sha256:e109f3e283c86ad74b657
 [[extra_debs]]
 url = "http://deb.debian.org/debian/pool/main/i/icu/libicu76_76.1-4+b1_arm64.deb"
 sha256 = "ff00a45df31aba9990fdb281a8def3a06df8a67d97b845b20af4b4796d3c6694"
+
+[[extra_debs]]
+path = "debs/libdavs2-16_1.7.1-1+dde1+deb14.20260831.b41cf11.843424c_arm64.deb"
+sha256 = "18c079694fd03e7a55c8291508a6ce1b66b074d80062c69d815c1b32b3263484"
+targets = ["image", "ffmpeg"]
+
+[[extra_debs]]
+path = "debs/libuavs3d1_1.2.89+deb14.20260831.0e20d2c.c411a33.70accd8_arm64.deb"
+sha256 = "6186bd3425479202b3c5f7cb060ebda6a03e974647ffb093ec490cc9ee518fa8"
+targets = ["image", "ffmpeg"]
+
+[[extra_debs]]
+path = "debs/libdavs2-dev_1.7.1-1+dde1+deb14.20260831.b41cf11.843424c_arm64.deb"
+sha256 = "20cd89388fcb444ca2769ff2911a20508b6e1bcb249973f4a874e81b29b9ee0d"
+targets = ["ffmpeg"]
+
+[[extra_debs]]
+path = "debs/libuavs3d-dev_1.2.89+deb14.20260831.0e20d2c.c411a33.70accd8_arm64.deb"
+sha256 = "82394267f59ef8584e6b4f756ac2014e5a96993e15446c50ca6b99f4db04f876"
+targets = ["ffmpeg"]

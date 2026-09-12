@@ -23,7 +23,7 @@ layout     = "combined"
 # first boot grows the partition to fill the card regardless.
 image_size = "2G"
 
-# Re-assessed over the v7.2 kernel; see asus-c201/mainline-forky for the delta.
+# Re-assessed over the v7.2 generation; see asus-c201/mainline-forky for the delta.
 # Nothing it moves is firmware-coupled, so the libreboot opt-in does not change it.
 [support]
 status = "expected"

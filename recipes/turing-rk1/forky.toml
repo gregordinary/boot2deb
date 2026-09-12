@@ -19,9 +19,10 @@ features   = []                          # base: accel kernel, no media userspac
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
-# This pin has not been on the board -- the last one that booted was v7.1.1 -- and
-# v7.2 is a .0 release, so it carries no stable point release yet. What the move from
-# v7.1.7 changes, on the paths this image runs:
+# This pin has not been on the board -- the last one that booted was v7.1.1. The pin is
+# v7.2.2, the current stable point release; 7.2 -> 7.2.2 touches no Rockchip driver, no
+# device tree and no defconfig, so what follows is written against the generation. What
+# the move from v7.1.7 changes, on the paths this image runs:
 #
 # The patch series changes shape under it. 050 retires: the Verisilicon IOMMU that
 # fronts the AV1 decoder is in the tree from 7.2, in a copy two cleanups newer than

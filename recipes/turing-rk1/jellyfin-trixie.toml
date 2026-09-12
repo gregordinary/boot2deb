@@ -15,7 +15,7 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 
 # The suite sibling of turing-rk1/jellyfin-forky and under the same bring-up gate:
 # the transcode path this recipe exists to serve has not been exercised through
-# Jellyfin on either suite. Re-assessed over the v7.2 kernel with its forky sibling.
+# Jellyfin on either suite. Re-assessed over the v7.2 generation with its forky sibling.
 [support]
 status = "experimental"
 date   = "2026-08-21"

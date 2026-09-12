@@ -1,0 +1,76 @@
+# features/avs-decode.toml — decode AVS2 and AVS3 in this image's FFmpeg.
+#
+# AVS2 (GB/T 33475.2) and AVS3 (GY/T 368) are China's national video codecs. No
+# Rockchip accelerator here decodes either — there is no V4L2 route to them on any
+# of these parts — so this is CPU decode, and the reason it is a feature rather
+# than part of the base build is that the libraries are not in Debian: they arrive
+# as pinned `.deb`s from `debs/`, and an image that has no use for the codecs
+# should not carry them.
+#
+# What that costs is measured. AVS2 decodes 1080p at 49.2 fps on demanding
+# content, taking 2.9 of the RK1's eight cores at realtime; AVS3 reaches 113.3 fps
+# for 1.3 cores, which is what software HEVC costs. Both are bit-exact against
+# their encoders' own reconstruction. 2160p AVS2 is out of reach — 15.6 fps on all
+# eight cores, wanting 10.4 cores' worth — which is why the caveat below states
+# the ceiling as 1080p rather than leaving it implied.
+description = "Decode AVS2 and AVS3 in software (libdavs2, libuavs3d)"
+
+# There has to be an FFmpeg to configure against these libraries, and it has to be
+# one this repo builds — the flags reach the ffmpeg stage's `./configure`, so a
+# selection with no FFmpeg provider is a resolution error rather than two flags
+# nobody passes. Named as a capability so it works against any provider.
+requires_capability = ["ffmpeg"]
+
+# The vendored `.deb`s are arm64 builds. Nothing about the codecs is
+# architecture-specific -- the `avs-debian` recipe builds amd64 as happily -- but a
+# pin is a pin, and the ones here are what is on hand.
+requires_arch = ["arm64"]
+
+caveats = [
+  "AVS2 and AVS3 decode on the CPU. Neither the RK3588's nor the RK3576's video decoder has an AVS path in any driver, mainline or vendor, so these codecs get no hardware assistance at all and no `-hwaccel` reaches them.",
+  "AVS2 is a 1080p capability on this hardware, not a 2160p one. A demanding 1080p AVS2 stream decodes at 49.2 fps and occupies 2.9 of eight cores at realtime, leaving room for one such stream and little else; 2160p AVS2 reaches 15.6 fps with all eight cores busy, so it does not play. AVS3 is much cheaper -- 113.3 fps at 1080p for 1.3 cores, about what software HEVC costs.",
+  "Decode only, in both codecs. FFmpeg has an AVS3 encoder wrapper for no library that exists here and none at all for AVS2, so nothing in this image encodes either format.",
+]
+
+# The libraries the ffmpeg build links, and the flags that compile it against
+# them. `links` is the runtime library then its `-dev`, in that order, the same
+# contract a compiled userspace tree carries: the `-dev` alone would give
+# `./configure` headers and a `.pc` file with no `libdavs2.so` to link and no
+# `shlibs` for `dpkg-shlibdeps` to read, and the produced deb would then declare
+# no dependency on the library it links.
+[[ffmpeg_libs]]
+flag  = "--enable-libdavs2"
+links = ["libdavs2-16", "libdavs2-dev"]
+
+[[ffmpeg_libs]]
+flag  = "--enable-libuavs3d"
+links = ["libuavs3d1", "libuavs3d-dev"]
+
+# The bytes behind those names. Provenance, licences and the upstream pins are in
+# `debs/README.md`; here is only where each file goes.
+#
+# The runtime libraries reach both the ffmpeg build root and the image: the build
+# needs them to link and to read their `shlibs`, and the image needs them because
+# `ffmpeg-rk` ends up depending on them. Nothing names them for install -- that
+# dependency does, once the bytes are in the local apt repo for the solve to find.
+[[extra_debs]]
+path    = "debs/libdavs2-16_1.7.1-1+dde1+deb14.20260831.b41cf11.843424c_arm64.deb"
+sha256  = "18c079694fd03e7a55c8291508a6ce1b66b074d80062c69d815c1b32b3263484"
+targets = ["image", "ffmpeg"]
+
+[[extra_debs]]
+path    = "debs/libuavs3d1_1.2.89+deb14.20260831.0e20d2c.c411a33.70accd8_arm64.deb"
+sha256  = "6186bd3425479202b3c5f7cb060ebda6a03e974647ffb093ec490cc9ee518fa8"
+targets = ["image", "ffmpeg"]
+
+# The `-dev` halves are build inputs and stop at the ffmpeg stage. A `-dev`
+# package in the image would be headers nothing on the device compiles against.
+[[extra_debs]]
+path    = "debs/libdavs2-dev_1.7.1-1+dde1+deb14.20260831.b41cf11.843424c_arm64.deb"
+sha256  = "20cd89388fcb444ca2769ff2911a20508b6e1bcb249973f4a874e81b29b9ee0d"
+targets = ["ffmpeg"]
+
+[[extra_debs]]
+path    = "debs/libuavs3d-dev_1.2.89+deb14.20260831.0e20d2c.c411a33.70accd8_arm64.deb"
+sha256  = "82394267f59ef8584e6b4f756ac2014e5a96993e15446c50ca6b99f4db04f876"
+targets = ["ffmpeg"]

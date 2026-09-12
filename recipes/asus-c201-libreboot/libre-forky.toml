@@ -25,9 +25,10 @@ layout     = "combined"
 # and first boot grows the partition to fill the card regardless.
 image_size = "2G"
 
-# Assessed over the same v7.2 pin as asus-c201/libre-forky; see that recipe for why
-# the deblobbed tree does not move this board. Neither opt-in — the firmware or the
-# kernel — touches the other's evidence, so this stands where its two parents do.
+# Assessed over the same v7.2-generation pin as asus-c201/libre-forky; see that
+# recipe for why the deblobbed tree does not move this board. Neither opt-in — the
+# firmware or the kernel — touches the other's evidence, so this stands where its
+# two parents do.
 [support]
 status = "expected"
 date   = "2026-08-21"
