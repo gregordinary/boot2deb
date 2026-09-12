@@ -11,7 +11,7 @@ commit = "b270e5a794f7c7d64ae3dd63f21f350ab0929ff6"
 series = ["rk3288-fixes"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "9a3a33bd18887a6bf243bc1d32e838271f46e12a"
+commit = "6e886797a2122254db2e24875ee6645498f501cd"
 
 [rootfs]
 suite = "forky"

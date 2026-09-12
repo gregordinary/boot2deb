@@ -134,7 +134,7 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | S/PDIF (optical) | works |
 | Analog audio (3.5 mm) | fixed in tree — the DAC is on `sdo2`; end-to-end confirmation on a shipped image still owed |
 | HW video decode, HEVC | works — 1080p and 4K on the VDPU383, bit-exact against software |
-| HW video decode, H.264 | decodes, but not reliably — see below before using it |
+| HW video decode, H.264 | works — a silicon power-up erratum exists, and the shipped kernel works around it; see below |
 | HW video encode | no mainline driver |
 | RGA 2D accelerator | works — both RGA2 cores, over DMA-BUF only; see below |
 | SD card | absent — the slot is depopulated |
@@ -213,23 +213,29 @@ HEVC runs at real time for about 1/130th of the CPU.
 So anything that consumes the output has to speak DMA-BUF — a KMS plane, a GL or Vulkan
 importer, or librga. A filter chain that cannot takes the download and the loss with it.
 
-### H.264 decode is not reliable on this SoC
+### H.264 decode: a power-up erratum, worked around in the shipped kernel
 
-HEVC is bit-exact against the software decoder on every run. **H.264 is not**: roughly
-one decode session in three to six comes out visibly wrong, and when it does the whole
-session is wrong — it diverges from the first frame at about 17 dB PSNR rather than
-glitching in places. Re-running the same file usually succeeds, which is what makes it
-easy to miss.
+This SoC's decoder has a silicon erratum: whether hardware H.264 comes up correct is
+decided when the block's power domain powers up. Unwarmed, roughly one power-up in
+three comes up bad (634 of 2000 measured power-ups; 1080p and 4K indistinguishable),
+the draw is independent every time, and every H.264 decode made on a bad power-up is
+corrupt from the first frame — about 17 dB PSNR, one row in eight of each plane wrong,
+spread across the picture by motion compensation. It is specific to this decoder
+generation; the same clips on an RK3588 are correct in every session.
 
-The fault is latched when the decoder powers up, not accumulated during a decode, so no
-warm-up or sacrificial first frame avoids it; holding the block resumed across a batch
-is clean, and letting it power-gate between decodes is not. It is specific to this
-SoC's decoder generation — the same clips on an RK3588 are correct in every session.
+The shipped kernel works around it by decoding a canned 2x2 H.264 frame on the block
+at every runtime resume, before any real decode of that power cycle can run. Measured
+on this board: 0 of 400 power-ups corrupt against an interleaved control's 128 of 400,
+a further 0 of 200 alternating 1080p and 4K on the shipped kernel, and the warm-up
+holds across system sleep as well as runtime PM. If the warm-up ever fails, the driver
+says so in dmesg (`vdpu383 warm-up job timed out`, or `... not ready`), and H.264
+decoded on that power cycle is suspect.
 
-Until it is fixed, do not rely on hardware H.264 here. The software decoder is correct
-and quick enough on eight cores — about 160 fps at 1080p and 40 at 4K — and HEVC in
-hardware is unaffected. This is stated as a caveat on the SoC, so it prints at the end
-of any build for this board and appears in the
+HEVC is unaffected either way — bit-exact against software on every run. A kernel
+*without* the work-around should not be relied on for hardware H.264 on this SoC; the
+software decoder is correct and quick enough on eight cores (about 160 fps at 1080p,
+40 at 4K). All of this is stated as a caveat on the SoC, so it prints at the end of
+any build for this board and appears in the
 [support matrix](../reference/support-matrix.md#caveats).
 
 ### RGA: pass it DMA-BUF file descriptors
@@ -255,9 +261,14 @@ removed is a permissions problem rather than a library bug.
 10-bit content decodes in hardware, but the VDPU383 writes `NV15` — packed 10-bit 4:2:0
 — and nothing downstream in this image can take it. Vulkan has no such format, and
 neither Mesa nor ffmpeg's filters can import it. A 10-bit transcode therefore converts
-on the CPU. RGA can convert `NV15` to `P010` for a program that drives it directly, and
-the display controller scans `NV15` out unconverted, so playback straight to a KMS plane
-is unaffected.
+on the CPU. RGA does not close the gap: this SoC has RGA2 cores only, which take `NV15`
+in but write no 10-bit format out — `P010` output is an RGA3 capability, and there is
+no RGA3 here — so a hardware 10-bit-to-10-bit conversion does not exist on this part,
+structurally. The VDPP block this SoC does carry is not a way round it either: its
+pixel path takes `NV12` or `NV21` and nothing else, with a two-bit format field that
+has no bit-depth selector at all, and the 10-bit formats it does name feed a histogram
+engine that produces statistics rather than a picture. The display controller scans
+`NV15` out unconverted, so playback straight to a KMS plane is unaffected.
 
 ## HDMI-CEC
 

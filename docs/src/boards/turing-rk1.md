@@ -48,8 +48,10 @@ are about what reaches FFmpeg rather than about code quality:
   break when multi-core scheduling is added later. The vendor driver schedules across
   all three.
 - **10-bit.** The in-tree driver implements scaling and colour conversion only; 10-bit
-  YUV is on its own list of what is not done yet. A 10-bit HEVC decode on this hardware
-  produces NV15, and converting that is the one job nothing else on the board does.
+  YUV is on its own list of what is not done yet. A 10-bit decode on this hardware
+  produces NV15, and RGA is the only block that converts it without a trip through
+  system memory — see [10-bit, and why `NV15` is the whole
+  story](#10-bit-and-why-nv15-is-the-whole-story).
 
 If you want a kernel with no out-of-tree code and can live without the FFmpeg filter
 path, the in-tree driver is a supported thing to switch to: unset
@@ -397,15 +399,272 @@ ffmpeg-rk -hide_banner -encoders | grep rkmpp      # h264_rkmpp, hevc_rkmpp
 
 Hardware **decode** is reached with `-hwaccel v4l2request`, not with the `*_rkmpp`
 decoders — those are compiled in but do not open on a mainline kernel, where `rkvdec`
-is a V4L2 stateless driver rather than an MPP service. A transcode that scales looks
-like this, and scales on the CPU:
+is a V4L2 stateless driver rather than an MPP service.
+
+A transcode that stays in hardware from decode through scale to encode names an RKMPP
+device for the RGA filters to allocate from, which a `v4l2request` chain does not supply
+on its own:
 
 ```sh
-ffmpeg-rk -hwaccel v4l2request -i in.mkv \
-          -vf "hwdownload,format=nv12,scale=1280:720" \
+ffmpeg-rk -init_hw_device rkmpp=rk -filter_hw_device rk \
+          -hwaccel v4l2request -hwaccel_output_format drm_prime -i in.mkv \
+          -vf "scale_rkrga=w=1280:h=720:format=nv12" \
           -c:v hevc_rkmpp out.mp4
 ```
 
-Both of those limits are stated as caveats on the `media-accel-rockchip` feature, so
-they print at the end of a build of any recipe composing it; see
-[Support matrix](../reference/support-matrix.md#caveats).
+Without `-init_hw_device rkmpp=rk -filter_hw_device rk` the filter fails with `No RKMPP
+hardware context provided`, which reads like a frame-format problem and is not one.
+
+Both of those are stated as caveats on the `media-accel-rockchip` feature, so they print
+at the end of a build of any recipe composing it; see
+[Support matrix](../reference/support-matrix.md#caveats). What each block can actually
+decode and encode is tabulated under [What the hardware decodes and
+encodes](#what-the-hardware-decodes-and-encodes).
+
+## What the hardware decodes and encodes
+
+Three hardware blocks behind two decode drivers, plus one encoder. The table is what the
+kernel this image builds actually offers; whether a given codec has been *validated* on
+this board is a different question, answered by [`boot2deb
+support-matrix`](../reference/support-matrix.md).
+
+### Decode
+
+| Codec | Block / node | 8-bit | 10-bit | Notes |
+|---|---|---|---|---|
+| HEVC | `rkvdec` VDPU381 | `NV12` | `NV15` | 4:2:0; two cores, one `/dev/video0` |
+| H.264 | `rkvdec` VDPU381 | `NV12`, `NV16` | `NV15`, `NV20` | 4:2:0 and 4:2:2 |
+| VP9 | `rkvdec` VDPU381 | `NV12` (profile 0) | `NV15` (profile 2) | profiles 1 and 3 are 4:2:2/4:4:4, which the hardware cannot do |
+| AV1 | Hantro VPU981 | `NV12` | `NV15`, `P010` | to 8192x4352; decodes to a 4x4-tiled buffer and post-processes out |
+| VP8 | Hantro VDPU2 | `NV12` | — | |
+| MPEG-2 | Hantro VDPU2 | `NV12` | — | 1080p ceiling; progressive bit-exact, interlaced output diverges slightly |
+
+Hantro's VDPU2 node also advertises H.264, at a 1080p ceiling and 8-bit only. `rkvdec`'s
+is the one to use — it is the newer block, goes to 10-bit, and has two cores. Both score
+identically on conformance (JVT-AVC_V1 129/135, the same six failures).
+
+Conformance, measured on this board against the ITU/ISO suites with the software decoder
+as control:
+
+- **HEVC** (JCT-VC-HEVC_V1): **146/147**; the one failure is unequal luma/chroma bit
+  depth, which software fails too. A stream that keeps its reference picture sets in the
+  SPS needs the `EXT_SPS_ST_RPS`/`EXT_SPS_LT_RPS` controls filled — `ffmpeg-rk` carries
+  the patch that does (`media-accel/ffmpeg/0016`), and with it the ffmpeg harness
+  reaches its own software ceiling (141/147); without it such streams (HM-encoded
+  material, not x265 output) decode against wrong references.
+- **H.264** (JVT-AVC_V1): **129/135** on either decoder. The failures are flexible
+  macroblock ordering and SP slices, which no decoder here does, and one
+  left/top-crop-offset vector. FRExt (JVT-FR-EXT): **65/69** — 4:2:2 at 8- and 10-bit
+  (`NV16`/`NV20`) decode correctly; the failures are 4:0:0 monochrome and MBAFF 4:2:2.
+- **VP9** (VP9-TEST-VECTORS): **224/305** driver-attributable, the upstream series'
+  exact number; the failure classes are sub-64x64 frames, mid-stream resolution
+  changes, and chroma formats the hardware lacks.
+- **VP8** (VP8-TEST-VECTORS): **59/61**, identical to the software score — zero
+  hardware-attributable failures.
+- **MPEG-2** (MPEG2_VIDEO-MAIN): progressive streams are bit-exact; interlaced streams
+  diverge slightly (about 57–60 dB against the reference, accumulating over frames) on
+  both the ffmpeg and GStreamer userspaces, so the divergence is the driver's.
+  MPEG-1-syntax streams do not reach the stateless path at all.
+
+The `*_rkmpp` decoders are compiled into `ffmpeg-rk` but never open — MPP finds no decode
+client on a mainline kernel. Decode is `-hwaccel v4l2request`, for every codec above.
+
+**AVS2 and AVS3 decode on the CPU, and only with the `avs-decode` feature.** The
+silicon has no V4L2 route to either codec, so there is nothing to accelerate; what the
+feature adds is `libdavs2` and `libuavs3d`, which Debian does not package and which
+`ffmpeg-rk` is otherwise not configured against. Without it such a stream demuxes — the
+`avs2` and `avs3` demuxers are always present — and then finds no decoder. The `avs` and
+`cavs` entries a `-decoders` listing shows are a 1990s game FMV format and AVS1-P2
+JiZhun; only AVS1 decodes without the feature.
+
+Measured on this board, it is a 1080p capability. A demanding 1080p AVS2 stream decodes
+at 49.2 fps and occupies 2.9 of the eight cores at realtime; 2160p AVS2 reaches 15.6 fps
+with all eight busy, wanting 10.4 cores' worth, so it does not play at any thread count.
+AVS3 is much cheaper — 113.3 fps at 1080p for 1.3 cores, about what software HEVC costs.
+Both are bit-exact against their encoders' own reconstruction. Neither direction
+encodes: FFmpeg has no AVS2 encoder wrapper at all, and its AVS3 one is for a library
+this image does not carry.
+
+```sh
+boot2deb build turing-rk1/forky+media-accel-rockchip+avs-decode
+```
+
+### Encode
+
+| Codec | Block | Depth | Reached as |
+|---|---|---|---|
+| H.264 | VEPU580 | 8-bit | `-c:v h264_rkmpp` |
+| HEVC | VEPU580 | 8-bit | `-c:v hevc_rkmpp` |
+| JPEG | VEPU121 | 8-bit | `-c:v mjpeg_v4l2m2m` |
+
+H.264 and HEVC encode is the one part of the stack that does go through MPP, over the
+vendor `/dev/mpp_service` the `060` patch adds.
+
+The JPEG encoder is a separate mainline V4L2 M2M device (`/dev/video2`), and it takes a
+different input set from the VEPU580: `yuv420p`, `nv12`, `yuyv422` or `uyvy422`, no
+`drm_prime`. Pick the quality with `-quality` (5–100, larger is better) or with `-q:v`,
+which takes the same percentage — note that is the **opposite** of the software `mjpeg`
+encoder, where `-q:v` is a quantiser and lower means better, so `-q:v 5` here asks for
+5% quality rather than near-lossless. Leaving both off keeps the driver's default of 50,
+which lands a 1080p frame at 116 KB and 40.6 dB.
+
+```sh
+ffmpeg-rk -i input.mkv -frames:v 1 -c:v mjpeg_v4l2m2m -quality 80 -update 1 out.jpg
+```
+
+Two things to expect. **What it buys is CPU, not speed.** It spends 4.9 CPU-seconds per
+300 1080p frames — a fixed-function cost, steady across content, most of what is left
+being the copy of each frame into the V4L2 buffer — against 8.1 for a single-threaded
+software encode of ordinary content and nearer 12 on high-detail material. But software
+`mjpeg` threads across all eight cores while this path submits serially, so a 1080p
+batch finishes about 2.4x *slower* in elapsed time for roughly half the CPU. That is
+what you want for trickplay or snapshots running beside a transcode, and not what you
+want if throughput is the goal. And at matched quality its files run 7–30% larger than
+the software encoder's, which uses optimised Huffman tables where the hardware has fixed
+ones.
+
+It encodes up to 8176x8176, which is 511 macroblocks in each axis — the most the
+hardware's nine-bit dimension registers hold, and the reason kernel patch `085` corrects
+an advertised maximum of 8192 that produced a JPEG whose header said 0x0, silently, in
+GStreamer as well as FFmpeg. Widths are rounded up to a multiple of 4 (854 becomes 856)
+and the encoder says so.
+
+The silicon has four of these cores; the driver registers the first and logs `missing
+multi-core support, ignoring this instance` for the other three, so the limit is
+throughput, not capability.
+
+### Filtering
+
+RGA does scale, colour conversion and alpha blending across three cores, as
+`scale_rkrga`, `vpp_rkrga` and `overlay_rkrga`. Vulkan filters are available too when the
+`vulkan` feature is selected, and `scale_vulkan` is the faster of the two for 8-bit work.
+
+RGA is the only one of the two that handles 10-bit, because Vulkan cannot import `NV15`
+at all. `overlay_rkrga` composites BGRA straight over a 10-bit decoded frame with no
+scale stage in front — subtitle burn-in over 1080p HDR runs at 63.7 fps, and over 4K at
+19.1 fps. The RGA filters need the RKMPP device named explicitly when the frames come
+from `-hwaccel v4l2request`: pass `-init_hw_device rkmpp=rk -filter_hw_device rk`, or
+they fail to configure with `No RKMPP hardware context provided`.
+
+There is no hardware deinterlacer: RGA does not deinterlace, and `bwdif_vulkan`,
+while it produces correct fields, costs the same CPU as the CPU filter and a third of
+its throughput once the upload/download round-trips are paid (15 fps against 110 fps
+at 1080i on this box). Deinterlace on the CPU with `bwdif`, and budget for it: a
+hardware-decoded 1080i to 1080p60 transcode costs 2.8 of the 8 cores at realtime, where
+the same transcode without deinterlacing costs 0.4. `bwdif=mode=send_frame` halves that
+by emitting 30p instead of 60p. Standard-definition interlaced content is free — 576i to
+576p50 runs at 12x realtime, about a fifth of a core.
+
+### 10-bit, and why `NV15` is the whole story
+
+Every 10-bit decode on this SoC produces **`NV15`** — packed 4:2:0, four samples in five
+bytes, no padding. `rkvdec` declares no `P010` at all and cannot be asked for one, because
+the hardware writes packed. So anything that wants a 10-bit frame has to consume `NV15`,
+and exactly two things can:
+
+- **RGA**, which converts it in hardware on the way out. This is the cheapest route and
+  the only one that keeps the frame in hardware end to end.
+- **`hwdownload`**, which brings it to system memory as a real `NV15` frame, where
+  `format=yuv420p10le` unpacks it in swscale. This is what lets a GPU tone mapper see a
+  hardware-decoded HDR frame:
+
+  ```sh
+  ffmpeg-rk -init_hw_device rkmpp=rk -filter_hw_device rk \
+            -hwaccel v4l2request -hwaccel_output_format drm_prime -i hdr.mkv \
+            -vf "scale_rkrga=w=1280:h=720,hwdownload,format=nv15,format=yuv420p10le,\
+  libplacebo=tonemapping=bt.2390:format=nv12:w=1280:h=720" \
+            -c:v hevc_rkmpp out.mp4
+  ```
+
+  Three things about that graph are load-bearing:
+
+  **Scale on RGA first.** The unpack is a serial CPU stage, so its cost follows the
+  frame size. Putting `scale_rkrga` in front hands swscale a 720p frame instead of a
+  1080p one, which is most of the difference in the table below. `scale_rkrga` keeps
+  `NV15` on the way out, so nothing is lost by doing it early.
+
+  **`format=nv15` right after `hwdownload` is required.** The download only offers the
+  frame's own format, so asking for `yuv420p10le` directly leaves the graph with no
+  viable target; convert in a second step. `hwmap` does not substitute for the download
+  here — deriving a Vulkan frames context from the mapped frame fails with `Unsupported
+  pixel format: nv15`.
+
+  **There is no `hwupload`, and that is deliberate.** A filtergraph carries one
+  `-filter_hw_device`; `scale_rkrga` needs the RKMPP one, and an explicit `hwupload`
+  into Vulkan would need the Vulkan one. They cannot both be satisfied —
+  `hwupload=derive_device=vulkan` from an RKMPP device is `ENOSYS`, and naming Vulkan
+  instead makes `scale_rkrga` fail with `No RKMPP hardware context provided`. The way
+  out is to drop the filter: given no Vulkan device, `libplacebo` creates its own and
+  does the upload and download itself, which leaves `-filter_hw_device` free for RGA.
+
+  Measured on this board, 1080p HDR10 to 720p SDR over 900 frames, `user+sys`:
+
+  | Route | CPU-s | fps |
+  |---|---:|---:|
+  | the chain above | **18.8** | **26.5** |
+  | same, but unpacking at 1080p with an explicit `hwupload` | 32.8 | 21.9 |
+  | software decode + `libplacebo` | 50.4 | 24.6 |
+  | floor: hardware decode + RGA scale, no tone mapping | 1.8 | 335.2 |
+
+  So the hardware path costs about a third of the CPU of software decode *and* runs
+  faster. At 4K to 1080p the same chain is 12.5 CPU-s at 12.1 fps against 56.9 at 9.9 —
+  under a quarter of the CPU — though 4K tone mapping is still short of realtime. The
+  floor row is the point worth remembering: tone mapping, not decode, is what this
+  chain spends its time on.
+
+  Output correctness was checked, not assumed: this chain and the software-decode chain
+  produce **bit-identical** frames, so the `NV15` unpack is exact.
+
+**Vulkan cannot import `NV15`.** There is no VkFormat for a packed 10-bit 4:2:0 sample, so
+the swscale unpack above is not avoidable, and the upload must be `yuv420p10le` — uploading
+`p010le` produces a silently black frame rather than an error.
+
+Both consumers take every 10-bit decoder's output at any width: the kernel pads the
+decoded stride to 64 bytes on `rkvdec` (HEVC, H.264, VP9) and on the AV1 decoder
+alike, which is what RGA's importer requires. The AV1 decoder's format list does
+also offer `P010`, but nothing can reach it — the `v4l2request` hwaccel negotiates
+`NV15`, and `hwdownload,format=p010le` on an AV1 frame is refused. That costs
+nothing: P010 would spend 60% more write bandwidth per frame than NV15 for the same
+samples.
+
+### What the silicon has that this image does not drive
+
+The tables above are what runs. The RK3588 carries more, and knowing which gaps are
+whose saves chasing them:
+
+- **AVS2 decode** is in the datasheet's decoder line, and **MPEG-4 ASP / H.263
+  decode** is within the VDPU2-class block's reach. Neither has a V4L2 stateless
+  uAPI at all, so no driver alone could add them; only the vendor stack decodes
+  them in hardware. AVS2 and AVS3 are reachable in software with the `avs-decode`
+  feature, at the cost measured above. MPEG-1 is nominally a subset of the MPEG-2 silicon, but MPEG-1-syntax
+  streams never engage the stateless path in any userspace — software carries them,
+  cheaply.
+- **A dedicated JPEG decoder block** exists — the devicetree carries its clock and
+  QoS plumbing — with a mainline driver in flight upstream. It is a stateful V4L2
+  M2M device, so once it lands ffmpeg reaches it the same way the encoder above is
+  reached; nothing new is needed beyond a decoder counterpart to that wrapper.
+- **An IEP block** (the vendor kernels' hardware deinterlacer) has power-domain and
+  QoS plumbing in the mainline devicetree and no mainline driver. Deinterlacing
+  here is CPU `bwdif`, which the measurements above prefer over the Vulkan route
+  anyway — at a real cost in cores for HD, and none for SD.
+- **8K decode** is validated on this board for the `rkvdec` codecs: H.264, HEVC and
+  VP9 decode 7680x4320 bit-exact at 8 *and* 10 bits, and `hevc_rkmpp` encodes 8K
+  that decodes back cleanly. What made 10-bit look like a ceiling was the RCB SRAM
+  mapping kernel patch `082` fixes — the decoder's line buffers were mapped into
+  the DMA domain at an address the IOVA allocator did not know was taken, so a
+  workload whose cumulative demand reached it collided and fell back to software.
+  Three concurrent *8-bit* 8K streams hit the same address, which is what showed it
+  was never about bit depth. Patch `084` raises the AV1 decoder's own limit from
+  4096x2304 to 8192x4352 on the strength of that fix; AV1 above 4K has not yet been
+  exercised on the board.
+- **10-bit encode does not exist on this stack, or any other.** The VEPU580's own
+  vendor userspace maps every 10-bit input format to "unsupported", so the 8-bit
+  encode ceiling is structural — an HDR transcode tone-maps to SDR, which is what
+  the chain above is for. VC-1 decode is similar: silicon the vendor stack itself
+  declines to drive.
+- **There is no VP8, VP9 or AV1 encoder** in the silicon; H.264, HEVC and JPEG are
+  the complete hardware encode set.
+
+For the codecs a media library actually holds — H.264, HEVC, VP9, AV1, VP8, MPEG-2,
+at 8 and 10 bit — decode coverage on this image is complete, at conformance parity
+with each driver's upstream results.

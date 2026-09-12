@@ -39,11 +39,11 @@
     the largest single saving available on this board: the same transcode costs
     17.0 CPU-seconds. Jellyfin cannot emit that flag on its own, because
     HardwareAccelerationType is a closed enum with no v4l2request member.
-    `patches/jellyfin/0001` makes the rkmpp type emit it when the FFmpeg build
-    carries the hwaccel. With a server carrying that patch, fill this list with
-    the codecs rkvdec decodes on this SoC — h264, hevc, vp9 — and 10-bit content
-    keeps decoding in software on its own, because v4l2request cannot transfer
-    NV15 to system memory.
+    The `patches/jellyfin` series adds a v4l2request acceleration type and a
+    HardwareDecodingType field that pairs it with rkmpp encode. On a server
+    carrying it, set HardwareDecodingType to v4l2request and fill this list
+    with the codecs rkvdec decodes on this SoC — h264, hevc, vp9. The type
+    declines 10-bit content itself, so that keeps decoding in software.
   -->
   <HardwareDecodingCodecs />
 
