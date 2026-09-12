@@ -94,6 +94,15 @@ pub struct Feature {
     /// layers + features and de-duplicated by sha256 at resolution.
     #[serde(default)]
     pub extra_debs: Vec<crate::model::ExtraDeb>,
+    /// Libraries the ffmpeg build links that Debian does not carry, supplied by this
+    /// feature's [`extra_debs`](Feature::extra_debs) targeting the ffmpeg stage.
+    ///
+    /// Declared beside those pins rather than derived from them: a `.deb` file name
+    /// is not a package name, resolution is pure and cannot read a package's control
+    /// file, and the `./configure` flag is a fact about ffmpeg rather than about the
+    /// bytes. Unioned across features at resolution and read by the ffmpeg stage.
+    #[serde(default)]
+    pub ffmpeg_libs: Vec<crate::model::FfmpegLib>,
     /// Other features, by name, that cannot be combined with this one. The check
     /// is symmetric — resolution rejects a selection holding this feature and any
     /// it names, or that names it — so declaring the conflict on either side is
@@ -413,6 +422,7 @@ mod tests {
             requires_arch: vec![],
             apt_sources: vec![],
             extra_debs: vec![],
+            ffmpeg_libs: vec![],
             conflicts: conflicts.into_iter().map(String::from).collect(),
             provides: vec![],
             requires_capability: vec![],

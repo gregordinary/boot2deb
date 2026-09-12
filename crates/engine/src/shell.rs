@@ -427,6 +427,7 @@ fn layer_packages(
             ffmpeg::layer_packages(
                 trees,
                 build.image.as_ref().is_some_and(|i| i.ffmpeg_nonfree),
+                build.image.as_ref().map_or(&[][..], |i| &i.ffmpeg_libs),
             )
         }
         // Never layered — the packaging root's contents are fixed at bootstrap.
@@ -816,7 +817,7 @@ mod tests {
         );
         assert_eq!(
             layer(ShellStage::Ffmpeg),
-            ffmpeg::layer_packages(&trees, false)
+            ffmpeg::layer_packages(&trees, false, &[])
         );
         // The packaging root is never layered.
         assert!(layer(ShellStage::Packaging).is_empty());

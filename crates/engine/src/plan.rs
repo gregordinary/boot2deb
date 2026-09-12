@@ -355,6 +355,11 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
                         .is_some_and(|i| i.ffmpeg_nonfree),
                     patches: patch_series(dev, &ffmpeg_fp),
                     us_patches: patch_series(dev, &userspace_fp),
+                    libs: inputs
+                        .build
+                        .image
+                        .as_ref()
+                        .map_or(&[][..], |i| &i.ffmpeg_libs),
                 },
             )
         });

@@ -98,6 +98,13 @@ nonfree_firmware_packages = ["firmware-brcm80211"]
 
 exclude = ["dhcpcd"]
 
+# `audio` rides with alsa-utils above. /dev/snd/* is root:audio 0660, and logind's
+# `uaccess` ACL reaches only a seated session -- which covers someone at the laptop's
+# own keyboard but not one reached over SSH, and not `alsactl` restoring the mixer
+# outside a session at all. On boards whose whole audio story is a codec that has to
+# be unmuted at first boot, the group is what lets the operator do it without sudo.
+groups = ["audio"]
+
 # What no build on this silicon lifts. Rendered in the support matrix and printed at
 # the end of a build; the board layer adds what is true of one board rather than the
 # part.

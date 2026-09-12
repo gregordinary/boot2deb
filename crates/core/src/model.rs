@@ -555,6 +555,15 @@ pub struct SocLayer {
     /// RK1, whose accel userspace ships via features, not the SoC layer.
     #[serde(default)]
     pub packages: Vec<PackageEntry>,
+    /// Supplementary groups this SoC adds to the default account, unioned onto the
+    /// base set and every other layer's.
+    ///
+    /// Additive rather than an override because a group is a capability the silicon
+    /// gives every board on it: `audio` belongs here on a SoC whose layer also ships
+    /// the sound stack, so a board added later inherits it instead of restating it.
+    /// Only a recipe replaces the resolved set outright.
+    #[serde(default)]
+    pub groups: Vec<String>,
     /// Packages carrying **nonfree firmware** this SoC's hardware loads at runtime,
     /// separated from [`packages`](Self::packages) so a
     /// [`libre`](CompiledKernelDef::libre) build can drop exactly them and nothing
@@ -668,6 +677,15 @@ impl BootMethodLayer {
         }
     }
 
+    /// Supplementary groups this boot method adds to the default account, unioned
+    /// with every other layer's.
+    pub fn groups(&self) -> &[String] {
+        match self {
+            BootMethodLayer::RockchipRkbin(l) => &l.groups,
+            BootMethodLayer::Depthcharge(l) => &l.groups,
+        }
+    }
+
     /// Packages this boot method drops from the merged rootfs set, unioned with
     /// every other layer's `exclude` (exclude wins).
     pub fn exclude(&self) -> &[String] {
@@ -736,6 +754,11 @@ pub struct RockchipRkbinLayer {
     /// since the boot wiring is overlay files, not packages.
     #[serde(default)]
     pub packages: Vec<PackageEntry>,
+    /// Supplementary groups this boot method adds to the default account. Empty on
+    /// both methods: the boot wiring reaches no device the account opens. Present so
+    /// the merge has one shape across every layer that can hold packages.
+    #[serde(default)]
+    pub groups: Vec<String>,
     /// Packages this boot method drops from the merged rootfs set.
     #[serde(default)]
     pub exclude: Vec<String>,
@@ -813,6 +836,11 @@ pub struct DepthchargeLayer {
     /// through its `/etc/kernel/postinst.d` hook.
     #[serde(default)]
     pub packages: Vec<PackageEntry>,
+    /// Supplementary groups this boot method adds to the default account. Empty on
+    /// both methods: the boot wiring reaches no device the account opens. Present so
+    /// the merge has one shape across every layer that can hold packages.
+    #[serde(default)]
+    pub groups: Vec<String>,
     /// Packages this boot method drops from the merged rootfs set.
     #[serde(default)]
     pub exclude: Vec<String>,
@@ -1005,6 +1033,58 @@ pub struct ExtraDeb {
     /// at resolution (and re-checked in the engine), not at the parse boundary, so
     /// the failure carries the typed [`ConfigError::ExtraDebBadHash`] context.
     pub sha256: String,
+    /// Where these bytes are wanted. Defaults to [`ExtraDebTarget::Image`] alone —
+    /// the local apt repo the rootfs solves against.
+    ///
+    /// A deb a compile stage build-depends on names that stage instead of, or as
+    /// well as, the image: a `-dev` package belongs in the ffmpeg build root and
+    /// nowhere near the rootfs, while the runtime library it depends on belongs in
+    /// both. Listing the destinations rather than inferring them from the package
+    /// name keeps the two decisions separate, since a runtime library that is only
+    /// a build dependency is a real case too.
+    #[serde(
+        default = "ExtraDeb::default_targets",
+        skip_serializing_if = "ExtraDeb::targets_are_default"
+    )]
+    pub targets: Vec<ExtraDebTarget>,
+}
+
+/// A destination an [`ExtraDeb`]'s bytes are staged into.
+///
+/// Not a build stage in general: each variant is a place that resolves packages,
+/// and adding one means teaching that place to take a pinned deb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExtraDebTarget {
+    /// The image's local apt repo, which the rootfs solve resolves against.
+    Image,
+    /// The ffmpeg stage's build pool, which its build root resolves against
+    /// alongside the suite mirrors.
+    Ffmpeg,
+}
+
+/// One library the ffmpeg build links that Debian does not carry, supplied as
+/// pinned [`ExtraDeb`]s targeting [`ExtraDebTarget::Ffmpeg`].
+///
+/// The prebuilt counterpart of a [`UserspaceTree`] ffmpeg is configured against, and
+/// deliberately the same shape: a `./configure` flag and the runtime library plus its
+/// `-dev`, in that order. The ffmpeg stage reads both through the same helpers, so a
+/// library that is compiled here and one that arrives as bytes reach `./configure`,
+/// the build root and the produced deb's `Depends` by one path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FfmpegLib {
+    /// The `./configure` flag that compiles ffmpeg against this library, e.g.
+    /// `--enable-libdavs2`.
+    pub flag: String,
+    /// The runtime library package and its `-dev`, in that order — the same contract
+    /// as [`UserspaceTree::links`], and read by the same helpers.
+    ///
+    /// The first entry is what the produced `ffmpeg-rk` deb must end up depending on,
+    /// which is checked rather than assumed: a `-dev` alone gives the build root
+    /// headers and a `.pc` file with no `shlibs`, and the dependency is then dropped
+    /// silently instead of failing.
+    pub links: Vec<String>,
 }
 
 /// Where an [`ExtraDeb`]'s bytes come from — the validated single locator.
@@ -1017,6 +1097,21 @@ pub enum ExtraDebLocator<'a> {
 }
 
 impl ExtraDeb {
+    /// The default destination set: the image alone.
+    fn default_targets() -> Vec<ExtraDebTarget> {
+        vec![ExtraDebTarget::Image]
+    }
+
+    /// Whether [`targets`](Self::targets) is the default, so serialization omits it.
+    fn targets_are_default(targets: &[ExtraDebTarget]) -> bool {
+        targets == Self::default_targets()
+    }
+
+    /// Whether these bytes are wanted at `target`.
+    pub fn wanted_at(&self, target: ExtraDebTarget) -> bool {
+        self.targets.contains(&target)
+    }
+
     /// The single validated locator, or [`ConfigError::ExtraDebLocator`] if not
     /// exactly one of `url`/`path` is set.
     pub fn locator(&self) -> Result<ExtraDebLocator<'_>, ConfigError> {
@@ -1037,6 +1132,11 @@ impl ExtraDeb {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if let ExtraDebLocator::Path(rel) = self.locator()? {
             reject_unsafe_path(rel)?;
+        }
+        if self.targets.is_empty() {
+            return Err(ConfigError::ExtraDebNoTarget {
+                locator: self.locator_label(),
+            });
         }
         let ok = self.sha256.len() == 64
             && self
@@ -1338,6 +1438,14 @@ pub struct DeviceLayer {
     /// RK1. Accumulates across [`extends`](Self::extends).
     #[serde(default)]
     pub packages: Vec<PackageEntry>,
+    /// Supplementary groups this board adds to the default account, unioned onto the
+    /// base set and every other layer's.
+    ///
+    /// Where the SoC layer states what the silicon gives every board on it, this
+    /// states what one board's own hardware adds — a capture card, a codec the SoC
+    /// does not carry. Only a recipe replaces the resolved set outright.
+    #[serde(default)]
+    pub groups: Vec<String>,
     /// Packages carrying **nonfree firmware** this board's hardware loads at runtime,
     /// under the same contract as [`SocLayer::nonfree_firmware_packages`]: dropped
     /// on a [`libre`](CompiledKernelDef::libre) build, merged in place on any other.
@@ -1472,6 +1580,33 @@ pub struct BaseLayer {
     /// and becomes the console fallback, which is what makes a long one cost nothing.
     #[serde(default)]
     pub ssh_authorized_keys: Vec<String>,
+    /// Supplementary groups the default account is added to, beyond the login group
+    /// `useradd` derives.
+    ///
+    /// This is the account's standing hardware access: group membership lives in
+    /// `/etc/group`, which is why it is config here and not something a feature's
+    /// overlay could contribute — an overlay would replace the file the package
+    /// install just wrote. Defaults to `video` and `render`, the pair the SoC udev
+    /// rules key their device permissions on; a recipe overrides.
+    ///
+    /// Each name must exist on the target, and a name that does not fails the build
+    /// rather than being created: naming a group no package provides is a typo, not a
+    /// request. Validated by
+    /// [`check_group_name`](crate::resolve::check_group_name).
+    #[serde(default = "default_groups")]
+    pub groups: Vec<String>,
+}
+
+/// The supplementary groups a config root falls back to: `video` and `render`, the two
+/// Debian groups the SoC udev rules key their device permissions on. Without them the
+/// account cannot open a decoder, a DRM render node, or a DMA-BUF heap on any board
+/// here, so the default is the one that makes a booted image usable rather than an
+/// empty set.
+///
+/// `audio` is deliberately not here. It is a media-recipe concern, and a base image
+/// that ships no sound stack has no reason to hand out the group.
+fn default_groups() -> Vec<String> {
+    vec!["video".to_string(), "render".to_string()]
 }
 
 // ---------------------------------------------------------------------------
@@ -2092,6 +2227,12 @@ pub struct Recipe {
     /// an image you intend to hand to someone else authorize nobody.
     #[serde(default)]
     pub ssh_authorized_keys: Option<Vec<String>>,
+    /// Supplementary-group override; `None` → base `groups`. `Some` **replaces** the
+    /// base list, so a recipe that wants the base groups plus one names all of them —
+    /// which keeps the recipe a complete statement of what the account can reach
+    /// rather than a diff against a default that may move.
+    #[serde(default)]
+    pub groups: Option<Vec<String>>,
     /// Second disks this image mounts for data, kept whole across reimaging.
     ///
     /// Declared at the recipe rather than the device because populating a board's
@@ -2178,6 +2319,11 @@ pub struct Overrides {
     /// recipe rather than a flag: a key is written down so that every build of a point
     /// carries it, which a per-invocation override cannot express.
     pub ssh_authorized_keys: Option<Vec<String>>,
+    /// Override the default account's supplementary groups (`Some` replaces the base
+    /// list). Set from a recipe rather than a flag, for the same reason as the keys:
+    /// what hardware an image's operator can reach is a property of the build point,
+    /// not of the invocation that happened to produce it.
+    pub groups: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2684,6 +2830,11 @@ pub struct ResolvedImage {
     /// Resolution guarantees each entry is a single well-formed `authorized_keys` line
     /// carrying a public key ([`crate::authkeys::check_authorized_key`]).
     pub ssh_authorized_keys: Vec<String>,
+    /// Supplementary groups the default account is added to, in the order the config
+    /// named them and with duplicates removed. Resolution guarantees each is a name
+    /// `usermod` accepts and that the set is non-empty of nothing — an empty list is
+    /// legal and means the account gets its login group only.
+    pub groups: Vec<String>,
     /// Out-of-tree kernel-module sets, in the order the device named them: each
     /// `kmods/<name>.toml` loaded and validated, built against this build's kernel tree
     /// and staged into `/lib/modules/<kver>/updates/`. Empty for a board that carries
@@ -2734,6 +2885,16 @@ pub struct ResolvedImage {
     /// the lock; `build` materializes them into the local apt repo before the
     /// solve. Empty when no layer or feature adds one.
     pub extra_debs: Vec<ExtraDeb>,
+    /// Libraries the ffmpeg build links that Debian does not carry, unioned across
+    /// the selected features and de-duplicated by `flag`. Their bytes are the
+    /// [`extra_debs`](Self::extra_debs) targeting [`ExtraDebTarget::Ffmpeg`]; this is
+    /// what tells the stage which packages to layer and which flags to pass.
+    ///
+    /// Resolved rather than pinned: like
+    /// [`ffmpeg_nonfree`](Self::ffmpeg_nonfree) it is an axis of the build point that
+    /// the selected features decide, not a source the lock has to pin — the pins are
+    /// the debs' own hashes. Empty when no feature adds one.
+    pub ffmpeg_libs: Vec<FfmpegLib>,
     /// The layers' selftest expectations, one group per declaring layer in merge
     /// order — SoC, boot method, device, kernel, features (selection order), then
     /// each kmod. The rootfs stage writes each group as its own
@@ -2947,6 +3108,7 @@ mod tests {
             url: Some("https://x/a.deb".into()),
             path: None,
             sha256: hex64.clone(),
+            targets: vec![ExtraDebTarget::Image],
         };
         assert!(with_url.validate().is_ok());
         assert_eq!(
@@ -2957,6 +3119,7 @@ mod tests {
             url: None,
             path: Some("vendor/a.deb".into()),
             sha256: hex64.clone(),
+            targets: vec![ExtraDebTarget::Image],
         };
         assert_eq!(
             with_path.locator().unwrap(),
@@ -2968,6 +3131,7 @@ mod tests {
             url: None,
             path: None,
             sha256: hex64.clone(),
+            targets: vec![ExtraDebTarget::Image],
         };
         assert!(matches!(
             neither.validate(),
@@ -2977,6 +3141,7 @@ mod tests {
             url: Some("u".into()),
             path: Some("p".into()),
             sha256: hex64.clone(),
+            targets: vec![ExtraDebTarget::Image],
         };
         assert!(matches!(
             both.validate(),
@@ -2990,6 +3155,7 @@ mod tests {
                 url: None,
                 path: Some("p".into()),
                 sha256: bad.to_string(),
+                targets: vec![ExtraDebTarget::Image],
             };
             assert!(
                 matches!(d.validate(), Err(ConfigError::ExtraDebBadHash { .. })),
@@ -3008,6 +3174,7 @@ mod tests {
             url: None,
             path: Some(p.into()),
             sha256: hex64.clone(),
+            targets: vec![ExtraDebTarget::Image],
         };
         // Absolute paths and `..` traversal escape the config root and are rejected
         // before any read — an out-of-root file is not a valid deb source.

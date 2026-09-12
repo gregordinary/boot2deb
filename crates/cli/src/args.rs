@@ -1351,6 +1351,11 @@ impl From<OverrideArgs> for Overrides {
             // build of a point carries it, which a per-invocation flag cannot express —
             // and a flag on `resolve` would name a point `build` could not reach.
             ssh_authorized_keys: None,
+            // Config-only for the same reason, and one more: the resolved list is a
+            // union across the hardware layers, so a flag would have to say whether it
+            // added to that or replaced it. A recipe's `groups` replaces; there is no
+            // second spelling.
+            groups: None,
         }
     }
 }

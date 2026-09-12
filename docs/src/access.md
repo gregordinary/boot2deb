@@ -1,8 +1,8 @@
 # The account, sudo, and SSH keys
 
-Every image carries one account — `debian` — and three settings decide who can use it
-and what it costs them to become root. All three are config, resolved before the build
-and recorded in the image's provenance.
+Every image carries one account — `debian` — and four settings decide who can use it,
+what it costs them to become root, and what hardware they can reach. All four are
+config, resolved before the build.
 
 ## The knobs
 
@@ -11,6 +11,7 @@ and recorded in the image's provenance.
 | `sudo` | `base.toml` | `nopasswd` | `/etc/sudoers.d/debian` — whether `sudo` prompts |
 | `first_boot_password_length` | `base.toml` | `12` | length of the generated per-image password |
 | `ssh_authorized_keys` | `base.toml` | none | `~debian/.ssh/authorized_keys` |
+| `groups` | `base.toml` + the hardware layers | `video`, `render` | the account's supplementary groups |
 
 Each is overridable in a recipe. `resolve` and `doctor` additionally take `--sudo` and
 `--password-length`, so you can see what a choice resolves to before writing it down:
@@ -23,7 +24,41 @@ boot2deb resolve turing-rk1/forky --sudo password --password-length 16
 resolved against, so changing them means changing `base.toml` or the recipe. `resolve`
 prints the recipe to write, with the keys already filled in.
 
-`ssh_authorized_keys` has no flag at all, deliberately — see below.
+`ssh_authorized_keys` and `groups` have no flag at all, deliberately — see below.
+
+## Groups
+
+`groups` is what the account can reach in hardware. The SoC layers' udev rules set
+`GROUP=` on the V4L2 codecs, the DRM render nodes, the DMA-BUF heaps and the sound
+cards; a group absent from this list is a device the operator opens as root or not at
+all. `resolve` prints the resolved set:
+
+```
+groups       : video, render, audio
+```
+
+It is the one part of the account axis the **hardware layers contribute to**, because
+a group is a capability the silicon has rather than a policy about its operator. The
+resolved set is the union of `base.toml`, the SoC, the boot method and the device, in
+that order and de-duplicated — so `audio` sits on `socs/rk3576.toml` and
+`socs/rk3288.toml`, next to the `alsa-utils` that is the reason it is wanted, and every
+board on those SoCs inherits it without restating it.
+
+Why the group and not logind's `uaccess` ACL: that ACL reaches only a *seated* session,
+so it covers someone at the board's own keyboard and not one reached over SSH. On a
+headless board the group is the whole story — without it `aplay -l` reports no
+soundcards to `debian` and works only under `sudo`.
+
+A recipe **replaces** the resolved set rather than adding to it, so name the whole list:
+
+```toml
+groups = ["video", "render", "audio"]   # omit -> the layers' union
+```
+
+Replacing is what lets a recipe withhold access the layers would grant; `groups = []`
+leaves the account in its login group and nothing else. Every name must already exist
+on the target — one no installed package creates fails the build rather than being
+created, since that is always a typo.
 
 ## The password
 

@@ -853,6 +853,10 @@ fn customize_env(
             "B2D_AUTHORIZED_KEYS".into(),
             image.ssh_authorized_keys.join("\n"),
         ),
+        // Comma-separated, which is the form `usermod -aG` takes. Resolution
+        // guarantees no entry holds a comma, so the join is unambiguous; empty when
+        // the account is to get its login group and nothing else.
+        ("B2D_GROUPS".into(), image.groups.join(",")),
         ("B2D_LOCAL_REPO".into(), LOCAL_REPO_NAME.to_string()),
         (
             "B2D_INITRAMFS_STUB".into(),
@@ -1459,7 +1463,14 @@ mod tests {
         assert!(!CUSTOMIZE.contains("chpasswd"));
         assert!(!CUSTOMIZE.contains("passwd -e"));
         assert!(CUSTOMIZE.contains(r#"useradd -m -s /bin/bash "$B2D_USER""#));
-        assert!(CUSTOMIZE.contains(r#"usermod -aG video,render "$B2D_USER""#));
+        // The groups are resolved config, so the script names the variable and never
+        // a group: a build that wants `audio` must be able to get it without this
+        // constant changing.
+        assert!(CUSTOMIZE.contains(r#"usermod -aG "$B2D_GROUPS" "$B2D_USER""#));
+        assert!(
+            !CUSTOMIZE.contains("video,render"),
+            "the group list is config, not a constant in the script"
+        );
         // The build-time-only local `.deb` repository's apt source is dropped: its
         // `file://` temp dir is gone by the time the image runs, so leaving it would
         // fail every on-device `apt-get update`.

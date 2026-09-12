@@ -1880,6 +1880,7 @@ pub(crate) mod tests {
             url: Some("https://vendor.example/foo_1.2_arm64.deb".into()),
             path: None,
             sha256: "cc".repeat(32),
+            targets: vec![crate::model::ExtraDebTarget::Image],
         }];
         let build = sample_build();
         assemble(
@@ -2311,6 +2312,7 @@ pub(crate) mod tests {
             url: Some("https://vendor.example/x_1_arm64.deb".into()),
             path: None,
             sha256: "aa".repeat(32),
+            targets: vec![crate::model::ExtraDebTarget::Image],
         }];
         let full = assembled(
             sample_build(),
@@ -2712,6 +2714,7 @@ pub(crate) mod tests {
             url: Some("https://vendor.example/x_1_arm64.deb".into()),
             path: None,
             sha256: "aa".repeat(32), // a well-formed 64-char hex pin
+            targets: vec![crate::model::ExtraDebTarget::Image],
         }];
         let facts = BuildFacts {
             restored_nodes: &[],

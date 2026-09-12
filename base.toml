@@ -134,6 +134,25 @@ first_boot_password_length = 12
 # Authorize the *public* key — the `.pub` file. A private key here is refused.
 ssh_authorized_keys = []
 
+# Supplementary groups the default account joins, on top of the login group `useradd`
+# derives. This is the whole of what the account can reach in hardware: the SoC layers'
+# udev rules set `GROUP=` on the V4L2 codecs, the DRM render nodes and the DMA-BUF
+# heaps, and a name absent here is a device the operator opens as root or not at all.
+#
+# `video` and `render` are the pair those rules key on, so they are the default. Group
+# membership lives in /etc/group, which the package install writes — so this cannot be
+# an overlay file, and a feature cannot contribute one either; it is config or it is a
+# manual `usermod` on a booted board.
+#
+# A recipe **replaces** this list rather than adding to it, so name all of them:
+#
+#   groups = ["video", "render", "audio"]
+#
+# `audio` is the usual addition and is not the default — a base image ships no sound
+# stack, and the recipes that do (the media-accel ones) name it themselves. Each group
+# must already exist on the target; one that does not fails the build.
+groups = ["video", "render"]
+
 # --- Packages -----------------------------------------------------------------
 # The base system is Debian's `required` + `important` priority set; everything below
 # stacks onto it. Two properties of the install decide what has to be named here:

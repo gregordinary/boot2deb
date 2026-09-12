@@ -408,6 +408,17 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             "access       : sudo {}, {}-char first-boot password, {keys}",
             i.sudo, i.first_boot_password_length,
         );
+        // The groups are the account's hardware reach, and unlike the keys they are a
+        // union across the layers rather than something the reader can find in one
+        // file — so print the resolved set itself, not a count.
+        println!(
+            "groups       : {}",
+            if i.groups.is_empty() {
+                "login group only".to_string()
+            } else {
+                i.groups.join(", ")
+            }
+        );
         println!("dtb          : {}", b.kernel_dtb);
         // Only a board carrying its own (not-yet-upstream) device tree has sources to
         // show; an upstream-DTB board would print an empty line for nothing.

@@ -20,7 +20,7 @@ use crate::render::{emit_artifact, note, print_event_at, print_event_json, short
 use crate::timing::Timeline;
 use crate::workdir::mark_work_dir;
 use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
-use boot2deb_core::model::{Overrides, ResolvedBoot, ResolvedBuild};
+use boot2deb_core::model::{ExtraDebTarget, Overrides, ResolvedBoot, ResolvedBuild};
 use boot2deb_core::series::Scope;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
 use boot2deb_engine::build::{ffmpeg, kernel, kmod, uboot, userspace, BuildEnv};
@@ -737,6 +737,14 @@ pub(crate) fn run(
                     .ffmpeg_base_src
                     .clone()
                     .unwrap_or_else(|| ff.base.git.clone());
+                // The libraries ffmpeg links that Debian does not carry arrive as
+                // pinned bytes rather than as a compiled tree, so they are materialized
+                // here — verified against the lock's hashes — and handed to the stage
+                // for its build pool. Materialized in the stage that consumes them,
+                // not once for the build: the rootfs takes a different share of the
+                // same set, and a stage that runs alone must still get its own.
+                let ffmpeg_extra_debs =
+                    materialize_extra_debs(&lock, root, ExtraDebTarget::Ffmpeg, &sink)?;
                 // ffmpeg build-depends on the userspace .debs; they are staged in
                 // out_dir by the userspace stage (run it first, or with --stage all).
                 let opts = ffmpeg::FfmpegOptions {
@@ -753,6 +761,8 @@ pub(crate) fn run(
                     work_dir: &work_dir,
                     out_dir: &out_dir,
                     store: artifact_store.as_deref(),
+                    libs: &ib.image.ffmpeg_libs,
+                    extra_debs: &ffmpeg_extra_debs,
                 };
                 let artifacts = ffmpeg::build_ffmpeg(
                     &lock,
@@ -1488,16 +1498,12 @@ fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
     // changed extra_deb re-bootstraps. The local repo is the trust boundary for
     // these unsigned debs; a package set entry (or another package's
     // dependency) is what actually installs them.
-    if !s.lock.extra_debs.is_empty() {
-        let extra = {
-            let step = Step::start(s.sink, "extra-debs");
-            let store = DebStore::open(&extra_debs_store(s.root))?;
-            let paths = extradebs::materialize(s.root, &s.lock.extra_debs, &store, &step)?;
-            step.finish();
-            paths
-        };
-        repo_debs.extend(extra);
-    }
+    repo_debs.extend(materialize_extra_debs(
+        s.lock,
+        s.root,
+        ExtraDebTarget::Image,
+        s.sink,
+    )?);
     // Scope the local repo to the kernel and modules this build produced. The repo is
     // `--multiversion` and both rootfs backends resolve a bare package name
     // highest-version-wins, so a stale higher-versioned deb an earlier build left in
@@ -1761,4 +1767,33 @@ fn publish_root_manifest(
             .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
             .count(),
     })
+}
+
+/// Materialize the locked `extra_debs` that `target` wants, verified against their
+/// pinned hashes, and return their paths in the store.
+///
+/// One function for both consumers — the ffmpeg stage's build pool and the image's
+/// local apt repo — so the two cannot disagree about which entry belongs where.
+/// A set with nothing for this target stages no step at all: an empty `extra-debs`
+/// step in a build that pins none would read as work that was skipped.
+fn materialize_extra_debs(
+    lock: &boot2deb_core::lock::Lock,
+    root: &ConfigRoot,
+    target: ExtraDebTarget,
+    sink: &dyn boot2deb_engine::event::EventSink,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let wanted: Vec<_> = lock
+        .extra_debs
+        .iter()
+        .filter(|d| d.wanted_at(target))
+        .cloned()
+        .collect();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let step = Step::start(sink, "extra-debs");
+    let store = DebStore::open(&extra_debs_store(root))?;
+    let paths = extradebs::materialize(root, &wanted, &store, &step)?;
+    step.finish();
+    Ok(paths)
 }

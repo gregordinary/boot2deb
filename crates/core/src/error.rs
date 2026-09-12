@@ -892,6 +892,15 @@ pub enum ConfigError {
         sha256: String,
     },
 
+    /// An `extra_debs` entry lists no destination, so its bytes would be fetched,
+    /// verified and then staged nowhere. Config that can never take effect is a
+    /// mistake rather than a no-op, the same way an empty `suites` list is.
+    #[error("extra_deb '{locator}' lists no `targets`; name at least one of `image`, `ffmpeg`")]
+    ExtraDebNoTarget {
+        /// The offending entry's locator, for a message that points at the file.
+        locator: String,
+    },
+
     /// An `extra_debs` entry's sha256 is not a 64-character lowercase-hex string,
     /// so it cannot be the content pin the build verifies the fetched bytes against.
     #[error("extra_deb sha256 '{value}' is not 64 lowercase hex characters")]

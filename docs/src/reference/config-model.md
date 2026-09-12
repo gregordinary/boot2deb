@@ -148,6 +148,12 @@ naming the file, not a value quietly carried into a build with nowhere to put it
   slot there is no fallback and a bad upgrade needs external media to recover. See
   [Upgrading the kernel](../kernel-upgrades.md).
 
+Both shapes lay the same GPT: the 1 MiB `b2d-seed` partition first, then the rootfs,
+which carries the **legacy-BIOS-bootable attribute**. That attribute is what points
+u-boot's `bootflow scan` at the rootfs — it narrows to the partitions marked bootable,
+and with none marked it looks at partition 1 alone, which is the seed. Depthcharge
+ignores it and selects a kernel slot by type GUID instead.
+
 Because the requirements are method-scoped, a board is only ever asked for fields its
 own boot method reads: the C201 declares no `uboot_defconfig` and no rkbin blobs, and
 omitting them is not an error — omitting its `[depthcharge]` block is.
@@ -577,6 +583,51 @@ either way, and FDK-AAC's advantages — bitrates below about 96 kbps, and the H
 profiles — sit outside the 128-384 kbps range a media server transcodes to, which
 FFmpeg's own native `aac` encoder covers.
 
+### A library FFmpeg links that Debian does not carry
+
+Some codecs have no Debian package. AVS2 and AVS3 are the case here: FFmpeg wraps
+`libdavs2` and `libuavs3d`, and the archive ships neither, so `./configure` has nothing
+to find and the codecs are absent from every build by default.
+
+The `avs-decode` feature supplies them as **pinned bytes**. Its `[[extra_debs]]` entries
+name `.deb` files in `debs/` and pin each by sha256, and its `[[ffmpeg_libs]]` entries
+say what to do with them:
+
+```toml
+[[ffmpeg_libs]]
+flag  = "--enable-libdavs2"
+links = ["libdavs2-16", "libdavs2-dev"]
+```
+
+`links` is the runtime library then its `-dev`, the same contract a compiled userspace
+tree carries, and both halves matter: the `-dev` alone gives `./configure` headers and a
+`.pc` file with no library to link against and no `shlibs` for `dpkg-shlibdeps` to read,
+so the produced `ffmpeg-rk` would declare no dependency on a library it links. The first
+entry is what the deb must end up depending on, and the stage fails rather than shipping
+one where that dependency was dropped.
+
+An `extra_debs` entry says where its bytes are wanted:
+
+```toml
+[[extra_debs]]
+path    = "debs/libdavs2-16_....deb"
+sha256  = "18c079694fd0..."
+targets = ["image", "ffmpeg"]      # default is ["image"]
+```
+
+`image` is the local apt repo the rootfs solves against; `ffmpeg` is the ffmpeg stage's
+build pool, which its build root resolves against beside the suite mirrors. A runtime
+library needs both — the build links it, the image runs it — while a `-dev` package
+names `ffmpeg` alone, since headers on a device compile nothing. Nothing installs these
+by name: `ffmpeg-rk`'s own `Depends` does, once the bytes are in the repo for the solve
+to find, which is what makes the image's apt consistent rather than force-installed.
+
+The pool is a real repository, so a package is resolved with its dependencies rather
+than unpacked into the build root behind the resolver's back — the same treatment the
+build's own `.deb`s get. And the pins reach the artifact cache: the ffmpeg stage's
+output key folds the hashes of the debs targeting it, so a re-cut library rebuilds
+FFmpeg instead of restoring one built against the old bytes.
+
 ### A board device tree that is not yet upstream
 
 A device normally names an in-tree DTB with `kernel_dtb`, and the kernel's own tree
@@ -827,6 +878,7 @@ quietly wrong:
 | `locale` / `timezone` / `keymap` | see [Locale, timezone, and keyboard](../localization.md) | `/etc/locale.gen`, the `/etc/localtime` target, shell-sourced `/etc/default/keyboard` |
 | `ntp_servers` | a bare host per entry: hostname or IP, no scheme, port, or whitespace — see [The clock and time sync](../clock.md) | the space-separated `NTP=` line of a `timesyncd.conf.d` drop-in |
 | `ssh_authorized_keys` | one line per entry: a known key type, a base64 blob whose own embedded type name agrees with it, an optional comment. Private key material and options prefixes are refused — see [The account, sudo, and SSH keys](../access.md) | a line of `~debian/.ssh/authorized_keys`, written through a quoted heredoc |
+| `groups` | Debian's `NAME_REGEX` per entry: a lowercase letter or `_`, then lowercase letters, digits, `_` and `-`, ≤ 32 characters. A comma is refused by name, since it would split one entry into two groups — see [The account, sudo, and SSH keys](../access.md) | the comma-separated argument of one `usermod -aG` |
 
 The rule these share is that a value is **rejected, never repaired**. A hostname with a
 space in it is not trimmed and an out-of-set source name is not folded to a legal

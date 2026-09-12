@@ -342,6 +342,7 @@ pub fn resolve_device(
     // locator, well-formed hash) up front — a malformed pin fails at resolve, not
     // mid-build.
     let extra_debs = merge_extra_debs(&base, &soc, &bm, &device, &loaded_features)?;
+    let ffmpeg_libs = merge_ffmpeg_libs(&loaded_features);
 
     let image_size = overrides
         .image_size
@@ -373,7 +374,7 @@ pub fn resolve_device(
     // costs them. Base-layer policy, each part overridable. Validated here for the same
     // reason as the localization axes — a key `sshd` will skip and a password too short
     // to resist guessing are both invisible on a booted board.
-    let account = resolve_account(&base, overrides)?;
+    let account = resolve_account(&base, &soc, &bm, &device, overrides)?;
 
     // The layers' runtime checks, one group per declaring layer in merge order. Built
     // here rather than inside the literal because the four hardware/kernel layers each
@@ -452,6 +453,7 @@ pub fn resolve_device(
             sudo: account.sudo,
             first_boot_password_length: account.password_length,
             ssh_authorized_keys: account.authorized_keys,
+            groups: account.groups,
             device_kmods,
             // Sources ride only when a feature builds the stack; a base build drops
             // them (validated above: `build_media_accel` implies the SoC supplies both).
@@ -464,6 +466,7 @@ pub fn resolve_device(
             ffmpeg_nonfree,
             apt_sources,
             extra_debs,
+            ffmpeg_libs,
             expectations,
             // A recipe field; `resolve_recipe` sets it, and a direct device build
             // (no recipe) ships the unit disabled.
@@ -1221,6 +1224,30 @@ fn merge_extra_debs(
     Ok(merged)
 }
 
+/// The union of the selected features' [`Feature::ffmpeg_libs`], de-duplicated by
+/// `flag` in first-appearance order.
+///
+/// Features only: a prebuilt ffmpeg library is a property of a capability that was
+/// selected, never of the silicon — the hardware layers decide which *userspace trees*
+/// ffmpeg links, which is a different question.
+///
+/// De-duplicated by the flag rather than by the whole entry, because the flag is what
+/// reaches `./configure` and passing one twice is not a second library.
+fn merge_ffmpeg_libs(
+    features: &[(String, crate::feature::Feature)],
+) -> Vec<crate::model::FfmpegLib> {
+    let mut merged: Vec<crate::model::FfmpegLib> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (_, feat) in features {
+        for lib in &feat.ffmpeg_libs {
+            if seen.insert(lib.flag.clone()) {
+                merged.push(lib.clone());
+            }
+        }
+    }
+    merged
+}
+
 /// One field of the apt one-line source format: non-empty printable ASCII with
 /// no whitespace and no `[`/`]` — whitespace separates the line's positional
 /// fields and the brackets delimit its option block, so either would be parsed
@@ -1375,6 +1402,7 @@ pub fn resolve_recipe(
             .ssh_authorized_keys
             .clone()
             .or(recipe.ssh_authorized_keys),
+        groups: cli.groups.clone().or(recipe.groups),
     };
     let mut build = resolve_device(root, &recipe.device, &merged)?;
     match build.image.as_mut() {
@@ -1596,7 +1624,7 @@ fn join<T: std::fmt::Display>(items: &[T]) -> String {
 ///
 /// Checked in flag order so the first-reported error is stable.
 fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(), ConfigError> {
-    let inapplicable: [(&'static str, bool); 12] = [
+    let inapplicable: [(&'static str, bool); 13] = [
         ("--kernel", overrides.kernel.is_some()),
         ("--suite", overrides.suite.is_some()),
         ("--feature", overrides.features.is_some()),
@@ -1616,6 +1644,8 @@ fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(
             "ssh_authorized_keys",
             overrides.ssh_authorized_keys.is_some(),
         ),
+        // Likewise recipe-only.
+        ("groups", overrides.groups.is_some()),
     ];
     match inapplicable.iter().find(|(_, set)| *set) {
         Some((flag, _)) => Err(ConfigError::OverrideNotApplicable {
@@ -1758,21 +1788,36 @@ struct Account {
     password_length: u8,
     /// Authorized `authorized_keys` lines, each validated, in config order.
     authorized_keys: Vec<String>,
+    /// Supplementary group names, each validated, in config order, de-duplicated.
+    groups: Vec<String>,
 }
 
 /// Resolve the account axis: the sudo policy, the generated first-boot password length,
-/// and the SSH keys authorized for the default account.
+/// the SSH keys authorized for the default account, and its supplementary groups.
 ///
-/// All three default at the **base** layer — they are distro/security policy, not
+/// The first three default at the **base** layer — they are distro/security policy, not
 /// properties of a board, and a board has no opinion about who its operator is. A
 /// recipe or CLI flag overrides any of them.
+///
+/// The groups are the exception, and deliberately: a group name is the account's access
+/// to a *device*, so the hardware layers contribute to it the way they contribute
+/// packages — base ∪ soc ∪ boot-method ∪ device, in merge order. `audio` sits on the
+/// SoC layers that also ship the sound stack, which is what keeps the two facts from
+/// drifting apart. A recipe's `groups` still replaces the whole resolved set, so a
+/// recipe can withhold access a layer would grant.
 ///
 /// Every part is validated here rather than at the point of use, because each failure
 /// is silent on the finished image: a malformed key is one `sshd` skips into its own
 /// log, and a too-short password looks exactly like a long one from the outside. The
 /// keys keep config order — `authorized_keys` is a list `sshd` walks, and preserving
 /// the authored order keeps the file a readable statement of who was granted access.
-fn resolve_account(base: &BaseLayer, overrides: &Overrides) -> Result<Account, ConfigError> {
+fn resolve_account(
+    base: &BaseLayer,
+    soc: &SocLayer,
+    bm: &BootMethodLayer,
+    device: &DeviceLayer,
+    overrides: &Overrides,
+) -> Result<Account, ConfigError> {
     let sudo = overrides.sudo.unwrap_or(base.sudo);
 
     let password_length = overrides
@@ -1805,11 +1850,71 @@ fn resolve_account(base: &BaseLayer, overrides: &Overrides) -> Result<Account, C
         }
     }
 
+    // A recipe replaces the whole resolved set; otherwise every hardware layer
+    // contributes, in the same order the package merge uses. De-duplicated because
+    // the list becomes one comma-separated `usermod -aG` argument, where a repeated
+    // name is noise in a build log rather than an error worth failing on; order is
+    // the authored one, first mention winning.
+    let sources: Vec<&[String]> = match &overrides.groups {
+        Some(replacement) => vec![replacement],
+        None => vec![&base.groups, &soc.groups, bm.groups(), &device.groups],
+    };
+    let mut groups: Vec<String> = Vec::new();
+    for group in sources.into_iter().flatten() {
+        check_group_name(group)?;
+        if !groups.contains(group) {
+            groups.push(group.clone());
+        }
+    }
+
     Ok(Account {
         sudo,
         password_length,
         authorized_keys,
+        groups,
     })
+}
+
+/// Reject a supplementary-group name `usermod` could not act on.
+///
+/// The resolved list is passed to the target-side customize program as one
+/// comma-separated environment value, and `usermod -aG` splits it on commas — so a
+/// name carrying a comma would silently become two names, and one carrying whitespace
+/// would be a name no `/etc/group` line can hold. The rest of the rule is Debian's own
+/// `NAME_REGEX` from `adduser.conf`: start with a lowercase letter or underscore, then
+/// lowercase letters, digits, underscores and hyphens.
+///
+/// Whether the group *exists* is not checked here — resolution is pure and cannot know
+/// what the target's packages will create. The customize program runs under `set -e`,
+/// so a name no package provides fails the build there, loudly, which is the right
+/// outcome for what is always a typo.
+pub fn check_group_name(group: &str) -> Result<(), ConfigError> {
+    let bad = |why| {
+        Err(ConfigError::InvalidField {
+            what: "group",
+            value: group.to_string(),
+            why,
+        })
+    };
+    if group.is_empty() {
+        return bad("empty");
+    }
+    if group.len() > 32 {
+        return bad("longer than the 32 characters a group name may have");
+    }
+    if !group.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') {
+        return bad("does not start with a lowercase letter or an underscore");
+    }
+    if let Some(c) = group
+        .chars()
+        .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '-'))
+    {
+        return match c {
+            ',' => bad("contains a comma, which `usermod -aG` would read as two groups"),
+            _ => bad("contains a character a group name may not hold (lowercase letters, digits, `_` and `-` only)"),
+        };
+    }
+    Ok(())
 }
 
 /// Reject a locale `locale-gen` could not act on, or that would not survive the two
@@ -2703,6 +2808,102 @@ mod tests {
         );
     }
 
+    /// Groups are the one part of the account axis the hardware layers contribute to,
+    /// because a group name is the account's access to a *device*. The union must reach
+    /// a board whose SoC declares one, and a recipe must still be able to replace the
+    /// whole set — including down to nothing.
+    #[test]
+    fn groups_union_across_the_hardware_layers_and_a_recipe_replaces_the_set() {
+        let root = repo_root();
+
+        // The RK1's SoC layer declares no groups, so a board there gets the base pair.
+        let rk1 = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
+        assert_eq!(image_of(&rk1).groups, vec!["video", "render"]);
+
+        // The RK3576 layer ships the sound stack and declares `audio`, so every board
+        // on it gets the group without a recipe naming it — which is the point of the
+        // union: a board added to that SoC later inherits it.
+        let h96 = resolve_recipe(&root, "h96-max-m9/forky", &Overrides::default()).unwrap();
+        assert_eq!(image_of(&h96).groups, vec!["video", "render", "audio"]);
+        assert!(
+            image_of(&h96)
+                .rootfs_packages
+                .iter()
+                .any(|p| p == "alsa-utils"),
+            "the group and the package it exists for come from the same layer"
+        );
+
+        // A recipe replaces the resolved set rather than adding to it, so it can also
+        // withhold what a layer would grant.
+        let narrowed = resolve_recipe(
+            &root,
+            "h96-max-m9/forky",
+            &Overrides {
+                groups: Some(vec!["video".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(image_of(&narrowed).groups, vec!["video"]);
+
+        let none = resolve_recipe(
+            &root,
+            "h96-max-m9/forky",
+            &Overrides {
+                groups: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            image_of(&none).groups.is_empty(),
+            "an empty list means the login group and nothing else"
+        );
+
+        // A name two layers both declare appears once: the list becomes one
+        // comma-separated `usermod -aG` argument.
+        let dup = resolve_recipe(
+            &root,
+            "h96-max-m9/forky",
+            &Overrides {
+                groups: Some(vec!["video".into(), "audio".into(), "video".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(image_of(&dup).groups, vec!["video", "audio"]);
+    }
+
+    /// The resolved list is joined with commas into one `usermod -aG` argument, so a
+    /// name carrying a comma would silently become two groups — the one malformation
+    /// that changes the meaning of the command rather than failing it.
+    #[test]
+    fn a_group_name_usermod_could_not_act_on_is_refused() {
+        for bad in [
+            "",
+            "video,render",
+            "video render",
+            "Video",
+            "9video",
+            "-video",
+            "vi/deo",
+            "video$",
+        ] {
+            assert!(
+                check_group_name(bad).is_err(),
+                "expected '{bad}' to be refused"
+            );
+        }
+        for good in [
+            "video", "render", "audio", "_ssh", "kvm", "i2c-dev", "gpio0",
+        ] {
+            assert!(
+                check_group_name(good).is_ok(),
+                "expected '{good}' to be accepted"
+            );
+        }
+    }
+
     /// The bounds exist because a short generated password is invisible on the finished
     /// image: nothing about a booted board says how much entropy its first credential
     /// had, so the only place to catch it is here.
@@ -3337,6 +3538,7 @@ mod tests {
             requires_arch: vec![],
             apt_sources: vec![],
             extra_debs: vec![],
+            ffmpeg_libs: vec![],
             conflicts: vec![],
             provides: vec![],
             requires_capability: vec![],
@@ -4392,6 +4594,7 @@ mod tests {
             requires_arch: vec![],
             apt_sources: sources,
             extra_debs: vec![],
+            ffmpeg_libs: vec![],
             conflicts: vec![],
             provides: vec![],
             requires_capability: vec![],
@@ -5284,6 +5487,105 @@ mod fixture_tests {
         );
         assert!(image_of(&b).extra_debs[0].url.is_none());
         assert_eq!(image_of(&b).extra_debs[1].sha256, sha_b);
+    }
+
+    #[test]
+    fn extra_debs_default_to_the_image_and_a_stage_is_named_explicitly() {
+        // An entry that says nothing goes to the image, which is what every existing
+        // pin means; naming a stage is what routes bytes to a build root.
+        let sha_a = sha('a');
+        let sha_b = sha('b');
+        let tree = Tree::default().write();
+        let p = tree.path();
+        fs::write(
+            p.join("base.toml"),
+            format!(
+                "packages = []\nexclude = []\n\
+                 extra_debs = [{{ path = \"vendor/a.deb\", sha256 = \"{sha_a}\" }}, \
+                 {{ path = \"vendor/b.deb\", sha256 = \"{sha_b}\", targets = [\"ffmpeg\"] }}]\n"
+            ),
+        )
+        .unwrap();
+        let root = ConfigRoot::new(p);
+        let b = resolve_device(&root, "dev", &Overrides::default()).unwrap();
+        let debs = &image_of(&b).extra_debs;
+        assert!(debs[0].wanted_at(crate::model::ExtraDebTarget::Image));
+        assert!(!debs[0].wanted_at(crate::model::ExtraDebTarget::Ffmpeg));
+        assert!(debs[1].wanted_at(crate::model::ExtraDebTarget::Ffmpeg));
+        assert!(
+            !debs[1].wanted_at(crate::model::ExtraDebTarget::Image),
+            "naming a stage replaces the default rather than adding to it"
+        );
+    }
+
+    #[test]
+    fn an_extra_deb_with_no_target_is_rejected_at_resolve() {
+        // Config that can never take effect is a mistake, not a no-op.
+        let tree = Tree::default().write();
+        let p = tree.path();
+        fs::write(
+            p.join("base.toml"),
+            format!(
+                "packages = []\nexclude = []\n\
+                 extra_debs = [{{ path = \"vendor/a.deb\", sha256 = \"{}\", targets = [] }}]\n",
+                sha('a')
+            ),
+        )
+        .unwrap();
+        let root = ConfigRoot::new(p);
+        assert!(matches!(
+            resolve_device(&ConfigRoot::new(root.path()), "dev", &Overrides::default())
+                .unwrap_err(),
+            ConfigError::ExtraDebNoTarget { .. }
+        ));
+    }
+
+    #[test]
+    fn ffmpeg_libs_union_across_features_and_dedup_by_flag() {
+        // Two features naming the same library contribute one flag: the flag is what
+        // reaches ./configure, and passing it twice is not a second library.
+        let tree = Tree {
+            features: vec![
+                Feat {
+                    name: "f1",
+                    packages: &["p1"],
+                    exclude: &[],
+                },
+                Feat {
+                    name: "f2",
+                    packages: &["p2"],
+                    exclude: &[],
+                },
+            ],
+            ..Default::default()
+        };
+        let dir = tree.write();
+        let p = dir.path();
+        fs::write(
+            p.join("features/f1.toml"),
+            "description = \"f\"\npackages = [\"p1\"]\nrequires_soc = [\"rk3588\"]\n\
+             ffmpeg_libs = [{ flag = \"--enable-libdavs2\", links = [\"libdavs2-16\", \"libdavs2-dev\"] }]\n",
+        )
+        .unwrap();
+        fs::write(
+            p.join("features/f2.toml"),
+            "description = \"f\"\npackages = [\"p2\"]\nrequires_soc = [\"rk3588\"]\n\
+             ffmpeg_libs = [{ flag = \"--enable-libdavs2\", links = [\"libdavs2-16\", \"libdavs2-dev\"] }, \
+             { flag = \"--enable-libuavs3d\", links = [\"libuavs3d1\", \"libuavs3d-dev\"] }]\n",
+        )
+        .unwrap();
+        let root = ConfigRoot::new(p);
+        let ov = Overrides {
+            features: Some(vec!["f1".into(), "f2".into()]),
+            ..Default::default()
+        };
+        let b = resolve_device(&root, "dev", &ov).unwrap();
+        let flags: Vec<&str> = image_of(&b)
+            .ffmpeg_libs
+            .iter()
+            .map(|l| l.flag.as_str())
+            .collect();
+        assert_eq!(flags, ["--enable-libdavs2", "--enable-libuavs3d"]);
     }
 
     #[test]

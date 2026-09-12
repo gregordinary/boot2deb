@@ -16,6 +16,7 @@
 #   B2D_USER                    the default account's name
 #   B2D_SUDOERS                 its sudoers spec, e.g. `NOPASSWD: ALL`
 #   B2D_AUTHORIZED_KEYS         its authorized_keys, one per line; empty for none
+#   B2D_GROUPS                  its supplementary groups, comma-separated; empty for none
 #   B2D_LOCAL_REPO              the build-time local apt source's stem
 #   B2D_INITRAMFS_STUB          the update-initramfs placeholder to remove
 #   B2D_INITRAMFS_STUB_LOG      where the placeholder recorded its calls
@@ -32,7 +33,12 @@ set -eu
 # /etc/shadow at image assembly, so the provisioned tree stays cacheable across images
 # built from one build point.
 useradd -m -s /bin/bash "$B2D_USER"
-usermod -aG video,render "$B2D_USER"
+
+# Supplementary groups: the account's standing hardware access, resolved from config.
+# `usermod` fails on a group the target does not have, and under `set -e` that fails the
+# build — which is what should happen, since a group no installed package created is a
+# name nobody will ever be a useful member of.
+[ -z "$B2D_GROUPS" ] || usermod -aG "$B2D_GROUPS" "$B2D_USER"
 
 # The sudoers drop-in. Written here rather than staged as an overlay file because the
 # mode matters and the overlay staging pass normalizes every mode it copies: sudo

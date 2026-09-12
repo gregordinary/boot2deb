@@ -557,11 +557,13 @@ mod tests {
                     url: Some("https://vendor.example/foo_1.2_arm64.deb".into()),
                     path: None,
                     sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    targets: vec![crate::model::ExtraDebTarget::Image],
                 },
                 ExtraDeb {
                     url: None,
                     path: Some("vendor/bar_3.4_arm64.deb".into()),
                     sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                    targets: vec![crate::model::ExtraDebTarget::Image],
                 },
             ],
             snapshot: Some(SnapshotPin {

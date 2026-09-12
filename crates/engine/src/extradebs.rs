@@ -185,6 +185,7 @@ mod tests {
             url: Some(url),
             path: None,
             sha256: sha.clone(),
+            targets: vec![boot2deb_core::model::ExtraDebTarget::Image],
         }];
         let out = materialize(&root, &pins, &store, &step).unwrap();
         handle.join().unwrap();
@@ -215,6 +216,7 @@ mod tests {
             url: None,
             path: Some("vendor/a.deb".into()),
             sha256: sha.clone(),
+            targets: vec![boot2deb_core::model::ExtraDebTarget::Image],
         }];
         let out = materialize(&root, &pins, &store, &step).unwrap();
         assert_eq!(std::fs::read(&out[0]).unwrap(), bytes);
@@ -238,6 +240,7 @@ mod tests {
             url: None,
             path: Some("vendor/a.deb".into()),
             sha256: wrong,
+            targets: vec![boot2deb_core::model::ExtraDebTarget::Image],
         }];
         assert!(matches!(
             materialize(&root, &bad_pin, &store, &step).unwrap_err(),
@@ -249,6 +252,7 @@ mod tests {
             url: None,
             path: Some("vendor/nope.deb".into()),
             sha256: crate::blobs::sha256_hex(b"x"),
+            targets: vec![boot2deb_core::model::ExtraDebTarget::Image],
         }];
         assert!(matches!(
             materialize(&root, &missing, &store, &step).unwrap_err(),
@@ -275,6 +279,7 @@ mod tests {
             url: None,
             path: Some("../secret.deb".into()),
             sha256: crate::blobs::sha256_hex(b"host-secret"),
+            targets: vec![boot2deb_core::model::ExtraDebTarget::Image],
         }];
         assert!(matches!(
             materialize(&root, &escaping, &store, &step).unwrap_err(),

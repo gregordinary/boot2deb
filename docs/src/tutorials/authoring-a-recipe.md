@@ -48,6 +48,7 @@ keymap       = "de"              # omit -> device keymap
 sudo         = "nopasswd"        # omit -> base sudo ("nopasswd" | "password")
 first_boot_password_length = 12   # omit -> base length (8..=64)
 ssh_authorized_keys = []         # omit -> base keys (replaces, not adds)
+groups = ["video", "render"]     # omit -> the layers' union (replaces, not adds)
 ```
 
 Real recipes are much shorter than that, because most of it is the board's default already.
