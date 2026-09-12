@@ -3,18 +3,19 @@
 //! `sgdisk`/`parted`/`cgpt` shell-out.
 //!
 //! Two shapes, one writer. A `rockchip-rkbin` image has a single Linux-filesystem
-//! partition (its bootloader lives in a raw gap *outside* the table); a
+//! partition, and its bootloader lives in a raw gap *outside* the table. A
 //! `depthcharge` image adds a **ChromeOS kernel partition** ahead of it, which is
-//! the entire boot mechanism on that board — the firmware scans every medium's GPT
-//! for that type GUID and picks among the candidates by the entry's attribute bits.
+//! the entire boot mechanism on that board. The firmware scans every medium's GPT
+//! for that type GUID, and picks among the candidates by the entry's attribute
+//! bits.
 //! Both are ordinary GPT entries, so the type GUID (`partition_types::CHROME_KERNEL`)
 //! and the raw 64-bit `flags` field carry it, and no ChromeOS host tooling is needed.
 //!
 //! The `gpt` crate writes only the GPT structures (primary header + entry array
 //! at the front, backup at the end), so the protective MBR at LBA 0 is written
-//! separately. The image file must already exist at its full size before this
-//! runs — the crate opens it without creating it, and lays the backup table
-//! relative to the file's length.
+//! separately. The image file must already exist at its full size before this runs.
+//! The crate opens it without creating it, and lays the backup table relative to
+//! the file's length.
 
 use crate::error::EngineError;
 use crate::image::geometry::{BootGeometry, Geometry, SECTOR};

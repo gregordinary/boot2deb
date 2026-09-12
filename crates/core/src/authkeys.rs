@@ -1,14 +1,16 @@
 //! The shape of an `authorized_keys` entry.
 //!
-//! Its own module because the check has to be strict about one thing in particular:
-//! the value is authored as an SSH key and lands in the file that decides who may log
-//! in as the image's default account. A malformed entry is not a cosmetic problem —
-//! `sshd` skips a line it cannot parse and says so only in its own log, on a board
-//! that may have no console, so the failure surfaces as "my key does not work" with
-//! nothing to read. Everything checkable offline is therefore checked here, at
-//! resolution, where the message can name the line.
+//! Its own module because the check has to be strict about one thing in particular.
+//! The value is authored as an SSH key. It lands in the file that decides who can log
+//! in as the image's default account.
 //!
-//! Pure and host-independent; nothing here touches the filesystem or the network.
+//! A malformed entry is not a cosmetic problem. `sshd` skips a line it cannot parse
+//! and says so only in its own log, on a board that might have no console. The failure
+//! surfaces as "my key does not work" with nothing to read. Everything checkable
+//! offline is therefore checked here, at resolution, where the message can name the
+//! line.
+//!
+//! Pure and host-independent. Nothing here touches the filesystem or the network.
 
 /// Key types `sshd` accepts and this builder will write. `ssh-dss` is deliberately
 /// absent: OpenSSH removed DSA support entirely, so a DSA line in the file is one
@@ -23,27 +25,29 @@ pub const KEY_TYPES: &[&str] = &[
     "sk-ecdsa-sha2-nistp256@openssh.com",
 ];
 
-/// Check `entry` against the shape of an `authorized_keys` line: a key type from
-/// [`KEY_TYPES`], a base64 key blob whose *own* embedded type name agrees with it, and
-/// an optional trailing comment.
+/// Check `entry` against the shape of an `authorized_keys` line, which is:
 ///
-/// Returns `Err` with a terse clause naming the offending property, for the caller to
-/// wrap in the typed error that suits where the value was authored — the same
-/// convention as [`crate::hostname::check`].
+/// - A key type from [`KEY_TYPES`].
+/// - A base64 key blob whose *own* embedded type name agrees with it.
+/// - An optional trailing comment.
+///
+/// Returns `Err` with a terse clause naming the offending property. The caller wraps
+/// it in the typed error that suits where the value was authored, the same convention
+/// as [`crate::hostname::check`].
 ///
 /// Four rejections carry more weight than the rest:
 ///
 ///  - **Private key material.** A `-----BEGIN … PRIVATE KEY-----` block here means the
-///    author reached for `id_ed25519` instead of `id_ed25519.pub`, and the consequence
-///    is a private key baked into every copy of a distributable image. This is checked
+///    author reached for `id_ed25519` instead of `id_ed25519.pub`. The consequence is a
+///    private key baked into every copy of a distributable image. This is checked
 ///    before anything else so the message is about *that* and not about field count.
-///  - **Options prefixes** (`restrict`, `command="…"`, `from="…"`). `sshd` accepts them;
-///    this does not, because their syntax is quoted, comma-separated, and shell-adjacent,
+///  - **Options prefixes** (`restrict`, `command="…"`, `from="…"`). `sshd` accepts them
+///    and this does not. Their syntax is quoted, comma-separated, and shell-adjacent,
 ///    and a builder that half-understood them would silently write a weaker restriction
 ///    than the author wrote. An entry here is a bare key.
 ///  - **A blob disagreeing with its type name.** The wire encoding of every accepted
-///    key repeats the type as its first field, so a truncated or line-wrapped paste is
-///    caught here rather than at first login.
+///    key repeats the type as its first field. A truncated or line-wrapped paste is
+///    therefore caught here rather than at first login.
 ///  - **Embedded newlines.** One entry is one line. A value carrying a newline would
 ///    become two lines in the file, the second of them unvalidated.
 pub fn check_authorized_key(entry: &str) -> Result<(), &'static str> {

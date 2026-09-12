@@ -1,9 +1,9 @@
 //! Thin `git` shell-out helpers shared by the verify gate and the pin resolver.
 //!
 //! Reimplementing `git am --3way` or remote ref resolution in Rust is not worth
-//! it, so these wrap the system `git`. Output parsing that has real logic
-//! — peeling an annotated tag to its commit — is factored into a pure function
-//! (`pick_commit`) so it is unit-testable without a network.
+//! it, so these wrap the system `git`. Output parsing that has real logic, such as
+//! peeling an annotated tag to its commit, is factored into a pure function
+//! (`pick_commit`). That keeps it unit-testable without a network.
 //!
 //! Every `git` this crate runs is constructed by one `command` helper, which
 //! neutralizes the build host's git configuration. See it for why.
@@ -131,24 +131,26 @@ pub(crate) fn is_clean(repo: &Path) -> Result<bool, EngineError> {
 
 /// Whether `repo`'s tracked content differs from `HEAD`.
 ///
-/// This is the *identity* notion of dirty — "does a commit still name what is on
-/// disk" — and it is deliberately narrower than this module's `is_clean`. Untracked
-/// files are not counted: they are not build input, so a scratch file beside a config
-/// tree must not make an otherwise-identified build report itself unidentifiable.
-/// `is_clean` answers a different question for a different caller, refusing untracked
-/// files and in-progress `am`/rebase state because it guards a tree about to be patched
-/// and reset.
+/// This is the *identity* notion of dirty, asking whether a commit still names what
+/// is on disk. It is deliberately narrower than this module's `is_clean`.
 ///
-/// Matches what the CLI's build script stamps as `BOOT2DEB_GIT_DIRTY`, so the binary's
-/// dirty flag and a config tree's mean the same thing in one provenance record.
+/// Untracked files are not counted, because they are not build input. A scratch file
+/// beside a config tree must not make an otherwise-identified build report itself
+/// unidentifiable. `is_clean` answers a different question for a different caller. It
+/// refuses untracked files and in-progress `am`/rebase state, because it guards a tree
+/// about to be patched and reset.
+///
+/// Matches what the CLI's build script stamps as `BOOT2DEB_GIT_DIRTY`. The binary's
+/// dirty flag and a config tree's then mean the same thing in one provenance record.
 ///
 /// `paths` narrows the question to the part of the tree the caller's identity depends
-/// on; empty asks about the whole checkout. Scoping matters where one repo holds both
-/// a program and its data: editing a device `.toml` does not change a compiled binary,
-/// so a check about the binary that answered "dirty" for it would fire on ordinary
-/// work.
+/// on. An empty `paths` asks about the whole checkout.
 ///
-/// Best-effort, and false on anything that is not a clean question: `git diff --quiet`
+/// Scoping matters where one repo holds both a program and its data. Editing a device
+/// `.toml` does not change a compiled binary. A check about the binary that answered
+/// "dirty" for it would fire on ordinary work.
+///
+/// Best-effort, and false on anything that is not a clean question. `git diff --quiet`
 /// exits 1 for "differences" but 128 for "not a repository", and only the former is
 /// dirtiness. A path that is not a checkout has no commit to differ from.
 pub fn has_tracked_changes(repo: &Path, paths: &[&str]) -> bool {
@@ -165,11 +167,12 @@ pub fn has_tracked_changes(repo: &Path, paths: &[&str]) -> bool {
 
 /// Whether `repo` holds `commit` as a commit object.
 ///
-/// The question a read-only query over a *historical* pin has to ask first: a
-/// checkout at one commit need not carry another, and asking for a blob under a
-/// commit that is not there fails deep inside the read rather than at its premise.
-/// Best-effort — a path that is not a repository at all answers `false`, since from
-/// the caller's side that is the same situation.
+/// The question a read-only query over a *historical* pin has to ask first. A checkout
+/// at one commit need not carry another. Asking for a blob under a commit that is not
+/// there fails deep inside the read rather than at its premise.
+///
+/// Best-effort: a path that is not a repository at all answers `false`, since from the
+/// caller's side that is the same situation.
 pub fn has_commit(repo: &Path, commit: &str) -> bool {
     run(
         Some(repo),
@@ -181,8 +184,8 @@ pub fn has_commit(repo: &Path, commit: &str) -> bool {
 
 /// The contents of `path` at `commit`, or `None` when the commit does not carry it.
 ///
-/// Reads out of the object store rather than the worktree, so a query about a
-/// historical pin does not need — and cannot disturb — a checkout at that commit.
+/// Reads out of the object store rather than the worktree. A query about a historical
+/// pin therefore does not need a checkout at that commit, and cannot disturb one.
 /// A file absent at that commit is `None` rather than an error: for a series that
 /// did not exist yet, absence is the answer.
 pub fn show_file(repo: &Path, commit: &str, path: &str) -> Option<String> {
@@ -200,7 +203,7 @@ pub fn show_file(repo: &Path, commit: &str, path: &str) -> Option<String> {
 /// The object id of `path` at `commit`, or `None` when the commit does not carry it.
 ///
 /// Comparing two blob ids is how two revisions of one file are told apart without
-/// reading either: git already content-addresses them, so equal ids are equal bytes.
+/// reading either, since git already content-addresses them. Equal ids are equal bytes.
 pub fn blob_id(repo: &Path, commit: &str, path: &str) -> Option<String> {
     let out = run(
         Some(repo),
@@ -245,8 +248,8 @@ pub(crate) fn pin_relation(repo: &Path, expected: &str, actual: &str) -> PinRela
 
 /// Resolve a tag/branch/ref on a remote to its exact commit, peeling annotated
 /// tags. A value that is already a full 40-hex commit is canonicalized to lowercase
-/// and returned — the form git's own `rev-parse HEAD` emits, so the build stage's
-/// `HEAD == pinned` check holds even for an uppercase sha a user pins.
+/// and returned. That is the form git's own `rev-parse HEAD` emits, so the build
+/// stage's `HEAD == pinned` check holds even for an uppercase sha a user pins.
 pub fn resolve_ref(url: &str, reference: &str) -> Result<String, EngineError> {
     if boot2deb_core::sources::is_full_sha(reference) {
         return Ok(boot2deb_core::sources::normalize_ref(reference));

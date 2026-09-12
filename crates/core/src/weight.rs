@@ -2,19 +2,23 @@
 //!
 //! Pure and deterministic: given the per-package rows a published plan document
 //! carries, group them and order them. Reading that document is the engine's job
-//! (`boot2deb_engine::rootfs::read_plan_weights`); everything here is arithmetic over
+//! (`boot2deb_engine::rootfs::read_plan_weights`). Everything here is arithmetic over
 //! the rows it hands back, so the whole policy is unit-testable without a build.
 //!
 //! **These are the archive's own estimates, not measurements.** `Installed-Size` is a
-//! figure the package's builder computed over a staged tree and Debian Policy states in
-//! kibibytes; it counts no filesystem overhead, no shared inode saved by a hard link,
-//! and nothing the image gains after `dpkg` — the kernel `/boot` artifacts an install
-//! hook produces, the initramfs, the ext4 metadata. So a report here answers "what did
-//! the package set contribute", never "how large is the image", and everything it
-//! renders says so.
+//! figure the package's builder computed over a staged tree, and Debian Policy states
+//! it in kibibytes. It counts none of:
+//!
+//! - Filesystem overhead.
+//! - A shared inode saved by a hard link.
+//! - Anything the image gains after `dpkg`, such as the kernel `/boot` artifacts an
+//!   install hook produces, the initramfs, and the ext4 metadata.
+//!
+//! So a report here answers "what did the package set contribute", never "how large is
+//! the image", and everything it renders says so.
 //!
 //! Policy also *permits* a stanza to omit the field. An omission is carried as
-//! [`None`] and counted separately rather than folded in as zero, because a total that
+//! [`None`] and counted separately, rather than folded in as zero. A total that
 //! silently absorbed unknowns would read as complete when it is not.
 
 use serde::Serialize;
@@ -23,8 +27,8 @@ use std::collections::BTreeMap;
 /// One package as a published plan document weighs it.
 ///
 /// Projected from the plan by the engine rather than parsed here, so this module stays
-/// free of the provisioner library — the same split [`crate::provenance`] makes for the
-/// archive rows.
+/// free of the provisioner library. That is the same split [`crate::provenance`] makes
+/// for the archive rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedWeight {
     /// Binary package name, as the plan names it.
@@ -33,8 +37,8 @@ pub struct PlannedWeight {
     pub version: String,
     /// The source package this was built from, where the archive states one that
     /// differs from [`name`](Self::name). `None` means the source carries the same
-    /// name, which is how Debian encodes the common case — so a rollup by source keys
-    /// on `source.unwrap_or(name)` rather than on this field alone.
+    /// name, which is how Debian encodes the common case. A rollup by source therefore
+    /// keys on `source.unwrap_or(name)` rather than on this field alone.
     pub source: Option<String>,
     /// The archive's `Installed-Size` in **kibibytes**, kept in Policy's own unit so it
     /// compares against a mirror's value directly. `None` where the stanza carried
@@ -47,10 +51,11 @@ pub struct PlannedWeight {
 
 /// Which axis a report rolls up on.
 ///
-/// Three, because three are answerable from a plan document. A fourth — which config
-/// layer asked for a package — is not: the plan records the *repository* a package was
-/// fetched from, and most of an image is transitive dependencies no layer named, so any
-/// per-layer figure would be a confident answer to a question the data cannot support.
+/// Three, because three are answerable from a plan document. A fourth, which config
+/// layer asked for a package, is not. The plan records the *repository* a package was
+/// fetched from, and most of an image is transitive dependencies no layer named. Any
+/// per-layer figure would therefore be a confident answer to a question the data
+/// cannot support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Grouping {
@@ -105,7 +110,7 @@ pub struct WeightRow {
 pub struct WeightReport {
     /// The axis the rows are grouped on.
     pub grouping: Grouping,
-    /// Rows, heaviest first; ties broken by key so the output is stable.
+    /// Rows, heaviest first. Ties are broken by key, so the output is stable.
     pub rows: Vec<WeightRow>,
     /// Every stated size in the plan, summed — the figure the rows partition,
     /// unchanged by any `top` truncation the caller applies afterwards.
@@ -120,10 +125,10 @@ pub struct WeightReport {
 impl WeightReport {
     /// Roll `weights` up on `grouping`.
     ///
-    /// `archive_labels` names the repositories by index, for [`Grouping::Archive`]; an
-    /// index it does not cover falls back to `archive <n>`, so a plan carrying more
-    /// stanzas than the caller resolved still produces a complete report rather than
-    /// dropping rows.
+    /// `archive_labels` names the repositories by index, for [`Grouping::Archive`]. An
+    /// index it does not cover falls back to `archive <n>`. A plan carrying more
+    /// stanzas than the caller resolved therefore still produces a complete report,
+    /// rather than dropping rows.
     pub fn build(
         weights: &[PlannedWeight],
         grouping: Grouping,
@@ -175,8 +180,9 @@ impl WeightReport {
 
     /// The first `n` rows, or all of them when `n` is `None`.
     ///
-    /// Truncation is applied after the totals are computed, so a `--top 20` report still
-    /// states the whole set's weight and can say what share the rows shown account for.
+    /// Truncation is applied after the totals are computed. A `--top 20` report
+    /// therefore still states the whole set's weight, and can say what share the rows
+    /// shown account for.
     pub fn top(&self, n: Option<usize>) -> &[WeightRow] {
         match n {
             Some(n) => &self.rows[..n.min(self.rows.len())],
@@ -188,11 +194,11 @@ impl WeightReport {
 /// Index the binary packages that name a source package other than themselves.
 ///
 /// Only the differing ones, because that is what the plan records and what a consumer
-/// needs: a package whose source shares its name is the common case, and an entry
-/// mapping a name to itself would say nothing while inviting a reader to treat its
-/// absence elsewhere as missing data.
+/// needs. A package whose source shares its name is the common case. An entry mapping
+/// a name to itself would say nothing, while inviting a reader to treat its absence
+/// elsewhere as missing data.
 ///
-/// The join key is the binary package name, which is unique within one plan — a plan
+/// The join key is the binary package name, which is unique within one plan. A plan
 /// installs one version of one package per name, by construction.
 pub fn source_index(weights: &[PlannedWeight]) -> BTreeMap<String, String> {
     weights

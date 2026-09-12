@@ -1,12 +1,12 @@
 //! The five `list-*` commands: the discovery surface over the config search path.
 //!
-//! Each renders one row per entry (or a JSON array under `--json`) and collects the
-//! entries that failed to parse, so a corrupt layer file is reported rather than
+//! Each renders one row per entry, or a JSON array under `--json`. It also collects
+//! the entries that failed to parse, so a corrupt layer file is reported rather than
 //! silently dropped. An unreadable entry never fails the listing.
 //!
 //! The human rendering goes through [`print_columns`], which sizes every column from
 //! the data. A listing whose widest name decides its own column stays readable as
-//! names grow; a hardcoded width silently breaks the day one does.
+//! names grow. A hardcoded width silently breaks the day one does.
 
 use crate::render::{constraint, finish_listing, print_columns};
 use boot2deb_core::ConfigRoot;

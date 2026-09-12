@@ -1,15 +1,18 @@
 //! `verify-packages`: does the archive carry what the recipe asks for?
 //!
-//! A recipe's package list is config like any other, and it is the one part of it the
-//! config tree cannot check on its own — whether `forky` ships `firmware-misc-nonfree`
-//! is a fact about an archive, not about a TOML file. Left unchecked it is found at
-//! resolve time, after every compile node has already run, and found badly: a top-level
-//! include naming nothing fails the *whole* resolve, so the failure says the set was
-//! unsatisfiable and never which names were the problem.
+//! A recipe's package list is config like any other. It is the one part of it the
+//! config tree cannot check on its own. Whether `forky` ships
+//! `firmware-misc-nonfree` is a fact about an archive, rather than about a TOML
+//! file.
+//!
+//! Left unchecked it is found at resolve time, after every compile node has already
+//! run. It is also found badly. A top-level include naming nothing fails the *whole*
+//! resolve, so the failure says the set was unsatisfiable and never which names were
+//! the problem.
 //!
 //! This asks the question directly, per recipe, before anything is built. It runs the
-//! read half of a resolve — release, indexes, stop — so one pass answers every name at
-//! once and nothing is downloaded, unpacked, or executed.
+//! read half of a resolve: release, indexes, stop. One pass therefore answers every
+//! name at once, and nothing is downloaded, unpacked, or executed.
 //!
 //! Read-only and network-only: no build, no sandbox, no hardware. A missing package
 //! exits non-zero, so CI can gate a board's recipes on it.

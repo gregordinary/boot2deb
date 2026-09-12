@@ -1,15 +1,15 @@
 //! `why-rebuild` — explain, per compile node, whether its cached source
-//! tree will be reused or rebuilt on the next `build`, and *why*, in terms of the
-//! pinned inputs that changed since it was last stamped.
+//! tree will be reused or rebuilt on the next `build`. The explanation is in terms of
+//! the pinned inputs that changed since the tree was last stamped.
 //!
-//! This is "the payoff of structure": each compile stage stamps its
-//! cloned+patched tree with a diffable [`SignatureManifest`], so `why-rebuild` can
-//! recompute the current manifest from the lock and diff it against the stamp — a
-//! rebuild is explained as "kernel.commit changed", not "the hash differs". Pure
-//! except reading the on-disk stamps: no network, no build, no hardware.
+//! This is "the payoff of structure". Each compile stage stamps its cloned+patched
+//! tree with a diffable [`SignatureManifest`]. `why-rebuild` recomputes the current
+//! manifest from the lock and diffs it against the stamp. A rebuild is then explained
+//! as "kernel.commit changed", not "the hash differs". Pure except reading the on-disk
+//! stamps: no network, no build, no hardware.
 //!
-//! Both build caches are predicted, because a user planning around this output is
-//! asking about the *expensive* case and the two tiers answer different halves of it:
+//! Both build caches are predicted. A user planning around this output is asking
+//! about the *expensive* case, and the two tiers answer different halves of it:
 //!
 //! - **Tier 1** ([`NodeStatus`]) — the cloned+patched source tree, stamped in the work
 //!   dir. A miss costs a clone and a patch run.
@@ -17,18 +17,24 @@
 //!   store outside any work dir ([`crate::artstore`]). A *hit here skips the compile
 //!   entirely*, so it dominates: a node can rebuild its tree and still not compile.
 //!
-//! **Nothing here is a second copy of the build's own answer.** Each verdict is computed
-//! by calling the very function the stage keys its store lookup on; each node's tree
-//! comes from the stage's own path helper
-//! ([`kernel::tree_dir`](crate::build::kernel::tree_dir) and its siblings); and each
-//! node's *name* comes from the stage's own [`NODE`](crate::build::kernel::NODE)
-//! constant, because the artifact store is keyed by `(node, signature)` and a prediction
-//! under a different name would answer a question about an entry no build ever wrote.
+//! **Nothing here is a second copy of the build's own answer.** Every prediction is
+//! taken from the stage itself:
+//!
+//! - Each verdict is computed by calling the very function the stage keys its store
+//!   lookup on.
+//! - Each node's tree comes from the stage's own path helper
+//!   ([`kernel::tree_dir`](crate::build::kernel::tree_dir) and its siblings).
+//! - Each node's *name* comes from the stage's own
+//!   [`NODE`](crate::build::kernel::NODE) constant.
+//!
+//! The name matters because the artifact store is keyed by `(node, signature)`. A
+//! prediction under a different name would answer a question about an entry no build
+//! ever wrote.
 //!
 //! What this module still decides for itself is the *set* of nodes and their order. That
-//! is deliberate and not drift: `build` runs the rootfs and image nodes too, and `shell`
-//! offers the packaging root, but neither is a node this predicts — the rootfs keys on a
-//! live package solve (below), and the image node caches nothing.
+//! is deliberate and not drift. `build` runs the rootfs and image nodes too, and
+//! `shell` offers the packaging root, but neither is a node this predicts. The rootfs
+//! keys on a live package solve (below), and the image node caches nothing.
 //!
 //! Out of scope, because it is not a static prediction: the rootfs node's cache keys
 //! on the live package solve, which needs the mirror.
@@ -84,8 +90,8 @@ pub struct NodePlan {
     /// What `build` will do with `tree`.
     pub status: NodeStatus,
     /// Whether the compile is skipped by a Tier-2 artifact-cache hit. Independent of
-    /// [`status`](Self::status): the store lives outside the work dir and is keyed by
-    /// the node's *inputs*, so a freshly cloned tree with no stamp at all can still
+    /// [`status`](Self::status). The store lives outside the work dir and is keyed by
+    /// the node's *inputs*. A freshly cloned tree with no stamp at all can still
     /// restore its `.deb`s and compile nothing.
     pub artifact: ArtifactStatus,
 }
@@ -133,7 +139,7 @@ impl NodePlan {
 }
 
 /// Inputs for [`plan_nodes`] — the lock plus the same dir / co-dev / libmali choices
-/// `build` resolves, so the predicted trees and signatures match what a build uses.
+/// `build` resolves. The predicted trees and signatures then match what a build uses.
 pub struct PlanInputs<'a> {
     /// The recipe's resolved lock (the source pins).
     pub lock: &'a Lock,
@@ -143,19 +149,19 @@ pub struct PlanInputs<'a> {
     /// kernel/u-boot/ffmpeg signatures so a co-dev tree never matches a pinned stamp.
     pub patches_dev: bool,
     /// The co-dev `--patches-path` checkout, when `patches_dev`. Needed so the
-    /// prediction folds the same live-series fingerprint the build stamps;
+    /// prediction folds the same live-series fingerprint the build stamps.
     /// `None` (or pinned mode) folds the series by commit only.
     pub patches_root: Option<&'a Path>,
     /// The userspace trees this build compiles, as the SoC declares them and resolution
-    /// narrowed them: an optional tree is here only when the build asked for it.
+    /// narrowed them. An optional tree is here only when the build asked for it.
     ///
     /// The prediction needs the declarations and not only the lock's pins, because the
-    /// output key folds the whole set — one tree's `build_deps` are layered for the
+    /// output key folds the whole set. One tree's `build_deps` are layered for the
     /// whole stage, so enabling an optional tree moves every tree's key.
     pub userspace: &'a [boot2deb_core::model::UserspaceTree],
     /// The build's resolved `device_dts` sources. Their content is folded into the
-    /// kernel tree signature (the stage copies them into the tree), so the prediction
-    /// must fold it too or an edited board `.dts` would be reported as "reuse". Empty
+    /// kernel tree signature (the stage copies them into the tree). The prediction
+    /// must fold it too, or an edited board `.dts` would be reported as "reuse". Empty
     /// for a board whose DTB is upstream.
     pub device_dts: &'a [PathBuf],
     /// The build's `device_kmods` descriptors — each predicts a `kmod:<name>` tree
@@ -163,12 +169,12 @@ pub struct PlanInputs<'a> {
     pub device_kmods: &'a [boot2deb_core::model::ResolvedKmod],
     /// The resolved local compat-patch paths per kmod name (as [`kmod`](crate::build::kmod)
     /// consumes them). Their content folds into each kmod tree signature, so an edited
-    /// shim is reported as a rebuild; a kmod absent here folds no local patch.
+    /// shim is reported as a rebuild. A kmod absent here folds no local patch.
     pub kmod_local_patches: &'a [(String, Vec<PathBuf>)],
     /// The resolved build. The Tier-2 output signatures fold axes the lock does not
     /// carry — the kernel arch, the `KBUILD_IMAGE` path, the base defconfig, the
-    /// u-boot defconfig — so predicting the artifact cache needs the resolution, not
-    /// just the pins.
+    /// u-boot defconfig. Predicting the artifact cache therefore needs the resolution,
+    /// not just the pins.
     pub build: &'a ResolvedBuild,
     /// The host-side identities the output signatures fold (the compiler that
     /// produces the kernel/u-boot bytes, the sandbox userland that produces the

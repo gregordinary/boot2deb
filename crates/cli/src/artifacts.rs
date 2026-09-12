@@ -1,9 +1,9 @@
 //! The output dir's artifact ledger and the kernel package it names.
 //!
 //! The rootfs stage stands up a `[trusted=yes]` local apt repo from the `.deb`s the
-//! compile stages produced. Its input set is this explicit ledger — the artifacts the
-//! build recorded — never an extension-only scan of the output dir, so a stray or
-//! half-written `.deb` cannot become trusted apt input.
+//! compile stages produced. Its input set is this explicit ledger, the artifacts the
+//! build recorded. It is never an extension-only scan of the output dir, so a stray
+//! or half-written `.deb` cannot become trusted apt input.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

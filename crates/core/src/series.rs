@@ -2,14 +2,14 @@
 //! `series/<name>.toml` in the `patches` repo — declaring the kernel
 //! range a series targets plus ordered per-tree patch lists.
 //!
-//! A series belongs to a *kernel definition*, not a device: a series that
-//! applies to one kernel version will not apply to another, so the series lives
-//! with the kernel that owns it. Supporting a new kernel version means
-//! authoring a new series; old series stay so old kernels keep building.
+//! A series belongs to a *kernel definition*, not a device. A series that applies to
+//! one kernel version will not apply to another, so the series lives with the kernel
+//! that owns it. Supporting a new kernel version means authoring a new series. Old
+//! series stay so old kernels keep building.
 //!
 //! Pure: parsing plus version-range matching only. Fetching the patches repo and
 //! running `git am` are engine side effects. The version match here is the
-//! *declared intent* (`applies_to_kernel`); the engine's verify-applies gate is
+//! *declared intent* (`applies_to_kernel`). The engine's verify-applies gate is
 //! the *enforcement*.
 
 use crate::error::ConfigError;
@@ -18,18 +18,20 @@ use serde::Deserialize;
 use std::path::Path;
 use std::str::FromStr;
 
-/// The `patch_series` a kernel definition authors when it applies no patch series
-/// at all — a stock mainline kernel whose SoC is fully upstream, or a vendor kernel
-/// that already ships its patches. Such a build never reads the `patches` repo, so
-/// its lock records no `[patches]` table.
+/// The `patch_series` a kernel definition authors when it applies no patch series at
+/// all. That is a stock mainline kernel whose SoC is fully upstream, or a vendor
+/// kernel that already ships its patches. Such a build never reads the `patches`
+/// repo, so its lock records no `[patches]` table.
 ///
-/// The spelling is config-facing; [`patch_series`] maps it to the `None` the rest of
+/// The spelling is config-facing. [`patch_series`] maps it to the `None` the rest of
 /// the code reasons about, so no other module compares against this string.
 pub const NO_PATCH_SERIES: &str = "none";
 
 /// Interpret a kernel definition's authored `patch_series`: `None` for the
 /// [`NO_PATCH_SERIES`] sentinel, `Some(name)` for a real series in the `patches`
-/// repo. Resolution calls this once, so an absent series flows through
+/// repo.
+///
+/// Resolution calls this once, so an absent series flows through
 /// [`ResolvedKernel`](crate::model::ResolvedKernel) and the lock as a typed absence
 /// rather than a magic string.
 pub fn patch_series(authored: &str) -> Option<&str> {
@@ -38,15 +40,15 @@ pub fn patch_series(authored: &str) -> Option<&str> {
 
 /// How a kernel version is matched against a declared range.
 ///
-/// The distinction exists only for prereleases. By semver's rule a prerelease
-/// never satisfies a range whose bounds carry none, so `7.2.0-rc3` does not match
-/// `">=7.0, <7.2"` — and separately does not match `">=7.2"` either, leaving an RC
+/// The distinction exists only for prereleases. By semver's rule a prerelease never
+/// satisfies a range whose bounds carry none, so `7.2.0-rc3` does not match
+/// `">=7.0, <7.2"`. It separately does not match `">=7.2"` either, which leaves an RC
 /// matched by nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeMatch {
     /// Release-strict: a prerelease matches only a range that names one. This is
-    /// what a **build** uses — a series' declared envelope is a claim about
-    /// released kernels, and quietly building an RC against it would overstate it.
+    /// what a **build** uses. A series' declared envelope is a claim about released
+    /// kernels, and quietly building an RC against it would overstate it.
     Release,
     /// Candidate: a prerelease is matched as its base release (`7.2.0-rc3` is read
     /// as `7.2.0`). This is what **candidate verification** uses, where an RC is
@@ -56,8 +58,8 @@ pub enum RangeMatch {
 
 /// One entry in a series' ordered scope list.
 ///
-/// Bare string or table, so the version-insensitive majority stay one-liners and
-/// only the volatile few carry a range:
+/// Bare string or table. The version-insensitive majority therefore stay one-liners,
+/// and only the volatile few carry a range:
 ///
 /// ```toml
 /// kernel = [
@@ -139,8 +141,8 @@ impl PatchEntry {
         }
     }
 
-    /// True when this entry is selected for `kernel_version`. A bare entry always
-    /// is; a ranged one is when its range matches under `mode`.
+    /// True when this entry is selected for `kernel_version`. A bare entry always is.
+    /// A ranged one is selected when its range matches under `mode`.
     ///
     /// `series` names the owner for the error message only.
     pub fn selected(
@@ -159,33 +161,34 @@ impl PatchEntry {
 /// A patch series manifest (`series/<name>.toml`).
 ///
 /// Each scope list is an ordered sequence of [`PatchEntry`], and the list — not the
-/// filename prefixes — is the authoritative apply order. A single tree's list may
-/// span scopes: the `kernel` list interleaves `media-accel/kernel/*` and `rocket/*`
+/// filename prefixes — is the authoritative apply order. A single tree's list can
+/// span scopes. The `kernel` list interleaves `media-accel/kernel/*` and `rocket/*`
 /// patches in one apply sequence, so a `rocket` patch can fall between two
 /// `media-accel` patches. The engine applies each list to its corresponding source
 /// tree via `git am --3way`.
 ///
-/// Two ranges gate a build: [`applies_to_kernel`](Self::applies_to_kernel) is the
-/// series' overall envelope, and each entry may narrow itself further within it.
-/// Both express *declared intent*; the engine's `git am` pass is the enforcement.
+/// Two ranges gate a build. [`applies_to_kernel`](Self::applies_to_kernel) is the
+/// series' overall envelope, and each entry can narrow itself further within it.
+/// Both express *declared intent*. The engine's `git am` pass is the enforcement.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchSeries {
     /// Version range the kernel-family scopes (`kernel`/`ffmpeg`/`userspace`) target,
     /// as a semver requirement (e.g. `">=7.0, <7.2"`), matched against the resolved
     /// kernel's release version. `None` (omitted) means those scopes apply to any
-    /// kernel — the shape a series that patches only u-boot takes, since it makes no
-    /// kernel claim. Gated per build by [`ensure_applies`](Self::ensure_applies).
+    /// kernel. That is the shape a series which patches only u-boot takes, since it
+    /// makes no kernel claim. Gated per build by
+    /// [`ensure_applies`](Self::ensure_applies).
     #[serde(default)]
     pub applies_to_kernel: Option<String>,
     /// Version range the `uboot` scope targets, matched against the resolved u-boot's
     /// version (the boot method's `uboot_ref`, e.g. `v2026.04`) rather than the
-    /// kernel's — u-boot is its own axis. `None` means the u-boot series applies to
-    /// any u-boot this series is built against. Gated by
+    /// kernel's, since u-boot is its own axis. `None` means the u-boot series applies
+    /// to any u-boot this series is built against. Gated by
     /// [`ensure_applies_uboot`](Self::ensure_applies_uboot).
     #[serde(default)]
     pub applies_to_uboot: Option<String>,
-    /// Kernel-tree patches, in apply order (may span the `media-accel` and
+    /// Kernel-tree patches, in apply order (can span the `media-accel` and
     /// `rocket` scopes).
     #[serde(default)]
     pub kernel: Vec<PatchEntry>,
@@ -219,7 +222,7 @@ impl PatchSeries {
     /// series declares none for it (that scope then applies to any version).
     ///
     /// Normalizes the range like every other read of one, so a zero-padded u-boot
-    /// envelope parses the same here as it does in a match — otherwise the
+    /// envelope parses the same here as it does in a match. Otherwise the
     /// unreachable-entry lint would reject a range the gate accepts.
     ///
     /// `series` names the owner for the error message only.
@@ -234,10 +237,10 @@ impl PatchSeries {
     }
 
     /// True when `kernel_version` falls in this series' kernel envelope, matched
-    /// release-strict ([`RangeMatch::Release`]); always true when the series
+    /// release-strict ([`RangeMatch::Release`]). Always true when the series
     /// declares no kernel envelope.
     ///
-    /// `kernel_version` may be `v`-prefixed (`v7.1.1`) and may omit the patch
+    /// `kernel_version` can be `v`-prefixed (`v7.1.1`) and can omit the patch
     /// component (`7.1` is read as `7.1.0`).
     pub fn applies_to(&self, series: &str, kernel_version: &str) -> Result<bool, ConfigError> {
         self.applies_to_under(series, kernel_version, RangeMatch::Release)
@@ -255,13 +258,13 @@ impl PatchSeries {
         self.applies_to_scope(series, Scope::Kernel, kernel_version, mode)
     }
 
-    /// True when `version` falls in the [envelope](Self::envelope) gating `scope`;
-    /// always true when that scope declares none.
+    /// True when `version` falls in the [envelope](Self::envelope) gating `scope`.
+    /// Always true when that scope declares none.
     ///
-    /// The scope-generic form of [`applies_to_under`](Self::applies_to_under), so a
-    /// caller reporting on both axes — `update`'s pin-time advisory — asks the same
-    /// question of each rather than carrying two near-copies. `version` is a kernel
-    /// tag for the kernel-family scopes and a u-boot tag for `uboot`.
+    /// The scope-generic form of [`applies_to_under`](Self::applies_to_under). A
+    /// caller reporting on both axes, such as `update`'s pin-time advisory, therefore
+    /// asks the same question of each rather than carrying two near-copies. `version`
+    /// is a kernel tag for the kernel-family scopes and a u-boot tag for `uboot`.
     pub fn applies_to_scope(
         &self,
         series: &str,
@@ -278,7 +281,7 @@ impl PatchSeries {
     /// The ordered paths of one [`Scope`] that apply to `kernel_version` — the
     /// series the engine actually feeds to `git am`.
     ///
-    /// Entries whose own range excludes this kernel are filtered out; order among
+    /// Entries whose own range excludes this kernel are filtered out. Order among
     /// the survivors is preserved. The envelope is *not* re-checked here (the
     /// kernel node gates it once per build via [`ensure_applies`](Self::ensure_applies)),
     /// so this is purely the per-entry narrowing.
@@ -302,22 +305,23 @@ impl PatchSeries {
     /// Entries the series can never select, as `(scope, entry)` pairs.
     ///
     /// An entry is unreachable when its own range shares no version with its scope's
-    /// envelope: no version the series admits for that scope can select it, so it is
-    /// dead by construction rather than by judgement. Envelope `">=7.8, <8.0"` with an
-    /// entry pinned `"<7.2"` is the shape this catches — typically a patch that was
-    /// upstreamed long enough ago that the envelope has moved past its cap. A scope
-    /// with no declared envelope admits every version, so none of its entries is
-    /// unreachable.
+    /// envelope. No version the series admits for that scope can select it, so it is
+    /// dead by construction rather than by judgment.
+    ///
+    /// Envelope `">=7.8, <8.0"` with an entry pinned `"<7.2"` is the shape this
+    /// catches. That is typically a patch upstreamed long enough ago that the envelope
+    /// has moved past its cap. A scope with no declared envelope admits every version,
+    /// so none of its entries is unreachable.
     ///
     /// Deleting a reported entry (and its file) is safe for the same reason the
-    /// commit pin exists: an old lock names an old `patches` commit whose tree still
+    /// commit pin exists. An old lock names an old `patches` commit whose tree still
     /// contains both.
     ///
-    /// Conservative: an entry whose range or envelope this cannot bound — an operator
-    /// outside `=`/`>`/`>=`/`<`/`<=`, or a comparator naming a prerelease — is never
-    /// reported, so a finding is always a real one. A partial comparator is bounded by
-    /// the component it omits (`=7.1` spans all of 7.1.x), which is what keeps a live
-    /// entry from being called dead.
+    /// Conservative: an entry whose range or envelope this cannot bound is never
+    /// reported, so a finding is always a real one. That covers an operator outside
+    /// `=`/`>`/`>=`/`<`/`<=`, and a comparator naming a prerelease. A partial
+    /// comparator is bounded by the component it omits (`=7.1` spans all of 7.1.x),
+    /// which is what keeps a live entry from being called dead.
     pub fn unreachable(&self, series: &str) -> Result<Vec<(Scope, &PatchEntry)>, ConfigError> {
         let mut dead = Vec::new();
         for scope in Scope::ALL {
@@ -341,7 +345,7 @@ impl PatchSeries {
     }
 
     /// [`applies_to`](PatchSeries::applies_to) as a hard gate on the kernel-family
-    /// scopes: returns [`ConfigError::KernelOutsideSeriesRange`] when the kernel is
+    /// scopes. It returns [`ConfigError::KernelOutsideSeriesRange`] when the kernel is
     /// out of range, so a mismatched `(kernel, series)` fails before any patch is
     /// fetched. A no-op when the series declares no kernel envelope.
     pub fn ensure_applies(&self, series: &str, kernel_version: &str) -> Result<(), ConfigError> {
@@ -360,7 +364,7 @@ impl PatchSeries {
     /// The `uboot` scope's declared-intent gate: returns
     /// [`ConfigError::UbootOutsideSeriesRange`] when `uboot_version` is outside the
     /// series' [`applies_to_uboot`](Self::applies_to_uboot) envelope. A no-op when
-    /// the series declares no u-boot envelope, which is the common case — a u-boot
+    /// the series declares no u-boot envelope, which is the common case. A u-boot
     /// series is usually written for the one u-boot generation the board runs.
     pub fn ensure_applies_uboot(
         &self,
@@ -456,16 +460,16 @@ pub fn patch_prefix(label: &str) -> Option<u32> {
 /// widest existing prefix (minimum 3).
 ///
 /// When two integer neighbors leave no whole-number gap (`070`/`071`), the import
-/// does not dead-end: it appends the next free lowercase-letter suffix to the lower
+/// does not dead-end. It appends the next free lowercase-letter suffix to the lower
 /// neighbor (`070` → `070a` → `070b` → …), which lexically sorts after `070` and
-/// before `071`, so a patch slots between consecutive entries without renumbering
-/// the committed series. Because the list — not the filename — is the authoritative
-/// order, the suffix only needs to read *near* its neighbors, not fall exactly
-/// between them.
+/// before `071`. A patch therefore slots between consecutive entries without
+/// renumbering the committed series. The list — not the filename — is the
+/// authoritative order, so the suffix only needs to read *near* its neighbors. It
+/// need not fall exactly between them.
 ///
 /// The one case with no automatic room is prepending before a `000`-prefixed first
-/// entry (nothing sorts below it): that is [`ConfigError::PatchPrefixNoGap`], so the
-/// caller supplies an explicit `--as` label.
+/// entry, since nothing sorts below it. That is [`ConfigError::PatchPrefixNoGap`], so
+/// the caller supplies an explicit `--as` label.
 pub fn derive_prefix(list: &[&str], index: usize) -> Result<String, ConfigError> {
     let before = index
         .checked_sub(1)

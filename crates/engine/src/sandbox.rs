@@ -1,96 +1,114 @@
-//! The provisioned Debian userlands boot2deb's package work happens in — every step
+//! The provisioned Debian userlands boot2deb's package work happens in. Every step
 //! that compiles a `.deb` or archives one runs inside one of them, never on the host.
 //!
 //! There are three, in two kinds. Two are **build sandboxes** ([`RootlessSandbox`]) and
-//! differ only in their [`SandboxRole`]; the third archives and compiles nothing:
+//! differ only in their [`SandboxRole`]. The third archives and compiles nothing:
 //!
 //! - The **target-arch build sandbox** ([`SandboxRole::Target`]) is where the userspace
 //!   and ffmpeg stages ([`crate::build`]) compile their `.deb`s, bootstrapped for the
 //!   build's suite and **target** arch.
 //! - The **cross build sandbox** ([`SandboxRole::Cross`]) is where the kernel, u-boot
-//!   and kmod stages compile, bootstrapped for the build's suite and the **host** arch
-//!   and carrying a cross toolchain that emits the target's objects.
+//!   and kmod stages compile. It is bootstrapped for the build's suite and the **host**
+//!   arch, and carries a cross toolchain that emits the target's objects.
 //! - The **packaging root** ([`PackagingSandbox`]) is where an already-staged tree
 //!   becomes a `.deb`. It is bootstrapped for the build's
 //!   [`packaging_suite`](boot2deb_core::model::ResolvedBuild::packaging_suite) and the
-//!   **host** arch, carries `dpkg` and `xz-utils` and nothing else, and is never
-//!   layered — so it has no `build_root` operation at all.
+//!   **host** arch. It carries `dpkg` and `xz-utils` and nothing else, and is never
+//!   layered, so it has no `build_root` operation at all.
 //!
-//! Both build sandboxes are layered: a stage declares its build-dependencies, gets a
-//! [`BuildRoot`] — the shared base plus that stage's increment, on an unprivileged
-//! overlay — and drops it when it is done.
+//! Both build sandboxes are layered. A stage declares its build-dependencies and gets a
+//! [`BuildRoot`]: the shared base plus that stage's increment, on an unprivileged
+//! overlay. It drops that root when it is done.
 //!
-//! **Why two compile roots rather than one, and why each sits where it does.** A compile
-//! that must *link against the target's libraries* has to happen at the target's
-//! architecture, and one that merely *emits the target's objects* does not. The
-//! userspace and ffmpeg stages are the first case; the kernel, u-boot and kmod stages
-//! are the second, so they compile natively in a host-arch root through a cross
-//! toolchain — the standard distro cross-build shape — and pay no emulation for a
-//! multi-minute kernel build. Archiving resolves nothing at all, which is why the
+//! # Why two compile roots rather than one
+//!
+//! A compile that must *link against the target's libraries* has to happen at the
+//! target's architecture. One that merely *emits the target's objects* does not.
+//!
+//! The userspace and ffmpeg stages are the first case. The kernel, u-boot and kmod
+//! stages are the second, so they compile natively in a host-arch root through a cross
+//! toolchain. That is the standard distro cross-build shape, and it pays no emulation
+//! for a multi-minute kernel build. Archiving resolves nothing at all, which is why the
 //! packaging root is host-arch too.
 //!
-//! What all three buy is the same: the tool that shapes the output — compiler, linker,
-//! `dpkg-deb` — is a sha256-pinned package resolved from the build's own mirror list,
-//! rather than whatever the build host happened to have installed.
+//! What all three buy is the same. The tool that shapes the output — compiler, linker,
+//! `dpkg-deb` — is a sha256-pinned package resolved from the build's own mirror list.
+//! It is not whatever the build host happened to have installed.
 //!
-//! The suite, not the arch, is what makes the target-arch sandbox necessary. Those stages
-//! emit `.deb`s for the target suite, and `dpkg-shlibdeps` derives each one's runtime
-//! `Depends` from the libraries present at build time — it maps every `NEEDED` soname
-//! to the package that provides it *here*. Building on the host would link against the
-//! host's libraries and stamp the host's package names and versions into `Depends`,
-//! producing a `.deb` that does not install in the target rootfs even on a
-//! matching-arch host. The sandbox is also the only place the stages can see the
-//! build's *own* userspace `.deb`s: ffmpeg links against `librga2`/`librockchip-mpp1`,
-//! which this build produces, and `dpkg-shlibdeps` resolves `librga.so.2` to
-//! `Depends: librga2` only because that deb — and its `shlibs` — is present in the
-//! root it compiles in. It gets there through the stage's own
-//! [`BuildRootSpec::pool`]: the build publishes its userspace `.deb`s as a trusted
-//! `file://` repository, and the stage's build root resolves them out of it like any
-//! other package.
+//! # Why the target-arch sandbox exists
+//!
+//! The suite, not the arch, is what makes it necessary. Those stages emit `.deb`s for
+//! the target suite, and `dpkg-shlibdeps` derives each one's runtime `Depends` from the
+//! libraries present at build time. It maps every `NEEDED` soname to the package that
+//! provides it *here*.
+//!
+//! Building on the host would link against the host's libraries, and stamp the host's
+//! package names and versions into `Depends`. That produces a `.deb` that does not
+//! install in the target rootfs, even on a matching-arch host.
+//!
+//! The sandbox is also the only place the stages can see the build's *own* userspace
+//! `.deb`s. ffmpeg links against `librga2`/`librockchip-mpp1`, which this build
+//! produces. `dpkg-shlibdeps` resolves `librga.so.2` to `Depends: librga2` only because
+//! that deb, and its `shlibs`, is present in the root it compiles in.
+//!
+//! It gets there through the stage's own [`BuildRootSpec::pool`]. The build publishes
+//! its userspace `.deb`s as a trusted `file://` repository, and the stage's build root
+//! resolves them out of it like any other package.
+//!
+//! # Layering
 //!
 //! A compile stage never mutates the environment it builds in. The base is
-//! bootstrapped once and then read-only; each stage declares its build-dependencies,
-//! gets a [`BuildRoot`] — the base plus that stage's increment, layered on with an
-//! unprivileged overlay — and drops it when it is done. So a build root is a function
-//! of what the stage declared, not of which builds ran in the directory before it, and
-//! an undeclared build-dependency fails immediately instead of compiling against a
-//! leftover. The packaging root needs none of that machinery, because it never acquires
-//! a package after its base is published: what it holds is fixed at bootstrap, so there
-//! is nothing for a declaration to get wrong.
+//! bootstrapped once and then read-only. Each stage declares its build-dependencies and
+//! gets a [`BuildRoot`]: the base plus that stage's increment, layered on with an
+//! unprivileged overlay. It drops that root when it is done.
 //!
-//! That is also where the host requirement for an unprivileged overlay comes from, and
-//! why it is a requirement of *compiling* rather than of every build: a build that
-//! compiles nothing — a board that installs Debian's kernel, or a rebuild whose
-//! artifacts all restore from the cache — stands up no build root and needs only user
-//! namespaces.
+//! A build root is therefore a function of what the stage declared, not of which builds
+//! ran in the directory before it. An undeclared build-dependency fails immediately,
+//! instead of compiling against a leftover.
 //!
-//! Every root is **unprivileged**: the rootfs is bootstrapped and entered entirely
-//! in-process by the pure-Rust [`ferroday_cage`] library — its Debian provisioner
-//! resolves, verifies, and lays out the suite/arch userland with no `sudo`
-//! and no external bootstrap binary, and each command then runs in a cage
-//! (fresh namespaces, the rootfs mounted as `/`, the caller mapped to root inside).
-//! When the root's arch differs from the host's, its binaries execute via the
-//! host's `qemu-user` binfmt handler — registered with the `F` (fix-binary) flag,
-//! so the interpreter is preloaded and nothing is copied into the rootfs; when the
-//! arches match they simply run, and `qemu-user` is never consulted. Only the
-//! target-arch sandbox is ever in the first case, which is what makes `qemu-user` a
-//! requirement of building *target-arch packages* rather than of cross-building at all.
-//! Each bootstrapped tree is cached and reused across builds — the base-rootfs cache —
-//! not a per-build throwaway. (The *OS* rootfs that becomes the image is a further tree,
-//! bootstrapped by [`crate::rootfs`].)
+//! The packaging root needs none of that machinery, because it never acquires a package
+//! after its base is published. What it holds is fixed at bootstrap, so there is
+//! nothing for a declaration to get wrong.
 //!
-//! Mapping the caller to root inside is what retires `fakeroot` — from every root, and
-//! so from boot2deb entirely. It is uid 0 that a Debian packaging tool wants, and the
-//! cage supplies the real thing, so each tool takes the branch it takes when run by
-//! root: a tree the build user staged on the host stats as `root:root` inside, and
-//! `dpkg-deb` archives it with the ownership a `.deb` must carry; `dpkg-buildpackage`
-//! selects no gain-root command at all. No base set carries the package, because
-//! nothing on any path would execute it.
+//! That is also where the host requirement for an unprivileged overlay comes from. It
+//! explains why that is a requirement of *compiling* rather than of every build. A build that
+//! compiles nothing stands up no build root and needs only user namespaces. That covers
+//! a board that installs Debian's kernel, and a rebuild whose artifacts all restore
+//! from the cache.
 //!
-//! No root is a hard security boundary against malicious build code: each runs
-//! as the build user with the build directories bind-mounted read-write. What
-//! stops a malicious build script is that every compiled source is pinned to an
-//! exact commit by the lock, not the namespace around the compiler.
+//! # Every root is unprivileged
+//!
+//! The rootfs is bootstrapped and entered entirely in-process by the pure-Rust
+//! [`ferroday_cage`] library. Its Debian provisioner resolves, verifies, and lays out
+//! the suite/arch userland with no `sudo` and no external bootstrap binary. Each
+//! command then runs in a cage: fresh namespaces, the rootfs mounted as `/`, and the
+//! caller mapped to root inside.
+//!
+//! When the root's arch differs from the host's, its binaries execute via the host's
+//! `qemu-user` binfmt handler. It is registered with the `F` (fix-binary) flag, so the
+//! interpreter is preloaded and nothing is copied into the rootfs. When the arches
+//! match they simply run, and `qemu-user` is never consulted.
+//!
+//! Only the target-arch sandbox is ever in the first case. That is what makes
+//! `qemu-user` a requirement of building *target-arch packages*, rather than of
+//! cross-building at all. Each bootstrapped tree is cached and reused across builds, as
+//! the base-rootfs cache, rather than being a per-build throwaway. (The *OS* rootfs that
+//! becomes the image is a further tree, bootstrapped by [`crate::rootfs`].)
+//!
+//! Mapping the caller to root inside is what retires `fakeroot`, from every root and so
+//! from boot2deb entirely. It is uid 0 that a Debian packaging tool wants, and the cage
+//! supplies the real thing. Each tool therefore takes the branch it takes when run by
+//! root.
+//!
+//! A tree the build user staged on the host stats as `root:root` inside, and `dpkg-deb`
+//! archives it with the ownership a `.deb` must carry. `dpkg-buildpackage` selects no
+//! gain-root command at all. No base set carries the package, because nothing on any
+//! path would execute it.
+//!
+//! No root is a hard security boundary against malicious build code. Each runs as the
+//! build user, with the build directories bind-mounted read-write. What stops a
+//! malicious build script is that every compiled source is pinned to an exact commit by
+//! the lock. It is not the namespace around the compiler.
 
 use crate::bootstrap::{COMPONENTS, DEFAULT_MIRROR};
 use crate::build;
@@ -168,16 +186,16 @@ const PACKAGING_DEPS: &[&str] = &["dpkg", "xz-utils"];
 /// packages its base carries, and which token names its tree.
 ///
 /// One type serves both because a compile root is a compile root — same bootstrap, same
-/// layering, same cage. What differs is which side of the compile the root stands on,
-/// and that is exactly one value rather than a second implementation of everything
-/// around it. Contrast [`PackagingSandbox`], which is a distinct type because "never
+/// layering, same cage. What differs is which side of the compile the root stands on.
+/// That is exactly one value, rather than a second implementation of everything around
+/// it. Contrast [`PackagingSandbox`], which is a distinct type because "never
 /// layered" is a difference in *contract*, not in configuration.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SandboxRole {
     /// The **target-arch** root the userspace and ffmpeg stages compile in.
     ///
-    /// Those stages link against the target's libraries and let `dpkg-shlibdeps` derive
-    /// each `.deb`'s runtime `Depends` from what is present at build time, which is only
+    /// Those stages link against the target's libraries, and let `dpkg-shlibdeps` derive
+    /// each `.deb`'s runtime `Depends` from what is present at build time. That is only
     /// correct at the target's architecture. On a host that cannot execute the target's
     /// binaries every command in here runs under `qemu-user`.
     Target,
@@ -185,7 +203,7 @@ pub enum SandboxRole {
     /// cross toolchain that emits `target`'s objects.
     ///
     /// These stages emit target objects but link nothing against the target's
-    /// libraries — the kernel and u-boot are freestanding, and an out-of-tree module
+    /// libraries. The kernel and u-boot are freestanding, and an out-of-tree module
     /// links against the kernel tree beside it. So the compile can be native, which is
     /// what keeps a multi-minute kernel build off `qemu-user`.
     Cross {
@@ -277,10 +295,10 @@ const PACKAGING_MANIFEST_HEADER: &str =
 
 /// One command to run inside a [`BuildRoot`].
 ///
-/// `work` is the working directory; it and every path in `binds` are host paths
-/// made visible inside the sandbox **at the same absolute path**, so a build that
-/// drops artifacts beside its source tree writes them back to the host dir. `env`
-/// entries are exported for the command.
+/// `work` is the working directory. It and every path in `binds` are host paths
+/// made visible inside the sandbox **at the same absolute path**. A build that
+/// drops artifacts beside its source tree therefore writes them back to the host dir.
+/// `env` entries are exported for the command.
 pub struct SandboxRun<'a> {
     /// Working directory (a host path, exposed inside at the same path). Must be
     /// `work` itself or lie under one of `binds`.
@@ -290,7 +308,7 @@ pub struct SandboxRun<'a> {
     pub binds: &'a [PathBuf],
     /// Environment variables exported for the command.
     pub env: &'a [(String, String)],
-    /// The command and its arguments (`argv[0]` is the program). Must be non-empty;
+    /// The command and its arguments (`argv[0]` is the program). Must be non-empty.
     /// [`BuildRoot::run`] rejects an empty one with [`EngineError::EmptyArgv`] rather
     /// than indexing past the end.
     pub argv: &'a [String],
@@ -300,21 +318,22 @@ pub struct SandboxRun<'a> {
     /// unwatched.
     ///
     /// A **host** path under one of `binds`, since the cage exposes binds at their own
-    /// absolute path and nothing else survives it. Set here rather than by rewriting
-    /// `argv` at the call site so that `argv` stays the command the build asked for:
-    /// the probe launches through `/bin/sh -c`, and an error naming its `argv[0]` would
-    /// report `/bin/sh` for every failed compile on an instrumented stage. What it
-    /// watches for, and why, is in the `build::probe` module.
+    /// absolute path and nothing else survives it. It is set here rather than by
+    /// rewriting `argv` at the call site, so that `argv` stays the command the build
+    /// asked for. The probe launches through `/bin/sh -c`, and an error naming its
+    /// `argv[0]` would report `/bin/sh` for every failed compile on an instrumented
+    /// stage. What it watches for, and why, is in the `build::probe` module.
     pub probe: Option<&'a Path>,
 }
 
 /// A build root and the host paths a command in it must see — the pair every compile
 /// invocation carries.
 ///
-/// One value because neither half means anything alone: a root with no binds sees no
-/// source tree, and a bind list with no root has nowhere to be exposed. Passing them
-/// together is also what keeps a stage's several `make` runs agreeing on what is
-/// visible, which a per-call bind list would leave to each call site to get right.
+/// One value, because neither half means anything alone. A root with no binds sees no
+/// source tree, and a bind list with no root has nowhere to be exposed.
+///
+/// Passing them together is also what keeps a stage's several `make` runs agreeing on
+/// what is visible. A per-call bind list would leave that to each call site to get right.
 pub struct CompileRoot<'a> {
     /// The layered root the command runs in: the shared base plus this stage's
     /// increment.
@@ -324,11 +343,11 @@ pub struct CompileRoot<'a> {
     pub binds: &'a [PathBuf],
 }
 
-/// What a stage needs in its build root — the packages to layer over the base, and
-/// where they may be resolved from.
+/// What a stage needs in its build root: the packages to layer over the base, and
+/// where they can be resolved from.
 ///
-/// A stage declares its requirements rather than mutating a shared environment, which
-/// is what makes the root a function of the declaration instead of a function of which
+/// A stage declares its requirements rather than mutating a shared environment. That is
+/// what makes the root a function of the declaration, instead of a function of which
 /// builds ran in the directory before it.
 pub struct BuildRootSpec<'a> {
     /// Debian packages to layer over the base — this stage's build-dependencies.
@@ -338,13 +357,14 @@ pub struct BuildRootSpec<'a> {
     /// contributes nothing, and an empty delta stages no increment at all.
     pub packages: &'a [&'a str],
     /// A trusted `file://` repository the increment resolves against **in addition**
-    /// to the suite mirrors — the build's own `.deb`s, fed forward from an earlier
-    /// stage ([`LocalDistsRepo::file_url`](crate::repo::LocalDistsRepo::file_url)).
+    /// to the suite mirrors. It holds the build's own `.deb`s, fed forward from an
+    /// earlier stage
+    /// ([`LocalDistsRepo::file_url`](crate::repo::LocalDistsRepo::file_url)).
     ///
     /// `None` resolves against the suite alone. This is how a stage build-depends on a
-    /// package *this build produced*: the pool is a real repository, so the resolver
-    /// pulls the package and its transitive dependencies through one resolution rather
-    /// than having the `.deb` pushed into the tree behind the resolver's back.
+    /// package *this build produced*. The pool is a real repository, so the resolver
+    /// pulls the package and its transitive dependencies through one resolution. The
+    /// `.deb` is not pushed into the tree behind the resolver's back.
     pub pool: Option<&'a str>,
     /// The stage this root belongs to (`userspace`, `ffmpeg`) — names the overlay
     /// upper's directory and appears in log lines. One root serves a whole stage: the
@@ -356,11 +376,11 @@ pub struct BuildRootSpec<'a> {
 /// increment.
 ///
 /// Returned by [`BuildSandbox::build_root`]. Commands run through
-/// [`run`](Self::run) see the merged `base + increment` view; dropping the value
+/// [`run`](Self::run) see the merged `base + increment` view. Dropping the value
 /// discards the increment and leaves the base as it was.
 ///
 /// `run` lives here rather than on the sandbox because a run has to name the root it
-/// happens in, and a build root is the only root a build command runs in — the base
+/// happens in. A build root is the only root a build command runs in, and the base
 /// itself is never entered.
 pub struct BuildRoot {
     /// The base tree — the overlay's read-only lower.
@@ -418,8 +438,8 @@ impl BuildRoot {
 /// A stage drives it through these operations and is otherwise agnostic to
 /// the backend, so another rootfs provider can satisfy the same contract.
 ///
-/// The base is immutable by construction: nothing on this trait writes into it after
-/// [`ensure_ready`](Self::ensure_ready) publishes it, and the only way a stage acquires
+/// The base is immutable by construction. Nothing on this trait writes into it after
+/// [`ensure_ready`](Self::ensure_ready) publishes it. The only way a stage acquires
 /// a package is [`build_root`](Self::build_root), which layers it into an overlay the
 /// stage then drops.
 pub trait BuildSandbox {
@@ -436,8 +456,8 @@ pub trait BuildSandbox {
     /// bootstrap resolved ([`crate::manifest`]).
     ///
     /// The base is the toolchain that compiles the build's target `.deb`s, and no
-    /// source pin covers it — so this is the record of what produced them, and it is
-    /// what the image's provenance reports. `None` until
+    /// source pin covers it. This is therefore the record of what produced them, and it
+    /// is what the image's provenance reports. `None` until
     /// [`ensure_ready`](Self::ensure_ready) has published a base, which a build with
     /// no package stage never does.
     fn base_manifest(&self) -> Option<PathBuf>;
@@ -446,7 +466,7 @@ pub trait BuildSandbox {
     /// against the suite and `spec.pool`, layered on with an unprivileged overlay.
     ///
     /// The increment lives in the overlay's upper layer and is discarded when the
-    /// returned [`BuildRoot`] drops, so the base is never mutated and a stage's
+    /// returned [`BuildRoot`] drops. The base is therefore never mutated, and a stage's
     /// build-deps cannot leak into the next stage or into the next build. Requires
     /// [`ensure_ready`](Self::ensure_ready) to have published the base.
     fn build_root(&self, spec: &BuildRootSpec, step: &Step) -> Result<BuildRoot, EngineError>;
@@ -455,12 +475,13 @@ pub trait BuildSandbox {
 /// A provisioned Debian userland and everything needed to provision it: the shared
 /// half of [`RootlessSandbox`] and [`PackagingSandbox`].
 ///
-/// The two roots differ in what they are *for* — one is layered and compiles, the other
-/// is fixed and archives — and in nothing about how a suite, an architecture and a
-/// mirror list become a tree on disk. That half lives here so the two cannot drift in
-/// which archive they resolve from, which keyring they trust, or how a base states its
-/// own contents. A role-specific type supplies the package set and the manifest header;
-/// this supplies the rest.
+/// The two roots differ in what they are *for*: one is layered and compiles, the other
+/// is fixed and archives. They differ in nothing about how a suite, an architecture and
+/// a mirror list become a tree on disk.
+///
+/// That half lives here so the two cannot drift in which archive they resolve from,
+/// which keyring they trust, or how a base states its own contents. A role-specific
+/// type supplies the package set and the manifest header, and this supplies the rest.
 struct SandboxBase {
     /// Rootfs directory — bootstrapped once, reused across builds (the seed of the
     /// base-rootfs cache).
@@ -475,37 +496,37 @@ struct SandboxBase {
     /// ([`snapshot::resolve_mirrors`](crate::snapshot::resolve_mirrors)). Non-empty.
     ///
     /// Shared, not defaulted, because the tools that produce the build's `.deb`s live
-    /// in these rootfs trees: a `--snapshot pin` that fixed the image's userland to a
-    /// point in time while a sandbox kept bootstrapping from the live mirror would
-    /// pin the *output* packages and leave the *compiler and archiver* that produced
-    /// them free to move, which is not what "pinned" reads as.
+    /// in these rootfs trees. Consider a `--snapshot pin` that fixed the image's
+    /// userland to a point in time while a sandbox kept bootstrapping from the live
+    /// mirror. It would pin the *output* packages and leave the *compiler and archiver*
+    /// that produced them free to move, which is not what "pinned" reads as.
     mirrors: Vec<String>,
     /// Debian archive keyring verifying the suite's `Release` signature. `None`
-    /// falls back to the host apt trust store (only works on a Debian host); a
+    /// falls back to the host apt trust store, which only works on a Debian host. A
     /// vendored keyring makes the bootstrap portable to non-Debian hosts.
     keyring: Option<PathBuf>,
     /// Content-addressed directory downloaded `.deb`s are cached in, reused across
     /// bootstraps. `None` downloads to a temporary directory the provisioner discards.
     ///
-    /// Shared with the rootfs node's cache rather than kept separate: both provision
-    /// the same suite and architecture, so their package sets overlap heavily and each
+    /// Shared with the rootfs node's cache rather than kept separate. Both provision
+    /// the same suite and architecture, so their package sets overlap heavily. Each
     /// entry is content-addressed, verified against its digest before reuse, and
-    /// published by rename — a cache two provisioners write is the same file they both
-    /// name.
+    /// published by rename, so a cache two provisioners write is the same file they
+    /// both name.
     cache_dir: Option<PathBuf>,
 }
 
-/// What a sandbox is provisioned from: where its tree lives, which suite and
+/// What a sandbox is provisioned from. It says where its tree lives, which suite and
 /// architecture it is, which mirrors and keyring it resolves against, and where its
 /// downloads are cached.
 ///
-/// A struct rather than six positional arguments because four of them are
-/// `String`/`Option<PathBuf>`-shaped: a transposed `suite`/`arch` pair would bootstrap a
+/// A struct rather than six positional arguments, because four of them are
+/// `String`/`Option<PathBuf>`-shaped. A transposed `suite`/`arch` pair would bootstrap a
 /// tree for a suite named `arm64`, and would compile. One value also states that the
-/// three sandbox kinds are provisioned from *the same* set of answers — only their role
-/// and their package set differ.
+/// three sandbox kinds are provisioned from *the same* set of answers. Only their
+/// role and their package set differ.
 pub struct SandboxSpec {
-    /// The tree's own directory, keyed by everything below it — the caller derives it
+    /// The tree's own directory, keyed by everything below it. The caller derives it
     /// with [`build_sandbox_dir`] or [`packaging_root_dir`], which is what makes two
     /// differently-configured sandboxes different directories.
     pub rootfs: PathBuf,
@@ -516,15 +537,15 @@ pub struct SandboxSpec {
     pub arch: String,
     /// The build's own resolved mirror list, in order. Under `--snapshot pin` the
     /// compiler and archiver have to come from the same point-in-time archive the
-    /// packages they produce do, so this is the build's list and not a fixed default.
-    /// Empty falls back to [`crate::DEFAULT_MIRROR`]: a caller that resolved no mirror
-    /// expressed no preference.
+    /// packages they produce do. This is therefore the build's list rather than a fixed
+    /// default. Empty falls back to [`crate::DEFAULT_MIRROR`], since a caller that
+    /// resolved no mirror expressed no preference.
     pub mirrors: Vec<String>,
-    /// Debian archive keyring verifying the suite's `Release` signature; `None` falls
+    /// Debian archive keyring verifying the suite's `Release` signature. `None` falls
     /// back to the host apt trust store. A vendored keyring makes the bootstrap portable
     /// to a non-Debian host.
     pub keyring: Option<PathBuf>,
-    /// Content-addressed directory downloaded `.deb`s are cached in; `None` discards
+    /// Content-addressed directory downloaded `.deb`s are cached in. `None` discards
     /// them with the bootstrap.
     pub cache_dir: Option<PathBuf>,
 }
@@ -533,9 +554,9 @@ impl SandboxBase {
     /// A base rooted at `rootfs` for `suite`/`arch`, resolved from `mirrors` in order
     /// and verified with `keyring`.
     ///
-    /// An empty `mirrors` falls back to [`crate::DEFAULT_MIRROR`] rather than failing:
-    /// a caller that resolved no mirror expressed no preference. Every other argument
-    /// is taken as given.
+    /// An empty `mirrors` falls back to [`crate::DEFAULT_MIRROR`] rather than failing,
+    /// since a caller that resolved no mirror expressed no preference. Every other
+    /// argument is taken as given.
     fn new(spec: SandboxSpec) -> Self {
         SandboxBase {
             rootfs: spec.rootfs,
@@ -828,19 +849,22 @@ impl SandboxBase {
 /// Rootless build sandbox: a Debian userland for the build's suite, bootstrapped and
 /// entered without root, and layered per stage.
 ///
-/// Its [`SandboxRole`] decides what it is — a target-arch root the userspace and ffmpeg
-/// stages compile in, or a host-arch root carrying a cross toolchain the kernel, u-boot
-/// and kmod stages compile in. Everything else about it is the same either way, which is
-/// why it is one type.
+/// Its [`SandboxRole`] decides what it is. One kind is a target-arch root the userspace
+/// and ffmpeg stages compile in. The other is a host-arch root with a cross toolchain
+/// for the kernel, u-boot and kmod stages. Everything else is the same either way,
+/// which is why it is one type.
 ///
-/// The rootfs is bootstrapped once by [`ferroday_cage`]'s Debian provisioner and
-/// reused as the read-only lower of every [`BuildRoot`]; each command runs in a
+/// The rootfs is bootstrapped once by [`ferroday_cage`]'s Debian provisioner, and
+/// reused as the read-only lower of every [`BuildRoot`]. Each command runs in a
 /// [`ferroday_cage::Cage`] with that overlay mounted as `/`, so a stage's writes land
-/// in its own increment. Where the root's arch differs from the host's its binaries
-/// execute via the `F`-flagged `qemu-user` binfmt handler with no interpreter copy;
-/// where they match they run directly, which a cross root always does. See
-/// the [module docs](self) for why the package stages always compile in here rather
-/// than on the host, and [`PackagingSandbox`] for the root that archives a staged tree.
+/// in its own increment.
+///
+/// Where the root's arch differs from the host's, its binaries execute via the
+/// `F`-flagged `qemu-user` binfmt handler with no interpreter copy. Where they match
+/// they run directly, which a cross root always does.
+///
+/// See the [module docs](self) for why the package stages always compile in here rather
+/// than on the host. [`PackagingSandbox`] is the root that archives a staged tree.
 pub struct RootlessSandbox {
     /// What this sandbox is for, and so which architecture it is provisioned at and
     /// which packages its base carries.
@@ -850,39 +874,39 @@ pub struct RootlessSandbox {
     /// Directory each stage's overlay upper is created under — one subdirectory per
     /// stage, holding that stage's upper and the overlay's work area beside it.
     ///
-    /// Supplied rather than derived from the base's tree because it is a *host
-    /// requirement*: an unprivileged overlay records whiteouts in `user.*`
+    /// Supplied rather than derived from the base's tree, because it is a *host
+    /// requirement*. An unprivileged overlay records whiteouts in `user.*`
     /// extended attributes, which not every filesystem holds, and
     /// [`overlay_check`](crate::checks::overlay_check) probes this exact directory
     /// before a build starts. Passing it in is what keeps the directory `doctor`
-    /// cleared and the directory a build uses the same one — both come from
+    /// cleared and the directory a build uses the same one, since both come from
     /// [`build_root_uppers`].
     uppers_dir: PathBuf,
 }
 
 impl RootlessSandbox {
     /// A build sandbox in `role`, rooted at `rootfs`, bootstrapping `suite`/`arch` from
-    /// `mirrors` in order, verifying the archive with `keyring` (recommended; `None`
-    /// uses the host apt trust store).
+    /// `mirrors` in order. The archive is verified with `keyring`, which is recommended.
+    /// `None` uses the host apt trust store.
     ///
-    /// `arch` is the architecture the root itself is provisioned at, which must be the
-    /// one `role` implies — the target's for [`SandboxRole::Target`], the host's for
-    /// [`SandboxRole::Cross`] — since `rootfs` has to be [`build_sandbox_dir`] of the
-    /// same role and arch for the tree and its contents to agree.
+    /// `arch` is the architecture the root itself is provisioned at, and it must be the
+    /// one `role` implies. That is the target's for [`SandboxRole::Target`], and the
+    /// host's for [`SandboxRole::Cross`]. `rootfs` has to be [`build_sandbox_dir`] of
+    /// the same role and arch, for the tree and its contents to agree.
     ///
     /// `mirrors` is the build's own resolved list
     /// ([`snapshot::resolve_mirrors`](crate::snapshot::resolve_mirrors)) rather than a
     /// fixed default, because the toolchain that compiles this build's `.deb`s lives in
-    /// this rootfs: a `--snapshot pin` that fixed the image's userland to a point in
-    /// time while this sandbox kept bootstrapping from the live mirror would pin the
-    /// *output* packages and leave the *compiler* that produced them free to move,
-    /// which is not what "pinned" reads as. An empty list falls back to
-    /// [`crate::DEFAULT_MIRROR`] rather than failing: a caller that resolved no mirror
-    /// expressed no preference.
+    /// this rootfs. Consider a `--snapshot pin` that fixed the image's userland to a
+    /// point in time while this sandbox kept bootstrapping from the live mirror. It
+    /// would pin the *output* packages and leave the *compiler* that produced them free
+    /// to move, which is not what "pinned" reads as. An empty list falls back to
+    /// [`crate::DEFAULT_MIRROR`] rather than failing, since a caller that resolved no
+    /// mirror expressed no preference.
     ///
-    /// `cache_dir` is where downloaded `.deb`s are cached; `None` discards them with
-    /// the bootstrap. `uppers_dir` is where each stage's overlay upper is created, and
-    /// must be [`build_root_uppers`] of the build's work dir — the directory
+    /// `cache_dir` is where downloaded `.deb`s are cached, and `None` discards them
+    /// with the bootstrap. `uppers_dir` is where each stage's overlay upper is created,
+    /// and must be [`build_root_uppers`] of the build's work dir. That is the directory
     /// [`overlay_check`](crate::checks::overlay_check) probes.
     pub fn new(role: SandboxRole, spec: SandboxSpec, uppers_dir: PathBuf) -> Self {
         RootlessSandbox {
@@ -1015,52 +1039,57 @@ impl BuildSandbox for RootlessSandbox {
 /// The packaging root: a host-arch Debian userland carrying `dpkg` and `xz-utils`, in
 /// which a staged tree becomes a `.deb`.
 ///
-/// The u-boot and kmod stages assemble their package trees on the host — the layout,
-/// the control text and the mode normalization are all host-side and pure — and then run
-/// one `dpkg-deb --build` in here. That is the whole of what this root does, which is
-/// why it has neither [`BuildSandbox::build_root`] nor an implementation of that trait:
+/// The u-boot and kmod stages assemble their package trees on the host. The layout,
+/// the control text and the mode normalization are all host-side and pure. They
+/// then run one `dpkg-deb --build` in here. That is the whole of what this root does,
+/// which is why it has neither [`BuildSandbox::build_root`] nor an implementation of
+/// that trait:
 ///
 /// - **It is never layered.** Its contents are fixed at bootstrap
 ///   (`dpkg` and `xz-utils`), so there is no per-stage increment to declare and no
 ///   undeclared-dependency hazard for an overlay to catch. Commands therefore run
-///   directly in the base, under the same cage profile a [`BuildRoot`] run uses — and
-///   an unprivileged overlay, which the compile sandbox requires, is not a host
+///   directly in the base, under the same cage profile a [`BuildRoot`] run uses. An
+///   unprivileged overlay, which the compile sandbox requires, is not a host
 ///   requirement for a build that only packages.
 /// - **It is host-arch.** `dpkg-deb` does not care what architecture the payload
 ///   targets, so packaging runs natively with no `qemu-user` in the path. Contrast the
 ///   build sandbox, which is target-arch because `dpkg-shlibdeps` must see the target's
-///   libraries; archiving a pre-staged tree resolves nothing.
+///   libraries. Archiving a pre-staged tree resolves nothing.
 ///
-/// What it buys is that `dpkg-deb`'s version and its `liblzma` — which do shape the
-/// archive bytes — become sha256-pinned packages resolved from the build's own mirror
-/// list, like every other input, instead of a property of whichever distribution ran
-/// the build.
+/// What it buys is that `dpkg-deb`'s version and its `liblzma` become sha256-pinned
+/// packages resolved from the build's own mirror list, like every other input. Both do
+/// shape the archive bytes, and neither is then a property of whichever distribution
+/// ran the build.
 ///
 /// The base is entered read-write, as every cage root is. Nothing written during a
-/// packaging run lands in it: the archive goes to a bind-mounted host path and
-/// `dpkg-deb`'s scratch to the cage's own `/tmp` tmpfs, so the tree stays what its
-/// manifest says it is.
+/// packaging run lands in it. The archive goes to a bind-mounted host path, and
+/// `dpkg-deb`'s scratch to the cage's own `/tmp` tmpfs. The tree therefore stays what
+/// its manifest says it is.
 pub struct PackagingSandbox {
     /// The provisioned host-arch userland packaging commands run in.
     base: SandboxBase,
 }
 
 impl PackagingSandbox {
-    /// A packaging root at `rootfs` for `suite`/`arch`, resolved from `mirrors` in order
-    /// and verified with `keyring` (recommended; `None` uses the host apt trust store).
+    /// A packaging root at `rootfs` for `suite`/`arch`, resolved from `mirrors` in
+    /// order and verified with `keyring`, which is recommended. `None` uses the host
+    /// apt trust store.
     ///
-    /// `arch` is the **host's** Debian architecture, so the root runs natively;
+    /// `arch` is the **host's** Debian architecture, so the root runs natively.
     /// `rootfs` must be [`packaging_root_dir`] of the build's work dir, whose key
-    /// covers everything below. `suite` is the build's
-    /// [`packaging_suite`](boot2deb_core::model::ResolvedBuild::packaging_suite) — its
-    /// image suite where it has one, the device's default otherwise — so a
-    /// bootloader-only build and that board's image builds share one provisioned tree.
+    /// covers everything below.
+    ///
+    /// `suite` is the build's
+    /// [`packaging_suite`](boot2deb_core::model::ResolvedBuild::packaging_suite), which
+    /// is its image suite where it has one and the device's default otherwise. A
+    /// bootloader-only build and that board's image builds therefore share one
+    /// provisioned tree.
     ///
     /// `mirrors` is the build's own resolved list, for the reason
-    /// [`RootlessSandbox::new`] takes one: under `--snapshot pin` the tool that archives
+    /// [`RootlessSandbox::new`] takes one. Under `--snapshot pin` the tool that archives
     /// the `.deb`s has to come from the same point-in-time archive their contents do.
-    /// `cache_dir` is where downloaded `.deb`s are cached; `None` discards them with the
-    /// bootstrap.
+    /// `cache_dir` is where downloaded `.deb`s are cached, and `None` discards them
+    /// with the bootstrap.
     pub fn new(spec: SandboxSpec) -> Self {
         PackagingSandbox {
             base: SandboxBase::new(spec),
@@ -1096,11 +1125,11 @@ impl PackagingSandbox {
     /// Run one command in this root per `spec`, streaming its output to `step` and
     /// mapping a non-zero exit to [`CommandFailed`](EngineError::CommandFailed).
     ///
-    /// The command's `/` is the root itself — there is no overlay, because there is no
-    /// increment — under the same cage profile and the same isolated network namespace
-    /// every build command runs under. `spec`'s binds expose host paths at their host
-    /// path, which is how the staged tree is read and the finished `.deb` written
-    /// back.
+    /// The command's `/` is the root itself, since there is no increment and so no
+    /// overlay. It runs under the same cage profile and the same isolated network
+    /// namespace every build command runs under. `spec`'s binds expose host paths at
+    /// their host path, which is how the staged tree is read and the finished `.deb`
+    /// written back.
     ///
     /// Requires [`ensure_ready`](Self::ensure_ready) to have published the root.
     pub fn run(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
@@ -1195,14 +1224,15 @@ fn run_cage(cage: Cage, spec: &SandboxRun, step: &Step) -> Result<(), EngineErro
 /// it.
 ///
 /// Only the caller knows which of the two kinds of directory it named. The provisioner
-/// writes that lock beside a rootfs it publishes, but a published tree and a directory
-/// *holding* published trees are both just directories, so the path cannot be asked —
-/// and a missing lock is no answer either, since a container that has none today looks
-/// exactly like a published tree whose lock was already cleared.
+/// writes that lock beside a rootfs it publishes. A published tree and a directory
+/// *holding* published trees are both just directories, so the path cannot be asked.
+///
+/// A missing lock is no answer either. A container that has none today looks exactly
+/// like a published tree whose lock was already cleared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationLock {
     /// The target is a rootfs the provisioner published, so the lock beside it is its
-    /// own and the two round-trip: create and destroy leave nothing behind.
+    /// own and the two round-trip. Create and destroy leave nothing behind.
     Take,
     /// The target merely *contains* published rootfs trees — a work dir, a cache, a
     /// stage directory holding an overlay upper. There the `.lock` sibling is a path
@@ -1214,19 +1244,21 @@ pub enum PublicationLock {
 /// build's scratch is always removable.
 ///
 /// A plain `remove_dir_all` runs as the caller and fails on two things the sandbox
-/// routinely leaves behind: an unprivileged overlay's work area, which the kernel
-/// leaves as a mode-`0` directory nothing can descend into, and any subtree a
-/// subordinate id-map owns, whose files belong to subuids outside the caller's own.
-/// The provisioner's own removal re-enters the map and handles both, and is idempotent
-/// on a missing path and correct on a non-directory — so callers need not distinguish
+/// routinely leaves behind. One is an unprivileged overlay's work area, which the
+/// kernel leaves as a mode-`0` directory nothing can descend into. The other is any
+/// subtree a subordinate id-map owns, whose files belong to subuids outside the
+/// caller's own.
+///
+/// The provisioner's own removal re-enters the map and handles both. It is idempotent
+/// on a missing path and correct on a non-directory, so callers need not distinguish
 /// the cases.
 ///
-/// `lock` says whether the publication lock goes with the tree; see
+/// `lock` says whether the publication lock goes with the tree. See
 /// [`PublicationLock`] for why that is the caller's to answer and not this function's.
 ///
-/// A caller that must not fail on a stale tree — discarding a build root's previous
-/// increment before staging a fresh one — drops the result; `clean`, whose whole
-/// purpose is the removal, reports it.
+/// A caller that must not fail on a stale tree drops the result. Discarding a build
+/// root's previous increment before staging a fresh one is that case. `clean`, whose
+/// whole purpose is the removal, reports it.
 pub fn reclaim_tree(path: &Path, lock: PublicationLock) -> Result<(), EngineError> {
     provision::Remove::new(path)
         .remove_lock(lock == PublicationLock::Take)
@@ -1440,16 +1472,16 @@ const PACKAGING_ROLE: &str = "package";
 /// `arch` is the architecture the root itself is provisioned at, which the role decides:
 /// the *target's* for [`SandboxRole::Target`], the *host's* for [`SandboxRole::Cross`].
 ///
-/// Keyed by role + arch + suite + a digest of **the mirror list it was bootstrapped
-/// from, the package set it was bootstrapped with, and a base recipe version** — so one
-/// host can serve several targets from one work dir, and a tree is only ever reused for
-/// a base it actually is.
+/// Keyed by role + arch + suite, plus a digest of three more things. Those are **the
+/// mirror list it was bootstrapped from, the package set it was bootstrapped with, and
+/// a base recipe version**. One host can therefore serve several targets from one work
+/// dir. A tree is only ever reused for a base it actually is.
 ///
-/// The digest is what makes the path honest rather than merely unique:
-/// [`BuildSandbox::ensure_ready`] fast-paths on an existing directory, and the one thing
+/// The digest is what makes the path honest rather than merely unique.
+/// [`BuildSandbox::ensure_ready`] fast-paths on an existing directory. The one thing
 /// it re-checks there is the package *versions* the tree's manifest records against the
-/// archive — never the ingredients below. So each ingredient stops a specific wrong
-/// answer.
+/// archive, never the ingredients below. So each ingredient stops a specific wrong
+/// answer:
 ///
 /// - **The mirrors.** Turning on `--snapshot pin` would otherwise reuse the sandbox a
 ///   previous live-mirror build left behind, while the output signature
@@ -1457,10 +1489,10 @@ const PACKAGING_ROLE: &str = "package";
 ///   snapshot's toolchain. The tree and the claim would disagree, with the claim being
 ///   the one that keys the artifact cache.
 /// - **The base package set.** Adding a package to it would otherwise leave every tree
-///   in place without it, and the stages would fail on a tool the declaration says is
+///   in place without it. The stages would then fail on a tool the declaration says is
 ///   present. This is also what keeps the three roots for one arch and suite apart, and
-///   what keeps two cross roots for different targets apart: each is a different package
-///   set, and a tree holding one is not another.
+///   two cross roots for different targets apart. Each is a different package set, and
+///   a tree holding one is not another.
 /// - **The recipe version.** A tree can also stop being a valid base for a reason its
 ///   inputs do not name, which is what the recipe version is for.
 ///
@@ -1485,13 +1517,13 @@ pub fn build_sandbox_dir(
 
 /// Where the packaging root's rootfs lives, for a build whose scratch tree is `work_dir`.
 ///
-/// Keyed exactly as [`build_sandbox_dir`] is, and for the same reasons — these are the
+/// Keyed exactly as [`build_sandbox_dir`] is, and for the same reasons. These are the
 /// same kind of provisioned tree keyed by the same ingredients, differing in the package
 /// set and the recipe version they name. `arch` here is the **host's**, since packaging
 /// runs natively.
 ///
-/// It sits beside the build sandboxes rather than under a directory of its own, so
-/// `clean --sandbox` reclaims every provisioned tree a build made in one sweep.
+/// It sits beside the build sandboxes rather than under a directory of its own. `clean
+/// --sandbox` therefore reclaims every provisioned tree a build made in one sweep.
 pub fn packaging_root_dir(work_dir: &Path, arch: &str, suite: &str, mirrors: &[String]) -> PathBuf {
     work_dir.join("sandbox").join(base_tree_name(
         PACKAGING_ROLE,
@@ -1533,9 +1565,10 @@ fn base_tree_name<S: AsRef<str>>(
 ///
 /// Beside the sandbox base it overlays, and deliberately **not** under `TMPDIR`. An
 /// unprivileged overlay records its whiteouts and opaque markers in `user.*` extended
-/// attributes, which a tmpfs older than Linux 6.6 cannot hold — so an upper placed in a
-/// tmpfs `TMPDIR` fails on a host whose work dir would have carried it. Which
-/// filesystem this lands on is therefore a host requirement, and
+/// attributes, which a tmpfs older than Linux 6.6 cannot hold. An upper placed in a
+/// tmpfs `TMPDIR` therefore fails on a host whose work dir would have carried it.
+///
+/// Which filesystem this lands on is a host requirement, and
 /// [`overlay_check`](crate::checks::overlay_check) probes this directory rather than
 /// `/tmp` for exactly that reason.
 pub fn build_root_uppers(work_dir: &Path) -> PathBuf {
@@ -1553,36 +1586,37 @@ fn is_packaging_root(name: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('-'))
 }
 
-/// Everything under `work_dir`'s sandbox directory **except the packaging root**: the
-/// provisioned build roots, the files that record what each was bootstrapped with, and
-/// the overlay uppers staged over them.
+/// Everything under `work_dir`'s sandbox directory **except the packaging root**. That
+/// is the provisioned build roots, the files that record what each was bootstrapped
+/// with, and the overlay uppers staged over them.
 ///
 /// This is the set that has to go for the build roots to be provisioned again against
 /// the archive as it stands now. A base's cache key covers the mirrors, the package set
-/// and the recipe version — not the versions those resolved to — so nothing invalidates
-/// a tree when the archive moves underneath it, and an aged base is indistinguishable
-/// from a current one by inspection.
+/// and the recipe version, not the versions those resolved to. Nothing therefore
+/// invalidates a tree when the archive moves underneath it, and an aged base is
+/// indistinguishable from a current one by inspection.
 ///
 /// The cut follows the split the types already make. A build root is layered
 /// ([`RootlessSandbox`]), and the layer resolves against the archive as it stands when
-/// the build runs, so a base older than that leaves a declared dependency unmet, which
+/// the build runs. A base older than that leaves a declared dependency unmet, which
 /// is raised as [`crate::EngineError::LayerIncoherent`] the moment the layer is staged.
+///
 /// The packaging root is [never layered](PackagingSandbox) and installs nothing after
-/// its bootstrap, so it has no skew to hit and dropping it would cost a bootstrap that
+/// its bootstrap. It has no skew to hit, and dropping it would cost a bootstrap that
 /// nothing asked for.
 ///
-/// Selected by leaf name rather than by resolving a recipe, because the trees that have
-/// to go include the ones whose digest no longer matches any base this config would
-/// provision — an aged tree is exactly the one a resolve would not name. The `.lock`
+/// Selection is by leaf name rather than by resolving a recipe. The trees that have to
+/// go include the ones whose digest no longer matches any base this config would
+/// provision. An aged tree is exactly the one a resolve would not name. The `.lock`
 /// and `.pkgs` siblings carry the tree's own leaf name and so come along with it.
 ///
 /// A name this cannot read as text is left out. Every tree here is named
 /// `<role>-<arch>-<suite>-<digest>` and so is ASCII, which makes an unreadable name
-/// something else entirely — and the caller deletes what this returns, so the safe
-/// answer to "what is that" is to leave it standing.
+/// something else entirely. The caller deletes what this returns, so the safe answer to
+/// "what is that" is to leave it standing.
 ///
 /// Every path returned exists. They are sorted, since `read_dir` yields whatever order
-/// the filesystem holds and a preview should list the same paths the same way twice. A
+/// the filesystem holds and a preview lists the same paths the same way twice. A
 /// work dir with no sandbox directory yields none.
 pub fn build_root_trees(work_dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(work_dir.join("sandbox")) else {
@@ -1602,31 +1636,34 @@ pub fn build_root_trees(work_dir: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// The sandbox profile as provenance data: the posture it launches under, the declared
-/// environment, and the mounts the sandbox library establishes *inside* the root every
-/// build command runs in.
+/// The sandbox profile as provenance data. It covers the posture the sandbox launches
+/// under and the declared environment. It also covers the mounts the sandbox library
+/// establishes *inside* the root every build command runs in.
 ///
-/// Resolved from the profile the stages themselves run in rather than restated, so the
-/// record reports what a command actually sees — including the six `/dev` device nodes
-/// and five `/dev` symlinks, and the resource limits and hardening controls in force,
-/// none of which any accessor other than
-/// [`Cage::resolved_inputs`](ferroday_cage::Cage::resolved_inputs) reports.
+/// It is resolved from the profile the stages themselves run in, rather than restated,
+/// so the record reports what a command actually sees. That includes the six `/dev`
+/// device nodes and five `/dev` symlinks, and the resource limits and hardening
+/// controls in force. No accessor other than
+/// [`Cage::resolved_inputs`](ferroday_cage::Cage::resolved_inputs) reports any of them.
 ///
-/// The profile is a function of the builder configuration alone — no mount in it names
-/// the root — so it resolves against an empty stand-in root. That is what makes the
-/// record the same for every build: a base image bootstraps no build-sandbox rootfs at
-/// all, and its provenance still has to state the profile its rootfs customize ran under.
+/// The profile is a function of the builder configuration alone, since no mount in it
+/// names the root. It therefore resolves against an empty stand-in root. That is what
+/// makes the record the same for every build. A base image bootstraps no build-sandbox
+/// rootfs at all, and its provenance still has to state the profile its rootfs
+/// customize ran under.
 ///
 /// **No path a build chose is in the record, and deliberately so.** A package stage
 /// compiles in an overlay of the sandbox base plus its own increment (a [`BuildRoot`]),
-/// while the rootfs customize uses a plain tree; both are per-build paths, so recording
-/// either would make the record a property of the machine. So the root contributes its
-/// *kind* and nothing else, the mounts omit it entirely, and what matters is that the two
-/// rooting modes agree on everything this function does record — which
+/// while the rootfs customize uses a plain tree. Both are per-build paths, so recording
+/// either would make the record a property of the machine.
+///
+/// The root therefore contributes its *kind* and nothing else, and the mounts omit it
+/// entirely. What matters is that the two rooting modes agree on everything this
+/// function does record, which
 /// `an_overlay_root_runs_under_the_same_profile_as_a_plain_one` holds.
 ///
-/// A run's own additions are outside the record for the same reason: its working and
-/// artifact binds are per-build paths, and the subordinate identity map the rootfs
+/// A run's own additions are outside the record for the same reason. Its working and
+/// artifact binds are per-build paths. The subordinate identity map the rootfs
 /// customize adds is the one posture it does not take from this profile.
 pub fn resolved_inputs() -> Result<SandboxProvenance, EngineError> {
     let scratch = tempfile::Builder::new()

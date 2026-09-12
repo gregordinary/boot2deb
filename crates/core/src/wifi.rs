@@ -1,15 +1,18 @@
 //! The shape of the Wi-Fi seed keys.
 //!
 //! Its own module for the same reason [`hostname`](crate::hostname) is: the values
-//! cross a trust boundary. A `wifi_ssid=`/`wifi_psk=` pair is typed at press time,
-//! travels as a line of `seed.txt`, and is written by the device's first-boot hook
-//! into a NetworkManager keyfile — a line-based format of its own. Both formats
-//! take one value per line, so the one property this module must hold is that a
-//! value cannot smuggle a line (or a control character) into a file another
-//! parser reads. The checks run where the value is authored, so a bad value is a
-//! press-time error naming the flag, not a board that silently never joins.
+//! cross a trust boundary. A `wifi_ssid=` and `wifi_psk=` pair is typed at press
+//! time and travels as a line of `seed.txt`. The device's first-boot hook writes it
+//! into a NetworkManager keyfile. That keyfile is a line-based format of its own.
 //!
-//! Pure and host-independent; nothing here touches the filesystem.
+//! Both formats take one value per line. The one property this module must hold is
+//! therefore narrow. A value cannot smuggle a line, or a control character, into a
+//! file another parser reads.
+//!
+//! The checks run where the value is authored. A bad value is therefore a
+//! press-time error naming the flag, rather than a board that silently never joins.
+//!
+//! Pure and host-independent. Nothing here touches the filesystem.
 
 /// Longest SSID 802.11 allows, in bytes.
 pub const MAX_SSID_LEN: usize = 32;
@@ -23,10 +26,10 @@ pub const MAX_PSK_LEN: usize = 63;
 
 /// Check an SSID: 1 to [`MAX_SSID_LEN`] bytes with no control characters.
 ///
-/// 802.11 itself allows arbitrary octets, but this SSID rides two line-based
-/// text files (`seed.txt`, the NetworkManager keyfile), so a value a line-based
-/// parser cannot carry — a newline, any other control character — is refused
-/// here rather than mangled there. Spaces and non-ASCII UTF-8 are fine.
+/// 802.11 itself allows arbitrary octets, but this SSID rides two line-based text
+/// files (`seed.txt`, the NetworkManager keyfile). A value a line-based parser
+/// cannot carry, such as a newline or any other control character, is refused here
+/// rather than mangled there. Spaces and non-ASCII UTF-8 are fine.
 ///
 /// # Errors
 ///
@@ -51,7 +54,7 @@ pub fn check_ssid(ssid: &str) -> Result<(), &'static str> {
 /// Check a WPA passphrase: [`MIN_PSK_LEN`] to [`MAX_PSK_LEN`] printable ASCII
 /// characters, or exactly 64 hex digits (the raw pre-shared key).
 ///
-/// The bound is the standard's, not this tool's: `wpa_passphrase` and
+/// The bound is the standard's rather than this tool's. `wpa_passphrase` and
 /// NetworkManager both refuse values outside it, so accepting one here would
 /// press a card whose network the board can never join.
 ///

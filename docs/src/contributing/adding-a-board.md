@@ -1,22 +1,22 @@
 # Adding a board
 
-Bringing up a new device is mostly **writing config layers** — a build resolves from TOML
-across the [config model](../reference/config-model.md)'s axes, so a new board is a set of
-small TOML files plus any vendored blobs and kernel fragments. The one exception is a
-genuinely new *chip family*, which also needs a small Rust change; see
+Bringing up a new device is mostly **writing config layers**. A build resolves from TOML
+across the [config model](../reference/config-model.md)'s axes. A new board is therefore a
+set of small TOML files, plus any vendored blobs and kernel fragments. The one exception is a
+genuinely new *chip family*, which also needs a small Rust change. See
 [What needs code](#what-needs-code).
 
 > **Which track are you on?** This is the **bring-up track** (resolve → update → verify →
-> build) — for a board or patch that has no lock yet. If you only want to build one of the
+> build), for a board or patch that has no lock yet. If you only want to build one of the
 > shipped recipes, take the shorter [Getting started](../getting-started.md) track
 > (doctor → build) instead. To add a *patch* rather than a board, see
-> [Adding a patch](adding-a-patch.md); to name a new build point on a board that is
+> [Adding a patch](adding-a-patch.md). To name a new build point on a board that is
 > already here, see [Authoring a recipe](../tutorials/authoring-a-recipe.md).
 
 > **Start with the generator.** `boot2deb new-device <name>` scaffolds the device
-> (and a matching recipe) for you — it offers the valid SoC/boot-method/kernel/feature
+> (and a matching recipe) for you. It offers the valid SoC/boot-method/kernel/feature
 > choices, fills every derivable value, and leaves the researched ones marked `# TODO:`.
-> Run it (`--soc <soc>` non-interactively, or answer the prompts on a terminal; add
+> Run it (`--soc <soc>` non-interactively, or answer the prompts on a terminal, and add
 > `--overlay <dir>` to scaffold into your own tree), then edit the TODO values below.
 > The rest of this page explains what those files mean and which values you must
 > research. See [`new-device`](../reference/cli.md#scaffolding).
@@ -26,31 +26,31 @@ genuinely new *chip family*, which also needs a small Rust change; see
 Two ways to add a board, chosen by intent:
 
 - **Out-of-tree overlay** — you are bringing up a board for yourself. Put the files in
-  your own directory and pass `--overlay <dir>`; there is nothing to fork, and the board's
+  your own directory and pass `--overlay <dir>`. There is nothing to fork, and the board's
   lock is written back beside it. This is the third-party path — see
   [Overlays](../reference/overlays.md).
 - **In-tree** — you are contributing a board back to boot2deb. Add the files to the
   vendored tree and open a pull request.
 
-The files are identical either way; only their location differs. The rest of this page
-describes those files.
+The files are identical either way, and only their location differs. The rest of this
+page describes those files.
 
 ## What needs code
 
-Most of a board is data, but three axes are **closed Rust enums** — `Arch`, `Soc`, and
-`BootMethod` in `crates/core/src/model.rs` — chosen for type safety and exhaustiveness
-checking. A board built on a chip family that already exists (any RK35xx SoC, the
-`rockchip-rkbin` boot method) needs **no code**: the variant is already there. A genuinely
-new family does:
+Most of a board is data, but three axes are **closed Rust enums**, chosen for type safety
+and exhaustiveness checking. They are `Arch`, `Soc`, and `BootMethod` in
+`crates/core/src/model.rs`. A board built on a chip family that already exists (any RK35xx
+SoC, the `rockchip-rkbin` boot method) needs **no code**, because the variant is already
+there. A genuinely new family does:
 
-- **New SoC** (e.g. a non-Rockchip chip) — add a variant to the `Soc` enum near the top of
-  `model.rs` *and* to its `kebab_enum!` invocation grouped just below the enum
-  definitions, then rebuild. The compiler flags every `match` that must now handle it.
+- **New SoC** (e.g. a non-Rockchip chip) — add a variant to the `Soc` enum near the top
+  of `model.rs`. Add it to the `kebab_enum!` invocation grouped just below the enum
+  definitions too, then rebuild. The compiler flags every `match` that must now handle it.
 - **New architecture** or **new boot method** — the same, on `Arch` / `BootMethod`. A new
   boot method also needs the engine taught how to write its payloads.
 
-This is a deliberate boundary: closed enums give the compiler a single source of truth and
-catch a half-added target at compile time, at the cost of a recompile for a new family.
+This is a deliberate boundary. Closed enums give the compiler a single source of truth,
+and catch a half-added target at compile time. The cost is a recompile for a new family.
 Within an existing family it is pure config.
 
 ## The layers to write
@@ -58,135 +58,189 @@ Within an existing family it is pure config.
 Work from the bottom of the hardware stack up, adding only what is new:
 
 **First, check whether the board joins a family that is already here.** If its SoC and
-boot method are both supported, a new board can be a device file and nothing else — no
-overlay, no kernel, no engine change. That is not an aspiration: the ASUS
-[C100P](../boards/asus-c100p.md) and [Chromebit CS10](../boards/asus-chromebit-cs10.md)
-each ship as a single TOML, and the Chromebit is a stick PC with no SD slot, no keyboard,
-no EC and no analog audio. The rule that makes it work is that anything true of the whole
-family belongs on the **SoC layer**, not on the board that happened to need it first —
-`socs/rk3288/` carries the family's radio blobs, initramfs module list and network stack
-for exactly that reason. When you find yourself copying a file from one board to another,
-move it up instead.
+boot method are both supported, a new board can be a device file and nothing else. It
+needs no overlay, no kernel, and no engine change.
 
-1. **arch** (`arches/<arch>.toml`) — only for a CPU architecture not already present.
-   Arch-wide kbuild facts: the cross triple, kbuild's `ARCH=`, and the kernel image path.
-   (u-boot takes no `ARCH=` from here — its defconfig carries it.)
-2. **soc** (`socs/<soc>.toml`, plus `socs/<soc>/overlay/` for files baked into the rootfs)
-   — the SoC's shared properties: device-tree directory, force-loaded modules, arch, and
-   any SoC-wide firmware packages.
-   - **Media-accel sources are optional and ride the feature.** Supply the
-     one `[[userspace]]` entry per vendor tree the part has, `[ffmpeg.base]`, and
-     `[ffmpeg.rockchip]` stanzas here **only if** a board of this SoC will enable a
-     `media-accel-*` feature (the feature compiles them into `.deb`s); copy the block from
-     `socs/rk3588.toml`. A headless SoC that never transcodes omits them entirely. Selecting
-     a `requires_media_accel` feature on a SoC that lacks them is a resolve-time error, so
-     the coupling is checked, not assumed.
-3. **boot-method** (`boot-methods/<method>.toml`) — how this family boots. **The file's
-   shape depends on the method**, because the methods differ in kind:
-   - `rockchip-rkbin` compiles a bootloader: the u-boot source + ref and the **raw-gap
-     offsets** (where `idbloader` and `u-boot.itb` sit outside any partition, and where
-     the rootfs partition starts).
-   - `depthcharge` compiles nothing — the firmware is the board's own and what it loads
-     is the signed kernel — so the file carries the ChromeOS kernel partition's geometry,
-     its GPT attribute bits, and the command line to sign into the kernel.
+That is not an aspiration. The ASUS [C100P](../boards/asus-c100p.md) and
+[Chromebit CS10](../boards/asus-chromebit-cs10.md) each ship as a single TOML. The
+Chromebit is a stick PC with no SD slot, no keyboard, no EC and no analog audio.
 
-   A field from the other method is an unknown field and fails to parse, which is the
-   point: an image cannot half-belong to two boot chains.
-   `boot-methods/<method>/overlay/` ships any boot-time files (e.g. the extlinux
-   generator), and `overlay-pre/` ships config a package's own maintainer scripts must
-   see *while they run* (see [Two overlay stages](#two-overlay-stages)).
-4. **device** (`devices/<device>.toml`) — the board itself, stating only its deltas: its
-   `soc`, `boot_method`, `supported_boot_methods`, `kernel_dtb`, `image_size`,
-   `hostname`, `supported_kernels` / `default_kernel`, `default_suite`, `default_layout`,
-   plus **whatever its boot method requires**:
-   - **The slug must be a host name** — `[A-Za-z0-9-]` labels joined by `.`, no leading
-     or trailing `-`, at most 64 characters. `hostname` defaults to it, so anything else
-     would hand the image a name it cannot come up under; use `my-board`, not
-     `my_board`. See [A value that becomes a file or a line is checked at
-     resolve](../reference/config-model.md#a-value-that-becomes-a-file-or-a-line-is-checked-at-resolve).
-     `boot2deb new-device` narrows this further for generated boards, to lowercase,
-     digits, and dashes.
-   - under `rockchip-rkbin`: a `uboot_defconfig`, and — only if the board departs from
-     the SoC's defaults — an `[rkbin]` block. The bootloader blobs are **inherited from
-     the soc layer** and merged per field, so a board on the SoC's usual memory omits the
-     block entirely; a board with different DRAM overrides just `tpl`.
-   - under `depthcharge`: a `[depthcharge]` block naming the board profile and the
-     series the unit supports. No `uboot_defconfig`, no blobs — this board compiles no
-     bootloader, and resolution does not ask it to.
-   - **`device_config_fragments` gotcha:** naming a fragment here makes its file
-     *mandatory*. `device_config_fragments = ["device/my-board"]` requires
-     `fragments/device/my-board.config` to exist — a missing file fails `resolve`. A board
-     with no board-specific kconfig deltas uses `device_config_fragments = []` to add none.
-     Do not name a fragment you have not written.
-   - **A variant of a board already here uses `extends`.** If your board is another one
-     with one difference — a block enabled for bring-up, a different DTB or DRAM fitting
-     — write `extends = "<other-device>"` and state only the deltas. It inherits that
-     device's keys *and* its `overlay/` tree, so the parent board's driver tuning, units,
-     and keymaps reach your image and any file of them can be overridden by shipping your
-     own copy at the same path. Do not hand-copy the other device's file: most arrays
-     replace rather than append across the merge, so restate any list you extend — the
-     five that describe the board (`caveats`, `expect`, `nonfree_firmware_packages`,
-     `packages`, `exclude`) accumulate instead. See
-     [A variant board extends another](../reference/config-model.md#a-variant-board-extends-another).
-5. **kmod** (`kmods/<name>.toml`) — only if the board carries hardware whose driver is in
-   nobody's kernel tree. Run `boot2deb list-kmods` first: if a kmod for the chip already
-   exists, your board needs one line, `device_kmods = ["<name>"]`, and nothing else. If
-   not, write the layer — the vendor repo, its `ref`, the `subdir` `make M=` builds in,
-   the modules to ship — and put any patch of your own under `kmods/<name>/patches/`.
-   Everything in that file is a property of the *driver*, so state nothing board-specific
-   there; a device cannot override a kmod's fields, and a board needing different build
-   flags is a second kmod, not an override. See
-   [Out-of-tree modules are their own layer](../reference/config-model.md#out-of-tree-modules-are-their-own-layer).
-6. **kernel** (`kernels/<kernel>.toml`) — the orthogonal kernel axis. **Ask first whether
-   the board needs a kernel of yours at all.**
-   - If Debian's own kernel already runs the hardware — which it does for any SoC and
-     board that are fully upstream — write a `flavor = "distro-package"` definition
-     naming the package (`linux-image-armmp`) and you are done. No source ref, no
-     defconfig, no fragments, no patches, and one definition serves every suite. This is
-     the *better* answer where it applies: `apt` keeps the board's kernel patched, which
-     a kernel you compiled does not.
-   - Otherwise write a `mainline` or `vendor` definition with its source refs, `.config`
-     fragments, and patch series. Version-coupled, so a new kernel version is a new
-     file. A compiled kernel that applies no series writes `patch_series = "none"` and
-     then never reads the `patches` repo.
+The rule that makes it work is simple. Anything true of the whole family belongs on the
+**SoC layer**, not on the board that happened to need it first. `socs/rk3288/` carries
+the family's radio blobs, initramfs module list and network stack for exactly that
+reason. When you find yourself copying a file from one board to another, move it up
+instead.
 
-   Note that a distro kernel and the compile-only device fields (`device_dts`,
-   `device_config_fragments`, `device_patch_series`, `device_kmods`) are mutually
-   exclusive, and resolution says so: nothing would ever build the DTB, merge the
-   fragments, apply the series, or give the modules a tree to build against.
+### 1. The arch layer
+
+`arches/<arch>.toml`, only for a CPU architecture not already present. It carries the
+arch-wide kbuild facts: the cross triple, kbuild's `ARCH=`, and the kernel image path.
+u-boot takes no `ARCH=` from here, because its defconfig carries it.
+
+### 2. The SoC layer
+
+`socs/<soc>.toml`, plus `socs/<soc>/overlay/` for files baked into the rootfs. It carries
+the SoC's shared properties:
+
+- Device-tree directory
+- Force-loaded modules
+- Arch
+- Any SoC-wide firmware packages
+
+**Media-accel sources are optional and ride the feature.** Supply the one `[[userspace]]`
+entry per vendor tree the part has, plus the `[ffmpeg.base]` and `[ffmpeg.rockchip]`
+stanzas. Do that **only if** a board of this SoC will enable a `media-accel-*` feature.
+The feature compiles them into `.deb`s. Copy the block from `socs/rk3588.toml`.
+
+A headless SoC that never transcodes omits them entirely. Selecting a
+`requires_media_accel` feature on a SoC that lacks them is a resolve-time error, so the
+coupling is checked, not assumed.
+
+### 3. The boot-method layer
+
+`boot-methods/<method>.toml`, which says how this family boots. **The file's shape depends
+on the method**, because the methods differ in kind:
+
+- `rockchip-rkbin` compiles a bootloader. It carries the u-boot source and ref, plus the
+  **raw-gap offsets**: where `idbloader` and `u-boot.itb` sit outside any partition, and
+  where the rootfs partition starts.
+- `depthcharge` compiles nothing, because the firmware is the board's own and what it
+  loads is the signed kernel. The file carries the ChromeOS kernel partition's geometry,
+  its GPT attribute bits, and the command line to sign into the kernel.
+
+A field from the other method is an unknown field and fails to parse. That is the point,
+since an image cannot half-belong to two boot chains.
+
+`boot-methods/<method>/overlay/` ships any boot-time files (e.g. the extlinux generator).
+`overlay-pre/` ships config a package's own maintainer scripts must see *while they run*
+(see [Two overlay stages](#two-overlay-stages)).
+
+### 4. The device layer
+
+`devices/<device>.toml`, the board itself, stating only its deltas:
+
+- `soc` and `boot_method`
+- `supported_boot_methods`
+- `kernel_dtb`
+- `image_size`
+- `hostname`
+- `supported_kernels` and `default_kernel`
+- `default_suite` and `default_layout`
+
+#### The slug
+
+The slug must be a host name: `[A-Za-z0-9-]` labels joined by `.`, no leading or
+trailing `-`, at most 64 characters. `hostname` defaults to it, so anything else would
+hand the image a name it cannot come up under. Use `my-board`, not `my_board`. See
+[A value that becomes a file or a line is checked at
+resolve](../reference/config-model.md#a-value-that-becomes-a-file-or-a-line-is-checked-at-resolve).
+`boot2deb new-device` narrows this further for generated boards, to lowercase, digits,
+and dashes.
+
+#### What the boot method requires
+
+A device also states whatever its boot method requires.
+
+Under `rockchip-rkbin`, the board states a `uboot_defconfig`, and an `[rkbin]` block only
+if it departs from the SoC's defaults. The bootloader blobs are **inherited from the soc
+layer** and merged per field. A board on the SoC's usual memory omits the block entirely,
+and a board with different DRAM overrides just `tpl`.
+
+Under `depthcharge`, the board states a `[depthcharge]` block naming the board profile and
+the series the unit supports. There is no `uboot_defconfig` and there are no blobs. This
+board compiles no bootloader, and resolution does not ask it to.
+
+#### `device_config_fragments`
+
+Naming a fragment here makes its file *mandatory*.
+`device_config_fragments = ["device/my-board"]` requires `fragments/device/my-board.config`
+to exist, and a missing file fails `resolve`. A board with no board-specific kconfig
+deltas uses `device_config_fragments = []` to add none. Do not name a fragment you have
+not written.
+
+#### Variants, with `extends`
+
+A variant of a board already here uses `extends`. If your board is another one with
+one difference, write `extends = "<other-device>"` and state only the deltas. That
+difference might be a block enabled for bring-up, a different DTB, or a different DRAM
+fitting.
+
+`extends` inherits that device's keys *and* its `overlay/` tree. The parent board's
+driver tuning, units, and keymaps therefore reach your image. Any file of them can be
+overridden by shipping your own copy at the same path.
+
+Do not hand-copy the other device's file. Most arrays replace rather than append across
+the merge, so restate any list you extend. The five that describe the board (`caveats`,
+`expect`, `nonfree_firmware_packages`, `packages`, `exclude`) accumulate instead. See
+[A variant board extends another](../reference/config-model.md#a-variant-board-extends-another).
+
+### 5. The kmod layer
+
+`kmods/<name>.toml`, only if the board carries hardware whose driver is in nobody's kernel
+tree. Run `boot2deb list-kmods` first. If a kmod for the chip already exists, your board
+needs one line, `device_kmods = ["<name>"]`, and nothing else.
+
+If not, write the layer: the vendor repo, its `ref`, the `subdir` `make M=` builds in, and
+the modules to ship. Put any patch of your own under `kmods/<name>/patches/`.
+
+Everything in that file is a property of the *driver*, so state nothing board-specific
+there. A device cannot override a kmod's fields, and a board needing different build flags
+is a second kmod, not an override. See
+[Out-of-tree modules are their own layer](../reference/config-model.md#out-of-tree-modules-are-their-own-layer).
+
+### 6. The kernel definition
+
+`kernels/<kernel>.toml`, the orthogonal kernel axis. **Ask first whether the board needs a
+kernel of yours at all.**
+
+If Debian's own kernel already runs the hardware, write a `flavor = "distro-package"`
+definition naming the package (`linux-image-armmp`) and you are done. It does run the
+hardware for any SoC and board that are fully upstream. There is no source ref, no
+defconfig, no fragments, and no patches, and one definition serves every suite. This is
+the *better* answer where it applies, because `apt` keeps the board's kernel patched,
+which a kernel you compiled does not.
+
+Otherwise write a `mainline` or `vendor` definition with its source refs, `.config`
+fragments, and patch series. It is version-coupled, so a new kernel version is a new file.
+A compiled kernel that applies no series writes `patch_series = "none"` and then never
+reads the `patches` repo.
+
+Note that a distro kernel and the compile-only device fields (`device_dts`,
+`device_config_fragments`, `device_patch_series`, `device_kmods`) are mutually exclusive,
+and resolution says so. Nothing would ever build the DTB, merge the fragments, apply the
+series, or give the modules a tree to build against.
 
 ## Two overlay stages
 
-Each layer may ship two trees of files that are copied into the rootfs:
+Each layer can ship two trees of files that are copied into the rootfs:
 
 - **`overlay/`** — laid in **after** every package. It therefore wins over whatever the
   packages shipped, which is what nearly all config wants.
 - **`overlay-pre/`** — laid in **before** any package is installed. This is for config a
   package's own maintainer scripts must see *while they run*, where winning afterwards is
   too late because the package already acted. The Veyron Chromebooks are the clearest
-  case: the initramfs module list under
-  `usr/share/initramfs-tools/modules.d/` has to precede the kernel package, or the first
-  initramfs is built without the drivers that reach the root device and then thrown away
-  and rebuilt.
+  case. The initramfs module list under `usr/share/initramfs-tools/modules.d/` has to
+  precede the kernel package. Otherwise the first initramfs is built without the drivers
+  that reach the root device, then thrown away and rebuilt.
 
-Boot-method config that resolution derives — the `depthcharge-tools` board profile, the
-signed cmdline, the initramfs `MODULES=`/`COMPRESS=` settings — is *generated* into the
-same pre-install stage rather than authored as an overlay file, for the same
-before-the-package reason. A layer does not ship those; it states the values they come
+Some boot-method config is derived by resolution: the `depthcharge-tools` board profile,
+the signed cmdline, and the initramfs `MODULES=`/`COMPRESS=` settings. It is *generated*
+into the same pre-install stage rather than authored as an overlay file, for the same
+before-the-package reason. A layer does not ship those. It states the values they come
 from.
 
 Use `overlay/` unless the package acts before your file would arrive.
 
 Supporting assets:
 
-- **blobs** (`blobs/<soc>/`) — vendored bootloader binaries the device/boot-method
+- **Blobs** (`blobs/<soc>/`) — vendored bootloader binaries the device/boot-method
   references.
-- **fragments** (`fragments/<name>.config`) — kernel `.config` fragments merged onto the
+- **Fragments** (`fragments/<name>.config`) — kernel `.config` fragments merged onto the
   base defconfig, referenced by name from a kernel or device.
-- **patch series** — lives in the separate `patches` repo, referenced by the kernel; see
+- **Patch series** — lives in the separate `patches` repo, referenced by the kernel. See
   [Adding a patch](adding-a-patch.md). Omitted entirely by a `patch_series = "none"`
   kernel.
-- **board device tree** — only when the board's `.dts` is not yet upstream; see
+- **Board device tree** — only when the board's `.dts` is not yet upstream. See
   [`device_dts`](#when-the-boards-device-tree-is-not-upstream).
 
 Finally, a **recipe** (`recipes/<device>/<leaf>.toml`) pins one point across the axes — device,
@@ -203,7 +257,7 @@ stage that consumes them compiles, so a typo produces a late, confusing failure:
 | `kernel_dtb` | device | the kernel build — the DTB is not produced (unless the board carries `device_dts`, below, which makes this a resolve-time check) |
 | `uboot_defconfig` | device | the u-boot build — unknown defconfig |
 
-Take both from the board's upstream support: `kernel_dtb` is the device tree the mainline
+Take both from the board's upstream support. `kernel_dtb` is the device tree the mainline
 kernel builds for the board (under `arch/<arch>/boot/dts/<dt_dir>/`), and
 `uboot_defconfig` is the board's u-boot defconfig. Confirm each exists in the exact
 kernel/u-boot versions you pin before you trust a green `resolve`.
@@ -220,11 +274,11 @@ device_dts = ["devices/my-box/dts/rk3576-my-box.dts"]
 
 The kernel stage copies it into the tree and registers the DTB with kbuild, so it ships
 in the `linux-image` deb like any in-tree board. `kernel_dtb` is then **validated** at
-resolve — it must be the DTB one of those sources builds — so the table above no longer
+resolve: it must be the DTB one of those sources builds. The table above no longer
 applies to it. Iterate with `build <recipe> --stage dtb`, which rebuilds only the DTB.
 
 Keep `device_dts` for the *new* board file. An edit to an *existing* upstream `.dts` is a
-patch in the kernel's patch series; a source that would overwrite an in-tree file is
+patch in the kernel's patch series. A source that would overwrite an in-tree file is
 refused rather than silently shadowing it.
 
 ## Bring it up
@@ -258,8 +312,8 @@ boot2deb build <recipe>
 ```
 
 `resolve`, `update`, and the two `verify-*` commands fail with a typed error before any
-compile starts, so most config mistakes surface in seconds rather than partway through a
-build. The `verify-*` commands auto-fetch the pinned source trees, so this whole sequence
+compile starts. Most config mistakes therefore surface in seconds, rather than partway
+through a build. The `verify-*` commands auto-fetch the pinned source trees, so this whole sequence
 works on a fresh clone with no hand-cloned kernel — see
 [Verification](../reference/cli.md#verification).
 
@@ -302,15 +356,15 @@ layout   = "combined"
 
 Then run the [bring-it-up](#bring-it-up) sequence against `my-board/forky`. A **new SoC**
 would additionally need `socs/<soc>.toml` (with the required userspace/ffmpeg stanzas) and
-its fragments; a **new family** would need the code change from
+its fragments. A **new family** would need the code change from
 [What needs code](#what-needs-code).
 
 ## Document your board
 
 Give each board a page under [Boards](../boards/turing-rk1.md), the way the Turing RK1
-page does, since flashing is inherently per-board — a Turing Pi module flashes through the
-BMC, a standalone SBC takes an SD card or a maskrom loader, a laptop boots UEFI. A useful
-skeleton:
+page does, since flashing is inherently per-board. A Turing Pi module flashes through the
+BMC, a standalone SBC takes an SD card or a maskrom loader, and a laptop boots UEFI. A
+useful skeleton:
 
 ```markdown
 # <Board name>

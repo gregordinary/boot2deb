@@ -37,5 +37,5 @@ image_size = "2G"
 status = "expected"
 date   = "2026-08-21"
 caveats = [
-  "The internal BCM4354 Wi-Fi and Bluetooth do not work. linux-libre removes brcmfmac's firmware request and btbcm's patchram filename, and this radio is the one part of the board that cannot run without a blob. An AR9271 USB adapter (firmware-ath9k-htc, in Debian main and already installed) is the supported way onto a network.",
+  "The internal BCM4354 Wi-Fi and Bluetooth do not work. linux-libre removes brcmfmac's firmware request and btbcm's patchram filename. This radio is the one part of the board that cannot run without a blob. An AR9271 USB adapter (firmware-ath9k-htc, in Debian main and already installed) is the supported way onto a network.",
 ]

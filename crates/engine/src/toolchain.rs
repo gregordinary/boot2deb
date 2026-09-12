@@ -1,48 +1,49 @@
 //! The one host binary that still shapes a build's compiled bytes: the `qemu-user`
 //! interpreter, for the Tier-2 output signature and the provenance manifest.
 //!
-//! Every compiler a build runs is a package of a provisioned root — the target-arch
-//! sandbox's for the userspace and ffmpeg `.deb`s, the cross root's for the kernel,
-//! u-boot and out-of-tree modules ([`crate::sandbox`]). Each root's identity is the name
-//! of the tree it was provisioned under, and its manifest states every package
-//! sha256-pinned, so "which compiler built this" is answered by
-//! [`sandbox_identity`](crate::build::sandbox_identity) and
+//! Every compiler a build runs is a package of a provisioned root. The target-arch
+//! sandbox's root supplies the userspace and ffmpeg `.deb`s, and the cross root's
+//! supplies the kernel, u-boot and out-of-tree modules ([`crate::sandbox`]). Each
+//! root's identity is the name of the tree it was provisioned under, and its manifest
+//! states every package sha256-pinned. "Which compiler built this" is therefore
+//! answered by [`sandbox_identity`](crate::build::sandbox_identity) and
 //! [`cross_identity`](crate::build::cross_identity) rather than by a `--version` line.
 //!
-//! `qemu-user` is the exception, and it is a real one: it is registered with the host
-//! *kernel's* binfmt handler and executes from the host filesystem, so no root can carry
-//! it and nothing but a probe can describe it. Where the host cannot execute the target's
-//! binaries it interprets every compiler invocation in the target-arch sandbox, which
-//! makes it an input to every `.deb` produced there.
+//! `qemu-user` is the exception, and it is a real one. It is registered with the host
+//! *kernel's* binfmt handler and executes from the host filesystem. No root can carry
+//! it, and nothing but a probe can describe it. Where the host cannot execute the
+//! target's binaries, it interprets every compiler invocation in the target-arch
+//! sandbox. That makes it an input to every `.deb` produced there.
 //!
 //! # The interpreter is the kernel's, not `PATH`'s
 //!
 //! What runs is whatever the kernel's binfmt registration names, and that is not
 //! necessarily what a `PATH` lookup finds. Debian registers a wrapper path under
-//! `/usr/libexec/qemu-binfmt/` rather than the `qemu-<arch>-static` on `PATH`; the two
+//! `/usr/libexec/qemu-binfmt/` rather than the `qemu-<arch>-static` on `PATH`. The two
 //! normally resolve to one file, and nothing makes them. A build whose `PATH` carries no
 //! interpreter at all still runs every target binary, because binfmt reaches the
-//! registered path directly — so a `PATH` probe can report an absence that is not one,
-//! and can name a binary that never ran.
+//! registered path directly. A `PATH` probe can therefore report an absence that is not
+//! one, and can name a binary that never ran.
 //!
 //! The registration is read by [`foreign_interpreter`], the same reader the
-//! provisioner's own preflight uses: the rootfs bootstrap and this module ask one
-//! question of one `/proc` file, so they cannot drift about whether a handler exists or
+//! provisioner's own preflight uses. The rootfs bootstrap and this module ask one
+//! question of one `/proc` file. They cannot drift about whether a handler exists or
 //! which binary it names.
 //!
 //! What this module adds on top is the **identity**: the content of the registered file
 //! rather than a version line. A digest survives a rebuild at an unchanged version, and
-//! it can be taken from a binary that cannot be run — which the registered path
-//! generally cannot, since `qemu` refuses to execute under its own binfmt wrapper name.
-//! The digest is taken over the registered path rather than the canonicalized one
-//! because `open` follows the symlink either way, so the bytes are the same and the
+//! it can be taken from a binary that cannot be run. The registered path generally
+//! cannot be run, since `qemu` refuses to execute under its own binfmt wrapper name.
+//!
+//! The digest is taken over the registered path rather than the canonicalized one,
+//! because `open` follows the symlink either way. The bytes are the same, and the
 //! provenance-faithful path is the one the kernel recorded. The canonical path is
 //! recorded beside it and is what a version probe is run against.
 //!
 //! Folding it into the [artifact store](crate::artstore) key keeps a build on one
-//! interpreter from restoring an artifact another produced — "bias toward hashing more,
-//! not less". This is a build-time host probe, so it lives in the engine, not in the pure
-//! lock-only `why-rebuild` plan.
+//! interpreter from restoring an artifact another produced. The rule is "bias toward
+//! hashing more, not less". This is a build-time host probe, so it lives in the engine,
+//! not in the pure lock-only `why-rebuild` plan.
 
 use ferroday_cage::provision::debian::foreign_interpreter;
 use sha2::{Digest, Sha256};
@@ -127,9 +128,9 @@ fn version_of(path: &Path) -> Option<String> {
 
 /// The build host's `qemu-user` interpreter, probed once per build.
 ///
-/// Held by [`BuildEnv`](crate::build::BuildEnv) and read from two directions: the
+/// Held by [`BuildEnv`](crate::build::BuildEnv) and read from two directions. The
 /// userspace and ffmpeg stages fold [`qemu_identity`](Self::qemu_identity) into their
-/// output signatures, and the CLI reads [`qemu`](Self::qemu) into the provenance
+/// output signatures. The CLI reads [`qemu`](Self::qemu) into the provenance
 /// manifest's `[toolchain.qemu]` section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostToolchain {
@@ -144,13 +145,14 @@ impl HostToolchain {
     /// host that executes the target's binaries directly — where nothing is interpreted
     /// at all.
     ///
-    /// That is a narrower question than "is this build cross": an arm64 host building
+    /// That is a narrower question than "is this build cross". An arm64 host building
     /// armhf compiles through a cross toolchain and then runs the result natively
-    /// (`CONFIG_COMPAT=y`), so it interprets nothing and passes `None` here. **The
-    /// caller owns that decision**, which is why it is a parameter rather than something
-    /// probed here: the reader this delegates to has its own, more conservative rule for
-    /// which pairs are native, and boot2deb's is the one that decides whether an
-    /// interpreter is an input to this build.
+    /// (`CONFIG_COMPAT=y`). It interprets nothing and passes `None` here.
+    ///
+    /// **The caller owns that decision**, which is why it is a parameter rather than
+    /// something probed here. The reader this delegates to has its own, more
+    /// conservative rule for which pairs are native. boot2deb's rule is the one that
+    /// decides whether an interpreter is an input to this build.
     pub fn probe(arch: Option<&str>) -> Self {
         HostToolchain {
             qemu: arch.map(Interpreter::probe),
@@ -164,23 +166,26 @@ impl HostToolchain {
         self.qemu.as_ref().map(Interpreter::identity)
     }
 
-    /// What the provenance manifest records about the interpreter: the path the kernel
-    /// registered, what that path resolves to, its digest, and its version line where it
-    /// could be run.
+    /// What the provenance manifest records about the interpreter:
+    ///
+    /// - The path the kernel registered
+    /// - What that path resolves to
+    /// - Its digest
+    /// - Its version line, where it could be run
     ///
     /// `None` where nothing is interpreted, and where the registration named nothing
     /// readable — the honest absence rather than
     /// [`qemu_identity`](Self::qemu_identity)'s total-for-a-cache-key fallback.
     ///
     /// Both paths are recorded because they are two facts. The registered one is what
-    /// the kernel holds; the resolved one is the file it reaches, and on the common
-    /// Debian layout repointing the wrapper symlink between them changes the interpreter
+    /// the kernel holds. The resolved one is the file it reaches. On the common Debian
+    /// layout, repointing the wrapper symlink between them changes the interpreter
     /// without changing the registration.
     ///
     /// The digest is taken at plan time from the path the registration names. The `F`
-    /// flag means the kernel opened and holds the interpreter at *registration* time, so
-    /// a file replaced since is one this digest describes and the kernel is not running.
-    /// That is the assumption; it is stated rather than defended, and no better one is
+    /// flag means the kernel opened and holds the interpreter at *registration* time. A
+    /// file replaced since is one this digest describes and the kernel is not running.
+    /// That is the assumption. It is stated rather than defended, and no better one is
     /// available to a process that is not the kernel.
     pub fn qemu(&self) -> Option<boot2deb_core::provenance::QemuProvenance> {
         let qemu = self.qemu.as_ref()?;

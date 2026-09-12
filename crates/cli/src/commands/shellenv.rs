@@ -3,13 +3,13 @@
 //!
 //! Neither is a second description of the tool. Both are rendered from the command
 //! tree, so a flag added in [`crate::args`] is completable and documented the moment
-//! it exists — the same property [`cli_reference`](super::cli_reference) gives the
-//! docs page.
+//! it exists. [`cli_reference`](super::cli_reference) gives the docs page the same
+//! property.
 //!
-//! They print to stdout rather than installing anything: where completions and man
-//! pages belong is the packager's decision (a `.deb`'s `debian/install`, a distro's
-//! `/usr/share`, a user's `~/.local`), and a tool that wrote into those directories
-//! itself would be guessing at it.
+//! They print to stdout rather than installing anything. Where completions and man
+//! pages belong is the packager's decision, whether a `.deb`'s `debian/install`, a
+//! distro's `/usr/share`, or a user's `~/.local`. A tool that wrote into those
+//! directories itself would be guessing at it.
 
 use clap::CommandFactory;
 use clap_complete::Shell;

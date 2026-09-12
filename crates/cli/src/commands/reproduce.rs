@@ -3,22 +3,25 @@
 //!
 //! A recipe's `.lock` pins sources, patches, and the builder. It does not pin *which
 //! package versions the archive served*, so the same lock a month later resolves a
-//! different userland. The plan document a build publishes beside its image pins exactly
-//! that — every package name, version and sha256, plus the state of each repository they
-//! were selected from — and this command replays it.
+//! different userland. The plan document a build publishes beside its image pins
+//! exactly that, and this command replays it. That document holds every package
+//! name, version and sha256, plus the state of each repository they were selected
+//! from.
 //!
-//! It is [`build`](super::build) with one substitution: the rootfs installs the plan it
-//! is given instead of resolving one. Every other input, flag and stage is the same, so
-//! the two commands share one pipeline. What differs is the trust model, and that is why
-//! this is its own command rather than a flag: a pinned install reads neither a release
-//! nor a package index, so the plan document — not an archive signature — is what the
-//! package digests chain to. See [`RootfsOptions::pinned_plan`](boot2deb_engine::rootfs::RootfsOptions::pinned_plan).
+//! It is [`build`](super::build) with one substitution: the rootfs installs the plan
+//! it is given instead of resolving one. Every other input, flag and stage is the
+//! same, so the two commands share one pipeline.
 //!
-//! The builder is the third reproducibility axis and is not enforced here. The published
-//! provenance manifest records which boot2deb produced the image, so this reports how the
-//! running checkout compares and leaves the decision to the operator — a stamped commit
-//! is a floor, not a ceiling, and a newer builder usually reproduces the image and may
-//! carry fixes.
+//! What differs is the trust model, and that is why this is its own command rather
+//! than a flag. A pinned install reads neither a release nor a package index. The
+//! plan document, rather than an archive signature, is what the package digests
+//! chain to. See [`RootfsOptions::pinned_plan`](boot2deb_engine::rootfs::RootfsOptions::pinned_plan).
+//!
+//! The builder is the third reproducibility axis and is not enforced here. The
+//! published provenance manifest records which boot2deb produced the image. This
+//! reports how the running checkout compares, and leaves the decision to the
+//! operator. A stamped commit is a floor rather than a ceiling, and a newer builder
+//! usually reproduces the image and can carry fixes.
 
 use crate::args::BuildArgs;
 use crate::render::{note, Verbosity};

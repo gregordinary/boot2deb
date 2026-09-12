@@ -1,25 +1,25 @@
 //! Templated tree additions: the `{{image.<name>}}` substitution a `.tmpl`
-//! addition receives at press time, and the closed set of names it may draw on.
+//! addition receives at press time, and the closed set of names it can draw on.
 //!
 //! An addition is normally a byte-for-byte copy, which cannot express a file
 //! whose content depends on the image it lands in. The values that matter there
-//! are the ones an operator *cannot* produce by hand — above all the partition
-//! and filesystem identifiers, which [`ImageIdentity`] derives from the recipe,
-//! so naming one in a config file would otherwise mean pressing the image,
+//! are the ones an operator *cannot* produce by hand. Above all those are the
+//! partition and filesystem identifiers, which [`ImageIdentity`] derives from the
+//! recipe. Naming one in a config file would otherwise mean pressing the image,
 //! reading its GPT back, editing, and pressing again.
 //!
-//! The vocabulary is exactly **the image's identity**: every name here is a
+//! The vocabulary is exactly **the image's identity**. Every name here is a
 //! field of the `/etc/boot2deb/image.toml` the tree already carries
-//! ([`SystemIdentity`]) or of the identifiers stamped into its GPT and
+//! ([`SystemIdentity`]), or of the identifiers stamped into its GPT and
 //! superblock ([`ImageIdentity`]). That is what the `image.` namespace states,
-//! and it is why the set is closed: a template draws on what the image knows
+//! and it is why the set is closed. A template draws on what the image knows
 //! about itself, not on the press's environment.
 //!
 //! The namespace is also what keeps the substitution safe to run over a file
 //! that carries braces of its own. `{{` is claimed **only** when `image.`
 //! follows it, so a Go, Helm, or Jinja template shipped as data passes through
-//! untouched; inside the namespace the rules are strict, and an unknown name is
-//! an error at press time rather than an empty string in the shipped image.
+//! untouched. Inside the namespace the rules are strict. An unknown name is an
+//! error at press time, rather than an empty string in the shipped image.
 
 use crate::error::EngineError;
 use crate::image::ImageIdentity;
@@ -42,25 +42,26 @@ const NAMESPACE: &str = "image.";
 
 /// Largest template a press will read.
 ///
-/// A template is a config file, and unlike a plain `--copy` — whose bytes stay
-/// on the host in a [`FileRange`](ferrosys::FileRange) until the formatter
-/// places them — a template must be read into memory to be parsed. The cap
+/// A template is a config file, and it must be read into memory to be parsed. A
+/// plain `--copy` does not: its bytes stay on the host in a
+/// [`FileRange`](ferrosys::FileRange) until the formatter places them. The cap
 /// keeps a mis-named multi-gigabyte payload from being loaded as one, and says
 /// so instead.
 pub const MAX_TEMPLATE_BYTES: u64 = 1 << 20;
 
 /// One name the `image.` namespace admits.
 ///
-/// Every variant resolves from the image's own identity — see
-/// [`ImageFacts::new`] for which document each is read out of. The set is
-/// closed by design: a name outside it is a press-time error listing the whole
-/// vocabulary, because a silently empty substitution would ship a broken config
-/// that only fails on the board.
+/// Every variant resolves from the image's own identity. See [`ImageFacts::new`]
+/// for which document each is read out of.
+///
+/// The set is closed by design. A name outside it is a press-time error listing
+/// the whole vocabulary. A silently empty substitution would otherwise ship a
+/// broken config that only fails on the board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageValue {
-    /// The hostname this unit will answer to — the `--hostname` seed key when
+    /// The hostname this unit will answer to: the `--hostname` seed key when
     /// the press names one, else the recipe's. The seed wins because it is what
-    /// the booted system ends up with: a template that baked the recipe's
+    /// the booted system ends up with. A template that baked the recipe's
     /// default would ship a file disagreeing with the machine reading it.
     Hostname,
     /// Device slug (`turing-rk1`).
@@ -173,14 +174,14 @@ impl ImageFacts {
     /// Resolve the vocabulary from the two documents that own it.
     ///
     /// `identity` is the tree's own `/etc/boot2deb/image.toml`, read back out of
-    /// the entry list being merged — so a template sees what the image says
-    /// about itself rather than a second copy of the build's opinion. `image`
-    /// carries the identifiers that exist only in the GPT and the superblock,
-    /// and `recipe` the build point, which the identity document does not
+    /// the entry list being merged. A template therefore sees what the image says
+    /// about itself, rather than a second copy of the build's opinion. `image`
+    /// carries the identifiers that exist only in the GPT and the superblock.
+    /// `recipe` carries the build point, which the identity document does not
     /// record (it states the axes the reference resolves to instead).
     ///
     /// `seed_hostname` is the press's `--hostname`, and supersedes the identity
-    /// document's: the seed is applied at first boot, so it — not the recipe's
+    /// document's. The seed is applied at first boot, so it — not the recipe's
     /// default — is the name the running system will answer to.
     #[must_use]
     pub fn new(
@@ -244,7 +245,7 @@ enum Segment {
 ///
 /// Parsing is separate from rendering because the two are checked at different
 /// times. The **names** are validated when the addition is collected, on the
-/// command line, so a typo fails before any artifact is read; the **values**
+/// command line, so a typo fails before any artifact is read. The **values**
 /// arrive at merge time, from the tree being assembled. A template that parses
 /// therefore always renders.
 #[derive(Debug)]

@@ -2,24 +2,27 @@
 //! produces, and the seed-partition constants shared by the image node and the
 //! press path.
 //!
-//! Pure and deterministic — a total mapping from the resolved boot method,
-//! layout, and deliverable onto the ordered list of image files a build has,
-//! unit-tested without touching a disk. Deriving the roles from the
-//! [`ResolvedBuild`] rather than from flags is what makes pressing a `split`
-//! build to one output path a resolution-shaped error naming both artifacts,
-//! instead of prose in a board page.
+//! Pure and deterministic: a total mapping from the resolved boot method, layout,
+//! and deliverable onto the ordered list of image files a build has. It is
+//! unit-tested without touching a disk.
 //!
-//! The mapping is small because resolution has already narrowed the space: a
-//! depthcharge build cannot split (its kernel slots live inside the image's own
-//! GPT), so a split role list is always `rockchip-rkbin`, and a
-//! [`Deliverable::Uboot`](crate::model::Deliverable::Uboot) build produces
-//! exactly the bootloader image a split layout's boot half is.
+//! The roles are derived from the [`ResolvedBuild`] rather than from flags. That is
+//! what makes pressing a `split` build to one output path a resolution-shaped error.
+//! The error names both artifacts, where a board page would only carry prose about
+//! them.
+//!
+//! The mapping is small because resolution has already narrowed the space. A
+//! depthcharge build cannot split, since its kernel slots live inside the image's own
+//! GPT, so a split role list is always `rockchip-rkbin`. A
+//! [`Deliverable::Uboot`](crate::model::Deliverable::Uboot) build produces exactly
+//! the bootloader image a split layout's boot half is.
 
 use crate::model::{Layout, ResolvedBuild};
 
 /// Size of the per-unit seed partition every GPT-bearing image carries: a FAT12
-/// volume holding `seed.txt`, regenerated whole by `press` and `seed` — 1 MiB,
-/// which is roomy for a hostname and a few keys and small enough to rebuild in
+/// volume holding `seed.txt`, regenerated whole by `press` and `seed`.
+///
+/// 1 MiB is roomy for a hostname and a few keys, and small enough to rebuild in
 /// memory.
 ///
 /// One number for the geometry that reserves it, the generator that fills it,
@@ -28,9 +31,9 @@ use crate::model::{Layout, ResolvedBuild};
 /// geometry place it by subtraction from an already-aligned offset.
 pub const SEED_PARTITION_BYTES: u64 = 1 << 20;
 
-/// The GPT entry label of the seed partition — how the device's first-boot hook
-/// finds it (`/dev/disk/by-partlabel/b2d-seed`) and how `boot2deb seed` locates
-/// it in an already-pressed image file.
+/// The GPT entry label of the seed partition. The device's first-boot hook finds it
+/// at `/dev/disk/by-partlabel/b2d-seed`, and `boot2deb seed` locates it in an
+/// already-pressed image file.
 pub const SEED_PARTLABEL: &str = "b2d-seed";
 
 /// Which of a build's image artifacts one pressed output derives from.
@@ -52,8 +55,8 @@ pub enum ArtifactRole {
 
 impl ArtifactRole {
     /// The artifact's file name for a build with this `stem`, without the
-    /// compression extension — the image node's own naming, stated once here so the
-    /// press side cannot drift from it.
+    /// compression extension. This is the image node's own naming, stated once here
+    /// so the press side cannot drift from it.
     #[must_use]
     pub fn file_name(self, stem: &str) -> String {
         match self {
@@ -89,14 +92,14 @@ impl ArtifactRole {
 /// Total over everything resolution can produce — every boot method, layout, and
 /// deliverable — so `press` cannot meet a build it has no answer for:
 ///
-/// - a u-boot deliverable is its standalone boot image;
-/// - a `combined` build is one whole-disk image;
-/// - a `split` build is its boot image plus its rootfs image, boot half first —
-///   the order the split image node emits them.
+/// - A u-boot deliverable is its standalone boot image.
+/// - A `combined` build is one whole-disk image.
+/// - A `split` build is its boot image plus its rootfs image, boot half first. That
+///   is the order the split image node emits them in.
 ///
-/// One role means the single positional output path names it; two mean the
-/// caller must name both outputs (`--boot-out` + `--rootfs-out`), which is what
-/// turns "two artifacts, two files" from prose into an error.
+/// One role means the single positional output path names it. Two mean the caller
+/// must name both outputs (`--boot-out` + `--rootfs-out`), which is what turns "two
+/// artifacts, two files" from prose into an error.
 #[must_use]
 pub fn roles(build: &ResolvedBuild) -> Vec<ArtifactRole> {
     if !build.produces_image() {

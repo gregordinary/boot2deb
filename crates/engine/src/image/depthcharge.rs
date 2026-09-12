@@ -2,15 +2,15 @@
 //! ChromeOS kernel partition.
 //!
 //! Unlike a bootloader we compile, this payload is produced **inside the rootfs**,
-//! by `depthchargectl`, during the rootfs customize step. That is deliberate: the
-//! same packaged tool, reading the same `/etc/fstab`, re-signs and re-writes the
-//! kernel partition through its `/etc/kernel/postinst.d` hook whenever the kernel is
-//! upgraded on the running board. Producing the image's payload any other way would
+//! by `depthchargectl`, during the rootfs customize step. That is deliberate. The
+//! same packaged tool re-signs and re-writes the kernel partition through its
+//! `/etc/kernel/postinst.d` hook, whenever the kernel is upgraded on the running
+//! board. It reads the same `/etc/fstab` either way. Producing the image's payload any other way would
 //! mean the shipped image and the installed system disagreed the first time `apt`
 //! touched the kernel.
 //!
-//! So the image node's job here is narrow: take the blob out of the rootfs tarball,
-//! check that it is one *this* image can actually boot, and place it.
+//! So the image node's job here is narrow. It takes the blob out of the rootfs
+//! tarball, checks that it is one *this* image can actually boot, and places it.
 
 use crate::error::EngineError;
 use crate::event::Step;

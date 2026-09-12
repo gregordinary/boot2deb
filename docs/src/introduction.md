@@ -1,31 +1,39 @@
 # Introduction
 
 boot2deb turns a laptop, SBC, tablet, or other device into a Debian device. It is a
-Rust-native, typed, testable builder that resolves a build from layered TOML config
-— an `arch ← soc ← boot-method ← device` hardware stack plus an orthogonal kernel
-axis — and drives the whole pipeline: kernel, u-boot, media-accel userspace, ffmpeg,
-the Debian rootfs, and a bootable disk image, all from a single committed lockfile.
+Rust-native, typed, testable builder that resolves a build from layered TOML config: an
+`arch ← soc ← boot-method ← device` hardware stack, plus an orthogonal kernel axis.
+
+From that one committed lock it drives the whole pipeline:
+
+- The kernel and u-boot.
+- The media-accel userspace and ffmpeg.
+- The Debian rootfs.
+- A bootable disk image.
 
 The image assembly is pure Rust: GPT partitioning, ext4 formatting, and `.xz` or `.gz`
 compression with no C dependencies and no `sudo`. The Debian bootstrap, every compile,
-and every `.deb` archiving run in rootless, in-process user-namespace roots, so an
-x86_64 host builds an arm64 image without root and without `fakeroot` at all.
+and every `.deb` archiving run in rootless, in-process user-namespace roots. An
+x86_64 host therefore builds an arm64 image without root and without `fakeroot` at all.
 
 **Your host supplies no compiler and no packaging tool.** Both are packages of a
 provisioned Debian root, resolved from the build's own mirror list and sha256-pinned in
-that root's manifest — so what compiled and archived an image is stated by its lock
-rather than by whichever `gcc` and `dpkg` your distribution happens to ship. What is
-left on the host is `git`, unprivileged user namespaces, an unprivileged overlay for a
-build that compiles, and `qemu-user` for one that assembles a foreign-architecture
-image. boot2deb does not need to run on a Debian-family machine.
+that root's manifest. What compiled and archived an image is therefore stated by its
+lock, rather than by whichever `gcc` and `dpkg` your distribution happens to ship.
+
+What is left on the host is `git` and unprivileged user namespaces. A build that
+compiles also wants an unprivileged overlay, and one that assembles a
+foreign-architecture image wants `qemu-user`. boot2deb does not need to run on a
+Debian-family machine.
 
 **Not every board needs every stage.** A build compiles a kernel only if the board needs
-one of its own, and builds a bootloader only if the board's firmware is ours to make. The
-Turing RK1 does both — a patched mainline kernel, and u-boot written into the disk's raw
-gap. The ASUS C201 Chromebook does neither: Debian's own kernel runs it, its firmware
-lives in an SPI chip, and what boot2deb produces for it is a *signed kernel* in a ChromeOS
-partition. Its lock, correspondingly, pins nothing from git. The model states what is true
-of each board rather than making them look alike.
+one of its own. It builds a bootloader only if the board's firmware is ours to make.
+
+The Turing RK1 does both: a patched mainline kernel, and u-boot written into the disk's
+raw gap. The ASUS C201 Chromebook does neither. Debian's own kernel runs it, and its
+firmware lives in an SPI chip. What boot2deb produces for it is a *signed kernel* in
+a ChromeOS partition. Its lock, correspondingly, pins nothing from git. The model states
+what is true of each board rather than making them look alike.
 
 ## Where to start
 

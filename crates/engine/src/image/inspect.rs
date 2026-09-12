@@ -2,13 +2,14 @@
 //! and its rootfs filesystem's superblock.
 //!
 //! The counterpart of this module's `ext4` and `gpt` siblings, which write those
-//! structures. This module exists so the acceptance gate asks the questions in the same
-//! language the image was written in — the alternative is a second implementation of
-//! both parsers, in a second language, that nothing tests.
+//! structures. This module exists so the acceptance gate asks the questions in the
+//! same language the image was written in. The alternative is a second
+//! implementation of both parsers, in a second language, that nothing tests.
 //!
-//! **Only the head of the artifact is read.** The GPT is the first 34 sectors and the
-//! superblock is 1024 bytes into the rootfs partition, so a compressed multi-gigabyte
-//! image costs a few hundred kilobytes of decompression rather than a full pass.
+//! **Only the head of the artifact is read.** The GPT is the first 34 sectors, and
+//! the superblock is 1024 bytes into the rootfs partition. A compressed
+//! multi-gigabyte image therefore costs a few hundred kilobytes of decompression
+//! rather than a full pass.
 //!
 //! Pure except for reading the artifact: no mount, no loop device, no root.
 
@@ -44,9 +45,10 @@ const SUPERBLOCK_BYTES: usize = 0x400;
 ///
 /// # Errors
 ///
-/// [`EngineError::ImageVerifyGpt`] when the artifact carries no readable primary table,
-/// or no partition labelled [`ROOTFS_PARTLABEL`] — a `-boot.img` legitimately has
-/// neither, and the caller reports that rather than treating it as a zero-length one.
+/// [`EngineError::ImageVerifyGpt`] when the artifact carries no readable primary
+/// table, or no partition labeled [`ROOTFS_PARTLABEL`]. A `-boot.img` legitimately
+/// has neither, and the caller reports that rather than treating it as a
+/// zero-length one.
 pub fn rootfs_partition(artifact: &Path) -> Result<RootfsPartition, EngineError> {
     let entry = crate::press::verify::planned_table(artifact)?
         .into_iter()
@@ -79,21 +81,22 @@ pub struct RootfsPartition {
     /// Whether the entry carries the legacy-BIOS-bootable attribute.
     ///
     /// U-Boot's `bootflow scan` narrows to the partitions marked with it as soon as
-    /// any partition on the medium is, and scans partition 1 alone when none is —
-    /// and partition 1 is the seed. An unmarked rootfs is therefore a board that
-    /// reaches its prompt and finds nothing to boot, which no filesystem-level check
-    /// can see.
+    /// any partition on the medium is. It scans partition 1 alone when none is, and
+    /// partition 1 is the seed. An unmarked rootfs is therefore a board that reaches
+    /// its prompt and finds nothing to boot, which no filesystem-level check can
+    /// see.
     pub bootable: bool,
 }
 
 /// The free-block count in the rootfs filesystem's superblock.
 ///
-/// This is the number a fitted `image_size` was measured against — the formatter
-/// decides how large the filesystem is from what it wrote, so nothing outside the
+/// This is the number a fitted `image_size` was measured against. The formatter
+/// decides how large the filesystem is from what it wrote. Nothing outside the
 /// superblock says whether the slack a recipe asked for actually survived.
 ///
-/// Both halves of the 64-bit count are read: every image this writes has `64bit` set,
-/// and taking the low half alone would silently truncate a filesystem above 16 TiB.
+/// Both halves of the 64-bit count are read. Every image this writes has `64bit`
+/// set, and taking the low half alone would silently truncate a filesystem above
+/// 16 TiB.
 ///
 /// # Errors
 ///

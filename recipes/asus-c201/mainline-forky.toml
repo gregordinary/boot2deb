@@ -13,8 +13,8 @@ layout     = "combined"
 image_size = "2G"
 
 # The last pin that booted was v7.1.3, so this one has not been on the board. The pin is
-# v7.2.2, the current stable point release; 7.2 -> 7.2.2 touches no Rockchip driver, no
-# device tree and no defconfig. Three things move from v7.1.7
+# v7.2.3, the current stable point release; no 7.2.y point release so far touches a
+# Rockchip driver, a device tree or a defconfig. Three things move from v7.1.7
 # that this board reaches, and the `rk3288-fixes` series applies to all of it
 # unchanged.
 #

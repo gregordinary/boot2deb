@@ -1,52 +1,63 @@
 //! Rootfs ext4 partition assembly: format the rootfs tarball into a fixed-size,
-//! resize-safe ext4 image with the pure-Rust [`ferrosys::ext`] formatter — no mount,
-//! no loop device, no root, no `mke2fs`, and no user namespace.
+//! resize-safe ext4 image with the pure-Rust [`ferrosys::ext`] formatter. The step
+//! needs no mount, no loop device and no root. It calls no `mke2fs`, and uses no user
+//! namespace.
 //!
-//! The formatter reads the rootfs `tar` in-process through [`ArchiveSource`], taking
+//! The formatter reads the rootfs `tar` in-process through [`ArchiveSource`]. It takes
 //! each entry's ownership, mode, times, extended attributes, and POSIX ACLs straight
-//! from the (PAX) headers, and writes those owner ids directly into the inodes. That is
-//! what makes the user namespace unnecessary: nothing is extracted to a staging tree
-//! whose multi-uid ownership an unprivileged process cannot set, so the whole step runs
-//! as the plain build user. Only the headers are read up front: each
-//! file's bytes stay in the archive until that file is placed, so a multi-gigabyte
-//! rootfs costs the largest single file in it rather than the sum.
+//! from the (PAX) headers. Those owner ids are written directly into the inodes.
 //!
-//! The image is resize-safe by construction: [`GrowReservation::Max`] sizes the
+//! That is what makes the user namespace unnecessary. Nothing is extracted to a staging
+//! tree whose multi-uid ownership an unprivileged process cannot set. The whole step
+//! runs as the plain build user.
+//!
+//! Only the headers are read up front. Each file's bytes stay in the archive until that
+//! file is placed. A multi-gigabyte rootfs therefore costs the largest single file in
+//! it rather than the sum.
+//!
+//! The image is resize-safe by construction. [`GrowReservation::Max`] sizes the
 //! reserved group-descriptor-table blocks to the most the format can address (~8 TiB
-//! under this feature set, at a cost of ~4 MiB), so first boot grows the mounted root
+//! under this feature set, at a cost of ~4 MiB). First boot then grows the mounted root
 //! onto a larger NVMe with `resize2fs` and no descriptor-table relocation. (`Max` never
 //! spends more than a sixty-fourth of the filesystem on headroom, so a filesystem below
-//! 256 MiB reserves proportionally less; every shipped image is well past that knee.)
-//! The feature set is chosen here rather than left to the formatter's default, and it is
-//! expressed relative to that default, which is itself a fixed set — so the on-disk
+//! 256 MiB reserves proportionally less. Every shipped image is well past that knee.)
+//!
+//! The feature set is chosen here rather than left to the formatter's default. It is
+//! expressed relative to that default, which is itself a fixed set, so the on-disk
 //! contract is stable across formatter releases. It is recorded rather than assumed
-//! either way: the provenance manifest's `[filesystem]` carries the formatter's own
-//! policy pin (every format option by name), its geometry pin planned at a fixed
-//! reference size (what those options *lay out*, which is what catches a change to the
-//! formula behind an unchanged option name), and the geometry this image's own size
-//! realized — see [`filesystem_provenance`].
+//! either way. The provenance manifest's `[filesystem]` carries three pins (see
+//! [`filesystem_provenance`]):
+//!
+//! - The formatter's own policy pin, every format option by name
+//! - Its geometry pin, planned at a fixed reference size
+//! - The geometry this image's own size realized
+//!
+//! The geometry pin is what those options *lay out*, which catches a change to the
+//! formula behind an unchanged option name.
+//!
 //! `metadata_csum_seed` stores the checksum seed in the superblock, decoupled
 //! from the UUID, so an operator's `tune2fs -U` (rescue, cloning hygiene) never has to
 //! rewrite every metadata checksum.
 //!
 //! The per-image first-boot password is spliced into `/etc/shadow` here — the one
 //! per-build-unique step. The cacheable rootfs tarball leaves the default account
-//! locked; the splice rewrites the entry's bytes in the parsed entry list, before the
-//! filesystem is written, leaving the entry's ownership and mtime untouched (DET).
+//! locked. The splice rewrites the entry's bytes in the parsed entry list, before the
+//! filesystem is written. The entry's ownership and mtime are left untouched (DET).
 //!
-//! The finished image is verified two ways: always by re-reading it with the crate's
-//! own [`Reader`] and scanning it whole (a finding means the formatter wrote an image
-//! its own reader disagrees with), and — when a new enough `e2fsck` is present — by a
-//! read-only `e2fsck -fn` cross-check whose any correction fails the build. The two are
-//! not redundant, and the second is not a weaker copy of the first: the scan is deeper
-//! but it is one implementation checking itself, so a wrong shared assumption passes it,
-//! and `e2fsck` is the only reader here that does not share the writer's code.
-//! `e2fsprogs` is not required; where it is absent the pure-Rust gate stands alone and
-//! the image's provenance records that only it ran.
+//! The finished image is verified two ways. It is always re-read with the crate's own
+//! [`Reader`] and scanned whole. A finding there means the formatter wrote an image its
+//! own reader disagrees with. Where a new enough `e2fsck` is present, a read-only
+//! `e2fsck -fn` cross-check runs too, and any correction it makes fails the build.
+//!
+//! The two are not redundant, and the second is not a weaker copy of the first. The
+//! scan is deeper, but it is one implementation checking itself, so a wrong shared
+//! assumption passes it. `e2fsck` is the only reader here that does not share the
+//! writer's code. `e2fsprogs` is not required. Where it is absent, the pure-Rust gate
+//! stands alone and the image's provenance records that only it ran.
 //!
 //! "New enough" is [`E2FSCK_MIN`], and the floor is not a formality. The pinned feature
-//! set includes `metadata_csum_seed`, which e2fsprogs only learned in 1.43 — an older
-//! `e2fsck` rejects the image over a feature it does not know, so without the floor a
+//! set includes `metadata_csum_seed`, which e2fsprogs only learned in 1.43. An older
+//! `e2fsck` rejects the image over a feature it does not know. Without the floor, a
 //! host carrying an ancient `e2fsck` fails a build that a host with **no** `e2fsck`
 //! completes. An optional cross-check must never be worse than absent, so below the
 //! floor it is skipped with a log line.
@@ -99,7 +110,7 @@ const REFERENCE_PIN_BYTES: u64 = 4 << 30;
 /// The filesystem the rootfs partition carries.
 ///
 /// A constant rather than a value read back off a formatted image, because two consumers
-/// need it *before* the image node runs: the rootfs node writes it into the initramfs
+/// need it *before* the image node runs. The rootfs node writes it into the initramfs
 /// configuration (`FSTYPE=`, which decides the fsck helper the initramfs carries), and
 /// its own test asserts that. `feature_set` selects it — the ext4 baseline plus this
 /// module's choices — so the two cannot be changed independently without the pin moving.
@@ -279,7 +290,7 @@ pub(crate) struct RootfsFilesystem {
     /// The filesystem's size in bytes, as the format realized it.
     ///
     /// Reported rather than echoed back from the request, because under
-    /// [`RootfsSize::Fit`] the caller did not state it: the search decided it, and the
+    /// [`RootfsSize::Fit`] the caller did not state it. The search decided it, and the
     /// rootfs partition is then laid out around this number.
     pub size_bytes: u64,
     /// The deterministic creation time the format stamped (the newest source

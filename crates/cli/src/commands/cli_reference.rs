@@ -1,12 +1,13 @@
 //! `cli-reference`: the complete flag table, generated from the clap surface.
 //!
-//! The book's `cli.md` is a curated narrative — it explains the model and the flags
-//! that carry it, and it is the better page to read. What a narrative cannot do is stay
-//! *complete*: a flag added in [`crate::args`] appears here the moment it exists, and a
-//! committed page that no longer matches fails this module's staleness test.
+//! The book's `cli.md` is a curated narrative. It explains the model and the flags
+//! that carry it, and it is the better page to read. What a narrative cannot do is
+//! stay *complete*. A flag added in [`crate::args`] appears here the moment it
+//! exists, and a committed page that no longer matches fails this module's
+//! staleness test.
 //!
-//! Every string below comes from the command tree itself — the same `///` doc comments
-//! `--help` renders — so this module decides layout and nothing else. There is no
+//! Every string below comes from the command tree itself, the same `///` doc comments
+//! `--help` renders. This module therefore decides layout and nothing else. There is no
 //! second place to describe a flag, and therefore no second place for a description to
 //! drift.
 

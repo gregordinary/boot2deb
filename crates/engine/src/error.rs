@@ -1,7 +1,7 @@
 //! Engine errors — the typed failures of the side-effecting build stages.
 //!
-//! The engine shells out to `git` and touches the filesystem, so its
-//! failures are distinct from the pure config errors in
+//! The engine shells out to `git` and touches the filesystem. Its failures are
+//! therefore distinct from the pure config errors in
 //! [`boot2deb_core::ConfigError`], which are re-wrapped via [`EngineError::Config`].
 
 use std::path::Path;
@@ -27,20 +27,20 @@ pub enum EngineError {
 
     /// A staged build root does not satisfy its own declared dependencies.
     ///
-    /// The base is provisioned once and cached; the layer over it is resolved against
+    /// The base is provisioned once and cached. The layer over it is resolved against
     /// the archive as it stands when the build runs. When those two describe different
     /// archive states, a layer package can install whose declared dependency the base
-    /// does not meet. Nothing fails at that moment — the failure arrives later as a
-    /// link or compile error naming a library that is present and correct, which sends
+    /// does not meet. Nothing fails at that moment. The failure arrives later as a
+    /// link or compile error naming a library that is present and correct. That sends
     /// a reader after the wrong thing entirely.
     ///
     /// Raised as soon as the layer is staged, naming the package, the constraint it
-    /// declared, and what is actually installed, so the skew is stated rather than
-    /// inferred. Dropping the cached build roots is what clears it: they are provisioned
-    /// again against the archive as it stands, and
+    /// declared, and what is actually installed. The skew is therefore stated rather
+    /// than inferred. Dropping the cached build roots is what clears it. They are
+    /// provisioned again against the archive as it stands, and
     /// [`build_root_trees`](crate::sandbox::build_root_trees) is the set that has to go.
     ///
-    /// `RECIPE` in the message is a placeholder — the engine knows the stage that staged
+    /// `RECIPE` in the message is a placeholder. The engine knows the stage that staged
     /// the layer, not the build point the caller named it under.
     #[error(
         "the {stage} build root does not satisfy its own dependencies — the cached base \
@@ -77,10 +77,10 @@ pub enum EngineError {
         stderr: String,
     },
 
-    /// A clone source or git ref looks like a command-line option (starts with
-    /// `-`), so passing it to `git` as a positional could be interpreted as a flag
-    /// — e.g. a `source = "--upload-pack=<cmd>"` reaching `git fetch` is command
-    /// execution. Refused before any git runs (positionals are additionally guarded
+    /// A clone source or git ref looks like a command-line option, starting with
+    /// `-`. Passing it to `git` as a positional could then be read as a flag.
+    /// A `source = "--upload-pack=<cmd>"` reaching `git fetch` is command execution.
+    /// Refused before any git runs (positionals are additionally guarded
     /// with `--end-of-options`).
     #[error("unsafe git {what} '{value}': must not start with '-'")]
     UnsafeGitArgument {
@@ -91,11 +91,11 @@ pub enum EngineError {
     },
 
     /// A make target derived from config (`base_defconfig` / `uboot_defconfig`)
-    /// looks like a GNU make option (`-…`) or a variable assignment
-    /// (`FOO=bar`) — either would change what `make` does instead of naming a
-    /// target, and an assignment like `CC=<cmd>` is arbitrary-tool injection. A
-    /// legitimate defconfig is a bare identifier, so both shapes are refused before
-    /// `make` runs; the target positional is additionally guarded with `--`.
+    /// looks like a GNU make option (`-…`) or a variable assignment (`FOO=bar`).
+    /// Either would change what `make` does instead of naming a target, and an
+    /// assignment like `CC=<cmd>` is arbitrary-tool injection. A legitimate defconfig
+    /// is a bare identifier, so both shapes are refused before `make` runs. The target
+    /// positional is additionally guarded with `--`.
     #[error("unsafe make target {what} '{value}': must name a target, not start with '-' or contain '='")]
     UnsafeMakeTarget {
         /// Which argument (e.g. `"base_defconfig"`, `"uboot_defconfig"`).
@@ -121,10 +121,10 @@ pub enum EngineError {
     },
 
     /// The committed lock disagrees with a fresh resolution on one or more axes the
-    /// lock records from the resolved build — the config drifted since `update`,
-    /// so the pins no longer describe the requested point. Each listed axis names its
-    /// mismatch; the fix is to re-run `update`. Refused up front so a build never mixes
-    /// newly resolved axes with stale pins.
+    /// lock records from the resolved build. The config drifted since `update`, so the
+    /// pins no longer describe the requested point. Each listed axis names its
+    /// mismatch, and the fix is to re-run `update`. Refused up front so a build never
+    /// mixes newly resolved axes with stale pins.
     #[error(
         "lock is stale: the recipe resolves differently than it was locked ({}) \
          — re-run `boot2deb update <recipe>` to re-pin",
@@ -156,12 +156,12 @@ pub enum EngineError {
     /// *different* series than the lock names. An explicit `--patches-path`
     /// override downgrades this to a warning for patch co-development.
     ///
-    /// Only raised when the commits genuinely differ; a checkout sitting *on* the pin
+    /// Only raised when the commits genuinely differ. A checkout sitting *on* the pin
     /// with uncommitted work is [`PatchesWorktreeDirty`](EngineError::PatchesWorktreeDirty),
     /// which is a different problem and must not be reported as a commit mismatch.
     ///
-    /// The remedy depends on *which side* moved: a checkout ahead of the pin (or
-    /// dirty) holds work the lock should include — the fix is to commit and re-run
+    /// The remedy depends on *which side* moved. A checkout ahead of the pin (or
+    /// dirty) holds work the lock has to include. The fix is to commit and re-run
     /// `boot2deb update`, not to discard the work by re-checking-out the pin. Only
     /// a stale checkout is fixed by checking out the locked commit. The `relation`
     /// field ([`PinRelation`]) carries that distinction into the message.
@@ -188,8 +188,8 @@ pub enum EngineError {
     /// lock describes — building would apply something unreproducible.
     ///
     /// Separate from [`PatchesPinMismatch`](EngineError::PatchesPinMismatch) because
-    /// nothing is mismatched: naming one commit as both "is at" and "pins" reads as a
-    /// contradiction and sends the reader looking for drift that is not there.
+    /// nothing is mismatched. Naming one commit as both "is at" and "pins" reads as a
+    /// contradiction, and sends the reader looking for drift that is not there.
     #[error(
         "patches checkout {root} has uncommitted changes at the pinned commit \
          {commit}\n  {}",
@@ -203,8 +203,8 @@ pub enum EngineError {
     },
 
     /// The `patches` checkout `update` would pin has uncommitted changes. The pin
-    /// is `HEAD`, so those changes — typically a just-imported patch — would be
-    /// silently absent from the lock and resurface later as a build-time
+    /// is `HEAD`, so those changes would be silently absent from the lock. They are
+    /// typically a just-imported patch, and resurface later as a build-time
     /// [`PatchesPinMismatch`](EngineError::PatchesPinMismatch). Refused before any
     /// upstream ref is consulted: commit first, then re-run.
     #[error(
@@ -217,9 +217,9 @@ pub enum EngineError {
     },
 
     /// `update` found no `patches` checkout at the given path. The pin is the
-    /// checkout's `HEAD`, so `update` needs a local clone — unlike `build`,
-    /// which reads the already-pinned commit and auto-fetches it with no
-    /// checkout present.
+    /// checkout's `HEAD`, so `update` needs a local clone. `build` does not, since
+    /// it reads the already-pinned commit and auto-fetches it with no checkout
+    /// present.
     #[error(
         "no patches checkout at {path}: `update` pins the checkout's HEAD, so it \
          needs a local clone there (clone the patches repo, or point --patches-path \
@@ -230,7 +230,7 @@ pub enum EngineError {
         path: String,
     },
 
-    /// A patch in the series did not apply to the target tree — the verify gate's
+    /// A patch in the series did not apply to the target tree. It is the verify gate's
     /// hard error, naming the failing patch and the kernel it was checked against.
     /// Patches are never silently skipped or fuzzed in.
     #[error("patch does not apply to {tree} at {target}:\n  {patch}\n{detail}")]
@@ -260,9 +260,9 @@ pub enum EngineError {
     },
 
     /// A build sandbox ([`crate::sandbox`]) could not configure or launch a
-    /// command. Distinct from [`CommandFailed`](Self::CommandFailed): the
-    /// command never ran — a rejected spec, a namespace/mount setup failure, or
-    /// an exec error — rather than running to a non-zero exit.
+    /// command. Distinct from [`CommandFailed`](Self::CommandFailed), because the
+    /// command never ran. The cause is a rejected spec, a namespace/mount setup
+    /// failure, or an exec error, rather than running to a non-zero exit.
     #[error("sandbox failed ({context}): {source}")]
     Sandbox {
         /// What the engine was trying to run inside the sandbox.
@@ -272,11 +272,11 @@ pub enum EngineError {
         source: ferroday_cage::Error,
     },
 
-    /// A `boot2deb try` run failed: the guest never reached a login prompt,
-    /// authentication with the generated password was refused, a unit failed,
-    /// the selftest failed, or first-boot re-ran on the second boot. Carries
-    /// the phase and what the console showed — the message is the whole
-    /// diagnosis, since the guest is gone by the time the error is read.
+    /// A `boot2deb try` run failed. The guest never reached a login prompt, or
+    /// authentication with the generated password was refused. Or a unit failed,
+    /// the selftest failed, or first-boot re-ran on the second boot. It carries
+    /// the phase and what the console showed. The message is the whole diagnosis,
+    /// since the guest is gone by the time the error is read.
     #[error("try: {context}: {message}")]
     TryBoot {
         /// What the harness was doing (`first boot`, `log in to the guest`, …).
@@ -300,12 +300,12 @@ pub enum EngineError {
 
     /// A published plan document could not be read as one — malformed, or written in a
     /// format version this boot2deb does not read. Distinct from
-    /// [`Bootstrap`](Self::Bootstrap) because no bootstrap is involved: the readers
-    /// that hit this are answering questions *about* a published image, and calling
-    /// that a failed bootstrap would name a stage the command never ran.
+    /// [`Bootstrap`](Self::Bootstrap) because no bootstrap is involved. The readers
+    /// that hit this are answering questions *about* a published image. Calling that
+    /// a failed bootstrap would name a stage the command never ran.
     ///
-    /// The plan format is versioned and a mismatch is refused rather than guessed at, so
-    /// the provisioner's own message — which names both versions — is carried verbatim.
+    /// The plan format is versioned, and a mismatch is refused rather than guessed at.
+    /// The provisioner's own message, which names both versions, is carried verbatim.
     #[error("cannot read the plan document {path}: {message}")]
     PlanDocument {
         /// The document that could not be read.
@@ -315,9 +315,9 @@ pub enum EngineError {
     },
 
     /// A [`SandboxRun`](crate::sandbox::SandboxRun) carried an empty `argv`, so there
-    /// is no program to run. The field's contract states it is non-empty and every
-    /// in-tree call site honours it; this makes the invariant structural rather than
-    /// conventional, since the alternative at the indexing site is a panic — and
+    /// is no program to run. The field's contract states it is non-empty, and every
+    /// in-tree call site honors it. This makes the invariant structural rather than
+    /// conventional, since the alternative at the indexing site is a panic.
     /// [`BuildRoot::run`](crate::sandbox::BuildRoot::run) is public API an out-of-tree
     /// caller can hand a spec to.
     #[error("no command to run in the sandbox ({context}): the argv is empty")]
@@ -330,8 +330,8 @@ pub enum EngineError {
     /// not a terminal.
     ///
     /// The session is a relay between the caller's terminal and the sandbox's own, so
-    /// it has two ends: without a terminal on this side there is nothing to put in raw
-    /// mode, no window size to follow, and no way to type into the sandbox. Refused at
+    /// it has two ends. Without a terminal on this side there is nothing to put in raw
+    /// mode. There is no window size to follow, and no way to type in. Refused at
     /// the start rather than discovered as a session that echoes nothing.
     #[error(
         "`shell` needs a terminal on standard input, and this one is not a terminal. \
@@ -341,12 +341,12 @@ pub enum EngineError {
     )]
     ShellNeedsTerminal,
 
-    /// An operation on the caller's own terminal failed — reading its window size,
-    /// putting it in raw mode, restoring it, or the `signalfd` the session follows
-    /// `SIGWINCH` through.
+    /// An operation on the caller's own terminal failed. That is reading its window
+    /// size, putting it in raw mode, restoring it, or the `signalfd` the session
+    /// follows `SIGWINCH` through.
     ///
     /// Distinct from [`Sandbox`](Self::Sandbox), which carries what the sandbox
-    /// library refused: this is the *caller's* end of the relay, which the library
+    /// library refused. This is the *caller's* end of the relay, which the library
     /// never touches.
     #[error("failed to {context}: {source}")]
     Terminal {
@@ -403,7 +403,7 @@ pub enum EngineError {
 
     /// A vendored keyring has no sibling fingerprint manifest. The manifest is what
     /// makes the keyring reviewable, so its absence is a hard error rather than an
-    /// unchecked pass — otherwise deleting one file would silently disable the
+    /// unchecked pass. Otherwise deleting one file would silently disable the
     /// trust-anchor audit.
     #[error(
         "keyring {keyring} has no fingerprint manifest at {manifest} — every vendored \
@@ -438,7 +438,7 @@ pub enum EngineError {
     },
 
     /// A keyring's primary keys are not the ones its manifest vets. An `unexpected`
-    /// key is a trust anchor nobody reviewed; a `missing` one means the manifest is
+    /// key is a trust anchor nobody reviewed. A `missing` one means the manifest is
     /// stale (a key rotation, which is a deliberate re-validation event). Either way
     /// the build stops rather than bootstrapping against unvetted keys.
     #[error(
@@ -459,7 +459,7 @@ pub enum EngineError {
         missing: Vec<String>,
     },
 
-    /// A checkout resolved to a different commit than the lock pins — the build
+    /// A checkout resolved to a different commit than the lock pins. The build
     /// reads only the lock, so a source that does not match it is a hard error
     /// rather than a silently different artifact.
     #[error("{what} checkout is at {actual}, but the lock pins {expected}")]
@@ -472,12 +472,12 @@ pub enum EngineError {
         actual: String,
     },
 
-    /// A pinned commit could not be obtained from the source: it is neither
+    /// A pinned commit could not be obtained from the source. It is neither
     /// shallow-fetchable by SHA nor reachable from any branch or tag after a
     /// full-history fetch. This happens when the upstream branch it was on has been
-    /// rebased, force-pushed, or deleted, so only a local checkout (or a durable
-    /// mirror) still holds it — the fetch mechanism cannot conjure a commit the
-    /// remote no longer advertises.
+    /// rebased, force-pushed, or deleted. Only a local checkout (or a durable mirror)
+    /// still holds it, and the fetch mechanism cannot conjure a commit the remote no
+    /// longer advertises.
     #[error(
         "{what} commit {commit} is not reachable from {url} \
          (the upstream branch may have been rebased, force-pushed, or deleted); \
@@ -494,9 +494,10 @@ pub enum EngineError {
 
     /// A media-accel build stage (userspace or ffmpeg) was invoked for a build
     /// whose lock carries no media-accel source pins. These stages run only when
-    /// the resolved build selects a `requires_media_accel` feature (which pins the
-    /// sources), so reaching one without pins is an internal scheduling bug, not a
-    /// user misconfiguration — the CLI gates the stages on the pins' presence.
+    /// the resolved build selects a `requires_media_accel` feature, which pins the
+    /// sources. Reaching one without pins is therefore an internal scheduling bug,
+    /// not a user misconfiguration, and the CLI gates the stages on the pins'
+    /// presence.
     #[error("internal: {stage} stage scheduled but the lock has no media-accel source pins")]
     MissingMediaAccelPins {
         /// The stage that was reached without pins (`userspace` or `ffmpeg`).
@@ -504,7 +505,7 @@ pub enum EngineError {
     },
 
     /// A `device_dts` source would overwrite a device-tree file the kernel already
-    /// ships. `device_dts` owns the *new* board file; an edit to an *existing*
+    /// ships. `device_dts` owns the *new* board file. An edit to an *existing*
     /// upstream `.dts`/`.dtsi` is a patch in the kernel's patch series, which `git
     /// am` applies with conflict detection. Silently clobbering the upstream file
     /// would hide that the fork has drifted, so the copy refuses.
@@ -520,8 +521,9 @@ pub enum EngineError {
     },
 
     /// The in-tree device-tree directory's `Makefile` has no `dtb-$(CONFIG_…) += …`
-    /// rule to model the board's DTB entry on, so the engine cannot teach kbuild to
-    /// build the copied `.dts` — a `.dts` compiled by nothing yields no DTB.
+    /// rule to model the board's DTB entry on. The engine therefore cannot teach
+    /// kbuild to build the copied `.dts`, and a `.dts` compiled by nothing yields no
+    /// DTB.
     #[error(
         "no 'dtb-$(CONFIG_…) +=' rule found in {makefile} — cannot register '{dtb}' for build"
     )]
@@ -541,11 +543,11 @@ pub enum EngineError {
         location: String,
     },
 
-    /// A compile stage was reached for a build that has no such stage — the kernel
-    /// node on a distro-package kernel, the u-boot node on a board whose firmware is
-    /// its own. The CLI schedules stages from the resolved build, so a normal run
-    /// cannot reach this; it is the engine's own contract check against being handed
-    /// a build it should never have been given.
+    /// A compile stage was reached for a build that has no such stage. That is the
+    /// kernel node on a distro-package kernel, or the u-boot node on a board whose
+    /// firmware is its own. The CLI schedules stages from the resolved build, so a
+    /// normal run cannot reach this. It is the engine's own contract check against
+    /// being handed a build it was never meant to see.
     #[error("the {stage} stage does not apply to this build: {why}")]
     StageNotApplicable {
         /// The stage that was invoked.
@@ -555,8 +557,9 @@ pub enum EngineError {
     },
 
     /// The lock omits a pin the stage needs. A lock omits a pin exactly when the
-    /// build has no such dependency, so this means the lock and the config disagree —
-    /// a lock written before the kernel's flavor or the board's boot method changed.
+    /// build has no such dependency, so this means the lock and the config disagree.
+    /// It is a lock written before the kernel's flavor or the board's boot method
+    /// changed.
     #[error(
         "the lock has no [{what}] pin, which the {stage} stage requires — the lock \
          predates a change to this recipe; re-run `boot2deb update <recipe>`"
@@ -570,7 +573,7 @@ pub enum EngineError {
 
     /// The signed kernel partition image is not one this image could boot. The
     /// cmdline is baked into its vboot signature, so a wrong value cannot be repaired
-    /// after the fact — and on a board with no serial console every variant of "wrong"
+    /// after the fact. On a board with no serial console every variant of "wrong"
     /// looks the same from the outside: it powers up, finds no root, and reboots. So
     /// each is caught here, at build time, with the reason named.
     #[error("the signed kernel partition is not bootable for this image: {detail}")]
@@ -594,9 +597,9 @@ pub enum EngineError {
     },
 
     /// A freshly-solved rootfs manifest did not reproduce the committed pin
-    /// (`RootfsPin.manifest_sha256`) — the live mirror moved off the pinned package
-    /// set, so the build is not reproducing the locked rootfs. A hard error
-    /// by default; `--save-manifest` accepts the new solve as the pin, or
+    /// (`RootfsPin.manifest_sha256`). The live mirror moved off the pinned package
+    /// set, so the build is not reproducing the locked rootfs. It is a hard error
+    /// by default. `--save-manifest` accepts the new solve as the pin, or
     /// `--snapshot pin` builds against the captured snapshot that reproduces it.
     #[error(
         "solved rootfs manifest drifted from the committed pin:\n  \
@@ -611,10 +614,10 @@ pub enum EngineError {
         actual: String,
     },
 
-    /// A snapshot mode (`fallback`/`pin`) was requested — via `--snapshot` or the
-    /// lock's captured mode — but the lock has no captured snapshot timestamp to
+    /// A snapshot mode (`fallback`/`pin`) was requested, via `--snapshot` or the
+    /// lock's captured mode, but the lock has no captured snapshot timestamp to
     /// use. There is nothing to fetch from, so the request cannot be honored
-    /// silently; capture one first with `--save-snapshot`.
+    /// silently. Capture one first with `--save-snapshot`.
     #[error(
         "snapshot mode '{mode}' requested but the lock has no captured snapshot \
          timestamp — run a build with --save-snapshot first"
@@ -624,9 +627,9 @@ pub enum EngineError {
         mode: &'static str,
     },
 
-    /// The resolved raw-gap offsets or image size are inconsistent — a bad
-    /// ordering (idbloader < u-boot.itb < rootfs), a non-sector-aligned offset,
-    /// an image too small to hold the GPT plus a rootfs partition, or a
+    /// The resolved raw-gap offsets or image size are inconsistent. The cause is a
+    /// bad ordering (idbloader < u-boot.itb < rootfs), or a non-sector-aligned offset.
+    /// It can also be an image too small to hold the GPT plus a rootfs partition. Or a
     /// bootloader payload that would overrun the next region. Checked
     /// before any bytes are written, so a misconfigured layout fails cleanly.
     #[error("image geometry is invalid: {detail}")]
@@ -644,8 +647,8 @@ pub enum EngineError {
         detail: String,
     },
 
-    /// The named path is not an image artifact this engine reads or writes: an
-    /// extension outside the set a build produces, or a compressed stream whose
+    /// The named path is not an image artifact this engine reads or writes. It has an
+    /// extension outside the set a build produces, or it is a compressed stream whose
     /// container does not parse.
     #[error("cannot read {target} as an image: {detail}")]
     ImageFileInvalid {
@@ -697,9 +700,9 @@ pub enum EngineError {
         detail: String,
     },
 
-    /// A `press` tree addition cannot be placed: an invalid destination path, a
-    /// destination the image holds a directory at, an unreadable source file, or
-    /// two additions claiming one path. Named per destination so a multi-flag
+    /// A `press` tree addition cannot be placed. The cause is an invalid destination
+    /// path, a destination the image holds a directory at, an unreadable source file,
+    /// or two additions claiming one path. Named per destination so a multi-flag
     /// press fails pointing at the flag that is wrong.
     #[error("cannot add {dest} to the image: {detail}")]
     PressAddition {
@@ -721,10 +724,10 @@ pub enum EngineError {
         detail: String,
     },
 
-    /// A fetched/read `extra_debs` deb's bytes did not hash to the pinned sha256
-    /// — the URL served different bytes than were pinned, or the local
-    /// file changed. The sha256 is the content identity, so a mismatch is a
-    /// verification failure, never a silent swap.
+    /// A fetched/read `extra_debs` deb's bytes did not hash to the pinned sha256.
+    /// The URL served different bytes than were pinned, or the local file changed.
+    /// The sha256 is the content identity, so a mismatch is a verification failure,
+    /// never a silent swap.
     #[error("extra_deb {locator} hash mismatch: lock pins {expected}, got {actual}")]
     ExtraDebHashMismatch {
         /// The locator whose bytes mismatched.
@@ -735,11 +738,11 @@ pub enum EngineError {
         actual: String,
     },
 
-    /// The `patches` repo could not be auto-fetched at the lock-pinned commit
-    /// — a clone/checkout via `gix` failed (offline, a bad URL, or the pinned
+    /// The `patches` repo could not be auto-fetched at the lock-pinned commit,
+    /// because a clone/checkout via `gix` failed (offline, a bad URL, or the pinned
     /// commit not reachable from the fetched history). Patches are never silently
-    /// skipped, so an unfetchable series is a hard error; the message names the
-    /// fetch URL and pinned commit so the user can retry or point `--patches-path`
+    /// skipped, so an unfetchable series is a hard error. The message names the
+    /// fetch URL and pinned commit, so the user can retry or point `--patches-path`
     /// at a local checkout.
     #[error("failed to fetch patches from {url} at {commit}: {detail}")]
     PatchesFetch {
@@ -757,8 +760,8 @@ pub enum EngineError {
     /// fetch the series manually.
     ///
     /// The pin's `source` is written by `update` from the resolved config, so the
-    /// durable fix names the axis that lost its URL: `patches_url` lives on the
-    /// kernel definition for a kernel series and on `boot-methods/rockchip-rkbin.toml`
+    /// durable fix names the axis that lost its URL. `patches_url` lives on the
+    /// kernel definition for a kernel series, and on `boot-methods/rockchip-rkbin.toml`
     /// for a u-boot one. A `deliverable = "uboot"` recipe has no kernel definition at
     /// all, which is why the message must not name only that one.
     #[error(
@@ -827,7 +830,7 @@ pub enum EngineError {
 
     /// Producing the image's first-boot credential failed inside the in-process
     /// hasher. Like [`Ext4Format`](Self::Ext4Format) this is a typed failure raised
-    /// from within the build rather than a host tool's nonzero exit — the credential
+    /// from within the build, rather than a host tool's nonzero exit. The credential
     /// path shells out to nothing.
     #[error("{context} failed: {message}")]
     Secret {
@@ -848,11 +851,11 @@ pub enum EngineError {
     },
 }
 
-/// How a drifted `patches` checkout's HEAD relates to the locked pin. Selects
-/// the [`PatchesPinMismatch`](EngineError::PatchesPinMismatch) remedy: "your
-/// checkout has newer work" and "your checkout is stale" have opposite fixes,
-/// and pointing an ahead-of-pin user at a re-checkout would tell them to discard
-/// their work.
+/// How a drifted `patches` checkout's HEAD relates to the locked pin. It selects
+/// the [`PatchesPinMismatch`](EngineError::PatchesPinMismatch) remedy. "Your
+/// checkout has newer work" and "your checkout is stale" have opposite fixes.
+/// Pointing an ahead-of-pin user at a re-checkout would tell them to discard their
+/// work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinRelation {
     /// The pin is an ancestor of HEAD: the checkout holds commits the lock has

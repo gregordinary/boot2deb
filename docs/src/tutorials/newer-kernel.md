@@ -26,8 +26,8 @@ Four things, in different repos, and they move at different rates:
 | The series envelope and per-patch ranges | the `patches` repo | when a boundary is measured |
 | The `[support]` claim | the recipe | when the moved pins are re-earned on hardware |
 
-The device's `supported_kernels` list gates which definitions a board may resolve, so a new
-definition is also one line there.
+The device's `supported_kernels` list gates which definitions a board can resolve, so a
+new definition is also one line there.
 
 ## Shape 1: within the track
 
@@ -67,8 +67,8 @@ so:
     boot2deb support-matrix --markdown > docs/src/reference/support-matrix.md
 ```
 
-Both are advisory — the lock is written either way — and both name work that belongs at the
-end of this tutorial, in [Closing the loop](#closing-the-loop).
+Both are advisory, since the lock is written either way. Both name work that belongs at
+the end of this tutorial, in [Closing the loop](#closing-the-loop).
 
 Deciding whether the `validated` claim survives means knowing *what* the re-pin moved,
 which is what `diff` is for. Keep the old lock before step 1 and compare against it
@@ -79,21 +79,21 @@ cp recipes/turing-rk1/forky.lock /tmp/old.lock       # before step 1
 boot2deb diff /tmp/old.lock turing-rk1/forky         # after it
 ```
 
-It names the kernel ref and commit that moved, the kconfig symbols the fragment sets
-now request differently (with the fragment behind each), and — where the patches
-commit moved too — the individual patch files that were added, removed, or rewritten.
-That is the evidence the claim is re-earned or retired on. See
+It names the kernel ref and commit that moved, and the kconfig symbols the fragment sets
+now request differently (with the fragment behind each). Where the patches commit moved
+too, it names the individual patch files that were added, removed, or rewritten. That is
+the evidence the claim is re-earned or retired on. See
 [Comparing two build points](../reference/cli.md#comparing-two-build-points).
 
-If you would rather not touch the lock until you know the answer, step 2 can come first:
-`verify-patches turing-rk1/forky --kernel v7.2.1 --kernel-path ../linux` measures a version
-the lock does not name and leaves the lock alone. That is the [candidate
-path](#step-2-measure-and-change-nothing) below, and it works inside the envelope as well as
-outside it.
+If you would rather not touch the lock until you know the answer, step 2 can come first.
+`verify-patches turing-rk1/forky --kernel v7.2.1 --kernel-path ../linux` measures a
+version the lock does not name and leaves the lock alone. That is the [candidate
+path](#step-2-measure-and-change-nothing) below, and it works inside the envelope as well
+as outside it.
 
-A patch that fails at step 2, or a kconfig symbol that has been renamed out from under a
-fragment at step 3, turns this shape into the next one: the series has hit a boundary, even
-inside its declared envelope.
+Step 2 can fail on a patch, and step 3 on a kconfig symbol renamed out from under a
+fragment. Either turns this shape into the next one. The series has hit a boundary,
+even inside its declared envelope.
 
 ## Shape 2: across a version boundary
 
@@ -128,23 +128,23 @@ asked at all:
   it already covers 7.3.
 - **A release candidate is matched as its base release**, because by semver `7.3.0-rc3`
   satisfies neither `<7.3` nor `>=7.3` and a release-only range would reject every RC. The
-  build path stays release-strict; this path does not.
+  build path stays release-strict, and this path does not.
 - **`--keep-going` reports every failure in one pass.** One boundary usually spawns
-  adjacent ones — a reworked patch shifts the context every later patch applies against —
-  so stopping at the first turns the survey into serial discovery. Each failing patch is
-  skipped so the rest still get measured, which makes the report a map of the damage rather
-  than a final verdict.
+  adjacent ones, because a reworked patch shifts the context every later patch applies
+  against. Stopping at the first therefore turns the survey into serial discovery. Each
+  failing patch is skipped so the rest still get measured, which makes the report a map
+  of the damage rather than a final verdict.
 
-Per-entry `kernels` ranges still narrow the series on this path, so a patch already marked
+Per-entry `kernels` ranges still narrow the series on this path. A patch already marked
 obsolete at the candidate drops out instead of counting as a failure.
 
 ### Step 3: act on the report
 
 Every failure is one of three things, and each has its own encoding in the series manifest:
 
-**Upstreamed.** The patch is in the new kernel already; the failure is the code being there
-twice. Give the entry an upper bound rather than deleting it — an older kernel still needs
-it. This is what happened to the Verisilicon IOMMU at 7.2:
+**Upstreamed.** The patch is in the new kernel already, and the failure is the code being
+there twice. Give the entry an upper bound rather than deleting it, since an older kernel
+still needs it. This is what happened to the Verisilicon IOMMU at 7.2:
 
 ```toml
 kernel = [
@@ -152,16 +152,19 @@ kernel = [
 ]
 ```
 
-Read what upstream took, not just that it applied: 050's driver, binding and DT node landed
-but its `CONFIG_VSI_IOMMU=m` defconfig line did not, so dropping the patch silently stopped
-building the driver until a kconfig fragment picked the symbol up. A patch that is *partly*
-absorbed is the dangerous shape, because nothing in the apply path reports it.
+Read what upstream took, not just that it applied. 050's driver, binding and DT node
+landed, but its `CONFIG_VSI_IOMMU=m` defconfig line did not. Dropping the patch therefore
+stopped building the driver until a kconfig fragment picked the symbol up. A patch that
+is *partly* absorbed is the dangerous shape, because nothing in the apply path reports
+it.
 
 **Reworked.** The patch is still needed but no longer applies. Rebase it, keep both
-versions, and give them complementary ranges — one list then builds both generations
-correctly from a single checkout, which a list mutated in place cannot do. The RK3588 RGA
-device-tree wiring is the worked example: 7.1 describes one RGA core and 7.2 describes all
-three, so the patch that points them at the out-of-tree driver reads differently on each:
+versions, and give them complementary ranges. One list then builds both generations
+correctly from a single checkout, which a list mutated in place cannot do.
+
+The RK3588 RGA device-tree wiring is the worked example. In 7.1 the device tree
+describes one RGA core, and in 7.2 it describes all three. The patch that points them at
+the out-of-tree driver therefore reads differently on each:
 
 ```toml
 kernel = [
@@ -177,9 +180,9 @@ Regenerate a rebased patch with `git format-patch` rather than hand-editing the 
 an old lock names an old `patches` commit, whose tree still contains both.
 
 Verify with plain `git am`, not `git am --3way`, before believing a clean run. A shallow
-build tree holds only the blobs of the commit it is at, so a patch that needs a three-way
-merge against a *previous* generation's file resolves in a full checkout and hard-fails in
-a build. Adding `--3way` is what hides that difference.
+build tree holds only the blobs of the commit it is at. A patch that needs a three-way
+merge against a *previous* generation's file therefore resolves in a full checkout and
+hard-fails in a build. Adding `--3way` is what hides that difference.
 
 Re-run step 2 after each round. When it comes back clean, and only then, widen the
 envelope:
@@ -231,10 +234,10 @@ boot2deb resolve turing-rk1/forky --kernel rk3588-mainline-7.3
 
 ### Step 5: adopt it in a recipe
 
-`update` has no `--kernel` flag: which definition a recipe pins is the recipe's own
+`update` has no `--kernel` flag. Which definition a recipe pins is the recipe's own
 `kernel` field, not a per-run choice, so adopting 7.3 is a recipe edit. Do it in a **new
-leaf** rather than in `forky.toml`, and the board keeps a validated recipe while the new one
-is unproven — `recipes/turing-rk1/forky-7.3.toml`:
+leaf** rather than in `forky.toml`, and the board keeps a validated recipe while the new
+one is unproven. That leaf is `recipes/turing-rk1/forky-7.3.toml`:
 
 ```toml
 device   = "turing-rk1"
@@ -248,8 +251,8 @@ status = "experimental"     # nothing has booted this yet
 date   = "2026-08-21"       # the day the claim was last assessed
 ```
 
-Then run the same sequence as shape 1 against the new leaf, on the locked path this time —
-no `--kernel`, because the lock now names 7.3 itself:
+Then run the same sequence as shape 1 against the new leaf, on the locked path this time.
+There is no `--kernel`, because the lock now names 7.3 itself:
 
 ```sh
 boot2deb update         turing-rk1/forky-7.3 --kernel-ref v7.3
@@ -258,12 +261,12 @@ boot2deb verify-config  turing-rk1/forky-7.3
 boot2deb build          turing-rk1/forky-7.3
 ```
 
-If you skipped ahead and pinned 7.3 before widening the envelope, nothing is broken: the
-envelope check is pure metadata, so `update` reports the mismatch and keeps going (pinning
-is the first step of adopting), while `build` refuses before cloning anything and names the
-`verify-patches --kernel` line to run instead. That is the cheap check telling you the
-series makes no claim about your kernel, ahead of the expensive one that tells you whether
-it would have worked anyway.
+If you skipped ahead and pinned 7.3 before widening the envelope, nothing is broken. The
+envelope check is pure metadata, so `update` reports the mismatch and keeps going, since
+pinning is the first step of adopting. `build` refuses before cloning anything, and names
+the `verify-patches --kernel` line to run instead. That is the cheap check telling you
+the series makes no claim about your kernel. The expensive one tells you whether it
+would have worked anyway.
 
 ### Step 6: the kernel config
 
@@ -277,8 +280,8 @@ boot2deb verify-config turing-rk1/forky-7.3 \
 ```
 
 Comparing the new kernel's generated config against the old one's is the fastest way to see
-what the bump changed on its own. Expect differences and read them; the ones that matter are
-options you *asked* for and did not get.
+what the bump changed on its own. Expect differences and read them. The ones that matter
+are options you *asked* for and did not get.
 
 ### Step 7: boot it
 

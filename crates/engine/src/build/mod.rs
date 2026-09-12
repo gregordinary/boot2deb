@@ -1,18 +1,18 @@
-//! The compile stages of the build graph — `git`/`make` steps wrapped as
+//! The compile stages of the build graph. They are `git`/`make` steps wrapped as
 //! engine subprocess stages that read the resolved [`Lock`] and emit the
 //! structured [`Event`](crate::event::Event) stream.
 //!
 //! These stages build the device's kernel, bootloader, out-of-tree modules, and media
 //! stack: [`kernel`] (`git am` series + `make bindeb-pkg`), [`uboot`], [`kmod`], the
-//! [`userspace`] MPP/RGA `.deb`s, and the [`ffmpeg`] `ffmpeg-rk` `.deb`. These stages
-//! drive the compile invocations directly rather than reimplementing them: the value
-//! here is the typed orchestration, the lock-driven pins, and the event stream, not a
-//! new build system.
+//! [`userspace`] MPP/RGA `.deb`s, and the [`ffmpeg`] `ffmpeg-rk` `.deb`. They drive
+//! the compile invocations directly rather than reimplementing them. The value here is
+//! the typed orchestration, the lock-driven pins, and the event stream, not a new
+//! build system.
 //!
 //! **No `.deb` is archived on the host.** The userspace and ffmpeg stages compile *and*
-//! package inside a target-arch [`BuildSandbox`](crate::sandbox::BuildSandbox); the
-//! u-boot and kmod stages stage their trees on the host — layout, control text and mode
-//! normalization are pure and testable there — and archive them through one
+//! package inside a target-arch [`BuildSandbox`](crate::sandbox::BuildSandbox). The
+//! u-boot and kmod stages stage their trees on the host, where layout, control text and
+//! mode normalization are pure and testable. They then archive them through one
 //! `dpkg-deb --build` in the host-arch [`PackagingSandbox`]. Only the kernel is still
 //! packaged host-side, by its own `make bindeb-pkg`.
 //!
@@ -47,61 +47,63 @@ pub(crate) const STDERR_TAIL: usize = 40;
 /// Host/target build parameters shared by the compile stages.
 #[derive(Debug, Clone, Default)]
 pub struct BuildEnv {
-    /// `CROSS_COMPILE` prefix, `Some` when the host arch differs from the target;
-    /// `None` for a native build (no prefix passed to `make`).
+    /// `CROSS_COMPILE` prefix, `Some` when the host arch differs from the target.
+    /// It is `None` for a native build (no prefix passed to `make`).
     pub cross_compile: Option<String>,
-    /// Parallelism cap for the whole build; `None` lets each stage default to the
+    /// Parallelism cap for the whole build. `None` lets each stage default to the
     /// host's available parallelism.
     ///
-    /// It bounds every concurrent thing the build does — `make -j`, the
+    /// It bounds every concurrent thing the build does, because the flag means "for
+    /// this build", not "for `make`". That is `make -j`, the
     /// `DEB_BUILD_OPTIONS=parallel=` a `dpkg-buildpackage` sees, and the image's `.xz`
-    /// worker pool — because the flag means "for this build", not "for `make`". On a
-    /// shared or constrained machine an unbounded compression pass is as unwelcome as
-    /// an unbounded compile.
+    /// worker pool. On a shared or constrained machine an unbounded compression pass is
+    /// as unwelcome as an unbounded compile.
     ///
     /// Deliberately **not** in any signature. That is a separate question from
-    /// bounding concurrency: a build system whose *output* depends on its job count is
-    /// a build system with a bug, so folding it would fragment the artifact cache by
-    /// machine size to key something that is supposed to be invariant. It is recorded
-    /// in the provenance manifest instead, where a difference between two images from
-    /// one lock can be seen without being paid for on every cache lookup.
+    /// bounding concurrency. A build system whose *output* depends on its job count is
+    /// a build system with a bug. Folding it would fragment the artifact cache by
+    /// machine size, to key something that is supposed to be invariant. It is recorded
+    /// in the provenance manifest instead. A difference between two images from one
+    /// lock can be seen there without being paid for on every cache lookup.
     pub jobs: Option<usize>,
     /// Identity of the **cross root** that compiles the kernel, u-boot and the
-    /// out-of-tree modules ([`cross_identity`]), folded into those three stages' Tier-2
-    /// output signatures so an artifact built with one compiler is not restored for a
-    /// build using another.
+    /// out-of-tree modules ([`cross_identity`]). It is folded into those three stages'
+    /// Tier-2 output signatures, so an artifact built with one compiler is not restored
+    /// for a build using another.
     ///
-    /// The compiler is a package of that root rather than a host binary, so this is the
-    /// root's own identity — its architecture, the target it emits for, its suite and
-    /// its mirror list, as the name of its tree. Nothing about the build host is in it,
-    /// which is the point: two hosts resolving one lock resolve one compiler.
+    /// The compiler is a package of that root rather than a host binary. This is
+    /// therefore the root's own identity, taken as the name of its tree. That is its
+    /// architecture, the target it emits for, its suite and its mirror list.
+    ///
+    /// Nothing about the build host is in it,
+    /// which is the point. Two hosts resolving one lock resolve one compiler.
     pub toolchain_id: String,
     /// Identity of everything host-side that shapes a **sandbox-built** `.deb` — the
     /// userspace and ffmpeg nodes — folded into their output signatures.
     ///
     /// Two inputs, because two things outside the source pins decide those bytes:
     ///
-    ///  - The **base the sandbox is provisioned as** — its architecture, suite, ordered
+    ///  - The **base the sandbox is provisioned as**: its architecture, suite, ordered
     ///    mirror list and package set, taken as the name of its own tree. The sandbox's
-    ///    `gcc` is the compiler for these packages, and the suite alone does not identify
-    ///    it: a testing suite's toolchain moves under a fixed suite name. What pins it is
-    ///    the mirror, so under `--snapshot pin` two builds at different snapshots key
-    ///    differently. Against a *live* mirror the compiler can still move under an
-    ///    unchanged key; that residual is what the snapshot exists to close, and it
-    ///    cannot be closed from here.
+    ///    `gcc` is the compiler for these packages, and the suite alone does not
+    ///    identify it. A testing suite's toolchain moves under a fixed suite
+    ///    name. What pins it is the mirror, so under `--snapshot pin` two builds at
+    ///    different snapshots key differently. Against a *live* mirror the compiler can
+    ///    still move under an unchanged key. That residual is what the snapshot exists
+    ///    to close, and it cannot be closed from here.
     ///
     ///    Empty for a build that stands up no sandbox at all, which is every build that
     ///    resolves no suite. Such a build runs neither node, so the field is unread
-    ///    rather than defaulted — and an empty string is no tree's name, so it cannot
+    ///    rather than defaulted. An empty string is no tree's name, so it cannot
     ///    collide with one.
     ///  - The **`qemu-user` interpreter**, where the host cannot execute the target's
     ///    binaries, which is what then executes that compiler
     ///    ([`qemu_identity`](crate::toolchain::HostToolchain::qemu_identity)). A host
     ///    that runs them directly folds no interpreter segment at all rather than an
-    ///    empty one, so it can never key alike with an emulated build whose qemu is
-    ///    merely missing.
+    ///    empty one. It can therefore never key alike with an emulated build whose qemu
+    ///    is merely missing.
     ///
-    ///    "Cannot execute" is narrower than "cross": an arm64 host building armhf
+    ///    "Cannot execute" is narrower than "cross". An arm64 host building armhf
     ///    compiles through a cross toolchain and then runs the result natively, so it
     ///    folds no interpreter. Keying on the toolchain question instead would name a
     ///    binary that never ran.
@@ -110,13 +112,14 @@ pub struct BuildEnv {
     /// ([`packaging_identity`]), folded into their output signatures.
     ///
     /// `dpkg-deb`'s version and its `liblzma` shape the archive bytes, and both are
-    /// packages of that root — so what it resolved to is an input to the output, in the
-    /// way [`sandbox_id`](Self::sandbox_id) is for a compiled `.deb`. Two roots with the
-    /// same identity hold the same `dpkg`, so their archives are interchangeable and
-    /// the cache may serve one for the other; two that differ may not.
+    /// packages of that root. What it resolved to is therefore an input to the output,
+    /// in the way [`sandbox_id`](Self::sandbox_id) is for a compiled `.deb`. Two roots
+    /// with the same identity hold the same `dpkg`, so their archives are
+    /// interchangeable and the cache can serve one for the other. Two that differ
+    /// cannot.
     ///
-    /// Distinct from `sandbox_id` rather than folded into it because the two roots move
-    /// independently: they carry different package sets, at different architectures,
+    /// Distinct from `sandbox_id` rather than folded into it, because the two roots move
+    /// independently. They carry different package sets, at different architectures,
     /// and the packaging root's suite is not always the image's.
     pub packaging_id: String,
 }
@@ -126,21 +129,22 @@ pub struct BuildEnv {
 ///
 /// The first segment is the tree name the sandbox is provisioned under
 /// ([`build_sandbox_dir`](crate::sandbox::build_sandbox_dir)), which is the identity of
-/// the base: its digest covers the mirror list, the base package set and the base recipe
+/// the base. Its digest covers the mirror list, the base package set and the base recipe
 /// version, and its prefix carries the arch and suite. Deriving the signature input from
-/// the function that *names the directory* is what keeps the two from disagreeing — a
+/// the function that *names the directory* is what keeps the two from disagreeing. A
 /// build keyed on one claim while compiling in a differently-provisioned tree is exactly
 /// the failure that digest exists to prevent. A package added to or removed from the base
 /// changes what `./configure` detects, so it has to change the key as well as the path.
 ///
 /// The interpreter segment follows where the host cannot execute the target's binaries,
 /// because it then runs every compiler invocation. A build that runs them directly folds
-/// no segment at all — not an empty one — so it can never key alike with an emulated
-/// build whose `qemu-user` is merely missing. [`packaging_identity`] has no counterpart
-/// for it: that root is host-arch, so nothing is ever interpreted there.
+/// no segment at all, not an empty one. It can therefore never key alike with an
+/// emulated build whose `qemu-user` is merely missing. [`packaging_identity`] has no
+/// counterpart for it, since that root is host-arch and nothing is ever interpreted
+/// there.
 ///
-/// Lives here, beside the field it fills, rather than at the call sites: it decides when
-/// two sandbox-built `.deb`s may be restored for each other, and that is a property of
+/// Lives here, beside the field it fills, rather than at the call sites. It decides when
+/// two sandbox-built `.deb`s can be restored for each other, and that is a property of
 /// the signature, not of the CLI.
 pub fn sandbox_identity(
     arch: &str,
@@ -167,19 +171,19 @@ pub fn sandbox_identity(
 /// The tree name the cross root is provisioned under
 /// ([`build_sandbox_dir`](crate::sandbox::build_sandbox_dir) at
 /// [`SandboxRole::Cross`]), for the reason the other two identities are their trees'
-/// names: the compiler that produces the kernel, u-boot and module bytes *is* a package
-/// of that root, so what the root resolved to is what shapes the output, and deriving
-/// the key from the function that names the directory is what stops a claim and a tree
+/// names. The compiler that produces the kernel, u-boot and module bytes *is* a package
+/// of that root. What the root resolved to therefore shapes the output. Deriving the
+/// key from the function that names the directory is what stops a claim and a tree
 /// from disagreeing.
 ///
 /// `target` reaches the name through the toolchain package
 /// (`crossbuild-essential-<target>`), so two targets never share a key any more than
 /// they share a root.
 ///
-/// No interpreter segment, for the same reason [`packaging_identity`] has none: a cross
+/// No interpreter segment, for the same reason [`packaging_identity`] has none. A cross
 /// root is host-arch, so `qemu-user` is never in the path. That it is *derived* rather
-/// than probed is what lets `why-rebuild` ask the artifact store this question offline,
-/// with no root provisioned and none to provision — and what backs it with a
+/// than probed is what lets `why-rebuild` ask the artifact store this question offline.
+/// No root is provisioned and none has to be. It is also what backs it with a
 /// sha256-pinned package manifest instead of a `--version` line.
 pub fn cross_identity(arch: &str, target: &'static str, suite: &str, mirrors: &[String]) -> String {
     root_identity(crate::sandbox::build_sandbox_dir(
@@ -194,7 +198,7 @@ pub fn cross_identity(arch: &str, target: &'static str, suite: &str, mirrors: &[
 /// The identity of a provisioned root: the leaf name of the directory it lives in.
 ///
 /// The work dir is where a tree *lives*, not part of what it *is*, so only the leaf is
-/// taken — an empty stand-in work dir gives the same answer every real one would, which
+/// taken. An empty stand-in work dir gives the same answer every real one would, which
 /// is what makes two machines building one lock key alike.
 fn root_identity(dir: PathBuf) -> String {
     dir.file_name()
@@ -208,13 +212,13 @@ fn root_identity(dir: PathBuf) -> String {
 ///
 /// The tree name the root is provisioned under
 /// ([`packaging_root_dir`](crate::sandbox::packaging_root_dir)), which is the identity
-/// of the base: its digest already covers the mirrors, the package set and the recipe
+/// of the base. Its digest already covers the mirrors, the package set and the recipe
 /// version, and its prefix carries the arch and suite. Deriving the signature input from
-/// the same function that names the directory is what keeps the two from disagreeing —
-/// a claim keyed on one while the tree is provisioned under the other is exactly the
+/// the same function that names the directory is what keeps the two from disagreeing.
+/// A claim keyed on one while the tree is provisioned under the other is exactly the
 /// failure the tree name's own digest exists to prevent.
 ///
-/// No interpreter segment, unlike [`sandbox_identity`]: the packaging root is host-arch,
+/// No interpreter segment, unlike [`sandbox_identity`]. The packaging root is host-arch,
 /// so `qemu-user` is never in the path.
 ///
 /// Takes the pieces rather than a [`PackagingSandbox`], because `why-rebuild` asks the
@@ -315,28 +319,31 @@ pub(crate) fn run_in_root(
 /// [`Event::Log`](crate::event::Event) as it is produced, and mapping a non-zero
 /// exit to [`EngineError::CommandFailed`] (with a tail of stderr for context).
 ///
-/// stdout and stderr are read on separate threads so a chatty stage cannot
-/// deadlock on a full pipe; the sink is only touched on the calling thread, so it
-/// need not be `Send`. `tool` names the program for errors (`make`, `git`),
+/// stdout and stderr are read on separate threads, so a chatty stage cannot
+/// deadlock on a full pipe. The sink is only touched on the calling thread, so it
+/// need not be `Send`. `tool` names the program for errors (`make`, `git`), and
 /// `context` describes the invocation.
 ///
-/// This is the single host-side command choke point, and what still comes through it is
-/// the *git* work — the clone and the `git am` of a patch series — plus `tar` on the
-/// image path. Every compile runs in a provisioned root instead and does not pass
-/// through here at all. It normalizes the determinism-relevant environment —
-/// `TZ=UTC` and `LC_ALL=C.UTF-8`, matching the sandbox's built-from-scratch
-/// `SANDBOX_ENV` discipline so a host's timezone/locale cannot leak into packaged output,
-/// and the kbuild-honored flag variables (`KCFLAGS`/`KAFLAGS`/`KCPPFLAGS`) plus
-/// `MAKEFLAGS`/`GNUMAKEFLAGS` are removed, so a flag exported in the host shell
-/// cannot silently shape the kernel/u-boot bytes a lock-keyed cache entry claims
-/// to reproduce. A full `env_clear` is unsafe on the host (it would drop
-/// the `PATH`/`HOME` the tools need); the caller's own env (e.g.
-/// `SOURCE_DATE_EPOCH`) is already set and preserved.
+/// This is the single host-side command choke point. What still comes through it is
+/// the *git* work, the clone and the `git am` of a patch series, plus `tar` on the
+/// image path. Every compile runs in a provisioned root instead, and does not pass
+/// through here at all.
 ///
-/// **stdin is `/dev/null`.** A build is non-interactive by construction, and a tool
-/// that decides to ask a question — kbuild's `conf` dropping into `oldaskconfig` on an
-/// out-of-date `.config` is the live example — must fail or take its default rather
-/// than block forever on a terminal that may not even be attached.
+/// It normalizes the determinism-relevant environment. `TZ=UTC` and `LC_ALL=C.UTF-8`
+/// match the sandbox's built-from-scratch `SANDBOX_ENV` discipline, so a host's
+/// timezone and locale cannot leak into packaged output.
+///
+/// The kbuild-honored flag variables (`KCFLAGS`/`KAFLAGS`/`KCPPFLAGS`) plus
+/// `MAKEFLAGS`/`GNUMAKEFLAGS` are removed. A flag exported in the host shell therefore
+/// cannot silently shape the kernel/u-boot bytes a lock-keyed cache entry claims to
+/// reproduce. A full `env_clear` is unsafe on the host, since it would drop the
+/// `PATH`/`HOME` the tools need. The caller's own env (e.g. `SOURCE_DATE_EPOCH`) is
+/// already set and preserved.
+///
+/// **stdin is `/dev/null`.** A build is non-interactive by construction. A tool that
+/// decides to ask a question must fail or take its default. It must not block forever
+/// on a terminal that need not even be attached. The live example is kbuild's `conf`,
+/// dropping into `oldaskconfig` on an out-of-date `.config`.
 pub fn run(
     mut command: Command,
     tool: &str,
@@ -433,14 +440,15 @@ const CLONE_ATTEMPTS: u32 = 4;
 
 /// Shallow-clone `source` at `reference` into `tree`, retrying transient failures.
 ///
-/// Git hosts flake — a shallow clone can die mid-transfer on an HTTP 5xx, an RPC
+/// Git hosts flake, and a shallow clone can die mid-transfer on an HTTP 5xx, an RPC
 /// desync, or a dropped connection. A *transient* failure is retried (up to a small
-/// fixed attempt count) with an increasing backoff; a *non-transient* one (an unknown
+/// fixed attempt count) with an increasing backoff. A *non-transient* one (an unknown
 /// ref, auth failure, a missing `git`) fails immediately without wasting retries.
-/// Because a failed clone leaves a partial checkout that would make the next
-/// `git clone` refuse a non-empty target, the partial `tree` is removed between
-/// attempts — safe because callers only clone into a fresh path (an existing tree is
-/// reused, not re-cloned). On the final failure the underlying [`EngineError`] is
+///
+/// A failed clone leaves a partial checkout that would make the next `git clone`
+/// refuse a non-empty target, so the partial `tree` is removed between attempts. That
+/// is safe because callers only clone into a fresh path, and an existing tree is
+/// reused rather than re-cloned. On the final failure the underlying [`EngineError`] is
 /// returned unchanged, so the real cause is still surfaced.
 pub fn clone_shallow(
     source: &str,
@@ -899,25 +907,25 @@ pub(crate) struct ClonePinned<'a> {
     /// `"ffmpeg base"`).
     pub what: &'a str,
     /// The patch series to apply on top, or `None` when the resolved kernel names no
-    /// patch series — the tree is then compiled exactly as cloned.
+    /// patch series. The tree is then compiled exactly as cloned.
     pub patches: Option<PatchSource<'a>>,
     /// Which per-tree series to apply.
     pub scope: PatchScope,
     /// Message label for the patched tree (e.g. `"kernel @ v7.1.1"`).
     pub target: &'a str,
     /// When `Some`, gate the series' declared envelope against this ref before
-    /// applying — the declared-intent gate. The ref belongs to the *scope's own*
-    /// axis: the kernel tag for the kernel-family scopes, the u-boot tag for
-    /// [`PatchScope::Uboot`], since a u-boot series makes no claim about a kernel.
+    /// applying. That is the declared-intent gate. The ref belongs to the *scope's
+    /// own* axis: the kernel tag for the kernel-family scopes, the u-boot tag for
+    /// [`PatchScope::Uboot`]. A u-boot series makes no claim about a kernel.
     pub gate_reference: Option<&'a str>,
 }
 
 /// A resolved `patches` checkout together with the pin and series it supplies.
 ///
-/// Bundled rather than carried as four loose fields so that "this build applies no
-/// patches" is one `Option::None` the compiler enforces: there is no way to name a
-/// series without a checkout to read it from, nor to resolve a checkout for a build
-/// that has no series.
+/// Bundled rather than carried as four loose fields, so that "this build applies no
+/// patches" is one `Option::None` the compiler enforces. There is no way to name a
+/// series without a checkout to read it from. Nor is there a way to resolve a checkout
+/// for a build that has no series.
 #[derive(Clone, Copy)]
 pub struct PatchSource<'a> {
     /// The `patches` checkout the series is read from.
@@ -929,11 +937,11 @@ pub struct PatchSource<'a> {
     /// The checkout was chosen explicitly via `--patches-path` for co-development:
     /// a pin mismatch is a loud warning rather than an error.
     pub dev: bool,
-    /// The version the series' per-entry ranges are filtered against for this
-    /// scope: the resolved **kernel** version for the kernel/ffmpeg/userspace scopes,
-    /// the resolved **u-boot** version for the u-boot scope (u-boot is its own axis, so
-    /// a u-boot-only build has no kernel version to narrow by). The caller supplies the
-    /// one that matches the scope it is applying.
+    /// The version the series' per-entry ranges are filtered against for this scope.
+    /// It is the resolved **kernel** version for the kernel/ffmpeg/userspace scopes,
+    /// and the resolved **u-boot** version for the u-boot scope (u-boot is its own
+    /// axis, so a u-boot-only build has no kernel version to narrow by). The caller
+    /// supplies the one that matches the scope it is applying.
     pub version: &'a str,
 }
 
@@ -1011,9 +1019,9 @@ pub(crate) struct ApplyScope<'a> {
     /// Message label for the patched tree (e.g. `"kernel @ v7.1.1"`).
     pub target: &'a str,
     /// When `Some`, gate the series' declared envelope against this ref before
-    /// applying — the declared-intent gate. The ref belongs to the *scope's own*
-    /// axis: the kernel tag for the kernel-family scopes, the u-boot tag for
-    /// [`PatchScope::Uboot`], since a u-boot series makes no claim about a kernel.
+    /// applying. That is the declared-intent gate. The ref belongs to the *scope's
+    /// own* axis: the kernel tag for the kernel-family scopes, the u-boot tag for
+    /// [`PatchScope::Uboot`]. A u-boot series makes no claim about a kernel.
     pub gate_reference: Option<&'a str>,
 }
 
@@ -1275,11 +1283,12 @@ pub(crate) fn file_fingerprint(path: &Path) -> Result<String, EngineError> {
 /// How the applied patch series is identified in a Tier-1 tree signature.
 ///
 /// In pinned mode `lock.patches.commit` content-addresses the whole `patches` repo,
-/// so the folded commit alone identifies the exact series. In co-dev
-/// (`--patches-path`) mode the pin is advisory — a mismatch only warns
-/// (`verify_patches_pin`) — so the on-disk files, not the commit, are what get
-/// applied; the ordered content fingerprint of the live series is folded instead so
-/// an edited patch restamps the tree rather than restoring a stale one.
+/// so the folded commit alone identifies the exact series.
+///
+/// In co-dev (`--patches-path`) mode the pin is advisory, and a mismatch only warns
+/// (`verify_patches_pin`). The on-disk files, not the commit, are what get applied.
+/// The ordered content fingerprint of the live series is folded instead, so an edited
+/// patch restamps the tree rather than restoring a stale one.
 #[derive(Clone, Copy)]
 pub enum SeriesIdentity<'a> {
     /// Pinned mode: the folded `patches.commit` is the series identity.
@@ -1363,13 +1372,15 @@ pub(crate) fn series_identity<'a>(
 /// resolved `device_dts` path, in order, `"<basename>=<sha256 of its bytes>"`.
 ///
 /// Folded into the kernel's Tier-1 tree signature, because these files are copied into
-/// the tree: editing the board `.dts` must restamp the tree so the next build re-copies
-/// and recompiles rather than reusing a stale one. Only the basename is folded — that
-/// is what lands in the kernel's DT dir, so moving a source within the config root
-/// changes nothing about the resulting tree. Best-effort like the patch-series
-/// fingerprint: an unreadable file folds a stable `<unreadable>`
-/// sentinel so computing a signature never fails, and the copy then fails loudly at
-/// [`kernel::build_kernel`] time.
+/// the tree. Editing the board `.dts` must restamp the tree, so the next build
+/// re-copies and recompiles rather than reusing a stale one.
+///
+/// Only the basename is folded, since that is what lands in the kernel's DT dir. Moving
+/// a source within the config root therefore changes nothing about the resulting tree.
+///
+/// Best-effort like the patch-series fingerprint. An unreadable file folds a stable
+/// `<unreadable>` sentinel, so computing a signature never fails, and the copy then
+/// fails loudly at [`kernel::build_kernel`] time.
 pub fn device_dts_fingerprint(sources: &[PathBuf]) -> Vec<String> {
     sources
         .iter()
@@ -1565,22 +1576,23 @@ pub(crate) fn archive_deb(
 
 /// The umask every boot2deb build runs under, declared rather than inherited.
 ///
-/// The umask is the one build-host setting no environment variable covers: it is a
+/// The umask is the one build-host setting no environment variable covers. It is a
 /// process attribute, so it passes through `base_env(false)`, through the cage, and
-/// into every `mkdir` a build makes. Left inherited it reaches the image. `mkdir -p`
-/// asks for `0777`, so a `002` umask (the Ubuntu/Pop!_OS default) creates `0775`
-/// directories — which is how a `make install` staging tree comes to ship
-/// group-writable directories inside a `.deb`, and how `dpkg`'s own state files come
-/// to be group-writable in the rootfs. `022` is Debian's default and the mode every
+/// into every `mkdir` a build makes. Left inherited it reaches the image.
+///
+/// `mkdir -p` asks for `0777`, so a `002` umask (the Ubuntu/Pop!_OS default) creates
+/// `0775` directories. That is how a `make install` staging tree comes to ship
+/// group-writable directories inside a `.deb`. It is also how `dpkg`'s own state files
+/// come to be group-writable in the rootfs. `022` is Debian's default and the mode every
 /// such directory is meant to have.
 ///
 /// This covers modes created *during* the build.
-/// [`normalize_overlay_modes`](crate::rootfs) covers the other half — modes that
-/// already exist on disk, because a git checkout materializes an overlay tree at the
+/// [`normalize_overlay_modes`](crate::rootfs) covers the other half, modes that
+/// already exist on disk. A git checkout materializes an overlay tree at the
 /// developer's umask before boot2deb runs at all. Neither subsumes the other.
 ///
-/// Called once from the CLI entry point: it mutates process-global state, so it
-/// belongs at the top of a program rather than inside a library call that a caller
+/// Called once from the CLI entry point. It mutates process-global state, so it
+/// belongs at the top of a program. A library call is the wrong place, since a caller
 /// with its own threads did not ask to be reconfigured.
 pub fn declare_umask() {
     // Safety: `umask` is always successful, returns the previous mask, and touches no

@@ -1,40 +1,60 @@
 //! boot2deb engine — executes on Linux, owns build side effects, and emits the
 //! structured event stream.
 //!
-//! The lock-driven stages: lock resolution ([`pins`]), the patch verify-applies
-//! gate ([`patches`]), and kernel-config generation + the parity check
-//! ([`kconfig`]). Curating the series is [`patchimport`] (`patch import`): it fetches
-//! a patch, normalizes it to canonical mbox (via [`boot2deb_core::mbox`]), and slots
-//! it into a series' ordered scope list. The compile steps run as subprocess stages — the [`build`] graph
-//! nodes ([`build::kernel`], [`build::uboot`], [`build::userspace`],
-//! [`build::ffmpeg`]) — reading the resolved lock and emitting the structured
-//! [`event`] stream. Reuse of a cloned+patched kernel/u-boot tree is gated
-//! by a Tier-1 [`signature`] stamp rather than bare directory existence, so a lock
-//! bump rebuilds instead of silently building on a stale checkout; the same
-//! stamps let [`plan`] (`why-rebuild`) explain, offline, why each compile node will
-//! reuse or rebuild its tree. The userspace and ffmpeg `.deb`s cross-build inside a
-//! [`sandbox`]: an arm64 userland bootstrapped and entered without root. All
-//! of this is built on the shared [`git`] shell-outs, `make`/`merge_config.sh`,
-//! and blob verification ([`blobs`]). The [`image`] node assembles the
-//! bootable disk image without root — GPT and `.xz` in pure Rust, the ext4
-//! rootfs formatted in-process by the pure-Rust `ferrosys` formatter. The [`repo`] module assembles the build's
-//! `.deb`s into a local apt repo — including the pre-built `extra_debs` a
-//! layer or feature pulls from outside the mirror, which [`extradebs`] materializes
-//! into a content-addressed [`debstore`] and verifies against their sha256 pins
-//! — and the [`rootfs`] node bootstraps the
-//! device userland from it into the tarball the image node formats — with a unique
-//! per-image first-boot password ([`secret`]). Resolving the plan up front lets
-//! [`rootcache`] skip that bootstrap on an unchanged *solved* package set
-//! (early cutoff) without ever reusing a stale solve. The rootfs bootstrap fetches
-//! from the mirror list [`snapshot`] resolves (the live mirror, plus a
-//! `snapshot.debian.org` mirror when a captured snapshot is activated), and its
-//! solved package manifest is verified against the committed reproducibility pin by
-//! [`manifest`]. When reading a failed stage's captured output is not enough, [`shell`]
-//! stands that stage's root up again and hands the operator an interactive session in
-//! it. Host preflight
-//! for `doctor` — identity/cross status ([`preflight`]) plus tool-presence checks
-//! with remediation ([`checks`]) — is also here, over the one probe contract in
-//! [`hosttool`].
+//! # Lock, patches, and config
+//!
+//! Lock resolution is [`pins`], the patch verify-applies gate is [`patches`], and
+//! kernel-config generation plus the parity check is [`kconfig`].
+//!
+//! Curating the series is [`patchimport`] (`patch import`). It fetches a patch,
+//! normalizes it to canonical mbox (via [`boot2deb_core::mbox`]), and slots it into a
+//! series' ordered scope list.
+//!
+//! # Compiling
+//!
+//! The compile steps run as subprocess stages: the [`build`] graph nodes
+//! ([`build::kernel`], [`build::uboot`], [`build::userspace`], [`build::ffmpeg`]).
+//! They read the resolved lock and emit the structured [`event`] stream.
+//!
+//! Reuse of a cloned and patched kernel or u-boot tree is gated by a Tier-1
+//! [`signature`] stamp rather than by bare directory existence. A lock bump therefore
+//! rebuilds instead of silently building on a stale checkout. The same stamps let
+//! [`plan`] (`why-rebuild`) explain, offline, why each compile node will reuse or
+//! rebuild its tree.
+//!
+//! The userspace and ffmpeg `.deb`s cross-build inside a [`sandbox`]: an arm64
+//! userland bootstrapped and entered without root. All of this is built on the shared
+//! [`git`] shell-outs, `make`/`merge_config.sh`, and blob verification ([`blobs`]).
+//!
+//! # Assembling an image
+//!
+//! The [`image`] node assembles the bootable disk image without root. GPT and `.xz`
+//! are pure Rust, and the ext4 rootfs is formatted in-process by the pure-Rust
+//! `ferrosys` formatter.
+//!
+//! The [`repo`] module assembles the build's `.deb`s into a local apt repo. That
+//! includes the pre-built `extra_debs` a layer or feature pulls from outside the
+//! mirror. [`extradebs`] materializes those into a content-addressed [`debstore`] and
+//! verifies them against their sha256 pins.
+//!
+//! The [`rootfs`] node bootstraps the device userland from that repo into the tarball
+//! the image node formats, with a unique per-image first-boot password ([`secret`]).
+//! Resolving the plan up front lets [`rootcache`] skip that bootstrap on an unchanged
+//! *solved* package set (early cutoff), without ever reusing a stale solve.
+//!
+//! The rootfs bootstrap fetches from the mirror list [`snapshot`] resolves: the live
+//! mirror, plus a `snapshot.debian.org` mirror when a captured snapshot is activated.
+//! Its solved package manifest is verified against the committed reproducibility pin
+//! by [`manifest`].
+//!
+//! # Diagnosis
+//!
+//! When reading a failed stage's captured output is not enough, [`shell`] stands that
+//! stage's root up again. It hands the operator an interactive session in it.
+//!
+//! Host preflight for `doctor` is also here, over the one probe contract in
+//! [`hosttool`]. It covers identity and cross status ([`preflight`]) plus
+//! tool-presence checks with remediation ([`checks`]).
 #![warn(missing_docs)]
 
 pub mod archfetch;
@@ -202,7 +222,8 @@ impl Preflight {
     /// Every stage past resolution assumes Linux — user namespaces for the sandbox,
     /// binfmt for the interpreter, the loop-free image assembly. Answering here rather
     /// than letting the pipeline discover it means a macOS client fails on the first
-    /// thing it does instead of minutes in, on whichever syscall happened to be first.
+    /// thing it does. The alternative is failing minutes in, on whichever syscall
+    /// happened to be first.
     pub fn ensure_can_build(&self) -> Result<(), EngineError> {
         if self.host.is_linux() {
             return Ok(());

@@ -1,5 +1,7 @@
-//! Re-pin ref selection — which git ref an `update` pins for one source axis,
-//! given the caller's flag, the previous lock, and the config's declared ref.
+//! Re-pin ref selection — which git ref an `update` pins for one source axis.
+//!
+//! The inputs are the caller's flag, the previous lock, and the config's declared
+//! ref.
 //!
 //! Pure: a three-way choice over strings, no network and no I/O. Resolving the
 //! chosen ref to a commit is the engine's job.
@@ -7,18 +9,20 @@
 //! The config layers declare a *constraint* (`uboot_ref = "v2026.07"`,
 //! `[userspace.mpp] ref = "v1.5.0-…"`) and the lock records the *exact pin*. Editing
 //! a constraint is an authored decision that must reach every recipe on the next
-//! `update`, or a bump committed to `boot-methods/` leaves the boards that already
-//! have locks silently behind. So the config's ref is what an omitted flag takes.
+//! `update`. Otherwise a bump committed to `boot-methods/` leaves the boards that
+//! already have locks silently behind. So the config's ref is what an omitted flag
+//! takes.
 //!
-//! The exception is a lock pinned to a bare commit sha. No config layer can author
-//! one — a 40-hex ref only ever arrives through an explicit `--<tree>-ref`, so it is
-//! a deliberate hand-pin and re-reading the constraint over it would discard the
-//! operator's choice and float the tree back to a branch tip. Those pins are left
-//! alone; [`PinForm`](crate::sources::PinForm) draws the same named-ref/bare-commit
-//! line for durability.
+//! The exception is a lock pinned to a bare commit sha, which no config layer can
+//! author. A 40-hex ref only ever arrives through an explicit `--<tree>-ref`, so it
+//! is a deliberate hand-pin. Re-reading the constraint over it would discard the
+//! operator's choice and float the tree back to a branch tip.
+//!
+//! Those pins are left alone. [`PinForm`](crate::sources::PinForm) draws the same
+//! named-ref/bare-commit line for durability.
 //!
 //! An axis with no declared constraint at all (the kernel, whose config carries a
-//! `track` rather than a concrete ref) does not come through here; its ref is
+//! `track` rather than a concrete ref) does not come through here. Its ref is
 //! inherited from the lock directly.
 
 use crate::sources::is_full_sha;
@@ -34,12 +38,12 @@ use crate::sources::is_full_sha;
 /// 4. `locked`, when `configured` is empty — the axis declares no constraint, so
 ///    there is nothing to prefer over the existing pin.
 ///
-/// Returns the empty string when nothing declares the axis and no lock holds it,
-/// which is how the caller spells "this build has no such tree"; the engine never
+/// Returns the empty string when nothing declares the axis and no lock holds it.
+/// That is how the caller spells "this build has no such tree". The engine never
 /// reads a ref for a tree the build does not carry.
 ///
-/// `flag` is taken by value because it is moved straight into the engine's ref set;
-/// the other two are borrows of config and lock.
+/// `flag` is taken by value because it is moved straight into the engine's ref set.
+/// The other two are borrows of config and lock.
 pub fn pick_ref(flag: Option<String>, locked: Option<&str>, configured: &str) -> String {
     if let Some(f) = flag {
         return f;
@@ -50,12 +54,13 @@ pub fn pick_ref(flag: Option<String>, locked: Option<&str>, configured: &str) ->
     }
 }
 
-/// Whether choosing `chosen` over the existing `locked` pin is a *constraint*
-/// bump — the config moved and the omitted-flag path followed it — as opposed to a
-/// no-op re-pin or an explicit flag.
+/// Whether choosing `chosen` over the existing `locked` pin is a *constraint* bump,
+/// as opposed to a no-op re-pin or an explicit flag.
 ///
-/// `update` reports these so a propagated bump is visible at pin time rather than
-/// being discovered later as an unexplained ref change in the lock diff.
+/// A constraint bump is where the config moved and the omitted-flag path followed it.
+///
+/// `update` reports these so a propagated bump is visible at pin time. The
+/// alternative is discovering it later as an unexplained ref change in the lock diff.
 pub fn is_config_bump(locked: Option<&str>, chosen: &str, configured: &str) -> bool {
     matches!(locked, Some(l) if l != chosen && chosen == configured)
 }

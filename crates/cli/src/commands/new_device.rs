@@ -2,10 +2,11 @@
 //!
 //! Interactive on a terminal (menus over the closed axis enums and the SoC/arch-
 //! compatible kernels + features), flag-driven when `--non-interactive` or piped.
-//! Every derivable value is filled from the layers; the researched ones are left as
+//! Every derivable value is filled from the layers. The researched ones are left as
 //! `# TODO:` suggestions. Writes into the highest-precedence `--overlay` when one is
-//! given — so a third party scaffolds into their own tree — else the primary root,
-//! then resolve-checks the result and prints the values the author must still verify.
+//! given, so a third party scaffolds into their own tree, and otherwise into the
+//! primary root. It then resolve-checks the result and prints the values the author
+//! must still verify.
 
 use crate::args::NewDeviceArgs;
 use crate::fsutil::write_scaffold_file;

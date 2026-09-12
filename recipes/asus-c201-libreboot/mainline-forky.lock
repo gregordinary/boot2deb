@@ -4,8 +4,8 @@
 [kernel]
 id = "rk3288-mainline-7.2"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.2.2"
-commit = "52c36105f76e96b638152a42e735f2e7767ed946"
+ref = "v7.2.3"
+commit = "58e7295cfecaddec94629160386412e0f2b1e8fe"
 
 [patches]
 series = ["rk3288-fixes"]

@@ -3,15 +3,17 @@
 //!
 //! The resolution of a bare "patches commit moved" into named files. A lock records
 //! only the commit, so two builds pinning two commits say nothing about *what* moved
-//! between them — the difference between deciding a `validated` claim survives a bump
-//! and skipping the question.
+//! between them. That is the difference between deciding a `validated` claim
+//! survives a bump and skipping the question.
 //!
-//! Read entirely out of the object store ([`git::show_file`], [`git::blob_id`]), so it
-//! answers about historical pins without a checkout at either of them and without
-//! disturbing a checkout at one. It needs the repo to be present and to carry both
-//! commits, which a co-developed or freshly-fetched checkout may not — so every gap is
-//! an [`Unavailable`](SeriesDelta::Unavailable) answer rather than a failure, on the
-//! reasoning that a comparison missing one section is worth more than no comparison.
+//! Read entirely out of the object store ([`git::show_file`], [`git::blob_id`]). It
+//! therefore answers about historical pins without a checkout at either of them, and
+//! without disturbing a checkout at one.
+//!
+//! It needs the repo to be present and to carry both commits, which a co-developed
+//! or freshly-fetched checkout does not always do. Every gap is therefore an
+//! [`Unavailable`](SeriesDelta::Unavailable) answer rather than a failure. A
+//! comparison missing one section is worth more than no comparison.
 
 use crate::git;
 use boot2deb_core::series::{PatchSeries, Scope};
@@ -70,13 +72,13 @@ impl SeriesDelta {
 /// The patch files of `series` that differ between commits `from` and `to` of the
 /// `patches` checkout at `repo`.
 ///
-/// A series absent at one end is not a gap: every file it lists at the other end is
+/// A series absent at one end is not a gap. Every file it lists at the other end is
 /// reported added or removed, since that is exactly what happened. Absent at both
-/// ends is unavailable — there is no series to describe.
+/// ends is unavailable, because there is no series to describe.
 ///
 /// The file lists span every [`Scope`], because a series' patches are one set of
-/// files regardless of which tree each is applied to, and a reader asking what moved
-/// is asking about the files.
+/// files regardless of which tree each is applied to. A reader asking what moved is
+/// asking about the files.
 pub fn series_delta(repo: &Path, from: &str, to: &str, series: &str) -> SeriesDelta {
     let unavailable = |why: String| SeriesDelta::Unavailable {
         series: series.to_string(),

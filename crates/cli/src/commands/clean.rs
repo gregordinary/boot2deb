@@ -2,41 +2,62 @@
 //! durable caches every recipe shares, to reclaim disk or force a clean rebuild.
 //! `--dry-run` previews with sizes and removes nothing.
 //!
-//! Two scopes of selector, distinguished by what they can address. The **work-dir**
-//! selectors (`--cache`, `--sandbox`, `--build-roots`, and the no-selector whole-tree
-//! default) name a subtree of one recipe's scratch, so they need a recipe and they
-//! need the ownership stamp: without that guard a mistyped `--work-dir` would be a
-//! recursive delete of an arbitrary tree (see [`check_work_dir_removable`];
-//! `--force` overrides). The **root-scoped** selectors (`--artifacts`,
-//! `--verify-trees`, `--kconfig`, `--all-caches`) name stores under the config root
-//! that every recipe shares, at paths derived from `--root` rather than chosen by the
-//! caller — so they sweep without a recipe and without the stamp, which is what makes
-//! a routine disk sweep one command instead of one per slug.
+//! Two scopes of selector, distinguished by what they can address.
+//!
+//! The **work-dir** selectors name a subtree of one recipe's scratch:
+//!
+//! - `--cache`, the rootfs early-cutoff cache.
+//! - `--sandbox`, the provisioned roots.
+//! - `--build-roots`, the build roots and the layers staged over them.
+//! - No selector at all, which takes the whole tree.
+//!
+//! They need a recipe and they need the ownership stamp. Without that guard a mistyped
+//! `--work-dir` would be a recursive delete of an arbitrary tree (see
+//! [`check_work_dir_removable`], which `--force` overrides).
+//!
+//! The **root-scoped** selectors name stores under the config root that every recipe
+//! shares:
+//!
+//! - `--artifacts`, the Tier-2 artifact store.
+//! - `--verify-trees`, the auto-fetched source checkouts.
+//! - `--kconfig`, `verify-config`'s scratch tree.
+//! - `--all-caches`, the whole durable cache tree.
+//!
+//! Their paths are derived from `--root` rather than chosen by the caller, so they
+//! sweep without a recipe and without the stamp. That is what makes a routine disk
+//! sweep one command instead of one per slug.
 //!
 //! `--build-roots` is the narrow work-dir selector, and the only one whose targets are
-//! not a fixed path: it sweeps the build roots and their overlay layers while sparing
+//! not a fixed path. It sweeps the build roots and their overlay layers while sparing
 //! the packaging root, which is what a build root aged past the archive needs.
 //!
 //! Every removal goes through [`boot2deb_engine::sandbox::reclaim_tree`], which is the
 //! only route that gets past the mode-`0` work area an overlay leaves and past a
-//! subuid-owned tree. Each target names its own [`PublicationLock`], because the
-//! removal can take the `<target>.lock` a published rootfs carries beside it and only
-//! this module knows which targets are such trees. `--build-roots` names base trees, so
-//! its targets are [`PublicationLock::Take`] — and it names each lock as a target in
-//! its own right besides. Every other selector names a directory that merely *contains*
-//! published trees (a work dir, `cache/`, `sandbox/`, a shared store), where the
-//! `.lock` sibling is an unrelated path the caller never asked about — and for the
-//! whole-tree default it sits outside the stamped directory the ownership guard checks.
+//! subuid-owned tree.
+//!
+//! Each target names its own [`PublicationLock`]. The removal can take the
+//! `<target>.lock` a published rootfs carries beside it, and only this module knows
+//! which targets are such trees. `--build-roots` names base trees, so its targets are
+//! [`PublicationLock::Take`], and it names each lock as a target in its own right
+//! besides.
+//!
+//! Every other selector names a directory that merely *contains* published trees: a
+//! work dir, one of its subtrees (`cache/`, `sandbox/`), or a shared store. There the
+//! `.lock` sibling is an unrelated path the caller never asked about. For the
+//! whole-tree default it sits outside the stamped directory the ownership guard
+//! checks.
 //!
 //! `--verify-trees` is the only selector that prunes *within* a store rather than
-//! removing it. Both auto-fetch caches are commit-addressed, so liveness is decidable:
-//! a checkout whose commit no lock in the config tree names can only be re-fetched,
-//! never read back from, and is dead. That decision is only sound if the pinned set is
-//! complete, so an unreadable or unparseable lock aborts the sweep rather than
-//! narrowing it. The one narrowing this cannot detect is a missing `--overlay`: the
-//! locks are read from the search paths, so a sweep invoked without the overlays a
-//! build uses never sees their pins. The run reports how many locks it read for that
-//! reason — a count short of the tree the operator knows is the signal.
+//! removing it. Both auto-fetch caches are commit-addressed, so liveness is decidable.
+//! A checkout whose commit no lock in the config tree names can only be re-fetched,
+//! never read back from, and is dead.
+//!
+//! That decision is only sound if the pinned set is complete, so an unreadable or
+//! unparseable lock aborts the sweep rather than narrowing it. The one narrowing this
+//! cannot detect is a missing `--overlay`. The locks are read from the search paths,
+//! so a sweep invoked without the overlays a build uses never sees their pins. The run
+//! reports how many locks it read for that reason, and a count short of the tree the
+//! operator knows is the signal.
 
 use crate::args::CleanArgs;
 use crate::config::{artifact_cache, cache_dir, kconfig_cache, patches_cache, verify_trees_cache};
@@ -51,22 +72,24 @@ use std::path::{Path, PathBuf};
 /// Every commit any lock in the config tree pins — the liveness set
 /// [`unpinned_checkouts`] sweeps a commit-addressed cache against.
 ///
-/// Reads `recipes/*.lock` and `recipes/<device>/*.lock` under every search path — but
-/// not the `<recipe>.pkgs.lock` manifests beside them, which share the extension and
-/// are not TOML. An overlay's recipes count exactly as the shipped ones do. Locks are
-/// read by *path* rather than through the recipe inventory on purpose: a lock whose
-/// `.toml` was deleted still pins its checkouts, and listing recipes would miss it and
-/// call those trees dead.
+/// Reads `recipes/*.lock` and `recipes/<device>/*.lock` under every search path. It
+/// does not read the `<recipe>.pkgs.lock` manifests beside them, which share the
+/// extension and are not TOML. An overlay's recipes count exactly as the shipped ones
+/// do.
+///
+/// Locks are read by *path* rather than through the recipe inventory on purpose. A
+/// lock whose `.toml` was deleted still pins its checkouts, and listing recipes would
+/// miss it and call those trees dead.
 ///
 /// Returns the commits and how many locks were read for them. The count is reported to
 /// the operator because the one way this set can be silently narrow is outside the
-/// command's reach: the search paths come from `--overlay`, so a sweep invoked without
+/// command's reach. The search paths come from `--overlay`, so a sweep invoked without
 /// the overlays a build uses reads fewer locks and calls their checkouts dead. A count
 /// that does not match the tree the operator knows is the signal for that.
 ///
 /// # Errors
 ///
-/// Any unreadable directory or unparseable lock — the sweep must not proceed on a
+/// Any unreadable directory or unparseable lock. The sweep must not proceed on a
 /// partial answer, because a commit missing from this set is a live checkout deleted.
 fn pinned_commits(
     root: &ConfigRoot,

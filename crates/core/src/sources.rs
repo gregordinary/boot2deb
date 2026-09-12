@@ -2,22 +2,25 @@
 //! source pin from the lock's `(reference, commit)` alone.
 //!
 //! Pure: no network. A pin is re-fetchable from its URL only if the remote still
-//! holds the commit, and the lock records both the `reference` a pin resolved from
-//! and the exact `commit`. Comparing them tells the pin's *form* — a named ref
-//! (tag/branch) versus a bare commit — which is the offline half of durability: a
-//! bare-commit pin is undurable by construction (nothing but the commit anchors
-//! it), while a named ref *may* be durable if it is a tag. Confirming which needs
-//! the network, so the authoritative check is the engine's `verify-sources` probe;
-//! this form is what the provenance manifest ([`crate::provenance`]) records so
-//! durability is visible without a round-trip.
+//! holds the commit. The lock records both the `reference` a pin resolved from and
+//! the exact `commit`. Comparing them tells the pin's *form*, a named ref (tag or
+//! branch) against a bare commit.
+//!
+//! That form is the offline half of durability. A bare-commit pin is undurable by
+//! construction, since nothing but the commit anchors it. A named ref is durable
+//! when it is a tag.
+//!
+//! Confirming which needs the network, so the authoritative check is the engine's
+//! `verify-sources` probe. This form is what the provenance manifest
+//! ([`crate::provenance`]) records, so durability is visible without a round-trip.
 
 /// The offline durability *form* of a git source pin, derived from whether
 /// its lock `reference` is a named ref or the bare commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinForm {
-    /// Pinned by a named ref — `reference` differs from `commit`, so a tag or
+    /// Pinned by a named ref. `reference` differs from `commit`, so a tag or
     /// branch was resolved. Durable *iff* that ref is a tag (immutable,
-    /// shallow-fetchable forever); an ephemeral branch tip is not. Which one it is
+    /// shallow-fetchable forever). An ephemeral branch tip is not. Which one it is
     /// needs the network probe (`verify-sources`).
     NamedRef,
     /// Pinned by the bare commit — `reference` is the 40-hex commit itself, so no
@@ -30,8 +33,8 @@ pub enum PinForm {
 
 impl PinForm {
     /// Classify a pin from its lock `reference` and exact `commit`. A pin
-    /// whose `reference` is the full commit sha is a [`BareCommit`](PinForm::BareCommit);
-    /// anything else resolved from a tag or branch, so it is a
+    /// whose `reference` is the full commit sha is a [`BareCommit`](PinForm::BareCommit).
+    /// Anything else resolved from a tag or branch, so it is a
     /// [`NamedRef`](PinForm::NamedRef). Pins are stored canonically lowercase
     /// ([`normalize_ref`]), so within a lock `reference == commit` holds byte-for-byte
     /// for a bare-commit pin.
@@ -52,18 +55,19 @@ impl PinForm {
         }
     }
 
-    /// Whether this form is *definitely* undurable offline. A bare commit is; a
+    /// Whether this form is *definitely* undurable offline. A bare commit is. A
     /// named ref is only conditionally durable (tag yes, branch no), so it is not
-    /// flagged here — `verify-sources` makes that call.
+    /// flagged here. `verify-sources` makes that call.
     pub fn is_undurable(self) -> bool {
         matches!(self, PinForm::BareCommit)
     }
 }
 
-/// True for a full 40-character hex sha1 commit id, in either case — the one
-/// syntactic sha test shared across the workspace (the engine's git helpers use it
-/// too). This is a *shape* check; canonicalization is separate ([`normalize_ref`]),
-/// so a caller comparing against git's lowercase output normalizes first.
+/// True for a full 40-character hex sha1 commit id, in either case. It is the one
+/// syntactic sha test shared across the workspace, and the engine's git helpers use
+/// it too. This is a *shape* check. Canonicalization is separate
+/// ([`normalize_ref`]), so a caller comparing against git's lowercase output
+/// normalizes first.
 pub fn is_full_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -79,11 +83,13 @@ pub fn is_sha256_hex(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Canonicalize a git reference for a pin: a full 40-hex sha is lowercased to git's
-/// own output form, so a later byte-for-byte `HEAD == pinned` check holds; a tag or
-/// branch name is returned unchanged. Applied where a user-supplied ref is ingested
-/// into a pin, so a lock only ever records canonical commit ids (an uppercase sha a
-/// user passes to `update` never survives into the lock to fail verification later).
+/// Canonicalize a git reference for a pin. A full 40-hex sha is lowercased to git's
+/// own output form, so a later byte-for-byte `HEAD == pinned` check holds. A tag or
+/// branch name is returned unchanged.
+///
+/// Applied where a user-supplied ref is ingested into a pin, so a lock only ever
+/// records canonical commit ids. An uppercase sha a user passes to `update` never
+/// survives into the lock to fail verification later.
 pub fn normalize_ref(s: &str) -> String {
     if is_full_sha(s) {
         s.to_ascii_lowercase()

@@ -5,7 +5,7 @@
 //! Each package is fetched at its exact locked commit (`build::fetch_commit`),
 //! then `dpkg-buildpackage` runs in the sandbox with the tsukumijima forks'
 //! gcc-14 warning relaxations. The produced `.deb`s (`librockchip-mpp1`,
-//! `librga2`, their `-dev`s, …) are staged out; `ffmpeg-rk` later build-depends on
+//! `librga2`, their `-dev`s, …) are staged out. `ffmpeg-rk` later build-depends on
 //! the `-dev`s and runtime-depends on `librockchip-mpp1` + `librga2`.
 //!
 //! Libmali is off by default: the transcode pipeline rides the VPU + RGA, not the
@@ -29,9 +29,9 @@ const FETCH_STAGE_VERSION: u32 = 1;
 
 /// Where this stage's package trees and its produced `.deb`s live under `work_dir`
 /// (`<work_dir>/userspace`) — one directory per package inside it. Exposed for the same
-/// reason [`kernel::tree_dir`](crate::build::kernel::tree_dir) is: a reader of the tree
-/// — [`crate::shell`], which starts an interactive session in it — should not restate
-/// the layout literal.
+/// reason [`kernel::tree_dir`](crate::build::kernel::tree_dir) is. A reader of the tree
+/// restates no layout literal, and [`crate::shell`] starts an interactive session in
+/// it.
 pub fn stage_dir(work_dir: &Path) -> PathBuf {
     work_dir.join("userspace")
 }
@@ -60,15 +60,16 @@ const USERSPACE_DEPS: &[&str] = &[
 /// The build-dependency set this stage layers over the sandbox base.
 ///
 /// One function, read by the [`BuildRootSpec`] that stages the layer *and* by
-/// [`output_manifest_for`], which keys every package of the stage on it — so a package
-/// cannot reach a `./configure` without reaching the key. [`crate::shell`] reads it too,
-/// so an interactive session lands in the root this stage compiles in rather than one
-/// that resembles it.
+/// [`output_manifest_for`], which keys every package of the stage on it. A package
+/// therefore cannot reach a `./configure` without reaching the key. [`crate::shell`]
+/// reads it too, so an interactive session lands in the root this stage compiles in
+/// rather than one that resembles it.
 ///
 /// A tree's own `build_deps` are an increment to the layer for the *whole stage*, not a
-/// per-package one, which is why they are an input to every tree's signature and not
-/// only their own: those `.pc` files are present in the root every tree's `cmake` and
-/// `meson` runs probe, whether or not the tree that asked for them is being built.
+/// per-package one. That is why they are an input to every tree's signature and not
+/// only their own. Those `.pc` files are present in the root every tree's `cmake` and
+/// `meson` runs probe. That holds whether or not the tree that asked for them is
+/// being built.
 ///
 /// De-duplicated and sorted, so two trees naming one dependency layer it once and the
 /// declaration order cannot move a cache key.
@@ -124,25 +125,25 @@ impl Package<'_> {
 /// Filesystem inputs for the userspace stage.
 pub struct UserspaceOptions<'a> {
     /// The userspace trees this build compiles, as the SoC declares them and resolution
-    /// narrowed them: an optional tree is here only when the build asked for it.
+    /// narrowed them. An optional tree is here only when the build asked for it.
     pub trees: &'a [UserspaceTree],
     /// Per-tree clone-source overrides (`(name, source)`), from `--userspace-src`. A
-    /// tree absent here is cloned from its declared `git`; a local checkout is far
+    /// tree absent here is cloned from its declared `git`. A local checkout is far
     /// faster than a fresh clone.
     pub sources: &'a [(String, String)],
     /// The `userspace` patch scope's checkout + pin — the MPP CMA fix. The tree that
-    /// declares [`patched`](UserspaceTree::patched) receives it; the rest build
+    /// declares [`patched`](UserspaceTree::patched) receives it. The rest build
     /// unpatched upstream. `None` when the resolved kernel names no patch series.
     pub patches: Option<PatchSource<'a>>,
-    /// Scratch dir; sources are cloned under `<work>/userspace/<name>` and the
+    /// Scratch dir. Sources are cloned under `<work>/userspace/<name>`, and the
     /// `.deb`s `dpkg-buildpackage` drops land in `<work>/userspace/`.
     pub work_dir: &'a Path,
     /// Directory the produced `.deb`s are staged into.
     pub out_dir: &'a Path,
     /// Root of the Tier-2 artifact store ([`crate::artstore`]), or `None` to
-    /// disable output caching. Cached per package: a hit restores that package's
+    /// disable output caching. Cached per package. A hit restores that package's
     /// `.deb`s and, when *every* package is cached, the sandbox bootstrap is skipped
-    /// too; a miss builds the package and stores its `.deb`s.
+    /// too. A miss builds the package and stores its `.deb`s.
     pub store: Option<&'a Path>,
 }
 
@@ -156,8 +157,8 @@ pub struct UserspaceArtifacts {
 /// Run the userspace stage, emitting its [`Event`](crate::event::Event)s to `sink`.
 ///
 /// Reads only the [`Lock`] for the source pins. The `sandbox` supplies the userland
-/// for the build's suite + arch ([`RootlessSandbox`](crate::sandbox::RootlessSandbox));
-/// this stage is agnostic to the backend. A package whose `.deb`s are already staged
+/// for the build's suite + arch ([`RootlessSandbox`](crate::sandbox::RootlessSandbox)).
+/// This stage is agnostic to the backend. A package whose `.deb`s are already staged
 /// in the work dir is skipped (resume).
 pub fn build_userspace(
     lock: &Lock,
@@ -441,17 +442,17 @@ fn collect(
 /// Whether a userspace tree receives the series' `userspace` patch scope.
 ///
 /// The tree says so itself ([`UserspaceTree::patched`]) rather than the stage comparing
-/// a name: on the RK35xx family that is MPP alone — the CMA fix
-/// (`allocator_dma_heap`) — and librga builds unpatched upstream, but a second family's
-/// patched tree needs a config edit and no code. Read by the stage *and* by `why-rebuild`
-/// ([`crate::plan`]), so the two agree on which tree's signature folds the series.
+/// a name. On the RK35xx family that is MPP alone, the CMA fix (`allocator_dma_heap`),
+/// and librga builds unpatched upstream. A second family's patched tree needs a config
+/// edit and no code. Read by the stage *and* by `why-rebuild` ([`crate::plan`]), so the
+/// two agree on which tree's signature folds the series.
 pub fn receives_userspace_patches(tree: &UserspaceTree) -> bool {
     tree.patched
 }
 
 /// The patch inputs folded into a userspace package's tree signature when it
-/// receives the `userspace` scope — the series name, its pinned commit, and
-/// the applied-series identity, mirroring how the kernel/ffmpeg tree signatures fold
+/// receives the `userspace` scope. They are the series name, its pinned commit, and
+/// the applied-series identity. This mirrors how the kernel/ffmpeg tree signatures fold
 /// their series (`build::fold_patch_series`). A package that carries no patch folds
 /// none of this.
 pub struct PatchInputs<'a> {
@@ -519,12 +520,12 @@ fn apply_patches(
     Ok(())
 }
 
-/// Tier-1 signature manifest of a fetched userspace source tree, keyed by
-/// package `name`, its locked `commit` (which content-addresses the fetched tree),
-/// and — when the package receives the `userspace` scope — the patch series
-/// with its pinned commit, so a patch change restamps the tree just as a pin bump
-/// does. Public and parameterized so `why-rebuild` ([`crate::plan`]) recomputes the
-/// same per-package signature this stage stamps — the node is `userspace:<name>`.
+/// Tier-1 signature manifest of a fetched userspace source tree. It is keyed by
+/// package `name` and its locked `commit`, which content-addresses the fetched tree.
+/// A package that receives the `userspace` scope also folds the patch series with its
+/// pinned commit. A patch change therefore restamps the tree just as a pin bump does.
+/// Public and parameterized so `why-rebuild` ([`crate::plan`]) recomputes the same
+/// per-package signature this stage stamps — the node is `userspace:<name>`.
 pub fn signature_manifest(
     name: &str,
     commit: &str,
@@ -557,7 +558,7 @@ fn node_name(pkg: &Package) -> String {
 /// The same, from a bare tree name — for [`why-rebuild`](crate::plan), which predicts
 /// against the store before any `Package` exists.
 ///
-/// Public because the prediction and the store lookup must be the *same string*: the
+/// Public because the prediction and the store lookup must be the *same string*. The
 /// store is keyed by `(node, signature)`, so a prediction computed under a different
 /// name would answer a question about an entry no build ever wrote.
 pub fn node_name_for(name: &str) -> String {
@@ -566,22 +567,31 @@ pub fn node_name_for(name: &str) -> String {
 
 /// The Tier-2 output signature manifest of a userspace package's `.deb`s from
 /// primitives. It folds the Tier-1 fetch signature ([`signature_manifest`], the
-/// commit + MPP patch series) as a dependency, then the build recipe: the
-/// gcc-14 warning relaxation, the target arch, the **suite**, and `sandbox` — the
-/// package compiles inside the target-arch sandbox, so what produced it is that
-/// sandbox's toolchain. The suite names the userland; `sandbox`
+/// commit + MPP patch series) as a dependency, then the build recipe:
+///
+/// - The gcc-14 warning relaxation
+/// - The target arch
+/// - The **suite**
+/// - `sandbox`
+///
+/// The package compiles inside the target-arch sandbox, so what produced it is that
+/// sandbox's toolchain.
+///
+/// The suite names the userland. `sandbox`
 /// ([`BuildEnv::sandbox_id`](crate::build::BuildEnv::sandbox_id)) identifies the
 /// *instance* of it — which mirror it was bootstrapped from, and which `qemu-user`
-/// executes its compiler — so a snapshot-pinned build and a live-mirror build never
-/// restore each other's `.deb`s. Libmali also folds its variant filter. On a
-/// signature hit the store restores this package's `.deb`s rather than rebuilding; a
-/// patch change reaches this output signature through the folded tree dependency. A
-/// tree with a `targets_filter` folds that too, since it decides what was compiled.
+/// executes its compiler. A snapshot-pinned build and a live-mirror build therefore
+/// never restore each other's `.deb`s. Libmali also folds its variant filter.
 ///
-/// Public and keyed by primitives (not a `Package`) so the ffmpeg stage recomputes
-/// the mpp/librga dependency signatures from the lock and folds them into its own
-/// output key — an ffmpeg build links against those `.deb`s, so a change to
-/// them must invalidate the cached ffmpeg deb.
+/// On a signature hit the store restores this package's `.deb`s rather than
+/// rebuilding. A patch change reaches this output signature through the folded tree
+/// dependency. A tree with a `targets_filter` folds that too, since it decides what
+/// was compiled.
+///
+/// Public and keyed by primitives (not a `Package`). The ffmpeg stage recomputes the
+/// mpp/librga dependency signatures from the lock and folds them into its own output
+/// key. An ffmpeg build links against those `.deb`s, so a change to them must
+/// invalidate the cached ffmpeg deb.
 pub fn output_manifest_for(
     name: &str,
     commit: &str,

@@ -5,11 +5,12 @@
 //! formats them, resolving nothing upstream.
 //!
 //! The matrix exists so "which patch series worked with which kernel, on what
-//! board" is answerable without decoding a SHA. It is *generated* on purpose: the
-//! locks already hold every pin, so a table derived from them cannot drift from
-//! what was actually built, and there is no second copy for someone to forget. The
-//! one thing no lock can know — whether a human booted the result, and when — is the
-//! recipe's [`Support`] claim, which is the only hand-written input here.
+//! board" is answerable without decoding a SHA. It is *generated* on purpose. The
+//! locks already hold every pin, so a table derived from them cannot drift from what
+//! was actually built. There is no second copy for someone to forget.
+//!
+//! One thing no lock can know is whether a human booted the result, and when. That is
+//! the recipe's [`Support`] claim, which is the only hand-written input here.
 
 use crate::lock::Lock;
 use crate::model::{Caveat, CaveatScope, Support, SupportStatus};
@@ -22,8 +23,8 @@ const SHORT_COMMIT: usize = 12;
 /// One row: a shipped recipe, the point it builds, and what is claimed about it.
 ///
 /// Every field but [`status`](Self::status) and [`date`](Self::date) is read from
-/// the recipe's resolution and its lock, so a row cannot describe a point the build
-/// would not produce.
+/// the recipe's resolution and its lock. A row therefore cannot describe a point the
+/// build would not produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatrixRow {
     /// Recipe name — the handle `boot2deb build` takes.
@@ -35,9 +36,9 @@ pub struct MatrixRow {
     /// Kernel definition id (e.g. `rk3588-mainline-7.1`), or [`None`] for a
     /// u-boot-only recipe, which resolves no kernel.
     pub kernel: Option<String>,
-    /// The exact kernel the lock pins (e.g. `v7.1.1`), or [`None`] for a distro
-    /// kernel — whose version rides the suite's package set rather than a commit,
-    /// so the lock has none to state — or a u-boot-only recipe.
+    /// The exact kernel the lock pins (e.g. `v7.1.1`), or [`None`] for a distro kernel
+    /// or a u-boot-only recipe. A distro kernel's version rides the suite's package
+    /// set rather than a commit, so the lock has none to state.
     pub kernel_ref: Option<String>,
     /// The kernel patch series pinned for this build: series, ref, and short commit.
     /// [`None`] where the kernel applies no series.
@@ -47,7 +48,7 @@ pub struct MatrixRow {
     pub uboot: Option<PatchesCell>,
     /// The out-of-tree kernel modules the image ships, in lock order. Empty for a
     /// board that declares no `device_kmods`. Stated because a `.ko` built from a
-    /// driver repo is shipped bytes like any other pin, and it is the one the board's
+    /// driver repo is shipped bytes like any other pin. It is also the one the board's
     /// Wi-Fi works or does not work by.
     pub kmods: Vec<KmodCell>,
     /// The maintainer's claim.
@@ -60,8 +61,8 @@ pub struct MatrixRow {
     /// layers declare none.
     ///
     /// The one part of a row that is neither a pin nor a claim about a pin. It is
-    /// here rather than in a document of its own because a status without its
-    /// limitations overstates itself: `validated` means an image booted, not that
+    /// here rather than in a document of its own, because a status without its
+    /// limitations overstates itself. `validated` means an image booted, not that
     /// everything on the board works.
     pub caveats: Vec<Caveat>,
 }
@@ -96,18 +97,19 @@ pub struct Matrix {
     /// One row per recipe declaring a support claim, ordered by recipe name.
     pub rows: Vec<MatrixRow>,
     /// Recipes carrying no claim, ordered by name. Reported rather than silently
-    /// dropped: for a locally authored recipe an absent claim is correct, but for
-    /// one about to ship it is an omission, and only the caller knows which it is.
+    /// dropped. For a locally authored recipe an absent claim is correct, but for one
+    /// about to ship it is an omission. Only the caller knows which it is.
     pub unclaimed: Vec<String>,
 }
 
 /// Build the matrix from the committed recipes and locks under `root`.
 ///
-/// Resolution supplies the declarative axes (device, kernel id, suite) so a recipe
-/// that omits one and inherits the device default is still described completely;
-/// the lock supplies the exact refs and commits. A recipe whose lock is missing is
-/// an error, not an empty row: a shipped recipe without one is not buildable, so
-/// there is no validated point to describe.
+/// Resolution supplies the declarative axes (device, kernel id, suite), so a recipe
+/// that omits one and inherits the device default is still described completely. The
+/// lock supplies the exact refs and commits.
+///
+/// A recipe whose lock is missing is an error rather than an empty row. A shipped
+/// recipe without one is not buildable, so there is no validated point to describe.
 pub fn matrix(root: &ConfigRoot) -> Result<Matrix, ConfigError> {
     let mut out = Matrix::default();
     for recipe in root.list_recipes()? {
@@ -166,13 +168,14 @@ fn row(
 }
 
 impl MatrixRow {
-    /// The caveats the hardware imposes — the SoC's and the board's — which are the
-    /// same under every recipe for this device, and so are rendered once per device.
+    /// The caveats the hardware imposes, meaning the SoC's and the board's. They are
+    /// the same under every recipe for this device, and so are rendered once per
+    /// device.
     ///
-    /// Membership is by scope rather than by "not a recipe's": a feature's caveats
-    /// hold only where that feature is selected, so listing them under the device
-    /// would claim them for every recipe on the board, including the ones that did
-    /// not select it.
+    /// Membership is by scope rather than by "not a recipe's". A feature's caveats
+    /// hold only where that feature is selected. Listing them under the device would
+    /// claim them for every recipe on the board, including the ones that did not
+    /// select it.
     pub fn hardware_caveats(&self) -> impl Iterator<Item = &Caveat> {
         self.caveats
             .iter()
@@ -343,12 +346,14 @@ fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
 /// Describe what moved between two locks, one line per changed axis.
 ///
 /// This is the evidence question behind a [`Validated`](SupportStatus::Validated)
-/// claim: the claim rests on a build from specific pins, so a re-pin that moves any
-/// of them retires the evidence — the claim would otherwise transfer, silently, to a
-/// combination nobody booted. `update` holds both locks, which makes it the one
-/// place the drift can be caught as it is introduced rather than audited for later.
+/// claim. The claim rests on a build from specific pins, so a re-pin that moves any
+/// of them retires the evidence. The claim would otherwise transfer, silently, to a
+/// combination nobody booted.
 ///
-/// An axis absent from one lock and present in the other is a change: gaining or
+/// `update` holds both locks, which makes it the one place the drift can be caught as
+/// it is introduced rather than audited for later.
+///
+/// An axis absent from one lock and present in the other is a change. Gaining or
 /// losing a patch series or a bootloader is exactly the kind of move that invalidates
 /// a boot claim.
 pub fn pin_changes(prev: &Lock, next: &Lock) -> Vec<String> {
@@ -435,7 +440,7 @@ that cannot be checked from the running system.
 
 /// Render the matrix as the complete `docs/src/reference/support-matrix.md` page.
 ///
-/// The output is byte-for-byte what the committed page must contain; a test
+/// The output is byte-for-byte what the committed page must contain. A test
 /// regenerates it and compares, which is what keeps the page from going stale
 /// without anyone noticing.
 pub fn render_markdown(matrix: &Matrix) -> String {

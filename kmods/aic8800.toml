@@ -18,13 +18,21 @@ subdir = "src/SDIO/driver_fw/driver/aic8800"
 
 # The subset of radxa's `debian/patches/series` the SDIO build needs, in series order
 # (firmware path, the SDIO fall-through fix, the cumulative per-kernel build guards,
-# and the low-memory/vmalloc fixes). The PCIE/USB/Allwinner/BT entries radxa also
-# ships are irrelevant to an SDIO arm64 build and are omitted.
+# the low-memory/vmalloc fixes, and the per-chip firmware subdirectory). The
+# PCIE/USB/Allwinner/BT entries radxa also ships are irrelevant to an SDIO arm64 build
+# and are omitted.
 #
 # The 7.1 and 7.2 guards are what carry this driver onto a current kernel. 7.1 moved
 # the cfg80211 key and station ops from `net_device *` to `wireless_dev *`; 7.2 removed
 # `strncpy()` from the kernel and gave `remain_on_channel` a trailing receive-address
 # filter. Both patches reach the SDIO tree, so this build needs no local equivalent.
+#
+# The firmware path is two patches that only work as a pair. `fix-sdio-firmware-path`
+# compiles `/lib/firmware/aic8800_fw/SDIO` into the BSP loader as the root, and
+# `fix-sdio-per-chip-firmware-path` makes the loader append the chip's own subdirectory
+# (`/aic8800D80` for this board's part) at request time. Taking the first without the
+# second points the loader at the root itself, where nothing is installed, and Wi-Fi
+# never comes up.
 repo_patches = [
     "fix-sdio-firmware-path.patch",
     "fix-sdio-fall-through.patch",
@@ -39,6 +47,7 @@ repo_patches = [
     "fix-build-on-low-memory-devices.patch",
     "fix-linux-7.1-build.patch",
     "fix-linux-7.2-build.patch",
+    "fix-sdio-per-chip-firmware-path.patch",
 ]
 
 # Ours, from kmods/aic8800/patches/, applied after radxa's. All three are behaviour
@@ -77,12 +86,15 @@ modules   = ["aic8800_bsp", "aic8800_fdrv"]
 # revision), so boot2deb ships it from there rather than vendoring the license-unstated
 # blobs in-tree. It becomes its own `Architecture: all` `aic8800-firmware` deb -- kept out
 # of the per-kernel modules deb so two coexisting kernels never collide over the firmware
-# path. `install` is the path fix-sdio-firmware-path.patch compiles into the BSP loader.
+# path. `install` is the root fix-sdio-firmware-path.patch compiles into the BSP loader
+# plus the `aic8800D80` subdirectory fix-sdio-per-chip-firmware-path.patch appends for
+# this part.
 firmware = { subdir = "src/SDIO/driver_fw/fw/aic8800D80", install = "usr/lib/firmware/aic8800_fw/SDIO/aic8800D80" }
 
 # The driver's runtime contract, checked by boot2deb-selftest on every board
-# that names this kmod: the firmware directory is where the BSP loader's
-# compiled-in path (fix-sdio-firmware-path.patch) looks. Firmware from anywhere
+# that names this kmod: the firmware directory is where the BSP loader looks, its
+# compiled-in root plus the per-chip subdirectory (fix-sdio-firmware-path.patch and
+# fix-sdio-per-chip-firmware-path.patch). Firmware from anywhere
 # else does not pair with the driver revision, so presence of this exact path
 # is the check.
 [[expect]]

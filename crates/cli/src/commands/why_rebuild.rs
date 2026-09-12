@@ -1,8 +1,11 @@
-//! `why-rebuild`: explain, per compile node, what the next `build` will actually
-//! redo — whether it reuses or rebuilds the cached source tree, which pinned inputs
-//! changed if it will rebuild, and whether the durable artifact cache lets it skip
-//! the compile entirely. Offline: reads the lock, the on-disk build stamps, and the
-//! artifact store's directory listing; runs no build, touches no network or hardware.
+//! `why-rebuild`: explain, per compile node, what the next `build` will actually redo:
+//!
+//! - Whether it reuses or rebuilds the cached source tree.
+//! - Which pinned inputs changed, if it will rebuild.
+//! - Whether the durable artifact cache lets it skip the compile entirely.
+//!
+//! Offline. It reads the lock, the on-disk build stamps, and the artifact store's
+//! directory listing. It runs no build, and touches no network or hardware.
 
 use crate::args::WhyRebuildArgs;
 use crate::config::{device_dts_paths, fragment_paths, kmod_local_patches};

@@ -1,7 +1,7 @@
 # Data volumes
 
 A **data volume** is a second disk the image mounts for data and nothing else. No
-part of the boot lives on it, so reflashing the OS costs nothing but the OS: the
+part of the boot lives on it, so reflashing the OS costs nothing but the OS. The
 new image finds the volume by label and adopts it.
 
 ## Why a board would want one
@@ -10,22 +10,28 @@ Most single-board machines have one medium their flashing route can write and on
 medium with room on it, and they are not the same medium.
 
 A Turing RK1 in a Turing Pi carrier is the clearest case. The BMC writes the
-module's **eMMC** — `tpi flash`, the web UI, and gadget mode all target it, because
-the loader the BMC streams into the module speaks eMMC and nothing else. The M.2
-**NVMe** is invisible to that path. Putting the root filesystem on the NVMe
-therefore means getting an image onto a disk the management network cannot reach,
-which is a real errand: flash a whole OS to eMMC, boot it, copy the image across,
-`dd` it to the NVMe, then put a plain bootloader back on the eMMC. The alternative
-is opening the case to get at the M.2 slot with an adapter.
+module's **eMMC**, and `tpi flash`, the web UI, and gadget mode all target it. The
+loader the BMC streams into the module speaks eMMC and nothing else. The M.2
+**NVMe** is invisible to that path.
 
-Put the OS on the eMMC and the NVMe becomes data-only, and the errand disappears —
-along with a second problem you may not have noticed you had. **Reimaging no longer
+Putting the root filesystem on the NVMe therefore means getting an image onto a disk
+the management network cannot reach, which is a real errand:
+
+1. Flash a whole OS to eMMC.
+2. Boot it and copy the image across.
+3. `dd` it to the NVMe.
+4. Put a plain bootloader back on the eMMC.
+
+The alternative is opening the case to get at the M.2 slot with an adapter.
+
+Put the OS on the eMMC and the NVMe becomes data-only, and the errand disappears. So
+does a second problem you might not have noticed you had. **Reimaging no longer
 destroys the data.** With OS and data sharing one disk, every reinstall means
-re-copying the library; with them split, `tpi flash` a new image and the library is
+re-copying the library. With them split, `tpi flash` a new image and the library is
 still there.
 
-The same shape fits any board whose flashing route writes one medium: a
-Chromebook's internal eMMC plus an SD card, an SBC's SD card plus a USB disk.
+The same shape fits any board whose flashing route writes one medium. Examples are a
+Chromebook's internal eMMC plus an SD card, or an SBC's SD card plus a USB disk.
 
 If you *do* want root on the NVMe, that is the `split` layout plus a bootloader
 that can write the disk — see [Turing RK1](boards/turing-rk1.md).
@@ -33,16 +39,17 @@ that can write the disk — see [Turing RK1](boards/turing-rk1.md).
 ## Declaring one
 
 **No shipped recipe declares a data volume**, and that is deliberate. Where the
-data lives is a property of one installation, not of a board or of an application:
-two people running the same media server on the same board may keep the library on
-an M.2 disk, on an external USB drive, or on network storage, with root on either
-medium. A recipe that guessed would send first boot looking for hardware the
+data lives is a property of one installation, not of a board or of an application.
+Two people running the same media server on one board can keep the library on an M.2
+disk, an external USB drive, or network storage. Either can put root on either
+medium. A recipe that guessed would send first boot looking for
+hardware the
 operator does not have.
 
 So it is something you add to your own recipe — copy a shipped one and extend it,
-as in [Adapting a shipped recipe](tutorials/adapting-a-recipe.md). Two halves, and a
-build fails if it has only one: the `data-volume` **feature** carries the first-boot
-hook, and the recipe's `[[data_volumes]]` says what to mount where.
+as in [Adapting a shipped recipe](tutorials/adapting-a-recipe.md). There are two
+halves, and a build fails if it has only one. The `data-volume` **feature** carries
+the first-boot hook, and the recipe's `[[data_volumes]]` says what to mount where.
 
 ```toml
 features = ["jellyfin", "media-accel-rockchip", "data-volume"]
@@ -61,20 +68,22 @@ create = "if-blank"          # optional, the default; or "never"
 | `label` | Filesystem label, and the `LABEL=` the fstab entry mounts by. At most 16 bytes. **This is the volume's identity** — a later image with a different one sees a foreign disk and refuses it. |
 | `mount` | Absolute path, never `/`. |
 | `fstype` | `ext4`. |
-| `create` | `if-blank` (default) to format a genuinely blank disk; `never` to only ever adopt a volume you prepared yourself. |
+| `create` | `if-blank` (default) to format a genuinely blank disk. `never` to only ever adopt a volume you prepared yourself. |
 
 ### How a disk is matched
 
 `kind` names the **bus**, not the device-node spelling, because the spelling does
-not separate the cases that matter. A SATA disk and a USB disk are both `/dev/sd*`:
-a machine with an internal SSD and a drive somebody plugged in shows two devices no
-name pattern can tell apart, and writing the wrong one is the accident worth
-designing out. So `sata` and `usb` are separate kinds, matched on the transport the
-kernel reports (`lsblk -o TRAN`), and a `/dev/sd*` whose transport cannot be read is
-skipped rather than guessed at.
+not separate the cases that matter. A SATA disk and a USB disk are both `/dev/sd*`.
+A machine with an internal SSD and a drive somebody plugged in shows two devices no
+name pattern can tell apart. Writing the wrong one is the accident worth designing
+out.
+
+So `sata` and `usb` are separate kinds, matched on the transport the kernel reports
+(`lsblk -o TRAN`). A `/dev/sd*` whose transport cannot be read is skipped rather
+than guessed at.
 
 A disk must satisfy **both** the transport and the expected node name. That second
-test is not redundant — on a board with eMMC, `lsblk` reports `mmcblk0boot0` and
+test is not redundant. On a board with eMMC, `lsblk` reports `mmcblk0boot0` and
 `mmcblk0boot1` as whole disks (`TYPE=disk`), and those are the read-only eMMC boot
 hardware partitions. The `mmcblk<n>` pattern excludes them, and read-only disks are
 skipped besides. `mmc` is also the one kind that tolerates an unreported transport,
@@ -112,14 +121,14 @@ removes the blank-disk case too.
 
 The `/etc/fstab` entry is written at **build** time, so every boot after the first
 mounts the volume with no hook involved. It carries `nofail` and a short device
-timeout: a data disk that is absent, dead, or slow to enumerate must never be the
+timeout. A data disk that is absent, dead, or slow to enumerate must never be the
 reason a system will not boot. A node with no second disk boots normally and simply
 has an empty mount point.
 
 ## Renaming a volume
 
 The label is the identity, so changing it in a recipe without changing it on the
-disk means the next image refuses the volume — safe, but not what you meant.
+disk means the next image refuses the volume. That is safe, but not what you meant.
 Relabel the disk on the board in the same change:
 
 ```sh

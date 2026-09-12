@@ -1,31 +1,31 @@
 //! Tree additions for a pressed image: the files `press --copy`, `--copy-tree`,
-//! `--deb`, and `--embed-image` place into the rootfs, and the merge that lands
-//! them in the image node's entry list.
+//! `--deb`, and `--embed-image` place into the rootfs. The merge that lands them
+//! in the image node's entry list lives here too.
 //!
-//! An addition belongs to a *unit or a site*, never to the recipe — a recipe
-//! describes every board of a kind, `press` stamps one card — so additions ride
-//! the pressed file only: the recipe's artifacts stay untouched, and the pressed
-//! image records what it gained in its own `/etc/boot2deb/image.toml`
-//! ([`IdentityPressed`]). Everything here is pure list manipulation over
-//! [`SourceEntry`] values; a plain copy's bytes stay on the host as
-//! [`FileRange`]s until the formatter places them, so an embedded
-//! multi-gigabyte artifact costs no memory. A [template]
+//! An addition belongs to a *unit or a site*, never to the recipe. A recipe
+//! describes every board of a kind, and `press` stamps one card. Additions
+//! therefore ride the pressed file only. The recipe's artifacts stay untouched,
+//! and the pressed image records what it gained in its own
+//! `/etc/boot2deb/image.toml` ([`IdentityPressed`]).
+//!
+//! Everything here is pure list manipulation over [`SourceEntry`] values. A plain
+//! copy's bytes stay on the host as [`FileRange`]s until the formatter places
+//! them, so an embedded multi-gigabyte artifact costs no memory. A [template]
 //! is the one exception, because it has to be read to be expanded — and is
 //! size-capped for it.
 //!
 //! A whole directory is placed with [`copy_tree`](TreeAdditions::copy_tree),
 //! which mirrors the target rootfs: `DIR/etc/site.conf` lands at
 //! `/etc/site.conf`. The walk is
-//! [`ferrosys::DirectorySource`] — the same
-//! machinery the image node's own sources use — so symlinks are recorded as
-//! symlinks rather than followed, and the entry list a tree walks to does not
-//! depend on the order the host read its directories in.
+//! [`ferrosys::DirectorySource`], the same machinery the image node's own sources
+//! use. Symlinks are recorded as symlinks rather than followed. The entry list a
+//! tree walks to does not depend on the order the host read its directories in.
 //!
-//! The merge is deliberately conservative: an addition replaces an existing
+//! The merge is deliberately conservative. An addition replaces an existing
 //! *file* (copying a config over the shipped one is the use case) but never a
-//! directory, missing parent directories are synthesized as root-owned `0755`,
-//! and a parent that exists as anything but a directory is an error rather than
-//! a guess. Added entries take the rootfs's own clamped timestamp, so a pressed
+//! directory. Missing parent directories are synthesized as root-owned `0755`. A
+//! parent that exists as anything but a directory is an error rather than a
+//! guess. Added entries take the rootfs's own clamped timestamp, so a pressed
 //! image is deterministic in its inputs apart from the per-image password.
 
 use crate::error::EngineError;
@@ -36,11 +36,11 @@ use ferrosys::{EntryKind, FileContent, FileRange, Metadata, Source as _, SourceE
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Where `--deb` packages land in the tree; the first-boot hook installs
+/// Where `--deb` packages land in the tree. The first-boot hook installs
 /// everything it finds here, alphabetically.
 pub const FIRSTBOOT_DEBS_DIR: &str = "/var/lib/boot2deb/firstboot-debs";
 
-/// Where `--embed-image` places the compressed artifact;
+/// Where `--embed-image` places the compressed artifact.
 /// `boot2deb-install-to` (a base-overlay script in every image) looks here.
 pub const EMBEDDED_IMAGE_DIR: &str = "/var/lib/boot2deb/install";
 
@@ -62,7 +62,7 @@ const RESERVED_DESTS: &[&str] = &["/etc/boot2deb/image.toml", "/etc/shadow"];
 /// consumed by the image node's re-assembly
 /// ([`press_image`](crate::image::press_image)). Construction validates what can
 /// be judged without the entry list (paths, kinds, source files, template
-/// names); the merge validates the rest against the actual tree.
+/// names). The merge validates the rest against the actual tree.
 #[derive(Debug)]
 pub struct TreeAdditions {
     /// The artifact stem the pressed image derives from, recorded in the marker.
@@ -147,9 +147,9 @@ impl AddedFile {
 impl TreeAdditions {
     /// Additions for a press of `source_stem`'s artifacts, initially empty.
     ///
-    /// `recipe` is the build point being pressed and `identity` the identifiers
-    /// its image will carry; both exist only so a [template]
-    /// can name them, and neither is consulted by a press that adds no template.
+    /// `recipe` is the build point being pressed, and `identity` the identifiers
+    /// its image will carry. Both exist only so a [template] can name them.
+    /// Neither is consulted by a press that adds no template.
     #[must_use]
     pub fn new(
         source_stem: impl Into<String>,
@@ -193,8 +193,8 @@ impl TreeAdditions {
     }
 
     /// Add a `--copy src:dest` file: `src` on the host, placed at the absolute
-    /// `dest` in the tree. Mode `0644`, or `0755` when the source is executable;
-    /// ownership root:root. No option soup beyond that until a need appears.
+    /// `dest` in the tree. Mode `0644`, or `0755` when the source is executable.
+    /// Ownership is root:root. No option soup beyond that until a need appears.
     ///
     /// A source named `*.tmpl` is a [template]: it is
     /// read and its `{{image.…}}` references are checked now, and it is expanded
@@ -204,10 +204,12 @@ impl TreeAdditions {
     ///
     /// # Errors
     ///
-    /// [`EngineError::PressAddition`] for a destination that is not a clean
-    /// absolute file path (or is reserved), for a source that is missing or not
-    /// a regular file, and for a template that is oversized, not UTF-8, or names
-    /// something outside the vocabulary.
+    /// [`EngineError::PressAddition`] in three cases:
+    ///
+    /// - A destination that is not a clean absolute file path, or is reserved
+    /// - A source that is missing or not a regular file
+    /// - A template that is oversized, not UTF-8, or names something outside the
+    ///   vocabulary
     pub fn copy(&mut self, src: &Path, dest: &str) -> Result<(), EngineError> {
         let normalized = normalize_dest(dest).map_err(|detail| EngineError::PressAddition {
             dest: dest.to_string(),
@@ -238,26 +240,31 @@ impl TreeAdditions {
     /// `dir` placed at its corresponding absolute path, so `dir` mirrors the
     /// target rootfs (`dir/etc/site.conf` → `/etc/site.conf`).
     ///
-    /// Directories are not placed as entries of their own — the merge
-    /// synthesizes the parents it needs as root-owned `0755`, so a site tree's
-    /// umask never reaches the image. Files take `0644`, or `0755` when
-    /// executable on the host, exactly as [`copy`](Self::copy) does; symlinks
-    /// are recorded as symlinks and never followed, so a link pointing outside
-    /// the tree lands as the link it is. A file named `*.tmpl` is a
-    /// [template] and lands at the destination with the
-    /// suffix removed — which is also the escape for shipping a literal one:
+    /// Directories are not placed as entries of their own. The merge synthesizes
+    /// the parents it needs as root-owned `0755`, so a site tree's umask never
+    /// reaches the image. Files take `0644`, or `0755` when executable on the
+    /// host, exactly as [`copy`](Self::copy) does. Symlinks are recorded as
+    /// symlinks and never followed, so a link pointing outside the tree lands as
+    /// the link it is.
+    ///
+    /// A file named `*.tmpl` is a [template] and lands at the destination with
+    /// the suffix removed. That is also the escape for shipping a literal one:
     /// `site.tmpl.tmpl` lands as `site.tmpl`.
     ///
     /// Returns the number of entries placed.
     ///
     /// # Errors
     ///
-    /// [`EngineError::PressAddition`] when `dir` cannot be walked, names no
-    /// files at all, holds a path that is not UTF-8 or that lands on a reserved
-    /// destination, or holds an entry that is neither a regular file, a symlink,
-    /// nor a directory — a device node, FIFO, socket, or hard link is refused
-    /// rather than silently dropped, because a site tree carrying one means
-    /// something other than what a placement can do.
+    /// [`EngineError::PressAddition`] when `dir`:
+    ///
+    /// - Cannot be walked
+    /// - Names no files at all
+    /// - Holds a path that is not UTF-8, or that lands on a reserved destination
+    /// - Holds an entry that is neither a regular file, a symlink, nor a directory
+    ///
+    /// Anything else — a device node, a FIFO, a socket, a hard link — is refused
+    /// rather than silently dropped. A site tree carrying one means something
+    /// other than what a placement can do.
     pub fn copy_tree(&mut self, dir: &Path) -> Result<usize, EngineError> {
         let tree_err = |detail: String| EngineError::PressAddition {
             dest: dir.display().to_string(),

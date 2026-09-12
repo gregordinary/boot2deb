@@ -4,26 +4,26 @@
 //!
 //! The rootfs feature axis is a *list* of these, stacked onto the layered
 //! substrate — `base ⊕ soc ⊕ boot-method ⊕ device ⊕ Σ features`. A feature
-//! declares the Debian packages it adds; its overlay tree carries the config it
+//! declares the Debian packages it adds. Its overlay tree carries the config it
 //! lays into the rootfs, in the same manifest-plus-ordered-files spirit as a
 //! patch series.
 //!
 //! Pure: parsing plus compatibility checks — the SoC/arch gates, pairwise
 //! conflicts, and capability requirements. The last two are the *composition*
-//! gates, and they are opposites: `conflicts` rejects a selection holding two
+//! gates, and they are opposites. `conflicts` rejects a selection holding two
 //! features that cannot coexist, while
 //! [`requires_capability`](Feature::requires_capability) rejects one missing a
-//! feature it needs. Both validate what the recipe named; neither adds to it.
+//! feature it needs. Both validate what the recipe named. Neither adds to it.
 //!
 //! A feature reaches the kernel as well as the rootfs. Alongside its packages,
-//! overlay, and third-party apt sources, it may contribute
+//! overlay, and third-party apt sources, it can contribute
 //! [`config_fragments`](Feature::config_fragments) and
 //! [`patch_series`](Feature::patch_series) — because a capability is often not
 //! purely userspace. A hardware-accel provider whose driver is out-of-tree has to
-//! patch and configure the kernel to exist at all, and pinning that on the kernel
-//! or device layer would force it on every build of that SoC or board, including
-//! ones that never selected the capability. Contributing it from the feature keeps
-//! the opt-in and the thing opted into in one place.
+//! patch and configure the kernel to exist at all. Pinning that on the kernel or
+//! device layer would force it on every build of that SoC or board. That includes
+//! builds which never selected the capability. Contributing it from the feature
+//! keeps the opt-in and the thing opted into in one place.
 
 use crate::error::ConfigError;
 use crate::model::{AptSource, Arch, Soc};
@@ -46,8 +46,8 @@ use serde::Deserialize;
 ///   [`apt_sources`](Feature::apt_sources) entry because the app ships from its
 ///   own repo rather than the Debian mirror.
 ///
-/// The "accelerated Jellyfin" *use case* is not a feature — it is a recipe
-/// composing an app feature with the matching capability feature; there is
+/// The "accelerated Jellyfin" *use case* is not a feature. It is a recipe
+/// composing an app feature with the matching capability feature. There is
 /// no provider auto-resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,31 +56,31 @@ pub struct Feature {
     pub description: String,
     /// Debian packages this feature adds to the rootfs. Installed from the local
     /// apt repo (the build's own `.deb`s), the suite mirror, and any
-    /// [`apt_sources`](Feature::apt_sources) this feature adds — apt resolves
-    /// their dependencies; order is not significant — apt solves the set.
+    /// [`apt_sources`](Feature::apt_sources) this feature adds. Their dependencies
+    /// are resolved by apt. Order is not significant, because apt solves the set.
     #[serde(default)]
     pub packages: Vec<crate::model::PackageEntry>,
     /// Packages this feature drops from the merged rootfs set — e.g. a
     /// feature that replaces a base package with its own variant. Unioned with
-    /// every layer's `exclude`; any name in that union is removed from the include
+    /// every layer's `exclude`. Any name in that union is removed from the include
     /// set (exclude wins).
     #[serde(default)]
     pub exclude: Vec<String>,
-    /// SoCs this feature supports; empty means *any* SoC. Resolution rejects a
+    /// SoCs this feature supports, with empty meaning *any* SoC. Resolution rejects a
     /// feature whose non-empty list excludes the resolved SoC. The gate for
     /// a SoC-integrated capability feature (e.g. `media-accel-rockchip`).
     #[serde(default)]
     pub requires_soc: Vec<Soc>,
-    /// Architectures this feature supports; empty means *any* arch. Resolution
-    /// rejects a feature whose non-empty list excludes the resolved arch.
+    /// Architectures this feature supports, with empty meaning *any* arch.
+    /// Resolution rejects a feature whose non-empty list excludes the resolved arch.
     /// The gate for a discrete-GPU capability feature (e.g. a hypothetical
-    /// `media-accel-vaapi` on `x86_64`); orthogonal to `requires_soc`, and both
-    /// gates must pass. GPU *vendor* within an arch (Intel vs AMD vs NVIDIA) is
+    /// `media-accel-vaapi` on `x86_64`). It is orthogonal to `requires_soc`, and
+    /// both gates must pass. GPU *vendor* within an arch (Intel vs AMD vs NVIDIA) is
     /// not modeled — the user picks the matching provider feature explicitly, and
     /// `conflicts` catches a clashing pair (non-goal: no provider resolution).
     #[serde(default)]
     pub requires_arch: Vec<Arch>,
-    /// Third-party apt repositories this feature adds to the rootfs solve —
+    /// Third-party apt repositories this feature adds to the rootfs solve. This is
     /// how an application feature pulls an app that is not in the Debian mirror
     /// (Jellyfin, Plex, …). Empty for a feature whose packages all come from the
     /// mirror or the local repo.
@@ -89,7 +89,7 @@ pub struct Feature {
     /// Pre-built `.deb`s this feature pulls from outside the Debian mirror
     /// — a content-pinned vendor download or on-disk file. Provides the
     /// *bytes* into the local apt repo, the way [`apt_sources`](Feature::apt_sources)
-    /// provides a *source*; the feature's [`packages`](Feature::packages) (or another
+    /// provides a *source*. The feature's [`packages`](Feature::packages) (or another
     /// package's dependency) is what names them for install. Unioned across all
     /// layers + features and de-duplicated by sha256 at resolution.
     #[serde(default)]
@@ -97,16 +97,16 @@ pub struct Feature {
     /// Libraries the ffmpeg build links that Debian does not carry, supplied by this
     /// feature's [`extra_debs`](Feature::extra_debs) targeting the ffmpeg stage.
     ///
-    /// Declared beside those pins rather than derived from them: a `.deb` file name
-    /// is not a package name, resolution is pure and cannot read a package's control
-    /// file, and the `./configure` flag is a fact about ffmpeg rather than about the
-    /// bytes. Unioned across features at resolution and read by the ffmpeg stage.
+    /// Declared beside those pins rather than derived from them. A `.deb` file name
+    /// is not a package name, and resolution is pure and cannot read a package's
+    /// control file. The `./configure` flag is a fact about ffmpeg rather than about
+    /// the bytes. Unioned across features at resolution and read by the ffmpeg stage.
     #[serde(default)]
     pub ffmpeg_libs: Vec<crate::model::FfmpegLib>,
     /// Other features, by name, that cannot be combined with this one. The check
-    /// is symmetric — resolution rejects a selection holding this feature and any
-    /// it names, or that names it — so declaring the conflict on either side is
-    /// enough.
+    /// is symmetric: resolution rejects a selection holding this feature and any
+    /// it names, or that names it. Declaring the conflict on either side is
+    /// therefore enough.
     #[serde(default)]
     pub conflicts: Vec<String>,
     /// Capabilities this feature supplies to the rest of the selection — free-form
@@ -116,19 +116,19 @@ pub struct Feature {
     /// Set on a *provider*: both `media-accel-rockchip` and `media-accel-v4l2`
     /// build an `ffmpeg-rk` `.deb`, so both declare `provides = ["ffmpeg"]`. The
     /// point of naming a capability rather than the providers is that a consumer
-    /// does not enumerate them — a new provider for another platform declares the
-    /// same capability and every consumer accepts it unchanged.
+    /// does not enumerate them. A new provider for another platform declares the
+    /// same capability, and every consumer accepts it unchanged.
     #[serde(default)]
     pub provides: Vec<String>,
     /// Capabilities another selected feature must [`provides`](Feature::provides),
     /// or resolution fails with [`ConfigError::MissingCapability`].
     ///
-    /// Set on a *consumer* whose packages are useless without a sibling's: `jellyfin`
-    /// installs no FFmpeg and Jellyfin exits at startup rather than running with
-    /// transcoding disabled, so `jellyfin` alone is a bootable image with a dead
-    /// service. The gate turns that into a resolve-time error.
+    /// Set on a *consumer* whose packages are useless without a sibling's.
+    /// `jellyfin` installs no FFmpeg, and Jellyfin exits at startup rather than
+    /// running with transcoding disabled. `jellyfin` alone is therefore a bootable
+    /// image with a dead service. The gate turns that into a resolve-time error.
     ///
-    /// This validates a composition; it does not complete one. Nothing is added to
+    /// This validates a composition. It does not complete one. Nothing is added to
     /// the selection to satisfy a requirement — the recipe still names every
     /// feature explicitly (non-goal: no provider auto-resolution).
     #[serde(default)]
@@ -148,33 +148,35 @@ pub struct Feature {
     #[serde(default)]
     pub requires_media_accel: bool,
     /// Build the FFmpeg provider under `--enable-nonfree`, admitting the encoders
-    /// whose licences FFmpeg cannot combine with the GPL — a class, of which FDK-AAC
-    /// is the member this tree has a use for.
+    /// whose licenses FFmpeg cannot combine with the GPL. They are a class, of which
+    /// FDK-AAC is the member this tree has a use for.
     ///
-    /// It is a *licence* gate rather than a library switch, and the distinction is
-    /// FFmpeg's own: `./configure` refuses a GPL build linking such an encoder unless
-    /// the flag is present, so the flag and the encoders it admits move together in
-    /// both directions. Setting it makes the resulting binary undistributable — the
-    /// combination may be built and used, not passed on — which is why it is opt-in
-    /// per build rather than a property of the provider.
+    /// It is a *license* gate rather than a library switch, and the distinction is
+    /// FFmpeg's own. `./configure` refuses a GPL build linking such an encoder unless
+    /// the flag is present. The flag and the encoders it admits therefore move
+    /// together in both directions.
+    ///
+    /// Setting it makes the resulting binary undistributable. The combination can be
+    /// built and used, not passed on. That is why it is opt-in per build rather than
+    /// a property of the provider.
     ///
     /// Default `false`: every build produces a redistributable FFmpeg. The feature
     /// that sets it installs no packages of its own and declares
-    /// `requires_capability = ["ffmpeg"]`, so selecting it without a provider to
-    /// re-flavour is a resolution error rather than a silent no-op.
+    /// `requires_capability = ["ffmpeg"]`. Selecting it without a provider to
+    /// re-flavor is therefore a resolution error rather than a silent no-op.
     ///
     /// Reaches the build as [`ResolvedImage::ffmpeg_nonfree`](crate::model::ResolvedImage::ffmpeg_nonfree),
-    /// which decides both the `./configure` flags and the build root's package set —
-    /// so the free build does not carry the nonfree encoder's headers either.
+    /// which decides both the `./configure` flags and the build root's package set.
+    /// The free build therefore does not carry the nonfree encoder's headers either.
     #[serde(default)]
     pub ffmpeg_nonfree: bool,
     /// Kconfig fragments this feature merges into the kernel build, by fragment
-    /// path (`accel/rk3576-rga`), appended after the kernel's own and the device's
-    /// — so a feature's value wins a conflict, matching the way its packages stack
-    /// last in the rootfs merge.
+    /// path (`accel/rk3576-rga`), appended after the kernel's own and the device's.
+    /// A feature's value therefore wins a conflict, matching the way its packages
+    /// stack last in the rootfs merge.
     ///
-    /// For a capability whose driver is not in the base kernel: the fragment
-    /// compiles it, and lives here rather than on the kernel layer so a build that
+    /// For a capability whose driver is not in the base kernel, the fragment
+    /// compiles it. It lives here rather than on the kernel layer, so a build that
     /// did not select the capability does not carry the driver.
     ///
     /// Requires a *compiled* kernel. A distro-package kernel merges no kconfig, so
@@ -184,13 +186,13 @@ pub struct Feature {
     #[serde(default)]
     pub config_fragments: Vec<String>,
     /// Kernel patch series this feature adds, by name (`rk3576-rga`), appended
-    /// after the kernel's `patch_series` and the device's `device_patch_series`
-    /// and resolved from the same `patches` checkout at the same pin.
+    /// after the kernel's `patch_series` and the device's `device_patch_series`.
+    /// They resolve from the same `patches` checkout at the same pin.
     ///
-    /// The patch-series half of [`config_fragments`](Feature::config_fragments): a
-    /// fragment can only turn on code the tree contains, so a feature carrying an
-    /// out-of-tree driver supplies both — the series that adds the source and the
-    /// fragment that compiles it.
+    /// The patch-series half of [`config_fragments`](Feature::config_fragments). A
+    /// fragment can only turn on code the tree contains. A feature carrying an
+    /// out-of-tree driver therefore supplies both: the series that adds the source
+    /// and the fragment that compiles it.
     ///
     /// Same compiled-kernel requirement, and the same error, as
     /// [`config_fragments`](Feature::config_fragments).
@@ -201,21 +203,21 @@ pub struct Feature {
     /// in the resolved build.
     ///
     /// A capability's limits belong to the capability, not to whichever recipe
-    /// happened to name it first: every recipe composing the feature inherits them,
-    /// and a limit stated once cannot fall out of step across recipes that all have
-    /// it. Reserve the recipe's own `[support].caveats` for what is true of that
-    /// build point alone.
+    /// happened to name it first. Every recipe composing the feature inherits them.
+    /// A limit stated once cannot fall out of step across recipes that all have it.
+    /// Reserve the recipe's own `[support].caveats` for what is true of that build
+    /// point alone.
     ///
     /// Ordered after the hardware's caveats and before the recipe's, and
-    /// de-duplicated by text against both — a feature restating a SoC limitation
+    /// de-duplicated by text against both. A feature restating a SoC limitation
     /// keeps the SoC's wider tag.
     #[serde(default)]
     pub caveats: Vec<String>,
     /// Runtime checks images selecting this feature must pass (`[[expect]]`),
     /// compiled into `/etc/boot2deb/selftest.d/` for `boot2deb-selftest`. A
-    /// capability's proof belongs to the capability — the render node its stack
-    /// opens, the misc device its out-of-tree driver presents — so every recipe
-    /// composing the feature inherits the check without restating it. The
+    /// capability's proof belongs to the capability: the render node its stack
+    /// opens, the misc device its out-of-tree driver presents. Every recipe
+    /// composing the feature therefore inherits the check without restating it. The
     /// mechanically checkable counterpart of [`caveats`](Self::caveats).
     #[serde(default)]
     pub expect: Vec<crate::expect::Expectation>,
@@ -278,8 +280,8 @@ impl Feature {
 
 /// The first selected feature (in recipe order) that declares
 /// [`requires_media_accel`](Feature::requires_media_accel), or `None` when none
-/// do. `Some` means the build compiles the SoC's media-accel source trees;
-/// resolution then requires the SoC to provide them, and the build schedules the
+/// do. `Some` means the build compiles the SoC's media-accel source trees.
+/// Resolution then requires the SoC to provide them, and the build schedules the
 /// userspace/ffmpeg compile nodes. Returning the *name* lets the resolve error
 /// point at the specific feature that imposed the requirement.
 pub fn first_requiring_media_accel(selected: &[(String, Feature)]) -> Option<&str> {
@@ -293,9 +295,9 @@ pub fn first_requiring_media_accel(selected: &[(String, Feature)]) -> Option<&st
 /// [`ffmpeg_nonfree`](Feature::ffmpeg_nonfree), or `None` when none do.
 ///
 /// `Some` means the build's FFmpeg is configured `--enable-nonfree` and is therefore
-/// undistributable. The *name* is returned rather than a bare bool so a caller
-/// rejecting the combination — a recipe claiming support for a build it may not ship
-/// — can point at the feature that made it so.
+/// undistributable. The *name* is returned rather than a bare bool, so a caller
+/// rejecting the combination can point at the feature that made it so. One such
+/// caller is a recipe claiming support for a build it cannot ship.
 pub fn first_enabling_ffmpeg_nonfree(selected: &[(String, Feature)]) -> Option<&str> {
     selected
         .iter()
@@ -307,7 +309,7 @@ pub fn first_enabling_ffmpeg_nonfree(selected: &[(String, Feature)]) -> Option<&
 /// contributes, as `(config_fragments, patch_series)`.
 ///
 /// Both lists follow recipe selection order, and each is de-duplicated keeping the
-/// first occurrence: two features naming the same series express one requirement,
+/// first occurrence. Two features naming the same series express one requirement,
 /// and applying a series twice would fail the second time. The caller appends these
 /// after the kernel's and the device's, so a feature is the last word.
 pub fn kernel_contributions(selected: &[(String, Feature)]) -> (Vec<String>, Vec<String>) {
@@ -327,7 +329,7 @@ pub fn kernel_contributions(selected: &[(String, Feature)]) -> (Vec<String>, Vec
 /// The first selected feature (in recipe order) that contributes a kernel input,
 /// paired with the field name it used — `None` when the set is rootfs-only.
 ///
-/// Only a compiled kernel can act on either field, so this is what lets resolution
+/// Only a compiled kernel can act on either field. This is what lets resolution
 /// name the offending feature *and* field when the resolved kernel is a distro
 /// package.
 pub fn first_contributing_kernel_input(
@@ -348,7 +350,7 @@ pub fn first_contributing_kernel_input(
 ///
 /// `selected` pairs each chosen feature's name with its loaded manifest. Returns
 /// [`ConfigError::ConflictingFeatures`] for the first pair where either feature
-/// names the other in its `conflicts`; the check is symmetric, so declaring the
+/// names the other in its `conflicts`. The check is symmetric, so declaring the
 /// conflict on one side suffices.
 pub fn ensure_no_conflicts(selected: &[(String, Feature)]) -> Result<(), ConfigError> {
     for (i, (a_name, a)) in selected.iter().enumerate() {
@@ -368,10 +370,10 @@ pub fn ensure_no_conflicts(selected: &[(String, Feature)]) -> Result<(), ConfigE
 ///
 /// `selected` pairs each chosen feature's name with its loaded manifest. Returns
 /// [`ConfigError::MissingCapability`] for the first requirement no selected feature
-/// [`provides`](Feature::provides), naming the providers the shipped tree does carry
-/// so the message says what to add rather than only what is missing.
+/// [`provides`](Feature::provides). It names the providers the shipped tree does
+/// carry, so the message says what to add rather than only what is missing.
 ///
-/// A feature may satisfy its own requirement; that is a provider that also consumes
+/// A feature can satisfy its own requirement. That is a provider that also consumes
 /// what it supplies, and it needs no special case.
 pub fn ensure_capabilities_satisfied(
     selected: &[(String, Feature)],

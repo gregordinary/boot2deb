@@ -1,19 +1,19 @@
 //! Local apt repo — assembles the build's own `.deb`s into a small apt
-//! repository the rootfs node installs from, so the provisioner resolves our
+//! repository the rootfs node installs from. The provisioner then resolves our
 //! packages together with their dependencies (against this repo plus the suite
 //! mirror).
 //!
-//! The build makes every artifact a `.deb` (kernel, u-boot, MPP/RGA, ffmpeg-rk);
-//! dropping them behind a trusted apt source lets the rootfs install a package
-//! *list* — the substrate base set plus the selected features' packages — and
-//! have the solver pull each deb's transitive deps from the mirror.
+//! The build makes every artifact a `.deb` (kernel, u-boot, MPP/RGA, ffmpeg-rk).
+//! Dropping them behind a trusted apt source lets the rootfs install a package
+//! *list*, the substrate base set plus the selected features' packages. The solver
+//! then pulls each deb's transitive deps from the mirror.
 //!
 //! The repo is a **`dists/`-structured** trusted `file://` mirror
 //! ([`LocalDistsRepo`]): the provisioner speaks the standard
 //! `dists/<suite>/…/Release` + `Packages` mirror layout and nothing else. It is
 //! written by [`ferroday_cage::provision::debian::Pool`], the inverse of the
-//! provisioner's own index reader, so this side needs no external tool and the
-//! writer and the reader cannot disagree about the layout.
+//! provisioner's own index reader. This side therefore needs no external tool, and
+//! the writer and the reader cannot disagree about the layout.
 
 use crate::error::EngineError;
 use crate::event::Step;
@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 /// ```
 ///
 /// The debs are the build's own freshly-generated output, so trusting the repo
-/// unsigned is apt's own `file://` `[trusted=yes]` case — the provisioner refuses
+/// unsigned is apt's own `file://` `[trusted=yes]` case. The provisioner refuses
 /// `trust_unsigned` only over `http://`, never a local path.
 pub struct LocalDistsRepo {
     /// Absolute repo root — the `file://` mirror URL base the provisioner fetches
@@ -75,25 +75,26 @@ impl LocalDistsRepo {
     /// Assemble a `dists/`-structured trusted repo at `dir` from `debs` for
     /// `suite`/`arch`, emitting progress to `step`.
     ///
-    /// [`Pool`] copies each `.deb` to its archive pool path, writes the component
+    /// [`Pool`] copies each `.deb` to its archive pool path. It writes the component
     /// `Packages` index (with pool-relative `Filename`s the provisioner resolves
-    /// against the `file://` base) and the `Release` that checksums it, stamped
-    /// with the suite, the `main` component, and `<arch>` so the provisioner's
-    /// release check accepts it — `trust_unsigned` skips the signature and the
-    /// freshness bound, so no `Valid-Until` is needed.
+    /// against the `file://` base) and the `Release` that checksums it. The `Release`
+    /// is stamped with the suite, the `main` component, and `<arch>`, so the
+    /// provisioner's release check accepts it. `trust_unsigned` skips the signature
+    /// and the freshness bound, so no `Valid-Until` is needed.
     ///
     /// `source_date_epoch` pins the `Date` the `Release` carries, and pinning it is what
-    /// makes the publish byte-reproducible: the indexes are a function of the package
-    /// set, and the release is then a function of the indexes and this number — without
-    /// it the release takes the wall clock and no two publishes of one package set agree.
-    /// It is the same value the rootfs tar export clamps member mtimes to, so one
-    /// lock-derived number dates everything the build emits. `None` is a build with no
-    /// kernel tree to take an epoch from, where the release falls back to the publish
-    /// time and this repository is simply not reproducible — the same amount of
-    /// determinism the rest of that build has.
+    /// makes the publish byte-reproducible. The indexes are a function of the package
+    /// set, and the release is then a function of the indexes and this number. Without
+    /// it, the release takes the wall clock and no two publishes of one package set
+    /// agree. It is the same value the rootfs tar export clamps member mtimes to, so
+    /// one lock-derived number dates everything the build emits.
+    ///
+    /// `None` is a build with no kernel tree to take an epoch from. The release then
+    /// falls back to the publish time, and this repository is simply not reproducible.
+    /// That is the same amount of determinism the rest of that build has.
     ///
     /// Any prior contents of `dir` are removed first, so the repo reflects exactly
-    /// `debs`: `Pool::publish` is incremental by design, and this repo is a
+    /// `debs`. `Pool::publish` is incremental by design, and this repo is a
     /// per-build view of one artifact ledger rather than an accumulating pool.
     /// A `.deb` whose `Architecture` is neither `arch` nor `all` is rejected
     /// rather than indexed where nothing can resolve it. A relative `dir` is made
@@ -143,13 +144,15 @@ impl LocalDistsRepo {
     /// [`ferroday_cage`](crate::sandbox) `Repository::builder(...).mirror(...)`.
     ///
     /// The path is carried **verbatim, not percent-encoded**. The mirror base is
-    /// concatenated with a pool-relative suffix and the result is handed to
-    /// `HttpFetch`, which strips the `file://` scheme and opens what remains as a
-    /// filesystem path — it does no percent-decoding, so an encoded byte would be
-    /// looked up literally and a build under `/home/me/My Projects/…` would fail to
-    /// find its own `.deb`s. The repo dir is boot2deb's own (`<cache>/…`), never
-    /// attacker-supplied, and nothing downstream parses a query or fragment out of
-    /// it. `unencoded_paths_reach_the_provisioners_fetcher` holds this to the
+    /// concatenated with a pool-relative suffix, and the result is handed to
+    /// `HttpFetch`. That strips the `file://` scheme and opens what remains as a
+    /// filesystem path. It does no percent-decoding, so an encoded byte would be
+    /// looked up literally. A build under `/home/me/My Projects/…` would then fail to
+    /// find its own `.deb`s.
+    ///
+    /// The repo dir is boot2deb's own (`<cache>/…`), never attacker-supplied, and
+    /// nothing downstream parses a query or fragment out of it.
+    /// `unencoded_paths_reach_the_provisioners_fetcher` holds this to the
     /// fetcher's actual behavior rather than to an assumption about URL syntax.
     pub fn file_url(&self) -> &str {
         &self.mirror_url

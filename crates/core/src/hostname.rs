@@ -1,11 +1,14 @@
 //! The shape of a host name.
 //!
-//! Its own module because two layers enforce it and they must not drift: a device's
-//! `hostname`, which reaches the image, and the device **slug**, which is the default
-//! that `hostname` falls back to. A slug held to a looser rule than the name derived
-//! from it would put the generator's own default outside what the image accepts.
+//! Its own module because two layers enforce it and they must not drift:
 //!
-//! Pure and host-independent; nothing here touches the filesystem.
+//! - A device's `hostname`, which reaches the image.
+//! - The device **slug**, which is the default that `hostname` falls back to.
+//!
+//! A slug held to a looser rule than the name derived from it would put the
+//! generator's own default outside what the image accepts.
+//!
+//! Pure and host-independent. Nothing here touches the filesystem.
 
 /// Longest host name a Linux kernel will hold. The `utsname` node field is
 /// `__NEW_UTS_LEN` + 1 bytes, so a longer name is one `sethostname` refuses and the
@@ -16,27 +19,36 @@ pub const MAX_HOSTNAME_LEN: usize = 64;
 /// dotless name is bounded by this rather than by the kernel's limit.
 pub const MAX_LABEL_LEN: usize = 63;
 
-/// Check `name` against the RFC 1123 host-name shape: one or more labels of
-/// `[A-Za-z0-9-]`, each non-empty, at most [`MAX_LABEL_LEN`] characters, and neither
-/// starting nor ending with `-`, joined by `.` into at most [`MAX_HOSTNAME_LEN`]
-/// characters. Dots are allowed so a board may carry a fully qualified name.
+/// Check `name` against the RFC 1123 host-name shape. Each label is:
 ///
-/// A shape that fails returns *why* — a terse clause naming the offending property,
-/// for the caller to wrap in the typed error that suits where the value was authored:
-/// [`ConfigError::InvalidField`] with `what = "hostname"` for a device's `hostname`,
-/// [`ConfigError::InvalidDeviceName`] for the slug. The clause says what is wrong, not
-/// what goes wrong if it is ignored; that is this documentation's job, and repeating it
-/// in every message would bury the part the author has to act on.
+/// - Made of `[A-Za-z0-9-]`, and non-empty.
+/// - At most [`MAX_LABEL_LEN`] characters.
+/// - Neither starting nor ending with `-`.
+///
+/// Labels are joined by `.` into at most [`MAX_HOSTNAME_LEN`] characters. Dots are
+/// allowed so a board can carry a fully qualified name.
+///
+/// A shape that fails returns *why*: a terse clause naming the offending property. The
+/// caller wraps that clause in the typed error that suits where the value was authored.
+/// A device's `hostname` gets [`ConfigError::InvalidField`] with `what = "hostname"`,
+/// and the slug gets [`ConfigError::InvalidDeviceName`].
+///
+/// The clause says what is wrong, not what goes wrong if it is ignored. That is this
+/// documentation's job, and repeating it in every message would bury the part the
+/// author has to act on.
 ///
 /// [`ConfigError::InvalidField`]: crate::ConfigError::InvalidField
 /// [`ConfigError::InvalidDeviceName`]: crate::ConfigError::InvalidDeviceName
 ///
 /// **Rejected, not repaired.** Debian's `hostname(5)` says systemd *filters* invalid
-/// characters out of `/etc/hostname` when it sets the name, so an unchecked value does
-/// not fail — the board boots under a different name than the one written. `/etc/hosts`
-/// is generated from the authored value, so its `127.0.1.1` entry then maps a name the
-/// running system does not have, and every lookup of the machine's own name misses.
-/// Refusing the value is what keeps the two files describing one host.
+/// characters out of `/etc/hostname` when it sets the name. An unchecked value
+/// therefore does not fail, and the board boots under a different name than the one
+/// written.
+///
+/// `/etc/hosts` is generated from the authored value, so its `127.0.1.1` entry then
+/// maps a name the running system does not have. Every lookup of the machine's own
+/// name then misses. Refusing the value is what keeps the two files describing one
+/// host.
 pub fn check(name: &str) -> Result<(), &'static str> {
     if name.is_empty() {
         return Err("empty");

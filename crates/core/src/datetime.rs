@@ -4,10 +4,10 @@
 //! Pure: the caller reads the clock and passes whole Unix seconds, so the civil-date
 //! conversion is unit-testable and nothing here is a source of nondeterminism.
 //!
-//! There are two spellings because two external formats demand different ones —
-//! `snapshot.debian.org` wants `YYYYMMDDTHHMMSSZ`, SPDX and CycloneDX want RFC 3339 —
-//! and one calendar conversion because a second copy of it is the kind of code that
-//! is wrong for four years without anyone noticing.
+//! There are two spellings because two external formats demand different ones.
+//! `snapshot.debian.org` wants `YYYYMMDDTHHMMSSZ`, and SPDX and CycloneDX want
+//! RFC 3339. One calendar conversion, because a second copy of it is the kind of
+//! code that is wrong for four years without anyone noticing.
 
 /// Format whole Unix seconds as a `snapshot.debian.org` timestamp,
 /// `YYYYMMDDTHHMMSSZ` in UTC — the spelling a snapshot mirror URL takes.

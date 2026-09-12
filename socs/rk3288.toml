@@ -109,7 +109,7 @@ groups = ["audio"]
 # the end of a build; the board layer adds what is true of one board rather than the
 # part.
 caveats = [
-  "HDMI tops out at 4K30 and cannot reach 4K60: the RK3288 caps TMDS at 340 MHz, its PHY has no scrambling above that, and the VOP cannot emit YUV420, so there is no reduced-rate path either.",
+  "HDMI tops out at 4K30 and cannot reach 4K60. The RK3288 caps TMDS at 340 MHz, and its PHY has no scrambling above that. The VOP cannot emit YUV420, so there is no reduced-rate path either.",
 ]
 
 # No [userspace] / [ffmpeg]: there is no Rockchip media-accel userspace stack for the

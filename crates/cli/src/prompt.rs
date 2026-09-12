@@ -1,9 +1,12 @@
 //! Terminal prompts for the `new-device` scaffold wizard.
 //!
-//! Every helper resolves one scaffold value under the same contract: an explicit
-//! flag wins outright, a terminal gets a prompt (blank takes the default), and a
-//! non-interactive run takes the default silently — so the wizard and the
-//! flag-driven scripted path produce the same file.
+//! Every helper resolves one scaffold value under the same contract:
+//!
+//! - An explicit flag wins outright.
+//! - A terminal gets a prompt, and a blank answer takes the default.
+//! - A non-interactive run takes the default silently.
+//!
+//! The wizard and the flag-driven scripted path therefore produce the same file.
 
 use std::io::Write as _;
 

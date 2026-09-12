@@ -99,7 +99,7 @@ image_size              = "2G"
 # the silicon. Rendered in the support matrix and printed at the end of a build.
 caveats = [
   "Only the blue port beside HDMI carries USB 3.0. It reaches 5 Gbps and holds ~154 MB/s over sustained reads. The black ports never will -- they sit behind an internal USB 2.0 hub, and their SuperSpeed lane reaches no connector.",
-  "A drive in the blue port that enumerates at 480 Mb/s is usually not seated. With the board sitting back from the enclosure's front panel a plug bottoms out on the case before the connector's recessed SuperSpeed contacts mate, so USB 2.0 works perfectly and SuperSpeed is silent. Push the plug fully home, or reseat the board against the panel.",
+  "A drive in the blue port that enumerates at 480 Mb/s is usually not seated. With the board sitting back from the enclosure's front panel, a plug bottoms out on the case before the connector's recessed SuperSpeed contacts mate. USB 2.0 then works perfectly and SuperSpeed is silent. Push the plug fully home, or reseat the board against the panel.",
   "There is no SD-card slot: it is depopulated on this box. eMMC and USB are the only storage.",
 ]
 

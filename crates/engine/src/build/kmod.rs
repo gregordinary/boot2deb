@@ -1,16 +1,25 @@
-//! Out-of-tree kernel-module build stage: for each kmod the board named, fetch the
-//! pinned driver repo, apply its own quilt (plus any boot2deb-authored compat
-//! patches), build the module against the freshly built kernel tree with `make M=`, and
-//! package the resulting `.ko`s as a `<name>-modules-<kver>` `.deb` that installs them
-//! into `/lib/modules/<kver>/updates/` and runs `depmod` on configure.
+//! Out-of-tree kernel-module build stage.
+//!
+//! For each kmod the board named, this stage:
+//!
+//! - Fetches the pinned driver repo.
+//! - Applies its own quilt, plus any boot2deb-authored compat patches.
+//! - Builds the module against the freshly built kernel tree with `make M=`.
+//! - Packages the resulting `.ko`s as a `<name>-modules-<kver>` `.deb`.
+//!
+//! That `.deb` installs the modules into `/lib/modules/<kver>/updates/` and runs
+//! `depmod` on configure.
 //!
 //! This is the kernel-side analogue of the userspace-from-git nodes
-//! ([`build_userspace`](crate::build::userspace::build_userspace)): the source is a
-//! pinned git repo we fetch, not a series we author, and the compat patch is the tracked
-//! fork's own quilt — updates are a pin bump. Unlike the userspace node it builds
-//! host-side with the kernel's cross toolchain (not the target-arch rootless sandbox),
-//! because a module links against the kernel's `Module.symvers` and must match its
-//! vermagic. Engine side effects (git, make, packaging) live here; the pins it reads are
+//! ([`build_userspace`](crate::build::userspace::build_userspace)). The source is a
+//! pinned git repo this stage fetches, rather than a series boot2deb authors. The
+//! compat patch is the tracked fork's own quilt, and updates are a pin bump.
+//!
+//! Unlike the userspace node it builds host-side with the kernel's cross toolchain,
+//! not the target-arch rootless sandbox. A module links against the kernel's
+//! `Module.symvers` and must match its vermagic.
+//!
+//! Engine side effects (git, make, packaging) live here. The pins it reads are
 //! resolved in [`crate::pins`].
 
 use crate::build::{self, BuildEnv};
@@ -30,9 +39,9 @@ const TREE_STAGE_VERSION: u32 = 1;
 
 /// Where this stage's driver trees and packaging scratch live under `work_dir`
 /// (`<work_dir>/kmod`) — one directory per declared module inside it. Exposed for the
-/// same reason [`kernel::tree_dir`](crate::build::kernel::tree_dir) is: a reader of the
-/// tree — [`crate::shell`], which starts an interactive session in it — should not
-/// restate the layout literal.
+/// same reason [`kernel::tree_dir`](crate::build::kernel::tree_dir) is. A reader of
+/// the tree, such as [`crate::shell`], which starts an interactive session in it, does
+/// not restate the layout literal.
 pub fn stage_dir(work_dir: &Path) -> PathBuf {
     work_dir.join("kmod")
 }
@@ -50,38 +59,39 @@ const OUTPUT_STAGE_VERSION: u32 = 4;
 const FIRMWARE_STAGE_VERSION: u32 = 3;
 
 /// Filesystem inputs for the kmod stage. The resolved build carries the descriptors
-/// (`subdir`/patches/`make_args`/modules) and the lock the git pins; these are the
+/// (`subdir`/patches/`make_args`/modules), and the lock the git pins. These are the
 /// on-disk locations plus the resolved local-patch paths the CLI expanded.
 pub struct KmodOptions<'a> {
     /// The kernel stage's options — reused to reach (and, if a `--stage kmod` run or a
     /// kernel cache hit left no tree, rebuild) the built kernel tree via
     /// [`kernel::ensure_module_tree`](crate::build::kernel::ensure_module_tree).
     pub kernel: &'a crate::build::kernel::KernelOptions<'a>,
-    /// Per-name clone-source overrides (`(name, url-or-path)`) from `--kmod-src`; a
+    /// Per-name clone-source overrides (`(name, url-or-path)`) from `--kmod-src`. A
     /// name absent here uses that kmod's locked `source`.
     ///
     /// Keyed by name because a board declares several modules, unlike the single-tree
     /// axes whose `--*-src` flags take a bare source. The override redirects only
-    /// *where* the tree is cloned from — the commit is still the lock's, so a local
+    /// *where* the tree is cloned from. The commit is still the lock's, so a local
     /// mirror is a faster fetch and never a different build.
     pub sources: &'a [(String, String)],
     /// Per-name resolved local-patch paths (`(name, [abs path, …])`) — each kmod's
     /// `local_patches`, expanded from bare filenames to absolute paths by the CLI, in
     /// apply order. A name absent here applies no local patch.
     pub local_patches: &'a [(String, Vec<PathBuf>)],
-    /// Scratch dir; each fetched+patched driver tree is `<work>/kmod/<name>` and the
-    /// packaging stage lives beside it.
+    /// Scratch dir. Each fetched and patched driver tree is `<work>/kmod/<name>`, and
+    /// the packaging stage lives beside it.
     pub work_dir: &'a Path,
     /// Directory the produced `.deb`s are staged into.
     pub out_dir: &'a Path,
     /// The root the modules and firmware `.deb`s are archived in.
     ///
     /// Provisioned lazily by this stage: a build whose kmod artifacts all restore from
-    /// the cache archives nothing and should not pay for a bootstrap. Its identity is
+    /// the cache archives nothing and does not pay for a bootstrap. Its identity is
     /// folded into both output signatures — it decides the archive bytes.
     pub packaging: &'a PackagingSandbox,
     /// Root of the Tier-2 artifact store, or `None` to disable output caching. A hit
-    /// restores the `.deb` without touching the kernel tree; a miss builds and stores it.
+    /// restores the `.deb` without touching the kernel tree. A miss builds and stores
+    /// it.
     pub store: Option<&'a Path>,
 }
 
@@ -885,11 +895,18 @@ pub fn tree_signature_manifest(
     b.manifest()
 }
 
-/// The Tier-2 output signature of the `<name>-modules-<kver>.deb`. Folds the kernel tree
-/// signature (a kernel commit/patch bump changes module vermagic), the driver commit +
-/// applied patches, the subdir, the make args, the module list, arch, and toolchain id —
-/// every input that changes the produced `.ko`s — plus the identity of the packaging
-/// root, which decides the archive those `.ko`s are wrapped in.
+/// The Tier-2 output signature of the `<name>-modules-<kver>.deb`.
+///
+/// It folds every input that changes the produced `.ko`s:
+///
+/// - The kernel tree signature, since a kernel commit or patch bump changes module
+///   vermagic.
+/// - The driver commit plus applied patches.
+/// - The subdir, the make args, and the module list.
+/// - Arch and toolchain id.
+///
+/// It also folds the identity of the packaging root, which decides the archive those
+/// `.ko`s are wrapped in.
 pub fn output_manifest(
     k: &ResolvedKmod,
     pin: &KmodPin,
@@ -933,9 +950,11 @@ pub fn firmware_node_name(name: &str) -> String {
 /// (which content-addresses the repo and its quilt, hence the firmware bytes at that
 /// commit), the applied patch list + local-patch fingerprints (a patch could touch the
 /// firmware dir), the firmware source/install paths, and the identity of the packaging
-/// root. No arch and no toolchain: the package is `Architecture: all` and nothing is
-/// compiled — but something still *archives* it, and that is not arch-dependent either,
-/// so the packaging root is folded where the compiler is not.
+/// root.
+///
+/// No arch and no toolchain: the package is `Architecture: all` and nothing is
+/// compiled. Something still *archives* it, and that is not arch-dependent either, so
+/// the packaging root is folded where the compiler is not.
 pub fn firmware_output_manifest(
     k: &ResolvedKmod,
     fw: &KmodFirmware,

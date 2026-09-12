@@ -5,8 +5,8 @@
 //! [`EventSink`] (a callback or trait object). The serialized form is the
 //! CLI's `--json` wire format: one event per line, each a JSON object tagged
 //! by its `event` field (the serde `tag` below), e.g.
-//! `{"event":"step_started","step":"kernel"}`. Variants and fields may still
-//! grow; consumers should ignore unknown `event` tags.
+//! `{"event":"step_started","step":"kernel"}`. Variants and fields can still grow, so
+//! a consumer must ignore an unknown `event` tag.
 //!
 //! Every event carries the `step` it belongs to (a build-graph node such as
 //! `kernel` or `uboot`), so a flat stream stays self-describing once
@@ -29,12 +29,14 @@ pub enum Stream {
 /// Who wrote a [`Event::Log`] line.
 ///
 /// The two are the same variant because they belong to the same step and the same
-/// ordering, but they are not the same *kind* of information: a stage's own lines
+/// ordering. They are not the same *kind* of information. A stage's own lines
 /// summarize what it decided ("reusing the kernel tree", "restored from the artifact
-/// cache") in tens of lines, while relayed output is the tens of thousands of lines
-/// `make` emits. Without the distinction a renderer has to choose between showing
-/// everything and showing nothing; with it, a default verbosity can show what the
-/// build decided and leave the compile chatter behind `--verbose`.
+/// cache") in tens of lines. Relayed output is the tens of thousands of lines `make`
+/// emits.
+///
+/// Without the distinction a renderer has to choose between showing everything and
+/// showing nothing. With it, a default verbosity can show what the build decided and
+/// leave the compile chatter behind `--verbose`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogOrigin {
@@ -46,8 +48,8 @@ pub enum LogOrigin {
 
 /// Where a finished step's outputs came from.
 ///
-/// The companion to a step's duration, and the reason the duration is worth reading:
-/// a thirty-second kernel step is a cache hit, and a reader who cannot tell the two
+/// The companion to a step's duration, and the reason the duration is worth reading.
+/// A thirty-second kernel step is a cache hit, and a reader who cannot tell the two
 /// apart has to guess. Reported by the step itself rather than inferred from how long
 /// it took, since that inference is exactly what this removes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,11 +58,11 @@ pub enum StepOutcome {
     /// This run produced the step's outputs. Also what a step with nothing to cache
     /// reports — the image node assembles a disk every time.
     Built,
-    /// Every output came back from the artifact cache; nothing was compiled.
+    /// Every output came back from the artifact cache. Nothing was compiled.
     Restored,
     /// Some outputs were restored and some were built. Reachable only from a step
-    /// whose outputs are cached individually rather than as a set — the userspace
-    /// stage builds several `.deb`s, each with its own signature.
+    /// whose outputs are cached individually rather than as a set. The userspace stage
+    /// builds several `.deb`s, each with its own signature.
     Mixed,
 }
 
@@ -77,7 +79,7 @@ impl StepOutcome {
 
 /// A single event in a build's structured stream.
 ///
-/// Consumers render or forward these; they are the whole observable surface of a
+/// Consumers render or forward these. They are the whole observable surface of a
 /// running build. `pct` on [`Progress`](Event::Progress) is coarse and
 /// phase-based (a stage reports it at sub-step boundaries), not a fine-grained
 /// byte/line ratio.
@@ -120,9 +122,9 @@ pub enum Event {
         /// interpretable.
         outcome: StepOutcome,
     },
-    /// A produced artifact's location — the structured counterpart of the CLI's
-    /// human `role : path` summary lines, so a `--json` consumer gets the paths
-    /// (image, `.deb`s, boot payloads) without scraping log lines.
+    /// A produced artifact's location, the structured counterpart of the CLI's human
+    /// `role : path` summary lines. A `--json` consumer gets the paths (image, `.deb`s,
+    /// boot payloads) without scraping log lines.
     Artifact {
         /// The step that produced it.
         step: String,
@@ -131,9 +133,9 @@ pub enum Event {
         /// Its path on the build host.
         path: String,
     },
-    /// A build step failed. The build stops; `context` is a human-readable
-    /// summary (the typed [`EngineError`](crate::EngineError) is returned
-    /// separately to the caller).
+    /// A build step failed and the build stops. `context` is a human-readable summary
+    /// (the typed [`EngineError`](crate::EngineError) is returned separately to the
+    /// caller).
     Error {
         /// The step that failed.
         step: String,
@@ -146,7 +148,7 @@ pub enum Event {
 /// prints) and, later, by whatever bridges the stream to the UI.
 ///
 /// A blanket impl covers any `Fn(Event)`, so a closure is a sink. `emit` takes
-/// `&self`; a sink that accumulates uses interior mutability.
+/// `&self`, so a sink that accumulates uses interior mutability.
 pub trait EventSink {
     /// Deliver one event.
     fn emit(&self, event: Event);
@@ -159,8 +161,8 @@ impl<F: Fn(Event)> EventSink for F {
 }
 
 /// A handle bound to one step and the sink, so a stage emits events without
-/// repeating the step name. Constructed with [`Step::start`] (which emits
-/// [`Event::StepStarted`]); call [`Step::finish`] on success. On failure a stage
+/// repeating the step name. Constructed with [`Step::start`], which emits
+/// [`Event::StepStarted`]. Call [`Step::finish`] on success. On failure a stage
 /// returns its error instead of finishing, and the orchestrator emits
 /// [`Event::Error`].
 pub struct Step<'a> {
@@ -193,8 +195,8 @@ impl<'a> Step<'a> {
     /// instead of being produced by this run.
     ///
     /// A step that restores *some* of its outputs must also call
-    /// [`compiled`](Step::compiled) for the rest, or it will claim to have restored a
-    /// set it partly compiled. Stages that cache through the shared
+    /// [`compiled`](Step::compiled) for the rest. Otherwise it claims to have restored
+    /// a set it partly compiled. Stages that cache through the shared
     /// `restore_stage_outputs`/`store_stage_outputs` pair have both halves recorded for
     /// them, so only a stage driving the artifact store itself calls these.
     pub fn restored(&self) {
@@ -204,7 +206,7 @@ impl<'a> Step<'a> {
     /// Record that one of this step's outputs was produced by this run — the other
     /// half of the pair described on [`restored`](Step::restored).
     ///
-    /// A step that restores nothing may skip this: with `restored` unset the outcome
+    /// A step that restores nothing can skip this. With `restored` unset the outcome
     /// is [`StepOutcome::Built`] regardless, which already claims the work was done.
     pub fn compiled(&self) {
         self.compiled.set(true);

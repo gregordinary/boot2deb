@@ -1,24 +1,25 @@
-//! ffmpeg-rk compile stage: assemble the hybrid FFmpeg — mainline
-//! V4L2-request stateless *decode* from the Kwiboo base, Rockchip rkmpp *encode*
-//! and rkrga *scale* grafted on from nyanmisaka — and package it as the
-//! `ffmpeg-rk` `.deb`.
+//! ffmpeg-rk compile stage: assemble the hybrid FFmpeg and package it as the
+//! `ffmpeg-rk` `.deb`. It is mainline V4L2-request stateless *decode* from the Kwiboo
+//! base, with Rockchip rkmpp *encode* and rkrga *scale* grafted on from nyanmisaka.
 //!
-//! The graft is the series' ffmpeg `git am` series: the nyanmisaka
-//! encode/scale commits, resolved and materialized as patches (one — the RKMPP
-//! hwcontext — needs a 3-way conflict resolution a plain cherry-pick cannot
-//! reproduce), followed by the NV15 scale_rkrga fix. A patch that will not apply
-//! is a hard error naming it — the "never silently skip" contract of the verify
-//! gate. The build fetches only the base tree; the series carries the graft.
+//! The graft is the series' ffmpeg `git am` series: the nyanmisaka encode/scale
+//! commits, resolved and materialized as patches, followed by the NV15 scale_rkrga
+//! fix. One of them, the RKMPP hwcontext, needs a 3-way conflict resolution a plain
+//! cherry-pick cannot reproduce. A patch that will not apply is a hard error naming
+//! it, the "never silently skip" contract of the verify gate. The build fetches only
+//! the base tree, and the series carries the graft.
+//!
 //! Then `./configure` + `make` + `make install` run inside a target-arch
-//! [`BuildSandbox`], and the staged install tree is wrapped into a self-contained
-//! `.deb` installing to `/opt/ffmpeg-rk` so it coexists with any system FFmpeg.
+//! [`BuildSandbox`]. The staged install tree is wrapped into a self-contained `.deb`
+//! installing to `/opt/ffmpeg-rk`, so it coexists with any system FFmpeg.
 //!
 //! ffmpeg build-depends on the userspace `-dev` packages (`librockchip-mpp-dev` +
 //! `librga-dev`) and runtime-depends on `librockchip-mpp1` + `librga2`. Those packages
-//! are this build's own output, so the stage publishes the `.deb`s a prior
-//! [`userspace`] run produced as a trusted `file://` pool and layers them into its
-//! build root from there — resolved like any other package, with their transitive
-//! dependencies, rather than pushed into the tree behind the resolver's back.
+//! are this build's own output. The stage therefore publishes the `.deb`s a prior
+//! [`userspace`] run produced as a trusted `file://` pool, and layers them into its
+//! build root from there. They are resolved like any other package, with their
+//! transitive dependencies, rather than pushed into the tree behind the resolver's
+//! back.
 //!
 //! [`userspace`]: crate::build::userspace
 
@@ -49,8 +50,8 @@ const INSTALL_PREFIX: &str = "/opt/ffmpeg-rk";
 /// The artifact-store node this stage keys its outputs under, and the label
 /// [`why-rebuild`](crate::plan) predicts against.
 ///
-/// A constant because the two have to be the *same string*: the store is keyed by
-/// `(node, signature)`, so a prediction computed under a different node name would
+/// A constant because the two have to be the *same string*. The store is keyed by
+/// `(node, signature)`. A prediction computed under a different node name would
 /// answer a question about an entry no build ever wrote. It is the counterpart of the
 /// path helper above — one names where the tree is, this names where the artifacts are.
 pub const NODE: &str = "ffmpeg";
@@ -59,12 +60,12 @@ pub const NODE: &str = "ffmpeg";
 /// fetch/patch logic that shapes the reused tree changes.
 const CLONE_STAGE_VERSION: u32 = 1;
 
-/// Where this stage's scratch lives under `work_dir` (`<work_dir>/ffmpeg`): the source
-/// tree at [`tree_dir`], the install staging beside it, and the pool the layer resolves
-/// this build's own `.deb`s from. Exposed for the same reason
-/// [`kernel::tree_dir`](crate::build::kernel::tree_dir) is: a reader of the tree —
-/// [`crate::shell`], which starts an interactive session in it — should not restate the
-/// layout literal.
+/// Where this stage's scratch lives under `work_dir` (`<work_dir>/ffmpeg`). That is
+/// the source tree at [`tree_dir`], the install staging beside it, and the pool the
+/// layer resolves this build's own `.deb`s from. Exposed for the same reason
+/// [`kernel::tree_dir`](crate::build::kernel::tree_dir) is. A reader of the tree
+/// restates no layout literal, and [`crate::shell`] starts an interactive session in
+/// it.
 pub fn stage_dir(work_dir: &Path) -> PathBuf {
     work_dir.join("ffmpeg")
 }
@@ -201,16 +202,16 @@ fn userspace_layer_packages(trees: &[UserspaceTree]) -> Vec<String> {
 /// The whole build-dependency set this stage layers over the sandbox base: the suite's
 /// codec libraries plus this build's own userspace `.deb`s.
 ///
-/// One function, read by the [`BuildRootSpec`] that stages the layer *and* by the output
-/// signature that keys on it, so a package cannot reach `./configure` without reaching
-/// the key. Which matters here more than anywhere: ffmpeg's `./configure` is a probe
-/// suite, and every entry decides whether a codec is compiled in. [`crate::shell`] reads
-/// it too, so an interactive session lands in the root this stage compiles in rather
-/// than one that resembles it.
+/// One function, read by the [`BuildRootSpec`] that stages the layer *and* by the
+/// output signature that keys on it. A package therefore cannot reach `./configure`
+/// without reaching the key. That matters here more than anywhere: ffmpeg's
+/// `./configure` is a probe suite, and every entry decides whether a codec is compiled
+/// in. [`crate::shell`] reads it too, so an interactive session lands in the root this
+/// stage compiles in rather than one that resembles it.
 ///
-/// `nonfree` is the build's licence flavour, and it moves this set in step with the
-/// configure flags: the two flavours differ in what they ask `./configure` for *and* in
-/// what is present for it to find, which is what makes them different builds rather
+/// `nonfree` is the build's license flavor, and it moves this set in step with the
+/// configure flags. The two flavors differ in what they ask `./configure` for *and* in
+/// what is present for it to find. That is what makes them different builds rather
 /// than the same build described differently.
 pub fn layer_packages(trees: &[UserspaceTree], nonfree: bool, libs: &[FfmpegLib]) -> Vec<String> {
     let mut packages: Vec<String> = FFMPEG_DEPS.iter().map(|p| (*p).to_string()).collect();
@@ -409,35 +410,35 @@ pub struct FfmpegOptions<'a> {
     /// [`ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree), passed through
     /// rather than re-derived so the stage cannot disagree with what was resolved.
     ///
-    /// It is not in the lock because it is not a source pin: it is an axis of the
+    /// It is not in the lock because it is not a source pin. It is an axis of the
     /// build point, resolved from the selected features exactly like the feature list
-    /// itself, and the provenance manifest records it there. `true` produces a `.deb`
-    /// that may not be redistributed.
+    /// itself. The provenance manifest records it there. `true` produces a `.deb`
+    /// that cannot be redistributed.
     pub nonfree: bool,
     /// The userspace trees this build compiles, as the SoC declares them and resolution
     /// narrowed them.
     ///
-    /// The whole set, not only the ones ffmpeg links: a tree ffmpeg ignores still
+    /// The whole set, not only the ones ffmpeg links. A tree ffmpeg ignores still
     /// decides what the *userspace* stage layered over the shared sandbox base
-    /// ([`layer_packages`](crate::build::userspace::layer_packages)), and this stage's
-    /// key folds those packages' output signatures — so recomputing them here from a
-    /// smaller set would name `.deb`s that were never built.
+    /// ([`layer_packages`](crate::build::userspace::layer_packages)). This stage's key
+    /// folds those packages' output signatures. Recomputing them here from a smaller
+    /// set would name `.deb`s that were never built.
     pub trees: &'a [UserspaceTree],
-    /// Scratch directory; the ffmpeg tree, `pkg-stage`, and the built `.deb` live
+    /// Scratch directory. The ffmpeg tree, `pkg-stage`, and the built `.deb` live
     /// under `<work>/ffmpeg/`.
     pub work_dir: &'a Path,
     /// Directory the produced `.deb` is staged into.
     pub out_dir: &'a Path,
     /// Root of the Tier-2 artifact store ([`crate::artstore`]), or `None` to
-    /// disable output caching. On a hit the `ffmpeg-rk` deb is restored; on a miss it
+    /// disable output caching. On a hit the `ffmpeg-rk` deb is restored. On a miss it
     /// is stored after the build.
     pub store: Option<&'a Path>,
     /// The prebuilt libraries this build links, from
     /// [`ResolvedImage::ffmpeg_libs`](boot2deb_core::ResolvedImage::ffmpeg_libs).
     ///
     /// They decide a `./configure` flag and a pair of build-root packages each, the
-    /// same three things a linked [`UserspaceTree`] decides, and the packages are
-    /// resolved out of [`extra_debs`](Self::extra_debs) rather than the suite.
+    /// same three things a linked [`UserspaceTree`] decides. The packages are resolved
+    /// out of [`extra_debs`](Self::extra_debs) rather than the suite.
     pub libs: &'a [FfmpegLib],
     /// Materialized paths of the locked `extra_debs` that target this stage, which
     /// join this build's own userspace `.deb`s in the pool the build root resolves
@@ -658,20 +659,25 @@ pub fn build_ffmpeg(
 
 /// The Tier-2 output signature manifest of the `ffmpeg-rk` deb. It folds the
 /// Tier-1 tree signature ([`clone_manifest`]) as a dependency (base commit + patch
-/// series), then the inputs the sandbox build adds: the `./configure` feature flags
-/// (order-sensitive), the target arch, the base ref (which becomes the deb version),
-/// and the **suite**. Unlike the host-cross kernel/u-boot nodes, ffmpeg compiles
-/// inside the target-arch sandbox, whose toolchain is the suite's `gcc`; the suite
-/// stands in for that toolchain identity, and the runtime `Depends` `dpkg-shlibdeps`
-/// resolves against the suite's libraries. The residual within-suite `gcc`
-/// point-release drift is bounded and these accel debs are not byte-gated, so a hit
-/// restores a functionally-equivalent deb; `--no-artifact-cache` forces a rebuild.
+/// series), then the inputs the sandbox build adds:
+///
+/// - The `./configure` feature flags (order-sensitive)
+/// - The target arch
+/// - The base ref, which becomes the deb version
+/// - The **suite**
+///
+/// Unlike the host-cross kernel/u-boot nodes, ffmpeg compiles inside the target-arch
+/// sandbox, whose toolchain is the suite's `gcc`. The suite stands in for that
+/// toolchain identity, and the runtime `Depends` `dpkg-shlibdeps` resolves against the
+/// suite's libraries. The residual within-suite `gcc` point-release drift is bounded
+/// and these accel debs are not byte-gated, so a hit restores a functionally
+/// equivalent deb. `--no-artifact-cache` forces a rebuild.
 ///
 /// It also folds the Tier-2 output signatures of the **MPP** and **RGA** userspace
 /// packages ffmpeg build-depends on (`--enable-rkmpp`/`--enable-rkrga`), recomputed
-/// from the lock: the built ffmpeg deb links against those `.deb`s, so a
-/// change to a userspace pin, patch series, suite, or arch must invalidate the cached
-/// ffmpeg deb rather than restore one built against stale userspace libraries. Only
+/// from the lock. The built ffmpeg deb links against those `.deb`s. A change to a
+/// userspace pin, patch series, suite, or arch must invalidate the cached deb rather
+/// than restore a stale one. Only
 /// MPP carries the `userspace` patch scope, so its dep folds `us_patches`
 /// while RGA is unpatched. Folding the lock-derived dep *signatures* (not the built
 /// deb bytes) keeps the key computable without the userspace `.deb`s present.
@@ -682,10 +688,10 @@ pub fn build_ffmpeg(
 /// `.deb` and is not already in the lock.
 ///
 /// A struct rather than six positional arguments, for the reason
-/// [`rootcache::CacheKeyInputs`](crate::rootcache::CacheKeyInputs) gives: most of these
+/// [`rootcache::CacheKeyInputs`](crate::rootcache::CacheKeyInputs) gives. Most of these
 /// are `&str`- or `bool`-shaped, so a swapped pair would silently change every key
-/// rather than fail to compile — and a wrong key here restores a deb built from
-/// something else.
+/// rather than fail to compile. A wrong key here restores a deb built from something
+/// else.
 #[derive(Clone, Copy)]
 pub struct OutputKeyInputs<'a> {
     /// The Debian architecture the deb is built for.
@@ -695,12 +701,12 @@ pub struct OutputKeyInputs<'a> {
     pub sandbox_id: &'a str,
     /// The userspace trees this build compiles, as the SoC declares them and resolution
     /// narrowed them. They decide the configure flags, the layered build-deps and the
-    /// folded dependency signatures at once, so the key carries the set rather than a
-    /// flag per tree.
+    /// folded dependency signatures at once. The key therefore carries the set rather
+    /// than a flag per tree.
     pub trees: &'a [UserspaceTree],
-    /// The licence flavour — `--enable-nonfree`. It moves both folded inputs at once
+    /// The license flavor — `--enable-nonfree`. It moves both folded inputs at once
     /// (the ordered `configure_flags` and the `build_deps` set), so the key separates
-    /// the two flavours without a term of its own.
+    /// the two flavors without a term of its own.
     pub nonfree: bool,
     /// The ffmpeg patch series' identity.
     pub patches: SeriesIdentity<'a>,
@@ -708,13 +714,13 @@ pub struct OutputKeyInputs<'a> {
     pub us_patches: SeriesIdentity<'a>,
     /// The prebuilt libraries this build links. They move the configure flags and the
     /// layered build-deps together, and their bytes are folded separately from the
-    /// lock, so a re-cut deb of the same library rebuilds rather than restores.
+    /// lock. A re-cut deb of the same library therefore rebuilds rather than restores.
     pub libs: &'a [FfmpegLib],
 }
 
-/// `nonfree` is the build's licence flavour, and it is why the two flavours of one
-/// recipe never share a cached deb: it moves both folded inputs at once — the ordered
-/// `configure_flags` and the `build_deps` set — so the key separates them without a
+/// `nonfree` is the build's license flavor, and it is why the two flavors of one
+/// recipe never share a cached deb. It moves both folded inputs at once, the ordered
+/// `configure_flags` and the `build_deps` set, so the key separates them without a
 /// term of its own.
 pub fn output_manifest(
     lock: &Lock,
@@ -797,9 +803,9 @@ pub fn output_manifest(
 /// The Tier-1 signature manifest of the fetched+patched ffmpeg tree: the
 /// base commit and the patch series (`build::fold_patch_series`) that together
 /// determine the tree. The source URL is excluded (the commit content-addresses the
-/// base). The [`SeriesIdentity`] fold covers the pinned patch commit and — in co-dev
-/// mode — the live-series fingerprint, so a co-dev build never shares a
-/// stamp with a pinned one and an edited patch restamps. Public so `why-rebuild`
+/// base). The [`SeriesIdentity`] fold covers the pinned patch commit and, in co-dev
+/// mode, the live-series fingerprint. A co-dev build therefore never shares a stamp
+/// with a pinned one, and an edited patch restamps. Public so `why-rebuild`
 /// ([`crate::plan`]) recomputes the same signature it stamps here. Takes the
 /// [`FfmpegPins`] and the patch series/commit directly rather than the whole
 /// [`Lock`], since it is only meaningful for a media-accel build (one that has

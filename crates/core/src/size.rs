@@ -1,26 +1,32 @@
 //! Parse human-authored size / offset strings (`32KiB`, `8MiB`, `2G`) to bytes.
 //!
 //! Config carries the raw-gap offsets and the image size as authored strings
-//! ([`Offsets`](crate::model::Offsets), [`ResolvedImage::image_size`](crate::model::ResolvedBuild));
-//! they are parsed to exact byte counts only when an artifact is written — the
-//! u-boot deb's documented `dd` offsets and the image node's partition
-//! geometry. This is that parse: pure and deterministic, so the geometry
-//! is unit-testable without touching a disk.
+//! ([`Offsets`](crate::model::Offsets), [`ResolvedImage::image_size`](crate::model::ResolvedBuild)).
+//! They are parsed to exact byte counts only when an artifact is written. Those are
+//! the u-boot deb's documented `dd` offsets, and the image node's partition geometry.
 //!
-//! Units are binary (powers of 1024), matching the authored values and the
-//! builder's `m = 1024²` / `g = 1024³` convention — `K`/`KB`/`KiB` are all 1024,
-//! and so on up through `T`. Parsing is case-insensitive and tolerates
-//! whitespace around the number and unit.
+//! This is that parse, pure and deterministic, so the geometry is unit-testable
+//! without touching a disk.
+//!
+//! Units are binary (powers of 1024), matching the authored values and the builder's
+//! `m = 1024²` / `g = 1024³` convention. `K`/`KB`/`KiB` are all 1024, and so on up
+//! through `T`. Parsing is case-insensitive and tolerates whitespace around the
+//! number and unit.
 
 use crate::error::ConfigError;
 
 /// Parse a size / offset string to a byte count.
 ///
-/// Accepts a bare integer (bytes) or an integer with a binary unit suffix —
-/// `K`/`KB`/`KiB` (×1024), `M`/`MB`/`MiB` (×1024²), `G`/`GB`/`GiB` (×1024³),
-/// `T`/`TB`/`TiB` (×1024⁴) — case-insensitively, with optional whitespace
-/// around the unit. A malformed string, a missing or unknown unit, or a value
-/// that overflows [`u64`] is a [`ConfigError::InvalidSize`].
+/// Accepts a bare integer (bytes), or an integer with a binary unit suffix:
+///
+/// - `K`/`KB`/`KiB` (×1024).
+/// - `M`/`MB`/`MiB` (×1024²).
+/// - `G`/`GB`/`GiB` (×1024³).
+/// - `T`/`TB`/`TiB` (×1024⁴).
+///
+/// The suffix is case-insensitive, with optional whitespace around it. A malformed
+/// string, a missing or unknown unit, or a value that overflows [`u64`] is a
+/// [`ConfigError::InvalidSize`].
 ///
 /// ```
 /// use boot2deb_core::size::parse_size;
@@ -45,12 +51,12 @@ pub fn parse_size(input: &str) -> Result<u64, ConfigError> {
 ///
 /// For a value resolution *derived* rather than read from config — the depthcharge
 /// rootfs offset, computed from the slot geometry. Everything else on a resolved
-/// build carries the author's own string, so a derived value should read like one
+/// build carries the author's own string. A derived value therefore reads like one,
 /// instead of appearing as the lone bare byte count in the output.
 ///
-/// Exact division only: `76MiB` for 79691776, but a value no unit divides stays
-/// bytes rather than being rounded, since these are offsets and a rounded offset is
-/// the wrong offset.
+/// Exact division only: `76MiB` for 79691776. A value no unit divides stays bytes
+/// rather than being rounded, since these are offsets and a rounded offset is the
+/// wrong offset.
 ///
 /// ```
 /// use boot2deb_core::size::{format_size, parse_size};
@@ -78,12 +84,13 @@ pub fn format_size(bytes: u64) -> String {
 /// What an authored `image_size` asks for: a stated whole-disk size, or one to be
 /// measured from the rootfs itself.
 ///
-/// The two run the image node in opposite orders. A stated size lays out the disk first
-/// and formats the rootfs into the partition that leaves; a fitted one formats first —
-/// searching for the smallest filesystem that holds the rootfs with the stated room to
-/// spare — and lays out the disk around the answer. Only the grammar is decided here;
-/// what a fit costs and what limits it are the formatter's, and the image node applies
-/// them.
+/// The two run the image node in opposite orders. A stated size lays out the disk
+/// first and formats the rootfs into the partition that leaves. A fitted one formats
+/// first, searching for the smallest filesystem that holds the rootfs with the stated
+/// room to spare. It then lays out the disk around the answer.
+///
+/// Only the grammar is decided here. What a fit costs and what limits it are the
+/// formatter's, and the image node applies them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageSize {
     /// An authored whole-disk size in bytes (`4G`).
@@ -94,9 +101,9 @@ pub enum ImageSize {
 
 /// How much of a fitted rootfs must remain free once it holds the source.
 ///
-/// A restatement of the formatter's own slack in terms this crate can hold — the image
-/// node translates it — because the *grammar* is config's business and this crate is
-/// where an authored string is validated, while the search that consumes it is not.
+/// A restatement of the formatter's own slack in terms this crate can hold, which the
+/// image node translates. The *grammar* is config's business, and this crate is where
+/// an authored string is validated. The search that consumes it is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slack {
     /// At least this many bytes free.
@@ -111,14 +118,14 @@ pub enum Slack {
 /// The grammar is a plain size ([`parse_size`]), or `fit+<slack>` where the slack is a
 /// share (`fit+20%`, `fit+1.5%`) or a byte count (`fit+512M`).
 ///
-/// A bare `fit` is refused: the smallest filesystem holding a rootfs is one with nothing
-/// left in it, which boots into a full disk, so the room to leave is stated rather than
-/// defaulted. `fit+0%` is accepted — an explicit zero is a decision, an unstated one is
-/// an omission.
+/// A bare `fit` is refused. The smallest filesystem holding a rootfs is one with
+/// nothing left in it, which boots into a full disk. The room to leave is therefore
+/// stated rather than defaulted. `fit+0%` is accepted — an explicit zero is a
+/// decision, an unstated one is an omission.
 ///
-/// This validates the *form* only. Whether a share or a byte slack is within the limits
-/// the search will accept is checked where the search lives, together with the rest of
-/// the image geometry.
+/// This validates the *form* only. Whether a share or a byte slack is within the
+/// limits the search will accept is checked where the search lives. That check happens
+/// together with the rest of the image geometry.
 ///
 /// ```
 /// use boot2deb_core::size::{parse_image_size, ImageSize, Slack};

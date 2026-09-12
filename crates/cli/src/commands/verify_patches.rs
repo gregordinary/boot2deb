@@ -1,21 +1,26 @@
 //! `verify-patches`: the patch gate — dry-run the locked series with `git am --3way`.
 //!
 //! Both patch axes are covered. The kernel axis verifies the `kernel` scope, plus
-//! `ffmpeg`/`userspace` when the series carries patches for them; the u-boot axis
-//! verifies the `uboot` scope. A recipe carrying one axis verifies that one; a
-//! recipe carrying both verifies both, each against its own version — a u-boot
-//! series makes no claim about a kernel, so reporting them at one target would
-//! misdescribe one of them.
+//! `ffmpeg` and `userspace` when the series carries patches for them. The u-boot
+//! axis verifies the `uboot` scope.
 //!
-//! Each tree is either an explicit `--<tree>-path` checkout or, when omitted,
-//! auto-fetched at its locked pin into a durable cache — so a fresh clone can verify
-//! with no hand-cloned trees. The patches checkout itself is resolved the same way
-//! `build` resolves it (explicit, `../patches`, or auto-fetched at the pinned commit
-//! from the lock's own record of where it came from) — but, unlike `build`, the pin is
-//! reported rather than enforced. A local checkout is read as it stands, so that a
-//! patch being written can be gated before it is committed; when that checkout is not
-//! the pinned commit, the run says so, because its verdict is then about the working
-//! tree and not about the series the lock names.
+//! A recipe carrying one axis verifies that one. A recipe carrying both verifies
+//! both, each against its own version. A u-boot series makes no claim about a
+//! kernel, so reporting them at one target would misdescribe one of them.
+//!
+//! Each tree is either an explicit `--<tree>-path` checkout, or, when omitted,
+//! auto-fetched at its locked pin into a durable cache. A fresh clone can therefore
+//! verify with no hand-cloned trees.
+//!
+//! The patches checkout itself is resolved the same way `build` resolves it
+//! (explicit, `../patches`, or auto-fetched at the pinned commit from the lock's own
+//! record of where it came from). Unlike `build`, the pin is reported rather than
+//! enforced.
+//!
+//! A local checkout is read as it stands, so that a patch being written can be gated
+//! before it is committed. When that checkout is not the pinned commit, the run says
+//! so. Its verdict is then about the working tree rather than about the series the
+//! lock names.
 
 use crate::args::VerifyArgs;
 use crate::config::{fetch_verify_tree, resolve_patches_source, verify_trees_cache};

@@ -1,12 +1,12 @@
 //! Compare two build points: what moved between them, section by section.
 //!
-//! Pure — a deterministic comparison of values the caller has already read, so the
-//! whole report is unit-testable without a build, a network, or a checkout. Reading
-//! the documents is the caller's job ([`Side`] is what it hands over); deciding what
-//! changed is this module's.
+//! Pure, a deterministic comparison of values the caller has already read. The whole
+//! report is therefore unit-testable without a build, a network, or a checkout.
+//! Reading the documents is the caller's job ([`Side`] is what it hands over), and
+//! deciding what changed is this module's.
 //!
-//! A side can be described by a [`Lock`], by a [`ProvenanceManifest`], or by both,
-//! and the two carry overlapping but different facts — a lock has no toolchain, a
+//! A side can be described by a [`Lock`], by a [`ProvenanceManifest`], or by both.
+//! The two carry overlapping but different facts: a lock has no toolchain, and a
 //! manifest has no patch-series `ref`. So both are normalized into one [`Side`]
 //! first, and a section neither side can answer reports itself
 //! [`Unavailable`](Section::Unavailable) rather than as "nothing changed". The
@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 /// caller afterwards, which is what keeps this module pure.
 ///
 /// Every field is optional because every document answers a different subset. A
-/// `None` means "this document does not say", never "there is none": a build with no
+/// `None` means "this document does not say", never "there is none". A build with no
 /// rkbin blobs and a document that does not record blobs both arrive here as `None`,
 /// and neither is a change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,7 +64,7 @@ pub struct KernelFacts {
     /// Kernel definition id (`rk3588-mainline-7.1`).
     pub id: String,
     /// How it is obtained (`mainline`, `vendor`, `distro-package`). Recorded by a
-    /// provenance manifest; a lock states it only implicitly, by whether it pins a
+    /// provenance manifest. A lock states it only implicitly, by whether it pins a
     /// commit at all.
     pub flavor: Option<String>,
     /// The clone URL the commit was pinned from. Lock-only: a commit id means
@@ -96,8 +96,12 @@ pub struct PatchAxis {
 /// One pinned source tree outside the kernel and patch axes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcePin {
-    /// Axis name: `uboot`, `mpp`, `librga`, `libmali`, `ffmpeg-base`,
-    /// `ffmpeg-rockchip`, or `kmod:<name>`.
+    /// Axis name. One of:
+    ///
+    /// - `uboot`.
+    /// - `mpp`, `librga`, or `libmali`.
+    /// - `ffmpeg-base` or `ffmpeg-rockchip`.
+    /// - `kmod:<name>`, for a board's out-of-tree module.
     pub axis: String,
     /// The pinned ref.
     pub reference: Option<String>,
@@ -118,9 +122,9 @@ pub struct BlobFacts {
 
 /// What produced a build, as only a provenance manifest records it.
 ///
-/// The section that answers "nothing changed in the config but the output moved":
-/// the builder that ran, the host it cross-compiled from, and the archive state the
-/// rootfs resolved against.
+/// The section that answers "nothing changed in the config but the output moved". It
+/// carries the builder that ran, the host it cross-compiled from, and the archive
+/// state the rootfs resolved against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderFacts {
     /// boot2deb version that ran the build.
@@ -141,10 +145,10 @@ pub struct BuilderFacts {
     pub target_arch: String,
     /// The `CROSS_COMPILE` prefix the compile ran under.
     pub cross_compile: String,
-    /// Each configured repository's release digest, keyed by the mirror URL — or by
-    /// `local pool #<index>` for the build's own pool, whose URL is a path on the
-    /// build host and therefore not recorded. The digest is the sharp value: it
-    /// identifies the exact archive state a signature vouched for.
+    /// Each configured repository's release digest, keyed by the mirror URL. The
+    /// build's own pool is keyed by `local pool #<index>` instead, since its URL is a
+    /// path on the build host and therefore not recorded. The digest is the sharp
+    /// value: it identifies the exact archive state a signature vouched for.
     pub archives: BTreeMap<String, String>,
 }
 
@@ -229,10 +233,10 @@ impl Side {
 
     /// Normalize a [`ProvenanceManifest`] into a side.
     ///
-    /// Answers one section a lock cannot ([`builder`](Self::builder)) and answers two
-    /// others more thinly: it records the kernel's flavor but not its clone URL, and
-    /// the kernel patch series' commit but not its ref, and it records nothing about
-    /// the u-boot patch axis at all. Each of those arrives as `None`, so comparing a
+    /// Answers one section a lock cannot ([`builder`](Self::builder)), and answers two
+    /// others more thinly. It records the kernel's flavor but not its clone URL, and
+    /// the kernel patch series' commit but not its ref. It records nothing about the
+    /// u-boot patch axis at all. Each of those arrives as `None`, so comparing a
     /// manifest against a lock reports them unavailable rather than as a change.
     pub fn from_provenance(label: impl Into<String>, prov: &ProvenanceManifest) -> Self {
         let s = &prov.sources;
@@ -329,11 +333,12 @@ impl Side {
     /// Normalize a resolved build point's kernel identity into a side.
     ///
     /// Only the kernel, and only its identity — the id, the flavor, and the package a
-    /// distro-package kernel installs. That is exactly the gap a lock leaves: a
-    /// distro kernel pins no commit, so a lock records no `[kernel]` table at all and
-    /// two boards' kernels would compare as absent. Everything else a resolve holds
-    /// is a *declaration*; the lock's pins are what a build used, and those are what
-    /// the other constructors carry.
+    /// distro-package kernel installs. That is exactly the gap a lock leaves. A distro
+    /// kernel pins no commit, so a lock records no `[kernel]` table at all and two
+    /// boards' kernels would compare as absent.
+    ///
+    /// Everything else a resolve holds is a *declaration*. The lock's pins are what a
+    /// build used, and those are what the other constructors carry.
     ///
     /// Folded onto a lock's side with [`merge`](Self::merge), which keeps the lock's
     /// pinned ref over the declared one.
@@ -355,8 +360,8 @@ impl Side {
 
     /// Fold `other`'s facts into this side wherever this one has none.
     ///
-    /// For the caller that holds both documents for one build: the lock supplies the
-    /// clone URLs, the patches ref and the u-boot patch axis; the manifest supplies
+    /// For the caller that holds both documents for one build. The lock supplies the
+    /// clone URLs, the patches ref and the u-boot patch axis. The manifest supplies
     /// the flavor and the builder. Taking this side's value wherever it has one makes
     /// the merge order the caller's declaration of which document it trusts.
     pub fn merge(mut self, other: Side) -> Self {
@@ -394,7 +399,7 @@ impl Side {
 /// One section's result: either both sides could answer it, or they could not.
 ///
 /// The two are kept apart because "identical" and "not recorded" are different
-/// answers to the same question, and reporting the second as the first would state
+/// answers to the same question. Reporting the second as the first would state
 /// evidence that does not exist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -552,10 +557,10 @@ pub struct KernelChanges {
     pub commit: Option<Change>,
     /// The package a distro-package kernel installs.
     pub package: Option<Change>,
-    /// Symbols whose requested value differs between the two fragment sets — a
+    /// Symbols whose requested value differs between the two fragment sets. It is a
     /// section of its own, because a side can carry a kernel pin and no fragment set
-    /// at all, and an empty delta then means "nothing compared" rather than
-    /// "identical configuration".
+    /// at all. An empty delta then means "nothing compared" rather than "identical
+    /// configuration".
     pub kconfig: Section<Vec<SymbolChange>>,
 }
 

@@ -1,21 +1,21 @@
 //! Bounded HTTP(S) fetch — the size-capped, redirect-bounded GET shared by
 //! the `extra_debs` and `patch import` fetchers.
 //!
-//! Both callers pull bytes from an operator- or lock-supplied URL, so an unbounded
-//! `read_to_end` is a memory-exhaustion vector and an unpinned redirect chain is a
-//! transport-trust gap. This module centralizes the network policy so both fetchers
+//! Both callers pull bytes from an operator- or lock-supplied URL. An unbounded
+//! `read_to_end` is therefore a memory-exhaustion vector, and an unpinned redirect
+//! chain is a transport-trust gap. This module centralizes the network policy so both fetchers
 //! get the same guarantees:
 //!
 //! - **Size cap.** The body is read through a `take(max + 1)` limiter and refused if
-//!   it would exceed `max_bytes`, so a hostile or misconfigured server cannot force
-//!   an arbitrarily large allocation.
-//! - **Scheme allowlist.** Only `http://` and `https://` are accepted; a redirect to
+//!   it would exceed `max_bytes`. A hostile or misconfigured server therefore cannot
+//!   force an arbitrarily large allocation.
+//! - **Scheme allowlist.** Only `http://` and `https://` are accepted. A redirect to
 //!   any other scheme is refused.
 //! - **No TLS downgrade.** Redirects are followed manually (auto-redirect off), and a
 //!   hop from `https` to `http` is refused — a MITM cannot strip TLS by redirecting.
 //! - **Bounded redirects.** At most `MAX_REDIRECTS` hops before giving up.
 //!
-//! Integrity of a fetched `extra_deb` still comes from its pinned sha256; this
+//! Integrity of a fetched `extra_deb` still comes from its pinned sha256. This
 //! is the transport-hardening layer beneath that pin.
 
 use std::io::Read;
@@ -31,8 +31,12 @@ pub(crate) const MAX_REDIRECTS: u32 = 5;
 pub struct FetchError(pub String);
 
 /// GET `url` over HTTP(S), following redirects manually under the module's policy,
-/// and return the body — refusing anything larger than `max_bytes`, a non-HTTP(S)
-/// scheme, a TLS downgrade, or more than `MAX_REDIRECTS` hops.
+/// and return the body. The fetch is refused on any of these:
+///
+/// - A body larger than `max_bytes`.
+/// - A non-HTTP(S) scheme.
+/// - A TLS downgrade.
+/// - More than `MAX_REDIRECTS` hops.
 pub fn fetch_bounded(url: &str, max_bytes: u64, timeout: Duration) -> Result<Vec<u8>, FetchError> {
     require_http(url)?;
     // Auto-redirect off: we follow manually so each hop passes the scheme/downgrade

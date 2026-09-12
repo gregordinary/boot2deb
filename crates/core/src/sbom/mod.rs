@@ -1,34 +1,39 @@
-//! Software bill of materials: one internal model of what an image is made of, and
+//! Software bill of materials: one internal model of the parts an image has, and
 //! two renderers over it.
 //!
 //! Pure — the caller reads the [provenance manifest](crate::provenance) and the solved
-//! [manifest](crate::manifest); this decides what the document says. Adding a third
-//! format is then a renderer over [`Sbom`] rather than a second traversal of the
-//! provenance, which is the whole reason for the intermediate model: SPDX and
-//! CycloneDX disagree about nearly every field name and agree about the facts.
+//! [manifest](crate::manifest), and this decides what the document says.
+//!
+//! Two renderers write the model out:
 //!
 //! - [`spdx`] — SPDX 2.3, JSON.
 //! - [`cyclonedx`] — CycloneDX 1.6, JSON.
 //!
-//! Both are typed `Serialize` documents rather than hand-built JSON, so the shape a
-//! validator checks is visible in the source and a missing required field is a
+//! Both are typed `Serialize` documents rather than hand-built JSON. The shape a
+//! validator checks is therefore visible in the source. A missing required field is a
 //! compile error rather than a rejected document.
+//!
+//! Adding a third format is then a renderer over [`Sbom`] rather than a second
+//! traversal of the provenance. That is the whole reason for the intermediate model.
+//! SPDX and CycloneDX disagree about nearly every field name and agree about the
+//! facts.
 //!
 //! ## What it claims, and what it does not
 //!
-//! **Licenses are `NOASSERTION`.** boot2deb records no per-package license, and
-//! synthesizing one by reading `/usr/share/doc/*/copyright` out of the rootfs would
-//! produce a field that looks authoritative and is not — Debian's copyright files are
-//! prose, and a wrong SPDX license identifier in a document consumers scan for license
-//! compliance is worse than an honest absence. Recording real license data is a
-//! follow-on with its own accuracy question.
+//! **Licenses are `NOASSERTION`.** boot2deb records no per-package license.
+//! Synthesizing one by reading `/usr/share/doc/*/copyright` out of the rootfs would
+//! produce a field that looks authoritative and is not. Debian's copyright files are
+//! prose. A wrong SPDX license identifier is worse than an honest absence in a
+//! document consumers scan for license compliance.
+//!
+//! Recording real license data is a follow-on with its own accuracy question.
 //!
 //! **The document is deterministic.** Its identity — the SPDX `documentNamespace` and
-//! the CycloneDX `serialNumber` — is derived from the solved manifest's digest, so two
-//! SBOMs of the same package set are byte-identical rather than differing in a random
-//! UUID. The one input that is not content-derived is the creation timestamp, which
-//! both formats require and which the caller supplies: pass `SOURCE_DATE_EPOCH` for a
-//! reproducible document.
+//! the CycloneDX `serialNumber` — is derived from the solved manifest's digest. Two
+//! SBOMs of the same package set are therefore byte-identical rather than differing in
+//! a random UUID. The one input that is not content-derived is the creation timestamp,
+//! which both formats require and which the caller supplies. Pass `SOURCE_DATE_EPOCH`
+//! for a reproducible document.
 
 pub mod cyclonedx;
 pub mod spdx;
@@ -45,7 +50,7 @@ pub enum ComponentKind {
     Image,
     /// A Debian binary package installed into the rootfs, from the solved manifest.
     DebianPackage,
-    /// A pinned source tree the build compiled from. Not *in* the image; the image
+    /// A pinned source tree the build compiled from. Not *in* the image. The image
     /// was generated from it.
     Source,
     /// A vendored boot blob consumed by the boot chain (rkbin ATF / TPL / BL32),
@@ -58,24 +63,24 @@ pub enum ComponentKind {
 
 /// How a component relates to the image.
 ///
-/// One relation per component rather than a free relationship graph: every component
-/// this model can hold relates to the image exactly one way, and a graph would be a
+/// One relation per component rather than a free relationship graph. Every component
+/// this model can hold relates to the image exactly one way. A graph would be a
 /// mechanism with a single shape flowing through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Relation {
     /// The image ships these bytes.
     Contains,
-    /// The image was built from this, which is not the same as shipping it: a kernel
+    /// The image was built from this, which is not the same as shipping it. A kernel
     /// source tree is compiled into the image, not installed in it.
     GeneratedFrom,
 }
 
-/// One thing an image is made of.
+/// One part an image has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Component {
     /// Document-local identifier, unique within one [`Sbom`] and always valid as an
     /// SPDX id (`[a-zA-Z0-9.-]+`). Assigned by [`Sbom::from_provenance`] by position
-    /// and kind rather than derived from the name, because a package name may carry
+    /// and kind rather than derived from the name, because a package name can carry
     /// characters SPDX ids forbid (`libstdc++6`).
     pub id: String,
     /// Component name as its ecosystem spells it.
@@ -107,11 +112,11 @@ pub struct Sbom {
     /// Document name — the image's artifact stem (`turing-rk1-forky`).
     pub name: String,
     /// Creation timestamp, RFC 3339 UTC. Supplied by the caller because this module
-    /// reads no clock; both output formats require it.
+    /// reads no clock. Both output formats require it.
     pub created: String,
-    /// The builder that produced the image — taken from the provenance manifest, so
-    /// the tool credited is the one that built the image and not whichever binary
-    /// rendered the document.
+    /// The builder that produced the image, taken from the provenance manifest. The
+    /// tool credited is the one that built the image, not whichever binary rendered
+    /// the document.
     pub tool: Tool,
     /// Content-derived document identity: the solved manifest's sha256. The SPDX
     /// namespace and the CycloneDX serial number are both derived from it, which is
@@ -129,12 +134,12 @@ impl Sbom {
     /// manifest it names.
     ///
     /// `name` is the document name — the image's artifact stem. `created` is an
-    /// RFC 3339 UTC timestamp ([`crate::datetime::format_rfc3339`]); pass the value of
+    /// RFC 3339 UTC timestamp ([`crate::datetime::format_rfc3339`]). Pass the value of
     /// `SOURCE_DATE_EPOCH` through it for a reproducible document.
     ///
     /// `packages` must be the manifest whose digest the provenance records. Nothing
-    /// here re-checks that — the caller reads both files and is the only party that
-    /// can — but a mismatch would make the document describe one image's packages
+    /// here re-checks that, because the caller reads both files and is the only party
+    /// that can. A mismatch would make the document describe one image's packages
     /// under another's identity.
     ///
     /// `sources` maps a binary package name to the source package it was built from,
@@ -271,8 +276,8 @@ impl Sbom {
     ///
     /// Content-derived rather than random, so re-rendering an SBOM for one image
     /// yields the same document. SPDX requires the namespace to be unique per
-    /// document; two documents that agree on every byte are one document, so
-    /// sharing an identity is the correct reading rather than a collision.
+    /// document. Two documents that agree on every byte are one document, so sharing
+    /// an identity is the correct reading rather than a collision.
     pub fn namespace(&self) -> String {
         format!(
             "https://github.com/gregordinary/boot2deb/spdxdocs/{}-{}",
@@ -283,10 +288,10 @@ impl Sbom {
     /// The CycloneDX `serialNumber`: a URN UUID derived from
     /// [`content_id`](Self::content_id), so it is stable for a package set.
     ///
-    /// The digest's first 32 hex characters are laid out as a UUID with the version
-    /// nibble set to 8 (RFC 9562 custom) and the variant bits to `10x`, which is what
-    /// makes the result a *valid* UUID rather than merely UUID-shaped — the format's
-    /// pattern is checked by validators.
+    /// The digest's first 32 hex characters are laid out as a UUID. The version
+    /// nibble is set to 8 (RFC 9562 custom) and the variant bits to `10x`. That is
+    /// what makes the result a *valid* UUID rather than merely UUID-shaped, and
+    /// validators check the format's pattern.
     pub fn serial_number(&self) -> String {
         // A short or non-hex content id would be a corrupt provenance manifest; pad
         // deterministically rather than panic, since a document is still worth
@@ -321,8 +326,8 @@ impl Sbom {
 
 /// The builder credited as the document's creator.
 ///
-/// Kept as fields rather than one rendered string because the two formats want it
-/// differently: SPDX's `creators` takes `Tool: <name>-<version>` and nothing else,
+/// Kept as fields rather than one rendered string, because the two formats want it
+/// differently. SPDX's `creators` takes `Tool: <name>-<version>` and nothing else,
 /// while CycloneDX takes a component with a name and a version of its own. A commit
 /// and a dirty flag fit in neither, so they ride in the free-text field each format
 /// does have.
@@ -334,8 +339,8 @@ pub struct Tool {
     pub version: String,
     /// Short git commit of that builder's checkout, where it was one.
     pub commit: Option<String>,
-    /// Whether that checkout had uncommitted changes — in which case the commit does
-    /// not identify the builder, and the document says so rather than implying it does.
+    /// Whether that checkout had uncommitted changes. If it did, the commit does not
+    /// identify the builder, and the document says so rather than implying it does.
     pub dirty: bool,
 }
 

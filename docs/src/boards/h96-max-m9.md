@@ -1,14 +1,14 @@
 # H96 MAX M9
 
 The H96 MAX M9 (and the M9S, the same board) is an Android TV box built on the
-Rockchip **RK3576** — octa-core (4x Cortex-A72 + 4x Cortex-A53), Mali-G52 MC3,
-LPDDR4X, eMMC 5.1, Gigabit ethernet, and HDMI. boot2deb turns it into a mainline
-Debian box: kernel `v7.2`, u-boot `v2026.07`, no vendor BSP.
+Rockchip **RK3576**. It carries an octa-core CPU (4x Cortex-A72 + 4x Cortex-A53) with a
+Mali-G52 MC3, LPDDR4X memory, eMMC 5.1 storage, Gigabit ethernet and HDMI. boot2deb turns
+it into a mainline Debian box: kernel `v7.2`, u-boot `v2026.07`, no vendor BSP.
 
-It is a cheap and widely available RK3576 board, which makes it a practical target —
-and an awkward one. There is no SD slot (the pads are depopulated), no reset button,
-and no exposed serial header until you open it, so most of the work of supporting it
-is having a bootloader that can recover the board without a cable. That is what the
+It is a cheap and widely available RK3576 board, which makes it a practical target, and
+an awkward one. There is no SD slot (the pads are depopulated), no reset button, and no
+exposed serial header until you open it. Most of the work of supporting it is therefore
+having a bootloader that can recover the board without a cable. That is what the
 [RK3576 u-boot images](../reference/rk3576-uboot-images.md) exist for.
 
 ## Recipes
@@ -17,7 +17,7 @@ is having a bootloader that can recover the board without a cable. That is what 
 | --- | --- | --- |
 | `h96-max-m9/forky` | Whole-disk Debian image (forky) | expected — the board has booted this configuration, but not at this pin |
 | `h96-max-m9/media-accel` | The same image plus HW video decode and the RGA 2D accelerator | experimental |
-| `h96-max-m9/util` | u-boot only — the recovery tool, with this board's ethernet | builds; ethernet validated |
+| `h96-max-m9/util` | u-boot only — the recovery tool, with this board's ethernet | builds, and its ethernet is validated |
 
 The base image carries the NPU — see [The NPU](#the-npu) below.
 
@@ -33,8 +33,8 @@ everything.
 
 ## Flash
 
-The box boots from eMMC and has no card slot, so every path goes over USB through the
-**USB 3.0 Type-A port on the rear panel** — that connector is the SoC's `drd0`
+The box boots from eMMC and has no card slot. Every path therefore goes over USB, through
+the **USB 3.0 Type-A port on the rear panel**. That connector is the SoC's `drd0`
 controller, wired as a USB *device*. A plain USB-A-to-USB-A cable to your laptop is
 what talks to it.
 
@@ -49,7 +49,7 @@ ums 0 mmc 0
 ```
 
 The eMMC appears on your laptop as a USB block device. Press the image into a
-verified raw file, then write it with any flasher — confirm the device with
+verified raw file, then write it with any flasher. Confirm the device with
 `lsblk` first, since the eMMC reports as an ordinary fixed disk:
 
 ```sh
@@ -70,7 +70,7 @@ rkdeveloptool wl 0 h96.img
 ```
 
 `rkdeveloptool` takes the raw file `press` produces (not the `.img.xz`). This
-route is also the fallback if you have no u-boot on the board yet; a failed
+route is also the fallback if you have no u-boot on the board yet. A failed
 `db` almost always means no board in maskrom mode on USB.
 
 Reading the eMMC back over rockusb does **not** work — the read path truncates at
@@ -79,7 +79,7 @@ Reading the eMMC back over rockusb does **not** work — the read path truncates
 ### Getting into maskrom
 
 Maskrom is the BootROM's USB download mode, and it is the entry that depends on
-nothing already working on the board.
+nothing already working on the board. There are two ways in:
 
 - **The floor, on any firmware:** short the two **eMMC test pads** (clock and ground,
   on the solder side next to the `EMMC` silkscreen) at power-on. The BootROM cannot
@@ -89,25 +89,25 @@ nothing already working on the board.
   before connecting power. Our u-boot carries the download-key patches, so the button
   drops straight into maskrom.
 
-The AV-jack button behaves differently on factory firmware depending on the build —
-some reach loader mode, the reference unit's newer firmware boots Android recovery
-instead — which is exactly why the pad short is the documented floor.
+The AV-jack button behaves differently on factory firmware depending on the build. Some
+reach loader mode, and the reference unit's newer firmware boots Android recovery
+instead. That is exactly why the pad short is the documented floor.
 
 ## Serial console
 
 The UART is on an unpopulated 3-pin header inside the case, and it runs at
-**1500000 baud**, not 115200 — a Rockchip default that will otherwise look like a dead
-port.
+**1500000 baud**, not 115200. That is a Rockchip default which will otherwise look like a
+dead port.
 
 You do not need it. The `display` u-boot the image ships with drives the **HDMI console
-and a USB keyboard** on the drd1 (USB 2.0) port, so the u-boot prompt, the boot menu,
-and a rescue-stick boot are all reachable on the television.
+and a USB keyboard** on the drd1 (USB 2.0) port. The u-boot prompt, the boot menu,
+and a rescue-stick boot are therefore all reachable on the television.
 
 ## First boot
 
 Power on. The image regenerates its SSH host keys and grows the rootfs to fill the
 eMMC, online, in the same boot. Log in as **`debian`** with the password the build
-printed; it is expired, so you set a new one immediately. The account has passwordless
+printed. It is expired, so you set a new one immediately. The account has passwordless
 `sudo` and the hostname is `h96-max-m9`.
 
 ## Hardware status
@@ -128,66 +128,74 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | USB 2.0 host | works |
 | Bundled remote | works, zero-config |
 | IR receiver | works — NEC decoded to input events |
-| HDMI-CEC | works — the box wakes, switches to and standbys a TV; opt-in, see below |
-| NPU (`rocket`) | device works — jobs compute bit-exact; no userspace for this SoC yet |
+| HDMI-CEC | works — the box wakes, switches to and standbys a TV. Opt-in, see below |
+| NPU (`rocket`) | device works — jobs compute bit-exact. No userspace for this SoC yet |
 | HDMI audio | works |
 | S/PDIF (optical) | works |
-| Analog audio (3.5 mm) | fixed in tree — the DAC is on `sdo2`; end-to-end confirmation on a shipped image still owed |
+| Analog audio (3.5 mm) | fixed in tree — the DAC is on `sdo2`. End-to-end confirmation on a shipped image still owed |
 | HW video decode, HEVC | works — 1080p and 4K on the VDPU383, bit-exact against software |
-| HW video decode, H.264 | works — a silicon power-up erratum exists, and the shipped kernel works around it; see below |
+| HW video decode, H.264 | works — a silicon power-up erratum exists, and the shipped kernel works around it. See below |
 | HW video encode | no mainline driver |
-| RGA 2D accelerator | works — both RGA2 cores, over DMA-BUF only; see below |
+| RGA 2D accelerator | works — both RGA2 cores, over DMA-BUF only. See below |
 | SD card | absent — the slot is depopulated |
-| USB 3.0 SuperSpeed | blue port only, and unconfirmed — enabled in tree, never yet trained on hardware; the black ports cannot, see below |
+| USB 3.0 SuperSpeed | works on the blue port — 5 Gbps sustained over 92 GB with no link error. The black ports cannot, see below |
 
 Things the board needs that are worth knowing about:
 
 - **Wi-Fi is an out-of-tree module.** The AIC8800D80 has no mainline driver, so
   boot2deb builds one from a pinned upstream repo as a `.deb` through the
-  [kmods layer](../reference/config-model.md#out-of-tree-modules-are-their-own-layer)
-  — declared by the device as `device_kmods = ["aic8800"]`, not carried as a kernel
-  patch series, so an RK3576 board without the chip gets a lean kernel.
+  [kmods layer](../reference/config-model.md#out-of-tree-modules-are-their-own-layer).
+  The device declares it as `device_kmods = ["aic8800"]` rather than carrying it as a
+  kernel patch series. An RK3576 board without the chip therefore gets a lean kernel.
 - **Bluetooth audio needs `libspa-0.2-bluetooth` installed alongside a desktop.** The image ships
-  `bluez`, so `hci0` comes up on its own and a headset pairs — but sound only reaches it through
+  `bluez`, so `hci0` comes up on its own and a headset pairs. Sound only reaches it through
   PipeWire's Bluetooth plugin, which `wireplumber` and `pipewire-pulse` merely *Suggest*. No
   desktop metapackage brings it in, and a paired headset with no sink is what its absence looks
   like. Images are headless and carry no PipeWire, so install it when you install the desktop.
 - **`cpuidle.off=1` is in the kernel command line.** A core suspended into the DT
   `CPU_SLEEP` state can miss its wakeup on this platform's BL31. It is a board-level
   workaround, stated in `devices/h96-max-m9.toml` with the condition to drop it.
-- **Only the blue port beside HDMI can ever carry SuperSpeed**, and whether it does is
-  not yet settled. That port is `drd0`, and it runs SuperSpeed on the usbdp PHY with
-  `snps,dis_rxdet_inp3_quirk` — dwc3's receiver-detection workaround is what turned SS
-  training into a `-62/-71` SetAddress loop, and suppressing it is the lever this board
-  has. No SuperSpeed device has trained on it yet, so treat the port as high speed until
-  you have measured otherwise. The black ports are `drd1`, and they cannot: they sit
-  behind an internal `1a86:8091` 4-port **USB 2.0** hub that also carries the bundled
-  remote's receiver, and `drd1`'s own SuperSpeed lane reaches no connector, so its SS
-  phy is left off the controller entirely.
+- **Only the blue port beside HDMI carries SuperSpeed, and it does.** That port is
+  `drd0`, running SuperSpeed on the usbdp PHY, and it needs nothing beyond the SoC dtsi
+  to do it. Measured at 5 Gbps and holding it: 92 GB of continuous reads in 606 s at
+  145-158 MB/s, with no link error. The port was still at `speed=5000` afterwards.
+  That rate is the drive's flash rather than the link.
+
+  **A device landing at 480 Mb/s here is a mechanical fault, not a configuration one.**
+  With the board seated back from the enclosure's front panel, a plug bottoms out on the
+  case before the connector's five recessed SuperSpeed contacts mate. The four USB 2.0
+  contacts at the leading edge do mate. That enumerates flawlessly at high speed and
+  leaves the SuperSpeed root hub silent. Receiver detection is a DC test for the
+  device's termination, and an unmated pair reads as absent. Check the seating first.
+
+  The black ports are `drd1`, and they cannot carry SuperSpeed. They sit behind an
+  internal `1a86:8091` 4-port **USB 2.0** hub that also carries the bundled remote's
+  receiver. `drd1`'s own SuperSpeed lane reaches no connector.
 - **4K60 is not reachable on any `dw-hdmi-qp` board**, this one included, and you see it
-  in the mode list rather than as a failure: on a 4K60 display the connector offers
-  3840x2160 at 30, 29.97, 25, 24 and 23.98 Hz with 30 preferred, 2560x1440 at 60, and
-  1920x1080 at 60 — no 4K60 entry at all, because the driver rejects the mode before
-  userspace sees it. The bridge rejects every mode above 340 MHz TMDS because it has no
-  SCDC/scrambling support, so 4K30 (297 MHz) is the ceiling even when the display
-  advertises 4K60. This is upstream
-  behaviour, not a board or device-tree limitation.
+  in the mode list rather than as a failure. On a 4K60 display the connector offers
+  3840x2160 at 30, 29.97, 25, 24 and 23.98 Hz with 30 preferred. It also offers
+  2560x1440 at 60 and 1920x1080 at 60. There is no 4K60 entry at all, because the driver
+  rejects the mode before userspace sees it. The bridge rejects every mode above 340 MHz
+  TMDS, because it has no SCDC/scrambling support. 4K30 (297 MHz) is the ceiling even
+  when the display advertises 4K60. This is upstream behavior, not a board or
+  device-tree limitation.
 - **The 3.5 mm analog jack needed both a device-tree and a kernel fix.** Its DAC sits on
-  SAI1's `sdo2`, and reaching it takes `rockchip,sai-tx-route = <0 1 0>` — in
+  SAI1's `sdo2`, and reaching it takes `rockchip,sai-tx-route = <0 1 0>`. In
   `SAI_PATH_SEL`, TX field *x* selects which stream drives **SDO port x**, so the third
   entry is the one that matters. The upstream SAI driver programmed that register only
-  at probe and the value did not survive to the running device, which no in-tree board
-  could notice because they all describe the identity mapping the register already holds.
-  The `rk3576-fixes` series carries the driver fix, as patch 103. Verified at the register
-  level by driving each SDO port in turn and listening; the device tree alone cannot fix
-  this board.
+  at probe, and the value did not survive to the running device. No in-tree board could
+  notice, because they all describe the identity mapping the register already holds.
+  The `rk3576-fixes` series carries the driver fix, as patch 103.
+
+  It was verified at the register level, by driving each SDO port in turn and listening.
+  The device tree alone cannot fix this board.
 
 ## Hardware video decode and RGA
 
-`h96-max-m9/media-accel` adds the `media-accel-v4l2` feature on top of the base image:
-`ffmpeg-rk` built with V4L2-request decode, and `librga2` with the out-of-tree RGA
-driver the feature's own patch series and kconfig fragment bring in. The base image
-carries neither — the VDPU383 driver is on the SoC layer either way, but nothing in a
+`h96-max-m9/media-accel` adds the `media-accel-v4l2` feature on top of the base image.
+That is `ffmpeg-rk` built with V4L2-request decode, and `librga2` with the out-of-tree
+RGA driver the feature's own patch series and kconfig fragment bring in. The base image
+carries neither. The VDPU383 driver is on the SoC layer either way, but nothing in a
 base image can drive it.
 
 ```sh
@@ -205,8 +213,8 @@ ffmpeg-rk -hwaccel v4l2request -hwaccel_output_format drm_prime -i in.mkv -f nul
 
 Both flags matter, and the second one is the difference between an accelerator and a
 regression. `-hwaccel v4l2request` alone leaves the frames going back to system memory
-one at a time, and at 1080p the download costs more than software decoding the stream
-would have: the hardware path ends up *slower* than no hardware path. With
+one at a time. At 1080p the download costs more than software decoding the stream would
+have, so the hardware path ends up *slower* than no hardware path. With
 `-hwaccel_output_format drm_prime` the decoded frames stay in DMA-BUF handles, and 4K
 HEVC runs at real time for about 1/130th of the CPU.
 
@@ -215,78 +223,88 @@ importer, or librga. A filter chain that cannot takes the download and the loss 
 
 ### H.264 decode: a power-up erratum, worked around in the shipped kernel
 
-This SoC's decoder has a silicon erratum: whether hardware H.264 comes up correct is
+This SoC's decoder has a silicon erratum. Whether hardware H.264 comes up correct is
 decided when the block's power domain powers up. Unwarmed, roughly one power-up in
-three comes up bad (634 of 2000 measured power-ups; 1080p and 4K indistinguishable),
-the draw is independent every time, and every H.264 decode made on a bad power-up is
-corrupt from the first frame — about 17 dB PSNR, one row in eight of each plane wrong,
-spread across the picture by motion compensation. It is specific to this decoder
-generation; the same clips on an RK3588 are correct in every session.
+three comes up bad (634 of 2000 measured power-ups, with 1080p and 4K
+indistinguishable), and the draw is independent every time. Every H.264 decode made on a
+bad power-up is corrupt from the first frame. That is about 17 dB PSNR, with one row in
+eight of each plane wrong, spread across the picture by motion compensation. It is
+specific to this
+decoder generation, and the same clips on an RK3588 are correct in every session.
 
 The shipped kernel works around it by decoding a canned 2x2 H.264 frame on the block
-at every runtime resume, before any real decode of that power cycle can run. Measured
-on this board: 0 of 400 power-ups corrupt against an interleaved control's 128 of 400,
-a further 0 of 200 alternating 1080p and 4K on the shipped kernel, and the warm-up
-holds across system sleep as well as runtime PM. If the warm-up ever fails, the driver
-says so in dmesg (`vdpu383 warm-up job timed out`, or `... not ready`), and H.264
-decoded on that power cycle is suspect.
+at every runtime resume. That happens before any real decode of that power cycle can
+run. Three measurements on this board:
 
-HEVC is unaffected either way — bit-exact against software on every run. A kernel
-*without* the work-around should not be relied on for hardware H.264 on this SoC; the
+- 0 of 400 power-ups corrupt, against an interleaved control's 128 of 400
+- A further 0 of 200, alternating 1080p and 4K on the shipped kernel
+- The warm-up holds across system sleep as well as runtime PM
+
+If the warm-up ever fails, the driver says so in dmesg (`vdpu383 warm-up job timed out`,
+or `... not ready`), and H.264 decoded on that power cycle is suspect.
+
+HEVC is unaffected either way, and is bit-exact against software on every run. A kernel
+*without* the work-around cannot be relied on for hardware H.264 on this SoC. The
 software decoder is correct and quick enough on eight cores (about 160 fps at 1080p,
-40 at 4K). All of this is stated as a caveat on the SoC, so it prints at the end of
-any build for this board and appears in the
+40 at 4K). All of this is stated as a caveat on the SoC. It therefore prints at the end
+of any build for this board, and appears in the
 [support matrix](../reference/support-matrix.md#caveats).
 
 ### RGA: pass it DMA-BUF file descriptors
 
 Both RGA2 cores work, and `librga2` is installed for programs that speak its API.
-ffmpeg is not one of them here: `scale_rkrga` and `vpp_rkrga` need MPP, which needs a
-vendor kernel framework mainline does not have, so this ffmpeg scales on CPU or GPU and
-RGA is reached directly.
+ffmpeg is not one of them here. `scale_rkrga` and `vpp_rkrga` need MPP, which needs a
+vendor kernel framework mainline does not have. This ffmpeg therefore scales on CPU or
+GPU, and RGA is reached directly.
 
 **Import buffers with `importbuffer_fd`, never `wrapbuffer_virtualaddr`.** The
-virtual-address path builds an IOMMU mapping per call over ordinary process memory and
-faults roughly a third of jobs — the job times out after a second, the core is soft
+virtual-address path builds an IOMMU mapping per call over ordinary process memory, and
+faults roughly a third of jobs. The job times out after a second, the core is soft
 reset, and the destination is left untouched. It is also about seven times slower when
 it does work. The same operations over DMA-BUF run clean on both cores.
 
-One consequence worth knowing if a client dies without a message: librga does not fail
-gracefully when it cannot open `/dev/rga` or a DMA-BUF heap — it segfaults. The image
-ships udev rules that make both accessible, so a segfault on a board where they were
-removed is a permissions problem rather than a library bug.
+One consequence is worth knowing if a client dies without a message. Failing to open
+`/dev/rga` or a DMA-BUF heap makes librga segfault rather than fail gracefully. The
+image ships udev rules that make both accessible. A segfault on a board where they were
+removed is therefore a permissions problem rather than a library bug.
 
 ### 10-bit stops at the decoder
 
 10-bit content decodes in hardware, but the VDPU383 writes `NV15` — packed 10-bit 4:2:0
 — and nothing downstream in this image can take it. Vulkan has no such format, and
 neither Mesa nor ffmpeg's filters can import it. A 10-bit transcode therefore converts
-on the CPU. RGA does not close the gap: this SoC has RGA2 cores only, which take `NV15`
-in but write no 10-bit format out — `P010` output is an RGA3 capability, and there is
-no RGA3 here — so a hardware 10-bit-to-10-bit conversion does not exist on this part,
-structurally. The VDPP block this SoC does carry is not a way round it either: its
-pixel path takes `NV12` or `NV21` and nothing else, with a two-bit format field that
-has no bit-depth selector at all, and the 10-bit formats it does name feed a histogram
-engine that produces statistics rather than a picture. The display controller scans
-`NV15` out unconverted, so playback straight to a KMS plane is unaffected.
+on the CPU.
+
+RGA does not close the gap. This SoC has RGA2 cores only, which take `NV15` in but write
+no 10-bit format out. `P010` output is an RGA3 capability, and there is no RGA3 here. A
+hardware 10-bit-to-10-bit conversion therefore does not exist on this part, structurally.
+
+The VDPP block this SoC does carry is not a way round it either. Its pixel path takes
+`NV12` or `NV21` and nothing else, with a two-bit format field that has no bit-depth
+selector at all. The 10-bit formats it does name feed a histogram engine that produces
+statistics rather than a picture. The display controller scans `NV15` out unconverted, so
+playback straight to a KMS plane is unaffected.
 
 ## HDMI-CEC
 
-CEC is a control channel inside the HDMI cable, and this box drives it both ways: it can
+CEC is a control channel inside the HDMI cable, and this box drives it both ways. It can
 wake a television, claim its input and put it back into standby, and the television's own
-remote can drive the box. The kernel side is present in every image for this board —
-`DRM_DW_HDMI_QP_CEC` and `MEDIA_CEC_RC` are set at the SoC layer — so `/dev/cec0` exists on
-a fresh boot and the adapter comes up as Playback Device 1 at physical address `1.0.0.0`.
+remote can drive the box.
 
-None of it acts until you ask. Three units ship installed but **disabled**, because a box
-plugged into a computer monitor, or into a television whose owner would rather it kept to
-itself, must not start sending CEC messages on its own:
+The kernel side is present in every image for this board, since
+`DRM_DW_HDMI_QP_CEC` and `MEDIA_CEC_RC` are set at the SoC layer. `/dev/cec0` therefore
+exists on a fresh boot, and the adapter comes up as Playback Device 1 at physical address
+`1.0.0.0`.
+
+None of it acts until you ask. Three units ship installed but **disabled**. A box must
+not start sending CEC messages on its own, on a computer monitor or on a television
+whose owner wants quiet:
 
 | Unit | What it sends | When |
 | --- | --- | --- |
 | `cec-tv-on` | `IMAGE_VIEW_ON`, then `ACTIVE_SOURCE` — wakes the TV and switches it to this input | at boot, and on resume from sleep |
 | `cec-tv-standby` | a directed `STANDBY` to the TV | at shutdown and reboot |
-| `cec-passthrough` | nothing; runs `cec-follower` so the TV remote's keys arrive as input events | continuously |
+| `cec-passthrough` | nothing. It runs `cec-follower` so the TV remote's keys arrive as input events | continuously |
 
 Box drives TV, which is what most people want:
 
@@ -300,17 +318,19 @@ The second deliberately has no `--now`: its work runs at *stop*, so it fires whe
 goes down, not when you enable it.
 
 **Enabling `cec-tv-on` is also what makes the TV follow the box into sleep.** The
-`h96-cec` hook in `/usr/lib/systemd/system-sleep/` reads that one unit for both directions
-— with it enabled, a POWER press standbys the TV on the way down and wakes it on the way
-back up. `cec-tv-standby` covers only shutdown and reboot, so enabling that one on its own
-leaves suspend untouched: the box sleeps, the HDMI signal simply stops, and the television
-shows its own "No Signal" instead of going dark. Without CEC that is the whole story of
-what a suspend looks like on screen — the TV was never in standby, it just lost its source.
+`h96-cec` hook in `/usr/lib/systemd/system-sleep/` reads that one unit for both
+directions. With it enabled, a POWER press standbys the TV on the way down and wakes it
+on the way back up.
+
+`cec-tv-standby` covers only shutdown and reboot, so enabling that one on its own leaves
+suspend untouched. The box sleeps, the HDMI signal simply stops, and the television shows
+its own "No Signal" instead of going dark. Without CEC that is the whole story of what a
+suspend looks like on screen. The TV was never in standby, and just lost its source.
 
 For the other direction, the TV's remote driving the box, enable `cec-passthrough` **and**
-`cec-tv-on`. The dependency is not incidental: a television forwards `USER_CONTROL_PRESSED`
-only to whatever it believes is the active source, so a box that never announced itself
-receives nothing.
+`cec-tv-on`. The dependency is not incidental. A television forwards
+`USER_CONTROL_PRESSED` only to whatever it believes is the active source, so a box that
+never announced itself receives nothing.
 
 Once `cec-tv-on` has run the adapter stays configured, so the bus is visible from the box:
 
@@ -319,15 +339,15 @@ cec-ctl -d /dev/cec0 -S
 ```
 
 A television that implements CEC answers as `0.0.0.0: TV` with its vendor ID. Everything
-else on the cable is listed too, which is worth reading before enabling `cec-tv-standby`:
-the standby it sends is directed at the TV rather than broadcast, precisely so a games
-console or receiver sharing the bus is not put to sleep along with it.
+else on the cable is listed too, which is worth reading before enabling `cec-tv-standby`.
+The standby it sends is directed at the TV rather than broadcast. That is precisely so a
+games console or receiver sharing the bus is not put to sleep along with it.
 
 Two results that look like faults and are not:
 
 - **A physical address is not evidence of CEC support.** `Physical Address: 1.0.0.0` is
   derived from a mandatory EDID field, so it is reported even when nothing at the other end
-  speaks the protocol. The real test is whether messages are acknowledged;
+  speaks the protocol. The real test is whether messages are acknowledged.
   `Tx, Not Acknowledged (4), Max Retries` means nothing is driving the CEC line at all.
   Computer monitors generally do not, including ones from vendors whose televisions do.
 - **Some queries go unanswered.** `GIVE_OSD_NAME` and `GIVE_CEC_VERSION` time out against
@@ -337,34 +357,34 @@ Two results that look like faults and are not:
 
 The box appears in the TV's device list as `H96 MAX M9`. The wrappers in `/usr/lib/h96/`
 take `OSD_NAME` and `CEC_DEV` from the environment if a different name or a second adapter
-is wanted; CEC caps the name at 14 characters.
+is wanted. CEC caps the name at 14 characters.
 
 ## Sleep and the POWER key
 
 The remote's POWER key suspends the box, and the same key wakes it. That is the shipped
-default rather than systemd's, and the reason is that the alternative is not recoverable
-here: the box has no power button, and once it is off the remote's receiver is unpowered,
-so `HandlePowerKey=poweroff` would leave cycling the supply as the only way back. To
+default rather than systemd's, because the alternative is not recoverable here. The box
+has no power button, and once it is off the remote's receiver is unpowered.
+`HandlePowerKey=poweroff` would therefore leave cycling the supply as the only way back. To
 choose `poweroff` or `ignore` anyway, see `/usr/lib/h96/power-profiles/README` on the
 board.
 
 Sleep is **suspend-to-idle**, pinned by `50-h96-s2idle.conf`. The SoC also offers `deep`,
-and selects it by default, but nothing resumes from it — the box powers down and needs
-its supply cycled — so the image names `freeze` explicitly rather than letting systemd
-write `mem`. Anything that asks logind to suspend, a desktop's idle timer included, takes
-that path.
+and selects it by default, but nothing resumes from it: the box powers down and needs
+its supply cycled. The image therefore names `freeze` explicitly, rather than letting
+systemd write `mem`. Anything that asks logind to suspend, a desktop's idle timer
+included, takes that path.
 
 The television does not follow the box unless you tell it to. Suspending stops the HDMI
-signal and nothing more, which a TV shows as "No Signal" while staying on; putting it into
-standby alongside the box is one `systemctl enable cec-tv-on.service` away, and
+signal and nothing more, which a TV shows as "No Signal" while staying on. Putting it
+into standby alongside the box is one `systemctl enable cec-tv-on.service` away, and
 [HDMI-CEC](#hdmi-cec) covers what that turns on.
 
 Waking is out of band: the receiver drives gpio0 PD3, the `gpio-keys` POWER input, which
 is a `wakeup-source` in the always-on power domain. **The bundled remote is the only
-wake source the box has out of the box.** Its receiver cannot wake anything over USB —
-it leaves the remote-wakeup bit clear in its configuration descriptor, so the kernel
-creates no `power/wakeup` node for it — and there is no RTC on this board, so there is no
-`rtcwake` either.
+wake source the box has out of the box.** Its receiver cannot wake anything over USB. It
+leaves the remote-wakeup bit clear in its configuration descriptor, so the kernel
+creates no `power/wakeup` node for it. There is no RTC on this board either, so there is
+no `rtcwake`.
 
 A USB keyboard or mouse can wake it if its receiver *does* set that bit.
 `70-h96-usb-wakeup.rules` arms every HID device that has a `power/wakeup` node, which
@@ -382,28 +402,33 @@ in-tree `rocket` DRM-accel driver, no vendor RKNPU2 stack. **Every image for thi
 has it**: the shipped `h96-max-m9/forky` binds `rocket` on `27700000.npu` and presents
 **`/dev/accel/accel0`**.
 
-Jobs submitted to it compute correctly: an int8 convolution is bit-exact against a CPU
+Jobs submitted to it compute correctly. An int8 convolution is bit-exact against a CPU
 model on this silicon, and multi-task row-windowed programs stay bit-exact submitted
 back to back with no gap.
 
 The image supplies the *device*, not a runtime, and **there is no released userspace for
 this SoC yet**. Nothing in Debian opens an accel node at all, and the NPU's register
-program is SoC-specific — the RK3576 map is shifted and re-packed relative to the RK3588,
+program is SoC-specific. The RK3576 map is shifted and re-packed relative to the RK3588,
 so a userspace written for the RK3588 does not run here.
+
 [rocket-userspace](https://github.com/gregordinary/rocket-userspace) is the library to
-watch: it is bit-exact on the RK3588 today and names the RK3576 as its next target, but
-its machine parameters (CBUF size, core count, datatype set) have to be confirmed on this
+watch. It is bit-exact on the RK3588 today and names the RK3576 as its next target. Its
+machine parameters (CBUF size, core count, datatype set) have to be confirmed on this
 part before it drives this board. Until then, driving the NPU here means writing your own
 regcmd encoder against `/dev/accel`.
 
-Two properties of the board's DTS are load-bearing and fail in ways that do not point
-at themselves — both power domains (`NPU0` *and* `NPU1`) on the one core node, or the
-driver's own domain attach loses to the device core's and there is no `/dev/accel`; and
-`regulator-always-on` on `vdd_npu_s0`, or the rail is torn down as unused ~33 s into
-boot, long after a successful probe. The board `.dts` states both with the reasoning.
+Two properties of the board's DTS are load-bearing, and fail in ways that do not point
+at themselves:
 
-That always-on rail is the standing cost of carrying the NPU in the base image: it holds
-a supply up on a board that may never open the accel node.
+- Both power domains (`NPU0` *and* `NPU1`) go on the one core node. Otherwise the
+  driver's own domain attach loses to the device core's, and there is no `/dev/accel`.
+- `regulator-always-on` goes on `vdd_npu_s0`. Otherwise the rail is torn down as unused
+  about 33 s into boot, long after a successful probe.
+
+The board `.dts` states both with the reasoning.
+
+That always-on rail is the standing cost of carrying the NPU in the base image. It holds
+a supply up on a board that might never open the accel node.
 
 ## Related pages
 

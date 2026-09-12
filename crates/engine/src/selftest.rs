@@ -1,17 +1,19 @@
 //! The on-image selftest: what the engine knows about the runner the base
 //! overlay ships.
 //!
-//! The runner itself is POSIX sh (`base/overlay/usr/lib/boot2deb/selftest`) —
-//! it executes on the device, where no Rust of ours runs. This module holds the
-//! paths the engine and `boot2deb try` address it by, and the harness tests
-//! that drive every check kind through a fixture root, so the shell's contract
-//! is pinned by `cargo test` like any other stage's.
+//! The runner itself is POSIX sh (`base/overlay/usr/lib/boot2deb/selftest`). It
+//! executes on the device, where no Rust of ours runs. This module holds the paths
+//! the engine and `boot2deb try` address it by. It also holds the harness tests that
+//! drive every check kind through a fixture root. The shell's contract is therefore
+//! pinned by `cargo test` like any other stage's.
 //!
 //! The split of responsibilities is the reason the runner can stay parser-free:
-//! `core::expect` validates and renders the checks at build time, the rootfs
-//! stage writes them into `/etc/boot2deb/selftest.d/`, and the runner only
-//! reads lines and looks at the system. See the manual's self-test reference
-//! for the check-kind semantics.
+//!
+//! - `core::expect` validates and renders the checks at build time.
+//! - The rootfs stage writes them into `/etc/boot2deb/selftest.d/`.
+//! - The runner only reads lines and looks at the system.
+//!
+//! See the manual's self-test reference for the check-kind semantics.
 
 /// Where the runner lives on the image (and in the base overlay). `boot2deb
 /// try` invokes this path in the guest rather than the `boot2deb-selftest`

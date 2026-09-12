@@ -7,9 +7,9 @@
 //! Two SPDX conventions shape what comes out:
 //!
 //! - **Every component is a `package`**, including the image itself and each blob.
-//!   SPDX has no other container for "a thing with a name, a version and a digest",
-//!   and `files` would claim a file-level analysis that never happened
-//!   (`filesAnalyzed` is `false` throughout for the same reason).
+//!   SPDX has no other container for "a thing with a name, a version and a digest".
+//!   `files` would claim a file-level analysis that never happened, and
+//!   `filesAnalyzed` is `false` throughout for the same reason.
 //! - **Identifiers are positional** (`SPDXRef-Package-0`), because an SPDX id admits
 //!   only `[a-zA-Z0-9.-]` and Debian package names do not (`libstdc++6`).
 

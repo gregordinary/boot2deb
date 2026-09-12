@@ -29,6 +29,29 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  # The prose gate over the documentation. It sits beside `fmt` for the same reason:
+  # it needs no compile and fails in seconds. `style/README.md` says what it holds and
+  # how to run it locally.
+  #
+  # Python is pinned to the floor `style/prose-lint.py` declares, so the claim that 3.11
+  # is enough is the thing CI actually tests. The gate itself has no dependency beyond
+  # the standard library, which is why nothing is installed here.
+  #
+  # `--self-test` is not optional. Both length rules rest on where one sentence ends, so
+  # a boundary the splitter cannot see reports findings that are not there while missing
+  # the ones that are.
+  prose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check the splitter's own contracts
+        run: python3 style/prose-lint.py --config prose-lint.toml --self-test
+      - name: Check the prose
+        run: python3 style/prose-lint.py --config prose-lint.toml
+
   # Tests, clippy, and rustdoc share one job so they share a target directory; a
   # second job would pay the same compile twice for no extra signal.
   test:

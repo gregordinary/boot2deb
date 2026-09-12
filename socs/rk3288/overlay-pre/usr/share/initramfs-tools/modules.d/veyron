@@ -23,8 +23,7 @@
 # provide them the root device never appears and the boot hangs on the
 # firmware's white screen. io-domain's supplies come from the same PMIC.
 # Debian builds the rk8xx-i2c MFD core in; what it modularizes is the I2C bus
-# driver beneath it and the regulator function on top. The full account is
-# board-research/veyron/veyron-white-screen.md.
+# driver beneath it and the regulator function on top.
 i2c-rk3x
 rk808-regulator
 # The RK808's 32 kHz clock output. Consumed by the wifi power sequence

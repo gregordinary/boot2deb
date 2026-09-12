@@ -10,7 +10,7 @@ boot2deb build asus-c100p/forky
 
 That produces `build/asus-c100p/forky/artifacts/asus-c100p-forky.img.xz` — a whole-disk image
 carrying two ChromeOS kernel slots and the ext4 rootfs, so one write lays down everything
-the firmware needs. The kernel is in the first slot; the second ships empty, and is what
+the firmware needs. The kernel is in the first slot. The second ships empty, and is what
 lets a later kernel upgrade roll itself back if the new kernel does not boot. See
 [Upgrading the kernel](../kernel-upgrades.md).
 
@@ -18,9 +18,9 @@ lets a later kernel upgrade roll itself back if the new kernel does not boot. Se
 
 Structurally this board is the [C201](asus-c201.md). It includes the same
 `rk3288-veyron-chromebook.dtsi`, so the EC keyboard, the trackpad, the microSD slot, the
-max98090 codec and the eDP panel are all identical, and all of them — along with the
-Broadcom radio, the initramfs and the network stack — are inherited from the shared layers.
-Its device file states a boot method, a board profile, a DTB and a few defaults, and ships
+max98090 codec and the eDP panel are all identical. All of them are inherited from the
+shared layers, along with the Broadcom radio, the initramfs and the network stack. Its
+device file states a boot method, a board profile, a DTB and a few defaults, and ships
 no overlay.
 
 Its own hardware deltas are four, and only the last two matter to you:
@@ -35,13 +35,14 @@ Its own hardware deltas are four, and only the last two matter to you:
 ## Board profiles
 
 One: `minnie`, which `depthcharge-tools` carries as a first-class board. There is no
-libreboot port for it — the family's only libreboot profile is the C201's — so this board
-runs stock ChromeOS firmware and the `crossystem` step below is required.
+libreboot port for it, since the family's only libreboot profile is the C201's. This
+board therefore runs stock ChromeOS firmware, and the `crossystem` step below is
+required.
 
 ## Flash and boot
 
-Press the image — `--embed-image` if the card will install the OS to the internal
-eMMC — and write it to a microSD card or a USB stick (the C100P has both, and two
+Press the image, adding `--embed-image` if the card will install the OS to the internal
+eMMC. Then write it to a microSD card or a USB stick (the C100P has both, and two
 USB ports, so unlike the [Chromebit](asus-chromebit-cs10.md) nothing here needs a
 hub):
 
@@ -52,11 +53,16 @@ sudo dd if=card.img of=/dev/sdX bs=4M status=progress conv=fsync
 
 `press` verifies the file it wrote and `--hostname`/`--ssh-key` personalize the
 unit — see [Producing images](../press.md). Confirm the device with `lsblk`
-first; `dd` overwrites it whole.
+first, because `dd` overwrites it whole.
 
-The unit must be in **developer mode**: power off, hold **Esc + Refresh** and briefly press
-**Power**, keep Esc+Refresh held until the recovery screen appears, then **Ctrl+D** and
-**Enter** to confirm. It wipes and transitions; allow 15 to 20 minutes.
+The unit must be in **developer mode**:
+
+1. Power off.
+2. Hold **Esc + Refresh** and briefly press **Power**.
+3. Keep Esc+Refresh held until the recovery screen appears.
+4. Press **Ctrl+D**, then **Enter** to confirm.
+
+It wipes and transitions, so allow 15 to 20 minutes.
 
 Then, once, from a ChromeOS shell (Ctrl+Alt+T, then `shell`):
 
@@ -68,42 +74,42 @@ Reboot and press **Ctrl+U** at the "OS verification is OFF" screen. Ctrl+U cover
 card as well as USB.
 
 The convertible's side buttons do nothing here. The recovery combo is read by the EC from
-the built-in keyboard, and the volume-button sequence Google documents belongs to
+the built-in keyboard. The volume-button sequence Google documents belongs to
 detachables and tablets, which this firmware is not built as. Use Esc+Refresh+Power.
 
-A USB keyboard will not help you at these screens either: `CONFIG_LP_USB_HID` is not set in
+A USB keyboard will not help you at these screens either. `CONFIG_LP_USB_HID` is not set in
 this board's libpayload, so depthcharge reads the EC keyboard and nothing else. (The
 Chromebit, which has no EC, is the one board in the family built the other way.)
 
-If a boot fails, the board tells you by rebooting: the signed command line carries
-`panic=30`, so a kernel panic or an initramfs that gives up on root returns to the firmware
+If a boot fails, the board tells you by rebooting. The signed command line carries
+`panic=30`. A kernel panic, or an initramfs that gives up on root, returns to the firmware
 splash about 30 seconds later. A board that *never* reboots means the kernel never reached
 the initramfs at all. A panic also writes a full dmesg to `BOOT2DEB-PANIC.txt` on every
 ext4 partition it can reach.
 
-Expect a few seconds of white screen on a healthy boot before the display comes up: the
+Expect a few seconds of white screen on a healthy boot before the display comes up. The
 image leaves the DRM stack out of the initramfs to keep the signed payload under its
-16 MiB ceiling, so the console appears only once the real root is mounted. The same
+16 MiB ceiling. The console therefore appears only once the real root is mounted. The same
 arrangement on the [C201](asus-c201.md) takes about 5 seconds from eMMC and about 8 from
-USB, the difference being the time the initramfs spends enumerating the stick.
+USB. The difference is the time the initramfs spends enumerating the stick.
 
 ## Installing to the eMMC
 
-The board has 16 GB of internal eMMC, and the image is a whole-disk image, so putting the
-OS there is one command from a card pressed with `--embed-image`:
+The board has 16 GB of internal eMMC, and the image is a whole-disk image. Putting the
+OS there is therefore one command from a card pressed with `--embed-image`:
 
 ```sh
 sudo boot2deb-install-to /dev/mmcblk0    # the eMMC — the one with mmcblk0boot0 beside it
 sudo reboot                              # Ctrl+D boots the eMMC, Ctrl+U the card
 ```
 
-The helper finds the embedded artifact, refuses the disk the system is running from and
-anything mounted, and asks you to type the target's name before it writes. Without
+The helper finds the embedded artifact, and refuses the disk the system is running from
+and anything mounted. It asks you to type the target's name before it writes. Without
 `--embed-image` the manual form is the same write: copy the `.img.xz` to the booted
 board and `xzcat asus-c100p-forky.img.xz | sudo dd of=/dev/mmcblk0 bs=4M conv=fsync`.
 
 This needs no kernel patch, contrary to the usual advice. The Veyron eMMC ships with its
-primary GPT deliberately corrupted — ChromeOS marks it `IGNOREME` and uses the secondary,
+primary GPT deliberately corrupted. ChromeOS marks it `IGNOREME` and uses the secondary,
 and a stock kernel cannot read a table like that. That only bites if you *keep* the factory
 GPT. Writing a whole-disk image lays down a fresh, valid one over the top, which a stock
 kernel reads like any other.
@@ -120,10 +126,10 @@ build, in forky (7.1.3) and trixie (6.12.94) alike:
 | `ti,bq27500` fuel gauge | `bq27xxx_battery_i2c` | `# CONFIG_BATTERY_BQ27XXX_I2C is not set` |
 
 So a C100P image comes up with a working keyboard, trackpad, panel, HDMI, Wi-Fi,
-Bluetooth and audio — and no touch input and no battery percentage.
+Bluetooth and audio. It has no touch input and no battery percentage.
 
 Neither is a near miss you can work around in config. The modules are simply absent from
-the kernel Debian ships. Note the trackpad is unaffected and does work: it is a
+the kernel Debian ships. Note the trackpad is unaffected and does work. It is a
 *different* Elan driver (`elan_i2c`, `CONFIG_MOUSE_ELAN_I2C=m`), and the similar names are
 the only thing the two have in common. The C201 is unaffected by both gaps — its battery is
 an SBS one, which Debian does build, and it has no touchscreen.
@@ -132,7 +138,7 @@ an SBS one, which Debian does build, and it has no touchscreen.
 
 A laptop, so it declares a console keymap — `keymap = "us"`, the layout the C100PA ships.
 
-There are two ways to get another layout, and neither is a `build` flag — an image's
+There are two ways to get another layout, and neither is a `build` flag. An image's
 keymap comes from the config its lock was resolved against:
 
 - **Change it on the running board**, offline, like any Debian system:
@@ -159,24 +165,28 @@ There is no ethernet port, so Wi-Fi is the only way onto the network:
 sudo nmtui        # pick "Activate a connection", choose the network, enter the key
 ```
 
-The radio is the family's Broadcom BCM4354 and needs two blobs Debian does not ship; they
-are vendored on the SoC layer and are already in the image. Bluetooth works as it does on
-the C201 — the BCM4354's Bluetooth half is on `uart0`, the kernel loads the vendored
-patchram, and `bluez` is installed to use it. `btsdio` is blacklisted, because if it claims
-the BCM4354's SDIO Bluetooth function, Wi-Fi does not survive suspend and resume. Bluetooth
-**audio** takes `libspa-0.2-bluetooth` on top, for the same reason as on the C201: PipeWire's
-Bluetooth plugin is only a *Suggests* of `wireplumber` and `pipewire-pulse`, so a desktop
-install does not bring it in and a headset pairs with no sink to play to.
+The radio is the family's Broadcom BCM4354, and needs two blobs Debian does not ship.
+They are vendored on the SoC layer and are already in the image.
+
+Bluetooth works as it does on the C201. The BCM4354's Bluetooth half is on `uart0`, the
+kernel loads the vendored patchram, and `bluez` is installed to use it. `btsdio` is
+blacklisted, because if it claims the BCM4354's SDIO Bluetooth function, Wi-Fi does not
+survive suspend and resume.
+
+Bluetooth **audio** takes `libspa-0.2-bluetooth` on top, for the same reason as on the
+C201. PipeWire's Bluetooth plugin is only a *Suggests* of `wireplumber` and
+`pipewire-pulse`. A desktop install therefore does not bring it in, and a headset pairs
+with no sink to play to.
 
 ## Audio
 
 The same max98090 as the C201, so the same first-boot fixup applies unchanged. The codec
-comes up with its amplifiers muted *and* the DAPM mixers that feed them holding their DAC
-input switches open — so there is no route from the DAC to the speakers to unmute in the
-first place, and clearing only the obvious `Speaker` control leaves the board silent.
+comes up with its amplifiers muted. The DAPM mixers that feed them also hold their DAC
+input switches open. There is therefore no route from the DAC to the speakers to unmute in
+the first place. Clearing only the obvious `Speaker` control leaves the board silent.
 
 The SoC layer's `first-boot.d/20-audio` hook closes the routing switches, unmutes both
-amplifiers, sets sane volumes, and runs `alsactl store`; `alsa-utils` replays the result on
+amplifiers, sets sane volumes, and runs `alsactl store`. `alsa-utils` replays the result on
 every later boot. Adjust it like any other Debian system:
 
 ```sh
@@ -187,33 +197,39 @@ alsamixer && sudo alsactl store
 
 A 1280x800 eDP panel and a micro-HDMI port, both driven by mainline `rockchip-drm`.
 
-The panel's backlight has one quirk worth knowing if you write to it directly: its PWM duty
+The panel's backlight has one quirk worth knowing if you write to it directly. Its PWM duty
 must be at least 1%, so the device tree starts its brightness scale at **3, not 0**. A
 userspace policy that writes 0 to turn the backlight down is doing something this panel does
 not accept.
 
-HDMI does **4K30** and cannot do 4K60 — the RK3288 caps TMDS at 340 MHz, its PHY has no
-scrambling above that, and the VOP cannot emit YUV420, so there is no reduced-rate path.
+HDMI does **4K30** and cannot do 4K60. The RK3288 caps TMDS at 340 MHz, its PHY has no
+scrambling above that, and the VOP cannot emit YUV420. There is no reduced-rate path.
 Nothing in the image configures any of this.
 
-Like the C201, this board lights two display controllers, and the smaller one (VOPL) tops
+Like the C201, this board lights two display controllers. The smaller one (VOPL) tops
 out at 2560x1600 while advertising the same maximum as the larger. Which one the HDMI
-encoder lands on is decided at runtime by DRM, not by configuration; `dmesg | grep -i vop`
+encoder lands on is decided at runtime by DRM, not by configuration. `dmesg | grep -i vop`
 says which it got. That is the thing to check if a 4K display comes up showing only part of
 the picture.
 
 ## Status
 
-**Not yet booted on hardware.** The image builds, and everything it is made of is shared
-with a board that does boot: the C100P resolves to the same rootfs, the same boot method,
-the same signed-payload flow, the same initramfs and the same Debian kernel as the C201,
-which is confirmed booting to a login prompt. It differs from it in a DTB, a depthcharge
-profile and a hostname.
+**Not yet booted on hardware.** The image builds, and every part it has is shared
+with a board that does boot. The C100P resolves to the same things as the C201:
 
-Of the family's three boards this is the one most likely to boot first time — it is the
-C201 in a different case, and unlike the Chromebit it has a card slot, a keyboard and two
-USB ports, so there is nothing unusual about getting an image into it. The known gaps are
-the touchscreen and the battery gauge, above; audio and Bluetooth ship configured and are
+- Rootfs
+- Boot method
+- Signed-payload flow
+- Initramfs
+- Debian kernel
+
+The C201 is confirmed booting to a login prompt. The C100P differs from it in a DTB, a
+depthcharge profile and a hostname.
+
+Of the family's three boards this is the one most likely to boot first time. It is the
+C201 in a different case. Unlike the Chromebit it has a card slot, a keyboard and two
+USB ports. There is nothing unusual about getting an image into it. The known gaps are
+the touchscreen and the battery gauge, above. Audio and Bluetooth ship configured and are
 unverified here.
 
 ## The family

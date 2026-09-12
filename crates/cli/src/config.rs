@@ -1,9 +1,14 @@
-//! Helpers over the [`ConfigRoot`] shared by several commands: the root's own
-//! structural check, target resolution, the early config preflight, and the
-//! search-path lookups (fragments, board `.dts`, apt keyrings, overlay trees) plus
-//! the durable cache locations and the patches-checkout resolution.
+//! Helpers over the [`ConfigRoot`] shared by several commands:
 //!
-//! Everything here reads config; the side effects belong to the commands that call it.
+//! - The root's own structural check.
+//! - Target resolution.
+//! - The early config preflight.
+//! - The search-path lookups, over fragments, board `.dts` files, apt keyrings and
+//!   overlay trees.
+//! - The durable cache locations.
+//! - The patches-checkout resolution.
+//!
+//! Everything here reads config. The side effects belong to the commands that call it.
 
 use crate::fsutil::{absolutize, normalize};
 use boot2deb_core::model::{Overrides, ResolvedBuild};

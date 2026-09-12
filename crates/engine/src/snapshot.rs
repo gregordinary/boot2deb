@@ -2,11 +2,11 @@
 //! bootstrap fetches from, and the `snapshot.debian.org` timestamp
 //! `--save-snapshot` stamps into the lock.
 //!
-//! The solved-manifest content pin already fixes *which bytes* a build
-//! installs; the snapshot is purely an availability backstop for when those exact
-//! versions rotate off the live mirror. So it is dormant by default (`mode = off`)
-//! and never on the hot path — [`resolve_mirrors`] returns just the live mirror
-//! until a mode explicitly activates it.
+//! The solved-manifest content pin already fixes *which bytes* a build installs. The
+//! snapshot is purely an availability backstop for when those exact versions rotate
+//! off the live mirror. So it is dormant by default (`mode = off`) and never on the
+//! hot path. [`resolve_mirrors`] returns just the live mirror until a mode explicitly
+//! activates it.
 //!
 //! Pure: the URL and timestamp formatting and the mode-to-mirror-list mapping do no
 //! I/O and read no clock (the caller passes `SystemTime::now()` into
@@ -28,15 +28,16 @@ pub fn snapshot_mirror(timestamp: &str) -> String {
 /// is past its `Valid-Until` by design.
 ///
 /// This is the question every provisioner configuration site asks before relaxing the
-/// release freshness check, and it is answered here because this module is the one that
-/// knows which URLs are snapshots. Asking it of the list *contents* rather than of the
-/// list *shape* is what makes [`Pin`](SnapshotMode::Pin) work: a pin has exactly one
-/// mirror and it is the snapshot, so a site keying on "are there fallbacks?" would
-/// refuse the stale release in the one mode where every fetch comes from a deliberately
-/// expired archive.
+/// release freshness check. It is answered here because this module is the one that
+/// knows which URLs are snapshots.
 ///
-/// The posture the caller then takes is repository-wide — it relaxes freshness for every
-/// mirror in the list, not just the snapshot — which is why it is taken only when a
+/// Asking it of the list *contents* rather than of the list *shape* is what makes
+/// [`Pin`](SnapshotMode::Pin) work. A pin has exactly one mirror and it is the
+/// snapshot. A site keying on "are there fallbacks?" would refuse the stale release.
+/// That is the one mode where every fetch comes from a deliberately expired archive.
+///
+/// The posture the caller then takes is repository-wide. It relaxes freshness for every
+/// mirror in the list, not just the snapshot. That is why it is taken only when a
 /// snapshot is actually present. A [`Fallback`](SnapshotMode::Fallback) list pays that
 /// price knowingly: the live mirror loses its freshness check so the backstop can be
 /// read at all.
@@ -45,9 +46,16 @@ pub fn has_snapshot(mirrors: &[String]) -> bool {
 }
 
 /// Resolve the ordered mirror list the rootfs bootstrap fetches from, honoring the
-/// active snapshot mode. `base_mirror` is the live Debian mirror ([`crate::DEFAULT_MIRROR`]);
-/// `mode` is the effective mode (a `--snapshot` override, else the lock's captured
-/// mode); `snapshot` is the lock's captured pin, if any.
+/// active snapshot mode.
+///
+/// The parameters:
+///
+/// - `base_mirror` is the live Debian mirror ([`crate::DEFAULT_MIRROR`]).
+/// - `mode` is the effective mode: a `--snapshot` override, else the lock's captured
+///   mode.
+/// - `snapshot` is the lock's captured pin, if any.
+///
+/// The modes:
 ///
 /// - [`Off`](SnapshotMode::Off) (or no snapshot): the live mirror only — the
 ///   snapshot stays provenance and never touches the build.
@@ -56,7 +64,7 @@ pub fn has_snapshot(mirrors: &[String]) -> bool {
 /// - [`Pin`](SnapshotMode::Pin): the snapshot only — a fully deterministic userland.
 ///
 /// A `Fallback`/`Pin` mode with no captured timestamp is
-/// [`SnapshotUnavailable`](EngineError::SnapshotUnavailable): there is nothing to
+/// [`SnapshotUnavailable`](EngineError::SnapshotUnavailable). There is nothing to
 /// fetch from, so the request is refused rather than silently downgraded to live.
 pub fn resolve_mirrors(
     base_mirror: &str,

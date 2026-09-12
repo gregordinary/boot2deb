@@ -10,17 +10,19 @@ boot2deb --overlay ~/my-boards build my-tablet/forky
 ```
 
 Each `--overlay` must name an existing directory. An empty or mistyped path is a
-resolve-time error rather than a silent no-op: an empty one would resolve every asset
-against the current directory, and a typo would shadow nothing at all — either way the
+resolve-time error rather than a silent no-op. An empty one would resolve every asset
+against the current directory, and a typo would shadow nothing at all. Either way the
 build would quietly use a config tree you did not intend, which is exactly what an
 overlay exists to make explicit.
 
-An overlay has the **same directory layout** as the shipped root — any subset of
+An overlay has the **same directory layout** as the shipped root. That is any subset of
 `devices/`, `socs/`, `arches/`, `boot-methods/`, `kernels/`, `features/`, `recipes/`,
 plus `fragments/`, `blobs/`, and per-layer `overlay/` trees. You ship only the files you
-add or change; everything else resolves from the shipped tree underneath. Because an
-overlay is just a second config search root, everything the CLI does — `resolve`,
-`doctor`, `verify-*`, `build`, and the `list-*` commands — sees the merged tree.
+add or change, and everything else resolves from the shipped tree underneath.
+
+An overlay is just a second config search root, so everything the CLI does sees the
+merged tree. That covers `resolve` and `doctor`, the `verify-*` and `list-*` commands,
+and `build`.
 
 ## What an overlay can do
 
@@ -31,13 +33,13 @@ overlay is just a second config search root, everything the CLI does — `resolv
   `[[apt_sources]]` — by restating the array with your addition (arrays are replaced
   wholesale, not concatenated).
 - **Add a whole target.** Drop in a new `devices/my-tablet.toml`, `socs/…`, `kernels/…`,
-  `features/…`, or `recipes/…`; it lists and builds alongside the shipped ones, since
+  `features/…`, or `recipes/…`. It lists and builds alongside the shipped ones, because
   `list-devices`, `list-recipes`, and friends union the overlay's targets in.
 
 ## How overlays merge
 
-The search path is the shipped root first, then each `--overlay` in the order given;
-**later wins**, and any overlay wins over the shipped root. When the same layer file
+The search path is the shipped root first, then each `--overlay` in the order given.
+**Later wins**, and any overlay wins over the shipped root. When the same layer file
 (e.g. `devices/turing-rk1.toml`) exists in more than one root, the copies are
 **deep-merged**:
 
@@ -49,7 +51,7 @@ The search path is the shipped root first, then each `--overlay` in the order gi
 
 A layer file present only in an overlay simply adds a new target (nothing to merge).
 Fragments, blobs, and per-feature/-layer rootfs trees (`overlay/`, `overlay-pre/` and
-`overlay-nonfree/`) resolve along the same path: a same-named asset in an overlay shadows
+`overlay-nonfree/`) resolve along the same path. A same-named asset in an overlay shadows
 the shipped one, while rootfs trees present in both roots stack (shipped first, overlay
 last).
 
@@ -67,51 +69,55 @@ A layer can carry up to three trees, which differ in *when* they are laid in and
 `overlay-nonfree/` is where a hardware layer vendors nonfree firmware Debian does not
 package — on the RK3288 that is the two Broadcom blobs in `socs/rk3288/overlay-nonfree/`.
 It stacks directly after its own layer's `overlay/`, so a board's own file still wins
-over what it extends. It is a separate tree rather than a subtraction from `overlay/`
-so that every blob a layer ships sits in one directory you can audit, and a libre build
-skipping it cannot miss one by spelling a path wrong.
+over what it extends. It is a separate tree rather than a subtraction from `overlay/`,
+so that every blob a layer ships sits in one directory you can audit. A libre build
+skipping it therefore cannot miss one by spelling a path wrong.
 
 ## File modes in a rootfs `overlay/` tree
 
-A per-layer `overlay/`, `overlay-pre/` or `overlay-nonfree/` tree is copied into the image, and its modes are
-normalized to **git's own file model** on the way in: directories become `0755`, and a file
-becomes `0755` if its executable bit is set and `0644` otherwise. Symlinks are untouched.
+A per-layer `overlay/`, `overlay-pre/` or `overlay-nonfree/` tree is copied into the
+image. Its modes are normalized to **git's own file model** on the way in.
+Directories become `0755`, and a file becomes `0755` if its executable bit is set and
+`0644` otherwise. Symlinks are untouched.
 
-That is the identity function on everything a git tree can express — git records exactly
-`100644` and `100755`, and no directory mode at all — and it discards the one thing it
-cannot: your umask at checkout time. Set the executable bit on a hook and it stays
-executable in the image; everything else about the mode is not yours to choose here.
+That is the identity function on everything a git tree can express, since git records
+exactly `100644` and `100755`, and no directory mode at all. It discards the one thing a
+git tree cannot express: your umask at checkout time. Set the executable bit on a hook
+and it stays executable in the image. Everything else about the mode is not yours to
+choose here.
 
-If a file needs a mode outside those two — a `0440` sudoers drop-in, a `0700` home — an
-overlay tree is the wrong place for it, because a git checkout cannot carry that mode to
-begin with. Ship it from a first-boot hook, which runs as root on the board.
+If a file needs a mode outside those two, an overlay tree is the wrong place for it. A
+git checkout cannot carry that mode to begin with. A `0440` sudoers drop-in and a `0700`
+home are the usual cases. Ship it from a first-boot hook, which runs as root on the
+board.
 
 ## Locks land in the owning overlay
 
 `update` writes a recipe's lock, and `build --save-manifest` writes its solved manifest,
-into the **root that owns the recipe** — so an overlay recipe's lock and manifest land in
-that overlay, beside the recipe, not in the shipped tree. An out-of-tree recipe stays
-fully self-contained: recipe, lock, and manifest are all versioned together in your repo.
+into the **root that owns the recipe**. An overlay recipe's lock and manifest therefore
+land in that overlay, beside the recipe, not in the shipped tree. An out-of-tree recipe
+stays fully self-contained: recipe, lock, and manifest are all versioned together in
+your repo.
 
 ## The keyring is a fixed trust anchor
 
-One asset an overlay may **not** silently replace: the Debian archive keyring
+One asset an overlay cannot silently replace is the Debian archive keyring
 (`blobs/keyrings/debian-archive-keyring.gpg`). It is the trust root for the rootfs
-bootstrap, so an overlay that ships its own copy is **refused** with a fail-closed error
-rather than trusted — an overlay must not be able to swap the bootstrap's trust anchor.
-If you genuinely intend to use the overlay's keyring, opt in explicitly with
+bootstrap, so an overlay that ships its own copy is **refused** with a fail-closed
+error. An overlay must not be able to swap the bootstrap's trust anchor. If you
+genuinely intend to use the overlay's keyring, opt in explicitly with
 `build --unsafe-overlay-keyring`. Every other asset follows the normal
-highest-precedence-wins rule; only this trust anchor is pinned to the shipped root.
+highest-precedence-wins rule, and only this trust anchor is pinned to the shipped root.
 
 ## Overlay or in-tree edit?
 
 Two paths, chosen by intent:
 
 - **Overlay** — you are bringing up your own board, or tuning a build for yourself. Keep
-  it out-of-tree with `--overlay`; there is nothing to upstream and nothing to fork.
+  it out-of-tree with `--overlay`. There is nothing to upstream and nothing to fork.
 - **In-tree edit** — you are contributing a board back to boot2deb. Edit the vendored
   tree directly and open a pull request.
 
-[Adding a board](../contributing/adding-a-board.md) walks through the layers to write and
-applies to both paths — the only difference is whether the files land in your overlay or
-in the vendored tree.
+[Adding a board](../contributing/adding-a-board.md) walks through the layers to write,
+and applies to both paths. The only difference is whether the files land in your overlay
+or in the vendored tree.

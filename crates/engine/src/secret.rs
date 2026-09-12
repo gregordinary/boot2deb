@@ -1,22 +1,23 @@
 //! Per-image build secrets.
 //!
 //! The shipped image's default account gets a **unique per built image** first-boot
-//! password, generated here from the kernel CSPRNG (`/dev/urandom`) so there is no
-//! guessable root-capable login on the network before the forced change
+//! password. It is generated here from the kernel CSPRNG (`/dev/urandom`), so there
+//! is no guessable root-capable login on the network before the forced change
 //! (`passwd -e`). This is side-effecting (it reads the RNG), hence in the engine
-//! rather than the pure core. A fresh secret per build deliberately places the
-//! rootfs `/etc/shadow` outside the byte-reproducibility claim; the package
-//! content-pin is unaffected.
+//! rather than the pure core.
 //!
-//! Expiry forces the *operator* to replace the password; it does not hold off anyone
+//! A fresh secret per build deliberately places the rootfs `/etc/shadow` outside the
+//! byte-reproducibility claim. The package content-pin is unaffected.
+//!
+//! Expiry forces the *operator* to replace the password. It does not hold off anyone
 //! else, since a login against an expired account is allowed to set the new password.
-//! That is what the length is for, and why the length is a validated config value
-//! rather than a preference: an unguessable secret is the only thing standing between
+//! That is what the length is for. It is also why the length is a validated config
+//! value rather than a preference. An unguessable secret is the only thing between
 //! the board and whoever else reaches it first.
 //!
-//! Both the draw and the hash are in-process: nothing on the credential path shells
-//! out to a host binary, so what lands in the image's `/etc/shadow` does not depend
-//! on which host built it.
+//! Both the draw and the hash are in-process. Nothing on the credential path shells
+//! out to a host binary. What lands in the image's `/etc/shadow` therefore does not
+//! depend on which host built it.
 
 use crate::error::EngineError;
 use sha_crypt::{PasswordHasher, ShaCrypt};
@@ -45,11 +46,12 @@ fn fill_random(buf: &mut [u8]) -> Result<(), EngineError> {
 
 /// Generate a fresh per-image password of `len` symbols from `/dev/urandom`.
 ///
-/// Uniform over the 56-symbol unambiguous alphabet by rejection sampling: bytes at or
+/// Uniform over the 56-symbol unambiguous alphabet by rejection sampling. Bytes at or
 /// above the largest multiple of the alphabet length are discarded, so `byte % len`
-/// maps no symbol more often than another (no modulo bias). Each symbol carries
-/// log2(56) ≈ 5.81 bits, so the length the config resolved to *is* the entropy
-/// statement. Fails only if the CSPRNG cannot be read.
+/// maps no symbol more often than another (no modulo bias).
+///
+/// Each symbol carries log2(56) ≈ 5.81 bits, so the length the config resolved to
+/// *is* the entropy statement. Fails only if the CSPRNG cannot be read.
 ///
 /// `len` comes from
 /// [`ResolvedImage::first_boot_password_length`](boot2deb_core::model::ResolvedImage::first_boot_password_length),

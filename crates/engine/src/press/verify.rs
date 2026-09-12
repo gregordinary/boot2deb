@@ -1,17 +1,17 @@
-//! Verify a written image file: re-read what was written and hold it to the
-//! digest computed during the write, then re-read the partition table and hold
+//! Verify a written image file. It re-reads what was written and holds it to the
+//! digest computed during the write. It then re-reads the partition table and holds
 //! it to the one the source artifact carries.
 //!
-//! The two checks catch different faults with the same symptom — a truncated
-//! copy (a filesystem that ran out of space mid-write), and a table that does
-//! not say what the artifact's does. Cheap next to the write itself, and
-//! together they keep the property `press` exists for: the file handed to a
+//! The two checks catch different faults with the same symptom. One is a truncated
+//! copy, from a filesystem that ran out of space mid-write. The other is a table
+//! that does not say what the artifact's does. Both are cheap next to the write
+//! itself. Together they keep the property `press` exists for: the file handed to a
 //! flasher is exactly what the build made.
 //!
-//! An image written to a medium larger than itself carries its *backup* GPT at
-//! the image's end, not the medium's — every tool reports that until first boot
-//! moves it, and it is not a fault. Both reads therefore judge the primary
-//! table only, which is the one the backup is reconstructed from.
+//! An image written to a medium larger than itself carries its *backup* GPT at the
+//! image's end rather than the medium's. Every tool reports that until first boot
+//! moves it, and it is not a fault. Both reads therefore judge the primary table
+//! only, which is the one the backup is reconstructed from.
 
 use crate::error::EngineError;
 use crate::event::Step;
@@ -26,10 +26,10 @@ use std::path::Path;
 /// so the prefix a table comparison needs.
 const GPT_PREFIX_BYTES: usize = 34 * 512;
 
-/// One partition entry as the table comparison sees it: the fields the firmware
-/// and the kernel act on. The partition GUID is deliberately included — on
-/// depthcharge it is how the booted slot knows itself — and the attribute
-/// word carries the boot selection.
+/// One partition entry as the table comparison sees it: the fields the firmware and
+/// the kernel act on. The partition GUID is deliberately included, because on
+/// depthcharge it is how the booted slot knows itself. The attribute word carries
+/// the boot selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableEntry {
     /// Entry index (1-based).
@@ -50,13 +50,13 @@ pub struct TableEntry {
 
 /// Re-read `written.bytes` from `target` and hold them to `written.sha256`.
 ///
-/// Reports progress on `step` in the 0–100 range of its own — verification is its
-/// own step, so the bar restarting is the truth rather than a glitch.
+/// Reports progress on `step` in the 0–100 range of its own. Verification is its own
+/// step, so the bar restarting is the truth rather than a glitch.
 ///
 /// # Errors
 ///
 /// [`EngineError::ImageVerifyShortRead`] when the target hands back fewer bytes
-/// than were written; [`EngineError::ImageVerifyDigest`] when the bytes differ.
+/// than were written. [`EngineError::ImageVerifyDigest`] when the bytes differ.
 pub fn verify_digest(
     target: &Path,
     written: &WrittenImage,
@@ -108,7 +108,7 @@ pub fn verify_digest(
 /// # Errors
 ///
 /// [`EngineError::ImageVerifyGpt`] when the artifact carries no readable primary
-/// table — which a `-boot.img` legitimately does not; the caller skips the table
+/// table, which a `-boot.img` legitimately does not. The caller skips the table
 /// comparison for an artifact this refuses.
 pub fn planned_table(artifact: &Path) -> Result<Vec<TableEntry>, EngineError> {
     let prefix = decompressed_prefix(artifact, GPT_PREFIX_BYTES)?;
@@ -118,9 +118,9 @@ pub fn planned_table(artifact: &Path) -> Result<Vec<TableEntry>, EngineError> {
     )
 }
 
-/// The whole-image size the artifact's own GPT states: the backup header sits on
-/// the image's last LBA, so `backup_lba + 1` sectors *is* the image — how large
-/// a medium the pressed file needs, read without decompressing anything past
+/// The whole-image size the artifact's own GPT states. The backup header sits on
+/// the image's last LBA, so `backup_lba + 1` sectors *is* the image. That is how
+/// large a medium the pressed file needs, read without decompressing anything past
 /// the table.
 ///
 /// # Errors

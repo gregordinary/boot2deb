@@ -8,7 +8,7 @@
 //! A build root is a base tree plus a staged layer of build-dependencies. The layer is
 //! resolved against a live archive while the base was provisioned earlier, so the two
 //! can describe different archive states. When they do, a layer package can be
-//! installed whose declared dependency the base does not meet — and the failure that
+//! installed whose declared dependency the base does not meet. The failure that
 //! follows is a link error deep inside a compile, naming a library that is present and
 //! correct. [`unsatisfied`] states the real fault instead: the package, the constraint
 //! it declared, and what is actually installed.
@@ -18,12 +18,12 @@
 //! [`unsatisfied`] answers the question `dpkg` would answer about an already-unpacked
 //! set, not the question a resolver answers about a candidate one. It checks
 //! `Depends` and `Pre-Depends` of every installed package against the installed set,
-//! honouring alternatives (`a | b`), virtual packages (`Provides`), and architecture
+//! honoring alternatives (`a | b`), virtual packages (`Provides`), and architecture
 //! qualifiers. `Recommends` and `Suggests` are not dependencies and are not checked.
 //!
-//! Version ordering is dpkg's own algorithm ([`compare_versions`]), which is not
-//! `sort -V`: it splits epoch, upstream and revision, orders `~` *before* the empty
-//! string so `1.0~rc1` precedes `1.0`, and orders letters before non-letters.
+//! Version ordering is dpkg's own algorithm ([`compare_versions`]) rather than
+//! `sort -V`. It splits epoch, upstream and revision. It orders `~` *before* the empty
+//! string, so `1.0~rc1` precedes `1.0`, and it orders letters before non-letters.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -35,10 +35,11 @@ pub struct Package {
     pub name: String,
     /// The package's own version, as `dpkg` records it.
     pub version: String,
-    /// `Depends` and `Pre-Depends` joined — both are hard requirements and neither may
+    /// `Depends` and `Pre-Depends` joined. Both are hard requirements, and neither can
     /// be unsatisfied in a usable root, so they are checked identically.
     pub depends: String,
-    /// The `Provides` field verbatim; virtual names a dependency may name instead.
+    /// The `Provides` field verbatim. These are the virtual names a dependency can name
+    /// instead.
     pub provides: String,
 }
 
@@ -58,12 +59,12 @@ pub struct Unsatisfied {
 
 /// Every hard dependency of `packages` that `packages` does not satisfy.
 ///
-/// The result is ordered by package name then by the declared group, so two runs over
-/// the same root report identically and a test can assert on the whole list.
+/// The result is ordered by package name then by the declared group. Two runs over the
+/// same root therefore report identically, and a test can assert on the whole list.
 ///
-/// Virtual packages are honoured: an unversioned dependency is satisfied by any
-/// `Provides` of that name, and a versioned one only by a versioned `Provides`, which
-/// is what Debian policy says a bare `Provides` may not satisfy.
+/// Virtual packages are honored. An unversioned dependency is satisfied by any
+/// `Provides` of that name, and a versioned one only by a versioned `Provides`. Debian
+/// policy is what says a bare `Provides` cannot satisfy a versioned dependency.
 pub fn unsatisfied(packages: &[Package]) -> Vec<Unsatisfied> {
     let installed: HashMap<&str, &str> = packages
         .iter()
@@ -209,7 +210,7 @@ fn parse_atom(atom: &str) -> (String, Option<(String, String)>) {
 
 /// Parse a `dpkg` status database into the packages that are actually installed.
 ///
-/// Only stanzas whose `Status` field ends in `installed` are returned: a removed or
+/// Only stanzas whose `Status` field ends in `installed` are returned. A removed or
 /// half-configured package contributes no files and must not be treated as satisfying
 /// anything. `Depends` and `Pre-Depends` are joined, since both are hard requirements.
 ///
@@ -285,10 +286,14 @@ pub fn parse_status(text: &str) -> Vec<Package> {
 
 /// Compare two Debian package versions the way `dpkg --compare-versions` does.
 ///
-/// The version is `[epoch:]upstream[-revision]`. Each of the three parts is compared
-/// by the same rule: runs of digits compare numerically, and runs of non-digits compare
-/// by a modified ordinal where `~` sorts before everything including the end of the
-/// string, letters sort before non-letters, and the rest sort by byte value.
+/// The version is `[epoch:]upstream[-revision]`, and each of the three parts is
+/// compared by the same rule:
+///
+/// - Runs of digits compare numerically.
+/// - Runs of non-digits compare by a modified ordinal.
+///
+/// In that ordinal `~` sorts before everything, including the end of the string.
+/// Letters sort before non-letters, and the rest sort by byte value.
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     let (ea, ua, ra) = split_version(a);
     let (eb, ub, rb) = split_version(b);

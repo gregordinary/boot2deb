@@ -3,27 +3,30 @@
 //!
 //! The bundled client speaks plain `http://` and `file://`, which covers the Debian
 //! mirror (integrity comes from the `Release` signature, not the transport) and the
-//! build's local `file://` pool. It does not speak TLS — deliberately, since carrying a
-//! TLS stack is a decision a consumer should make rather than inherit.
+//! build's local `file://` pool. It does not speak TLS, deliberately, since carrying a
+//! TLS stack is a decision a consumer makes rather than inherits.
 //!
-//! boot2deb has to make it, because a feature can contribute an apt repository at any
-//! URL its vendor publishes and the ones that matter are `https://` (Jellyfin's is).
-//! Such a repository is verified against its own keyring exactly as the mirror is, so
-//! TLS adds nothing to the *integrity* of what is installed — but without it the
-//! resource cannot be fetched at all, and the recipe fails at the rootfs solve.
+//! boot2deb has to make it. A feature can contribute an apt repository at any URL its
+//! vendor publishes, and the ones that matter are `https://` (Jellyfin's is). Such a
+//! repository is verified against its own keyring exactly as the mirror is. TLS
+//! therefore adds nothing to the *integrity* of what is installed. Without it, though,
+//! the resource cannot be fetched at all, and the recipe fails at the rootfs solve.
 //!
-//! The TLS half is [`ureq`] with rustls and bundled roots, which is already in the tree
-//! for the `extra_debs` fetch: no system OpenSSL, no certificate store to depend on, no
-//! async runtime. Everything that is not `https://` is handed to [`HttpFetch`]
-//! unchanged, so the mirror and the local pool keep the library's own behaviour rather
-//! than a second implementation of it.
+//! The TLS half is [`ureq`] with rustls and bundled roots, already in the tree for the
+//! `extra_debs` fetch. That means no system OpenSSL, no certificate store to depend on,
+//! and no async runtime. Everything that is not `https://` is handed to [`HttpFetch`]
+//! unchanged. The mirror and the local pool therefore keep the library's own behavior
+//! rather than a second implementation of it.
 //!
-//! Both halves batch. [`Fetch::fetch_all`]'s default body would serve one job at a time,
-//! and the provisioner's package prefetch chunks in plan order across every configured
-//! repository — so a chunk holds whichever schemes those repositories happen to use.
-//! [`ArchiveFetch::fetch_all`] therefore partitions a batch by scheme, passes the plain
-//! half to [`HttpFetch`] as a batch of its own, serves the `https://` half here through a
-//! bounded pool of its own, and runs the two halves at once.
+//! Both halves batch. [`Fetch::fetch_all`]'s default body would serve one job at a
+//! time, and the provisioner's package prefetch chunks in plan order across every
+//! configured repository. A chunk therefore holds whichever schemes those repositories
+//! happen to use. [`ArchiveFetch::fetch_all`] partitions a batch by scheme:
+//!
+//! - The plain half goes to [`HttpFetch`] as a batch of its own.
+//! - The `https://` half is served here through a bounded pool of its own.
+//!
+//! The two halves run at once.
 
 use crate::netfetch::MAX_REDIRECTS;
 use ferroday_cage::provision::{Fetch, FetchError, FetchJob, FetchRequest, HttpFetch};

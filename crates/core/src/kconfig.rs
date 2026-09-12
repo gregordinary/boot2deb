@@ -1,12 +1,12 @@
 //! Kernel `.config` / fragment model — parse a Kconfig file into a symbol
 //! map and diff two configs over the normalized `CONFIG_*` set.
 //!
-//! Pure and deterministic: parsing plus set comparison, no I/O. *Generating* a
-//! `.config` from a base defconfig + fragments is an engine side effect — it
-//! shells out to the kernel's `merge_config.sh` + `make olddefconfig` to reuse
-//! the tree's own Kconfig dependency resolution rather than reimplementing it.
-//! This module is the value layer the config-parity check
-//! compares with.
+//! Pure and deterministic, with no I/O at all: parsing plus set comparison.
+//!
+//! *Generating* a `.config` from a base defconfig + fragments is an engine side
+//! effect. It shells out to the kernel's `merge_config.sh` + `make olddefconfig`, to
+//! reuse the tree's own Kconfig dependency resolution rather than reimplementing it.
+//! This module is the value layer the config-parity check compares with.
 //!
 //! Normalization follows Kconfig semantics: a symbol absent from a `.config` is
 //! disabled, so *absent* and `# CONFIG_X is not set` are the same value
@@ -23,9 +23,9 @@ pub enum Value {
     /// Disabled: written `# CONFIG_X is not set`, or absent entirely — the same
     /// thing in Kconfig, so the two forms compare equal.
     NotSet,
-    /// Set to a value — `y`, `m`, a number, or a quoted string — stored verbatim
-    /// as the text after the `=` (quotes included), since parity is a
-    /// byte-for-byte comparison of that text.
+    /// Set to a value — `y`, `m`, a number, or a quoted string — stored verbatim as
+    /// the text after the `=`, quotes included. Parity is a byte-for-byte comparison
+    /// of that text.
     Set(String),
 }
 
@@ -40,8 +40,8 @@ impl fmt::Display for Value {
 
 /// A parsed kernel `.config` or config fragment: symbol name → [`Value`].
 ///
-/// Only `CONFIG_*` assignments and `# CONFIG_X is not set` lines are retained;
-/// blank lines, the version banner, and section-header comments are dropped.
+/// Only `CONFIG_*` assignments and `# CONFIG_X is not set` lines are retained.
+/// Blank lines, the version banner, and section-header comments are dropped.
 /// [`get`](KernelConfig::get) reads an absent symbol as [`Value::NotSet`],
 /// matching Kconfig's "absent means disabled" rule, so a fragment and a full
 /// `.config` are directly comparable.
@@ -121,15 +121,15 @@ impl KernelConfig {
 /// fragment last set each symbol.
 ///
 /// The merge order is the kernel definition's `config_fragments` order, and last
-/// wins — the same rule a `.config` follows. The attribution is the point: comparing
+/// wins — the same rule a `.config` follows. The attribution is the point. Comparing
 /// two builds' resolved fragment sets says *which fragment* introduced a symbol,
-/// which comparing two generated `.config` files cannot, because by then every
-/// symbol is anonymous.
+/// which comparing two generated `.config` files cannot. By then every symbol is
+/// anonymous.
 ///
 /// This is the *requested* configuration, not the realized one. A symbol here can
 /// still be dropped or forced by the kernel's own dependency resolution when the
-/// tree generates its `.config`; the clean-merge gate is what checks that, and this
-/// is what a reader compares two build points on without a tree.
+/// tree generates its `.config`. The clean-merge gate is what checks that. This is
+/// what a reader compares two build points on without a tree.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FragmentSet {
     config: KernelConfig,
@@ -140,7 +140,7 @@ impl FragmentSet {
     /// Merge `fragments` — `(name, text)` pairs in declaration order — into one
     /// config, recording for each symbol the name of the fragment that last set it.
     ///
-    /// `name` is whatever the caller wants a reader to see: the fragment's path
+    /// `name` is whatever the caller wants a reader to see. The fragment's path
     /// relative to the config root reads best, since that is how the kernel
     /// definition names it.
     pub fn merge<'a>(fragments: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
@@ -186,8 +186,8 @@ impl fmt::Display for Diff {
 /// both symbol sets, sorted by name.
 ///
 /// Absent counts as [`Value::NotSet`], so a symbol disabled in one config and
-/// absent from the other is *not* reported — that is the correct Kconfig
-/// reading, and it is what lets a small fragment be compared against a full
+/// absent from the other is *not* reported. That is the correct Kconfig reading,
+/// and it is what lets a small fragment be compared against a full
 /// `.config`. An empty result is exact parity over the normalized `CONFIG_*`
 /// set: what the fragment set must reproduce against the reference config.
 pub fn diff(left: &KernelConfig, right: &KernelConfig) -> Vec<Diff> {

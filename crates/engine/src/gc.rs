@@ -1,16 +1,19 @@
 //! Opportunistic garbage collection of stale partial-publish temporaries.
 //!
 //! Every atomic publish in the engine stages into a uniquely-named sibling temp and
-//! renames it into place, so a present entry is always complete: the
-//! [artifact store](crate::artstore) and [rootfs store](crate::rootcache) use
-//! `<key>.partial` dirs, the [deb store](crate::debstore) and
-//! [`stage_artifact`](crate::build) use `.<name>.<pid>.partial` files, the rootfs
-//! password splice uses `.<name>.<pid>.splice.partial`, and the
-//! [patch fetch cache](crate::patchfetch) uses `.fetch-*` staging dirs. A hard kill
-//! (SIGKILL, power loss) between stage and rename leaves that temp behind. It is
-//! harmless to correctness — hit checks require the *final* entry, never a temp — but
-//! it accumulates as disk clutter, since the durable stores under `<root>/cache`
-//! outlive the work dirs that read them.
+//! renames it into place, so a present entry is always complete:
+//!
+//! - The [artifact store](crate::artstore) and [rootfs store](crate::rootcache) use
+//!   `<key>.partial` dirs.
+//! - The [deb store](crate::debstore) and [`stage_artifact`](crate::build) use
+//!   `.<name>.<pid>.partial` files.
+//! - The rootfs password splice uses `.<name>.<pid>.splice.partial`.
+//! - The [patch fetch cache](crate::patchfetch) uses `.fetch-*` staging dirs.
+//!
+//! A hard kill (SIGKILL, power loss) between stage and rename leaves that temp
+//! behind. It is harmless to correctness, since hit checks require the *final*
+//! entry and never a temp. It does accumulate as disk clutter, because the durable
+//! stores under `<root>/cache` outlive the work dirs that read them.
 //!
 //! [`sweep_stale_temps`] removes those leftovers best-effort at store-open and
 //! build-start. A temp is deleted only when it is both name-matched and older than
@@ -36,11 +39,13 @@ fn is_temp_name(name: &str) -> bool {
 /// Remove partial-publish temps under `dir` older than `STALE_AGE`, and one level
 /// deeper (the artifact store keys its temps under per-node subdirs), best-effort.
 ///
-/// Never fails and never logs: a sweep error (a permission issue, or a temp a
-/// concurrent build is mid-rename on) is ignored — GC is opportunistic, and the
-/// conservative hit checks mean any temp that survives is only clutter. Non-temp
-/// subdirectories are descended one level so a stale `<node>/.sig.pid.partial` is
-/// reached; their own non-temp contents are left untouched.
+/// Never fails and never logs. A sweep error, such as a permission issue or a temp a
+/// concurrent build is mid-rename on, is ignored. GC is opportunistic, and the
+/// conservative hit checks mean any temp that survives is only clutter.
+///
+/// Non-temp subdirectories are descended one level so a stale
+/// `<node>/.sig.pid.partial` is reached. Their own non-temp contents are left
+/// untouched.
 pub fn sweep_stale_temps(dir: &Path) {
     sweep_dir(dir, STALE_AGE, SystemTime::now(), true);
 }

@@ -1,54 +1,57 @@
 # Upgrading the kernel
 
-This page is about the kernel on a **board that is already running**. Moving a *recipe* to a
-newer kernel version — re-pinning the tag, and measuring whether the patch series survives
-the bump — is [Moving a board to a newer kernel](tutorials/newer-kernel.md).
+This page is about the kernel on a **board that is already running**. Moving a *recipe*
+to a newer kernel version is
+[Moving a board to a newer kernel](tutorials/newer-kernel.md). That means re-pinning the
+tag, and measuring whether the patch series survives the bump.
 
-On a ChromeOS-firmware board — the [C201](boards/asus-c201.md), the
+On a ChromeOS-firmware board, upgrading the kernel is `apt upgrade`, and it is **atomic
+and reversible**. Those boards are the [C201](boards/asus-c201.md), the
 [C100P](boards/asus-c100p.md), the [Chromebit](boards/asus-chromebit-cs10.md), and every
-other board using the `depthcharge` boot method — upgrading the kernel is `apt upgrade`,
-and it is **atomic and reversible**. If a new kernel does not boot, the firmware puts the
+other board using the `depthcharge` boot method.
+
+If a new kernel does not boot, the firmware puts the
 old one back on its own. You do not have to do anything, and you do not need a USB stick.
 
 That is worth stating plainly, because on these boards it is not obvious. The kernel is
 not a file in `/boot` that a bootloader reads. It is a **vboot-signed blob written raw
-into a partition**, and changing it means re-signing it and rewriting that partition —
-which is exactly the operation you cannot afford to get wrong, because it is the only
+into a partition**, and changing it means re-signing it and rewriting that partition.
+That is exactly the operation you cannot afford to get wrong, because it is the only
 thing standing between the board and a firmware screen.
 
 ## How it works
 
 The image ships **two ChromeOS kernel slots**, `KERN-A` and `KERN-B`. The kernel lives in
-one of them; the other is empty. Both are ordinary GPT partitions, and the firmware picks
+one of them, and the other is empty. Both are ordinary GPT partitions, and the firmware picks
 between them using three fields in each partition's GPT attribute bits:
 
 | field | meaning |
 |---|---|
-| `priority` | boot order among candidates; `0` means **never boot** |
+| `priority` | boot order among candidates, where `0` means **never boot** |
 | `tries` | attempts remaining, decremented *before* each attempt |
-| `successful` | known-good; stops the firmware spending `tries` |
+| `successful` | known-good, which stops the firmware spending `tries` |
 
 A slot is a boot candidate while `priority > 0` and (`successful` or `tries > 0`).
 
-When a kernel package is installed — by `apt`, or by `dpkg -i` on a `.deb` you built
-yourself — Debian's `depthcharge-tools` package runs its `/etc/kernel/postinst.d` hook,
-which:
+When a kernel package is installed, Debian's `depthcharge-tools` package runs its
+`/etc/kernel/postinst.d` hook. That covers installation by `apt`, and by `dpkg -i` on a
+`.deb` you built yourself. The hook does three things:
 
-1. rebuilds the kernel FIT (kernel + device tree + initramfs) and signs it,
-2. writes it into the slot the board is **not currently booted from**,
-3. marks that slot highest-priority with `tries = 1, successful = 0`.
+1. Rebuild the kernel FIT (kernel + device tree + initramfs) and sign it.
+2. Write it into the slot the board is **not currently booted from**.
+3. Mark that slot highest-priority with `tries = 1, successful = 0`.
 
 On the next boot the firmware spends that single try on the new slot. If the system comes
 up, `depthcharge-tools.service` runs `depthchargectl bless`, which sets `successful` and
-commits the upgrade. If the system *never* comes up, the try is already spent, the slot
-stops being a candidate, and the firmware falls back to the other slot — which still holds
-the kernel that worked, still marked `successful`.
+commits the upgrade. If the system *never* comes up, the try is already spent and the
+slot stops being a candidate. The firmware falls back to the other slot, which still
+holds the kernel that worked, still marked `successful`.
 
 So a failed kernel upgrade costs you one reboot. Nothing else.
 
 > **The spare slot is the whole mechanism.** An image with only one kernel slot cannot do
-> any of this: the only slot is the one you are running from, so an upgrade has to
-> overwrite the running kernel in place, and a kernel that does not come up leaves the
+> any of this. The only slot is the one you are running from, so an upgrade has to
+> overwrite the running kernel in place. A kernel that does not come up then leaves the
 > board with nothing to boot and no way in but external media.
 
 ## Doing it
@@ -84,7 +87,7 @@ That value is what `depthchargectl` uses to know which slot it must *not* overwr
 ## Rolling back on purpose
 
 If a kernel boots but is bad in some way you only notice later, mark it unbootable and
-reboot — the firmware falls back to the other slot:
+reboot. The firmware then falls back to the other slot:
 
 ```sh
 sudo depthchargectl bless --bad      # zero the running slot's attributes
@@ -96,7 +99,7 @@ back.
 
 ## When the write fails: the payload ceiling
 
-The signed blob must fit its kernel slot — 16 MiB on stock firmware (a board page may
+The signed blob must fit its kernel slot, 16 MiB on stock firmware (a board page can
 list roomier firmware series). `depthchargectl` builds the new image first and writes
 second, so when nothing it tries fits under the ceiling, it fails **without touching the
 slot**:
@@ -106,26 +109,26 @@ Couldn't build a small enough image for this board
 ```
 
 Nothing is broken when this prints. The slot still holds the payload the board booted
-from and the board keeps booting — but the change that triggered the rebuild has not
+from, and the board keeps booting. The change that triggered the rebuild has not
 reached the slot, and nothing will until the payload fits again.
 
 The payload is kernel + device tree + initramfs, and the part that grows is the
 initramfs. Under the stock ceiling the image ships it deliberately small — an explicit
 module list (`MODULES=list`) and xz compression, which leaves about 2 MB of headroom. A
-board with a roomier firmware buffer spends that margin instead: `boot2deb resolve` shows
-which compressor a build gets on its `initramfs` line, and a board at `COMPRESS=zstd`
+A board with a roomier firmware buffer spends that margin instead. `boot2deb resolve`
+shows which compressor a build gets on its `initramfs` line. A board at `COMPRESS=zstd`
 has slot to spare and is unlikely to meet this failure at all.
 
 **What spends that headroom is initramfs-tools hooks**, and the one that spends it all at
 once is plymouth. Desktop metapackages (`cinnamon-desktop-environment`,
-`task-gnome-desktop`, and the rest) pull plymouth in through Recommends, `desktop-base`
-registers a graphical boot theme, and plymouth's hook then copies the splash daemon, its
-renderers, the theme, and the text plugin with its whole font stack into every initramfs
-built afterwards. That is several MB, and the next slot write — a kernel upgrade, or any
-package that triggers `update-initramfs` — fails as above.
+`task-gnome-desktop`, and the rest) pull plymouth in through Recommends, and
+`desktop-base` registers a graphical boot theme. Plymouth's hook then copies the splash
+daemon, its renderers, the theme, and the text plugin with its whole font stack into
+every initramfs built afterwards. That is several MB, and the next slot write fails as
+above. That write is a kernel upgrade, or any package that triggers `update-initramfs`.
 
 On a board at the stock ceiling the cost buys nothing anyway. Its initramfs carries no
-DRM modules, so plymouth cannot draw before the root pivot regardless — it says so itself
+DRM modules, so plymouth cannot draw before the root pivot regardless. It says so itself
 during the rebuild:
 
 ```
@@ -134,7 +137,7 @@ W: plymouth: not including drm modules since MODULES=list
 
 That warning is about plymouth's own hook declining to add modules, so it prints on any
 `MODULES=list` board. It only means "plymouth is dead weight" where nothing *else* put a
-DRM module in the initramfs; a board that carries the display stack in its module list
+DRM module in the initramfs. A board that carries the display stack in its module list
 has one either way.
 
 Remove it:
@@ -143,9 +146,9 @@ Remove it:
 sudo apt purge 'plymouth*'
 ```
 
-The purge re-triggers the initramfs rebuild and the slot write; watch the
-`depthchargectl` run in the output succeed. Nothing depends on plymouth — desktops only
-recommend it — and no configuration keeps an installed plymouth out of the initramfs
+The purge re-triggers the initramfs rebuild and the slot write, so watch the
+`depthchargectl` run in the output succeed. Nothing depends on plymouth, since desktops
+only recommend it. No configuration keeps an installed plymouth out of the initramfs
 (its initramfs-tools fragment overrides any admin setting), so removing the package is
 the supported answer. If the original failure aborted an `apt` run partway, finish it
 first with `sudo dpkg --configure -a`.
@@ -161,9 +164,10 @@ A healthy initramfs for these boards is 7–8 MB compressed (`ls -lh /boot/initr
 
 ## Does it differ with a compiled kernel?
 
-**No — the mechanism is identical.** The hook that re-signs and writes a slot is triggered
-by the *kernel package's own maintainer script*, not by `apt`, so it fires for any
-`linux-image` `.deb` that gets configured, however it arrived. A boot2deb-compiled kernel
+**No — the mechanism is identical.** The hook that re-signs and writes a slot is
+triggered by the *kernel package's own maintainer script*, not by `apt`. It therefore
+fires for any `linux-image` `.deb` that gets configured, however it arrived. A
+boot2deb-compiled kernel
 and Debian's stock `linux-image-armmp` take exactly the same path through the same tool,
 and both get the same A/B safety.
 
@@ -180,12 +184,12 @@ safe as any other.
 
 > **The upgrade unit is the `.deb`, not the signed blob.** It is tempting to think of the
 > signed kernel partition as the thing you ship, and it is not. The signed blob contains
-> the kernel, the device tree, and the initramfs — but *not* the kernel modules, which
+> the kernel, the device tree, and the initramfs, but *not* the kernel modules. Those
 > live on the root filesystem in `/lib/modules/<version>` and are where Wi-Fi, graphics
 > and sound actually come from. A kernel written without its modules boots into a system
 > with no drivers. The `.deb` carries both, which is why it is what you move around.
 >
-> The signed blob is also **specific to the image it was built from**: the rootfs
+> The signed blob is also **specific to the image it was built from**. The rootfs
 > PARTUUID is baked into the *signature*, and every device keeps the PARTUUID its image
 > was stamped with. A blob signed for one image's PARTUUID cannot find root on a disk
 > flashed from a different image.
@@ -195,5 +199,5 @@ safe as any other.
 On a `rockchip-rkbin` board — the [Turing RK1](boards/turing-rk1.md), the H96 — none of
 this applies. There the kernel is an ordinary file in `/boot`, the bootloader is u-boot
 reading `extlinux.conf`, and a kernel upgrade rewrites that config file. It is simpler,
-and it has no rollback: the boot configuration is a file, so a bad kernel is fixed by
-editing it back, which needs a keyboard and a screen or a serial console.
+and it has no rollback. The boot configuration is a file, so a bad kernel is fixed by
+editing it back. That needs a keyboard and a screen, or a serial console.

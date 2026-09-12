@@ -1,28 +1,30 @@
 //! `boot2deb try` — boot the built image under QEMU system emulation and assert
 //! the userland works, before anything is flashed.
 //!
-//! This tests the **userland**, not the board. The guest machine is `-M virt`,
-//! so no board device exists in it; what it proves is that systemd reaches
-//! `multi-user.target` with no failed unit, that the generated first-boot
-//! password authenticates, that `first-boot` ran to completion — and, because
-//! it boots the same disk **twice**, that the image survives its second boot,
-//! the failure class no single-boot smoke test finds. The on-image selftest
-//! runs inside the guest in userland mode, so the disk-content half of the
-//! board's expectations is checked too.
+//! This tests the **userland**, not the board. The guest machine is `-M virt`, so no
+//! board device exists in it. What it proves is:
 //!
-//! The board kernel is deliberately not booted: it is configured from the
-//! board's fragments and has no reason to carry virtio drivers, and adding them
-//! would change the shipped kernel to serve the test. The guest instead boots
-//! the suite's own generic kernel ([`fixture_kernel`]) — the kernel is a
-//! fixture, the userland is what is under test. No bootloader is in the loop
-//! either: QEMU loads the kernel directly, because `try` is not testing the
-//! boot path.
+//! - Systemd reaches `multi-user.target` with no failed unit.
+//! - The generated first-boot password authenticates.
+//! - `first-boot` ran to completion.
+//! - The image survives its second boot, because it boots the same disk **twice**.
+//!   That is the failure class no single-boot smoke test finds.
 //!
-//! Everything in the guest is driven over the serial console: `try` logs in as
-//! the image's account with the password the build generated (handling the
-//! forced first-login change), runs the assertions as shell commands, and
-//! powers the guest off. Driving the real login path is the point — it is the
-//! assertion that the account works, not a side channel around it.
+//! The on-image selftest runs inside the guest in userland mode, so the disk-content
+//! half of the board's expectations is checked too.
+//!
+//! The board kernel is deliberately not booted. It is configured from the board's
+//! fragments and has no reason to carry virtio drivers. Adding them would change the
+//! shipped kernel to serve the test. The guest instead boots the suite's own generic
+//! kernel ([`fixture_kernel`]) — the kernel is a fixture, the userland is what is
+//! under test. No bootloader is in the loop either: QEMU loads the kernel directly,
+//! because `try` is not testing the boot path.
+//!
+//! Everything in the guest is driven over the serial console. `try` logs in as the
+//! image's account with the password the build generated, handling the forced
+//! first-login change. It then runs the assertions as shell commands and powers the
+//! guest off. Driving the real login path is the point — it is the assertion that the
+//! account works, not a side channel around it.
 //!
 //! Runtime is minutes, not seconds, under TCG on an x86 host: this replaces a
 //! flash-plus-serial-console cycle, not a unit test. With KVM on a matching
@@ -81,27 +83,29 @@ pub fn qemu_system(arch: Arch) -> Result<&'static str, EngineError> {
     }
 }
 
-/// The fixture kernel pair a guest boots with: the suite's generic kernel and
-/// an initramfs that can find a virtio root, both harvested from the archive's
-/// own `.deb` ([`fixture_kernel`]).
+/// The fixture kernel pair a guest boots with: the suite's generic kernel, and an
+/// initramfs that can find a virtio root. Both are harvested from the archive's own
+/// `.deb` ([`fixture_kernel`]).
 pub struct FixtureKernel {
     /// The kernel image (`vmlinuz`).
     pub kernel: PathBuf,
     /// The matching initramfs, built by `initramfs-tools` inside a target-arch
-    /// root at harvest time, with its `MODULES=most` default — which is what
+    /// root at harvest time, with its `MODULES=most` default. That default is what
     /// puts the virtio drivers in it.
     pub initrd: PathBuf,
 }
 
 /// Obtain the fixture kernel for `arch`, cached under `dir`.
 ///
-/// The suite's `linux-image-*` metapackage and `initramfs-tools` are layered
-/// over the target-arch build sandbox's base ([`BuildSandbox::build_root`]), so
-/// the kernel's own postinst builds the initramfs inside a real userland of the
-/// pinned suite — the same machinery every package stage uses, and the reason
-/// this needs no host `dpkg`. The pair is copied out and reused on later runs;
-/// `refresh` discards the cached pair and harvests again (how a new point
-/// release of the suite kernel is picked up).
+/// The suite's `linux-image-*` metapackage and `initramfs-tools` are layered over the
+/// target-arch build sandbox's base ([`BuildSandbox::build_root`]). The kernel's own
+/// postinst therefore builds the initramfs inside a real userland of the pinned
+/// suite. That is the same machinery every package stage uses, and the reason this
+/// needs no host `dpkg`.
+///
+/// The pair is copied out and reused on later runs. `refresh` discards the cached
+/// pair and harvests again, which is how a new point release of the suite kernel is
+/// picked up.
 pub fn fixture_kernel(
     sandbox: &dyn BuildSandbox,
     arch: Arch,
@@ -176,13 +180,13 @@ pub struct TryOptions<'a> {
     pub user: &'a str,
     /// The generated first-boot password, from the build's provenance manifest.
     pub password: &'a str,
-    /// How long one boot may take to reach a login prompt (and how long
-    /// `systemctl is-system-running --wait` may take after it). Under TCG this
-    /// is minutes.
+    /// How long one boot is allowed to take to reach a login prompt (and how long
+    /// `systemctl is-system-running --wait` is allowed to take after it). Under TCG
+    /// this is minutes.
     pub boot_timeout: Duration,
     /// Keep the disk copy after the run — for a post-mortem, or to boot it by
-    /// hand. Note the first login was forced to change the account password;
-    /// the report carries the one that is now set.
+    /// hand. Note the first login was forced to change the account password. The
+    /// report carries the one that is now set.
     pub keep_disk: bool,
 }
 
@@ -207,7 +211,7 @@ pub struct TryReport {
     pub second: BootReport,
     /// The account password now set on the disk copy (the forced first-login
     /// change replaces the generated one). Only meaningful with
-    /// [`TryOptions::keep_disk`]; the built image is untouched.
+    /// [`TryOptions::keep_disk`]. The built image is untouched.
     pub disk_password: String,
 }
 

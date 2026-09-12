@@ -1,21 +1,22 @@
 //! The per-unit seed partition: a 1 MiB FAT12 volume holding `seed.txt`, built
 //! whole and written whole.
 //!
-//! The seed is how one image presses six cards that do not collide: `press
-//! --hostname --ssh-key --wifi-ssid` regenerates the partition per unit, and
-//! the device's first-boot hook applies what it finds. FAT because an operator
-//! can edit the file from any laptop — plug the card in, open `seed.txt`,
-//! change the hostname, eject — with no `dd`, no root, and no boot2deb
+//! The seed is how one image presses six cards that do not collide. `press
+//! --hostname --ssh-key --wifi-ssid` regenerates the partition per unit, and the
+//! device's first-boot hook applies what it finds.
+//!
+//! FAT, because an operator can edit the file from any laptop: plug the card in, open
+//! `seed.txt`, change the hostname, eject. None of that needs `dd`, root, or boot2deb
 //! installed.
 //!
 //! **Regenerated, never mutated.** Whether at build time (the empty template),
 //! at press time, or under `boot2deb seed`, the whole partition image is built
 //! in memory ([`partition_image`]) and written as one unit. A partition small
-//! enough to regenerate needs no in-place FAT writer and no extent bookkeeping,
-//! and it makes re-personalizing an already-pressed image the same code path as
-//! a fresh press.
+//! enough to regenerate needs no in-place FAT writer and no extent bookkeeping. It
+//! also makes re-personalizing an already-pressed image the same code path as a fresh
+//! press.
 //!
-//! The text format is `key=value` lines, `#` comments, unknown keys ignored —
+//! The text format is `key=value` lines, with `#` comments and unknown keys ignored.
 //! [`render`] and [`parse`] are the two directions, and the device hook's shell
 //! parser follows the same grammar. An absent or empty seed means "personalize
 //! nothing", so an unpersonalized image behaves exactly like one pressed with
@@ -41,7 +42,7 @@ const SEED_LABEL: &str = "B2D-SEED";
 /// file's mtime would invert the priorities.
 const FAT_EPOCH_FLOOR: i64 = 315_532_800;
 
-/// The keys a seed can carry. Every field optional; the default is the empty
+/// The keys a seed can carry. Every field is optional, and the default is the empty
 /// seed the built image ships. Unknown keys in the file are ignored on both
 /// sides, so an old image meets a newer seed (and the reverse) safely.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -53,20 +54,20 @@ pub struct SeedKeys {
     pub authorized_keys: Vec<String>,
     /// `wifi_ssid=` — the network the hook writes a NetworkManager connection
     /// profile for, on images that carry NetworkManager (every Wi-Fi-capable
-    /// board's do); elsewhere the hook logs and skips. The canonical per-site
+    /// board's do). Elsewhere the hook logs and skips. The canonical per-site
     /// value that must never sit in a committed recipe.
     pub wifi_ssid: Option<String>,
-    /// `wifi_psk=` — the WPA passphrase for [`wifi_ssid`](Self::wifi_ssid);
-    /// absent means an open network. Plaintext on the FAT volume by design,
+    /// `wifi_psk=` — the WPA passphrase for [`wifi_ssid`](Self::wifi_ssid).
+    /// Absent means an open network. Plaintext on the FAT volume by design,
     /// like the rest of the seed: the card personalizes the unit, it is not a
     /// secret store.
     pub wifi_psk: Option<String>,
-    /// `static_ip=` — static IPv4 (`address/prefix[,gateway[,dns...]]`,
-    /// validated by `boot2deb_core::staticip`) for the connection the seed
-    /// sets up: the Wi-Fi profile when [`wifi_ssid`](Self::wifi_ssid) is
-    /// present, the wired interface otherwise — through NetworkManager on
-    /// images that carry it, `dhcpcd.conf` on images that carry dhcpcd, and a
-    /// logged skip on images with neither. Absent means DHCP.
+    /// `static_ip=` — static IPv4 (`address/prefix[,gateway[,dns...]]`, validated by
+    /// `boot2deb_core::staticip`) for the connection the seed sets up. That is the
+    /// Wi-Fi profile when [`wifi_ssid`](Self::wifi_ssid) is present, and the wired
+    /// interface otherwise. It is applied through NetworkManager on images that carry
+    /// it, `dhcpcd.conf` on images that carry dhcpcd, and a logged skip on images with
+    /// neither. Absent means DHCP.
     pub static_ip: Option<String>,
 }
 
@@ -122,10 +123,13 @@ pub fn render(keys: &SeedKeys) -> String {
     out
 }
 
-/// Parse a seed file's text — the same grammar the device hook's shell parser
-/// follows: `key=value` per line, whitespace-trimmed, `#` comments and blank
-/// lines skipped, unknown keys ignored (a newer image may know more keys), the
-/// last `hostname=` winning.
+/// Parse a seed file's text, in the same grammar the device hook's shell parser
+/// follows:
+///
+/// - `key=value` per line, whitespace-trimmed.
+/// - `#` comments and blank lines skipped.
+/// - Unknown keys ignored, since a newer image can know more keys.
+/// - The last `hostname=` winning.
 #[must_use]
 pub fn parse(text: &str) -> SeedKeys {
     let mut keys = SeedKeys::default();
@@ -163,10 +167,10 @@ pub fn parse(text: &str) -> SeedKeys {
 /// [`SEED_FILE`] with `keys` rendered into it.
 ///
 /// `volume_id` and `time_secs` are the two values a FAT format would otherwise
-/// invent; both are supplied so the built-in seed is a function of the lock
-/// (the identity derivation and the rootfs timestamp), and a press-time seed is
-/// a function of its inputs. `offset_sectors` is where the partition sits on
-/// the medium, recorded as the volume's hidden-sector count.
+/// invent. Both are supplied, so the built-in seed is a function of the lock (the
+/// identity derivation and the rootfs timestamp), and a press-time seed is a function
+/// of its inputs. `offset_sectors` is where the partition sits on the medium,
+/// recorded as the volume's hidden-sector count.
 ///
 /// # Errors
 ///
@@ -202,14 +206,15 @@ pub fn partition_image(
     Ok(image.into_bytes())
 }
 
-/// Regenerate the seed partition of an already-pressed image file (`boot2deb
-/// seed`, and the personalization half of `press`): find the [`SEED_PARTLABEL`]
-/// entry in the target's GPT, rebuild the partition image, and write it over
-/// the old one.
+/// Regenerate the seed partition of an already-pressed image file (`boot2deb seed`,
+/// and the personalization half of `press`).
 ///
-/// The volume id is derived from the entry's own PARTUUID, so re-seeding does
-/// not change the volume's identity; `time_secs` is the caller's (a wall-clock
-/// re-personalization is per-unit data, not a reproducible artifact).
+/// This finds the [`SEED_PARTLABEL`] entry in the target's GPT, rebuilds the
+/// partition image, and writes it over the old one.
+///
+/// The volume id is derived from the entry's own PARTUUID, so re-seeding does not
+/// change the volume's identity. `time_secs` is the caller's, since a wall-clock
+/// re-personalization is per-unit data rather than a reproducible artifact.
 ///
 /// # Errors
 ///

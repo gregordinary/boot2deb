@@ -2,10 +2,12 @@
 //! the on-image `.checks` grammar it compiles to.
 //!
 //! Pure: parsing, validation, and rendering only. An expectation states what a
-//! *booted* image must have — a firmware file the driver asks for, a device node,
-//! a driver bound to a DT address — as a property of the layer that knows it: the
-//! SoC's GPU firmware on the SoC layer, a board's Wi-Fi module on the board's
-//! kmod, a capability's render node on the feature. Resolution collects them into
+//! *booted* image must have. That is a firmware file the driver asks for, a device
+//! node, or a driver bound to a DT address. Each is a property of the layer that
+//! knows it. The SoC's GPU firmware sits on the SoC layer, a board's Wi-Fi module on
+//! its kmod, and a capability's render node on the feature.
+//!
+//! Resolution collects them into
 //! [`ResolvedImage::expectations`](crate::model::ResolvedImage::expectations),
 //! and the rootfs stage flattens each group into
 //! `/etc/boot2deb/selftest.d/<scope>-<name>.checks`, one line per check, which
@@ -13,19 +15,19 @@
 //! device. The TOML is parsed here on the build host so the shell never parses
 //! anything richer than a line.
 //!
-//! The `.checks` line grammar is deliberately parser-free: `<kind>` then the
+//! The `.checks` line grammar is deliberately parser-free. It is `<kind>` then the
 //! argument text to end of line, split on whitespace only where the kind takes
 //! two arguments (`driver-bound`). Blank lines and full-line `#` comments are
-//! skipped; there are no inline comments and no quoting, so a pattern or a card
+//! skipped. There are no inline comments and no quoting, so a pattern or a card
 //! name is carried verbatim.
 //!
 //! Three check kinds exist only in the generated stream and cannot be authored.
 //! `kernel-release` and `kernel-flavor` are derived from the image identity by
-//! the build (see the rootfs stage), because a layer restating the pinned kernel
-//! would drift from the lock that owns it. `single-kernel` takes no argument at
-//! all and is not a property of any layer: it states that the image carries one
-//! kernel, which is true of every image this builder produces and is a claim
-//! only the build is in a position to make.
+//! the build (see the rootfs stage). A layer restating the pinned kernel would
+//! drift from the lock that owns it. `single-kernel` takes no argument at all and
+//! is not a property of any layer. It states that the image carries one kernel.
+//! That is true of every image this builder produces, and is a claim only the
+//! build is in a position to make.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,23 +41,23 @@ pub const CHECKS_DIR: &str = "etc/boot2deb/selftest.d";
 /// in a layer's `[[expect]]` array.
 ///
 /// Every entry is a table with a `check` key naming the kind and the kind's own
-/// argument fields — an unknown kind, a missing argument, or an argument that
-/// belongs to a different kind is a parse error naming the field, so a typo
+/// argument fields. An unknown kind, a missing argument, or an argument that
+/// belongs to a different kind is a parse error naming the field. A typo therefore
 /// fails at config load rather than on the board. The kinds split along what the
 /// selftest runner can observe:
 ///
 /// - **Disk content** (checkable on any boot of the rootfs, including under
 ///   `boot2deb try`): [`File`](Self::File), [`Dtb`](Self::Dtb),
 ///   [`Firmware`](Self::Firmware), [`InitramfsModule`](Self::InitramfsModule).
-/// - **Hardware state** (meaningful only on the board; reported not-applicable
+/// - **Hardware state** (meaningful only on the board, reported not-applicable
 ///   under emulation): [`DriverBound`](Self::DriverBound),
 ///   [`Devnode`](Self::Devnode), [`SoundCard`](Self::SoundCard),
 ///   [`NoDmesgMatch`](Self::NoDmesgMatch).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "check", rename_all = "kebab-case", try_from = "ExpectRaw")]
 pub enum Expectation {
-    /// A path that must exist on the booted image. `path` is absolute and may
-    /// glob (`/boot/vmlinuz-*`); the check passes when the glob matches at least
+    /// A path that must exist on the booted image. `path` is absolute and can
+    /// glob (`/boot/vmlinuz-*`). The check passes when the glob matches at least
     /// one entry.
     File {
         /// Absolute path, `*` allowed (e.g. `/boot/initrd.img-*`).
@@ -63,7 +65,7 @@ pub enum Expectation {
     },
     /// The board's device-tree blob must be installed where its boot path reads
     /// it. `path` is DT-dir-relative (`rockchip/rk3588-turing-rk1.dtb`), matching
-    /// [`DeviceLayer::kernel_dtb`](crate::model::DeviceLayer::kernel_dtb); the
+    /// [`DeviceLayer::kernel_dtb`](crate::model::DeviceLayer::kernel_dtb). The
     /// runner accepts any of the layouts the shipped kernels install
     /// (`/boot/<name>-<kver>`, a `bindeb-pkg` `/usr/lib/linux-image-<ver>/`, or
     /// Debian's flat `/usr/lib/modules/<ver>/dtb/`). Authored only for a *second*
@@ -75,8 +77,8 @@ pub enum Expectation {
     },
     /// A firmware file a driver on this hardware requests must be present under
     /// `/lib/firmware`. This is the check that catches a blob package that
-    /// stopped shipping the path the kernel asks for — the failure that
-    /// otherwise surfaces as a GPU (or radio) that is silently absent.
+    /// stopped shipping the path the kernel asks for. That failure otherwise
+    /// surfaces as a GPU (or radio) that is silently absent.
     Firmware {
         /// Path relative to `/lib/firmware` (e.g.
         /// `arm/mali/arch10.8/mali_csffw.bin`).
@@ -85,14 +87,14 @@ pub enum Expectation {
     /// A kernel module that must be reachable at early boot: either built into
     /// the installed kernel or present in its initramfs. The runner checks
     /// `modules.builtin` first, so a kernel that compiles the driver in passes
-    /// without an initrd copy — the invariant is "the boot path can load it",
+    /// without an initrd copy. The invariant is "the boot path can load it",
     /// not "the initrd carries it".
     InitramfsModule {
         /// Module name; `-` and `_` are interchangeable, as modprobe treats them.
         module: String,
     },
-    /// A driver must be bound to a specific device — the check that catches a
-    /// probe that deferred forever or a power domain that never acked. Passes
+    /// A driver must be bound to a specific device. This check catches a probe
+    /// that deferred forever, or a power domain that never acked. Passes
     /// when `/sys/bus/*/drivers/<driver>/<device>` exists.
     DriverBound {
         /// Kernel device name, usually `<unit-address>.<node-name>` for a
@@ -117,8 +119,8 @@ pub enum Expectation {
         /// `rockchip,model` string).
         name: String,
     },
-    /// A pattern that must **not** appear in the kernel log — the check that
-    /// turns "the boot looked fine" into "nothing SError'd on the way up". The
+    /// A pattern that must **not** appear in the kernel log. This check turns
+    /// "the boot looked fine" into "nothing SError'd on the way up". The
     /// pattern is a POSIX extended regular expression, matched with `grep -E`
     /// against `dmesg`.
     ///
@@ -317,8 +319,8 @@ impl Expectation {
 /// checks render identically.
 ///
 /// Trailing whitespace is trimmed, so a kind that takes no argument at all
-/// (`single-kernel`) renders as the bare word rather than as a word and the
-/// padding of an argument that is not there.
+/// (`single-kernel`) renders as the bare word. The alternative would be a word
+/// followed by the padding of an argument that is not there.
 pub fn render_line(kind: &str, args: &str) -> String {
     format!("{kind:<17} {args}").trim_end().to_string()
 }
@@ -376,10 +378,10 @@ fn line(what: &str, value: &str) -> Result<(), String> {
 
 /// Which config layer declared a group of expectations.
 ///
-/// Carried for the same reason [`CaveatScope`](crate::model::CaveatScope) is —
-/// "the SoC expects this" and "one feature expects this" answer different
-/// questions when a check fails — and because the scope plus the layer name is
-/// the generated file's identity: `<scope>-<name>.checks`.
+/// Carried for the same reason [`CaveatScope`](crate::model::CaveatScope) is.
+/// "The SoC expects this" and "one feature expects this" answer different
+/// questions when a check fails. The scope plus the layer name is also the
+/// generated file's identity: `<scope>-<name>.checks`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExpectScope {
@@ -414,10 +416,10 @@ impl ExpectScope {
 /// One layer's expectations, resolved: the scope, the layer's name, and its
 /// checks in authored order.
 ///
-/// Groups are kept per layer rather than flattened because the layer is the
-/// unit of authorship and of the generated file — a failing check names the
+/// Groups are kept per layer rather than flattened, because the layer is the
+/// unit of authorship and of the generated file. A failing check names the
 /// layer that expected it, which is where the fix (or the stale expectation)
-/// lives. Identical checks declared by two layers run twice by design: each
+/// lives. Identical checks declared by two layers run twice by design. Each
 /// layer's file states that layer's contract, and de-duplicating across files
 /// would make one layer's edit silently change another's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

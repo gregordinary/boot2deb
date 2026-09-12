@@ -2,18 +2,18 @@
 //! rootfs node ([`crate::rootfs`]).
 //!
 //! Both stand up a Debian userland with ferroday-cage's provisioner, so both draw
-//! from the same mirror and the same component set. The values live here rather
-//! than in either caller because a build in which the sandbox and the image
-//! resolved against different archives would be silently inconsistent.
+//! from the same mirror and the same component set. The values live here rather than
+//! in either caller. A build in which the sandbox and the image resolved against
+//! different archives would be silently inconsistent.
 
-/// Default Debian mirror both bootstraps pull from — also the base mirror the
-/// rootfs node's snapshot resolution ([`crate::snapshot`]) layers a snapshot
-/// mirror onto, re-exported at the crate root as [`crate::DEFAULT_MIRROR`].
+/// Default Debian mirror both bootstraps pull from. It is also the base mirror the
+/// rootfs node's snapshot resolution ([`crate::snapshot`]) layers a snapshot mirror
+/// onto. It is re-exported at the crate root as [`crate::DEFAULT_MIRROR`].
 ///
-/// Plain `http://` is standard Debian practice: integrity comes from
-/// `Release`-signature verification against the vendored archive keyring, not
-/// the transport, so a tampering mirror or on-path attacker can at worst
-/// observe which packages are fetched or deny service — never alter what is
+/// Plain `http://` is standard Debian practice. Integrity comes from
+/// `Release`-signature verification against the vendored archive keyring, rather
+/// than from the transport. A tampering mirror or on-path attacker can at worst
+/// observe which packages are fetched, or deny service. Neither can alter what is
 /// installed.
 pub const DEFAULT_MIRROR: &str = "http://deb.debian.org/debian";
 

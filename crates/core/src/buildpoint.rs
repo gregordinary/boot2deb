@@ -2,7 +2,7 @@
 //!
 //! A [`Recipe`](crate::model::Recipe) names one curated point across the build axes
 //! and carries a support claim. The feature axis, though, is a *list*, and the set a
-//! caller wants is often not one anybody curated: "the shipped H96 image, plus
+//! caller wants is often not one anybody curated. "The shipped H96 image, plus
 //! transcode, plus Jellyfin" is a legal selection with no recipe behind it. A
 //! [`BuildPoint`] is that pairing — the recipe supplying every other axis, and the
 //! features replacing the recipe's own list.
@@ -15,11 +15,13 @@
 //! turing-rk1/forky+media-accel-rockchip+jellyfin  ... with two, in this order
 //! ```
 //!
-//! A point that selects no features of its own *is* its recipe: the reference is the
+//! A point that selects no features of its own *is* its recipe. The reference is the
 //! recipe name unchanged, so every existing lock, work directory, and artifact path
-//! keeps the name it already has. Only a variant grows the suffix, and it grows one
-//! everywhere at once — the lock, the solved package manifest, and the build
-//! directory all key off the reference, so two selections cannot collide.
+//! keeps the name it already has.
+//!
+//! Only a variant grows the suffix, and it grows one everywhere at once. The lock,
+//! the solved package manifest, and the build directory all key off the reference, so
+//! two selections cannot collide.
 //!
 //! **Order is preserved, not sorted.** Feature order is significant in resolution:
 //! `config_fragments` and `patch_series` compose in selection order, so a later
@@ -42,7 +44,7 @@ pub const FEATURE_SEP: char = '+';
 ///
 /// Construct with [`new`](BuildPoint::new) from a recipe name and a (possibly empty)
 /// feature list, or with [`parse`](BuildPoint::parse) from a
-/// [reference](BuildPoint::reference). Both validate; an instance is always
+/// [reference](BuildPoint::reference). Both validate. An instance is always
 /// well-formed, so [`reference`](BuildPoint::reference) round-trips through `parse`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildPoint {
@@ -103,9 +105,10 @@ impl BuildPoint {
 
     /// Whether this point replaces the recipe's feature list.
     ///
-    /// A variant has no `[support]` claim of its own — the claim belongs to the
-    /// recipe, and a different feature set is a different build — so callers that
-    /// report or record support state on it should say so rather than inherit.
+    /// A variant has no `[support]` claim of its own. The claim belongs to the
+    /// recipe, and a different feature set is a different build. A caller that reports
+    /// or records support state on a variant says so rather than inheriting the
+    /// recipe's claim.
     pub fn is_variant(&self) -> bool {
         !self.features.is_empty()
     }
@@ -139,19 +142,25 @@ impl BuildPoint {
     ///
     /// Artifacts land in one flat output directory, so the separator has to go — but
     /// the *device* half cannot go with it. A recipe leaf is unique only within its
-    /// device folder, and the leaves that repeat are exactly the ones a reader most
-    /// needs told apart: `forky.img` names both `asus-c201/forky` (Debian's armmp
-    /// kernel) and `turing-rk1/forky`, and sits one letter from
-    /// `asus-c201/mainline-forky`. An image outlives the directory it was built in —
-    /// it gets copied to a flashing host, kept beside three others — so its name has to
-    /// carry the whole point on its own.
+    /// device folder. The leaves that repeat are exactly the ones a reader most needs
+    /// told apart. `forky.img` names both `asus-c201/forky` (Debian's armmp kernel)
+    /// and `turing-rk1/forky`, and sits one letter from `asus-c201/mainline-forky`.
     ///
-    /// **Every artifact the build point owns is named for this**, `.deb`s aside: the
-    /// image, the rootfs tarball, the boot payloads, the solved package manifest, the
-    /// provenance document. That is what lets several recipes share one `--out-dir`
-    /// without one silently folding another's bootloader or rootfs into its image.
-    /// (`.deb`s carry a package name and version instead, and are scoped by the output
-    /// dir's artifact ledger.)
+    /// An image outlives the directory it was built in, getting copied to a flashing
+    /// host and kept beside three others. Its name therefore has to carry the whole
+    /// point on its own.
+    ///
+    /// **Every artifact the build point owns is named for this**, `.deb`s aside:
+    ///
+    /// - The image.
+    /// - The rootfs tarball.
+    /// - The boot payloads.
+    /// - The solved package manifest.
+    /// - The provenance document.
+    ///
+    /// That is what lets several recipes share one `--out-dir` without one silently
+    /// folding another's bootloader or rootfs into its image. (`.deb`s carry a package
+    /// name and version instead, and are scoped by the output dir's artifact ledger.)
     ///
     /// A variant keeps its `+feature` suffixes, so a selection never publishes over the
     /// recipe it starts from.

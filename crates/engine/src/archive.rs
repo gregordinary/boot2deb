@@ -2,20 +2,23 @@
 //!
 //! Two questions, answered separately because they fail differently.
 //!
-//! [`available`] is the read half of a resolve and nothing more: it downloads the
+//! [`available`] is the read half of a resolve and nothing more. It downloads the
 //! release and the package indexes, projects the names out of them, and stops. No
 //! closure is computed, no `.deb` is fetched, and the answer is served for an
-//! architecture the host cannot execute — so it costs one index download however many
-//! names are asked about, where a resolve per name would re-fetch that index every time.
-//! It exists because a top-level include naming nothing fails the *whole* resolve, so a
-//! batch of names would report that they were not all there and never which were not.
+//! architecture the host cannot execute. It therefore costs one index download however
+//! many names are asked about, where a resolve per name would re-fetch that index every
+//! time.
+//!
+//! It exists because a top-level include naming nothing fails the *whole* resolve. A
+//! batch of names would otherwise report that they were not all there, and never which
+//! were not.
 //!
 //! [`closure`] then asks what the names *depend* on. A name being in the archive says
-//! nothing about its dependencies being there, and that gap is not hypothetical: a
-//! package can be present, install, and leave the rootfs unable to configure anything
-//! because a versioned dependency of its own is absent from the suite. Only a resolve
-//! sees that, and the resolver reports every refusal it meets rather than the first — so
-//! one pass names the whole list a user has to correct.
+//! nothing about its dependencies being there, and that gap is not hypothetical. A
+//! package can be present, install, and leave the rootfs unable to configure anything.
+//! The cause is a versioned dependency of its own, absent from the suite. Only a
+//! resolve sees that, and the resolver reports every refusal it meets rather than the
+//! first. One pass therefore names the whole list a user has to correct.
 //!
 //! Both are read-only and network-only, and both run before anything is built.
 
@@ -42,9 +45,9 @@ pub struct AvailabilityReport {
     /// The providers of each resolvable name something `Provides`, sorted by name.
     ///
     /// An annotation over [`present`](Self::present), not a separate class, because the
-    /// two are not exclusive: `dhcpcd` in a modern suite is a real package *and* a name
-    /// other packages provide, so a report that split them would have to pick one and be
-    /// wrong either way. What this adds is that apt has a choice here — a name with
+    /// two are not exclusive. `dhcpcd` in a modern suite is a real package *and* a name
+    /// other packages provide. A report that split them would have to pick one and be
+    /// wrong either way. What this adds is that apt has a choice here. A name with
     /// providers can be satisfied by something other than the package of that name.
     pub provided: Vec<(String, Vec<String>)>,
     /// Names the archives do not offer at all, sorted — the answer the query is for.
@@ -127,20 +130,20 @@ fn archives<'a>(
 /// Ask the archives a build would resolve against which of `names` they offer.
 ///
 /// The archives are the build's own: the primary mirror with any snapshot backstop,
-/// plus every repository the selected features contribute — so a package that exists
-/// only in a feature's own repository (Jellyfin's, say) is found where the recipe
+/// plus every repository the selected features contribute. A package that exists only
+/// in a feature's own repository (Jellyfin's, say) is therefore found where the recipe
 /// expects it. The build's **local** `.deb` pool is deliberately not among them: it
 /// holds what a build produces, and nothing has been produced yet.
 ///
-/// `mirrors` is the resolved mirror list (primary first) and must be non-empty;
+/// `mirrors` is the resolved mirror list (primary first) and must be non-empty.
 /// `keyring` is the vendored archive keyring, or `None` to fall back to the host apt
 /// trust store.
 ///
 /// # Errors
 ///
 /// [`EngineError::Bootstrap`] when the archives cannot be configured, or when the
-/// release or an index cannot be fetched or verified — the same failures a resolve's
-/// read half has, surfaced before a build rather than during one.
+/// release or an index cannot be fetched or verified. Those are the same failures a
+/// resolve's read half has, surfaced before a build rather than during one.
 pub fn available(
     ib: ImageBuild,
     mirrors: &[String],
@@ -195,7 +198,7 @@ pub fn available(
 /// One dependency a resolution could not satisfy.
 ///
 /// The three fields are the resolver's own account of the refusal, kept apart rather
-/// than pre-formatted into a sentence: a caller rendering JSON wants them separate, and
+/// than pre-formatted into a sentence. A caller rendering JSON wants them separate, and
 /// a caller rendering a line wants to join them its own way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
@@ -215,8 +218,8 @@ pub struct Refusal {
 pub struct ClosureReport {
     /// How many packages the closure came to, or `None` where it did not close.
     ///
-    /// An `Option` rather than a zero: a resolution that refused something never
-    /// finished selecting, so it has no size, and a count of nothing would read as a set
+    /// An `Option` rather than a zero. A resolution that refused something never
+    /// finished selecting, so it has no size. A count of nothing would read as a set
     /// that closed empty. The caller renders the two differently because they are
     /// different answers.
     pub installed: Option<usize>,
@@ -235,19 +238,19 @@ impl ClosureReport {
 /// Resolve the dependency closure of `names` against the archives a build would use.
 ///
 /// This is the question [`available`] does not ask. A name being in the archive says
-/// nothing about its dependencies being there, and a package whose dependency is absent
-/// installs anyway — dpkg configures with `--force-depends` — leaving a rootfs that
-/// cannot configure packages at all, including unrelated ones. The failure then surfaces
-/// long after the build, on hardware, as a broken image.
+/// nothing about its dependencies being there. A package whose dependency is absent
+/// installs anyway, because dpkg configures with `--force-depends`. That leaves a
+/// rootfs that cannot configure packages at all, including unrelated ones. The failure
+/// then surfaces long after the build, on hardware, as a broken image.
 ///
 /// Nothing is downloaded past the indexes: the resolution is computed from them and
 /// stopped before the first `.deb`. So this costs what [`available`] costs plus the
 /// closure, and answers before any node has compiled.
 ///
 /// A refused resolve is reported, not raised: the refusals *are* the answer, and a
-/// caller wants all of them rather than the first. Anything else that goes wrong —
-/// an unreachable mirror, an unverifiable release — is still an error, because that is
-/// a failure to ask the question rather than an answer to it.
+/// caller wants all of them rather than the first. Anything else that goes wrong is
+/// still an error, whether an unreachable mirror or an unverifiable release. That is a
+/// failure to ask the question rather than an answer to it.
 ///
 /// # Errors
 ///

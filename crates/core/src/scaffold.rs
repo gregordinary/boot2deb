@@ -1,27 +1,34 @@
 //! Device/recipe scaffolding — the pure text generator behind `boot2deb
 //! new-device`.
 //!
-//! Bringing up a new board is mostly *transcription*: the closed axis enums
-//! ([`Soc`], [`BootMethod`], [`Layout`]) fix the valid choices, the SoC layer
-//! supplies the inherited hardware facts, and only a handful of values genuinely
-//! have to be researched per board. This module turns a [`DeviceScaffold`] — the
-//! decisions a wizard (or UI) has gathered — into the exact `devices/<name>.toml`
-//! and `recipes/<name>.toml` text, pre-filling every derivable value and marking
-//! the researched ones with `# TODO:` comments plus greppable placeholder values.
+//! Bringing up a new board is mostly *transcription*. The closed axis enums
+//! ([`Soc`], [`BootMethod`], [`Layout`]) fix the valid choices, and the SoC layer
+//! supplies the inherited hardware facts. Only a handful of values genuinely have to
+//! be researched per board.
 //!
-//! Pure and deterministic: it renders strings and reports which fields still need a
-//! human, doing no I/O. The CLI writes the files and runs the resolve check; a
-//! future UI reuses the same rendering. The two unvalidatable, build-late values
-//! ([`kernel_dtb`](DeviceScaffold::kernel_dtb_suggestion) and the u-boot defconfig)
-//! plus the DDR TPL — inherited from the SoC layer but board-memory-specific, so
-//! worth confirming — are the [`research_notes`](DeviceScaffold::research_notes) a
-//! caller surfaces after writing.
+//! This module turns a [`DeviceScaffold`] — the decisions a wizard (or UI) has
+//! gathered — into the exact `devices/<name>.toml` and `recipes/<name>.toml` text. It
+//! pre-fills every derivable value and marks the researched ones with `# TODO:`
+//! comments plus greppable placeholder values.
+//!
+//! Pure and deterministic, doing no I/O: it renders strings and reports which fields
+//! still need a human. The CLI writes the files and runs the resolve check. A future
+//! UI reuses the same rendering.
+//!
+//! Three values reach [`research_notes`](DeviceScaffold::research_notes), which a
+//! caller surfaces after writing:
+//!
+//! - [`kernel_dtb`](DeviceScaffold::kernel_dtb_suggestion), unvalidatable and
+//!   build-late.
+//! - The u-boot defconfig, unvalidatable and build-late in the same way.
+//! - The DDR TPL, inherited from the SoC layer but board-memory-specific, so worth
+//!   confirming.
 
 use crate::model::{BootMethod, Layout, RkbinLayer, Soc};
 use std::fmt::Write as _;
 
 /// The decisions needed to scaffold a new device (and, optionally, its default
-/// recipe). Every enum-typed axis is already a valid choice; the string fields are
+/// recipe). Every enum-typed axis is already a valid choice. The string fields are
 /// either derivable defaults or the researched values the caller has gathered.
 #[derive(Debug, Clone)]
 pub struct DeviceScaffold {
@@ -30,13 +37,13 @@ pub struct DeviceScaffold {
     pub name: String,
     /// Human-readable board description.
     pub description: String,
-    /// The SoC this board uses; fixes arch, `dt_dir`, and the module list by
+    /// The SoC this board uses. It fixes arch, `dt_dir`, and the module list by
     /// inheritance, so none of those appear in the device file.
     pub soc: Soc,
-    /// Boot method; written as both `boot_method` and the sole
+    /// Boot method. Written as both `boot_method` and the sole
     /// `supported_boot_methods` entry.
     pub boot_method: BootMethod,
-    /// Kernel definition id; written as both `default_kernel` and the sole
+    /// Kernel definition id. Written as both `default_kernel` and the sole
     /// `supported_kernels` entry.
     pub kernel: String,
     /// Debian suite the board defaults to.
@@ -52,8 +59,8 @@ pub struct DeviceScaffold {
     pub dt_dir: String,
     /// The SoC layer's rkbin defaults, read from `socs/<soc>.toml`. When the SoC
     /// supplies `atf` + `tpl`, a standard-memory board inherits them and the
-    /// scaffold emits no `[rkbin]` block — only a note on overriding the DDR TPL
-    /// for different memory. When the SoC has no defaults, the scaffold writes a
+    /// scaffold emits no `[rkbin]` block. It emits only a note on overriding the DDR
+    /// TPL for different memory. When the SoC has no defaults, the scaffold writes a
     /// `[rkbin]` block with `CHANGEME` placeholders the author must fill.
     pub soc_rkbin: RkbinLayer,
     /// Features the scaffolded recipe selects. Empty means a plain base image.
@@ -68,9 +75,9 @@ pub struct DeviceScaffold {
 pub const PLACEHOLDER: &str = "CHANGEME";
 
 /// One value the scaffold could not determine, surfaced to the author after the
-/// files are written. The rendered file carries a best-effort suggestion so it
-/// still *resolves* (proving the layer composition); these notes say which
-/// suggestions are guesses that fail late if wrong.
+/// files are written. The rendered file carries a best-effort suggestion so it still
+/// *resolves*, proving the layer composition. These notes say which suggestions are
+/// guesses that fail late if wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResearchNote {
     /// The TOML key (or `key.subkey`) the author must verify.
@@ -106,7 +113,8 @@ impl DeviceScaffold {
 
     /// The rkbin ATF blob the SoC layer supplies, or a `CHANGEME` placeholder when
     /// it has none. The ATF (BL31) is SoC-generic, so the SoC default is normally
-    /// right; still vendored under `blobs/<soc>/` and content-checked at `update`.
+    /// right. It is still vendored under `blobs/<soc>/` and content-checked at
+    /// `update`.
     pub fn atf_suggestion(&self) -> String {
         self.soc_rkbin
             .atf
@@ -134,11 +142,11 @@ impl DeviceScaffold {
         self.name.clone()
     }
 
-    /// Render `devices/<name>.toml`. Derivable values are filled; the researched
+    /// Render `devices/<name>.toml`. Derivable values are filled. The researched
     /// values carry a best-effort suggestion and a `# TODO:` line, so the file
     /// resolves immediately while flagging what still needs verifying.
     ///
-    /// The boot method decides which fields the board even *has*: a board that
+    /// The boot method decides which fields the board even *has*. A board that
     /// compiles u-boot needs a defconfig and a blob set, and one whose firmware is
     /// its own needs a board profile instead. Emitting the other method's fields
     /// would not merely be noise — they are unknown fields, and the file would not

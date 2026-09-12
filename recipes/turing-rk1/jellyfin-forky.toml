@@ -25,14 +25,21 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 # To attach one, add the `data-volume` feature and a `[[data_volumes]]` block to
 # your own copy of this recipe; see docs/src/data-volumes.md.
 
-# turing-rk1/media-accel-forky plus the application layer, and still under bring-up:
-# the transcode path this recipe exists to serve has not been exercised through
-# Jellyfin. Re-assessed over the v7.2 generation: the encode path this recipe uses is the
+# turing-rk1/media-accel-forky plus the application layer. The transcode path this
+# recipe exists to serve is exercised through Jellyfin itself: the server emits
+# `-hwaccel v4l2request` with `hevc_rkmpp`, declines 10-bit by design, and never falls
+# back to libx264. Re-assessed over the v7.2 generation: the encode path it uses is the
 # VEPU580 out-of-tree driver, which 7.2 does not touch — mainline still has no Rockchip
 # video encoder. See turing-rk1/forky for the full delta.
+#
+# `expected` until an image from this pin boots. The last image on the board is the
+# feature variant `forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode`
+# at v7.2.2 and patches 6e886797a212, booted 2026-09-02; it exercised the kernel,
+# u-boot, device layers and the media stack end to end, and only the kernel pin has
+# moved since.
 [support]
-status = "experimental"
-date   = "2026-08-21"
+status = "expected"
+date   = "2026-09-05"
 
 # What an operator gets, stated up front, because the shape of the acceleration is
 # not the shape the Jellyfin dashboard implies. The two limits underneath these ride

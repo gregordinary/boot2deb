@@ -1,8 +1,8 @@
 //! `outdated`: what has moved upstream since the locks were pinned.
 //!
-//! The read-only sibling of `update`. `update` re-pins; this only looks, and it
-//! looks across every recipe at once, which is the form the question is usually
-//! asked in ("is anything behind?") rather than one recipe at a time.
+//! The read-only sibling of `update`. `update` re-pins. This only looks, and it looks
+//! across every recipe at once. That is the form the question is usually asked in
+//! ("is anything behind?"), rather than one recipe at a time.
 //!
 //! Two neighbours answer adjacent questions about the same pins, and keeping them
 //! apart is deliberate:
@@ -10,9 +10,9 @@
 //! - `verify-sources` asks whether a pin is still **re-fetchable** — a durable tag, an
 //!   ephemeral branch tip, or orphaned. An orphaned pin fails it.
 //! - `outdated` asks whether something **newer** exists. Being behind is not a
-//!   failure, so this always exits zero; it is a survey, not a gate.
+//!   failure, so this always exits zero. It is a survey, not a gate.
 //!
-//! The network cost is one `git ls-remote` per distinct *URL*, not per pin: the
+//! The network cost is one `git ls-remote` per distinct *URL*, not per pin. The
 //! shipped recipes share a kernel repo and a patches repo, so a survey of the whole
 //! tree is a handful of round-trips. Each remote's advertisement is compared by
 //! [`boot2deb_core::outdated`], which is pure — all the deciding is there, and this

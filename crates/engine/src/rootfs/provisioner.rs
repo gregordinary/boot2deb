@@ -2,46 +2,46 @@
 //! bootstrap binary.
 //!
 //! [`build_rootfs`] resolves and materializes the device userland with
-//! [`ferroday_cage`]'s pure-Rust Debian provisioner — the same library the build
-//! sandbox uses ([`crate::sandbox`]) — talking to the archive directly.
+//! [`ferroday_cage`]'s pure-Rust Debian provisioner, talking to the archive
+//! directly. That is the same library the build sandbox uses ([`crate::sandbox`]).
 //!
 //! The image is a **deployed product**, so its files carry real system ownership
 //! (`root:shadow` on `/etc/shadow`, `_apt`, `systemd-journald`, the setgid `dbus`
 //! and `ssh` helpers). The provisioner therefore runs under ferroday-cage's
 //! **subordinate** identity map (real ids, via the `subid` feature's
-//! `newuidmap`/`newgidmap`), and the finished tree is emitted with [`Export`],
-//! which re-enters that map so the on-host offset ids (`100000 + n`) round-trip to
-//! the ids the rootfs intends; a plain host-side `tar` would record the offset ids
-//! and miss the `security.*` xattrs a setcap'd binary carries. Device nodes are
+//! `newuidmap`/`newgidmap`). The finished tree is emitted with [`Export`], which
+//! re-enters that map so the on-host offset ids (`100000 + n`) round-trip to the
+//! ids the rootfs intends. A plain host-side `tar` would record the offset ids and
+//! miss the `security.*` xattrs a setcap'd binary carries. Device nodes are
 //! excluded, as the runtime provides its own.
 //!
 //! The pipeline, keyed by the resolved [`Plan`](ferroday_cage::provision::debian::Plan):
 //!
 //! 1. **Resolve** the plan (`Debian::resolve`) — the exact install set with each
 //!    `.deb`'s archive-recorded sha256, without downloading. The build resolves
-//!    **once**: this one call keys the early-cutoff cache, is handed back to the
-//!    bootstrap as the set to install, and becomes the content-pinned manifest, so
-//!    all three describe the same packages by construction. The plan is published
-//!    beside the tar as a deb822 document carrying the archive state it resolved
-//!    against; a later run replays that document instead of resolving
+//!    **once**. This one call keys the early-cutoff cache, is handed back to the
+//!    bootstrap as the set to install, and becomes the content-pinned manifest. All
+//!    three therefore describe the same packages by construction. The plan is
+//!    published beside the tar as a deb822 document carrying the archive state it
+//!    resolved against. A later run replays that document instead of resolving
 //!    ([`RootfsOptions::pinned_plan`]), which is what `reproduce` does.
 //! 2. On a cache miss, **provision** that plan into a staging tree
-//!    (`provision::ensure`), with the build's own `.deb`s as a local trusted
-//!    `dists/` mirror, the feature repositories, and the pre-install overlay laid in
-//!    via [`pre_configure_overlay`](ferroday_cage::provision::debian::DebianBuilder::pre_configure_overlay)
+//!    (`provision::ensure`). The build's own `.deb`s go in as a local trusted
+//!    `dists/` mirror, alongside the feature repositories. The pre-install overlay
+//!    is laid in via [`pre_configure_overlay`](ferroday_cage::provision::debian::DebianBuilder::pre_configure_overlay),
 //!    so a package's maintainer scripts see the l10n/depthcharge config as they
 //!    configure. A pinned install fetches neither a release nor a package index —
 //!    see [`build_debian`].
 //! 3. **Customize** the tree boot2deb-side: lay the post-install overlay in, then
 //!    run the account/`postinst.d`/depthcharge steps as commands in a subordinate
 //!    cage over the finished tree.
-//! 4. **Export** the ownership-preserving tar and write the plan manifest; store
+//! 4. **Export** the ownership-preserving tar and write the plan manifest. Store
 //!    both in the shared [`RootfsStore`].
 //!
-//! The account is created **locked**; the unique per-image first-boot password is
+//! The account is created **locked**. The unique per-image first-boot password is
 //! spliced into `/etc/shadow` at image assembly, keeping the cached tree reusable. Its
 //! `sudoers` drop-in and `authorized_keys` *are* part of the tree, and so part of the
-//! [`cache_key`](crate::rootcache::cache_key) — they are resolved config, identical for
+//! [`cache_key`](crate::rootcache::cache_key). They are resolved config, identical for
 //! every image built from one build point, unlike the password.
 
 use super::{
@@ -358,10 +358,10 @@ fn read_pinned_plan(path: &Path, step: &Step) -> Result<(Plan, String), EngineEr
 /// Read a published plan document into what the provenance manifest records of it.
 ///
 /// The digest is of the file's bytes, and the archive rows are parsed from the same
-/// read, so the manifest describes the document that was published rather than a value
-/// carried alongside it. That also lets an `--stage image` re-run over an existing
-/// rootfs tar record the plan the earlier rootfs stage left in the output directory,
-/// the same way it records that stage's solved manifest.
+/// read. The manifest therefore describes the document that was published rather than
+/// a value carried alongside it. An `--stage image` re-run over an existing rootfs tar
+/// therefore records the plan the earlier rootfs stage left in the output directory.
+/// It does so the same way it records that stage's solved manifest.
 pub fn read_plan_record(path: &Path) -> Result<PlanRecord, EngineError> {
     let bytes = std::fs::read(path).map_err(|s| EngineError::io(path, s))?;
     let text = String::from_utf8(bytes.clone()).map_err(|_| EngineError::PlanDocument {
@@ -390,14 +390,14 @@ pub struct PlanRecord {
 /// Read a published plan document into what a size report rolls up.
 ///
 /// The plan is the right file to read this from, and the solved manifest is the wrong
-/// one. That manifest is a **content pin** — its sha256 is committed in the lock's
-/// `RootfsPin.manifest_sha256`, and a mismatch is a hard `ManifestDrift` — so adding
+/// one. That manifest is a **content pin**. Its sha256 is committed in the lock's
+/// `RootfsPin.manifest_sha256`, and a mismatch is a hard `ManifestDrift`. Adding
 /// columns to it would invalidate every committed pin for a reason that has nothing to
 /// do with the package set. The plan carries the same rows plus the archive's own
 /// `Installed-Size` and `Source`, and nothing pins its shape.
 ///
 /// A document written before those fields existed parses fine and reports every size as
-/// absent; a report says how many that was rather than presenting the result as
+/// absent. A report says how many that was rather than presenting the result as
 /// complete.
 pub fn read_plan_weights(path: &Path) -> Result<PlanWeights, EngineError> {
     let text = std::fs::read_to_string(path).map_err(|s| EngineError::io(path, s))?;
@@ -429,9 +429,9 @@ pub fn read_plan_weights(path: &Path) -> Result<PlanWeights, EngineError> {
 pub struct PlanWeights {
     /// One row per package the plan installs, in document order.
     pub packages: Vec<PlannedWeight>,
-    /// One row per repository, in configuration order — the same projection the
-    /// provenance manifest's `[[archives]]` carries, so a `file://` pool is marked
-    /// local and its build-host path is dropped here too.
+    /// One row per repository, in configuration order. This is the same projection
+    /// the provenance manifest's `[[archives]]` carries. A `file://` pool is marked
+    /// local, and its build-host path is dropped here too.
     pub archives: Vec<boot2deb_core::provenance::ArchiveProvenance>,
 }
 
@@ -491,11 +491,11 @@ const PROVISIONED_PREFIX: &str = "prov-rootfs-";
 /// Reclaim every provisioned rootfs left in `scratch_dir` by an earlier run, through
 /// the id-map that owns them (those named `prov-rootfs-*`).
 ///
-/// Best-effort and quiet: a tree that resists removal is not a reason to fail the
-/// operation that called this, and a live concurrent build's own tree is skipped
-/// naturally — `provision::remove` on a directory another process still holds fails,
-/// leaving it alone. Called at the start of the rootfs node and by `clean`, so the
-/// user-facing rule is simply that the work dir is always removable.
+/// Best-effort and quiet. A tree that resists removal is not a reason to fail the
+/// operation that called this. A live concurrent build's own tree is skipped
+/// naturally, because `provision::remove` on a directory another process still holds
+/// fails and leaves it alone. Called at the start of the rootfs node and by `clean`,
+/// so the user-facing rule is simply that the work dir is always removable.
 pub fn sweep_provisioned(scratch_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(scratch_dir) else {
         return;

@@ -1,11 +1,11 @@
 # CLI
 
-This page explains what the commands are *for*. For the exhaustive list of every
-flag on every command — generated from the binary, so it cannot drift — see
-[Every flag](cli-flags.md), or run `boot2deb <command> --help`.
+This page explains what the commands are *for*. The exhaustive list of every flag on
+every command is [Every flag](cli-flags.md), generated from the binary so it cannot
+drift. `boot2deb <command> --help` answers the same question per command.
 
 The binary is `boot2deb`, installed with `cargo install --path crates/cli` (see
-[Getting started](../getting-started.md)); working from a checkout without installing,
+[Getting started](../getting-started.md)). To work from a checkout without installing,
 prefix each command with `cargo run -p boot2deb-cli --`. It defaults `--root .`, so run
 it from inside `boot2deb/` (or pass `--root`).
 
@@ -14,9 +14,13 @@ Five global flags apply to every command: `--root <dir>` (the config root),
 [Overlays](overlays.md)), `--json` (machine-readable output), and `--quiet`/`--verbose`.
 
 `--root` moves everything, not just where config is read from. A run's durable
-state is anchored to the config root: the build scratch (`<root>/build/<recipe>`),
-the artifact, patches, extra-deb, and verify-tree caches (`<root>/cache/...`), and
-the default `patches` checkout (the root's sibling `../patches`). So `--root
+state is anchored to the config root:
+
+- The build scratch (`<root>/build/<recipe>`).
+- The artifact, patches, extra-deb and verify-tree caches (`<root>/cache/...`).
+- The default `patches` checkout (the root's sibling `../patches`).
+
+So `--root
 boot2deb why-rebuild turing-rk1/forky` from the parent directory inspects the same
 trees a run from inside `boot2deb/` builds into. An explicit `--work-dir` or
 `--patches-path` is taken as given, relative to the current directory.
@@ -49,11 +53,13 @@ image      1m12s   built
 total      18m02s
 ```
 
-The second column is what makes the first readable — a three-second kernel step is
-the artifact cache answering, not a fast compiler. `restored` means every one of that
-step's outputs came back from the cache and nothing was compiled; `partly restored`
-is a step whose outputs cache one at a time (the userspace stage builds several
-`.deb`s, each with its own signature) where some were restored and some were built.
+The second column is what makes the first readable. A three-second kernel step is
+the artifact cache answering, not a fast compiler.
+
+`restored` means every one of that step's outputs came back from the cache, and nothing
+was compiled. `partly restored` is a step whose outputs cache one at a time, where some
+were restored and some were built. The userspace stage is that shape: it builds several
+`.deb`s, each with its own signature.
 
 `total` is the command's own wall clock, so it exceeds the sum of the rows by
 whatever the build does outside any step. The summary is suppressed under `--quiet`
@@ -68,12 +74,13 @@ next: write the image to /dev/sdX — confirm the device with `lsblk` first, sin
         of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-The paths are the files the run actually produced, so a `--compress none` build hints
-the raw `.img` and a `split` build hints both halves with the medium each goes to.
-The pipe matches the container: `xzcat` for a `.xz` and `zcat` for a `.gz`, and where a
+The paths are the files the run actually produced. A `--compress none` build therefore
+hints the raw `.img`, and a `split` build hints both halves with the medium each goes to.
+
+The pipe matches the container: `xzcat` for a `.xz` and `zcat` for a `.gz`. Where a
 build asked for both (`--compress xz,gz`) the hint names the one asked for first.
-`/dev/sdX` is a placeholder in every case — a build cannot know which disk is meant,
-and a real device node in a copy-pasteable `dd` line is how the wrong disk gets
+`/dev/sdX` is a placeholder in every case, since a build cannot know which disk is
+meant. A real device node in a copy-pasteable `dd` line is how the wrong disk gets
 overwritten. Boards with a flashing route of their own (the RK1's `tpi`, a Chromebook's
 recovery media) document it on their [board page](../boards/turing-rk1.md).
 
@@ -83,7 +90,7 @@ recovery media) document it on their [board page](../boards/turing-rk1.md).
 
 | command | `--json` form |
 | --- | --- |
-| `list-*` | one JSON array; an unreadable entry rides along as `{"name", "error"}` |
+| `list-*` | one JSON array, where an unreadable entry rides along as `{"name", "error"}` |
 | `resolve` | the fully resolved build as one JSON document. Everything only an *image* has — the kernel, suite, rootfs set, localization, account, out-of-tree modules, media-accel sources — is nested under `image`, which is absent on a `deliverable = "uboot"` recipe |
 | `doctor` | host facts, every check with its status and remedy, the trust anchors, and a `result` |
 | `verify-patches` | per axis: how many patches applied, and every one that did not |
@@ -100,10 +107,11 @@ Errors are still plain text on stderr, and the exit code is the result either wa
 `--quiet`/`--verbose` do not apply under `--json`: the stream *is* the record of the
 build, and a filtered record would be a wrong one.
 
-A command with no machine form — `update`, `clean`, `why-rebuild`, `new-device`,
-`support-matrix`, `patch import`, `sbom` — **rejects** `--json` rather than ignoring it,
-naming the structured route to the same information where one exists. A global flag that
-silently did nothing would be a trap for exactly the scripted caller it exists for.
+A command with no machine form **rejects** `--json` rather than ignoring it, naming the
+structured route to the same information where one exists. Those commands are `update`
+and `clean`, `why-rebuild` and `new-device`, and `support-matrix`, `patch import` and
+`sbom`. A global flag that silently did nothing would be a trap for exactly the scripted
+caller it exists for.
 
 The two commands that split reproducibility from upstream are `update` (the only one
 that consults the network) and `build` (reads only the lock). See
@@ -123,22 +131,25 @@ boot2deb resolve turing-rk1 --suite trixie --layout split
 boot2deb doctor turing-rk1/forky
 ```
 
-- **`list-devices` / `list-recipes`** enumerate the buildable targets; `list-recipes`
-  shows each recipe's support claim and flags any recipe with no committed lock as
+- **`list-devices` / `list-recipes`** enumerate the buildable targets. `list-recipes`
+  shows each recipe's support claim, and flags any recipe with no committed lock as
   not-yet-buildable (run `update`).
 - **`support-matrix`** prints that claim beside the exact pins the recipe's lock
-  records — board, suite, kernel, patch series — so "which patch series worked with
-  which kernel, on what board" is answerable without decoding a SHA. `--markdown`
-  emits [the docs page](support-matrix.md) verbatim; regenerate it after changing a
-  claim or re-pinning a lock, and a test fails if the committed page is stale.
+  records: board, suite, kernel, and patch series. "Which patch series worked with
+  which kernel, on what board" is therefore answerable without decoding a SHA.
+
+  `--markdown` emits [the docs page](support-matrix.md) verbatim. Regenerate it after
+  changing a claim or re-pinning a lock, since a test fails if the committed page is
+  stale.
 - **`list-kernels` / `list-features`** enumerate the valid values for the `--kernel`
-  and `--feature` overrides — name, version/compatibility, and (for kernels) the patch
-  series — so the override knobs are discoverable without reading the TOML tree.
+  and `--feature` overrides. That is name, version or compatibility, and (for kernels)
+  the patch series, so the override knobs are discoverable without reading the TOML tree.
 - **`list-kmods`** enumerates the out-of-tree kernel-module sets a device's
-  `device_kmods` may name, with the driver ref each tracks and the modules it ships.
-  Unlike the two above this is not an override: it is what a new board consults to find
-  out whether the driver for its Wi-Fi part is already declared, before writing a second
-  declaration of it.
+  `device_kmods` can name, with the driver ref each tracks and the modules it ships.
+
+  Unlike the two above this is not an override. It is what a new board consults to find
+  out whether the driver for its Wi-Fi part is already declared. That saves writing a
+  second declaration of it.
 - **`resolve`** prints the fully merged build point without building, and runs the same
   local `preflight_config` coherence check the build does (geometry, fragment-file
   existence, feature compatibility, apt keyrings). Every selectable axis (`--kernel`,
@@ -147,7 +158,7 @@ boot2deb doctor turing-rk1/forky
   see what a choice resolves to before committing it to config.
 
   It accepts a wider set than any command that can *build* the result, and says so when
-  that matters: an override `build` does not take closes the printout with the recipe
+  that matters. An override `build` does not take closes the printout with the recipe
   file to write, ready to paste.
 
   ```
@@ -159,14 +170,16 @@ boot2deb doctor turing-rk1/forky
   then `boot2deb update turing-rk1/<leaf>` to pin it.
   ```
 
-  `--boot-method` is the one axis a recipe cannot express — how a board boots is a
-  property of the hardware — so its note names a device file instead. See
+  `--boot-method` is the one axis a recipe cannot express, since how a board boots is a
+  property of the hardware. Its note therefore names a device file instead. See
   [Adapting a shipped recipe](../tutorials/adapting-a-recipe.md).
 - **`doctor`** reports the host's tool-presence preflight and, for anything missing, the
-  exact per-distro install command. With a target it asks only for what *that build*
-  will invoke: a board that installs Debian's kernel and boots its own firmware compiles
-  nothing, so it is not told to install a cross compiler — which keeps a genuinely
-  missing tool from getting lost among requirements that do not apply. Bare, it runs the
+  exact per-distro install command.
+
+  With a target it asks only for what *that build* will invoke. A board that installs
+  Debian's kernel and boots its own firmware compiles nothing, so it is not told to
+  install a cross compiler. That keeps a genuinely missing tool from getting lost among
+  requirements that do not apply. Bare, it runs the
   requirements every board shares (user namespaces, the `.deb` packaging tools, the
   vendored apt trust anchors), so it is useful before a recipe is chosen. Either way a
   missing required tool is a non-zero exit, so it gates CI. See
@@ -199,18 +212,25 @@ boot2deb --overlay ~/my-boards new-device my-board --soc rk3588
 ```
 
 **`new-device`** generates a device (and, unless `--no-recipe`, a matching recipe) from
-the typed model. It offers only valid choices — the closed `Soc`/`BootMethod`/`Layout`
-enums, the kernels whose `supported_socs` include the chosen SoC, and the features
-compatible with the SoC/arch — fills every derivable value, and leaves the four
-values it cannot validate (`uboot_defconfig`, `kernel_dtb`, and the `[rkbin]`
-`atf`/`tpl` blobs) as best-effort suggestions marked `# TODO:`. It writes into the
-highest-precedence `--overlay` when one is given (the third-party path), else the
-primary root, then resolve-checks the result and prints exactly which values you still
-have to research. It refuses to overwrite an existing file without `--force`.
+the typed model. It offers only valid choices:
 
-The generated files resolve immediately (proving the layer composition); the `# TODO:`
-values are the ones that fail *late* — at the u-boot or kernel build — if left wrong,
-so verify them before `update`/`build`. See [Adding a board](../contributing/adding-a-board.md).
+- The closed `Soc`/`BootMethod`/`Layout` enums.
+- The kernels whose `supported_socs` include the chosen SoC.
+- The features compatible with the SoC and arch.
+
+It fills every derivable value, and leaves the four values it cannot validate as
+best-effort suggestions marked `# TODO:`. Those are `uboot_defconfig`, `kernel_dtb`, and
+the `[rkbin]` `atf`/`tpl` blobs.
+
+It writes into the highest-precedence `--overlay` when one is given (the third-party
+path), else the primary root. It then resolve-checks the result and prints exactly which
+values you still have to research. It refuses to overwrite an existing file without
+`--force`.
+
+The generated files resolve immediately, which proves the layer composition. The
+`# TODO:` values are the ones that fail *late*, at the u-boot or kernel build, if left
+wrong. Verify them before `update`/`build`. See
+[Adding a board](../contributing/adding-a-board.md).
 
 ## update
 
@@ -219,14 +239,18 @@ boot2deb update turing-rk1/forky --kernel-ref v7.1.1
 ```
 
 Resolves upstream refs to commits and hashes the vendored blobs, writing
-`recipes/<device>/<leaf>.lock`. This is the **only** command that consults upstream; `build`
-reads only the lock, so a build is reproducible from its committed pins.
+`recipes/<device>/<leaf>.lock`. This is the **only** command that consults upstream.
+`build` reads only the lock, so a build is reproducible from its committed pins.
+
+One flag is worth calling out:
 
 - **`--feature <name>`**, repeatable, pins a [feature
   selection](config-model.md#a-feature-selection-is-a-build-point-not-a-new-recipe)
-  as a *variant* of the recipe — everything but the features comes from the recipe,
+  as a *variant* of the recipe. Everything but the features comes from the recipe,
   and the lock lands beside it as `<leaf>+<feature>...lock`. A variant's first
   `update` inherits the recipe's pins, so it needs no `--kernel-ref`.
+
+An example:
 
 ```sh
 boot2deb update turing-rk1/forky --feature media-accel-rockchip --feature jellyfin
@@ -254,43 +278,47 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   A variant builds in its own work directory under its own image identity, so it never
   lands on the recipe's artifacts.
 
-- **`--stage <node>`** runs a single node — `kernel`, `dtb`, `kmod`, `uboot`,
-  `userspace`, `ffmpeg`, `rootfs`, or `image`; the default builds everything. `kmod`
-  builds the board's out-of-tree module `.deb`s (its
+- **`--stage <node>`** runs a single node, and the default builds everything. The nodes
+  are `kernel`, `dtb`, `kmod`, `uboot`, `userspace`, `ffmpeg`, `rootfs`, and `image`.
+
+  `kmod` builds the board's out-of-tree module `.deb`s (its
   [`device_kmods`](config-model.md#out-of-tree-modules-are-their-own-layer))
-  against an existing kernel tree, so a
-  driver bump need not rebuild the kernel. A `--stage uboot` run
-  also emits a standalone, directly-flashable `<point>-boot.img` (see below). Asking for
-  a node this recipe does not *have* — `--stage kernel` on a board that installs Debian's
-  kernel — is an error naming why, not a silent no-op.
+  against an existing kernel tree, so a driver bump need not rebuild the kernel. A
+  `--stage uboot` run also emits a standalone, directly-flashable `<point>-boot.img`
+  (see below).
+
+  Asking for a node this recipe does not *have* is an error naming why, rather than a
+  silent no-op. `--stage kernel` on a board that installs Debian's kernel is that case.
 - **`--layout combined|split`** overrides the image packaging. `combined` is one
-  whole-disk image; `split` emits a bootloader-only image and a separate rootfs image
-  for a two-medium install. This is lock-independent — it changes only how the image is
-  packaged, not any pinned source. Only a boot method that *has* a bootloader can split
-  it off.
+  whole-disk image. `split` emits a bootloader-only image and a separate rootfs image
+  for a two-medium install. This is lock-independent, changing only how the image is
+  packaged rather than any pinned source. Only a boot method that *has* a bootloader can
+  split it off.
 - **`--image-size <size>`** overrides the image size the same way. The rootfs grows to
   fill its medium on first boot, so this bounds the *artifact*, not the installed system.
-  It also takes the measured form — `--image-size fit+20%` builds the smallest image that
-  holds the rootfs with a fifth of it free, which is the quickest way to find out how
-  large a new board's image actually needs to be. See
+
+  It also takes the measured form. `--image-size fit+20%` builds the smallest image
+  that holds the rootfs with a fifth of it free. That is the quickest way to find out
+  how large a new board's image actually needs to be. See
   [An image size can be stated or measured](config-model.md#an-image-size-can-be-stated-or-measured).
 - **`--refresh-rootfs`** forces a clean rootfs bootstrap instead of restoring the
-  content cache; **`--no-artifact-cache`** forces every compile node to rebuild instead
+  content cache. **`--no-artifact-cache`** forces every compile node to rebuild instead
   of restoring stored `.deb`s (see [Two caches](#two-caches-and-what-each-one-keys-on)).
 
 - **`--kernel-src`, `--uboot-src`, `--ffmpeg-base-src`, `--userspace-src`,
-  `--kmod-src`** redirect where a tree is *cloned from*, without
-  changing what is built: the commit still comes from the lock, so a local checkout
-  holding it makes the fetch near-instant and produces the same result. A SoC declares
-  several userspace trees and a board several out-of-tree modules, so those two name the
-  one they apply to — `--userspace-src mpp=../mpp-rockchip`, `--kmod-src
-  aic8800=../aic8800`, both repeatable. A name the recipe does not build is an
-  error rather than a silently ignored flag.
+  `--kmod-src`** redirect where a tree is *cloned from*, without changing what is built.
+  The commit still comes from the lock, so a local checkout holding it makes the fetch
+  near-instant and produces the same result.
 
-`build` takes no `--kernel`, `--suite`, `--board`, `--locale`, `--timezone`, or
-`--keymap`. Those axes come from the config the recipe's lock was resolved against, not
-from a flag: `resolve` accepts them so you can see what a choice resolves to, and then
-says so — naming the recipe file to write if you want to build it. See
+  A SoC declares several userspace trees and a board several out-of-tree modules, so
+  those two name the one they apply to. Both are repeatable:
+  `--userspace-src mpp=../mpp-rockchip` and `--kmod-src aic8800=../aic8800`. A name the
+  recipe does not build is an error rather than a silently ignored flag.
+
+`build` takes none of `--kernel`, `--suite`, `--board`, `--locale`, `--timezone` or
+`--keymap`. Those axes come from the config the recipe's lock was resolved against,
+rather than from a flag. `resolve` accepts them so you can see what a choice resolves
+to, and then says so. It names the recipe file to write if you want to build it. See
 [Adapting a shipped recipe](../tutorials/adapting-a-recipe.md) for that path, and
 [Locale, timezone, and keyboard](../localization.md) for the localization axes in
 particular.
@@ -302,29 +330,36 @@ the two caches answers which question. `why-rebuild` reports both, per node.
 
 **The rootfs cache** keys on the *solved package set*. A rebuild whose solve is
 unchanged restores the bootstrapped tree instead of re-running the multi-minute
-bootstrap. Because the key is the solved set and not the requested one, a moved mirror
-resolves new versions and rebuilds automatically — a hit is never stale. The unique
-per-image first-boot password is applied on restore rather than cached, so every image
-still gets its own credential. The *rest* of the account policy — the sudo drop-in and
-the authorized keys — is part of the tree and part of the key, so authorizing a key or
-tightening `sudo` rebuilds rather than restoring a tree with the old rules.
-`--refresh-rootfs` forces a clean bootstrap.
+bootstrap. The key is the solved set rather than the requested one, so a moved mirror
+resolves new versions and rebuilds automatically. A hit is never stale.
+
+The unique per-image first-boot password is applied on restore rather than cached, so
+every image still gets its own credential. The *rest* of the account policy is part of
+the tree and part of the key: the sudo drop-in and the authorized keys. Authorizing a
+key or tightening `sudo` therefore rebuilds, rather than restoring a tree with the old
+rules. `--refresh-rootfs` forces a clean bootstrap.
 
 **The artifact cache** keys on each compile node's *full set of output-determining
-inputs* — the source pins and patch series, the kconfig fragments' contents, the
-defconfig, the identity of the root the stage compiled in, and the build-dependencies it
-layered over that root. On a hit, `build` restores that node's stored
-`.deb`s and **skips the compile entirely**: the single largest lever there is, since it
-is the difference between restoring a file and a 30-minute kernel cross-compile or a
-70-minute emulated ffmpeg build.
+inputs*:
 
-It lives at `<root>/cache/artifacts`, outside any recipe's work dir — so it survives
-`clean`, and is shared across work dirs and recipes. A freshly cloned checkout with no
-build tree at all can still restore every `.deb` and compile nothing. `clean --artifacts`
-empties it (for *every* recipe, since the store is shared); `--no-artifact-cache` on a
-build ignores it and stores nothing.
+- The source pins and patch series.
+- The kconfig fragments' contents, and the defconfig.
+- The identity of the root the stage compiled in.
+- The build-dependencies it layered over that root.
 
-Because the key covers every input that can change the output, a hit is sound: two
+On a hit, `build` restores that node's stored `.deb`s and **skips the compile
+entirely**. That is the single largest lever there is. It is the difference between
+restoring a file and a 30-minute kernel cross-compile, or a 70-minute emulated ffmpeg
+build.
+
+It lives at `<root>/cache/artifacts`, outside any recipe's work dir. It therefore
+survives `clean`, and is shared across work dirs and recipes. A freshly cloned checkout
+with no build tree at all can still restore every `.deb` and compile nothing.
+
+`clean --artifacts` empties it, for *every* recipe, since the store is shared.
+`--no-artifact-cache` on a build ignores it and stores nothing.
+
+Because the key covers every input that can change the output, a hit is sound. Two
 builds that would produce different `.deb`s cannot share an entry.
 
 ### Rebuilding only the board DTB
@@ -338,9 +373,10 @@ DTB a full `--stage kernel` ships inside the `linux-image` deb.
 ### Standalone bootloader image
 
 `build <recipe> --stage uboot` writes `<point>-boot.img` next to the raw
-`<point>-idbloader.img` and `<point>-u-boot.itb`, where `<point>` is the build point
-with its `/` flattened (`turing-rk1/forky` → `turing-rk1-forky`): a small, GPT-less
-image holding just the bootloader at its offsets. It
+`<point>-idbloader.img` and `<point>-u-boot.itb`. `<point>` is the build point with its
+`/` flattened (`turing-rk1/forky` → `turing-rk1-forky`).
+
+That image is a small, GPT-less one holding just the bootloader at its offsets. It
 needs no rootfs, so you can produce a flashable eMMC/SPI bootloader image without building
 a whole OS. The `split` layout emits the same image as part of a full build. See
 [Turing RK1](../boards/turing-rk1.md) for the eMMC-plus-NVMe workflow this serves.
@@ -354,9 +390,9 @@ a whole OS. The `split` layout emits the same image as part of a full build. See
 boot2deb try turing-rk1/forky
 ```
 
-The step between `build` and `press`: it catches the image that flashes fine
-and is quietly broken — a userland fault, a brick-on-second-boot — while the
-fix is still a rebuild rather than a reflash-and-serial-console session. The
+The step between `build` and `press`. It catches the image that flashes fine and is
+quietly broken, such as a userland fault or a brick-on-second-boot. It catches it while
+the fix is still a rebuild rather than a reflash-and-serial-console session. The
 board kernel is not booted (the guest runs the suite's generic kernel as a
 fixture) and no board hardware exists under `-M virt`, so this tests the
 userland and only the userland. [Trying an image before flashing](try.md) has
@@ -378,12 +414,14 @@ boot2deb press asus-c201/forky card.img --embed-image \
     --copy site.conf:/etc/myapp/site.conf
 ```
 
-What a press produces is derived from the resolved build, not from flags: a
-`combined` build is one file, a u-boot deliverable is its boot image, and a
+What a press produces is derived from the resolved build rather than from flags. A
+`combined` build is one file, and a u-boot deliverable is its boot image. A
 `split` build refuses a single positional output and names `--boot-out` +
-`--rootfs-out`. A plain press streams the existing artifact and verifies the
-file it wrote (digest re-read + partition-table compare); a press with
-`--copy`/`--deb`/`--embed-image` re-assembles the image from the kept rootfs
+`--rootfs-out`.
+
+A plain press streams the existing artifact and verifies the file it wrote, by a digest
+re-read and a partition-table compare. A press with `--copy`/`--deb`/`--embed-image`
+re-assembles the image from the kept rootfs
 tar. boot2deb does not write devices — hand the file to `dd` or a real flasher.
 [Producing images](../press.md) is the full story, including the seed keys and
 the pressed-image provenance marker.
@@ -411,13 +449,16 @@ boot2deb shell turing-rk1/forky --stage kernel -- make olddefconfig
 ```
 
 When a compile fails, `--verbose` shows you what it printed. `shell` is the other way
-in: it stands the stage's root up and hands you a prompt inside it, with the same base
-tree, the same layered build-dependencies, the same mounts, the same environment and the
-same identity map the compile had. You start in the stage's own tree — `make` re-runs
-verbatim, `ARCH` and `CROSS_COMPILE` are already set for the kbuild stages, and you are
-`root`, as every command in these roots is.
+in. It stands the stage's root up and hands you a prompt inside it. That root has the
+same base tree, layered build-dependencies and mounts the compile had, and the same
+environment and identity map.
 
-`--stage` names the root, and is required — the point is entering a *particular* one:
+You start in the stage's own tree. `make` re-runs verbatim, `ARCH` and `CROSS_COMPILE`
+are already set for the kbuild stages, and you are `root`, as every command in these
+roots is.
+
+`--stage` names the root, and is required, because the point is entering a *particular*
+one:
 
 | `--stage` | the root | layered with |
 | --- | --- | --- |
@@ -429,28 +470,32 @@ verbatim, `ARCH` and `CROSS_COMPILE` are already set for the kbuild stages, and 
 | `packaging` | the host-arch packaging root | nothing — it is never layered |
 
 The work dir is bound at its host path, so every stage's tree, scratch and output is
-there and edits you make inside are on the host when you leave — as are the config
-root's kernel fragments and board device trees, which the kernel stage binds the same
-way. Everything else you write goes into the session's own overlay and is gone when you
-exit. The root has **no network**, exactly as a compile does not: everything a build root
-needs is resolved before it is entered.
+there. Edits you make inside are on the host when you leave. So are the config root's
+kernel fragments and board device trees, which the kernel stage binds the same way.
+
+Everything else you write goes into the session's own overlay, and is gone when you
+exit. The root has **no network**, exactly as a compile does not. Everything a build
+root needs is resolved before it is entered.
 
 Two things to know about what you are entering. The layer is **re-staged, not
-reattached**: a build root is discarded when its stage ends, so what you get is the root
-that stage's declaration produces and not the failed run's writable layer — what the
-compile wrote into the *work dir* is still there, what it wrote into `/usr` is not. And
-the session's layer is staged under its own name, so opening a shell while a build of
-the same recipe is running does not disturb it.
+reattached**. A build root is discarded when its stage ends. What you get is the root
+that stage's declaration produces, not the failed run's writable layer. What the compile
+wrote into the *work dir* is still there, and what it wrote into `/usr` is not.
+
+The session's layer is also staged under its own name. Opening a shell while a build of
+the same recipe is running therefore does not disturb it.
 
 The session's exit status is `boot2deb`'s own, so `shell <recipe> --stage kernel -- make
-foo` in a script reports what `make` reported. It needs a terminal: `shell` relays yours
+foo` in a script reports what `make` reported. It needs a terminal. `shell` relays yours
 to a pseudoterminal inside the sandbox, and refuses rather than starting a session with
-nothing on one end. `tty`, `who`, and `GPG_TTY` have no answer inside — the terminal is
-allocated on the host, so it has no device node in the sandbox — while everything else a
-terminal does, including full-screen programs, job control, and running `tmux`, works.
+nothing on one end.
 
-If the root has never been provisioned in this work dir, the first `shell` bootstraps it,
-which is the same minutes a first build would spend. Later ones reuse the tree.
+`tty`, `who`, and `GPG_TTY` have no answer inside, because the terminal is allocated on
+the host and so has no device node in the sandbox. Everything else a terminal does
+works, including full-screen programs, job control, and running `tmux`.
+
+If the root has never been provisioned in this work dir, the first `shell` bootstraps
+it. That is the same minutes a first build would spend. Later ones reuse the tree.
 
 ## reproduce
 
@@ -459,9 +504,9 @@ boot2deb reproduce turing-rk1/forky --from ./published
 ```
 
 Rebuilds an image from the **plan document** a previous build published, rather than
-resolving the archive afresh. It takes every `build` flag and runs the same pipeline;
-what differs is the rootfs, which installs the plan's exact package set by the digests
-the plan records — reading neither a `Release` nor a package index.
+resolving the archive afresh. It takes every `build` flag and runs the same pipeline.
+What differs is the rootfs, which installs the plan's exact package set by the digests
+the plan records. It reads neither a `Release` nor a package index.
 
 The lock pins sources, patches, and the builder. It cannot pin *which package versions
 the archive served*, so the same lock a month later resolves a different userland. The
@@ -476,47 +521,54 @@ turing-rk1-forky.pkgs.lock
 
 It is deb822 — the archive's own control format — so it reviews as a diff. Each stanza
 names a package's version, architecture, sha256, pool path, and which archive it came
-from; a leading stanza per archive records the mirror that answered, the suite and
-components, the sha256 of the release body that was verified, its `Date` and
-`Valid-Until`, and the fingerprint of the key that verified it.
+from.
 
-`--from` names the directory holding that document; it defaults to this build point's
+A leading stanza per archive records the mirror that answered, the suite and components,
+and the sha256 of the release body that was verified. It also records that release's
+`Date` and `Valid-Until`, and the fingerprint of the key that verified it.
+
+`--from` names the directory holding that document. It defaults to this build point's
 own output directory, so re-running a build to check that it *is* reproducible needs no
-flag. The provenance manifest beside it is read for one advisory line — which boot2deb
-produced the image, and how the running checkout compares. That is advice and never a
-gate: a stamped commit is the commit at which the build worked, never the commit past
-which it breaks.
+flag.
+
+The provenance manifest beside it is read for one advisory line: which boot2deb produced
+the image, and how the running checkout compares. That is advice and never a gate. A
+stamped commit is the commit at which the build worked, never the commit past which it
+breaks.
 
 **This moves the trust anchor, deliberately.** An ordinary build's package digests come
 from an index whose own digest a signed release vouched for, so they chain to the archive
 signature. A replay never reads that index, so the digests chain to the plan document
-instead. Each `.deb` is still verified against the digest the plan records — a mirror
-serving different bytes is caught — but nothing re-checks that the plan describes a set
-the archive ever offered. That trade is right for reproducing a published image and wrong
-for a routine build, which is why it is reachable only through this command; `build` has
+instead.
+
+Each `.deb` is still verified against the digest the plan records, so a mirror serving
+different bytes is caught. What nothing re-checks is that the plan describes a set the
+archive ever offered. That trade is right for reproducing a published image and wrong
+for a routine build, which is why it is reachable only through this command. `build` has
 no flag for it.
 
 **A recipe that compiles its own packages replays only if those compiles are
-byte-reproducible.** The plan pins the sha256 of the kernel `.deb` — and, on a
-media-accel recipe, of `ffmpeg-rk`, `librockchip-mpp1` and `librga2` — that the original
-build produced, because those install from the build's own local pool like any other
+byte-reproducible.** The plan pins the sha256 of the kernel `.deb` that the original
+build produced, and on a media-accel recipe those of `ffmpeg-rk`, `librockchip-mpp1` and
+`librga2`. Those install from the build's own local pool like any other
 package. Replay them and either the digests match, which proves the whole image
 reproduced, or the install fails naming the package that drifted. The second outcome is
 the honest one: it says this recipe is not yet reproducible, rather than quietly
 producing a different image. A recipe that installs Debian's own kernel and compiles
 nothing has no such dependency.
 
-Pair it with a snapshot pin for the strongest form. The plan says which versions; the
+Pair it with a snapshot pin for the strongest form. The plan says which versions. The
 lock's `snapshot.debian.org` timestamp keeps those versions *fetchable* after they rotate
 off the live mirror. See [Reproducibility](reproducibility.md).
 
 ## Verification
 
-Four read-only commands catch config mistakes before any compile — each exits non-zero
-on failure, so they gate CI as well as an interactive bring-up. They share the
-reproducibility split: every one reads the recipe's lock for its pins, and any that needs
-a source tree **auto-fetches it at the locked commit** into a durable cache, so all four
-work on a fresh clone with no hand-cloned trees.
+Four read-only commands catch config mistakes before any compile. Each exits non-zero
+on failure, so they gate CI as well as an interactive bring-up.
+
+They share the reproducibility split. Every one reads the recipe's lock for its pins.
+Any that needs a source tree **auto-fetches it at the locked commit** into a durable
+cache. All four therefore work on a fresh clone with no hand-cloned trees.
 
 ### Which verify when
 
@@ -530,35 +582,42 @@ work on a fresh clone with no hand-cloned trees.
 
 The first `verify-patches` or `verify-config` on a cold cache clones the kernel, and
 linux-stable is large. If you already have a local checkout, point `--kernel-src` at it
-(a git URL or path holding the locked commit) to make the fetch near-instant;
-`--ffmpeg-base-src` and `--userspace-src` do the same for the other trees. `verify-sources`
-never clones — it only queries the remotes.
+(a git URL or path holding the locked commit) to make the fetch near-instant.
+`--ffmpeg-base-src` and `--userspace-src` do the same for the other trees.
+`verify-sources` never clones, and only queries the remotes.
 
-`verify-packages` clones nothing either. It runs the read half of a package resolve —
-the archive's `Release` and its package indexes, and then stops — against the same
-archives a build would use: the mirror the lock's snapshot pins (or the live one), plus
-every repository the selected features contribute. One pass answers every name at once,
-which is why it is cheap enough to run per board over every recipe.
+`verify-packages` clones nothing either. It runs the read half of a package resolve: the
+archive's `Release` and its package indexes, and then stops.
+
+It runs that against the same archives a build would use. Those are the mirror the
+lock's snapshot pins (or the live one), plus every repository the selected features
+contribute. One pass answers every name at once, which is why it is cheap enough to run
+per board over every recipe.
 
 It is worth having as its own command because the resolver cannot answer it. A recipe
-naming a package the suite does not carry fails at resolve time — deep in a build, after
-every compile node has already run — and fails badly: a top-level include naming nothing
-makes the *whole* set unsatisfiable, so the error says the set could not be resolved and
-never which names were the problem.
+naming a package the suite does not carry fails at resolve time, deep in a build, after
+every compile node has already run.
 
-Two kinds of name are reported rather than failed. A package the build **produces** —
-anything a `requires_media_accel` feature contributes, which comes from the SoC's source
-trees through the build's own local pool — is set aside, since the archives are rightly
-silent about it. And a name something else `Provides` is listed with its providers,
-because apt then has a choice the recipe did not make.
+It fails badly, too. A top-level include naming nothing makes the *whole* set
+unsatisfiable. The error therefore says the set could not be resolved, and never which
+names were the problem.
+
+Two kinds of name are reported rather than failed. A package the build **produces** is
+set aside, since the archives are rightly silent about it. That is anything a
+`requires_media_accel` feature contributes, which comes from the SoC's source trees
+through the build's own local pool.
+
+A name something else `Provides` is listed with its providers, because apt then has a
+choice the recipe did not make.
 
 Once every name is accounted for, it asks the second question: does the set **close**?
 A package being in the archive says nothing about its dependencies being there, and the
-difference matters more than it sounds. A package whose dependency is absent still
-installs — dpkg configures with `--force-depends` — so the build succeeds, the image
-flashes, and what breaks is `apt` on the running board, for every package rather than
-the one at fault. Resolving the closure here is what turns that into a line of output
-before anything compiles:
+difference matters more than it sounds.
+
+A package whose dependency is absent still installs, because dpkg configures with
+`--force-depends`. The build succeeds, the image flashes, and what breaks is `apt` on the
+running board, for every package rather than the one at fault. Resolving the closure
+here is what turns that into a line of output before anything compiles:
 
 ```text
 UNSATISFIED: jellyfin-server requires libicu76, and no configured archive offers it
@@ -566,13 +625,13 @@ UNSATISFIED: jellyfin-server requires libicu76, and no configured archive offers
 ```
 
 Every refusal is reported, not just the first, because the list is what a user has to
-correct. The closure runs only when the name check passed: a name the archive does not
+correct. The closure runs only when the name check passed. A name the archive does not
 carry refuses its own dependency group as well, and reporting that twice would bury
 whatever else was found.
 
 The same blind spot applies here as above, and the check accounts for it rather than
 crying wolf. A dependency satisfied by a package this build produces, or by one of the
-recipe's pre-built `[[extra_debs]]`, cannot be seen by a resolve — neither is in an
+recipe's pre-built `[[extra_debs]]`, cannot be seen by a resolve. Neither is in an
 archive, and the local pool does not exist until a build runs. Such a refusal is reported
 as a note and does not fail the recipe:
 
@@ -580,13 +639,16 @@ as a note and does not fail the recipe:
 local : jellyfin-server requires libicu76 — supplied by this build, not by an archive
 ```
 
-An `extra_debs` name comes from its filename (`<package>_<version>_<arch>.deb`), because
-reading it out of the file would mean downloading and unpacking every pin — which is the
-one thing this command promises not to do. A filename that does not follow the convention
-explains nothing, and the refusal it would have covered is reported: the safe direction
-for a heuristic. Only the *name* is matched, never a version constraint — a local `.deb`
-is pinned by digest and this cannot know what version is inside it, so the constraint
-stays the build's problem.
+An `extra_debs` name comes from its filename (`<package>_<version>_<arch>.deb`). Reading
+it out of the file would mean downloading and unpacking every pin, which is the one thing
+this command promises not to do.
+
+A filename that does not follow the convention explains nothing, and the refusal it
+would have covered is reported. That is the safe direction for a heuristic.
+
+Only the *name* is matched, never a version constraint. A local `.deb` is pinned by
+digest, and this cannot know what version is inside it, so the constraint stays the
+build's problem.
 
 A resolution stopped that way has no closure size, and the output says that instead of
 printing zero. Under `--json`, `closure.installed` is `null` in that case, `refusals`
@@ -595,23 +657,23 @@ not see.
 
 #### The free prerequisite: does the series even claim this version?
 
-Before any of those, there is a question that needs no source tree at all — whether
-each composed series' declared envelope admits the version being pinned. It is pure
-metadata, so `update` and `build` both ask it for free:
+Before any of those, there is a question that needs no source tree at all. It asks
+whether each composed series' declared envelope admits the version being pinned. It is
+pure metadata, so `update` and `build` both ask it for free:
 
 - **`update`** says so at pin time and keeps going, because pinning the new version is
   the first step of adopting it. Bumping onto a kernel the series predates is exactly
   the routine move that hits this.
 - **`build`** refuses, before cloning anything. The compile nodes ask the same
-  question, but only once the tree is on disk — a minute of network for an answer that
-  was already in the manifests.
+  question, but only once the tree is on disk. That is a minute of network for an answer
+  that was already in the manifests.
 
 Each axis is asked about its own version: `applies_to_kernel` against the pinned kernel
 tag, `applies_to_uboot` against the pinned u-boot tag. A u-boot series makes no claim
 about a kernel, so the two never gate each other.
 
 On the kernel axis both name the `verify-patches --kernel` line to run next. That
-ordering is the point: the cheap check tells you a series makes no claim about your
+ordering is the point. The cheap check tells you a series makes no claim about your
 kernel, and the expensive one tells you whether it would have worked anyway.
 
 ```
@@ -622,8 +684,8 @@ then widen applies_to_kernel in the series if it comes back clean, or retire the
 patches it names.
 ```
 
-u-boot has no `--kernel` equivalent — there is no "verify against a u-boot the lock does
-not pin" mode — so its advisory points straight at the claim:
+u-boot has no `--kernel` equivalent, since there is no "verify against a u-boot the lock
+does not pin" mode. Its advisory therefore points straight at the claim:
 
 ```
 note: u-boot v2027.04 is outside series 'rk3576-display' (declared >=2026.01, <2027.01) —
@@ -665,47 +727,59 @@ boot2deb verify-patches turing-rk1/forky \
 #### Asking about a kernel you have not adopted
 
 `--kernel <version>` verifies against a kernel the lock does not pin, and **leaves the
-lock alone**. That ordering matters: without it, finding out whether a series survives a
-new kernel means re-pinning to that kernel first — mutating state before knowing whether
-the answer is yes, which is backwards for the one command whose job is finding out.
+lock alone**. That ordering matters. Without it, finding out whether a series survives a
+new kernel means re-pinning to that kernel first. That mutates state before knowing
+whether the answer is yes, which is backwards for the one command whose job is finding
+out.
 
 Because the lock pins no commit for a kernel it does not name, a candidate needs
 `--kernel-path` pointing at a checkout already at that version. Three rules shift on this
 path:
 
 - **The declared envelope does not gate the run.** A series is asked about 7.2 exactly
-  while its `applies_to_kernel` still says `<7.2`, so refusing an out-of-envelope
-  candidate would answer the question by assuming it — the only way past would be to
-  widen the claim first, which is the very thing being tested. So the run reports that
-  the kernel is outside the envelope and measures it anyway, and what `git am` does is
-  the answer. A clean result is the *evidence for* widening the envelope, not a claim
-  that it already covers that kernel. On the locked path an out-of-envelope kernel stays
-  a hard error: there the series really would be applied to a kernel it makes no claim
-  about. Per-entry `kernels` ranges still narrow the series, so a patch already marked
-  obsolete at the candidate drops out rather than counting as a failure.
+  while its `applies_to_kernel` still says `<7.2`. Refusing an out-of-envelope
+  candidate would answer the question by assuming it. The only way past would be to
+  widen the claim first, which is the very thing being tested.
+
+  So the run reports that the kernel is outside the envelope and measures it anyway, and
+  what `git am` does is the answer. A clean result is the *evidence for* widening the
+  envelope, not a claim that it already covers that kernel.
+
+  On the locked path an out-of-envelope kernel stays a hard error. There the series
+  really would be applied to a kernel it makes no claim about. Per-entry
+  `kernels` ranges still narrow the series, so a patch already marked obsolete at the
+  candidate drops out rather than counting as a failure.
 - **A release candidate is answerable.** By semver's rule `7.2.0-rc3` satisfies neither
-  `<7.2` nor `>=7.2`, so a release-only range rejects every RC. That strictness is right
-  for a build — a series' envelope is a claim about *released* kernels — but wrong
-  here, where an RC is exactly the tree you want to measure. On the candidate path an RC
-  is matched as its base release; the build path stays release-strict.
+  `<7.2` nor `>=7.2`, so a release-only range rejects every RC.
+
+  That strictness is right for a build, since a series' envelope is a claim about
+  *released* kernels. It is wrong here, where an RC is exactly the tree you want to
+  measure. On the candidate path an RC is matched as its base release, and the build path
+  stays release-strict.
 - **`--keep-going` reports every failure in one pass.** A single boundary frequently
-  spawns adjacent ones: reworking a patch shifts the context every later patch applies
-  against. Stopping at the first turns that into serial discovery — fix, re-run, find the
-  next, re-run. Each failing patch is skipped so the rest still get measured, which means
-  a batch report shows the *shape* of the damage rather than a final verdict; a rework can
-  still change what comes after it.
+  spawns adjacent ones, because reworking a patch shifts the context every later patch
+  applies against. Stopping at the first turns that into serial discovery: fix, re-run,
+  find the next, re-run.
+
+  Each failing patch is skipped so the rest still get measured. A batch report therefore
+  shows the *shape* of the damage rather than a final verdict, and a rework can still
+  change what comes after it.
 
 `--kernel-path` / `--uboot-path` / `--ffmpeg-path` / `--userspace-path` are all
-**optional**: an omitted tree is auto-fetched at its locked commit (ffmpeg and userspace
-only when the series carries patches for that scope). The `--kernel-src` / `--uboot-src`
-/ `--ffmpeg-base-src` / `--userspace-src` flags (the first three the same names and
-meaning as `build`'s; the last names the patched tree's source) override
-the fetch *source* — a git URL or local path used in place of the configured upstream —
-while the tree still lands at exactly the locked commit; they are consulted only on the
-first materialization and ignored when the matching `--*-path` is given. The `patches`
-checkout is resolved the way `build` does: an explicit `--patches-path`, else
-`../patches` if present, else an auto-fetch at the pinned commit from the repo the
-lock's pin names.
+**optional**. An omitted tree is auto-fetched at its locked commit (ffmpeg and userspace
+only when the series carries patches for that scope).
+
+The `--kernel-src` / `--uboot-src` / `--ffmpeg-base-src` / `--userspace-src` flags
+override the fetch *source*. That is a git URL or local path used in place of the
+configured upstream. The first three carry the same names and meaning as `build`'s, and
+the last names the patched tree's source.
+
+The tree still lands at exactly the locked commit. Those flags are consulted only on the
+first materialization, and ignored when the matching `--*-path` is given.
+
+The `patches` checkout is resolved the way `build` does. It takes an explicit
+`--patches-path`, else `../patches` if present, else an auto-fetch at the pinned commit
+from the repo the lock's pin names.
 
 `--kernel` is kernel-axis only. A recipe that pins no kernel patch series rejects it
 rather than quietly verifying its u-boot series and reporting a green that answers
@@ -723,10 +797,10 @@ boot2deb verify-config turing-rk1/forky
 boot2deb verify-config turing-rk1/forky --reference-config /path/to/.config
 ```
 
-`--kernel-path` is optional; omitted, the kernel is auto-fetched at its pin and the kernel
-patch series applied before the config run. `--kernel-src` supplies a local fetch source
-the same way as `verify-patches`. With `--reference-config`, the run additionally fails on
-any `CONFIG_*` difference from the reference.
+`--kernel-path` is optional. Omitted, the kernel is auto-fetched at its pin and the
+kernel patch series applied before the config run. `--kernel-src` supplies a local fetch
+source the same way as `verify-patches`. With `--reference-config`, the run additionally
+fails on any `CONFIG_*` difference from the reference.
 
 ### verify-image
 
@@ -737,20 +811,26 @@ boot2deb verify-image turing-rk1/forky --out-dir /path/to/artifacts
 ```
 
 The off-board half of the hardware gate, and the last thing worth running before a flash.
-Per image it checks that the artifact set is present, that the plan document parses and
-its digest matches what the provenance manifest records, that `[[archives]]` is
-well formed (the mirror plus the build's own pool, the pool marked `local` and carrying no
-mirror URL, since a per-run path is not portable provenance), that **the ext4 filesystem
-is exactly its GPT partition**, and — for a fitted `--image-size` — that the slack the
-recipe asked for actually survived into the shipped filesystem.
+Per image it checks:
 
-The filesystem/partition check is the one that matters most: larger and it will not mount
-at all, smaller and the difference is wasted. It is checked on every image, not only the
-fitted one, because it is the invariant the fit ordering exists to preserve.
+- That the artifact set is present.
+- That the plan document parses, and its digest matches what the provenance manifest
+  records.
+- That `[[archives]]` is well formed. That is the mirror plus the build's own pool. The
+  pool is marked `local` and carries no mirror URL, since a per-run path is not
+  portable provenance.
+- That **the ext4 filesystem is exactly its GPT partition**.
+- For a fitted `--image-size`, that the slack the recipe asked for actually survived
+  into the shipped filesystem.
 
-Every structure is read by the code that *wrote* it — the same Rust GPT and ext4 readers
-the image node uses — so the check cannot drift from the build by parsing the same bytes
-differently. Read-only and no root: only the head of the artifact is decompressed, so a
+The filesystem and partition check is the one that matters most. Larger and it will not
+mount at all, and smaller and the difference is wasted. It is checked on every image,
+not only the fitted one, because it is the invariant the fit ordering exists to preserve.
+
+Every structure is read by the code that *wrote* it, meaning the same Rust GPT and ext4
+readers the image node uses. The check therefore cannot drift from the build by parsing
+the same bytes differently. Read-only and no root: only the head of the artifact is
+decompressed, so a
 compressed multi-gigabyte image costs a few hundred kilobytes. A failing invariant exits
 non-zero, and `--json` gives the whole run as one document.
 
@@ -769,9 +849,10 @@ boot2deb verify-sources turing-rk1/forky
 a lock rotting before a build needs it. Capture a snapshot (`build --save-snapshot`) to
 make the rootfs solve durable the same way.
 
-It reads the same ref advertisement as [`outdated`](#what-has-moved-upstream) and
-answers the other half of the question: this one is about whether a pin can still be
-*fetched*, that one about whether something *newer* exists. Neither implies the other.
+It reads the same ref advertisement as [`outdated`](#what-has-moved-upstream), and
+answers the other half of the question. This one is about whether a pin can still be
+*fetched*, and that one about whether something *newer* exists. Neither implies the
+other.
 
 ### patch import
 
@@ -800,7 +881,7 @@ boot2deb diff a/turing-rk1-forky.provenance.toml b/turing-rk1-forky.provenance.t
 ```
 
 Each side is a **recipe name**, a path to a **`.lock`**, or a path to a
-**`.provenance.toml`**, and the two sides need not be the same kind. Everything it
+**`.provenance.toml`**. The two sides need not be the same kind. Everything it
 reads is a document the build already wrote, so it runs offline and builds nothing.
 
 Six sections, in the order they answer the question:
@@ -814,7 +895,7 @@ Six sections, in the order they answer the question:
 | `blobs` | the rkbin pins, by sha256 |
 | `builder` | which boot2deb ran, the host it cross-compiled from, and the archive state the rootfs resolved against |
 
-Narrow it with `--section` (repeatable); `--json` gives the whole report as one
+Narrow it with `--section`, which is repeatable. `--json` gives the whole report as one
 document, with the patch-file deltas under `patch_files`.
 
 **Unavailable is not unchanged.** A section neither side records says so rather than
@@ -825,14 +906,16 @@ builder: not compared — neither side records a provenance manifest, which is w
 the builder and archive state are recorded
 ```
 
-Which side is silent is named when only one is, so you know whether to go find the
-other document or accept that it does not exist.
+Which side is silent is named when only one is. You then know whether to go find the
+other document, or accept that it does not exist.
 
 Two sections answer more when you name a **recipe** than when you name a document.
-The kconfig delta is one: a fragment set is resolved from the config tree, and no
-document a build writes names it — so `diff` reads the fragments a recipe's kernel
-merges and reports each differing symbol *with the fragment that set it*, which
-diffing two generated `.config` files cannot do. A distro-package kernel merges no
+The kconfig delta is one. A fragment set is resolved from the config tree, and no
+document a build writes names it.
+
+`diff` therefore reads the fragments a recipe's kernel merges, and reports each
+differing symbol *with the fragment that set it*. Diffing two generated `.config` files
+cannot do that. A distro-package kernel merges no
 fragments at all, and that section reports itself unavailable rather than claiming
 every symbol the other side enables is new.
 
@@ -848,11 +931,12 @@ patches:
       ~  media-accel/kernel/060-vepu580-rcawston-v3.patch
 ```
 
-`+` added, `-` removed, `~` rewritten under an unchanged name — the last being the
-case a membership comparison calls identical. It needs a `patches` checkout carrying
-both commits (`--patches-path`, else the config root's sibling `../patches`); without
-one it reports "the commit moved, and here is why the files could not be listed"
-rather than failing the rest of the comparison.
+`+` added, `-` removed, `~` rewritten under an unchanged name. The last is the
+case a membership comparison calls identical.
+
+It needs a `patches` checkout carrying both commits, from `--patches-path` or else the
+config root's sibling `../patches`. Without one it reports "the commit moved, and here is
+why the files could not be listed", rather than failing the rest of the comparison.
 
 That section is what turns deciding whether a `validated` [support
 claim](support-matrix.md) survives a kernel or patches bump from hand work into
@@ -882,32 +966,36 @@ documents state the same facts. What is in them:
 | every externally-fetched `.deb` | its URL and sha256 |
 
 The `upstream` qualifier is what ties the several binary packages of one source back to
-the thing that was built — `libsystemd0`, `libsystemd-shared` and `systemd` are one
-source package, and nothing else in the document says so. It comes from the published
-plan beside the image, and it is emitted only where the source name *differs* from the
-binary package's own, because that absence is how the ecosystem spells "the source
-carries this name". An image handed over without its plan simply carries no attribution:
-the SBOM is complete without it, and a warning says what is missing rather than the
-command failing.
+the thing that was built. `libsystemd0`, `libsystemd-shared` and `systemd` are one
+source package, and nothing else in the document says so.
+
+It comes from the published plan beside the image. It is emitted only where the source
+name *differs* from the binary package's own. That absence is how the ecosystem spells
+"the source carries this name".
+
+An image handed over without its plan simply carries no attribution. The SBOM is
+complete without it, and a warning says what is missing rather than the command failing.
 
 The one distinction worth reading is between what the image **contains** and what it was
 **generated from**. A kernel source tree is compiled into the image, not installed in
-it; SPDX says so with `CONTAINS` and `GENERATED_FROM`, and CycloneDX — which has one
-relationship kind — carries it in the component type and description instead.
+it. SPDX says so with `CONTAINS` and `GENERATED_FROM`. CycloneDX has one relationship
+kind, so it carries the distinction in the component type and description instead.
 
 **Licenses are `NOASSERTION`, deliberately.** boot2deb records no per-package license,
 and synthesizing one by reading `/usr/share/doc/*/copyright` out of the rootfs would
 produce a field that looks authoritative and is not. An honest absence is worth more to
 a compliance scan than a wrong SPDX identifier.
 
-**The document is reproducible.** Its identity — the SPDX `documentNamespace` and the
-CycloneDX `serialNumber` — is derived from the solved manifest's digest, so two SBOMs of
-one package set are byte-identical rather than differing in a random UUID. The only
-field the image's own content does not determine is the creation timestamp, which both
-formats require; set `SOURCE_DATE_EPOCH` and the whole document is byte-stable.
+**The document is reproducible.** Its identity is the SPDX `documentNamespace` and the
+CycloneDX `serialNumber`. Both are derived from the solved manifest's digest, so two
+SBOMs of one package set are byte-identical rather than differing in a random UUID.
+
+The only field the image's own content does not determine is the creation timestamp,
+which both formats require. Set `SOURCE_DATE_EPOCH` and the whole document is
+byte-stable.
 
 It reads a *published build*, not a recipe's lock. A lock says what an image would be
-made of; only a build says what one is — so `sbom <recipe>` reads the
+made of, and only a build says what one is. `sbom <recipe>` therefore reads the
 `.provenance.toml` and `.pkgs.lock` beside that recipe's image, and says so if no build
 has produced them yet.
 
@@ -950,20 +1038,22 @@ Three axes, because three are answerable from a plan:
 
 **A fourth — which config layer asked for a package — is not answerable**, and the
 command does not pretend otherwise. The plan records the *repository* a package came
-from, not the layer that named it, and most of an image is transitive dependencies no
-layer named at all.
+from, not the layer that named it. Most of an image is transitive dependencies no layer
+named at all.
 
 **The figures are the archives' own estimates, not measurements.** `Installed-Size` is
 what each package's builder computed over a staged tree, in the kibibytes Debian Policy
-defines it in. It counts no filesystem overhead, no inode shared by a hard link, and
-nothing the image gains after `dpkg` — the initramfs, the `/boot` artifacts an install
-hook produces, the ext4 metadata. So the total is smaller than the image, and the report
-is for comparing rows against each other rather than for predicting a card's occupancy.
-Policy also permits a package to state no size at all; those are counted apart rather
-than folded in as zero, and the report says how many there were.
+defines it in. It counts none of the filesystem overhead, the inodes shared by a hard
+link, or anything the image gains after `dpkg`. That last covers the initramfs, the
+`/boot` artifacts an install hook produces, and the ext4 metadata.
+
+So the total is smaller than the image, and the report is for comparing rows against
+each other rather than for predicting a card's occupancy. Policy also permits a package
+to state no size at all. Those are counted apart rather than folded in as zero, and the
+report says how many there were.
 
 `--top` truncates the table and never the totals, so a partial view still states what it
-is a view of; `--top 0` shows every row. `--json` prints the whole report — a consumer
+is a view of. `--top 0` shows every row. `--json` prints the whole report, and a consumer
 that asked for structure can slice it itself.
 
 ## What has moved upstream
@@ -993,34 +1083,39 @@ turing-rk1/forky              u-boot   behind     v2026.04 -> v2026.07 (1 newer 
 turing-rk1/forky              patches  tip-moved  branch main: tip moved 659033b7e543 -> ed52b7fa4a3d
 ```
 
-Two figures because they are different moves. The **in-line** bump — the next stable
-point release — usually keeps the patch series inside its declared `applies_to_kernel`
-envelope and the kernel config where it was. The **newest upstream** release usually
-does not, and is the one that wants a [`verify-patches`](#verify-patches) run before it
-is pinned. A pin that is itself at the newest release in its line reports only the
-wider move.
+Two figures because they are different moves. The **in-line** bump is the next stable
+point release. It usually keeps the patch series inside its declared `applies_to_kernel`
+envelope, and the kernel config where it was.
 
-A release pin is never offered a **prerelease**: `v7.3-rc1` is not an upgrade from
-`v7.1.6`, it is a different question. Nor is a pin compared across naming schemes — the
-Linux-libre `sources/v7.1.6-gnu` trees and upstream's own `v7.1.6` live in the same
-repo and their versions interleave, so a survey that mixed them would offer to swap a
-board's whole firmware posture as a point release. The rule is that the pin states its
-own scheme and only tags spelled the same way are candidates, which is why no per-axis
-list of version patterns exists to fall out of date.
+The **newest upstream** release usually does not, and is the one that wants a
+[`verify-patches`](#verify-patches) run before it is pinned. A pin that is itself at the
+newest release in its line reports only the wider move.
 
-Being behind is not a failure. `outdated` always exits zero; it is a survey, and
-whether to move is a decision with hardware evidence behind it. Its neighbour
-[`verify-sources`](#verify-sources) is the gate, and it asks the opposite question —
-not "is there something newer" but "is what we pinned still fetchable at all". A pin
-can be a durable tag and nine releases behind, or an ephemeral branch tip and current.
+A release pin is never offered a **prerelease**. `v7.3-rc1` is not an upgrade from
+`v7.1.6`, but a different question.
 
-Cost is one `git ls-remote` per **distinct remote**, not per pin: the shipped recipes
+Nor is a pin compared across naming schemes. The Linux-libre `sources/v7.1.6-gnu` trees
+and upstream's own `v7.1.6` live in the same repo, and their versions interleave. A
+survey that mixed them would offer to swap a board's whole firmware posture as a point
+release. The rule is that the pin states its own scheme, and only tags spelled the same
+way are candidates. That is why no per-axis list of version patterns exists to fall out
+of date.
+
+Being behind is not a failure. `outdated` always exits zero. It is a survey, and
+whether to move is a decision with hardware evidence behind it.
+
+Its neighbour [`verify-sources`](#verify-sources) is the gate, and it asks the opposite
+question. Not "is there something newer" but "is what we pinned still fetchable at all".
+A pin can be a durable tag and nine releases behind, or an ephemeral branch tip and
+current.
+
+Cost is one `git ls-remote` per **distinct remote**, not per pin. The shipped recipes
 share a kernel repo and a patches repo, so surveying the whole tree is a handful of
 round-trips and a few seconds. Nothing is fetched and nothing is written.
 
-What it does **not** cover is the pins that have no upstream ref to move: the rkbin
-blobs and any `extra_debs` are content-pinned by sha256 and read from the config tree,
-and the apt archive is pinned by the solved manifest rather than by a ref. Those move
+What it does **not** cover is the pins that have no upstream ref to move. The rkbin
+blobs and any `extra_debs` are content-pinned by sha256 and read from the config tree.
+The apt archive is pinned by the solved manifest rather than by a ref. Those move
 only when someone changes the config, which [`diff`](#comparing-two-build-points)
 shows.
 
@@ -1046,13 +1141,13 @@ boot2deb clean --verify-trees --kconfig --dry-run
 `why-rebuild` answers the question that decides how long a build takes, and it answers
 it for [both caches](#two-caches-and-what-each-one-keys-on). Per compile node it reports:
 
-- whether the cloned-and-patched **source tree** is reused or rebuilt, naming the pinned
-  input that moved when it will rebuild; and
-- whether the **artifact cache** already holds that node's output, in which case the
+- Whether the cloned-and-patched **source tree** is reused or rebuilt. It names the
+  pinned input that moved when it will rebuild.
+- Whether the **artifact cache** already holds that node's output, in which case the
   compile is skipped entirely.
 
 The two are independent, and the second dominates. A node can rebuild its tree and still
-compile nothing — the artifact store lives outside the work dir, so a fresh clone with no
+compile nothing. The artifact store lives outside the work dir, so a fresh clone with no
 tree at all can restore every `.deb`. Each verdict is computed by calling the same
 function the build keys its own decision on, so the prediction cannot drift from what
 happens next. It runs no build and touches no network.
@@ -1066,28 +1161,30 @@ note: the per-node verdict is the *source tree*: whether the clone and patch run
 ```
 
 Pass `--no-artifact-cache` to see the prediction for a build that will not use the
-store, and `--patches-path` / `--userspace <name>` to match a build that will use those.
+store. Pass `--patches-path` / `--userspace <name>` to match a build that will use those.
 
-`clean` removes only directories `build` created: every work dir is stamped with a
-`.boot2deb-work` marker, and an unmarked target is refused — so a mistyped
+`clean` removes only directories `build` created. Every work dir is stamped with a
+`.boot2deb-work` marker, and an unmarked target is refused, so a mistyped
 `--work-dir` cannot recursively delete an arbitrary tree. `--force` overrides the
 check for a directory you are sure about.
 
 `--build-roots` is the narrow selector, and the one to reach for when a build fails
 with **`the <stage> build root does not satisfy its own dependencies`**. A build root
-is provisioned once and cached; the packages layered over it are resolved against the
-archive as it stands when the build runs. The base's cache key covers the mirrors it
-bootstrapped from and the package set it bootstrapped with — not the versions those
-resolved to — so nothing invalidates the tree when the archive moves underneath it,
-and an aged base cannot be told from a current one by inspection. Dropping it is what
-clears the skew.
+is provisioned once and cached. The packages layered over it are resolved against
+the archive as it stands when the build runs.
+
+The base's cache key covers the mirrors it bootstrapped from and the package set it
+bootstrapped with, not the versions those resolved to. Nothing therefore invalidates the
+tree when the archive moves underneath it, and an aged base cannot be told from a
+current one by inspection. Dropping it is what clears the skew.
 
 It sweeps the provisioned build roots, the `.lock` and `.pkgs` files beside each, and
-the overlay layers staged over them, and it spares the **packaging root**. That root
-is never layered — its contents are fixed at bootstrap — so it has no skew to hit, and
-`--sandbox`, which takes it too, charges a second bootstrap for nothing. The two are
-mutually exclusive for that reason: they answer opposite questions about the packaging
-root. Preview either with `--dry-run` to see the trees and their sizes.
+the overlay layers staged over them. It spares the **packaging root**. That root is
+never layered, since its contents are fixed at bootstrap, so it has no skew to hit.
+`--sandbox`, which takes it too, charges a second bootstrap for nothing.
+
+The two are mutually exclusive for that reason: they answer opposite questions about the
+packaging root. Preview either with `--dry-run` to see the trees and their sizes.
 
 ### Sweeping the shared caches
 
@@ -1104,30 +1201,34 @@ shared, the selectors that name them take **no recipe**:
 
 `--verify-trees` is the routine one, and the only selector that prunes *within* a store
 rather than emptying it. Both auto-fetch caches are keyed on the commit they hold, so
-liveness is decidable: a checkout whose commit no `recipes/*/*.lock` names can only ever
-be re-fetched, never read back from, and is dead. Re-pinning a kernel therefore strands
-the old tree the moment `update` writes the new commit, and this is what collects it.
-The still-pinned checkouts stay — they are what makes `verify-patches` and
-`verify-config` start instantly. Because a *narrower* pinned set would delete a live
-tree, a lock that will not parse aborts the sweep instead of narrowing it: nothing is
-removed until every lock in the config tree has been read.
+liveness is decidable. A checkout whose commit no `recipes/*/*.lock` names can only ever
+be re-fetched, never read back from, and is dead.
+
+Re-pinning a kernel therefore strands the old tree the moment `update` writes the new
+commit, and this is what collects it. The still-pinned checkouts stay, and they are what
+makes `verify-patches` and `verify-config` start instantly.
+
+Because a *narrower* pinned set would delete a live tree, a lock that will not parse
+aborts the sweep instead of narrowing it. Nothing is removed until every lock in the
+config tree has been read.
 
 The one narrowing that rule cannot catch is a missing `--overlay`. The locks are read
-from the search paths, so a sweep invoked without the overlays your builds use never
-sees their pins and calls their checkouts dead. Pass the same `--overlay` flags you
-build with; the run reports how many locks it read, so a count short of the tree you
-know is the signal that something was left out.
+from the search paths. A sweep invoked without the overlays your builds use therefore
+never sees their pins, and calls their checkouts dead.
+
+Pass the same `--overlay` flags you build with. The run reports how many locks it read,
+so a count short of the tree you know is the signal that something was left out.
 
 `--kconfig` empties `verify-config`'s scratch, one work dir per recipe. Each holds a
 provisioned cross root and an out-of-tree kbuild output dir, both re-created on the next
-run, and each is a base that ages against the archive exactly as a build root does — so
-dropping them costs a re-provision and buys back the largest of the four stores after
+run. Each is also a base that ages against the archive exactly as a build root does.
+Dropping them costs a re-provision, and buys back the largest of the four stores after
 the artifact cache.
 
-`--artifacts` empties the durable artifact store; since it is shared, that clears cached
+`--artifacts` empties the durable artifact store. Since it is shared, that clears cached
 outputs for every recipe, and the next build of each recompiles.
 
-`--all-caches` takes the whole tree — the three above, the pinned checkouts, and the
+`--all-caches` takes the whole tree: the three above, the pinned checkouts, and the
 pre-built `extra_debs` store. Everything there is reclaimable by construction, but
-re-earning it costs a full re-fetch and a cache-cold rebuild, so it is the answer to
+re-earning it costs a full re-fetch and a cache-cold rebuild. It is the answer to
 "I need the disk back", not to routine housekeeping.

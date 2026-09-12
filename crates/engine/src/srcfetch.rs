@@ -1,12 +1,12 @@
 //! Auto-fetch of a pinned *source* tree (kernel, ffmpeg, userspace) into a durable,
-//! commit-addressed cache, so the verify gates run on a fresh clone with no
-//! hand-cloned checkout — the "select a device, everything it needs is fetched"
-//! ergonomic extended from the build to `verify-patches`/`verify-config`.
+//! commit-addressed cache. The verify gates then run on a fresh clone, with no
+//! hand-cloned checkout. That is the "select a device, everything it needs is fetched"
+//! ergonomic, extended from the build to `verify-patches`/`verify-config`.
 //!
-//! Mirrors [`crate::patchfetch`] (which does the same for the `patches` repo) but for
-//! the build's source trees, reusing the git shell-out `fetch_commit` (the same one
-//! the compile stages use) so a tag, branch, or reachable-commit pin all resolve
-//! uniformly and land the tree at exactly the locked commit.
+//! Mirrors [`crate::patchfetch`] (which does the same for the `patches` repo), but for
+//! the build's source trees. It reuses the git shell-out `fetch_commit`, the same one
+//! the compile stages use. A tag, branch, or reachable-commit pin therefore all
+//! resolve uniformly, and land the tree at exactly the locked commit.
 
 use crate::build;
 use crate::error::EngineError;
@@ -16,21 +16,23 @@ use std::path::{Path, PathBuf};
 /// Materialize `source` at the locked `commit` into a commit-addressed directory
 /// under `cache_root`, returning that clean, detached checkout's path.
 ///
-/// Durable and content-addressed like [`crate::patchfetch::fetch_series`]: a present
-/// `cache_root/<commit>` is always a complete checkout at that commit — the fetch
-/// stages into a temp sibling and atomically renames on success, so an interrupted
-/// clone never leaves a half-materialized tree a later run trusts. A hit touches no
-/// network. The returned tree always sits at `commit` with a clean worktree, so a
-/// verify gate can apply a series onto it and hard-reset around it (see
+/// Durable and content-addressed like [`crate::patchfetch::fetch_series`]. A present
+/// `cache_root/<commit>` is always a complete checkout at that commit. The fetch
+/// stages into a temp sibling and atomically renames on success. An interrupted clone
+/// therefore never leaves a half-materialized tree a later run trusts. A hit touches
+/// no network.
+///
+/// The returned tree always sits at `commit` with a clean worktree. A verify gate can
+/// therefore apply a series onto it and hard-reset around it (see
 /// [`apply_kernel_series`] / [`restore_tree`]).
 ///
 /// That last guarantee is *restored*, not assumed: a hit runs
 /// [`restore_cache_tree`]. A run killed mid-`git am` leaves applied commits and a
-/// `.git/rebase-apply` behind, and because the cache is keyed on the commit and shared
-/// across recipes, the wreckage would otherwise make every later gate against that
-/// commit fail — including for recipes unrelated to the one that died.
+/// `.git/rebase-apply` behind. The cache is keyed on the commit and shared across
+/// recipes. That wreckage would otherwise make every later gate against that commit
+/// fail, including for recipes unrelated to the one that died.
 ///
-/// `reference` is the pin's ref (tag/branch) for the shallow fetch; `what` labels the
+/// `reference` is the pin's ref (tag/branch) for the shallow fetch. `what` labels the
 /// tree in a [`EngineError::CommitMismatch`] (e.g. `"kernel"`, `"ffmpeg base"`).
 pub fn ensure_tree(
     source: &str,
@@ -70,17 +72,20 @@ pub fn ensure_tree(
 }
 
 /// Bring a commit-addressed cache tree back to `commit` with a clean worktree,
-/// whatever a previous run left in it: abort an interrupted `git am`, drop any applied
-/// patch commits, and remove untracked leftovers.
+/// whatever a previous run left in it:
+///
+/// - Abort an interrupted `git am`.
+/// - Drop any applied patch commits.
+/// - Remove untracked leftovers.
 ///
 /// Unconditionally safe *because* the directory is commit-addressed. Its whole content
-/// is one immutable upstream commit that can be re-fetched, nothing here is ever hand
-/// edited, and the path is keyed on the commit being restored — so there is no work to
+/// is one immutable upstream commit that can be re-fetched. Nothing here is ever hand
+/// edited, and the path is keyed on the commit being restored. There is no work to
 /// lose. This is the opposite of an operator's own `--kernel-path` checkout, where
 /// [`crate::patches::verify_tree`] refuses a dirty tree rather than reset it.
 ///
 /// Errors only if the tree is still unclean afterwards, which means something outside
-/// git's control is in the directory; a stale cache entry must be reported rather than
+/// git's control is in the directory. A stale cache entry must be reported rather than
 /// silently patched onto.
 pub fn restore_cache_tree(
     tree: &Path,
@@ -108,9 +113,9 @@ pub fn restore_cache_tree(
     Ok(())
 }
 
-/// Prepare a cached kernel tree for the config gate: reset it to the locked
-/// `base_commit` (clearing patches a prior run left, and aborting any interrupted
-/// `git am`), then apply the series' kernel `series` in place — leaving it patched
+/// Prepare a cached kernel tree for the config gate. It is reset to the locked
+/// `base_commit`, clearing patches a prior run left and aborting any interrupted
+/// `git am`. The series' kernel `series` is then applied in place, leaving it patched
 /// for `verify-config`'s out-of-tree kconfig run. Returns the number of patches
 /// applied.
 ///
@@ -131,8 +136,8 @@ pub fn apply_kernel_series(
     crate::patches::apply_tree(patches_root, series, tree, "kernel", target)
 }
 
-/// Restore a shared cache tree to its clean `base_commit` after the config gate, so
-/// the next `verify-patches` reuse sees a clean base rather than a patched tree.
+/// Restore a shared cache tree to its clean `base_commit` after the config gate. The
+/// next `verify-patches` reuse then sees a clean base rather than a patched tree.
 pub fn restore_tree(tree: &Path, base_commit: &str) -> Result<(), EngineError> {
     crate::git::reset_hard(tree, base_commit)
 }

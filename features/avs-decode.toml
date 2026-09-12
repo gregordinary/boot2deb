@@ -27,9 +27,9 @@ requires_capability = ["ffmpeg"]
 requires_arch = ["arm64"]
 
 caveats = [
-  "AVS2 and AVS3 decode on the CPU. Neither the RK3588's nor the RK3576's video decoder has an AVS path in any driver, mainline or vendor, so these codecs get no hardware assistance at all and no `-hwaccel` reaches them.",
-  "AVS2 is a 1080p capability on this hardware, not a 2160p one. A demanding 1080p AVS2 stream decodes at 49.2 fps and occupies 2.9 of eight cores at realtime, leaving room for one such stream and little else; 2160p AVS2 reaches 15.6 fps with all eight cores busy, so it does not play. AVS3 is much cheaper -- 113.3 fps at 1080p for 1.3 cores, about what software HEVC costs.",
-  "Decode only, in both codecs. FFmpeg has an AVS3 encoder wrapper for no library that exists here and none at all for AVS2, so nothing in this image encodes either format.",
+  "AVS2 and AVS3 decode on the CPU. Neither the RK3588's nor the RK3576's video decoder has an AVS path in any driver, mainline or vendor. These codecs get no hardware assistance at all, and no `-hwaccel` reaches them.",
+  "AVS2 is a 1080p capability on this hardware, not a 2160p one. A demanding 1080p AVS2 stream decodes at 49.2 fps and occupies 2.9 of eight cores at realtime. That leaves room for one such stream and little else. At 2160p it reaches 15.6 fps with all eight cores busy, so it does not play. AVS3 is much cheaper, at 113.3 fps for 1.3 cores at 1080p -- about what software HEVC costs.",
+  "Decode only, in both codecs. FFmpeg has an AVS3 encoder wrapper for no library that exists here, and none at all for AVS2. Nothing in this image encodes either format.",
 ]
 
 # The libraries the ffmpeg build links, and the flags that compile it against

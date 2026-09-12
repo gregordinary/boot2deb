@@ -1,11 +1,11 @@
-//! u-boot compile stage: clone the pinned u-boot, apply the locked u-boot patch
-//! series if the resolved device selects one, build the board defconfig with the
-//! sha256-verified rkbin ATF/TPL blobs, and stage the raw-gap payloads
-//! (`idbloader.img`, `u-boot.itb`).
+//! u-boot compile stage. It clones the pinned u-boot and applies the locked u-boot
+//! patch series where the resolved device selects one. It then builds the board
+//! defconfig with the sha256-verified rkbin ATF/TPL blobs, and stages the raw-gap
+//! payloads (`idbloader.img`, `u-boot.itb`).
 //!
 //! RK3588 u-boot builds with the aarch64 toolchain (`CROSS_COMPILE` on a
 //! non-arm64 host) and `CONFIG_ARM64=y` from the defconfig, so no `ARCH=` is
-//! passed — the defconfig carries it. The blobs are verified against the lock's
+//! passed. The defconfig carries it. The blobs are verified against the lock's
 //! hashes ([`crate::blobs`]) before `make` consumes them.
 
 use crate::blobs;
@@ -24,10 +24,11 @@ use std::path::{Path, PathBuf};
 /// The artifact-store node this stage keys its outputs under, and the label
 /// [`why-rebuild`](crate::plan) predicts against.
 ///
-/// A constant because the two have to be the *same string*: the store is keyed by
-/// `(node, signature)`, so a prediction computed under a different node name would
-/// answer a question about an entry no build ever wrote. It is the counterpart of the
-/// path helper above — one names where the tree is, this names where the artifacts are.
+/// A constant because the two have to be the *same string*. The store is keyed by
+/// `(node, signature)`. A prediction computed under a different node name would
+/// therefore answer a question about an entry no build ever wrote. It is the
+/// counterpart of the
+/// path helper above: one names where the tree is, this names where the artifacts are.
 pub const NODE: &str = "uboot";
 
 /// Stage-recipe version for the u-boot tree signature: bump when the
@@ -36,29 +37,29 @@ const CLONE_STAGE_VERSION: u32 = 1;
 
 /// The u-boot source tree the [`build_uboot`] stage clones and reuses under `work_dir`
 /// (`<work_dir>/u-boot`). Exposed for the same reason
-/// [`kernel::tree_dir`](crate::build::kernel::tree_dir) is: a reader of the tree —
-/// [`crate::shell`], which starts an interactive session in it — should not restate the
-/// layout literal.
+/// [`kernel::tree_dir`](crate::build::kernel::tree_dir) is. A reader of the tree, such
+/// as [`crate::shell`], which starts an interactive session in it, does not restate
+/// the layout literal.
 pub fn tree_dir(work_dir: &Path) -> PathBuf {
     work_dir.join("u-boot")
 }
 
-/// Build-dependencies this stage layers over the cross root's base — what a u-boot
-/// build wants that the toolchain, `make`, `bc`, `bison`, `flex` and `libssl-dev`
-/// already in that base do not supply.
+/// Build-dependencies this stage layers over the cross root's base. These are what a
+/// u-boot build wants that the toolchain, `make`, `bc`, `bison`, `flex` and
+/// `libssl-dev` already in that base do not supply.
 ///
-/// Four of them serve one step: u-boot generates Python bindings for libfdt and then
+/// Four of them serve one step. u-boot generates Python bindings for libfdt and then
 /// runs `binman` to assemble the image. `swig` and the Python dev headers compile the
 /// `pylibfdt` extension, `setuptools` builds it, and `pyelftools` is what `binman`
 /// imports. Absent, the failure is a mid-build Python traceback rather than a missing
-/// dependency — which is exactly why they are declared here rather than left to be
+/// dependency. That is exactly why they are declared here rather than left to be
 /// present by accident.
 ///
-/// `libgnutls28-dev` is the fifth and serves a different one: `tools/mkeficapsule`
+/// `libgnutls28-dev` is the fifth, and serves a different one. `tools/mkeficapsule`
 /// includes `<gnutls/gnutls.h>` and is built whenever the board's defconfig sets
 /// `CONFIG_TOOLS_MKEFICAPSULE`, which every EFI-loader configuration does. It is a host
-/// tool rather than something the payloads link, but `make tools` is on the path to
-/// them, so its absence stops the build outright.
+/// tool rather than something the payloads link. `make tools` is on the path to them,
+/// so its absence stops the build outright.
 ///
 /// Read by the [`BuildRootSpec`] that stages the layer, and by [`crate::shell`], which
 /// stages the same layer for an interactive session in this stage's root.
@@ -75,18 +76,18 @@ pub const UBOOT_BUILD_DEPS: &[&str] = &[
 ///
 /// An entry stored under a different version is never restored. Bump it when the
 /// compile or package logic changes the produced payloads or `.deb` in a way the
-/// folded inputs do not already capture — a defconfig generated with different `make`
-/// variables, a change to which artifacts the stage emits, a different archive
-/// compressor.
+/// folded inputs do not already capture. That covers a defconfig generated with
+/// different `make` variables, a change to which artifacts the stage emits, and a
+/// different archive compressor.
 const OUTPUT_STAGE_VERSION: u32 = 6;
 
 /// Filesystem inputs for the u-boot stage.
 pub struct UbootOptions<'a> {
     /// Git URL or local path to clone u-boot from, at the locked ref. Defaults to
-    /// the boot method's `uboot_source`; a local clone speeds the shallow clone.
+    /// the boot method's `uboot_source`. A local clone speeds the shallow clone.
     pub source: &'a str,
     /// The patch series to apply, or `None` when the resolved kernel names no patch
-    /// series — u-boot is then compiled exactly as cloned.
+    /// series. u-boot is then compiled exactly as cloned.
     pub patches: Option<PatchSource<'a>>,
     /// Directory holding the vendored rkbin blobs, verified against the lock
     /// before use.
@@ -97,29 +98,28 @@ pub struct UbootOptions<'a> {
     /// ([`SandboxRole::Cross`](crate::sandbox::SandboxRole::Cross)).
     ///
     /// u-boot's build compiles host tools (`mkimage`, `dtc`) as well as target ones,
-    /// generates its `pylibfdt` device-tree bindings, and runs `binman` — so the
-    /// toolchain, `swig`, the Python dev headers and `pyelftools` all come from this
-    /// root, and the host carries none of them. Bootstrapped lazily, like
+    /// generates its `pylibfdt` device-tree bindings, and runs `binman`. The
+    /// toolchain, `swig`, the Python dev headers and `pyelftools` therefore all come
+    /// from this root, and the host carries none of them. Bootstrapped lazily, like
     /// [`packaging`](Self::packaging) and for the same reason.
     pub cross: &'a dyn BuildSandbox,
     /// Directory the produced boot payloads are staged into.
     pub out_dir: &'a Path,
     /// The root the `u-boot-<device>` `.deb` is archived in.
     ///
-    /// Provisioned lazily by this stage rather than by the caller: a build that
-    /// restores its u-boot artifacts from the cache never archives anything and should
-    /// not pay for a bootstrap. Its identity is folded into
-    /// [`output_manifest`] for the same reason the toolchain's is — it decides the
-    /// output bytes.
+    /// Provisioned lazily by this stage rather than by the caller. A build that
+    /// restores its u-boot artifacts from the cache never archives anything, and does
+    /// not pay for a bootstrap. Its identity is folded into [`output_manifest`] for the
+    /// same reason the toolchain's is: it decides the output bytes.
     pub packaging: &'a PackagingSandbox,
     /// The build point's
     /// [artifact stem](boot2deb_core::buildpoint::BuildPoint::artifact_stem) — every
     /// payload is published as `<stem>-<name>`. Two recipes on one board can pin
-    /// different u-boot series, so payloads named for the board alone would let the
-    /// second build's bootloader be folded into the first's image, silently.
+    /// different u-boot series. Payloads named for the board alone would therefore let
+    /// the second build's bootloader be folded into the first's image, silently.
     pub stem: &'a str,
     /// Root of the Tier-2 artifact store ([`crate::artstore`]), or `None` to
-    /// disable output caching. On a hit the payloads + deb are restored; on a miss
+    /// disable output caching. On a hit the payloads + deb are restored. On a miss
     /// they are stored after the build.
     pub store: Option<&'a Path>,
 }
@@ -151,7 +151,7 @@ impl Drop for RestoreDir {
 }
 
 /// The maskrom USB boot images: the CODE471/CODE472 payloads the BootROM download
-/// protocol takes to run this u-boot from RAM over USB with nothing written to
+/// protocol takes. They run this u-boot from RAM over USB, with nothing written to
 /// storage. Present only when the build enables `CONFIG_ROCKCHIP_MASKROM_IMAGE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaskromImages {
@@ -159,11 +159,11 @@ pub struct MaskromImages {
     pub usb471: PathBuf,
     /// `u-boot-rockchip-usb472.bin` — CODE472, SPL + the FIT, laid out so the FIT
     /// sits at `SPL_LOAD_FIT_ADDRESS`. The SPL advertises `SPL_TEXT_BASE` as its load
-    /// address (patch `0005`), which the RK3576 BootROM honours to place the download.
+    /// address (patch `0005`), which the RK3576 BootROM honors to place the download.
     pub usb472: PathBuf,
     /// `u-boot-rockchip-maskrom.bin` — the two payloads packed into the RKBOOT
     /// container `rkdeveloptool db` consumes (see [`crate::build::rkboot`]). The
-    /// directly-flashable single-file loader; the raw pair above is what pyrographer
+    /// directly-flashable single-file loader. The raw pair above is what pyrographer
     /// streams.
     pub loader: PathBuf,
 }
@@ -176,12 +176,12 @@ pub struct UbootArtifacts {
     /// `u-boot.itb` (FIT: u-boot proper + ATF + DT), written at its offset.
     pub uboot_itb: PathBuf,
     /// The `u-boot-<device>` `.deb` staging the payloads under `/usr/lib/u-boot`.
-    /// The image build still writes the raw payloads to the gap directly;
-    /// this deb is the package-centric artifact + on-board reference, not the
+    /// The image build still writes the raw payloads to the gap directly. This deb is
+    /// the package-centric artifact and on-board reference, rather than the
     /// bootloader-write path (it never auto-flashes).
     pub deb: PathBuf,
     /// The maskrom USB boot images, when the build produced them (see
-    /// [`MaskromImages`]); `None` for boards whose u-boot does not enable
+    /// [`MaskromImages`]). `None` for boards whose u-boot does not enable
     /// `CONFIG_ROCKCHIP_MASKROM_IMAGE`. Cached alongside the payloads, so a Tier-2
     /// restore reproduces them.
     pub maskrom: Option<MaskromImages>,
@@ -190,7 +190,7 @@ pub struct UbootArtifacts {
 /// Run the u-boot stage, emitting its [`Event`](crate::event::Event)s to `sink`.
 ///
 /// Reads the [`Lock`] for the u-boot ref/commit and the blob hashes. A fresh
-/// clone is verified against the locked commit before any patches; a reused tree
+/// clone is verified against the locked commit before any patches. A reused tree
 /// is `distclean`ed and reconfigured.
 pub fn build_uboot(
     build: &ResolvedBuild,
@@ -366,16 +366,21 @@ pub fn build_uboot(
     })
 }
 
-/// The Tier-2 output signature manifest of the u-boot payloads + deb. It
-/// folds the Tier-1 tree signature ([`clone_manifest`]) as a dependency, then every
-/// other input that shapes the output: the board defconfig, the sha256-pinned rkbin
-/// blob hashes (a blob change → new signature → rebuild, so a hit implies the same
-/// verified blobs), the deb's packaged fields (device, description, SoC, arch, the
-/// raw offsets, the u-boot ref that becomes the deb version), whether the build is
-/// cross, the host toolchain identity, and the identity of the packaging root that
-/// archives the deb. On a signature hit the artifact store
-/// restores the payloads + deb rather than rebuilding, so the key must cover
-/// everything that can change them.
+/// The Tier-2 output signature manifest of the u-boot payloads + deb.
+///
+/// It folds the Tier-1 tree signature ([`clone_manifest`]) as a dependency, then every
+/// other input that shapes the output:
+///
+/// - The board defconfig.
+/// - The sha256-pinned rkbin blob hashes. A blob change means a new signature and so a
+///   rebuild, which is why a hit implies the same verified blobs.
+/// - The deb's packaged fields: device, description, SoC, arch, the raw offsets, and
+///   the u-boot ref that becomes the deb version.
+/// - Whether the build is cross, and the host toolchain identity.
+/// - The identity of the packaging root that archives the deb.
+///
+/// On a signature hit the artifact store restores the payloads + deb rather than
+/// rebuilding, so the key must cover everything that can change them.
 /// Public so `why-rebuild` ([`crate::plan`]) asks the artifact store the same
 /// question this stage does, rather than reimplementing the key it is asking under.
 pub fn output_manifest(
@@ -419,15 +424,18 @@ pub fn output_manifest(
     Ok(b.manifest())
 }
 
-/// The Tier-1 signature manifest of the cloned+patched u-boot tree: the
-/// pinned inputs that determine its content — the u-boot commit and the patch series
-/// (`build::fold_patch_series`). The source URL is excluded (the commit
-/// content-addresses the tree). The [`SeriesIdentity`] fold covers the pinned patch
-/// commit and — in co-dev mode — the live-series fingerprint, so a co-dev
-/// build never shares a stamp with a pinned one and an edited patch restamps.
-/// Blobs/defconfig are not folded here — they gate compile, which re-runs on every
-/// invocation, not the tree reuse. Public so `why-rebuild` ([`crate::plan`])
-/// recomputes the same signature it stamps here.
+/// The Tier-1 signature manifest of the cloned and patched u-boot tree. It folds the
+/// pinned inputs that determine its content: the u-boot commit and the patch series
+/// (`build::fold_patch_series`). The source URL is excluded, since the commit
+/// content-addresses the tree.
+///
+/// The [`SeriesIdentity`] fold covers the pinned patch commit and, in co-dev mode, the
+/// live-series fingerprint. A co-dev build therefore never shares a stamp with a
+/// pinned one, and an edited patch restamps.
+///
+/// Blobs and the defconfig are not folded here. They gate compile, which re-runs on
+/// every invocation, rather than the tree reuse. Public so `why-rebuild`
+/// ([`crate::plan`]) recomputes the same signature it stamps here.
 pub fn clone_manifest(
     lock: &Lock,
     patches: SeriesIdentity,

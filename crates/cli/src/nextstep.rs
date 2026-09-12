@@ -1,14 +1,15 @@
 //! What to do with a finished build: the `next:` block printed after a build that
 //! wrote an image.
 //!
-//! Derived from what the run actually produced — the image files themselves and the
-//! layout that decided how many there are — rather than from a template, so the
-//! paths in it are paths that exist and the destinations match the layout. A `split`
+//! Derived from what the run actually produced, rather than from a template. The
+//! inputs are the image files themselves and the layout that decided how many there
+//! are. The paths in it are therefore paths that exist, and the destinations match
+//! the layout. A `split`
 //! build names both media, since that layout exists precisely because they are two.
 //!
 //! The device node is a placeholder. Naming a real one would be a command that
-//! overwrites a disk if pasted on the wrong host, and the build has no way to know
-//! which disk is meant.
+//! overwrites a disk if pasted on the wrong host. The build has no way to know which
+//! disk is meant.
 
 use boot2deb_engine::image::{CompressedImage, ImageCompression, ImageOutput};
 use std::path::PathBuf;

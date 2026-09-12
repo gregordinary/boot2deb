@@ -1,0 +1,114 @@
+# The prose gate. `style/README.md` says how to run it, and `style/STYLE.md` is the guide
+# it enforces Part 5 of.
+#
+#   python3 style/prose-lint.py --config prose-lint.toml
+#
+# Every path below resolves relative to this file, which is why it sits at the repository
+# root rather than beside the script.
+
+[surfaces]
+root = "."
+# The pages a stranger reads: the README, then the book. A glob rather than the contents
+# order, so a chapter added to `docs/src/` and not to `SUMMARY.md` is still held.
+include = ["README.md", "docs/src/**/*.md"]
+# `SUMMARY.md` is the contents page and carries no prose. The other two are generated, and
+# a generated page is not the surface: its sentences were authored once and are repeated
+# once per row, so a ratchet over it measures how much the world grew rather than how the
+# prose reads. Each is held at its source instead, where a fix lands once.
+#
+#   `support-matrix.md`   `boot2deb support-matrix --markdown`, over the caveats in the
+#                         config tree. Held by the `data` surface below.
+#   `cli-flags.md`        `boot2deb cli-reference --markdown`, over the flag descriptions
+#                         in `crates/cli/src/args.rs`. Held by the third surface below.
+exclude = [
+  "docs/src/SUMMARY.md",
+  "docs/src/reference/support-matrix.md",
+  "docs/src/reference/cli-flags.md",
+]
+
+# rustdoc. `visibility = "public"` holds the API reference alone, which is the split
+# `STYLE.md` draws: a public doc comment is what a stranger reads, and one on anything else
+# explains the code to whoever changes it next. Rust's own marker is what the gate can see,
+# so an item re-exported into the public API from a private module reads as private.
+[[surfaces.doc_comments]]
+dialect = "rust"
+visibility = "public"
+include = ["crates/core/src/**/*.rs", "crates/engine/src/**/*.rs", "crates/cli/src/**/*.rs"]
+exclude = ["crates/**/tests/**", "crates/cli/src/args.rs"]
+
+# The flag descriptions. `args.rs` is `pub(crate)` throughout, so the surface above reads
+# nothing of it, yet every one of these comments is rendered twice for a stranger: by
+# `--help`, and into the generated `cli-flags.md` the exclusion above names. Visibility is
+# unset here for that reason. This is the one file whose private doc comments ship.
+[[surfaces.doc_comments]]
+dialect = "rust"
+include = ["crates/cli/src/args.rs"]
+
+# Config data. `caveats` and `description` are the two keys in the config tree that carry
+# prose a user reads, through `list-features`, `resolve`, and the generated support matrix.
+# The dialect refuses to run without `keys`, because a `data` surface with none would report
+# every file clean while holding nothing in it.
+[[surfaces.doc_comments]]
+dialect = "data"
+keys = ["caveats", "description"]
+include = [
+  "arches/*.toml",
+  "socs/*.toml",
+  "boot-methods/*.toml",
+  "devices/*.toml",
+  "kernels/*.toml",
+  "kmods/*.toml",
+  "features/*.toml",
+  "recipes/**/*.toml",
+  "base.toml",
+]
+
+[profile]
+path = "style/PROFILE.md"
+vocabulary_heading = "## Domain vocabulary"
+
+[terms]
+# The fixed-terms table is enforced. The third column is matched literally, per paragraph
+# and case-insensitively, with code spans stripped first. A variant there is therefore a
+# phrase specific enough that only the wrong usage matches it: the table rules out "build
+# config", not "config", because this project's own config tree is named by that word.
+# `style/PROFILE.md`'s guards carry the distinctions too fine for that match to make.
+heading = "## Fixed terms"
+
+[answers]
+# The answered-questions table, checked against the crates rather than against the prose:
+# every row cites a Rust path, and the check fails when a rename leaves one pointing at
+# nothing. Tests are excluded so a citation is held to the API and not to a fixture that
+# happens to name it.
+heading = "## Answered questions"
+include = ["crates/**/*.rs"]
+exclude = ["crates/**/tests/**"]
+
+[ratchet]
+# Where each surface stood when the gate went in. A listed surface may not get worse, and
+# comes off the list once it reaches zero. Rewrite it with `--baseline`.
+path = "prose-pending.txt"
+
+[limits]
+sentence_words = 25
+paragraph_sentences = 6
+# Rule 18, a sentence carrying a run of parallel items. Held at the tightest setting the
+# script offers, because no surface above carries a run of three.
+enumeration_items = 3
+# Rule 12, a repeated bold lead-in whose block runs long. Off, and it stays off: the guide
+# exempts a list whose bold terms are definition labels, and the script cannot see that
+# exemption. Of the 138 blocks it reports at 40 words, 106 are list items, and a tight list
+# gives every item the whole list as its block. The sections where a bold lead-in really is
+# a heading are held by a reviewer instead, and `style/PROFILE.md` names that guard.
+label_block_words = 0
+labels_per_section = 3
+
+[counting]
+# A quantity and its unit count as one word, so "512 MiB" does not spend two of Rule 20's
+# budget on one fact.
+units = [
+  "TiB", "GiB", "MiB", "KiB", "TB", "GB", "MB", "KB", "B",
+  "bit", "bits", "byte", "bytes", "ms", "s", "MHz", "GHz",
+]
+# Technical names come from the profile's vocabulary run instead, so nothing is listed twice.
+names = []

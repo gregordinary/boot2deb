@@ -2,13 +2,15 @@
 //! content store, verify its sha256, and return the stored paths for the local apt
 //! repo.
 //!
-//! Shared by `update` (fills the store, verifying every pin up front so a dead URL
-//! or a wrong hash fails before the lock is written) and `build` (materializes from
-//! the store, re-fetching only a miss). The build reads only the lock's pins, so a
-//! locator that 404s or a hash that mismatches is a hard error, never a silently
-//! dropped package. Fetched debs reach the image only through the local apt repo the
-//! engine assembles ([`crate::repo`]) — their integrity comes from the pin, their
-//! trust boundary from that repo, never a `dpkg -i`.
+//! Shared by `update` and `build`. `update` fills the store, verifying every pin up
+//! front so a dead URL or a wrong hash fails before the lock is written. `build`
+//! materializes from the store, re-fetching only a miss.
+//!
+//! The build reads only the lock's pins. A locator that 404s, or a hash that
+//! mismatches, is a hard error rather than a silently dropped package. Fetched debs
+//! reach the image only through the local apt repo the engine assembles
+//! ([`crate::repo`]). Their integrity comes from the pin and their trust boundary
+//! from that repo, never from a `dpkg -i`.
 
 use crate::debstore::DebStore;
 use crate::error::EngineError;
@@ -29,14 +31,15 @@ const MAX_DEB_BYTES: u64 = 512 * 1024 * 1024;
 /// Materialize every pinned deb in `pins` into `store`, returning their stored
 /// paths in `pins` order.
 ///
-/// A store hit (`<sha256>.deb` present) is used directly — the store is
-/// content-addressed, so its bytes are already the pinned ones (and are re-verified
-/// at install time against the solved manifest). On a miss the deb is obtained
-/// from its locator — a `url` fetched over HTTP(S), a `path` read along the config
-/// search path (`root`, so an overlay may ship it) — and [`DebStore::put_bytes`]
-/// verifies it hashes to the pin before storing. A fetch/read failure is
-/// [`EngineError::ExtraDebFetch`]; a hash mismatch is
-/// [`EngineError::ExtraDebHashMismatch`].
+/// A store hit (`<sha256>.deb` present) is used directly. The store is
+/// content-addressed, so its bytes are already the pinned ones, and they are
+/// re-verified at install time against the solved manifest.
+///
+/// On a miss the deb is obtained from its locator. A `url` is fetched over HTTP(S),
+/// and a `path` is read along the config search path (`root`, so an overlay can
+/// ship it). [`DebStore::put_bytes`] then verifies it hashes to the pin before
+/// storing. A fetch or read failure is [`EngineError::ExtraDebFetch`]. A hash
+/// mismatch is [`EngineError::ExtraDebHashMismatch`].
 pub fn materialize(
     root: &ConfigRoot,
     pins: &[ExtraDeb],

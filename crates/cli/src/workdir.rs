@@ -1,8 +1,8 @@
 //! The build scratch dir's ownership stamp.
 //!
-//! `clean --work-dir <path>` removes a tree recursively, so it must be able to
-//! prove the target is boot2deb's own scratch and not, say, a mistyped path into
-//! the user's home. `build` stamps every work dir it creates with a marker file;
+//! `clean --work-dir <path>` removes a tree recursively. It must therefore be able
+//! to prove the target is boot2deb's own scratch, and not a mistyped path into the
+//! user's home. `build` stamps every work dir it creates with a marker file.
 //! `clean` refuses to remove an unstamped one unless forced.
 
 use crate::fsutil::absolutize;

@@ -1,25 +1,30 @@
 //! Content-addressed store of build-node **output artifacts** (Tier 2).
 //!
-//! Tier 1 ([`crate::signature`]) caches a compile node's *source tree* so a lock
-//! bump does not silently reuse a stale checkout — but it never caches the node's
-//! *output*, so the expensive `make`/`dpkg-buildpackage` step re-runs on every
-//! build (the ~30 min kernel cross-compile, the ~70 min qemu ffmpeg build). This
-//! store closes that gap: each node's produced `.deb`s (and the u-boot raw payloads)
-//! are kept under a directory keyed by the node's **output signature** — the full
-//! set of inputs that determine the output, not just the tree. On a signature
-//! hit `build` restores the files instead of recompiling; on a miss it compiles and
-//! [`put`](ArtifactStore::put)s. Because the key covers every output-affecting input,
-//! a hit is sound; because the store lives outside any recipe work dir, it outlives
-//! them and is shared across work dirs — a rebuilt or freshly-cloned checkout
-//! restores rather than recompiles. `clean --artifacts` empties it, as does the
-//! `--all-caches` sweep of the tree it sits in.
+//! Tier 1 ([`crate::signature`]) caches a compile node's *source tree*, so a lock
+//! bump does not silently reuse a stale checkout. It never caches the node's
+//! *output*, so the expensive `make`/`dpkg-buildpackage` step re-runs on every build
+//! (the ~30 min kernel cross-compile, the ~70 min qemu ffmpeg build).
 //!
-//! The store is self-verifying like [`crate::debstore`]: an entry is a directory
-//! `<node>/<signature>/` holding the artifact files plus a `manifest.toml`, written
-//! atomically (assembled in a temp dir, renamed into place) so a present entry is
-//! always complete. A restore whose manifest is unreadable or whose files are not
-//! all present is treated as a **miss** — the same fail-safe bias as the signature
-//! stamps: a spurious miss only wastes time, a spurious hit ships a stale artifact.
+//! This store closes that gap. Each node's produced `.deb`s (and the u-boot raw
+//! payloads) are kept under a directory keyed by the node's **output signature**.
+//! That signature is the full set of inputs that determine the output, not just the
+//! tree. On a signature hit `build` restores the files instead of recompiling. On a
+//! miss it compiles and [`put`](ArtifactStore::put)s.
+//!
+//! A hit is sound because the key covers every output-affecting input. The store
+//! lives outside any recipe work dir, so it outlives them and is shared across work
+//! dirs. A rebuilt or freshly-cloned checkout restores rather than recompiles.
+//! `clean --artifacts` empties it, as does the `--all-caches` sweep of the tree it
+//! sits in.
+//!
+//! The store is self-verifying like [`crate::debstore`]. An entry is a directory
+//! `<node>/<signature>/` holding the artifact files plus a `manifest.toml`. It is
+//! written atomically, assembled in a temp dir and renamed into place, so a present
+//! entry is always complete.
+//!
+//! A restore whose manifest is unreadable or whose files are not all present is
+//! treated as a **miss**. That is the same fail-safe bias as the signature stamps: a
+//! spurious miss only wastes time, and a spurious hit ships a stale artifact.
 //!
 //! This is the signature-keyed restore half of Tier 2. The output-hash *early
 //! cutoff* (skipping a dependent when a changed input reproduces a byte-identical
@@ -32,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 /// One stored artifact: the role its producing node assigns it (e.g. `image_deb`,
 /// `idbloader`, `deb`) and the file name it is stored and restored under. The role
-/// lets a node reconstruct its typed artifact struct on restore; the file name is
+/// lets a node reconstruct its typed artifact struct on restore. The file name is
 /// the artifact's on-disk name (preserved so downstream stages see the same names a
 /// fresh build produces).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,9 +90,10 @@ impl ArtifactStore {
         self.node_dir(node).join(signature)
     }
 
-    /// Whether the store holds a complete entry for `(node, signature)` — a cheap
-    /// stat of its manifest, used to decide up front whether a stage needs to build
-    /// anything at all (e.g. skip a sandbox bootstrap when every package is cached).
+    /// Whether the store holds a complete entry for `(node, signature)`. This is a
+    /// cheap stat of its manifest, used to decide up front whether a stage needs to
+    /// build anything at all (e.g. skip a sandbox bootstrap when every package is
+    /// cached).
     pub fn has(&self, node: &str, signature: &str) -> bool {
         self.entry_dir(node, signature)
             .join("manifest.toml")
@@ -97,9 +103,13 @@ impl ArtifactStore {
     /// Restore a stored `(node, signature)` output into `dest`, returning the ordered
     /// `(role, restored-path)` list, or `None` on a miss.
     ///
-    /// A hit whose manifest is unreadable, whose recorded signature does not match, or
-    /// whose files are not all present is treated as a **miss** (fail-safe): a
-    /// partial or foreign entry is never trusted, so the caller rebuilds. Files are
+    /// A hit is treated as a **miss** (fail-safe) in any of three cases:
+    ///
+    /// - Its manifest is unreadable.
+    /// - Its recorded signature does not match.
+    /// - Its files are not all present.
+    ///
+    /// A partial or foreign entry is never trusted, so the caller rebuilds. Files are
     /// copied into `dest` (created if needed) under their stored names, matching the
     /// paths a fresh build would stage there.
     pub fn restore(
@@ -141,7 +151,7 @@ impl ArtifactStore {
     /// dir and renamed into place, so a present entry directory is always complete.
     /// A re-put of an entry that already exists (idempotent rebuild, or a concurrent
     /// build that won the rename race) keeps the existing complete entry and discards
-    /// the temp — the content is signature-keyed, so any complete entry is equivalent.
+    /// the temp. The content is signature-keyed, so any complete entry is equivalent.
     pub fn put(
         &self,
         node: &str,

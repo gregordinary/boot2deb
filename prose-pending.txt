@@ -1,0 +1,9 @@
+# Surfaces not yet held to the style guide's Part 5, with the weight they stood at.
+#
+# A ratchet, not an exemption: a surface here may not get worse, and comes off the
+# list when it reaches zero. Delete a line once its surface is clean.
+#
+# The number is a weight rather than a finding count. A length finding weighs how
+# far it runs over its limit, so splitting one long sentence into two shorter ones
+# lowers it. Every other finding weighs one.
+# prose-lint ratchet format: weight

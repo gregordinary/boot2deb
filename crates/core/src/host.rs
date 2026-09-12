@@ -1,11 +1,12 @@
 //! Host detection for preflight (`doctor`) and the build's cross decisions. The
-//! build host may be x86_64 or arm64 Linux (or a non-Linux client).
+//! build host is x86_64 or arm64 Linux, or a non-Linux client.
 //!
-//! Two questions the host answers, and they are not the same question:
-//! whether a **cross toolchain** is needed to *produce* target binaries, and whether a
-//! qemu-user **interpreter** is needed to *run* them. See
-//! [`needs_cross_toolchain`](HostInfo::needs_cross_toolchain) and
-//! [`needs_interpreter`](HostInfo::needs_interpreter).
+//! The host answers two questions, and they are not the same question:
+//!
+//! - Whether a **cross toolchain** is needed to *produce* target binaries. See
+//!   [`needs_cross_toolchain`](HostInfo::needs_cross_toolchain).
+//! - Whether a qemu-user **interpreter** is needed to *run* them. See
+//!   [`needs_interpreter`](HostInfo::needs_interpreter).
 
 use crate::model::Arch;
 
@@ -30,7 +31,7 @@ impl HostInfo {
 
     /// The host arch expressed as one of our target [`Arch`]es, if it maps.
     ///
-    /// 32-bit ARM Linux reports `"arm"`; `std::env::consts::ARCH` has no `"armv7"`
+    /// 32-bit ARM Linux reports `"arm"`. `std::env::consts::ARCH` has no `"armv7"`
     /// value, so matching one would claim support for a string that cannot arrive.
     pub fn as_target_arch(&self) -> Option<Arch> {
         match self.arch {
@@ -41,13 +42,13 @@ impl HostInfo {
         }
     }
 
-    /// True when producing `target` binaries needs a cross toolchain — a compiler built
-    /// for this host's architecture cannot emit them, so the compile root is given
-    /// `crossbuild-essential-<target>` and the compile is passed `CROSS_COMPILE`.
+    /// True when producing `target` binaries needs a cross toolchain, because a compiler
+    /// built for this host's architecture cannot emit them. The compile root is then
+    /// given `crossbuild-essential-<target>`, and the compile is passed `CROSS_COMPILE`.
     ///
-    /// About the *compile*, not about the host's own tooling: no build invokes a compiler
-    /// from the host at all, so this decides which package a provisioned root carries
-    /// rather than which package the operator installs.
+    /// About the *compile* rather than about the host's own tooling. No build invokes a
+    /// compiler from the host at all. This decides which package a provisioned root
+    /// carries, rather than which package the operator installs.
     ///
     /// Strict arch equality: an aarch64 compiler cannot emit armhf even though the same
     /// CPU executes armhf fine.
@@ -59,16 +60,16 @@ impl HostInfo {
     /// interpreter and a registered binfmt handler.
     ///
     /// This is the *execute* half, and it is strictly weaker than
-    /// [`needs_cross_toolchain`](Self::needs_cross_toolchain): an arm64 host runs
-    /// armhf binaries natively, because every Debian arm64 kernel is built with
+    /// [`needs_cross_toolchain`](Self::needs_cross_toolchain). An arm64 host runs armhf
+    /// binaries natively, because every Debian arm64 kernel is built with
     /// `CONFIG_COMPAT=y`. So an arm64 host building an armhf (RK3288/Veyron) image
     /// genuinely compiles through `arm-linux-gnueabihf-` and genuinely needs no
-    /// `qemu-arm-static` — the one case where the two answers differ.
+    /// `qemu-arm-static`. That is the one case where the two answers differ.
     ///
-    /// Conflating them made `doctor` report qemu-user and the arm binfmt handler as
-    /// *blocking* on such a host, for tooling the build never invokes. Necessary but not
-    /// sufficient on its own: an interpreter is a requirement only of a build that
-    /// actually enters a target-arch root, which is the image path.
+    /// Conflating them makes `doctor` report qemu-user and the arm binfmt handler as
+    /// *blocking* on such a host, for tooling the build never invokes. It is necessary
+    /// but not sufficient on its own. An interpreter is a requirement only of a build
+    /// that actually enters a target-arch root, which is the image path.
     pub fn needs_interpreter(&self, target: Arch) -> bool {
         match self.as_target_arch() {
             Some(host) => !runs_natively(host, target),
@@ -84,15 +85,15 @@ impl HostInfo {
     /// this does not model.
     ///
     /// Distinct from [`as_target_arch`](Self::as_target_arch), which asks whether the
-    /// host is a *target* boot2deb builds images for. It is not the same question: the
-    /// overwhelmingly common build host is `x86_64`, which is no board's architecture
-    /// and yet is a perfectly good `amd64` for the packaging root
+    /// host is a *target* boot2deb builds images for. That is not the same question. The
+    /// overwhelmingly common build host is `x86_64`, which is no board's architecture.
+    /// It is still a perfectly good `amd64` for the packaging root
     /// ([`PackagingSandbox`](../../boot2deb_engine/sandbox/struct.PackagingSandbox.html))
     /// to be provisioned at, since archiving a `.deb` is arch-independent work.
     ///
-    /// `None` rather than a guess: the name reaches an archive as the architecture a
-    /// root is provisioned for, and a wrong one there resolves the wrong packages
-    /// rather than failing.
+    /// `None` rather than a guess. The name reaches an archive as the architecture a
+    /// root is provisioned for. A wrong one there resolves the wrong packages rather
+    /// than failing.
     pub fn debian_arch(&self) -> Option<&'static str> {
         match self.arch {
             "x86_64" => Some("amd64"),

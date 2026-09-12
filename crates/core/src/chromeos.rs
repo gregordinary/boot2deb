@@ -5,38 +5,39 @@
 //! written down.
 //!
 //! A ChromeOS-firmware board does not read a bootloader from a fixed offset. It
-//! scans every boot medium's GPT for partitions of the ChromeOS kernel type, and
+//! scans every boot medium's GPT for partitions of the ChromeOS kernel type. It
 //! chooses among them using three fields packed into the **top 16 bits (48-63) of
 //! the entry's 64-bit attribute word**:
 //!
 //! | field        | bits  | meaning                                                    |
 //! |--------------|-------|------------------------------------------------------------|
-//! | `priority`   | 51:48 | boot order; 15 is highest, **0 means never boot**           |
-//! | `tries`      | 55:52 | attempts remaining; decremented on each failed boot         |
-//! | `successful` | 56    | known-good; the firmware stops decrementing `tries`         |
+//! | `priority`   | 51:48 | boot order. 15 is highest, **0 means never boot**           |
+//! | `tries`      | 55:52 | attempts remaining, decremented on each failed boot         |
+//! | `successful` | 56    | known-good, so the firmware stops decrementing `tries`      |
 //!
-//! The conventional writer is ChromeOS's `cgpt`, but these are plain bits in a
-//! standard GPT entry, so the `gpt` crate's raw `flags: u64` writes them and the
-//! build needs no ChromeOS host tooling at all.
+//! The conventional writer is ChromeOS's `cgpt`. These are plain bits in a standard
+//! GPT entry, so the `gpt` crate's raw `flags: u64` writes them. The build needs no
+//! ChromeOS host tooling at all.
 //!
 //! # Why an image carries more than one kernel slot
 //!
-//! Those three fields are not just a boot order — together they are an **atomic
+//! Those three fields are not just a boot order. Together they are an **atomic
 //! update protocol with firmware-level rollback**, and it only works if there is
 //! somewhere to roll back *to*.
 //!
 //! A slot is a boot candidate while `priority > 0` and (`successful` or `tries > 0`).
 //! The firmware decrements `tries` *before* jumping, so a kernel that hangs has
-//! already spent its attempt. An upgrade therefore writes the **other** slot, marks
-//! it highest-priority with `tries = 1, successful = 0`, and reboots. If the new
-//! kernel comes up, the running system sets `successful` and the upgrade is
-//! committed; if it never comes up, its single try is gone and the firmware falls
-//! back to the older slot, which is still marked `successful`. No user action, no
-//! external media.
+//! already spent its attempt.
 //!
-//! An image with one slot cannot do this: the only slot is the running one, so an
-//! upgrade must overwrite the kernel it is currently booted from, and a kernel that
-//! does not come up leaves nothing to boot. That is why a depthcharge image lays
+//! An upgrade therefore writes the **other** slot, marks it highest-priority with
+//! `tries = 1, successful = 0`, and reboots. If the new kernel comes up, the running
+//! system sets `successful` and the upgrade is committed. If it never comes up, its
+//! single try is gone, and the firmware falls back to the older slot, which is still
+//! marked `successful`. No user action, no external media.
+//!
+//! An image with one slot cannot do this. The only slot is the running one, so an
+//! upgrade must overwrite the kernel it is currently booted from. A kernel that does
+//! not come up then leaves nothing to boot. That is why a depthcharge image lays
 //! down [`MAX_KPART_SLOTS`]-bounded *pairs* — the payload in the first, a spare at
 //! [`SPARE_KPART_FLAGS`] behind it.
 
@@ -51,7 +52,7 @@ const PRIORITY_SHIFT: u32 = 48;
 /// `priority` and `tries` are 4 bits each.
 const NIBBLE_MAX: u8 = 0xF;
 
-/// The most kernel slots one image may carry, and the length of the `KERN-A`..`KERN-D`
+/// The most kernel slots one image can carry, and the length of the `KERN-A`..`KERN-D`
 /// name set the image node draws from.
 ///
 /// Two is the useful number — it is what buys an upgrade its fallback — and nothing
@@ -61,19 +62,21 @@ pub const MAX_KPART_SLOTS: u8 = 4;
 
 /// The attribute word of a **spare** kernel slot: all zero, so `priority = 0`.
 ///
-/// A spare ships empty — no signed payload has been written to it — and `priority = 0`
-/// is the firmware's "never boot" value, which is exactly right for a partition full
-/// of nothing. It becomes a boot candidate only when an on-device kernel upgrade
-/// writes a kernel into it and raises its priority, and `depthchargectl` finds it in
-/// the first place because the firmware and its tooling select slots by **type GUID**,
-/// not by attributes — a zero-priority slot is still a slot.
+/// A spare ships empty, with no signed payload written to it. `priority = 0` is the
+/// firmware's "never boot" value, which is exactly right for a partition full of
+/// nothing.
+///
+/// It becomes a boot candidate only when an on-device kernel upgrade writes a kernel
+/// into it and raises its priority. `depthchargectl` finds it in the first place
+/// because the firmware and its tooling select slots by **type GUID** rather than by
+/// attributes. A zero-priority slot is still a slot.
 pub const SPARE_KPART_FLAGS: u64 = 0;
 
 /// Pack the ChromeOS kernel-partition attributes into a GPT entry's attribute word.
 ///
 /// `priority` and `tries` are 4-bit fields, so a value above 15 cannot be
-/// represented and is a [`ConfigError::InvalidKpartAttr`] rather than a silent
-/// truncation into a neighbouring field — a truncated `priority` of 0 would mean
+/// represented. Such a value is a [`ConfigError::InvalidKpartAttr`] rather than a
+/// silent truncation into a neighboring field. A truncated `priority` of 0 would mean
 /// "never boot", which is precisely the failure that must not happen quietly.
 pub fn kpart_flags(priority: u8, tries: u8, successful: bool) -> Result<u64, ConfigError> {
     let nibble = |value: u8, field: &'static str| {

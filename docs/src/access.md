@@ -1,8 +1,8 @@
 # The account, sudo, and SSH keys
 
-Every image carries one account — `debian` — and four settings decide who can use it,
-what it costs them to become root, and what hardware they can reach. All four are
-config, resolved before the build.
+Every image carries one account, `debian`. Four settings decide who can use it, what it
+costs them to become root, and what hardware they can reach. All four are config,
+resolved before the build.
 
 ## The knobs
 
@@ -20,7 +20,7 @@ Each is overridable in a recipe. `resolve` and `doctor` additionally take `--sud
 boot2deb resolve turing-rk1/forky --sudo password --password-length 16
 ```
 
-`build` takes none of them: an image's access rules come from the config its lock was
+`build` takes none of them. An image's access rules come from the config its lock was
 resolved against, so changing them means changing `base.toml` or the recipe. `resolve`
 prints the recipe to write, with the keys already filled in.
 
@@ -30,24 +30,24 @@ prints the recipe to write, with the keys already filled in.
 
 `groups` is what the account can reach in hardware. The SoC layers' udev rules set
 `GROUP=` on the V4L2 codecs, the DRM render nodes, the DMA-BUF heaps and the sound
-cards; a group absent from this list is a device the operator opens as root or not at
+cards. A group absent from this list is a device the operator opens as root or not at
 all. `resolve` prints the resolved set:
 
 ```
 groups       : video, render, audio
 ```
 
-It is the one part of the account axis the **hardware layers contribute to**, because
-a group is a capability the silicon has rather than a policy about its operator. The
+It is the one part of the account axis the **hardware layers contribute to**. A group is
+a capability the silicon has, rather than a policy about its operator. The
 resolved set is the union of `base.toml`, the SoC, the boot method and the device, in
-that order and de-duplicated — so `audio` sits on `socs/rk3576.toml` and
-`socs/rk3288.toml`, next to the `alsa-utils` that is the reason it is wanted, and every
+that order and de-duplicated. So `audio` sits on `socs/rk3576.toml` and
+`socs/rk3288.toml`, next to the `alsa-utils` that is the reason it is wanted. Every
 board on those SoCs inherits it without restating it.
 
-Why the group and not logind's `uaccess` ACL: that ACL reaches only a *seated* session,
+Why the group and not logind's `uaccess` ACL? That ACL reaches only a *seated* session,
 so it covers someone at the board's own keyboard and not one reached over SSH. On a
-headless board the group is the whole story — without it `aplay -l` reports no
-soundcards to `debian` and works only under `sudo`.
+headless board the group is the whole story. Without it `aplay -l` reports no
+soundcards to `debian`, and works only under `sudo`.
 
 A recipe **replaces** the resolved set rather than adding to it, so name the whole list:
 
@@ -55,9 +55,9 @@ A recipe **replaces** the resolved set rather than adding to it, so name the who
 groups = ["video", "render", "audio"]   # omit -> the layers' union
 ```
 
-Replacing is what lets a recipe withhold access the layers would grant; `groups = []`
+Replacing is what lets a recipe withhold access the layers would grant. `groups = []`
 leaves the account in its login group and nothing else. Every name must already exist
-on the target — one no installed package creates fails the build rather than being
+on the target. One no installed package creates fails the build rather than being
 created, since that is always a typo.
 
 ## The password
@@ -70,23 +70,23 @@ build's last lines and stored in the `.provenance.toml` beside the image. It is
 first-boot pw : 7kQmR3xLpAvB  (user debian, expired — change at first login)
 ```
 
-Three facts about the base image decide how much that password is guarding:
-`openssh-server` is installed and enabled, a DHCP client brings the board onto the
-network before anyone has logged in, and `sudo` defaults to `nopasswd`. So the printed
-password is root, on whatever network the board is plugged into, from the moment it
-powers on.
+Three facts about the base image decide how much that password is guarding.
+`openssh-server` is installed and enabled, and a DHCP client brings the board onto the
+network before anyone has logged in. `sudo` defaults to `nopasswd`. The printed
+password is therefore root, on whatever network the board is plugged into, from the
+moment it powers on.
 
 **Expiry does not change that.** A login against an expired account is permitted and is
 then required to *set* the new password. That protects against a credential nobody ever
-rotates; it does nothing against someone reaching the board before its owner does —
+rotates. It does nothing against someone reaching the board before its owner does, since
 whoever logs in first chooses the new password and keeps the account. Length is what
 covers that window, which is why it is a validated range rather than a preference.
 
 ### Choosing a length
 
-The alphabet is 56 symbols — mixed case and digits, with `0`/`O`/`o` and `1`/`l`/`I`
-removed so the value transcribes cleanly at a console — so each character is about 5.8
-bits. The accepted range is **8 to 64**, and the default is 12.
+The alphabet is 56 symbols: mixed case and digits, with `0`/`O`/`o` and `1`/`l`/`I`
+removed so the value transcribes cleanly at a console. Each character is therefore about
+5.8 bits. The accepted range is **8 to 64**, and the default is 12.
 
 There are two different attacks, and they have very different reach:
 
@@ -95,11 +95,11 @@ There are two different attacks, and they have very different reach:
   far out of reach here. This is why 8 is the floor rather than a recommendation.
 - **Attacking the hash offline.** `/etc/shadow` travels *inside the image file*, and the
   password appears in the `.provenance.toml` beside it. Anyone holding a copy of either
-  can attack the hash with no rate limit and no board involved. 8 characters is merely
-  expensive against that; 12 (~70 bits) is out of reach.
+  can attack the hash with no rate limit and no board involved. Against that, 8
+  characters is merely expensive, and 12 (~70 bits) is out of reach.
 
-So the length that matters is the one for an image you might copy, publish, or hand to
-someone else — and 12 is chosen for that case. Shortening to 8 suits an image one
+The length that matters is the one for an image you might copy, publish, or hand to
+someone else. That case is what 12 is chosen for. Shortening to 8 suits an image one
 operator flashes and boots directly, where the hash never leaves the build host.
 
 **Before shortening it:** the friction here is typing a password at a console, and an
@@ -116,9 +116,9 @@ ssh_authorized_keys = [
 ]
 ```
 
-With a key in place you never type the generated password: `ssh debian@<board>` works on
-the first boot, and the password stays as the console fallback for the day the key is on
-a laptop you do not have.
+With a key in place you never type the generated password. `ssh debian@<board>` works on
+the first boot. The password stays as the console fallback for the day the key is on a
+laptop you do not have.
 
 The entries are **key material, not paths**. A path would resolve differently on another
 machine, and the point of writing a key down is that every build of that recipe carries
@@ -132,57 +132,58 @@ Three places to put them, depending on scope:
   shipped tree. See [Overlays](reference/overlays.md).
 - **The shipped `base.toml`** — only if the config root is your own fork.
 
-A fourth, per *unit* rather than per image: `boot2deb press --ssh-key` writes the
+A fourth is per *unit* rather than per image. `boot2deb press --ssh-key` writes the
 key into the pressed file's seed partition, and the device appends it to
-`authorized_keys` at first boot — how six boards from one image get six different
-keys (or the same key without rebuilding). See [Producing images](press.md).
+`authorized_keys` at first boot. That is how six boards from one image get six different
+keys, or the same key without rebuilding. See [Producing images](press.md).
 
-A recipe's list **replaces** the base list rather than adding to it, so a recipe for an
-image you intend to hand to someone else can authorize nobody with
+A recipe's list **replaces** the base list rather than adding to it. A recipe for an
+image you intend to hand to someone else can therefore authorize nobody, with
 `ssh_authorized_keys = []`.
 
 ### What is checked, and what is not
 
-Each entry is validated at `resolve`, because `sshd` reports a line it cannot parse only
-in its own log — on a board that may have no console. The failure to avoid is an image
-whose key silently does not work.
+Each entry is validated at `resolve`. `sshd` reports a line it cannot parse only in its
+own log, on a board that need not have a console. The failure to avoid is an image whose
+key silently does not work.
 
 An entry must be one line holding a key type, a base64 blob, and an optional comment. The
 blob is decoded far enough to confirm its *own* embedded type name agrees with the
-declared one, which catches the common paste accidents: a key wrapped by a mail client, a
+declared one. That catches the common paste accidents: a key wrapped by a mail client, a
 truncated copy, or a blob under the wrong type name.
 
 Two rejections are worth knowing about:
 
 - **Private key material is refused by name.** A `-----BEGIN OPENSSH PRIVATE KEY-----`
-  block here means `id_ed25519` was reached for instead of `id_ed25519.pub`, and the
+  block here means `id_ed25519` was reached for instead of `id_ed25519.pub`. The
   consequence would be a private key baked into every copy of the image. Authorize the
   `.pub`.
 - **Options prefixes** (`restrict`, `command="…"`, `from="…"`) are refused. `sshd`
-  accepts them, but their syntax is quoted and comma-separated, and a builder that half
-  understood it would write a weaker restriction than the author wrote. Write a bare key;
-  add options on the running board if you need them.
+  accepts them, but their syntax is quoted and comma-separated. A builder that half
+  understood it would write a weaker restriction than the author wrote. Write a bare
+  key, and add options on the running board if you need them.
 
 `ssh-dss` is not an accepted type: OpenSSH removed DSA support, so such a line could
 never authenticate anything.
 
-The file is written with mode `0600` inside a `0700` `~/.ssh`, both owned by `debian`,
-which is what `sshd`'s default `StrictModes` requires before it will read a key at all.
+The file is written with mode `0600` inside a `0700` `~/.ssh`, both owned by `debian`.
+That is what `sshd`'s default `StrictModes` requires before it will read a key at all.
 
 ## Choosing a sudo policy
 
-`sudo = "nopasswd"` gives `debian` root with no prompt; `sudo = "password"` prompts for
+`sudo = "nopasswd"` gives `debian` root with no prompt. `sudo = "password"` prompts for
 the account's own password.
 
-`nopasswd` is the default because these are single-operator boards: the account's
+`nopasswd` is the default because these are single-operator boards. The account's
 password was just set at first login, and re-typing it to reach root adds nothing that
 the login did not already decide. It is also what makes an unattended first-boot setup
 script work without embedding a password in it.
 
-Choose `password` for a board that is shared between people, that runs anything reachable
-from beyond a trusted network, or whose console someone else can walk up to. The
-tradeoff is narrow but real: under `nopasswd`, anything that can log in is root, so the
-password and the keys above are the *whole* boundary.
+Choose `password` for a board that is shared between people. The same goes for one that
+runs anything reachable from beyond a trusted network, or whose console someone else can
+walk up to. The tradeoff is narrow but real. Under `nopasswd`, anything that can log in
+is root, so
+the password and the keys above are the *whole* boundary.
 
 It is also one line to change on a running board, so this is a default rather than a
 commitment:
@@ -192,7 +193,7 @@ sudo sh -c 'echo "debian ALL=(ALL) ALL" > /etc/sudoers.d/debian'
 ```
 
 Note that `passwd root` does **not** change it. The rule belongs to `debian`, not to
-root — root ships locked, and Debian's convention is to leave it that way and reach root
+root. Root ships locked, and Debian's convention is to leave it that way and reach root
 through `sudo`.
 
 ## What the provenance records
@@ -209,13 +210,13 @@ sudo = "nopasswd"
 authorized_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9... operator@workstation"]
 ```
 
-That file holds a live credential — treat it as sensitive. The image's own
-`/etc/boot2deb/image.toml` deliberately carries none of this: it is readable by anyone
-holding the disk, and an image that inventoried its own access rules would hand a reader
-the list of what to go after.
+That file holds a live credential, so treat it as sensitive. The image's own
+`/etc/boot2deb/image.toml` deliberately carries none of this. It is readable by anyone
+holding the disk. An image that inventoried its own access rules would hand a reader the
+list of what to go after.
 
 Because the password is fresh per build, it is also the one thing that puts a built
 image's `/etc/shadow` outside the byte-reproducibility claim. The keys and the sudo
-policy are ordinary resolved config, so they are part of what a rebuild reproduces — and
-part of the rootfs cache key, so adding a key or tightening `sudo` rebuilds the rootfs
-rather than reusing the tree that had the old rules.
+policy are ordinary resolved config, so they are part of what a rebuild reproduces. They
+are part of the rootfs cache key too. Adding a key or tightening `sudo` therefore
+rebuilds the rootfs, rather than reusing the tree that had the old rules.

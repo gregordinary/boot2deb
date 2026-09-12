@@ -3,10 +3,10 @@
 //!
 //! With a target it resolves the build to know which toolchain the checks apply to.
 //! Bare, it runs the requirements no board can opt out of
-//! ([`host_checks`](boot2deb_engine::checks::host_checks)) and says which answers are
-//! waiting on a target, so the first command after a clone is useful with nothing else
-//! typed. Missing *required* tools are a non-zero exit either way, so it doubles as a
-//! CI gate — and `--json` renders the same verdict as one document for one to parse.
+//! ([`host_checks`](boot2deb_engine::checks::host_checks)). It also says which answers
+//! are waiting on a target, so the first command after a clone is useful with nothing
+//! else typed. Missing *required* tools are a non-zero exit either way, so it doubles
+//! as a CI gate. `--json` renders the same verdict as one document for one to parse.
 
 use crate::config::resolve;
 use crate::workdir::work_dir_for;

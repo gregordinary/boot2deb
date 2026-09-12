@@ -1,19 +1,24 @@
-//! Pure disk geometry for the image node: turn the resolved boot layout and image
-//! size (authored strings, [`boot2deb_core::size`]) into the exact byte and LBA
-//! layout the [GPT](super::gpt) and [ext4](super::ext4) steps write against.
+//! Pure disk geometry for the image node. It turns the resolved boot layout and
+//! image size into the exact byte and LBA layout the [GPT](super::gpt) and
+//! [ext4](super::ext4) steps write against. Both inputs are authored strings
+//! ([`boot2deb_core::size`]).
 //!
-//! Deterministic and side-effect-free, so the layout — where the rootfs
-//! partition starts, how large the ext4 filesystem is, whether the boot payload
-//! fits its slot — is unit-tested without touching a disk. The only
-//! external contract is the sector size and the standard GPT reservation
-//! (primary table at the front, backup table in the last 33 sectors); the actual
-//! usable range is re-validated by the `gpt` crate when the partition is added.
+//! Deterministic and side-effect-free, so the layout is unit-tested without
+//! touching a disk. That layout is where the rootfs partition starts, how large the
+//! ext4 filesystem is, and whether the boot payload fits its slot.
+//!
+//! The only external contract is the sector size and the standard GPT reservation.
+//! That reservation is a primary table at the front and a backup table in the last
+//! 33 sectors. The actual usable range is re-validated by the `gpt` crate when the
+//! partition is added.
 //!
 //! What sits ahead of the rootfs is the boot method's business, and the two shapes
-//! are genuinely different: `rockchip-rkbin` writes two payloads into a *raw gap*
-//! outside any partition, while `depthcharge` puts one signed payload in a *GPT
-//! partition* of its own. [`BootGeometry`] carries that difference; everything after
-//! it — the rootfs partition, the filesystem, the backup table — is shared.
+//! are genuinely different. `rockchip-rkbin` writes two payloads into a *raw gap*
+//! outside any partition. `depthcharge` puts one signed payload in a *GPT
+//! partition* of its own.
+//!
+//! [`BootGeometry`] carries that difference. Everything after it is shared: the
+//! rootfs partition, the filesystem, and the backup table.
 
 use crate::error::EngineError;
 use boot2deb_core::chromeos::{kpart_flags, SPARE_KPART_FLAGS};

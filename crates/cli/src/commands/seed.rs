@@ -1,14 +1,14 @@
 //! `seed`: rewrite the per-unit seed partition of an already-pressed image file.
 //!
-//! The smaller half of `press`'s personalization, for the file that already
-//! exists: no recipe, no artifacts — the seed partition is found by its GPT
-//! label (`b2d-seed`), so the file is the whole input. With no keys the seed
-//! resets to the empty template.
+//! The smaller half of `press`'s personalization, for the file that already exists.
+//! No recipe, and no artifacts. The seed partition is found by its GPT label
+//! (`b2d-seed`), so the file is the whole input. With no keys the seed resets to
+//! the empty template.
 //!
 //! Deliberately a *file* operation. boot2deb does not write devices, so a block
-//! device is refused by name — a card that is already written is
-//! re-personalized by editing `seed.txt` on its `B2D-SEED` volume from any
-//! machine, which is the seed's whole design.
+//! device is refused by name. A card that is already written is re-personalized by
+//! editing `seed.txt` on its `B2D-SEED` volume from any machine, which is the
+//! seed's whole design.
 
 use crate::args::SeedArgs;
 use crate::render::{print_event_at, Verbosity};

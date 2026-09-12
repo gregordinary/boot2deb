@@ -7,26 +7,27 @@
 //!     document the rootfs published.
 //!  2. The plan parses, and its digest is the one the provenance records. A mismatch
 //!     means the manifest describes a document other than the one that shipped.
-//!  3. `[[archives]]` is well formed: at least the mirror and the build's own pool, the
-//!     pool marked `local` with no mirror URL (a per-run path is not portable
-//!     provenance), and `signed_by` written on every row — an empty `signed_by` is a
-//!     *fact* (trusted unsigned), so it must be present rather than absent.
+//!  3. `[[archives]]` is well formed. It carries at least the mirror and the build's
+//!     own pool. The pool is marked `local` with no mirror URL, since a per-run path
+//!     is not portable provenance. `signed_by` is written on every row, because an
+//!     empty `signed_by` is a *fact* (trusted unsigned) and must be present rather
+//!     than absent.
 //!  4. **The ext4 filesystem is exactly its GPT partition.** Larger and it will not
-//!     mount at all; smaller and the difference is wasted. This is the invariant the
+//!     mount at all. Smaller and the difference is wasted. This is the invariant the
 //!     fit ordering exists to preserve, so it is checked on every image and not only on
 //!     the fitted one.
 //!  5. **The rootfs GPT entry is marked bootable.** U-Boot's `bootflow scan` narrows
-//!     to the partitions carrying the legacy-BIOS-bootable attribute as soon as any
-//!     partition on the medium carries it, and scans partition 1 alone when none
-//!     does — and partition 1 is the seed. Nothing about the filesystem's contents
+//!     to the partitions carrying the legacy-BIOS-bootable attribute, as soon as any
+//!     partition on the medium carries it. It scans partition 1 alone when none
+//!     does, and partition 1 is the seed. Nothing about the filesystem's contents
 //!     says whether the bootloader will ever open it.
 //!  6. A fitted `image_size` left the slack it asked for.
 //!
-//! Every structure is read by the code that writes it —
-//! [`image::inspect`](boot2deb_engine::image::inspect) for the GPT and the superblock,
-//! [`ProvenanceManifest`] for the record — so the gate cannot drift from the build by
-//! parsing the same bytes differently. The alternative is a second implementation of
-//! both parsers that nothing tests.
+//! Every structure is read by the code that writes it.
+//! [`image::inspect`](boot2deb_engine::image::inspect) reads the GPT and the
+//! superblock, and [`ProvenanceManifest`] reads the record. The gate therefore
+//! cannot drift from the build by parsing the same bytes differently. The
+//! alternative is a second implementation of both parsers that nothing tests.
 //!
 //! Read-only, and no root: only the head of the artifact is decompressed.
 

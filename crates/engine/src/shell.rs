@@ -1,33 +1,39 @@
 //! An interactive shell in the root a build stage compiles in — the `shell` command.
 //!
 //! A failed compile is ordinarily diagnosed from captured output. This is the other
-//! way: stand the stage's root up again and enter it, with the same base tree, the same
-//! layered build-dependencies, the same mounts, the same declared environment and the
-//! same identity map the compile had, and look at it.
+//! way: stand the stage's root up again, enter it, and look at it. The session gets
+//! what the compile had:
 //!
-//! Linux side effects, like the rest of the engine: it provisions the root
-//! ([`crate::sandbox`]) and then holds two file descriptors open between the operator's
-//! terminal and the sandbox's own for as long as the session lasts.
+//! - The same base tree
+//! - The same layered build-dependencies
+//! - The same mounts
+//! - The same declared environment
+//! - The same identity map
+//!
+//! Linux side effects, like the rest of the engine. It provisions the root
+//! ([`crate::sandbox`]). It then holds two file descriptors open between the
+//! operator's terminal and the sandbox's own, for as long as the session lasts.
 //!
 //! # What "the same root" means, and what it does not
 //!
-//! The root is **re-staged, not attached to**. A [`BuildRoot`]
-//! is disposable by construction: its overlay upper is discarded when the stage that
-//! declared it ends, including when it ends in a failure. So what a session enters is
-//! the root that stage's declaration produces — the same immutable base tree, resolved
-//! from the same mirrors, plus the same declared build-dependency set — rather than the
-//! dead run's writable layer. What the compile *wrote* into its upper is gone; what it
-//! wrote into the work dir is bound, at its host path, and is what a diagnosis is
-//! usually after.
+//! The root is **re-staged, not attached to**. A [`BuildRoot`] is disposable by
+//! construction. Its overlay upper is discarded when the stage that declared it ends,
+//! including when it ends in a failure.
 //!
-//! The session's layer is staged into a directory of its own — the stage's name,
-//! prefixed — so opening one while a build of the same recipe runs cannot reclaim that
-//! build's upper out from under it.
+//! So what a session enters is the root that stage's declaration produces, rather than
+//! the dead run's writable layer. That is the same immutable base tree, resolved from
+//! the same mirrors, plus the same declared build-dependency set. What the compile
+//! *wrote* into its upper is gone. What it wrote into the work dir is bound, at its
+//! host path, and is what a diagnosis is usually after.
+//!
+//! The session's layer is staged into a directory of its own, the stage's name with a
+//! prefix. Opening one while a build of the same recipe runs therefore cannot reclaim
+//! that build's upper out from under it.
 //!
 //! # The one deviation from the build profile
 //!
 //! Every command boot2deb runs in a sandbox launches under the one profile
-//! [`crate::sandbox`] defines, and a session launches under that profile with **standard
+//! [`crate::sandbox`] defines. A session launches under that profile with **standard
 //! input reset to [`Stdio::Inherit`]**. Two reasons, and they are the same reason:
 //!
 //! - A terminal launch is *refused* against a stream disposition that names a
@@ -35,9 +41,9 @@
 //!   streams. `Stdio::Null` names one.
 //! - The hazard `Stdio::Null` exists to close is not reintroduced. It keeps a build out
 //!   of the operator's session, where a maintainer script could read `/dev/tty` and push
-//!   characters into the operator's input queue. A terminal launch owns a session *and a
-//!   controlling terminal* of its own, so `/dev/tty` inside resolves to the sandbox's own
-//!   pseudoterminal — which the operator is not sharing with anything.
+//!   characters into the operator's input queue. A terminal launch owns a session *and
+//!   a controlling terminal* of its own, so `/dev/tty` inside resolves to the sandbox's
+//!   own pseudoterminal. The operator is not sharing that with anything.
 //!
 //! `stop_with_caller` stays as the profile sets it, which is what an interactive session
 //! wants anyway: kill boot2deb and the session goes with it.
@@ -47,8 +53,14 @@
 //! The pseudoterminal is allocated on the host before the fork, so it has no device node
 //! in the sandbox's own `/dev/pts`. Path resolution for the terminal fails: `tty(1)`,
 //! `who`, and `GPG_TTY` (and so `pinentry`) have no answer. Everything that operates on
-//! the descriptor — `isatty`, `tcsetattr`, the line discipline, the window size, job
-//! control, `/dev/tty`, and nested allocation for `tmux` or `script` — works normally.
+//! the descriptor works normally:
+//!
+//! - `isatty` and `tcsetattr`
+//! - The line discipline
+//! - The window size
+//! - Job control
+//! - `/dev/tty`
+//! - Nested allocation for `tmux` or `script`
 //!
 //! The user-facing description of the command is the CLI reference page,
 //! `docs/src/reference/cli.md`.
@@ -78,8 +90,8 @@ const DEFAULT_COMMAND: &str = "bash";
 /// layers over it.
 ///
 /// One variant per root a build command can fail in. The rootfs is deliberately not
-/// among them: that tree is a per-run temporary, bootstrapped, customized, exported to a
-/// tarball and removed within one stage, so there is no tree for a later session to
+/// among them. That tree is a per-run temporary: bootstrapped, customized, exported to
+/// a tarball and removed within one stage. There is no tree for a later session to
 /// enter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShellStage {
@@ -181,9 +193,9 @@ impl ShellStage {
 
 /// The three roots a build stands up, for [`open`] to choose between.
 ///
-/// All three rather than the one the stage needs, so the caller cannot hand over a root
-/// that does not match the stage it asked for — which would be a session in the wrong
-/// architecture, reported as nothing at all.
+/// All three, rather than the one the stage needs. The caller then cannot hand over a
+/// root that does not match the stage it asked for. That would be a session in the
+/// wrong architecture, reported as nothing at all.
 pub struct ShellRoots<'a> {
     /// The target-arch build sandbox, or `None` for a build that resolves no image
     /// suite and so stands one up nowhere. Asking for a stage that needs it is then an
@@ -199,55 +211,57 @@ pub struct ShellRoots<'a> {
 pub struct ShellOptions<'a> {
     /// Which root to enter and what to layer over it.
     pub stage: ShellStage,
-    /// The build's scratch tree, bound read-write at its host path — every stage's
+    /// The build's scratch tree, bound read-write at its host path. Every stage's
     /// tree, scratch and output live under it, so one bind carries all of them.
     pub work_dir: &'a Path,
     /// Where the compile stages stage their `.deb`s. Read only by
     /// [`ShellStage::Ffmpeg`], whose layer resolves this build's own userspace packages
-    /// out of a pool assembled from it — the same dependency the ffmpeg stage has.
+    /// out of a pool assembled from it. That is the same dependency the ffmpeg stage
+    /// has.
     pub out_dir: &'a Path,
     /// Further host paths to bind at their host path, for inputs that live outside the
-    /// work dir — the config root's kernel fragments and board device trees, which a
-    /// compile in this root reads by absolute path.
+    /// work dir. Those are the config root's kernel fragments and board device trees,
+    /// which a compile in this root reads by absolute path.
     ///
     /// Read-write, like every bind a stage makes, because the point is the mounts the
-    /// compile had: the kernel stage binds those same fragment files read-write, and a
+    /// compile had. The kernel stage binds those same fragment files read-write. A
     /// session that could not re-run `merge_config.sh` the way the stage runs it would
     /// be a different environment wearing the same name.
     pub binds: &'a [PathBuf],
     /// The command and its arguments, or empty for an interactive `bash`.
     pub argv: &'a [String],
-    /// Environment entries applied over the stage's own — `TERM` above all, which the
-    /// declared sandbox environment does not carry because a build has no terminal to
-    /// describe.
+    /// Environment entries applied over the stage's own. `TERM` matters above all,
+    /// and the declared sandbox environment does not carry it because a build has no
+    /// terminal to describe.
     pub env: &'a [(String, String)],
     /// The userspace trees the build being reproduced compiles — the SoC's set narrowed
     /// by its `--userspace` flags. It decides what the layer carries: a tree's own
     /// `build_deps` are layered for the whole stage. Read only by
     /// [`ShellStage::Userspace`] and [`ShellStage::Ffmpeg`].
     pub userspace: &'a [boot2deb_core::model::UserspaceTree],
-    /// The `CROSS_COMPILE` prefix the kernel, u-boot and kmod stages compile with, or
-    /// `None` where the cross root is already the target's architecture and the compile
-    /// is native.
+    /// The `CROSS_COMPILE` prefix the kernel, u-boot and kmod stages compile with. It
+    /// is `None` where the cross root is already the target's architecture and the
+    /// compile is native.
     pub cross_compile: Option<&'a str>,
 }
 
 /// Stand up `opts.stage`'s root and hold an interactive session in it, returning the
-/// process exit code a caller adopts as its own: the command's code where it exited, and
-/// the shell convention `128 + signal` where it was signalled — the number a script
-/// wrapping `boot2deb shell` would read from the command run any other way. The
-/// convention is [`ferroday_cage::ExitStatus::shell_code`]'s documented promise.
+/// process exit code a caller adopts as its own. That is the command's code where it
+/// exited, and the shell convention `128 + signal` where it was signalled. It is the
+/// number a script wrapping `boot2deb shell` would read from the command run any other
+/// way, and the convention is [`ferroday_cage::ExitStatus::shell_code`]'s documented
+/// promise.
 ///
-/// Provisions the root the stage compiles in — bootstrapping the base if this work dir
-/// has none, then staging the stage's declared build-dependencies over it — and relays
+/// Provisions the root the stage compiles in, bootstrapping the base if this work dir
+/// has none, then staging the stage's declared build-dependencies over it. It relays
 /// the caller's terminal to a pseudoterminal inside it until the command exits.
 ///
 /// The `step` is finished before the session starts, so the provisioning it reports and
 /// the session's own output never interleave on one terminal.
 ///
 /// Fails with [`ShellNeedsTerminal`](EngineError::ShellNeedsTerminal) when standard
-/// input is not a terminal, before any provisioning: standing a root up can take minutes
-/// on a cold cache, and there is nothing to relay at either end.
+/// input is not a terminal, before any provisioning. Standing a root up can take
+/// minutes on a cold cache, and there is nothing to relay at either end.
 pub fn open(
     build: &ResolvedBuild,
     lock: &Lock,

@@ -1,16 +1,15 @@
 //! The solved package manifest's text form: one `name version arch sha256` line
 //! per installed package, sorted, under a `#` header.
 //!
-//! Pure — rendering and parsing a text format, no I/O. The engine owns the
+//! Pure — no I/O here, only rendering and parsing a text format. The engine owns the
 //! *production* of a manifest (projecting a resolved provisioner plan, writing the
-//! file, hashing it); this module owns what the bytes are, so the writer and every
-//! reader agree on one definition of the format rather than on two that happen to
-//! match.
+//! file, hashing it). This module owns what the bytes are. The writer and every reader
+//! agree on one definition of the format rather than on two that happen to match.
 //!
-//! Every sha256 is the one the signed archive records for that `.deb`, so a manifest
-//! pins a package set by content rather than by name — which is what makes
-//! [`render`] a stable identity for the set and not for the run that produced it,
-//! and what lets two manifests be compared package-for-package
+//! Every sha256 is the one the signed archive records for that `.deb`. A manifest
+//! therefore pins a package set by content rather than by name. That is what makes
+//! [`render`] a stable identity for the set and not for the run that produced it. It
+//! is also what lets two manifests be compared package-for-package
 //! ([`diff`](crate::diff)).
 
 use crate::error::ConfigError;
@@ -21,9 +20,9 @@ use std::fmt::Write as _;
 /// beside the `<recipe>.lock` that names it.
 ///
 /// Part of the format this module defines, so a writer and a reader cannot disagree
-/// about which files are manifests. That distinction is load-bearing beyond parsing:
-/// a manifest shares the `.lock` extension with a recipe lock but is not TOML, so a
-/// consumer that walks `recipes/` by extension alone reads one as the other.
+/// about which files are manifests. That distinction is load-bearing beyond parsing.
+/// A manifest shares the `.lock` extension with a recipe lock but is not TOML. A
+/// consumer that walks `recipes/` by extension alone therefore reads one as the other.
 pub const MANIFEST_SUFFIX: &str = ".pkgs.lock";
 
 /// The manifest filename for a recipe `stem` — the name `update` and `build` write,
@@ -79,15 +78,15 @@ pub fn render(header: &str, packages: &[Package]) -> String {
 /// Parse manifest text back into its package list, in file order.
 ///
 /// Comment and blank lines are skipped. The list is returned as written rather than
-/// re-sorted: [`render`] already sorts, so a manifest boot2deb wrote is in canonical
-/// order, and preserving what was read keeps a hand-inspected file's order visible
-/// in an error.
+/// re-sorted. [`render`] already sorts, so a manifest boot2deb wrote is in canonical
+/// order. Preserving what was read keeps a hand-inspected file's order visible in an
+/// error.
 ///
 /// # Errors
 ///
-/// [`ConfigError::Parse`] is not used here, because the format is not TOML: a
+/// [`ConfigError::Parse`] is not used here, because the format is not TOML. A
 /// malformed line yields [`ConfigError::InvalidManifest`] naming the file, the line
-/// number, and the line — a manifest is a pin, so a line that does not parse must not
+/// number, and the line. A manifest is a pin, so a line that does not parse must not
 /// be silently dropped from the set it pins.
 pub fn parse(text: &str, path: &str) -> Result<Vec<Package>, ConfigError> {
     let mut packages = Vec::new();
@@ -123,8 +122,8 @@ pub fn parse(text: &str, path: &str) -> Result<Vec<Package>, ConfigError> {
 /// One package's difference between two solved sets — the unit
 /// [`moved`] reports.
 ///
-/// A side is `None` when that set does not hold the package at all, so an addition and
-/// a removal are the same shape as a version change and need no separate variant.
+/// A side is `None` when that set does not hold the package at all. An addition and a
+/// removal are then the same shape as a version change, and need no separate variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Moved {
     /// Binary package name, the identity the two sides are matched on.
@@ -143,7 +142,7 @@ impl Moved {
     /// standing in for a side that does not hold the package.
     ///
     /// The version is what a reader acts on, so it leads. Two sides at the same version
-    /// render the sha256s instead — that pair differs in the `.deb`'s *bytes*, and
+    /// render the sha256s instead. That pair differs in the `.deb`'s *bytes*, and
     /// printing one version twice would read as no difference at all.
     pub fn describe(&self) -> String {
         let same_version = matches!(
@@ -167,14 +166,14 @@ impl Moved {
 
 /// What differs between two solved package sets, sorted by name then architecture.
 ///
-/// Packages are matched on `name` + `architecture` and compared on the *whole* row, so
-/// a set that agrees on every version but records one different sha256 still reports —
-/// that pair names different bytes, which is the case a name-and-version comparison
+/// Packages are matched on `name` + `architecture` and compared on the *whole* row. A
+/// set that agrees on every version but records one different sha256 still reports.
+/// That pair names different bytes, which is the case a name-and-version comparison
 /// would call equal.
 ///
 /// An empty result is the decisive answer that the two sets are the same set. That is
 /// what lets a caller treat a recorded manifest as still describing what an archive
-/// would give now, rather than merely as having been true once.
+/// would give now. It is not merely a record of what was true once.
 pub fn moved(before: &[Package], after: &[Package]) -> Vec<Moved> {
     let key = |p: &Package| (p.name.clone(), p.architecture.clone());
     let index = |set: &[Package]| -> BTreeMap<(String, String), Package> {

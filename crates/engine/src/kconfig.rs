@@ -4,19 +4,20 @@
 //! <base_defconfig>` for the base, then the tree's own
 //! `scripts/kconfig/merge_config.sh` to layer the fragments (it runs
 //! `make KCONFIG_ALLCONFIG=<merged> alldefconfig` to dependency-resolve). We reuse
-//! the kernel's Kconfig machinery rather than reimplementing dependency resolution;
-//! the pure value comparison lives in [`boot2deb_core::kconfig`].
+//! the kernel's Kconfig machinery rather than reimplementing dependency resolution.
+//! The pure value comparison lives in [`boot2deb_core::kconfig`].
 //!
 //! The parity check ([`check_parity`]) compares our fragment-merged config against
 //! a reference config. It generates our fragment-merged `.config` and, separately,
-//! `olddefconfig(<reference>)` on the same patched tree with the same toolchain,
-//! then diffs them over the normalized `CONFIG_*` set. Comparing against the
-//! olddefconfig'd reference (not the raw file) is deliberate: a raw reference
-//! carries toolchain-probed symbols (MTE/RELR/`CC_*`) and no-prompt `default y`
-//! entries that the kernel's own `olddefconfig` overrides, so it is not the config
-//! the reference build actually compiles. Generating both sides on one tree +
-//! toolchain makes those probed symbols cancel, leaving only fragment-authored
-//! differences.
+//! `olddefconfig(<reference>)` on the same patched tree with the same toolchain. It
+//! then diffs them over the normalized `CONFIG_*` set.
+//!
+//! Comparing against the olddefconfig'd reference, rather than the raw file, is
+//! deliberate. A raw reference carries toolchain-probed symbols (MTE, RELR, `CC_*`)
+//! and no-prompt `default y` entries that the kernel's own `olddefconfig`
+//! overrides. It is therefore not the config the reference build actually compiles.
+//! Generating both sides on one tree and toolchain makes those probed symbols
+//! cancel, leaving only fragment-authored differences.
 //!
 //! The tree must already have the patch series applied: the accel fragment's
 //! symbols (`ROCKCHIP_MULTI_RGA`, `DRM_ACCEL_ROCKET`, …) exist only once the
@@ -36,31 +37,36 @@ pub struct ConfigInputs<'a> {
     /// `ARCH=` for kbuild (e.g. `arm64`).
     pub arch: &'a str,
     /// `CROSS_COMPILE=` prefix, so the config is resolved in the **same toolchain
-    /// context the kernel compiles in**; `None` on a native build. This is
-    /// load-bearing for a cross build: toolchain-probed symbols (`ARM64_BTI`,
-    /// `ARM64_E0PD`, the ARMv8.5 block, …) are gated on `cc-option` probes, so they
-    /// resolve per the *target* compiler. Generating with the host compiler instead
-    /// leaves them unresolved, and `make bindeb-pkg` under the cross toolchain then
-    /// finds them as new symbols and drops into an interactive `oldconfig`. Matching
-    /// the toolchains makes the fragment-merged `.config` complete for the build.
+    /// context the kernel compiles in**. `None` on a native build.
+    ///
+    /// This is load-bearing for a cross build. Toolchain-probed symbols
+    /// (`ARM64_BTI`, `ARM64_E0PD`, the ARMv8.5 block, …) are gated on `cc-option`
+    /// probes, so they resolve per the *target* compiler. Generating with the host
+    /// compiler instead leaves them unresolved. `make bindeb-pkg` under the cross
+    /// toolchain then finds them as new symbols, and drops into an interactive
+    /// `oldconfig`. Matching the toolchains makes the fragment-merged `.config`
+    /// complete for the build.
     pub cross_compile: Option<&'a str>,
     /// In-tree base defconfig target the fragments merge onto (e.g. `defconfig`).
     pub base_defconfig: &'a str,
-    /// Fragment files in merge order (base → soc → accel → device); later files
+    /// Fragment files in merge order (base → soc → accel → device). Later files
     /// win, per Kconfig last-wins.
     pub fragments: &'a [PathBuf],
     /// The build root every `make` here runs in — the same one the kernel then compiles
     /// in ([`SandboxRole::Cross`](crate::sandbox::SandboxRole::Cross)).
     ///
-    /// Generating a `.config` is a kbuild operation: it builds and runs the tree's own
-    /// `conf`, and resolves `cc-option` probes against a compiler. That has to be the
-    /// compiler the kernel is then built with, or the probed symbols come out different
-    /// and `make bindeb-pkg` drops into an interactive `oldconfig` on symbols the
-    /// generated config never settled. Sharing the root is what makes "the same
-    /// toolchain context" structural rather than a matter of two call sites agreeing.
+    /// Generating a `.config` is a kbuild operation. It builds and runs the tree's
+    /// own `conf`, and resolves `cc-option` probes against a compiler. That has to
+    /// be the compiler the kernel is then built with. Otherwise the probed symbols
+    /// come out different, and `make bindeb-pkg` drops into an interactive
+    /// `oldconfig` on symbols the generated config never settled.
+    ///
+    /// Sharing the root is what makes "the same toolchain context" structural rather
+    /// than a matter of two call sites agreeing.
+    ///
     /// Its binds carry the tree and the out-of-tree config directory, plus each
-    /// fragment — which lives in the config root, outside the work dir, and is read
-    /// from inside by absolute path.
+    /// fragment. A fragment lives in the config root, outside the work dir, and is
+    /// read from inside by absolute path.
     pub cr: &'a CompileRoot<'a>,
 }
 
@@ -185,12 +191,14 @@ fn prepare_out(dir: &Path) -> Result<PathBuf, EngineError> {
 /// The kbuild invocation context every `make` in this module runs under: which tree,
 /// for which architecture, with which toolchain prefix, in which build root.
 ///
-/// A struct rather than four positional arguments because three of them are
-/// `&str`/`Option<&str>`-shaped and one is a path: a swapped pair would configure a
-/// kernel for the wrong architecture, or probe `cc-option` against the wrong compiler,
-/// and would compile. It also states the contract the module's doc explains — that
-/// generating a `.config` and building the kernel must happen in *one* context, or the
-/// toolchain-probed symbols come out different.
+/// A struct rather than four positional arguments, because three of them are
+/// `&str` or `Option<&str>`-shaped and one is a path. A swapped pair would configure
+/// a kernel for the wrong architecture, or probe `cc-option` against the wrong
+/// compiler, and would compile.
+///
+/// It also states the contract the module's doc explains. Generating a `.config` and
+/// building the kernel must happen in *one* context, or the toolchain-probed symbols
+/// come out different.
 #[derive(Clone, Copy)]
 pub struct Kbuild<'a> {
     /// A checkout of the pinned kernel at the locked ref, patches applied. Out-of-tree

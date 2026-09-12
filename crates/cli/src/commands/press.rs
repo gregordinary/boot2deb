@@ -1,19 +1,26 @@
 //! `press`: produce a distributable image file from a build's artifacts —
 //! verified, per-unit personalized, and optionally extended with per-site files.
 //!
-//! boot2deb does not write devices; the pressed file is what gets handed to a
+//! boot2deb does not write devices. The pressed file is what gets handed to a
 //! flasher (`dd`, pyrographer, a vendor tool). Two paths produce it, chosen per
-//! output: a press with nothing to add **streams** the existing compressed
-//! artifact (decompress + digest tap + verify — a plain card must not cost a
-//! rebuild), while a press with tree additions **re-assembles** the image from
-//! the kept rootfs tar through [`boot2deb_engine::image::press_image`]. Either
-//! way the seed keys are written last, into the finished file.
+//! output:
 //!
-//! What this module owns is config: which build point's artifacts these are,
-//! how the resolved roles bind to output paths (one positional for one
-//! artifact; `--boot-out` + `--rootfs-out` for a split build), and validating
-//! the seed keys and additions before anything is written. The engine owns the
-//! bytes.
+//! - A press with nothing to add **streams** the existing compressed artifact,
+//!   decompressing through a digest tap and verifying. A plain card must not cost
+//!   a rebuild.
+//! - A press with tree additions **re-assembles** the image from the kept rootfs
+//!   tar, through [`boot2deb_engine::image::press_image`].
+//!
+//! Either way the seed keys are written last, into the finished file.
+//!
+//! What this module owns is config:
+//!
+//! - Which build point's artifacts these are.
+//! - How the resolved roles bind to output paths: one positional for one artifact,
+//!   or `--boot-out` and `--rootfs-out` for a split build.
+//! - Validating the seed keys and additions before anything is written.
+//!
+//! The engine owns the bytes.
 
 use crate::args::{PressArgs, SeedKeyArgs};
 use crate::fsutil::absolutize;

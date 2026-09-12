@@ -1,12 +1,13 @@
-//! `size`: what an image's package set weighs, and what the weight is made of.
+//! `size`: what an image's package set weighs, and the parts that weight has.
 //!
-//! Reads the plan document a build published — the one file that carries the archive's
-//! own `Installed-Size` and `Source` per package — and rolls it up. Offline, and it
-//! builds nothing: the input is a *published build*, because a lock says what an image
-//! would be made of and only a build says what one is.
+//! Reads the plan document a build published, then rolls it up. That document is the
+//! one file carrying the archive's own `Installed-Size` and `Source` per package.
+//! Offline, and it builds nothing. The input is a *published build*, because a lock
+//! says what an image would be made of. Only a build says what one is.
 //!
-//! All the arithmetic is [`boot2deb_core::weight`]; this module finds the file, reads
-//! it, and prints the table.
+//! All the arithmetic is [`boot2deb_core::weight`], which rolls the rows up into a
+//! [`weight::WeightReport`](boot2deb_core::weight::WeightReport). This module finds the
+//! file, reads it, and prints the table.
 
 use boot2deb_core::weight::{format_kib, Grouping, WeightReport};
 use boot2deb_core::ConfigRoot;

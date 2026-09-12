@@ -1353,16 +1353,17 @@ fn merge_apt_sources(
     Ok(merged.into_iter().map(|(_, s)| s).collect())
 }
 
-/// Resolve a [build reference](crate::buildpoint::BuildPoint::reference): recipe
-/// fields are the base axes; `cli` overrides win.
+/// Resolve a [build reference](crate::buildpoint::BuildPoint::reference). Recipe
+/// fields are the base axes, and `cli` overrides win.
 ///
 /// The reference is a recipe name, optionally carrying a `+`-separated feature
 /// suffix. A suffix replaces the recipe's own `features` list the same way
-/// `--feature` does — so `turing-rk1/forky+jellyfin` resolves the `turing-rk1/forky`
-/// axes with `jellyfin` as the feature selection. An explicit `cli.features` still
-/// wins over both, so a caller that already parsed the reference into a
-/// [`BuildPoint`](crate::buildpoint::BuildPoint) and passed its selection through
-/// `cli` gets the same answer.
+/// `--feature` does. So `turing-rk1/forky+jellyfin` resolves the `turing-rk1/forky`
+/// axes with `jellyfin` as the feature selection.
+///
+/// An explicit `cli.features` still wins over both. A caller that already parsed the
+/// reference into a [`BuildPoint`](crate::buildpoint::BuildPoint) and passed its
+/// selection through `cli` therefore gets the same answer.
 pub fn resolve_recipe(
     root: &ConfigRoot,
     reference: &str,
@@ -1878,15 +1879,17 @@ fn resolve_account(
 /// Reject a supplementary-group name `usermod` could not act on.
 ///
 /// The resolved list is passed to the target-side customize program as one
-/// comma-separated environment value, and `usermod -aG` splits it on commas — so a
-/// name carrying a comma would silently become two names, and one carrying whitespace
-/// would be a name no `/etc/group` line can hold. The rest of the rule is Debian's own
-/// `NAME_REGEX` from `adduser.conf`: start with a lowercase letter or underscore, then
-/// lowercase letters, digits, underscores and hyphens.
+/// comma-separated environment value, and `usermod -aG` splits it on commas. A name
+/// carrying a comma would silently become two names. One carrying whitespace would be
+/// a name no `/etc/group` line can hold.
 ///
-/// Whether the group *exists* is not checked here — resolution is pure and cannot know
+/// The rest of the rule is Debian's own `NAME_REGEX` from `adduser.conf`. A name
+/// starts with a lowercase letter or underscore, then takes lowercase letters, digits,
+/// underscores and hyphens.
+///
+/// Whether the group *exists* is not checked here. Resolution is pure and cannot know
 /// what the target's packages will create. The customize program runs under `set -e`,
-/// so a name no package provides fails the build there, loudly, which is the right
+/// so a name no package provides fails the build there, loudly. That is the right
 /// outcome for what is always a typo.
 pub fn check_group_name(group: &str) -> Result<(), ConfigError> {
     let bad = |why| {

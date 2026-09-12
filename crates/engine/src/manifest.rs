@@ -4,24 +4,27 @@
 //! A manifest is one `name version arch sha256` line per installed package, sorted.
 //! Every sha256 is the one the signed archive records for that `.deb`, so the file
 //! pins a package set by content rather than by name. Two trees are provisioned this
-//! way and each writes one: the image's rootfs ([`crate::rootfs`]) and the build
-//! sandbox's immutable base ([`crate::sandbox`]).
+//! way and each writes one. They are the image's rootfs ([`crate::rootfs`]) and the
+//! build sandbox's immutable base ([`crate::sandbox`]).
 //!
-//! **Manifest-as-input** applies to the rootfs manifest alone: once it is committed
-//! beside the lock — its sha256 pinned in `RootfsPin.manifest_sha256` — a later build
-//! verifies that a fresh solve reproduces it. Verification happens *after* the solve:
-//! hash the freshly written manifest and compare it to the committed pin. A mismatch
-//! means the live mirror moved off the pinned package set — a real reproducibility
-//! failure, so it is a hard error by default
-//! ([`ManifestDrift`](EngineError::ManifestDrift)), with the captured snapshot
-//! (`--snapshot pin`) or an explicit `--save-manifest` re-pin as the remediation. The
-//! sandbox base's manifest is a *record*, not a contract: it states what the toolchain
-//! that compiled the target `.deb`s was, and nothing verifies a later solve against it.
+//! **Manifest-as-input** applies to the rootfs manifest alone. Once it is committed
+//! beside the lock, with its sha256 pinned in `RootfsPin.manifest_sha256`, a later
+//! build verifies that a fresh solve reproduces it. Verification happens *after* the
+//! solve: hash the freshly written manifest and compare it to the committed pin.
+//!
+//! A mismatch means the live mirror moved off the pinned package set. That is a real
+//! reproducibility failure, so it is a hard error by default
+//! ([`ManifestDrift`](EngineError::ManifestDrift)). The remediation is the captured
+//! snapshot (`--snapshot pin`), or an explicit `--save-manifest` re-pin.
+//!
+//! The sandbox base's manifest is a *record* rather than a contract. It states what
+//! the toolchain that compiled the target `.deb`s was, and nothing verifies a later
+//! solve against it.
 //!
 //! [`digest`] and [`verify_reproduced`] are pure, so the contract is testable
-//! without a bootstrap. The text form itself lives in
-//! [`boot2deb_core::manifest`], so the writer here and every reader of a written
-//! manifest share one definition of what the bytes are.
+//! without a bootstrap. The text form itself lives in [`boot2deb_core::manifest`].
+//! The writer here and every reader of a written manifest therefore share one
+//! definition of what the bytes are.
 
 use crate::blobs::sha256_hex;
 use crate::error::EngineError;
@@ -32,8 +35,8 @@ use std::path::Path;
 /// Project a resolved plan onto manifest packages, in the plan's own order.
 ///
 /// The plan *is* the installed set, resolved through the same path the provisioner
-/// installs, and it carries each `.deb`'s archive-recorded sha256 — so a manifest
-/// needs neither a dpkg-status parse nor an in-bootstrap hash hook.
+/// installs, and it carries each `.deb`'s archive-recorded sha256. A manifest
+/// therefore needs neither a dpkg-status parse nor an in-bootstrap hash hook.
 pub fn packages(plan: &Plan) -> Vec<Package> {
     plan.packages
         .iter()
@@ -66,9 +69,9 @@ pub fn digest(path: &Path) -> Result<String, EngineError> {
 }
 
 /// Verify that a freshly-solved manifest reproduces the committed pin. `expected`
-/// is the lock's `manifest_sha256`; `actual` is the fresh solve's [`digest`]. A
-/// mismatch is [`ManifestDrift`](EngineError::ManifestDrift) — the mirror no longer
-/// serves the pinned package set.
+/// is the lock's `manifest_sha256`, and `actual` is the fresh solve's [`digest`]. A
+/// mismatch is [`ManifestDrift`](EngineError::ManifestDrift), meaning the mirror no
+/// longer serves the pinned package set.
 pub fn verify_reproduced(expected: &str, actual: &str) -> Result<(), EngineError> {
     if expected == actual {
         Ok(())
@@ -81,24 +84,23 @@ pub fn verify_reproduced(expected: &str, actual: &str) -> Result<(), EngineError
 }
 
 /// What a tree's recorded manifest holds that a fresh solve no longer gives, and the
-/// reverse — empty when the record still describes what the archive would resolve now.
+/// reverse. Empty when the record still describes what the archive would resolve now.
 ///
-/// A base sandbox's manifest is a *record* of what a bootstrap installed, and a record
-/// stays true about the past however far the archive moves on. This is the question the
-/// record cannot answer on its own: whether the tree it sits beside is still the tree
-/// the current archive would produce. Answering it is what keeps a reused base from
-/// being one the archive has since left behind — see
-/// [`ensure`](crate::sandbox) on the build sandbox base.
+/// A base sandbox's manifest is a *record* of what a bootstrap installed. A record
+/// stays true about the past however far the archive moves on. What it cannot say is
+/// whether the tree it sits beside is still the tree the current archive would
+/// produce. Answering that is what keeps a reused base from being one the archive has
+/// since left behind. See [`ensure`](crate::sandbox) on the build sandbox base.
 ///
 /// Compared as package sets rather than as bytes, so the answer is a list a report can
-/// name rather than a pair of digests. Unlike [`verify_reproduced`], a difference here
-/// is not a failure: the caller's remedy is to re-provision, not to stop.
+/// name rather than a pair of digests. Unlike [`verify_reproduced`], a difference
+/// here is not a failure. The caller's remedy is to re-provision rather than to stop.
 ///
 /// # Errors
 ///
-/// [`EngineError::Io`] if the manifest cannot be read,
-/// and [`EngineError::Config`] if it does not parse
-/// — a manifest that cannot be read is not evidence that the tree is current.
+/// [`EngineError::Io`] if the manifest cannot be read, and [`EngineError::Config`] if
+/// it does not parse. A manifest that cannot be read is not evidence that the tree is
+/// current.
 pub fn diverged(recorded: &Path, solved: &[Package]) -> Result<Vec<Moved>, EngineError> {
     let text = std::fs::read_to_string(recorded).map_err(|s| EngineError::io(recorded, s))?;
     let held = boot2deb_core::manifest::parse(&text, &recorded.display().to_string())?;

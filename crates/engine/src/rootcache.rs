@@ -3,9 +3,9 @@
 //!
 //! The rootfs node's cost is dominated by the qemu-emulated package configure
 //! (~250 s), not by the dependency solve (seconds). So this caches on the **solved
-//! manifest** rather than on the input package *names* ("early cutoff"): the
-//! provisioner resolves the plan up front — the exact versions the current mirror
-//! offers, without downloading — that solved set hashes into a [`Signature`], and a
+//! manifest** rather than on the input package *names* ("early cutoff"). The
+//! provisioner resolves the plan up front, the exact versions the current mirror
+//! offers, without downloading. That solved set hashes into a [`Signature`], and a
 //! stored rootfs is reused only when the hash matches. A moved mirror resolves
 //! different versions → a different key → an automatic fresh bootstrap, so a cache
 //! hit can never reflect an out-of-date mirror.
@@ -16,35 +16,39 @@
 //! The build's own accel `.deb`s (from the local repo) are *not* archive
 //! packages, so their bytes are folded in directly ([`RootfsStore`] callers pass
 //! their sha256s), as is the assembled overlay tree. What is deliberately **not**
-//! folded is the per-image first-boot password: it is unique per
-//! build by design, so it is applied *after* restore (the rootfs node splices it
-//! into `/etc/shadow`, [`splice_shadow`]), keeping the cached tree reusable.
+//! folded is the per-image first-boot password. It is unique per build by design, so
+//! it is applied *after* restore (the rootfs node splices it into `/etc/shadow`,
+//! [`splice_shadow`]), keeping the cached tree reusable.
 //!
 //! **The tree is not only its packages.** Three further inputs shape it without moving
-//! any package version, so all three are folded. The **interpreter**: on a cross host
-//! every maintainer script runs under the host's `qemu-user`, and so does everything
-//! they invoke — `update-initramfs` writing the initrd the image boots, `ldconfig`,
-//! `locale-gen`, a depthcharge board's kernel signing — so those bytes are the
-//! interpreter's as much as the package's. The **feature apt repositories**: the
-//! provisioner writes each one's `sources.list.d` entry and its keyring into the tree,
-//! so a re-pointed URI or a rotated key changes the image while the solve stands still.
-//! The **account policy** — the `sudoers` drop-in and `authorized_keys` — which the
-//! customize step writes from resolved config, so it appears in no overlay fingerprint
+//! any package version, so all three are folded.
+//!
+//! The **interpreter**: on a cross host every maintainer script runs under the host's
+//! `qemu-user`, and so does everything they invoke. That covers `update-initramfs`
+//! writing the initrd the image boots, `ldconfig`, `locale-gen`, and a depthcharge
+//! board's kernel signing. Those bytes are the interpreter's as much as the package's.
+//!
+//! The **feature apt repositories**: the provisioner writes each one's
+//! `sources.list.d` entry and its keyring into the tree. A re-pointed URI or a rotated
+//! key therefore changes the image while the solve stands still.
+//!
+//! The **account policy**: the `sudoers` drop-in and `authorized_keys`, which the
+//! customize step writes from resolved config. It appears in no overlay fingerprint
 //! and would otherwise be invisible to the key.
 //!
 //! Both fold only when present, and an absent fold contributes nothing rather than an
-//! empty record — so a native build can never key alike with a cross build whose
-//! interpreter is merely missing, and a build with no feature repository folds no such
+//! empty record. A native build can therefore never key alike with a cross build whose
+//! interpreter is merely missing. A build with no feature repository folds no such
 //! record at all. Labels and values are length-prefixed
 //! ([`SignatureBuilder`]), so an absent fold cannot be forged by a present one.
 //!
 //! The **archive components** fold unconditionally, because unlike those two they are
 //! not optional — every build provisions from some set. They are usually implied by
-//! the solved set, but only usually: a libre build narrows to `main` and would solve
+//! the solved set, but only usually. A libre build narrows to `main` and would solve
 //! identically to an ordinary one on a board whose layers declare no nonfree firmware.
 //!
 //! Pure except [`dir_fingerprints`] / [`file_fingerprints`] (which hash files) and
-//! [`RootfsStore`] (the on-disk store); the parse, key, and splice are deterministic
+//! [`RootfsStore`] (the on-disk store). The parse, key, and splice are deterministic
 //! and unit-tested.
 
 use crate::blobs::sha256_hex;
@@ -73,9 +77,9 @@ const ROOTFS_STAGE_VERSION: u32 = 11;
 /// password (applied on restore) — the inputs [`cache_key`] hashes.
 ///
 /// A struct rather than positional arguments because most of these are
-/// `&[String]`/`&str` shaped: a swapped pair would silently change every key rather
-/// than fail to compile, and a silent key change is the one failure mode a cache
-/// cannot recover from on its own.
+/// `&[String]`/`&str` shaped. A swapped pair would silently change every key rather
+/// than fail to compile. A silent key change is the one failure mode a cache cannot
+/// recover from on its own.
 #[derive(Debug, Clone, Copy)]
 pub struct CacheKeyInputs<'a> {
     /// The solved package set, `name version arch` per package, from the resolved
@@ -89,9 +93,9 @@ pub struct CacheKeyInputs<'a> {
     /// non-archive packages whose version carries no immutability guarantee.
     pub repo_debs: &'a [String],
     /// One opaque record per feature apt repository: its identity and the content of
-    /// the keyring it is verified against, both of which the provisioner writes into
-    /// the tree. Empty when the build's features contribute no repository, and an
-    /// empty set folds nothing at all.
+    /// the keyring it is verified against. The provisioner writes both into the tree.
+    /// Empty when the build's features contribute no repository, and an empty set
+    /// folds nothing at all.
     pub apt_sources: &'a [String],
     /// Target Debian architecture.
     pub arch: &'a str,
@@ -101,14 +105,14 @@ pub struct CacheKeyInputs<'a> {
     /// build, the full `main,contrib,non-free,non-free-firmware` otherwise.
     ///
     /// Folded in even though it is *usually* implied by the solved set, because
-    /// "usually" is not a cache guarantee: two builds differing only in whether they
-    /// permit nonfree firmware can solve to the same packages (when the layers declare
-    /// none) and would then share a key, serving one a tree the other's apt
+    /// "usually" is not a cache guarantee. Two builds differing only in whether they
+    /// permit nonfree firmware can solve to the same packages, when the layers declare
+    /// none. They would then share a key, serving one a tree the other's apt
     /// configuration produced.
     pub components: &'a str,
     /// Identity of the interpreter that executes the target's maintainer scripts
-    /// ([`RootfsOptions::interpreter_id`](crate::rootfs::RootfsOptions::interpreter_id)),
-    /// or `None` on a native host, where nothing is interpreted and no such input
+    /// ([`RootfsOptions::interpreter_id`](crate::rootfs::RootfsOptions::interpreter_id)).
+    /// It is `None` on a native host, where nothing is interpreted and no such input
     /// exists.
     pub interpreter: Option<&'a str>,
     /// The resolved sudo policy, as
@@ -121,10 +125,10 @@ pub struct CacheKeyInputs<'a> {
     pub sudo: &'a str,
     /// The `authorized_keys` entries written into the default account's home, in config
     /// order. Empty when no config root authorizes anyone, and an empty set folds
-    /// nothing at all — so the common case keys identically to a tree with no such file,
-    /// which is what it is.
+    /// nothing at all. The common case therefore keys identically to a tree with no
+    /// such file, which is what it is.
     ///
-    /// Order-sensitive, unlike the package set: these are lines in a file, so a
+    /// Order-sensitive, unlike the package set. These are lines in a file, so a
     /// different order is a different file, and the key must describe the bytes rather
     /// than the intent.
     pub authorized_keys: &'a [String],
@@ -216,7 +220,7 @@ pub fn file_fingerprints(files: &[PathBuf]) -> Result<Vec<String>, EngineError> 
 ///
 /// The rewritten line is `user:hash:0:0:99999:7:::` — hash, last-change 0 (expired),
 /// min 0, max 99999, warn 7, the standard remaining defaults. Only the matching
-/// line changes; every other account is preserved verbatim.
+/// line changes, and every other account is preserved verbatim.
 pub fn splice_shadow(shadow: &str, user: &str, hash: &str) -> Option<String> {
     let prefix = format!("{user}:");
     let mut found = false;
@@ -238,20 +242,20 @@ pub fn splice_shadow(shadow: &str, user: &str, hash: &str) -> Option<String> {
 
 /// A cached rootfs the store restores instead of re-bootstrapping.
 pub struct CachedRootfs {
-    /// The stored rootfs tarball (password-free — the account is present but locked;
-    /// the per-image password is spliced in on restore).
+    /// The stored rootfs tarball. It is password-free: the account is present but
+    /// locked, and the per-image password is spliced in on restore.
     pub tar: PathBuf,
     /// The stored content-pinned solved manifest for this tarball.
     pub manifest: PathBuf,
 }
 
 /// Content-addressed store of bootstrapped rootfs trees under `<cache>/rootfs/`,
-/// keyed by the [`cache_key`] signature. A stored entry is a directory
-/// `<key>/` holding `rootfs.tar` + `manifest.pkgs`; it is published atomically
-/// (staged in a pid-distinct `.partial` temp, then renamed), so an interrupted
-/// store never leaves a half-written entry a later build would trust, and two
-/// concurrent builds of the same key cannot clobber each other's staging — the same
-/// discipline as [`crate::artstore::ArtifactStore`].
+/// keyed by the [`cache_key`] signature. A stored entry is a directory `<key>/`
+/// holding `rootfs.tar` + `manifest.pkgs`. It is published atomically, staged in a
+/// pid-distinct `.partial` temp and then renamed. An interrupted store therefore
+/// never leaves a half-written entry a later build would trust. Two concurrent builds
+/// of the same key cannot clobber each other's staging, the same discipline as
+/// [`crate::artstore::ArtifactStore`].
 pub struct RootfsStore {
     /// The `<cache>/rootfs` root the entries live under.
     root: PathBuf,
@@ -259,7 +263,7 @@ pub struct RootfsStore {
 
 impl RootfsStore {
     /// A store rooted at `<cache_dir>/rootfs`. Opportunistically sweeps stale
-    /// `<key>.partial` temps a hard-killed `put` may have left.
+    /// `<key>.partial` temps a hard-killed `put` can have left behind.
     pub fn new(cache_dir: &Path) -> Self {
         let root = cache_dir.join("rootfs");
         crate::gc::sweep_stale_temps(&root);
@@ -280,17 +284,19 @@ impl RootfsStore {
         (tar.is_file() && manifest.is_file()).then_some(CachedRootfs { tar, manifest })
     }
 
-    /// Store `tar` + `manifest` under `key`, replacing any prior entry — a
+    /// Store `tar` + `manifest` under `key`, replacing any prior entry. A
     /// `--refresh-rootfs` rebuild must refresh the stored bytes, so (unlike
     /// [`crate::artstore::ArtifactStore::put`]) an existing entry is not kept.
     ///
-    /// Concurrency discipline: staging uses a pid-distinct `.partial`
-    /// temp, so two builds of the same key cannot delete each other's in-flight
-    /// staging; a prior entry is atomically moved aside rather than deleted in
-    /// place, so a concurrent `get`'s exposure is one rename, not the duration
-    /// of a recursive delete; and losing the publish rename to a concurrent
-    /// `put` keeps the winner's complete entry — content is signature-keyed, so
-    /// any complete entry for `key` is equivalent.
+    /// Concurrency discipline is three rules:
+    ///
+    /// - Staging uses a pid-distinct `.partial` temp, so two builds of the same key
+    ///   cannot delete each other's in-flight staging.
+    /// - A prior entry is atomically moved aside rather than deleted in place. A
+    ///   concurrent `get`'s exposure is then one rename, not a recursive delete.
+    /// - Losing the publish rename to a concurrent `put` keeps the winner's complete
+    ///   entry, since content is signature-keyed and any complete entry for `key` is
+    ///   equivalent.
     pub fn put(
         &self,
         key: &Signature,

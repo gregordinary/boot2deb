@@ -1,22 +1,27 @@
 //! Data volumes — a second disk the image mounts for data, kept whole across
 //! reimaging.
 //!
-//! The layout this exists for: the whole bootable system (u-boot, kernel, rootfs)
-//! on the medium the board's flashing route can actually write, and the large disk
-//! carrying nothing the boot depends on. On a compute module in a cluster carrier
-//! that is eMMC + an M.2 NVMe, and the property that makes it worth modelling is
-//! that **reflashing the OS does not touch the data**: the new image finds the
+//! The layout this exists for puts the whole bootable system (u-boot, kernel,
+//! rootfs) on the medium the board's flashing route can actually write. The large
+//! disk then carries nothing the boot depends on. On a compute module in a cluster
+//! carrier, that is eMMC + an M.2 NVMe. The property that makes it worth modeling
+//! is that **reflashing the OS does not touch the data**. The new image finds the
 //! volume already there, by label, and adopts it.
 //!
 //! That property is also what makes the safety rule non-negotiable. A volume this
 //! image did not create is evidence of data someone wants, so the first-boot
-//! ladder is: adopt a volume carrying our label, create one only on a genuinely
-//! blank disk, and refuse anything else. A feature that reformatted on each boot
-//! would destroy exactly the data it exists to preserve.
+//! ladder is:
+//!
+//! 1. Adopt a volume carrying our label.
+//! 2. Create one only on a genuinely blank disk.
+//! 3. Refuse anything else.
+//!
+//! A feature that reformatted on each boot would destroy exactly the data it
+//! exists to preserve.
 //!
 //! Pure: parsing and validation. The engine writes the resolved list into the
-//! rootfs as `/etc/boot2deb/data-volumes.conf`, and the `data-volume` feature's
-//! first-boot hook is what reads it and walks the ladder on the board.
+//! rootfs as `/etc/boot2deb/data-volumes.conf`. The `data-volume` feature's
+//! first-boot hook reads it and walks the ladder on the board.
 
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
@@ -27,7 +32,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_LABEL_BYTES: usize = 16;
 
 /// The feature that carries the first-boot hook acting on these declarations. A
-/// recipe needs it and at least one [`DataVolume`]; either alone is inert, which
+/// recipe needs it and at least one [`DataVolume`]. Either alone is inert, which
 /// [`ConfigError::DataVolumeFeatureMismatch`] reports.
 pub const FEATURE: &str = "data-volume";
 
@@ -45,17 +50,17 @@ pub struct DataVolume {
     /// Filesystem label identifying this volume, and the `LABEL=` the generated
     /// fstab entry mounts by.
     ///
-    /// This is the volume's identity, not a description: it is what lets a
-    /// freshly flashed image recognise the disk it must not touch. Changing it
-    /// between images means the next boot sees an unlabelled foreign disk and
-    /// refuses it, which is the safe outcome but not the intended one.
+    /// This is the volume's identity, not a description. It is what lets a
+    /// freshly flashed image recognize the disk it must not touch. Changing it
+    /// between images means the next boot sees an unlabeled foreign disk and
+    /// refuses it. That is the safe outcome, but not the intended one.
     pub label: String,
     /// Filesystem to create on a blank disk, and the type the fstab entry names.
     #[serde(default)]
     pub fstype: VolumeFs,
     /// Absolute path the volume is mounted at. Never `/`.
     pub mount: String,
-    /// Whether the first-boot hook may create the volume, or only adopt one that
+    /// Whether the first-boot hook can create the volume, or only adopt one that
     /// already exists — [`CreatePolicy`].
     #[serde(default)]
     pub create: CreatePolicy,
@@ -64,13 +69,13 @@ pub struct DataVolume {
 /// How the first-boot hook finds the disk a volume lives on.
 ///
 /// Deliberately narrow. A general predicate over disks would be a way to point
-/// the formatter at the wrong one, and the blank-disk requirement is the only
-/// thing standing between a typo here and someone's data.
+/// the formatter at the wrong one. The blank-disk requirement is the only thing
+/// standing between a typo here and someone's data.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VolumeMatch {
     /// The single disk of this transport. Resolution to a device node happens on
-    /// the board at first boot; matching more than one disk is refused there
+    /// the board at first boot. Matching more than one disk is refused there
     /// rather than guessed, since "the NVMe" is not an answer when there are two.
     Kind(DiskKind),
     /// An exact device node (`/dev/nvme0n1`). For a board where the transport is
@@ -81,9 +86,9 @@ pub enum VolumeMatch {
 /// A disk transport, as [`VolumeMatch::Kind`] names it.
 ///
 /// These name the bus, not the device-node spelling, because the spelling does not
-/// separate the cases that matter. A SATA disk and a USB disk are both `/dev/sd*`:
-/// a board with an internal SSD and a plugged-in USB drive shows two devices no
-/// name pattern can tell apart, and picking the wrong one is precisely the accident
+/// separate the cases that matter. A SATA disk and a USB disk are both `/dev/sd*`.
+/// A board with an internal SSD and a plugged-in USB drive shows two devices no
+/// name pattern can tell apart. Picking the wrong one is precisely the accident
 /// this type exists to prevent. The hook therefore matches on the kernel's reported
 /// transport and refuses a disk whose transport it cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -94,7 +99,7 @@ pub enum DiskKind {
     /// An internally attached SATA disk (`/dev/sd*` with transport `sata`).
     Sata,
     /// A USB-attached disk (`/dev/sd*` with transport `usb`). Distinct from
-    /// [`Sata`](Self::Sata) despite sharing the node name: they are told apart by
+    /// [`Sata`](Self::Sata) despite sharing the node name. They are told apart by
     /// transport alone, so conflating them would mean a removable drive could stand
     /// in for a fixed one.
     Usb,
@@ -109,9 +114,9 @@ impl DiskKind {
     /// The `lsblk -o TRAN` value a disk of this kind reports.
     ///
     /// The hook requires this to match before considering a disk, so a device whose
-    /// transport is unreadable is skipped rather than guessed at — except for
-    /// [`Mmc`](Self::Mmc), where the block driver commonly reports nothing and the
-    /// `mmcblk<n>` name is already unambiguous.
+    /// transport is unreadable is skipped rather than guessed at.
+    /// [`Mmc`](Self::Mmc) is the exception, where the block driver commonly reports
+    /// nothing and the `mmcblk<n>` name is already unambiguous.
     pub fn transport(self) -> &'static str {
         match self {
             DiskKind::Nvme => "nvme",
@@ -134,8 +139,8 @@ impl DiskKind {
 
 /// Filesystem a created volume gets.
 ///
-/// One value today. It is an enum rather than a bare string so the fstab type and
-/// the `mkfs` the hook runs cannot drift apart, and so adding a filesystem is a
+/// One value today. It is an enum rather than a bare string, so the fstab type and
+/// the `mkfs` the hook runs cannot drift apart. Adding a filesystem is then a
 /// change with one place to make it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -154,10 +159,10 @@ impl VolumeFs {
     }
 }
 
-/// Whether first boot may *create* a volume, or only adopt an existing one.
+/// Whether first boot can *create* a volume, or only adopt an existing one.
 ///
-/// Neither value permits touching a disk that already holds something: adopting a
-/// labelled volume and refusing foreign content are unconditional, and this only
+/// Neither value permits touching a disk that already holds something. Adopting a
+/// labeled volume and refusing foreign content are unconditional. This only
 /// decides what happens to a disk that is genuinely blank.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -167,15 +172,15 @@ pub enum CreatePolicy {
     #[default]
     IfBlank,
     /// Never write a partition table or a filesystem. A volume prepared by hand
-    /// is still adopted and mounted; a blank disk is left blank and logged.
+    /// is still adopted and mounted. A blank disk is left blank and logged.
     Never,
 }
 
 impl DataVolume {
     /// Validate one declaration, in isolation.
     ///
-    /// Checks what is knowable without a board: the mount path is absolute and is
-    /// not root, and the label is non-empty, fits [`MAX_LABEL_BYTES`], and holds
+    /// Checks what is knowable without a board. The mount path is absolute and is
+    /// not root. The label is non-empty, fits [`MAX_LABEL_BYTES`], and holds
     /// nothing that would need quoting in `/etc/fstab` or in the generated
     /// config's tab-separated lines.
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -240,13 +245,13 @@ impl DataVolume {
 
     /// The `/etc/fstab` line for this volume.
     ///
-    /// Mounted by `LABEL=`, never by device node or PARTUUID: the label is the one
-    /// identifier that survives the disk moving to another slot, and the whole
-    /// point of the volume is to outlive the image that created it.
+    /// Mounted by `LABEL=`, never by device node or PARTUUID. The label is the one
+    /// identifier that survives the disk moving to another slot. The whole point of
+    /// the volume is to outlive the image that created it.
     ///
-    /// `nofail` and a short device timeout are not optional. Without them a board
+    /// `nofail` and a short device timeout are not optional. Without them, a board
     /// whose data disk is absent, dead, or not yet enumerated stops in the
-    /// initramfs or drops to emergency mode — turning a missing *data* disk into
+    /// initramfs or drops to emergency mode. That turns a missing *data* disk into
     /// an unbootable system, which inverts the entire point of keeping the OS on
     /// its own medium.
     pub fn fstab_line(&self) -> String {
@@ -263,8 +268,8 @@ impl DataVolume {
 /// checks that only make sense across entries.
 ///
 /// Two volumes sharing a label or a mount point is a configuration that cannot do
-/// what it says — the second would adopt or shadow the first — so it is rejected
-/// here rather than producing a board where one of them silently loses.
+/// what it says. The second would adopt or shadow the first. It is rejected here
+/// rather than producing a board where one of them silently loses.
 pub fn validate_all(volumes: &[DataVolume]) -> Result<(), ConfigError> {
     for v in volumes {
         v.validate()?;
@@ -291,12 +296,12 @@ pub fn validate_all(volumes: &[DataVolume]) -> Result<(), ConfigError> {
 /// Render the resolved list as the on-device config at [`CONFIG_PATH`].
 ///
 /// Tab-separated fields, one volume per line, in declaration order. The format is
-/// deliberately dumb: the reader is a `/bin/sh` first-boot hook, and every field
-/// has already been validated to hold no whitespace or separator, so it needs no
+/// deliberately dumb. The reader is a `/bin/sh` first-boot hook, and every field
+/// has already been validated to hold no whitespace or separator. It needs no
 /// quoting rules and no parser.
 ///
 /// An empty list still renders the header. A present-but-empty file says the image
-/// was built with the feature and had nothing to mount, which is a different fact
+/// was built with the feature and had nothing to mount. That is a different fact
 /// from the file being absent, and the hook logs it as such rather than exiting
 /// silently.
 pub fn render_config(volumes: &[DataVolume]) -> String {

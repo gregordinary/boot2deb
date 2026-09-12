@@ -4,14 +4,14 @@
 [kernel]
 id = "rk3576-mainline-7.2"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.2.2"
-commit = "52c36105f76e96b638152a42e735f2e7767ed946"
+ref = "v7.2.3"
+commit = "58e7295cfecaddec94629160386412e0f2b1e8fe"
 
 [patches]
 series = ["rk3576-fixes", "rk3576-npu"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "6e886797a2122254db2e24875ee6645498f501cd"
+commit = "314b1b34b561e0b7f92a9893798eda3f3a8abf16"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,13 +22,13 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["rk3576-display"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "6e886797a2122254db2e24875ee6645498f501cd"
+commit = "314b1b34b561e0b7f92a9893798eda3f3a8abf16"
 
 [[kmods]]
 name = "aic8800"
 source = "https://github.com/radxa-pkg/aic8800.git"
 ref = "main"
-commit = "df4c783b663eba1956579c681acd5e45f25c671d"
+commit = "516e3b087763d80c44f5e3b6d2dd63e0d925c91d"
 
 [rootfs]
 suite = "forky"

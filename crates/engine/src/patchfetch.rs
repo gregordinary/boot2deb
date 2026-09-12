@@ -1,17 +1,19 @@
 //! Auto-fetch of the `patches` repo at the lock-pinned commit via `gix`.
 //!
 //! When a build has no local patches checkout, this materializes the exact
-//! `lock.patches.commit` into a durable, commit-addressed cache so the series can
-//! be verified and applied like any local checkout — the North-Star "selecting a
-//! device auto-fetches the right patches". The clone is pure-Rust (`gix` over
-//! rustls): a full history fetch (the repo is small, so no sparse checkout),
-//! then a **detached** worktree checkout of the pinned commit's tree, so a later
-//! `git rev-parse HEAD` returns that commit and `git status` is clean — exactly
-//! what the verify gate (`build::verify_patches_pin`) expects of a pinned checkout.
+//! `lock.patches.commit` into a durable, commit-addressed cache. The series is then
+//! verified and applied like any local checkout, which is the North-Star "selecting a
+//! device auto-fetches the right patches".
 //!
-//! Patches are never silently skipped: an unreachable commit or an offline fetch
-//! is a hard [`EngineError::PatchesFetch`], and the caller surfaces the pinned
-//! commit so the user can retry or point `--patches-path` at a local checkout.
+//! The clone is pure-Rust, `gix` over rustls. It is a full history fetch, with no
+//! sparse checkout because the repo is small. Then comes a **detached** worktree
+//! checkout of the pinned commit's tree. A later `git rev-parse HEAD` therefore
+//! returns that commit and `git status` is clean, which is exactly what the verify
+//! gate (`build::verify_patches_pin`) expects of a pinned checkout.
+//!
+//! Patches are never silently skipped. An unreachable commit or an offline fetch is a
+//! hard [`EngineError::PatchesFetch`]. The caller surfaces the pinned commit, so the
+//! user can retry or point `--patches-path` at a local checkout.
 
 use crate::error::EngineError;
 use crate::event::Step;
@@ -29,11 +31,14 @@ const GIX_FETCH_TIMEOUT: Duration = Duration::from_secs(180);
 /// Materialize the `patches` repo at `commit` from `url` into a commit-addressed
 /// directory under `cache_root`, returning that checkout's path.
 ///
-/// The cache is durable (it lives outside any recipe work dir, so cleaning one leaves
-/// it standing, and it is shared across builds) and content-addressed by the commit, so a
-/// present `cache_root/<commit>` is always a complete checkout at that commit —
-/// the fetch stages into a temporary sibling and atomically renames on success, so
-/// an interrupted clone never leaves a half-materialized tree a later run trusts.
+/// The cache is durable and content-addressed by the commit. It lives outside any
+/// recipe work dir, so cleaning one leaves it standing, and it is shared across
+/// builds. A present `cache_root/<commit>` is therefore always a complete checkout at
+/// that commit.
+///
+/// The fetch stages into a temporary sibling and atomically renames on success. An
+/// interrupted clone therefore never leaves a half-materialized tree a later run
+/// trusts.
 ///
 /// A hit (the directory already exists) returns immediately without touching the
 /// network. A miss performs a full pure-Rust `gix` clone (all history, so an

@@ -1,18 +1,22 @@
 //! boot2deb core — typed config model, layer resolution, and lock format.
 //!
 //! Pure and deterministic: no build side effects (those live in the engine), so
-//! everything here is unit-testable without a Linux host. The public surface is
-//! the [`model`] types, the [`ConfigRoot`] loader, the [`resolve_device`] /
-//! [`resolve_recipe`] entry points, the [`feature`], [`series`], [`lock`],
-//! [`manifest`], and [`kconfig`] formats, comparison of two build points
-//! ([`diff`]), patch normalization for `patch import` ([`mbox`]), device/recipe
-//! generation for `new-device` ([`scaffold`]), selftest expectations
-//! ([`expect`]), [`size`] parsing, source-pin
-//! durability form ([`sources`]), re-pin ref selection ([`repin`]), and the upgrade
-//! survey's comparison
-//! ([`outdated`]) over the tag spellings [`version`] parses, Debian suite facts
-//! ([`suite`]), `authorized_keys` entry shape ([`authkeys`]), and [`host`]
-//! detection.
+//! everything here is unit-testable without a Linux host.
+//!
+//! The public surface is:
+//!
+//! - The [`model`] types and the [`ConfigRoot`] loader.
+//! - The [`resolve_device`] and [`resolve_recipe`] entry points.
+//! - The [`feature`], [`series`], [`lock`], [`manifest`], and [`kconfig`] formats.
+//! - Comparison of two build points ([`diff`]).
+//! - Patch normalization for `patch import` ([`mbox`]).
+//! - Device and recipe generation for `new-device` ([`scaffold`]).
+//! - Selftest expectations ([`expect`]), and [`size`] parsing.
+//! - Source-pin durability form ([`sources`]), and re-pin ref selection ([`repin`]).
+//! - The upgrade survey's comparison ([`outdated`]), over the tag spellings
+//!   [`version`] parses.
+//! - Debian suite facts ([`suite`]), `authorized_keys` entry shape ([`authkeys`]),
+//!   and [`host`] detection.
 //!
 //! `missing_docs` is a warning here to keep the config surface documented as it
 //! grows.

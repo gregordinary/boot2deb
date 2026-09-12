@@ -6,24 +6,25 @@
 //! [`runpath`] needs: the program header table, the `PT_DYNAMIC` segment, and the
 //! string table the dynamic entries index into.
 //!
-//! Why this exists rather than shelling out to `readelf`: the check runs on the host
-//! over a staged tree that was built for the *target* arch, and the answer must be the
-//! same whether or not a cross binutils happens to be installed.
+//! This exists rather than shelling out to `readelf`. The check runs on the host, over
+//! a staged tree that was built for the *target* arch. The answer must be the same
+//! whether or not a cross binutils happens to be installed.
 
 /// The library search path baked into an ELF object — its `DT_RUNPATH`, or its
 /// legacy `DT_RPATH` when no `DT_RUNPATH` is present.
 ///
 /// Returns `None` for a file that is not an ELF, has no dynamic segment (a static
-/// binary), or carries neither tag. The two tags differ in a way that matters to a
-/// bundled library set: `DT_RPATH` is searched transitively for a dependency's own
-/// dependencies, while `DT_RUNPATH` applies **only** to the object that carries it —
-/// so a library that must find its siblings needs its own entry, and checking the
-/// executable alone would prove nothing about the libraries. Modern toolchains emit
-/// `DT_RUNPATH` (`--enable-new-dtags`); both are accepted here because either
-/// satisfies the object being asked about.
+/// binary), or carries neither tag.
 ///
-/// The value is the raw path string, which may hold several `:`-separated entries
-/// and may contain `$ORIGIN`; interpreting it is the caller's business.
+/// The two tags differ in a way that matters to a bundled library set. `DT_RPATH` is
+/// searched transitively for a dependency's own dependencies, while `DT_RUNPATH`
+/// applies **only** to the object that carries it. So a library that must find its
+/// siblings needs its own entry, and checking the executable alone would prove nothing
+/// about the libraries. Modern toolchains emit `DT_RUNPATH` (`--enable-new-dtags`).
+/// Both tags are accepted here because either satisfies the object being asked about.
+///
+/// The value is the raw path string. It can hold several `:`-separated entries and can
+/// contain `$ORIGIN`. Interpreting it is the caller's business.
 pub fn runpath(bytes: &[u8]) -> Option<String> {
     let elf = Elf::parse(bytes)?;
     let dynamic = elf.segment(PT_DYNAMIC)?;

@@ -1,17 +1,20 @@
-//! Kernel compile stage: clone the pinned tree, apply the locked
-//! patch series (`git am`), install the board's loose device-tree sources, lay down
-//! the fragment-derived `.config`, and run `make bindeb-pkg` — producing the
-//! `linux-image` / `linux-headers` `.deb`s.
+//! Kernel compile stage, producing the `linux-image` / `linux-headers` `.deb`s:
 //!
-//! The `.config` is generated exactly as the parity check does ([`crate::kconfig`]):
-//! base defconfig + fragments merged out-of-tree, then copied into the tree, so the
-//! shipped kernel is configured from the same fragments `verify-config` checks.
+//! 1. Clone the pinned tree.
+//! 2. Apply the locked patch series (`git am`).
+//! 3. Install the board's loose device-tree sources.
+//! 4. Lay down the fragment-derived `.config`.
+//! 5. Run `make bindeb-pkg`.
 //!
-//! A board whose `.dts` is not yet upstream carries it in `device_dts`: the
-//! clone step copies those sources into the in-tree DT dir and registers the board
-//! DTB in that dir's `Makefile`, so `bindeb-pkg` ships it in the `linux-image` deb
-//! like any in-tree board. [`build_dtb`] rebuilds just that DTB for the bring-up
-//! edit → reflash loop.
+//! The `.config` is generated exactly as the parity check does ([`crate::kconfig`]).
+//! The base defconfig and fragments are merged out-of-tree, then copied into the tree,
+//! so the shipped kernel is configured from the same fragments `verify-config` checks.
+//!
+//! A board whose `.dts` is not yet upstream carries it in `device_dts`. The clone step
+//! copies those sources into the in-tree DT dir and registers the board DTB in that
+//! dir's `Makefile`. `bindeb-pkg` then ships it in the `linux-image` deb like any
+//! in-tree board. [`build_dtb`] rebuilds just that DTB for the bring-up edit →
+//! reflash loop.
 
 use crate::build::{
     self, deb_names, pick_deb, stage_artifact, BuildEnv, CloneMode, ClonePinned, PatchScope,
@@ -34,8 +37,8 @@ const BUILD_VERSION: u32 = 1;
 /// The artifact-store node this stage keys its outputs under, and the label
 /// [`why-rebuild`](crate::plan) predicts against.
 ///
-/// A constant because the two have to be the *same string*: the store is keyed by
-/// `(node, signature)`, so a prediction computed under a different node name would
+/// A constant because the two have to be the *same string*. The store is keyed by
+/// `(node, signature)`. A prediction computed under a different node name would
 /// answer a question about an entry no build ever wrote. It is the counterpart of the
 /// path helper above — one names where the tree is, this names where the artifacts are.
 pub const NODE: &str = "kernel";
@@ -52,20 +55,22 @@ const CLONE_STAGE_VERSION: u32 = 1;
 /// Covers everything `bindeb-pkg` emits, not just the two `collect` stages.
 const KERNEL_DEB_PREFIXES: &[&str] = &["linux-image-", "linux-headers-", "linux-libc-dev"];
 
-/// Build-dependencies this stage layers over the cross root's base — what a kernel
-/// build wants that the toolchain, `make`, `bc`, `bison`, `flex` and `libssl-dev`
-/// already in that base do not supply.
+/// Build-dependencies this stage layers over the cross root's base. They are what a
+/// kernel build wants that the toolchain, `make`, `bc`, `bison`, `flex` and
+/// `libssl-dev` already in that base do not supply:
 ///
-/// `debhelper` because `bindeb-pkg` ends in `dh_builddeb`; `libelf-dev` and `libdw-dev`
-/// for `objtool` and BTF; `rsync` and `cpio` for the headers package and the initramfs
-/// staging; `kmod` for `depmod`. Declared rather than folded into the base because only
-/// this stage needs them: a u-boot-only build has no reason to carry `libdw-dev`, and a
-/// declaration is what makes an undeclared dependency fail loudly instead of compiling
-/// against a leftover.
+/// - `debhelper`, because `bindeb-pkg` ends in `dh_builddeb`
+/// - `libelf-dev` and `libdw-dev`, for `objtool` and BTF
+/// - `rsync` and `cpio`, for the headers package and the initramfs staging
+/// - `kmod`, for `depmod`
 ///
-/// Three readers: the [`BuildRootSpec`] that stages the layer, the kmod stage — an
-/// out-of-tree module build *is* a kbuild invocation, so it declares this same set — and
-/// [`crate::shell`], which stages it for an interactive session in either root.
+/// Declared rather than folded into the base because only this stage needs them. A
+/// u-boot-only build has no reason to carry `libdw-dev`. A declaration is what makes
+/// an undeclared dependency fail loudly instead of compiling against a leftover.
+///
+/// It has three readers. The [`BuildRootSpec`] stages the layer, and the kmod stage
+/// declares this same set because an out-of-tree module build *is* a kbuild
+/// invocation. [`crate::shell`] stages it for an interactive session in either root.
 pub const BUILD_DEPS: &[&str] = &[
     "debhelper",
     "libelf-dev",
@@ -84,14 +89,14 @@ pub const BUILD_DEPS: &[&str] = &[
 /// different toolchain variables, a different archive compressor.
 const OUTPUT_STAGE_VERSION: u32 = 4;
 
-/// Filesystem inputs for the kernel stage (the lock and resolved build carry the
-/// pins and axes; these are the on-disk locations).
+/// Filesystem inputs for the kernel stage. The lock and resolved build carry the
+/// pins and axes, and these are the on-disk locations.
 pub struct KernelOptions<'a> {
     /// Git URL or local path to clone the kernel from, at the locked ref. A local
     /// clone (e.g. `../linux`) makes the shallow clone near-instant.
     pub source: &'a str,
     /// The patch series to apply, or `None` when the resolved kernel names no patch
-    /// series — the tree is then compiled exactly as cloned and the `patches` repo is
+    /// series. The tree is then compiled exactly as cloned, and the `patches` repo is
     /// never read.
     pub patches: Option<PatchSource<'a>>,
     /// Resolved kconfig fragment files in merge order (base → soc → accel →
@@ -108,16 +113,16 @@ pub struct KernelOptions<'a> {
     /// ([`SandboxRole::Cross`](crate::sandbox::SandboxRole::Cross)).
     ///
     /// The compiler, `dpkg-buildpackage` and `dh_builddeb` are all packages of this
-    /// root, so the host needs none of them and what they resolved to is a property of
-    /// the lock's mirror list. Bootstrapped lazily: a Tier-2 cache hit returns before
-    /// the stage asks for a build root, so a build that restores its kernel provisions
-    /// nothing.
+    /// root. The host therefore needs none of them, and what they resolved to is a
+    /// property of the lock's mirror list. Bootstrapped lazily: a Tier-2 cache hit
+    /// returns before the stage asks for a build root, so a build that restores its
+    /// kernel provisions nothing.
     pub cross: &'a dyn BuildSandbox,
     /// Directory the produced `.deb`s are staged into.
     pub out_dir: &'a Path,
     /// Root of the Tier-2 artifact store ([`crate::artstore`]), or `None` to
     /// disable output caching. On a hit the built `.deb`s are restored instead of
-    /// recompiled; on a miss they are stored after the build.
+    /// recompiled. On a miss they are stored after the build.
     pub store: Option<&'a Path>,
 }
 
@@ -142,16 +147,21 @@ pub fn tree_dir(work_dir: &Path) -> PathBuf {
 /// `work_dir`. The rootfs node reuses it so its tarball mtimes are stable across builds
 /// of one lock.
 ///
-/// `None` when there is no such date to read: the lock pins no kernel commit (a
-/// distro-package kernel is installed from the mirror, so no source tree exists), the
-/// kernel tree is absent (a build that has not run the kernel stage in this `work_dir`),
-/// or the commit object is unreadable. The caller then proceeds without mtime clamping,
-/// and that build's tarball carries build-time mtimes.
+/// `None` when there is no such date to read:
 ///
-/// That is a scoped loss, not a hole in the reproducibility claim: the guarantee is the
-/// *content pin* — every package by name, version, and sha256 in the solved manifest —
-/// and it is untouched. The ext4 filesystem is not byte-reproducible either, so
-/// the whole-image byte claim already waits on the Phase-F formatter.
+/// - The lock pins no kernel commit (a distro-package kernel is installed from the
+///   mirror, so no source tree exists)
+/// - The kernel tree is absent (a build that has not run the kernel stage in this
+///   `work_dir`)
+/// - The commit object is unreadable
+///
+/// The caller then proceeds without mtime clamping, and that build's tarball carries
+/// build-time mtimes.
+///
+/// That is a scoped loss, not a hole in the reproducibility claim. The guarantee is
+/// the *content pin*, every package by name, version, and sha256 in the solved
+/// manifest, and it is untouched. The ext4 filesystem is not byte-reproducible either,
+/// so the whole-image byte claim already waits on the Phase-F formatter.
 pub fn source_date_epoch(work_dir: &Path, lock: &Lock) -> Option<u64> {
     let pin = lock.kernel.as_ref()?;
     crate::git::commit_epoch(&tree_dir(work_dir), &pin.commit).ok()
@@ -159,10 +169,10 @@ pub fn source_date_epoch(work_dir: &Path, lock: &Lock) -> Option<u64> {
 
 /// Run the kernel stage, emitting its [`Event`](crate::event::Event)s to `sink`.
 ///
-/// Reads only the [`Lock`] for pins: the kernel ref/commit, the patch
-/// series + its commit. A freshly-cloned tree is verified to sit at the locked
-/// commit before patches are applied; a reused `<work>/linux` is left as-is
-/// (already patched) and only reconfigured + rebuilt.
+/// Reads only the [`Lock`] for pins: the kernel ref/commit, the patch series and its
+/// commit. A freshly-cloned tree is verified to sit at the locked commit before
+/// patches are applied. A reused `<work>/linux` is left as-is (already patched) and
+/// only reconfigured + rebuilt.
 pub fn build_kernel(
     build: &ResolvedBuild,
     lock: &Lock,
@@ -273,11 +283,12 @@ pub fn build_kernel(
 /// CRCs) and its generated headers, both of which only a completed kernel build produces.
 ///
 /// In a normal `--stage all` build the kernel stage has already compiled this tree, so
-/// this is a near-instant reuse: the Tier-1 signature is fresh **and** `Module.symvers`
-/// is present, and the tree is returned as-is. It rebuilds — clone+patch (on a stale or
-/// absent tree), configure, and a full `make bindeb-pkg` — only when the tree is missing
-/// its modules metadata, which happens for `--stage kmod` run in isolation or after a
-/// kernel Tier-2 cache hit restored the `.deb`s without materializing a tree.
+/// this is a near-instant reuse. The Tier-1 signature is fresh **and**
+/// `Module.symvers` is present, and the tree is returned as-is. It rebuilds only when
+/// the tree is missing its modules metadata, which means clone+patch (on a stale or
+/// absent tree), configure, and a full `make bindeb-pkg`. That happens for
+/// `--stage kmod` run in isolation, or after a kernel Tier-2 cache hit restored the
+/// `.deb`s without materializing a tree.
 ///
 /// Shares `build_kernel`'s clone/configure/compile helpers so "a tree suitable for
 /// external modules" has one definition. A distro-package kernel has no tree and is a
@@ -342,10 +353,10 @@ pub fn ensure_module_tree(
 /// Prepares the tree exactly as [`build_kernel`] does (clone + `git am` +
 /// `device_dts` install on a stale or absent tree, reuse on a fresh one) and
 /// regenerates the `.config`, which kbuild needs before it will build any DTB.
-/// It then compiles the one DTB instead of the whole kernel, so an edit to the board
-/// `.dts` reaches a flashable DTB in seconds rather than a full kernel build. Neither
-/// artifact cache tier applies: the output is a single small file whose only input is
-/// a source the developer is actively editing.
+/// It then compiles the one DTB instead of the whole kernel. An edit to the board
+/// `.dts` therefore reaches a flashable DTB in seconds rather than a full kernel
+/// build. Neither artifact cache tier applies: the output is a single small file whose
+/// only input is a source the developer is actively editing.
 pub fn build_dtb(
     build: &ResolvedBuild,
     lock: &Lock,
@@ -420,11 +431,18 @@ pub fn build_dtb(
 
 /// The Tier-2 output signature manifest of the kernel `.deb`s: every input
 /// that determines the produced packages, not just the source tree. It folds the
-/// Tier-1 tree signature ([`clone_manifest`]) as a dependency (covering the kernel
-/// commit + patch series), then the inputs the compile/package step adds — the
-/// kconfig fragments' *contents* (order-sensitive, last-wins merge), the base
-/// defconfig, the kernel arch, the `KBUILD_IMAGE` path, the `LOCALVERSION` suffix,
-/// whether the build is cross, and the host toolchain identity. On a signature hit
+/// Tier-1 tree signature ([`clone_manifest`]) as a dependency, covering the kernel
+/// commit and patch series. It then folds the inputs the compile/package step adds:
+///
+/// - The kconfig fragments' *contents* (order-sensitive, last-wins merge)
+/// - The base defconfig
+/// - The kernel arch
+/// - The `KBUILD_IMAGE` path
+/// - The `LOCALVERSION` suffix
+/// - Whether the build is cross
+/// - The host toolchain identity
+///
+/// On a signature hit
 /// the artifact store restores the `.deb`s instead of rebuilding, so the key must
 /// cover everything that can change them. `SOURCE_DATE_EPOCH` derives from the
 /// kernel commit, already folded via the tree dependency.
@@ -463,20 +481,22 @@ pub fn output_manifest(
     Ok(b.manifest())
 }
 
-/// The Tier-1 signature manifest of the cloned+patched kernel tree: the
-/// pinned inputs that determine its content — the kernel commit, the kernel
-/// reference, the patch series (`build::fold_patch_series`), and the board's loose
-/// device-tree sources. The source URL is
-/// excluded (a commit content-addresses the tree, so the same commit from any mirror
-/// is the same tree). The reference is folded because the patch-applicability gate
-/// keys on it, so a reference change without a commit change must restamp the tree to
-/// force the gate to re-evaluate. The [`SeriesIdentity`] fold covers the
-/// pinned commit and — in co-dev mode — the live-series fingerprint, so a
-/// co-dev build never shares a stamp with a pinned one and an edited patch restamps.
+/// The Tier-1 signature manifest of the cloned+patched kernel tree: the pinned inputs
+/// that determine its content. Those are the kernel commit, the kernel reference, the
+/// patch series (`build::fold_patch_series`), and the board's loose device-tree
+/// sources. The source URL is excluded (a commit content-addresses the tree, so the
+/// same commit from any mirror is the same tree).
+///
+/// The reference is folded because the patch-applicability gate keys on it. A
+/// reference change without a commit change must therefore restamp the tree to force
+/// the gate to re-evaluate. The [`SeriesIdentity`] fold covers the pinned commit and,
+/// in co-dev mode, the live-series fingerprint. A co-dev build therefore never shares
+/// a stamp with a pinned one, and an edited patch restamps.
+///
 /// `device_dts` is the ordered content fingerprint from
-/// [`device_dts_fingerprint`](crate::build::device_dts_fingerprint); it is folded only
-/// when non-empty, so a board with an upstream DTB signs exactly as it did before the
-/// mechanism existed and keeps its cached tree.
+/// [`device_dts_fingerprint`](crate::build::device_dts_fingerprint). It is folded only
+/// when non-empty. A board with an upstream DTB therefore signs exactly as it did
+/// before the mechanism existed, and keeps its cached tree.
 /// Public so `why-rebuild` ([`crate::plan`]) recomputes the same signature it stamps
 /// here.
 pub fn clone_manifest(
@@ -848,7 +868,7 @@ fn localversion(build: &ResolvedBuild) -> String {
 }
 
 /// The reproducibility + packaging env passed to `make bindeb-pkg`. Pure so the
-/// mapping is testable; `CROSS_COMPILE` is added separately (it is a host/target
+/// mapping is testable. `CROSS_COMPILE` is added separately (it is a host/target
 /// fact, not a kbuild constant). Exposed so the out-of-tree module node builds its
 /// `make M=` against the same `ARCH`/`SOURCE_DATE_EPOCH` as the kernel it links into.
 pub fn kbuild_env(build: &ResolvedBuild, source_date_epoch: Option<u64>) -> Vec<(String, String)> {

@@ -5,11 +5,11 @@
 //! they are the same document with different keys:
 //!
 //! - **CycloneDX has no source-tree component type.** A pinned tree is a `library`
-//!   carrying a `vcs` external reference; its role is in the description.
-//! - **CycloneDX has one relationship kind.** `dependencies` says the image depends on
-//!   a component, which is true of a package it ships *and* of a tree it was compiled
-//!   from, so both appear there — the distinction SPDX draws with
-//!   `CONTAINS` / `GENERATED_FROM` survives in the component's `type` and description.
+//!   carrying a `vcs` external reference. Its role is in the description.
+//! - **CycloneDX has one relationship kind.** `dependencies` says the image depends
+//!   on a component. That is true of a package it ships *and* of a tree it was
+//!   compiled from, so both appear there. The distinction SPDX draws with `CONTAINS`
+//!   and `GENERATED_FROM` survives in the component's `type` and description.
 //! - **A blob is a `file`**, since it is bytes with a digest and no package identity.
 
 use super::{Component, ComponentKind, Sbom};
@@ -60,8 +60,12 @@ pub struct Tools {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CdxComponent {
-    /// CycloneDX component type: `operating-system`, `library`, `file`, or
-    /// `application` for the tool.
+    /// CycloneDX component type, one of:
+    ///
+    /// - `operating-system`
+    /// - `library`
+    /// - `file`
+    /// - `application`, for the tool
     #[serde(rename = "type")]
     pub kind: &'static str,
     /// Document-local reference, matching the model's component id so the two

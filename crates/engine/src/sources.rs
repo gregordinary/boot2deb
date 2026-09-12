@@ -4,21 +4,21 @@
 //! A commit is only re-fetchable if the remote still holds it. This probe
 //! answers, per pin, one of `durable | ephemeral | ORPHANED | skipped`:
 //!
-//! - **durable** — the commit is a tag target on the remote (immutable,
+//! - **`durable`** — the commit is a tag target on the remote (immutable,
 //!   shallow-fetchable forever). The target for every shipped pin.
-//! - **ephemeral** — the commit is fetchable now but not tag-anchored: a current
-//!   branch tip, or a past commit still reachable via history. A force-push /
-//!   rebase / delete can orphan it; pin a tag for durability.
-//! - **ORPHANED** — no tag and no branch reaches the commit; it may exist only in a
-//!   local checkout (the mpp anti-pattern). Not re-fetchable from the URL.
-//! - **skipped** — the probe could not complete: a network error, or the bounded
+//! - **`ephemeral`** — the commit is fetchable now but not tag-anchored: a current
+//!   branch tip, or a past commit still reachable via history. A force-push, rebase
+//!   or delete can orphan it, so pin a tag for durability.
+//! - **`ORPHANED`** — no tag and no branch reaches the commit. It might exist only in
+//!   a local checkout (the mpp anti-pattern), and is not re-fetchable from the URL.
+//! - **`skipped`** — the probe could not complete: a network error, or the bounded
 //!   ancestry check timed out on a huge-history repo (the FFmpeg base). Reported,
 //!   never hung on.
 //!
 //! The classification of `git ls-remote` output ([`classify_refs`]) is pure and
-//! unit-tested; the network (the `ls-remote` and the bounded ancestry fetch) is the
-//! side-effecting shell. This never mutates anything and never resolves "latest" —
-//! it is diagnostic only, alongside `verify-sources` and `update`'s pin-time warning.
+//! unit-tested. The network (the `ls-remote` and the bounded ancestry fetch) is the
+//! side-effecting shell. This never mutates anything and never resolves "latest". It
+//! is diagnostic only, alongside `verify-sources` and `update`'s pin-time warning.
 
 use std::io::Read;
 use std::path::Path;
@@ -44,7 +44,7 @@ pub enum Durability {
     /// The commit is fetchable now but not tag-anchored (a branch tip, or a past
     /// commit still reachable via history) — a move upstream can orphan it.
     Ephemeral(String),
-    /// No tag and no branch reaches the commit — it may exist only in a local
+    /// No tag and no branch reaches the commit, which might exist only in a local
     /// checkout. Not re-fetchable from the configured URL.
     Orphaned(String),
     /// The probe could not complete (network error, or the ancestry check exceeded
@@ -92,9 +92,9 @@ pub struct LsRef {
 }
 
 impl LsRef {
-    /// This ref as the pure comparison's borrowed view of it, so the upgrade survey
-    /// ([`boot2deb_core::outdated`]) reads the same advertisement the durability
-    /// probe classifies without either side copying it.
+    /// This ref as the pure comparison's borrowed view of it. The upgrade survey
+    /// ([`boot2deb_core::outdated`]) then reads the same advertisement the durability
+    /// probe classifies, without either side copying it.
     pub fn as_remote_ref(&self) -> boot2deb_core::outdated::RemoteRef<'_> {
         boot2deb_core::outdated::RemoteRef {
             name: &self.name,
@@ -124,10 +124,14 @@ pub enum RefVerdict {
 /// Classify `refs` (parsed `git ls-remote` output) for `commit`, pinned from
 /// `reference`. Pure, so the tag/tip precedence is unit-testable without a network.
 ///
-/// A tag pointing at the commit wins (durable); else a branch whose tip is the
-/// commit (ephemeral); else the commit is not advertised, and we note whether the
-/// pin's `reference` is itself a still-present branch (so a historical-but-reachable
-/// commit can be told from a truly orphaned one after the ancestry probe).
+/// The precedence is:
+///
+/// - A tag pointing at the commit wins, and is `durable`.
+/// - Failing that, a branch whose tip is the commit, which is `ephemeral`.
+/// - Failing that, the commit is not advertised. The verdict then notes whether the
+///   pin's `reference` is itself a still-present branch. That tells a
+///   historical-but-reachable commit from a truly orphaned one after the ancestry
+///   probe.
 pub fn classify_refs(refs: &[LsRef], reference: &str, commit: &str) -> RefVerdict {
     // A tag anchoring the commit is the durable case. Match either the peeled
     // annotated-tag line (`refs/tags/X^{}` → the commit) or a lightweight tag whose
@@ -184,19 +188,20 @@ pub fn parse_ls_remote(stdout: &str) -> Vec<LsRef> {
 }
 
 /// The cheap, ls-remote-only durability signal for `update`'s pin-time warning.
-/// One round-trip per source, no ancestry fetch — so `update`, which
-/// resolves several sources, stays fast; the deep reachability check is
-/// `verify-sources`' [`probe`] job.
+/// One round-trip per source, and no ancestry fetch, so `update`, which resolves
+/// several sources, stays fast. The deep reachability check is `verify-sources`'
+/// [`probe`] job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinWarning {
     /// The commit is a tag target — durable, no warning.
     Durable,
-    /// The commit is an ephemeral branch tip — a force-push/rebase orphans it; the
-    /// string names the branch. Warn (pin a tag).
+    /// The commit is an ephemeral branch tip, which a force-push or rebase orphans.
+    /// The string names the branch. Warn (pin a tag).
     Ephemeral(String),
-    /// The commit is advertised by no tag and no current branch tip — a hard note:
-    /// it may exist only in a local checkout (the mpp anti-pattern) and is not
-    /// reproducible from upstream. `verify-sources` confirms reachable-vs-orphaned.
+    /// The commit is advertised by no tag and no current branch tip, which is a hard
+    /// note. It might exist only in a local checkout (the mpp anti-pattern), and is
+    /// not reproducible from upstream. `verify-sources` confirms
+    /// reachable-vs-orphaned.
     Unadvertised,
     /// The ls-remote could not run (network/timeout) — noted, never blocks `update`.
     Skipped(String),
@@ -230,10 +235,10 @@ fn run_ls_remote(url: &str) -> Result<Vec<LsRef>, String> {
 /// The refs `url` advertises — one bounded `git ls-remote`, parsed.
 ///
 /// The whole network cost of both read-only surveys over a remote. `verify-sources`
-/// spends it through [`probe`] (which may then follow up with an ancestry fetch);
-/// `outdated` spends it here once per *URL* and compares every pin that names that
-/// URL against the one advertisement, since several recipes commonly share a kernel
-/// or patches repo.
+/// spends it through [`probe`], which can then follow up with an ancestry fetch.
+/// `outdated` spends it here once per *URL*, and compares every pin that names that
+/// URL against the one advertisement. Several recipes commonly share a kernel or
+/// patches repo.
 ///
 /// # Errors
 ///
@@ -259,11 +264,11 @@ pub fn pin_warning(url: &str, reference: &str, commit: &str) -> PinWarning {
 
 /// Probe one pin's durability against its configured `url`.
 ///
-/// One `ls-remote` classifies tag/tip cheaply; a commit that is neither is put
-/// through a bounded ancestry check — a cheap fetch-by-sha, then a
-/// timeout-bounded full-history fetch — so a reachable-but-untagged commit is told
-/// from an orphaned one, while a huge-history repo reports `skipped` rather than
-/// hanging. Never mutates the configured remote and never writes the lock.
+/// One `ls-remote` classifies tag/tip cheaply. A commit that is neither is put
+/// through a bounded ancestry check: a cheap fetch-by-sha, then a timeout-bounded
+/// full-history fetch. A reachable-but-untagged commit is thereby told from an
+/// orphaned one, while a huge-history repo reports `skipped` rather than hanging.
+/// Never mutates the configured remote and never writes the lock.
 pub fn probe(url: &str, reference: &str, commit: &str) -> Durability {
     let refs = match run_ls_remote(url) {
         Ok(refs) => refs,

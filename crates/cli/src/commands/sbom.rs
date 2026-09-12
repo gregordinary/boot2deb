@@ -3,10 +3,10 @@
 //! Reads two documents a build already published — the provenance manifest and the
 //! solved package manifest beside it — and renders them. Offline, and it builds
 //! nothing: an SBOM describes an image that exists, so the input is a *published
-//! build* rather than a recipe's lock. A lock says what an image would be made of;
-//! only a build says what one is.
+//! build* rather than a recipe's lock. A lock says what an image would be made of.
+//! Only a build says what one is.
 //!
-//! All the deciding is [`boot2deb_core::sbom`]; this module finds the files, reads
+//! All the deciding is [`boot2deb_core::sbom`]. This module finds the files, reads
 //! them, and writes the JSON.
 
 use boot2deb_core::sbom::{cyclonedx, spdx, Sbom};

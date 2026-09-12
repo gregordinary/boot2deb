@@ -1,10 +1,10 @@
 //! `update`: resolve upstream refs, hash the blobs, and write the recipe's `.lock`.
 //!
-//! The sole path that consults upstream — `build` reads only the lock. An omitted
-//! per-tree ref flag re-pins the config layer's declared ref, so an authored
-//! constraint bump propagates, while a lock pinned to a bare commit sha is left
-//! alone as a deliberate hand-pin ([`boot2deb_core::repin`]); the kernel, whose
-//! config declares no ref, inherits the previous lock's. After the lock is written,
+//! The sole path that consults upstream, since `build` reads only the lock. An
+//! omitted per-tree ref flag re-pins the config layer's declared ref, so an authored
+//! constraint bump propagates. A lock pinned to a bare commit sha is left alone as a
+//! deliberate hand-pin ([`boot2deb_core::repin`]). The kernel, whose config declares
+//! no ref, inherits the previous lock's. After the lock is written,
 //! every pinned source is checked for re-fetch durability and any
 //! ephemeral/unadvertised pin is flagged (advisory — it never blocks the write).
 

@@ -2,21 +2,22 @@
 //! run against.
 //!
 //! An image's `[built_with]` provenance names the boot2deb that produced it, and the
-//! commit there is stamped at *compile* time by this crate's build script. That is the
-//! truthful capture point, because the binary is the builder: an installed `boot2deb`
-//! has no source tree to consult, and reading whatever checkout happened to be nearby
-//! at run time would record a different claim than the one the field makes.
+//! commit there is stamped at *compile* time by this crate's build script. That is
+//! the truthful capture point, because the binary is the builder. An installed
+//! `boot2deb` has no source tree to consult. Reading whatever checkout happened to
+//! be nearby at run time would record a different claim than the one the field
+//! makes.
 //!
 //! The cost of that correctness is a development-loop hazard. Commit, forget to
-//! `cargo build`, and the next image is stamped with the commit *before* yours — a
-//! wrong answer that first becomes visible in a provenance file written at the end of
-//! the build, after the compiles have already been paid for. Worse, an amended commit
+//! `cargo build`, and the next image is stamped with the commit *before* yours. That
+//! wrong answer first becomes visible in a provenance file written at the end of the
+//! build, after the compiles are already paid for. Worse, an amended commit
 //! leaves the stamp naming an object no branch reaches, so the record points at
 //! nothing anyone else can resolve.
 //!
 //! So the mismatch is detected up front instead, from two cheap `git` reads, and
-//! [`Freshness`] is what a caller gates on. Relinking the CLI is seconds; discovering
-//! the stamp is wrong afterwards costs the whole build.
+//! [`Freshness`] is what a caller gates on. Relinking the CLI is seconds.
+//! Discovering the stamp is wrong afterwards costs the whole build.
 
 use boot2deb_core::ConfigRoot;
 use std::path::Path;

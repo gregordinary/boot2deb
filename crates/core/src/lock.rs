@@ -1,5 +1,5 @@
-//! Lockfile format — the *resolved exact pins* for a recipe. Populated from
-//! upstream by `boot2deb update`; `build` reads only the lock and never resolves
+//! Lock format — the *resolved exact pins* for a recipe. Populated from
+//! upstream by `boot2deb update`. `build` reads only the lock and never resolves
 //! "latest".
 
 use crate::model::ExtraDeb;
@@ -114,43 +114,43 @@ const LOCK_BANNER: &str = "\
 # re-run `boot2deb update` to re-resolve within the recipe's constraints.
 ";
 
-/// The resolved exact pins for a recipe. `boot2deb build` reads only this;
+/// The resolved exact pins for a recipe. `boot2deb build` reads only this.
 /// `boot2deb update` is the sole writer, re-resolving upstream within the
 /// recipe's constraints. Keeping old locks is what keeps old builds reproducible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lock {
     /// Exact kernel pin. Present iff the build **compiles** a kernel. A
-    /// distro-package kernel is installed from the mirror like any other package, so
-    /// its exact version and hash live in the solved package manifest
-    /// ([`RootfsPin::manifest`]) and there is no commit to pin here; the committed
+    /// distro-package kernel is installed from the mirror like any other package. Its
+    /// exact version and hash live in the solved package manifest
+    /// ([`RootfsPin::manifest`]), and there is no commit to pin here. The committed
     /// lock then omits the `[kernel]` table entirely, rather than recording a source
     /// dependency the build does not have.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel: Option<KernelPin>,
     /// Exact patch-series pin. Present iff the resolved kernel names a patch
-    /// series. A kernel that applies no series never reads the `patches` repo, so
-    /// pinning a commit would record provenance for a dependency the build does not
-    /// have; the committed lock then omits the `[patches]` table entirely.
+    /// series. A kernel that applies no series never reads the `patches` repo.
+    /// Pinning a commit would then record provenance for a dependency the build does
+    /// not have. The committed lock omits the `[patches]` table entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patches: Option<PatchesPin>,
     /// Exact u-boot pin. Present iff the build's boot method **compiles u-boot**
-    /// (`rockchip-rkbin`). A depthcharge board's firmware is its own — coreboot in an
-    /// SPI chip — so nothing bootloader-shaped is fetched or built, and the committed
+    /// (`rockchip-rkbin`). A depthcharge board's firmware is its own, coreboot in an
+    /// SPI chip. Nothing bootloader-shaped is fetched or built, and the committed
     /// lock omits the `[uboot]` table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot: Option<UbootPin>,
     /// Exact u-boot patch-series pin. Present iff the build's boot method compiles
     /// u-boot **and** the selected u-boot series names a real series (not the
-    /// pristine sentinel). Symmetric with [`patches`](Self::patches) — the kernel and
-    /// u-boot patch axes pin independently, so a u-boot-only build carries this with
-    /// no `[patches]`, and an image build can carry both — and reuses [`PatchesPin`]
-    /// verbatim. Omitted from the committed lock when u-boot ships pristine.
+    /// pristine sentinel). Symmetric with [`patches`](Self::patches), and reuses
+    /// [`PatchesPin`] verbatim. The kernel and u-boot patch axes pin independently. A
+    /// u-boot-only build carries this with no `[patches]`, and an image build can
+    /// carry both. Omitted from the committed lock when u-boot ships pristine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot_patches: Option<PatchesPin>,
     /// Exact media-accel userspace source pins, one `[[userspace]]` entry per tree the
     /// build compiles, in the SoC's declared order. Non-empty iff the recipe builds the
-    /// HW transcode stack (a `requires_media_accel` feature is selected); the committed
+    /// HW transcode stack (a `requires_media_accel` feature is selected). The committed
     /// lock omits the array entirely for a base build, which resolves and builds no
     /// userspace or ffmpeg node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -161,14 +161,14 @@ pub struct Lock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ffmpeg: Option<FfmpegPins>,
     /// Exact out-of-tree kernel-module source pins — one per device `device_kmods`
-    /// entry, in declared order. Present iff the resolved board declares any; the
+    /// entry, in declared order. Present iff the resolved board declares any. The
     /// committed lock omits the `[[kmods]]` array entirely when empty, like
     /// [`extra_debs`](Self::extra_debs). Each is a git pin the `kmod` build node fetches,
     /// patches, and builds against the kernel tree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kmods: Vec<KmodPin>,
     /// Rootfs suite + content-pinned package manifest. Present iff the build
-    /// produces an image; a u-boot-only build resolves no rootfs, so the committed
+    /// produces an image. A u-boot-only build resolves no rootfs, so the committed
     /// lock omits the `[rootfs]` table (as it already omits `[kernel]` for a build
     /// that compiles no kernel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,12 +181,12 @@ pub struct Lock {
     /// Pre-built `.deb`s pulled from outside the Debian mirror,
     /// content-pinned by sha256 — the resolved [`ExtraDeb`] set recorded verbatim
     /// (the sha256 is already exact, so there is nothing to resolve). `update`
-    /// fetches + verifies + stores each; `build` materializes from the store into
+    /// fetches + verifies + stores each. `build` materializes from the store into
     /// the local apt repo. Empty (and omitted from the committed file) when no layer
     /// or feature adds one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_debs: Vec<ExtraDeb>,
-    /// `snapshot.debian.org` availability backstop; captured but dormant.
+    /// `snapshot.debian.org` availability backstop, captured but dormant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<SnapshotPin>,
 }
@@ -204,7 +204,7 @@ impl Lock {
     }
 
     /// Parse a lock from text — the form for a lock named by *path* rather than by
-    /// recipe, which is how a comparison reads an older one out of a checkout or an
+    /// recipe. That is how a comparison reads an older one out of a checkout or an
     /// artifact directory. [`ConfigRoot::lock`](crate::ConfigRoot::lock) is the form
     /// for a lock named by recipe, and is the one a build uses.
     ///
@@ -223,15 +223,20 @@ impl Lock {
         })
     }
 
-    /// Every upstream commit this lock pins, across all source axes — the kernel and
-    /// u-boot trees, both patch-series checkouts, each userspace and ffmpeg tree, and
-    /// each out-of-tree kmod. Blob, extra-deb, and rootfs pins are content hashes, not
-    /// commits, so they are not here.
+    /// Every upstream commit this lock pins, across all source axes:
     ///
-    /// This is the *liveness* set a commit-addressed cache is swept against: a checkout
+    /// - The kernel and u-boot trees
+    /// - Both patch-series checkouts
+    /// - Each userspace and ffmpeg tree
+    /// - Each out-of-tree kmod
+    ///
+    /// Blob, extra-deb, and rootfs pins are content hashes, not commits, so they are
+    /// not here.
+    ///
+    /// This is the *liveness* set a commit-addressed cache is swept against. A checkout
     /// keyed on a commit no lock names can be re-fetched, so it is dead. Deliberately
-    /// the union of every axis rather than only the two a verify gate fetches today —
-    /// over-reporting keeps a live tree; under-reporting deletes one.
+    /// the union of every axis rather than only the two a verify gate fetches today.
+    /// Over-reporting keeps a live tree, and under-reporting deletes one.
     pub fn pinned_commits(&self) -> std::collections::BTreeSet<&str> {
         let mut out = std::collections::BTreeSet::new();
         out.extend(self.kernel.iter().map(|p| p.commit.as_str()));
@@ -257,7 +262,7 @@ pub struct KernelPin {
     pub id: String,
     /// Clone URL the commit was pinned from (the definition's resolved source).
     /// A commit id is meaningful only within its repo, so every commit pin
-    /// records its source; the drift gate compares it against a fresh resolve,
+    /// records its source. The drift gate compares it against a fresh resolve,
     /// catching a config edit that would reinterpret the pin in a different
     /// repo.
     pub source: String,
@@ -274,17 +279,19 @@ pub struct KernelPin {
 /// was resolved, and the exact commit.
 ///
 /// Symmetric with [`KernelPin`] and [`UbootPin`] on purpose. `commit` alone
-/// answers *reproducibility* ("these exact bytes") but nothing else: a bare SHA
-/// cannot tell a reader which patch release worked with which kernel, and — more
-/// sharply — cannot be graded for durability. `update` takes this pin from a local
-/// checkout's HEAD rather than resolving it against a remote, which makes it the
-/// pin *most* likely to name a commit that exists nowhere else, and `source` is what
-/// lets it join the durability check every other fetched axis already gets.
+/// answers *reproducibility* ("these exact bytes") but nothing else. A bare SHA
+/// cannot tell a reader which patch release worked with which kernel, and cannot be
+/// graded for durability.
+///
+/// `update` takes this pin from a local checkout's HEAD rather than resolving it
+/// against a remote. That makes it the pin *most* likely to name a commit that exists
+/// nowhere else. `source` is what lets it join the durability check every other
+/// fetched axis already gets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchesPin {
     /// Patch series names, applied in listed order. The kernel axis composes several
-    /// (a SoC-fix series plus an out-of-tree driver series, say); the u-boot axis
+    /// (a SoC-fix series plus an out-of-tree driver series, say). The u-boot axis
     /// always names exactly one. All come from the one repo, `ref`, and `commit` below.
     pub series: Vec<String>,
     /// Clone URL the commit was pinned from (the kernel definition's
@@ -342,16 +349,16 @@ pub struct GitPin {
 ///
 /// One `[[userspace]]` entry per tree the SoC declares *and* this build enables, keyed
 /// by [`name`](Self::name). A list rather than three named tables, mirroring
-/// [`UserspaceTree`](crate::model::UserspaceTree): the set is the SoC's to state, so a
+/// [`UserspaceTree`](crate::model::UserspaceTree). The set is the SoC's to state, so a
 /// part with a different stack pins a different set without a schema change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserspacePin {
-    /// Matches the SoC's `[[userspace]]` entry name; the drift gate compares the two.
+    /// Matches the SoC's `[[userspace]]` entry name. The drift gate compares the two.
     pub name: String,
     /// Clone URL the commit was pinned from. Compared against a fresh resolve by the
-    /// drift gate, so a re-pointed fork re-pins rather than fetching an old commit from
-    /// a repository that need not contain it.
+    /// drift gate. A re-pointed fork then re-pins rather than fetching an old commit
+    /// from a repository that need not contain it.
     pub source: String,
     /// The human-readable ref this pin came from (TOML key `ref`).
     #[serde(rename = "ref")]
@@ -362,8 +369,8 @@ pub struct UserspacePin {
 }
 
 /// Pinned out-of-tree kernel-module source — one per device `device_kmods` entry. A
-/// named git pin; the `subdir`/patch-subset/`make_args` that shape the build are config
-/// (re-resolved each build and folded into the node signature), not pinned here — the
+/// named git pin. The `subdir`/patch-subset/`make_args` that shape the build are config
+/// (re-resolved each build and folded into the node signature), not pinned here. The
 /// commit already content-addresses the repo's own quilt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -384,7 +391,7 @@ pub struct KmodPin {
 
 /// Pinned ffmpeg sources — the V4L2 base plus the Rockchip provenance tree the
 /// graft patch series was derived from. `build` fetches `base` and applies
-/// the series' ffmpeg `git am` series; the graft is not re-derived from
+/// the series' ffmpeg `git am` series. The graft is not re-derived from
 /// `rockchip`, which is recorded purely as provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -449,7 +456,7 @@ pub struct BlobsPin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SnapshotMode {
-    /// Provenance only; builds use the live mirror.
+    /// Provenance only. Builds use the live mirror.
     Off,
     /// Live mirror first, snapshot fills anything that 404s.
     Fallback,

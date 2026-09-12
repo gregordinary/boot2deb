@@ -1,6 +1,6 @@
 //! The clap surface: the command tree, each subcommand's argument group, and the
-//! value parsers that turn flag strings into the typed model. Pure — parsing and
-//! validation only; the handlers in [`crate::commands`] own every side effect.
+//! value parsers that turn flag strings into the typed model. Pure, parsing and
+//! validation only. The handlers in [`crate::commands`] own every side effect.
 
 use crate::commands;
 use boot2deb_core::lock::SnapshotMode;
@@ -21,15 +21,15 @@ pub(crate) struct Cli {
     pub(crate) root: PathBuf,
 
     /// Out-of-tree overlay directory holding your own devices/, socs/, kernels/,
-    /// features/, or recipes/ files. Repeatable; later overlays win, and any
+    /// features/, or recipes/ files. Repeatable. Later overlays win, and any
     /// overlay wins over the shipped root — a same-named layer is deep-merged
     /// last-wins, a new-named one adds a target. Fragments/blobs/overlay trees an
     /// overlay ships are resolved along the same path.
     #[arg(long = "overlay", global = true)]
     pub(crate) overlay: Vec<PathBuf>,
 
-    /// Machine-readable output: `list-*`, `resolve`, `doctor`, and the `verify-*`
-    /// commands print a JSON document; `build` streams NDJSON events (one JSON object
+    /// Machine-readable output. `list-*`, `resolve`, `doctor`, and the `verify-*`
+    /// commands print a JSON document. `build` streams NDJSON events (one JSON object
     /// per line, tagged by its `event` field, artifacts included) instead of the human
     /// rendering. A command with no machine form rejects the flag rather than ignoring
     /// it. Errors still go to stderr as text.
@@ -37,7 +37,7 @@ pub(crate) struct Cli {
     pub(crate) json: bool,
 
     /// Print only what a command produced — artifact paths and errors — and none of
-    /// its progress. Conflicts with `--verbose`; ignored under `--json`, where the
+    /// its progress. Conflicts with `--verbose`. Ignored under `--json`, where the
     /// stream is the record.
     #[arg(long, short, global = true, conflicts_with = "verbose")]
     pub(crate) quiet: bool,
@@ -45,7 +45,7 @@ pub(crate) struct Cli {
     /// Print every line the build's subprocesses emit (`make`, `git`,
     /// `dpkg-buildpackage`) as well as the step boundaries and each stage's own
     /// decisions. The default shows the latter only, which keeps a tens-of-minutes
-    /// compile readable; reach for this when a stage fails or hangs.
+    /// compile readable. Reach for this when a stage fails or hangs.
     #[arg(long, short, global = true)]
     pub(crate) verbose: bool,
 
@@ -77,7 +77,7 @@ pub(crate) enum Command {
     },
     /// Print the complete flag reference: every command's positional arguments and
     /// flags, generated from this command tree so it cannot drift from the binary.
-    /// `--help` answers this per command; this answers it for all of them at once.
+    /// `--help` answers this per command. This answers it for all of them at once.
     CliReference {
         /// Emit the `docs/src/reference/cli-flags.md` page verbatim, for regenerating
         /// it after a flag is added, removed, or re-described.
@@ -86,7 +86,7 @@ pub(crate) enum Command {
     },
     /// Print a shell completion script on stdout, for the shell named. Install it
     /// where your shell looks (e.g. `boot2deb completions bash > \
-    /// ~/.local/share/bash-completion/completions/boot2deb`); boot2deb writes no files
+    /// ~/.local/share/bash-completion/completions/boot2deb`). boot2deb writes no files
     /// itself, since where they belong is the packager's call.
     Completions {
         /// Shell to generate for.
@@ -97,10 +97,10 @@ pub(crate) enum Command {
     /// `boot2deb man > /usr/share/man/man1/boot2deb.1`.
     Man,
     /// Scaffold a new `devices/<name>.toml` (and, by default, a matching recipe)
-    /// from the typed model: it offers the valid SoC/boot-method/kernel/feature
-    /// choices, fills every derivable value, and marks the researched values
+    /// from the typed model. It offers the valid SoC/boot-method/kernel/feature
+    /// choices and fills every derivable value. It marks the researched values
     /// (`kernel_dtb`, `uboot_defconfig`, the rkbin blobs) with `# TODO:` comments.
-    /// Interactive on a terminal; drive it with flags for scripting. Writes into the
+    /// Interactive on a terminal. Drive it with flags for scripting. Writes into the
     /// highest-precedence `--overlay` when one is given, else the primary root.
     NewDevice {
         /// Device name — the `devices/<name>.toml` (and recipe) file stem.
@@ -117,23 +117,24 @@ pub(crate) enum Command {
     },
     /// Preflight the host: arch/OS facts, and whether every tool a build needs is
     /// present — with the exact per-distro install command for anything missing. With
-    /// a target it asks only for what *that* recipe will invoke; bare, it runs the
+    /// a target it asks only for what *that* recipe will invoke. Bare, it runs the
     /// requirements every board shares. A missing required tool is a non-zero exit.
     Doctor {
         /// Device/recipe to preflight. Omit to check only the requirements no board
         /// can opt out of (user namespaces, the `.deb` packaging tools, the vendored
         /// apt trust anchors) — the answerable half before a board is chosen.
         target: Option<String>,
-        /// Scratch dir the target would build in; default: `<root>/build/<target>`. Only the
-        /// overlay check reads it — it probes the filesystem that dir lands on, so
-        /// checking a build you will run with `--work-dir` needs the same path here.
+        /// Scratch dir the target would build in. Default: `<root>/build/<target>`.
+        /// Only the overlay check reads it, and it probes the filesystem that dir
+        /// lands on. Checking a build you will run with `--work-dir` therefore needs
+        /// the same path here.
         #[arg(long)]
         work_dir: Option<std::path::PathBuf>,
         #[command(flatten)]
         overrides: OverrideArgs,
     },
     /// Resolve upstream refs + hash blobs and write the recipe's `.lock`.
-    /// The sole path that consults upstream; `build` reads only the lock.
+    /// The sole path that consults upstream. `build` reads only the lock.
     Update {
         /// Recipe to resolve (e.g. turing-rk1/forky).
         recipe: String,
@@ -149,8 +150,8 @@ pub(crate) enum Command {
         args: VerifyArgs,
     },
     /// Generate the kernel `.config` (base defconfig + fragments via
-    /// `merge_config.sh`) on a patched kernel tree; with a reference config,
-    /// additionally check byte-identical `CONFIG_*` parity against it.
+    /// `merge_config.sh`) on a patched kernel tree. With a reference config, it
+    /// additionally checks byte-identical `CONFIG_*` parity against it.
     VerifyConfig {
         /// Recipe whose resolved kernel names the base defconfig + fragments.
         recipe: String,
@@ -159,19 +160,21 @@ pub(crate) enum Command {
     },
     /// Ask the archives a build would resolve against whether they carry every
     /// package the recipe names, and report the ones they do not. Runs the read half
-    /// of a resolve — release and indexes, nothing downloaded, no closure computed —
-    /// so one pass answers every name at once, before any build work starts.
+    /// of a resolve: release and indexes, nothing downloaded, no closure computed.
+    /// One pass therefore answers every name at once, before any build work starts.
     VerifyPackages {
         /// Recipe whose resolved package set to check (e.g. turing-rk1/forky).
         recipe: String,
     },
     /// Hold a finished image artifact to the invariants that are checkable without a
-    /// board: the artifact set is present, the plan document parses and its digest
-    /// matches what the provenance records, `[[archives]]` is well formed, the ext4
-    /// filesystem is exactly its GPT partition, the rootfs partition is marked
-    /// bootable, and a fitted `--image-size` left the slack it asked for. Read-only,
-    /// no root: only the head of the artifact is decompressed. The off-board half of
-    /// the hardware gate.
+    /// board. It checks that the artifact set is present. It checks that the plan
+    /// document parses, that its digest matches what the provenance records, and that
+    /// `[[archives]]` is well formed. It checks that the ext4 filesystem is exactly
+    /// its GPT partition, and that the rootfs partition is marked bootable. It checks
+    /// that a fitted `--image-size` left the slack it asked for.
+    ///
+    /// Read-only, no root: only the head of the artifact is decompressed. The
+    /// off-board half of the hardware gate.
     VerifyImage {
         /// Recipe whose built image to verify (e.g. turing-rk1/forky).
         recipe: String,
@@ -182,7 +185,7 @@ pub(crate) enum Command {
     },
     /// Probe each locked source pin against its *configured* upstream URL and
     /// report whether it is a durable tag, an ephemeral branch, or ORPHANED (not
-    /// re-fetchable) — the source-pin durability survey as a command.
+    /// re-fetchable). This is the source-pin durability survey as a command.
     /// Read-only: `git ls-remote` plus a timeout-bounded ancestry check, no build,
     /// no checkout, no hardware.
     VerifySources {
@@ -194,25 +197,26 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: PatchAction,
     },
-    /// Drive the build stages (kernel, u-boot, userspace, ffmpeg, and the disk
-    /// image) from the recipe's lock, streaming the structured build event stream.
-    /// Reads only the lock for pinned sources; the lock-independent
-    /// image axes (`--layout`, `--image-size`) are overridable, while re-pinning a
-    /// source axis (kernel/suite/features/boot-method) is `update`'s job.
+    /// Drive the build stages from the recipe's lock, streaming the structured build
+    /// event stream. The stages are the kernel, u-boot, userspace and ffmpeg
+    /// compiles, then the rootfs and the disk image.
+    /// Reads only the lock for pinned sources. The lock-independent image axes
+    /// (`--layout`, `--image-size`) are overridable, while re-pinning a source axis
+    /// (kernel/suite/features/boot-method) is `update`'s job.
     Build {
-        /// Recipe to build (e.g. turing-rk1/forky); its `.lock` must exist.
+        /// Recipe to build (e.g. turing-rk1/forky). Its `.lock` must exist.
         recipe: String,
         #[command(flatten)]
         args: BuildArgs,
     },
     /// Rebuild an image from the plan document a previous build published, instead of
-    /// resolving the archive afresh. The lock pins the sources; the plan pins the
+    /// resolving the archive afresh. The lock pins the sources. The plan pins the
     /// package versions the archive served, which the lock cannot. Takes every `build`
-    /// flag, and differs from it in one way: the rootfs installs the plan's exact set by
-    /// the digests it records, reading neither a release nor a package index — so the
+    /// flag, and differs from it in one way. The rootfs installs the plan's exact set
+    /// by the digests it records, reading neither a release nor a package index. The
     /// plan, not an archive signature, is what those digests chain to.
     Reproduce {
-        /// Recipe to reproduce (e.g. turing-rk1/forky); its `.lock` must exist.
+        /// Recipe to reproduce (e.g. turing-rk1/forky). Its `.lock` must exist.
         recipe: String,
         /// Directory holding the published `<stem>.plan` (and, for the builder
         /// advisory, `<stem>.provenance.toml`) — the directory the image shipped from.
@@ -223,10 +227,11 @@ pub(crate) enum Command {
         #[command(flatten)]
         args: BuildArgs,
     },
-    /// Compare two build points: the packages, the kernel pin and its requested
-    /// config, the patch series and the patch files behind them, every other source
-    /// pin, the rkbin blobs, and what built each side. Each side is a recipe name, a
-    /// `.lock`, or a `.provenance.toml`; mixing is allowed, and a section only one
+    /// Compare two build points on the packages, the kernel pin and its requested
+    /// config, and the patch series and the patch files behind them. It also compares
+    /// every other source pin, the rkbin blobs, and what built each side. Each side is
+    /// a recipe name, a
+    /// `.lock`, or a `.provenance.toml`. Mixing is allowed, and a section only one
     /// side can answer is reported unavailable rather than as a change. Offline —
     /// reads documents the build already wrote.
     Diff {
@@ -248,7 +253,7 @@ pub(crate) enum Command {
     /// installed package with its version and sha256, every pinned source tree the image
     /// was compiled from, every rkbin blob, and every externally-fetched `.deb`.
     /// Licenses are declared NOASSERTION — boot2deb records none, and inventing them
-    /// would produce a field that looks authoritative and is not. Offline; builds
+    /// would produce a field that looks authoritative and is not. Offline, and builds
     /// nothing.
     Sbom {
         /// Recipe whose published image to describe (e.g. turing-rk1/forky), or a path
@@ -261,19 +266,19 @@ pub(crate) enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
         /// Rootfs feature the published image was built with, repeatable — the same
-        /// selection `build --feature` used. It names which image's documents to read;
-        /// passing the reference directly (`sbom turing-rk1/forky+jellyfin`) is
-        /// equivalent. Ignored when a `.provenance.toml` path is given, which already
-        /// names one image.
+        /// selection `build --feature` used. It names which image's documents to
+        /// read, and passing the reference directly
+        /// (`sbom turing-rk1/forky+jellyfin`) is equivalent. Ignored when a
+        /// `.provenance.toml` path is given, which already names one image.
         #[arg(long = "feature")]
         features: Vec<String>,
     },
     /// Break down what an image's package set weighs, from the plan document a build
     /// published — per binary package, per source package, or per repository. The
     /// figures are the archives' own `Installed-Size` estimates in kibibytes, so they
-    /// answer "what did the packages contribute" and not "how large is the image":
-    /// they exclude filesystem overhead and everything the image gains after `dpkg`.
-    /// Offline; builds nothing.
+    /// answer "what did the packages contribute" and not "how large is the image".
+    /// They exclude filesystem overhead and everything the image gains after `dpkg`.
+    /// Offline, and builds nothing.
     Size {
         /// Recipe whose published image to weigh (e.g. turing-rk1/forky), or a path to
         /// a `.plan` shipped with an image.
@@ -284,54 +289,54 @@ pub(crate) enum Command {
         /// compiled).
         #[arg(long, value_enum, default_value = "package")]
         by: commands::size::ByArg,
-        /// Show only the heaviest N rows; `0` shows every row. The totals always
+        /// Show only the heaviest N rows. `0` shows every row. The totals always
         /// describe the whole set, so a truncated view still says what it is a view of.
         #[arg(long, default_value = "25")]
         top: usize,
         /// Rootfs feature the published image was built with, repeatable — the same
-        /// selection `build --feature` used. It names which image's plan to read;
+        /// selection `build --feature` used. It names which image's plan to read, and
         /// passing the reference directly (`size turing-rk1/forky+jellyfin`) is
         /// equivalent. Ignored when a `.plan` path is given, which already names one
         /// image.
         #[arg(long = "feature")]
         features: Vec<String>,
     },
-    /// Survey what has moved upstream since the locks were pinned: for each recipe's
-    /// git source pins, whether a newer release tag exists (and how far behind the
-    /// pin is), or whether a pinned branch's tip has moved. Read-only — one
+    /// Survey what has moved upstream since the locks were pinned. For each recipe's
+    /// git source pins, it reports whether a newer release tag exists (and how far
+    /// behind the pin is), or whether a pinned branch's tip has moved. Read-only — one
     /// `git ls-remote` per distinct remote, no fetch and no re-pin. Being behind is
-    /// not a failure, so this always exits zero; `verify-sources` is the gate, and it
+    /// not a failure, so this always exits zero. `verify-sources` is the gate, and it
     /// answers the different question of whether a pin is still fetchable at all.
     Outdated {
         /// Recipes to survey (e.g. turing-rk1/forky). Default: every recipe in the
         /// config tree.
         recipes: Vec<String>,
     },
-    /// Explain, per compile node, what the next `build` will actually redo: whether it
-    /// reuses or rebuilds the cached source tree (naming the pinned input that moved),
-    /// and whether the durable artifact cache lets it skip the compile entirely.
-    /// Offline: reads the lock, the build stamps, and the artifact store; runs no
-    /// build.
+    /// Explain, per compile node, what the next `build` will actually redo. It says
+    /// whether the cached source tree is reused or rebuilt (naming the pinned input
+    /// that moved), and whether the durable artifact cache lets it skip the compile
+    /// entirely. Offline: it reads the lock, the build stamps and the artifact store,
+    /// and runs no build.
     WhyRebuild {
-        /// Recipe to inspect (e.g. turing-rk1/forky); its `.lock` must exist.
+        /// Recipe to inspect (e.g. turing-rk1/forky). Its `.lock` must exist.
         recipe: String,
         #[command(flatten)]
         args: WhyRebuildArgs,
     },
-    /// Open an interactive shell in the root a build stage compiles in — the same base
-    /// tree, the same layered build-dependencies, the same mounts and the same
+    /// Open an interactive shell in the root a build stage compiles in. It has the
+    /// same base tree, the same layered build-dependencies, and the same mounts and
     /// environment the compile has. The way to diagnose a failed compile by looking at
     /// it rather than by reading what it printed. Provisions the root if this work dir
-    /// has none; needs a terminal.
+    /// has none. Needs a terminal.
     Shell {
-        /// Recipe whose root to enter (e.g. turing-rk1/forky); its `.lock` must exist.
+        /// Recipe whose root to enter (e.g. turing-rk1/forky). Its `.lock` must exist.
         recipe: String,
         #[command(flatten)]
         args: ShellArgs,
     },
     /// Remove a recipe's build scratch (clones, sandbox, rootfs cache) under its work
-    /// dir, or sweep the durable caches every recipe shares, to reclaim disk or force
-    /// a clean rebuild.
+    /// dir, or sweep the durable caches every recipe shares. Either reclaims disk or
+    /// forces a clean rebuild.
     Clean {
         /// Recipe whose build scratch to remove (e.g. turing-rk1/forky). Optional
         /// when every selector given is root-scoped (`--artifacts`,
@@ -367,13 +372,15 @@ pub(crate) enum Command {
         args: SeedArgs,
     },
     /// Boot the built image under QEMU before it is flashed, and assert the
-    /// userland works: systemd reaches multi-user with no failed unit, the
-    /// generated password logs in, first-boot completes, the on-image selftest
-    /// passes in userland mode — and a second boot of the same disk still does,
-    /// the check no single-boot smoke test covers. Boots the suite's generic
-    /// kernel as a fixture; the shipped kernel and the board are not under test.
+    /// userland works. It checks that systemd reaches multi-user with no failed unit
+    /// and that the generated password logs in. It checks that first-boot completes,
+    /// and that the on-image selftest passes in userland mode. A second boot of the
+    /// same disk must
+    /// still do all of that, which is the check no single-boot smoke test covers.
+    /// Boots the suite's generic kernel as a fixture. The shipped kernel and the board
+    /// are not under test.
     Try {
-        /// Recipe whose built image to boot (e.g. turing-rk1/forky); run
+        /// Recipe whose built image to boot (e.g. turing-rk1/forky). Run
         /// `boot2deb build` first.
         recipe: String,
         #[command(flatten)]
@@ -390,8 +397,8 @@ pub(crate) enum Command {
 pub(crate) enum ImageCompressionArg {
     /// `.xz` — the smallest artifact, and what an operator pipes into `dd`.
     Xz,
-    /// `.gz` — larger, but the only container u-boot's `gzwrite` can read, so this
-    /// is the one for an image a board writes to its own disk from the bootloader.
+    /// `.gz` — larger, but the only container u-boot's `gzwrite` can read. This is
+    /// the one for an image a board writes to its own disk from the bootloader.
     Gz,
     /// Emit the raw `.img` only.
     None,
@@ -399,12 +406,13 @@ pub(crate) enum ImageCompressionArg {
 
 /// Resolve the `--compress` values into the engine's ordered container list.
 ///
-/// Order is the operator's preference and is preserved; a format named twice is
+/// Order is the operator's preference and is preserved. A format named twice is
 /// kept once, at its first position, since emitting the same container twice would
-/// just overwrite it. `none` mixed with a real format is rejected rather than
-/// silently resolved either way — the two readings ("no compression" and "compress,
-/// plus nothing") contradict, and guessing would delete a raw image the operator
-/// asked to keep.
+/// just overwrite it.
+///
+/// `none` mixed with a real format is rejected rather than silently resolved either
+/// way. The two readings ("no compression" and "compress, plus nothing") contradict,
+/// and guessing would delete a raw image the operator asked to keep.
 pub(crate) fn image_compression(
     args: &[ImageCompressionArg],
 ) -> Result<Vec<ImageCompression>, String> {
@@ -433,11 +441,11 @@ pub(crate) fn image_compression(
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum StageArg {
     /// The full pipeline: kernel, u-boot, userspace, ffmpeg, rootfs, then the
-    /// disk image — a complete device image from the lock.
+    /// disk image. A complete device image from the lock.
     All,
     /// Only the kernel `.deb`s.
     Kernel,
-    /// Only the board DTB, rebuilt in the already-patched kernel tree — the
+    /// Only the board DTB, rebuilt in the already-patched kernel tree. This is the
     /// board-bring-up loop (edit the `device_dts` source, rebuild, reflash) without a
     /// full kernel build.
     Dtb,
@@ -464,8 +472,8 @@ pub(crate) enum StageArg {
 #[derive(Args)]
 pub(crate) struct BuildArgs {
     /// Rootfs feature to select, repeatable — the same selection `update --feature`
-    /// pinned. It names which lock to build from (`<recipe>+<feature>...`), it does
-    /// not re-resolve one: `update` must have written that variant's lock first, and
+    /// pinned. It names which lock to build from (`<recipe>+<feature>...`), and does
+    /// not re-resolve one. `update` must have written that variant's lock first, and
     /// a selection with no lock is an error naming the `update` line to run. Passing
     /// the reference directly (`build turing-rk1/forky+jellyfin`) is equivalent.
     #[arg(long = "feature")]
@@ -473,26 +481,26 @@ pub(crate) struct BuildArgs {
     /// Which stage(s) to run.
     #[arg(long, value_enum, default_value_t = StageArg::All)]
     pub(crate) stage: StageArg,
-    /// Kernel clone source (git URL or local path); default: the kernel
+    /// Kernel clone source (git URL or local path). Default: the kernel
     /// definition's source URL. A local clone (e.g. ../linux) is far faster.
     #[arg(long)]
     pub(crate) kernel_src: Option<String>,
-    /// u-boot clone source (git URL or local path); default: the boot method's
+    /// u-boot clone source (git URL or local path). Default: the boot method's
     /// `uboot_source`.
     #[arg(long)]
     pub(crate) uboot_src: Option<String>,
-    /// Media-accel userspace clone source, as `NAME=SRC`, repeatable; default: that
+    /// Media-accel userspace clone source, as `NAME=SRC`, repeatable. Default: that
     /// tree's own `[[userspace]]` URL. The SoC declares which trees it has, so each
     /// override names one (`--userspace-src mpp=../mpp-rockchip`). A local checkout is
     /// far faster than a fresh clone. The clone is still made at the locked commit, so
     /// the named tree must contain it.
     #[arg(long = "userspace-src", value_name = "NAME=SRC", value_parser = parse_named_source)]
     pub(crate) userspace_srcs: Vec<(String, String)>,
-    /// ffmpeg base (Kwiboo) clone source; default: the SoC layer's `ffmpeg.base`
+    /// ffmpeg base (Kwiboo) clone source. Default: the SoC layer's `ffmpeg.base`
     /// URL. A local checkout makes the fetch near-instant.
     #[arg(long)]
     pub(crate) ffmpeg_base_src: Option<String>,
-    /// Out-of-tree module clone source, as `NAME=SRC`, repeatable; default: that
+    /// Out-of-tree module clone source, as `NAME=SRC`, repeatable. Default: that
     /// kmod's locked `source`. Unlike the single-tree axes there are several modules,
     /// so each override names the `device_kmods` entry it applies to
     /// (`--kmod-src aic8800=../aic8800`). The clone is still made at the locked
@@ -501,11 +509,11 @@ pub(crate) struct BuildArgs {
     pub(crate) kmod_srcs: Vec<(String, String)>,
     /// Also build an *optional* media-accel userspace tree, by name, repeatable.
     ///
-    /// A tree the SoC marks `optional` is skipped unless named here: libmali is the
-    /// live case — the transcode pipeline rides the VPU and the RGA, not the GPU, so a
-    /// headless box never needs the blob and compiling its variant matrix is minutes
-    /// for nothing. Naming an optional tree also changes what the *whole* userspace
-    /// stage layers, so every tree's cache key moves with it.
+    /// A tree the SoC marks `optional` is skipped unless named here. libmali is the
+    /// live case. The transcode pipeline rides the VPU and the RGA rather than the
+    /// GPU, so a headless box never needs the blob. Compiling its variant matrix
+    /// is minutes for nothing. Naming an optional tree also changes what the *whole*
+    /// userspace stage layers, so every tree's cache key moves with it.
     #[arg(long = "userspace", value_name = "NAME")]
     pub(crate) userspace: Vec<String>,
     /// `patches` repo checkout the series is read from. Omit to use the config
@@ -517,7 +525,7 @@ pub(crate) struct BuildArgs {
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
     /// Clone URL for auto-fetching the `patches` series when no local checkout is
-    /// present; default: the repo the lock's patch pin names. The series is
+    /// present. Default: the repo the lock's patch pin names. The series is
     /// fetched at the lock's `patches.commit` into a durable cache and its pin
     /// enforced. Ignored when `--patches-path` or the sibling `../patches` supplies a
     /// checkout.
@@ -528,24 +536,24 @@ pub(crate) struct BuildArgs {
     pub(crate) blobs_dir: Option<PathBuf>,
     /// Debian archive keyring every root this build provisions is verified
     /// against (default: the vendored
-    /// blobs/keyrings/debian-archive-keyring.gpg; omit on a Debian host to use
-    /// its apt trust store).
+    /// blobs/keyrings/debian-archive-keyring.gpg). Omit it on a Debian host to use
+    /// its apt trust store.
     #[arg(long)]
     pub(crate) keyring: Option<PathBuf>,
     /// Trust an overlay-shipped copy of the archive keyring. By default an overlay
     /// that ships blobs/keyrings/debian-archive-keyring.gpg is refused as a
-    /// trust-anchor swap; this opts into the overlay's copy explicitly.
+    /// trust-anchor swap. This opts into the overlay's copy explicitly.
     #[arg(long)]
     pub(crate) unsafe_overlay_keyring: bool,
     /// Scratch dir for clones + builds (default: `<root>/build/RECIPE`).
     #[arg(long)]
     pub(crate) work_dir: Option<PathBuf>,
     /// Where produced artifacts are staged (default: WORK_DIR/artifacts). Every
-    /// artifact is named for the recipe, so several builds may share one directory.
+    /// artifact is named for the recipe, so several builds can share one directory.
     #[arg(long)]
     pub(crate) out_dir: Option<PathBuf>,
     /// `make -j` parallelism (default: host available parallelism). Must be at
-    /// least 1 — 0 would reach `make -j0` ("unlimited"), never what a typo means.
+    /// least 1, since 0 would reach `make -j0` ("unlimited"), never what a typo means.
     #[arg(long, value_parser = parse_jobs)]
     pub(crate) jobs: Option<usize>,
     /// Rootfs `tar` archive for the image stage. Optional: `--stage image`
@@ -559,7 +567,7 @@ pub(crate) struct BuildArgs {
     /// Containers to compress the finished image(s) into, comma-separated and in
     /// preference order — `xz` (default), `gz`, or `none`. Use `gz` for an image
     /// u-boot will write to a disk itself: `gzwrite` reads gzip only, never xz.
-    /// `--compress xz,gz` emits both; the first named is what the `next:` hint
+    /// `--compress xz,gz` emits both, and the first named is what the `next:` hint
     /// points at.
     #[arg(
         long,
@@ -574,13 +582,13 @@ pub(crate) struct BuildArgs {
     /// only output anyway.
     #[arg(long)]
     pub(crate) keep_raw: bool,
-    /// Image layout override (`combined` | `split`); default: the recipe/device
+    /// Image layout override (`combined` | `split`). Default: the recipe/device
     /// layout. Lock-independent — it changes only image packaging, not any pinned
     /// source, so it is safe to set against an existing lock.
     #[arg(long, value_parser = parse_layout)]
     pub(crate) layout: Option<Layout>,
     /// Image-size override (e.g. `4G`, or `fit+20%` to size the image to its contents
-    /// with a fifth of the rootfs left free); default: the recipe/device `image_size`.
+    /// with a fifth of the rootfs left free). Default: the recipe/device `image_size`.
     /// Lock-independent — it changes only image geometry, not any pinned source.
     #[arg(long = "image-size")]
     pub(crate) image_size: Option<String>,
@@ -591,13 +599,13 @@ pub(crate) struct BuildArgs {
     #[arg(long, value_parser = parse_snapshot_mode)]
     pub(crate) snapshot: Option<SnapshotMode>,
     /// After a successful build, capture the current UTC time as a
-    /// `snapshot.debian.org` timestamp into the lock (dormant, `mode = off`), so the
-    /// solved versions stay fetchable after they rotate off the live mirror; a later
+    /// `snapshot.debian.org` timestamp into the lock (dormant, `mode = off`). The
+    /// solved versions then stay fetchable after they rotate off the live mirror. A later
     /// build activates it with `--snapshot fallback|pin`.
     #[arg(long)]
     pub(crate) save_snapshot: bool,
     /// After the rootfs stage, commit the solved package manifest beside the lock
-    /// and record its sha256 in the lock (`[rootfs].manifest_sha256`) — the
+    /// and record its sha256 in the lock (`[rootfs].manifest_sha256`). That is the
     /// reproducibility pin later builds verify a fresh solve against.
     #[arg(long)]
     pub(crate) save_manifest: bool,
@@ -609,40 +617,40 @@ pub(crate) struct BuildArgs {
     pub(crate) allow_manifest_drift: bool,
     /// Also write a software bill of materials beside the image, in this format
     /// (repeatable — `--sbom spdx --sbom cyclonedx` writes both). Off by default, so
-    /// a build never silently gains a file; the same documents can be produced later
+    /// a build never silently gains a file. The same documents can be produced later
     /// from the published provenance manifest with `boot2deb sbom`. Set
     /// `SOURCE_DATE_EPOCH` for a byte-reproducible document — everything else in it is
     /// derived from the image's own content.
     #[arg(long = "sbom", value_enum)]
     pub(crate) sbom: Vec<commands::sbom::FormatArg>,
     /// Ignore a rootfs cache hit and re-bootstrap, refreshing the stored tree.
-    /// The plan is still resolved — the rootfs cache keys on the *solved* set, so a
-    /// moved mirror already rebuilds automatically; this is the manual escape when
+    /// The plan is still resolved. The rootfs cache keys on the *solved* set, so a
+    /// moved mirror already rebuilds automatically. This is the manual escape for when
     /// you want a clean bootstrap regardless.
     #[arg(long)]
     pub(crate) refresh_rootfs: bool,
-    /// Disable the Tier-2 artifact cache: always recompile the kernel /
-    /// u-boot / userspace / ffmpeg `.deb`s instead of restoring a stored output on a
-    /// signature hit, and do not store this build's outputs. The durable store at
+    /// Disable the Tier-2 artifact cache. The kernel, u-boot, userspace and ffmpeg
+    /// `.deb`s are always recompiled instead of restored on a signature hit, and this
+    /// build's outputs are not stored. The durable store at
     /// `<root>/cache/artifacts` is left untouched.
     #[arg(long)]
     pub(crate) no_artifact_cache: bool,
     /// Build even though this `boot2deb` binary does not match the source checkout it
-    /// is being run from — it was compiled before the checkout's current commit, or
+    /// is being run from. It was compiled before the checkout's current commit, or
     /// before edits under `crates/`. The image is built by the *running* binary either
-    /// way; what the mismatch costs is the truth of the `[built_with]` stamp, which
+    /// way. What the mismatch costs is the truth of the `[built_with]` stamp, which
     /// would name a commit that is not what ran. The fix is normally `cargo build`,
-    /// which takes seconds; this is for the case where you mean it.
+    /// which takes seconds. This is for the case where you mean it.
     #[arg(long)]
     pub(crate) allow_stale_builder: bool,
 }
 
 /// `why-rebuild`'s flags: the work dir whose stamps are read, plus the build knobs
-/// that change what the prediction should assume.
+/// that change what the prediction assumes.
 #[derive(Args)]
 pub(crate) struct WhyRebuildArgs {
-    /// Build scratch dir to inspect (default: `<root>/build/RECIPE`) — must match the dir the
-    /// build used, since the stamps live there.
+    /// Build scratch dir to inspect (default: `<root>/build/RECIPE`). It must match
+    /// the dir the build used, since the stamps live there.
     #[arg(long)]
     pub(crate) work_dir: Option<PathBuf>,
     /// The build being reasoned about used an explicit `--patches-path` co-dev
@@ -651,13 +659,13 @@ pub(crate) struct WhyRebuildArgs {
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
     /// The build being reasoned about names these optional userspace trees
-    /// (`--userspace <name>`). Pass the same set: an optional tree changes what the
+    /// (`--userspace <name>`). Pass the same set. An optional tree changes what the
     /// whole userspace stage layers, so it moves every userspace node's key.
     #[arg(long = "userspace", value_name = "NAME")]
     pub(crate) userspace: Vec<String>,
     /// The build being reasoned about passes `--no-artifact-cache`. The Tier-2
     /// artifact cache is then off, so no node restores a stored `.deb` and every one
-    /// recompiles — pass it here to see that prediction rather than the cached one.
+    /// recompiles. Pass it here to see that prediction rather than the cached one.
     #[arg(long)]
     pub(crate) no_artifact_cache: bool,
 }
@@ -665,8 +673,8 @@ pub(crate) struct WhyRebuildArgs {
 /// Which root `shell` enters. One per root a build command can fail in.
 ///
 /// The names are `build --stage`'s, for the stages that have both, because they name
-/// the same work: a `--stage kernel` that failed is diagnosed with `shell --stage
-/// kernel`. `packaging` is here and not there — it is a root rather than a build node,
+/// the same work. A `--stage kernel` that failed is diagnosed with `shell --stage
+/// kernel`. `packaging` is here and not there: it is a root rather than a build node,
 /// shared by every stage that archives a `.deb`. The build stages with no root of their
 /// own (`dtb` compiles in the kernel's, `rootfs` and `image` assemble trees) have no
 /// entry.
@@ -681,7 +689,7 @@ pub(crate) enum ShellStageArg {
     /// The target-arch root the MPP/RGA/Mali packages compile in.
     Userspace,
     /// The target-arch root ffmpeg compiles in, carrying this build's own userspace
-    /// `.deb`s — so the userspace stage has to have produced them first.
+    /// `.deb`s. The userspace stage therefore has to have produced them first.
     Ffmpeg,
     /// The host-arch packaging root a staged tree becomes a `.deb` in.
     Packaging,
@@ -704,14 +712,15 @@ impl From<ShellStageArg> for boot2deb_engine::shell::ShellStage {
 /// to run in it.
 ///
 /// A subset of [`BuildArgs`], and deliberately only the flags that decide *which tree*
-/// is entered: the work dir it lives under, the feature selection that picks the lock,
-/// the snapshot activation and mirror list its key covers, and the one layer input
-/// (`--build-libmali`) that changes what is staged over it. A flag that only changes
-/// what a build *produces* has nothing to say to a session.
+/// is entered. Those are the work dir it lives under, and the feature selection that
+/// picks the lock. They also include the snapshot activation and mirror list its key
+/// covers, and the one layer input (`--build-libmali`) that changes what is staged
+/// over it. A flag that only changes what a build *produces* has nothing to say to a
+/// session.
 #[derive(Args)]
 pub(crate) struct ShellArgs {
-    /// Which root to enter. Required: the whole point is entering a *particular*
-    /// stage's root, and no default is more likely right than another.
+    /// Which root to enter. Required, because the whole point is entering a
+    /// *particular* stage's root, and no default is more likely right than another.
     #[arg(long, value_enum)]
     pub(crate) stage: ShellStageArg,
     /// Rootfs feature to select, repeatable — the same selection `build --feature`
@@ -719,8 +728,8 @@ pub(crate) struct ShellArgs {
     /// directly (`shell turing-rk1/forky+jellyfin`) is equivalent.
     #[arg(long = "feature")]
     pub(crate) features: Vec<String>,
-    /// Build scratch dir whose roots to enter (default: `<root>/build/RECIPE`) — the
-    /// same default `build` uses, so a session lands in the tree a build made.
+    /// Build scratch dir whose roots to enter (default: `<root>/build/RECIPE`). That
+    /// is the same default `build` uses, so a session lands in the tree a build made.
     #[arg(long)]
     pub(crate) work_dir: Option<PathBuf>,
     /// Directory holding the `.deb`s the compile stages staged (default:
@@ -729,13 +738,13 @@ pub(crate) struct ShellArgs {
     #[arg(long)]
     pub(crate) out_dir: Option<PathBuf>,
     /// Enter the userspace root as a build naming these optional trees would see it,
-    /// carrying the development packages their own probes need — the same set the
-    /// userspace stage ran under.
+    /// carrying the development packages their own probes need. This is the same set
+    /// the userspace stage ran under.
     #[arg(long = "userspace", value_name = "NAME")]
     pub(crate) userspace: Vec<String>,
     /// Snapshot activation, as `build` takes it. Default: the lock's captured mode.
-    /// It is in every provisioned root's cache key, so a session opened under a
-    /// different mode than the build ran under would enter a different tree.
+    /// It is in every provisioned root's cache key. A session opened under a
+    /// different mode than the build ran under would therefore enter a different tree.
     #[arg(long, value_parser = parse_snapshot_mode)]
     pub(crate) snapshot: Option<SnapshotMode>,
     /// Debian archive keyring for the bootstrap, if the root has to be provisioned.
@@ -754,7 +763,7 @@ pub(crate) struct ShellArgs {
 ///
 /// The selectors fall in two scopes, and which scope is asked for decides whether the
 /// `RECIPE` positional is required. `--cache`/`--sandbox`/`--build-roots` (and the
-/// no-selector whole-tree default) name a subtree of *one recipe's* work dir;
+/// no-selector whole-tree default) name a subtree of *one recipe's* work dir.
 /// `--artifacts`/`--verify-trees`/`--kconfig`/`--all-caches` name a store under the
 /// config root that every recipe shares, so they sweep without naming one.
 #[derive(Args)]
@@ -767,40 +776,42 @@ pub(crate) struct CleanArgs {
     #[arg(long)]
     pub(crate) cache: bool,
     /// Remove only the provisioned roots (WORK_DIR/sandbox: the target-arch build
-    /// sandbox and the host-arch packaging root) — the largest reclaimable tree.
+    /// sandbox and the host-arch packaging root). This is the largest reclaimable
+    /// tree.
     #[arg(long)]
     pub(crate) sandbox: bool,
-    /// Remove the provisioned *build* roots and the layers staged over them, sparing the
-    /// packaging root, so the next build provisions them against the archive as it
-    /// stands now — the answer to `the <stage> build root does not satisfy its own
-    /// dependencies`, where a cached base has aged past the archive its layer resolved
-    /// from. `--sandbox` clears the same skew but takes the packaging root with it,
-    /// which is a second bootstrap for a root that is never layered and cannot skew.
+    /// Remove the provisioned *build* roots and the layers staged over them, sparing
+    /// the packaging root. The next build then provisions them against the archive as
+    /// it stands now. This is the answer to `the <stage> build root does not satisfy
+    /// its own dependencies`, where a cached base has aged past the archive its layer
+    /// resolved from. `--sandbox` clears the same skew but takes the packaging root
+    /// with it. That is a second bootstrap for a root that is never layered and
+    /// cannot skew.
     #[arg(long, conflicts_with = "sandbox")]
     pub(crate) build_roots: bool,
     /// Remove the durable Tier-2 artifact store (`<root>/cache/artifacts`).
-    /// Root-scoped: this store is shared across recipes, so it clears cached outputs
+    /// Root-scoped. This store is shared across recipes, so it clears cached outputs
     /// for *every* recipe, not just one.
     #[arg(long, conflicts_with = "all_caches")]
     pub(crate) artifacts: bool,
     /// Prune the auto-fetched source checkouts (`<root>/cache/verify-trees`, and the
-    /// `patches` checkouts beside them) down to what is still pinned: a checkout is
+    /// `patches` checkouts beside them) down to what is still pinned. A checkout is
     /// commit-addressed, so one whose commit no `recipes/*/*.lock` names can only be
     /// re-fetched, never reconstructed from, and is dead. Root-scoped. Pinned
-    /// checkouts stay — `--all-caches` is what takes those too. Pass the same
-    /// `--overlay` flags a build of these recipes uses: the pinned set is read from the
+    /// checkouts stay, and `--all-caches` is what takes those too. Pass the same
+    /// `--overlay` flags a build of these recipes uses. The pinned set is read from the
     /// search paths, so a sweep that omits an overlay calls its checkouts dead. The run
     /// reports how many locks it read, which is what makes a narrow set visible.
     #[arg(long, conflicts_with = "all_caches")]
     pub(crate) verify_trees: bool,
     /// Remove `verify-config`'s scratch tree (`<root>/cache/kconfig`), one work dir
     /// per recipe holding a provisioned cross root and a kbuild output dir. Pure
-    /// scratch: the next `verify-config` re-provisions. Root-scoped.
+    /// scratch, since the next `verify-config` re-provisions. Root-scoped.
     #[arg(long, conflicts_with = "all_caches")]
     pub(crate) kconfig: bool,
     /// Remove the whole durable cache tree (`<root>/cache`) — artifacts, every
     /// auto-fetched checkout *including the pinned ones*, the kconfig scratch, and the
-    /// pre-built extra-deb store. Root-scoped, and the nuclear option: everything here
+    /// pre-built extra-deb store. Root-scoped, and the nuclear option. Everything here
     /// is reclaimable by construction, but re-earning it costs a full re-fetch and a
     /// cache-cold rebuild.
     #[arg(long)]
@@ -838,9 +849,9 @@ pub(crate) struct SeedKeyArgs {
     #[arg(long = "wifi-psk", requires = "wifi_ssid")]
     pub(crate) wifi_psk: Option<String>,
     /// Static IPv4 (`ADDRESS/PREFIX[,GATEWAY[,DNS...]]`) for the connection the
-    /// seed sets up: the Wi-Fi profile when `--wifi-ssid` is present, the wired
-    /// interface otherwise — NetworkManager or dhcpcd, whichever the image
-    /// carries. Omit for DHCP.
+    /// seed sets up. That is the Wi-Fi profile when `--wifi-ssid` is present, and the
+    /// wired interface otherwise. It goes through NetworkManager or dhcpcd, whichever
+    /// the image carries. Omit for DHCP.
     #[arg(long = "static-ip", value_name = "ADDR/PREFIX[,GW[,DNS...]]")]
     pub(crate) static_ip: Option<String>,
 }
@@ -856,8 +867,8 @@ impl SeedKeyArgs {
     }
 }
 
-/// `press`'s flags: the split-build output names, the per-unit seed keys, the
-/// tree additions, and the verification knob.
+/// `press`'s flags. These are the split-build output names, the per-unit seed keys,
+/// the tree additions, and the verification knob.
 #[derive(Args)]
 pub(crate) struct PressArgs {
     /// The boot image's output file, for a `split` build — what goes onto the
@@ -880,24 +891,24 @@ pub(crate) struct PressArgs {
     pub(crate) copy: Vec<String>,
     /// Copy a whole directory that mirrors the target rootfs, repeatable —
     /// `DIR/etc/site.conf` lands at `/etc/site.conf`. Every regular file and
-    /// symlink under it is placed; directories are not, since the parents each
+    /// symlink under it is placed. Directories are not, since the parents each
     /// file needs are created root-owned 0755. Same modes as `--copy`, and a
     /// `*.tmpl` file is expanded and lands without the suffix.
     #[arg(long = "copy-tree", value_name = "DIR")]
     pub(crate) copy_tree: Vec<PathBuf>,
     /// Stage a local .deb (repeatable) for installation at first boot via
-    /// `dpkg -i`. Dependencies already in the image resolve immediately;
-    /// missing ones are fetched only if the board has network by then.
+    /// `dpkg -i`. Dependencies already in the image resolve immediately.
+    /// Missing ones are fetched only if the board has network by then.
     #[arg(long = "deb", value_name = "PATH")]
     pub(crate) debs: Vec<PathBuf>,
     /// Carry the recipe's own compressed image artifact inside the pressed image
     /// (at /var/lib/boot2deb/install/), so the booted board can install itself to
-    /// internal storage with `boot2deb-install-to` — the boot-from-card,
+    /// internal storage with `boot2deb-install-to`. This is the boot-from-card,
     /// install-to-eMMC workflow.
     #[arg(long)]
     pub(crate) embed_image: bool,
     /// Skip the post-write verification of the pressed file. The press is not
-    /// faster; only the re-read is saved.
+    /// faster, and only the re-read is saved.
     #[arg(long)]
     pub(crate) no_verify: bool,
     /// Print what would be pressed — artifacts, outputs, additions, seed keys —
@@ -931,25 +942,25 @@ pub(crate) struct SeedArgs {
     pub(crate) dry_run: bool,
 }
 
-/// `try`'s flags: how patient one boot may be, and what survives the run.
+/// `try`'s flags: how patient one boot is allowed to be, and what survives the run.
 #[derive(Args)]
 pub(crate) struct TryArgs {
-    /// Seconds one boot may take to reach a login prompt (and to settle after
-    /// it). The default is sized for TCG emulation on a loaded host; with KVM
+    /// Seconds one boot is allowed to take to reach a login prompt (and to settle
+    /// after it). The default is sized for TCG emulation on a loaded host. With KVM
     /// a boot takes a fraction of it, and the timeout is a ceiling, not a wait.
     #[arg(long, default_value_t = 900)]
     pub(crate) timeout: u64,
     /// Keep the booted disk copy under the work dir after the run, for a
     /// post-mortem or to boot it by hand. Its account password was changed at
-    /// first login; the run's report prints the one now set.
+    /// first login, and the run's report prints the one now set.
     #[arg(long)]
     pub(crate) keep_disk: bool,
-    /// Discard the cached fixture kernel and harvest the suite's current one —
-    /// how a new point release of the generic kernel is picked up.
+    /// Discard the cached fixture kernel and harvest the suite's current one. This
+    /// is how a new point release of the generic kernel is picked up.
     #[arg(long)]
     pub(crate) refresh_fixture: bool,
-    /// Build scratch directory (default `build/<recipe>` under the config root)
-    /// — where the disk copy and the fixture kernel live.
+    /// Build scratch directory (default `build/<recipe>` under the config root),
+    /// where the disk copy and the fixture kernel live.
     #[arg(long)]
     pub(crate) work_dir: Option<PathBuf>,
     /// Where the build's artifacts were written, when not the default
@@ -970,7 +981,7 @@ pub(crate) struct NewDeviceArgs {
     #[arg(long)]
     pub(crate) description: Option<String>,
     /// SoC (e.g. rk3588). Must already have a `socs/<soc>.toml`. Prompted if
-    /// omitted on a terminal; required otherwise.
+    /// omitted on a terminal, and required otherwise.
     #[arg(long)]
     pub(crate) soc: Option<String>,
     /// Boot method (e.g. rockchip-rkbin). Prompted/defaulted if omitted.
@@ -996,13 +1007,13 @@ pub(crate) struct NewDeviceArgs {
     /// the chosen SoC/arch. Prompted from the compatible set on a terminal.
     #[arg(long = "feature")]
     pub(crate) features: Vec<String>,
-    /// Do not scaffold a recipe — write only the device file.
+    /// Do not scaffold a recipe. Write only the device file.
     #[arg(long)]
     pub(crate) no_recipe: bool,
     /// Overwrite existing files instead of refusing.
     #[arg(long)]
     pub(crate) force: bool,
-    /// Never prompt; take every value from flags/defaults. Implied when stdin is
+    /// Never prompt, and take every value from flags/defaults. Implied when stdin is
     /// not a terminal.
     #[arg(long)]
     pub(crate) non_interactive: bool,
@@ -1014,44 +1025,44 @@ pub(crate) struct NewDeviceArgs {
 pub(crate) struct UpdateArgs {
     /// Rootfs feature to select, repeatable (`--feature jellyfin --feature
     /// media-accel-rockchip`). Replaces the recipe's own feature list and pins the
-    /// result as a *variant* of the recipe: the lock, its solved package manifest,
-    /// and the build directory are all named `<recipe>+<feature>...`, so the recipe's
-    /// own lock is left alone and two selections never collide. Order is significant
-    /// — kernel fragments and patch series compose in selection order. A variant
-    /// carries no `[support]` claim; the claim belongs to the recipe.
+    /// result as a *variant* of the recipe. The lock, its solved package manifest,
+    /// and the build directory are all named `<recipe>+<feature>...`. The recipe's
+    /// own lock is left alone, and two selections never collide. Order is significant,
+    /// because kernel fragments and patch series compose in selection order. A variant
+    /// carries no `[support]` claim, since the claim belongs to the recipe.
     #[arg(long = "feature")]
     pub(crate) features: Vec<String>,
     /// Kernel ref to pin, resolved to a commit (e.g. v7.2). Optional once a lock
-    /// exists: omitting it re-pins the *previous lock's* kernel ref, so a routine
+    /// exists. Omitting it re-pins the *previous lock's* kernel ref, so a routine
     /// re-pin (e.g. after importing a patch) needs no kernel tag the user did not
     /// touch. Required only for the first update, which has no prior ref to inherit.
     /// Auto-resolving a kernel `track` to its latest tag is a later refinement.
     #[arg(long)]
     pub(crate) kernel_ref: Option<String>,
     /// u-boot ref to pin. Defaults to the boot-method's `uboot_ref`, re-read on every
-    /// update, so bumping that one constraint moves every board on the method — except
-    /// a lock already pinned to a bare commit sha, which is kept as the deliberate
-    /// hand-pin only this flag can have created.
+    /// update, so bumping that one constraint moves every board on the method. The
+    /// exception is a lock already pinned to a bare commit sha, which is kept as the
+    /// deliberate hand-pin only this flag can have created.
     #[arg(long)]
     pub(crate) uboot_ref: Option<String>,
     /// Media-accel userspace ref to pin, as `NAME=REF`, repeatable. Defaults to that
-    /// tree's own `[[userspace]]` ref, re-read on every update; a lock pinned to a bare
+    /// tree's own `[[userspace]]` ref, re-read on every update. A lock pinned to a bare
     /// commit sha is kept instead. The SoC declares which trees it has, so each override
     /// names one (`--userspace-ref mpp=v1.5.0`).
     #[arg(long = "userspace-ref", value_name = "NAME=REF", value_parser = parse_named_source)]
     pub(crate) userspace_refs: Vec<(String, String)>,
     /// ffmpeg base (V4L2) ref to pin. Defaults to the SoC layer's `ffmpeg.base`,
-    /// re-read on every update; a lock pinned to a bare commit sha is kept instead.
+    /// re-read on every update. A lock pinned to a bare commit sha is kept instead.
     #[arg(long)]
     pub(crate) ffmpeg_base_ref: Option<String>,
     /// ffmpeg Rockchip provenance-tree ref to pin. Defaults to the SoC layer's
-    /// `ffmpeg.rockchip`, re-read on every update; a lock pinned to a bare commit sha
-    /// is kept instead. Recorded as the graft's provenance; not fetched.
+    /// `ffmpeg.rockchip`, re-read on every update. A lock pinned to a bare commit sha
+    /// is kept instead. Recorded as the graft's provenance, and not fetched.
     #[arg(long)]
     pub(crate) ffmpeg_rockchip_ref: Option<String>,
     /// `patches` repo checkout whose HEAD pins the series (default: the config
     /// root's sibling `../patches`). `update` requires this local clone when the
-    /// kernel names a patch series — the pin *is* its HEAD — unlike `build`, which
+    /// kernel names a patch series, because the pin *is* its HEAD. `build` differs: it
     /// auto-fetches the already-pinned commit and needs no checkout.
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
@@ -1068,9 +1079,9 @@ pub(crate) struct UpdateArgs {
 /// source to auto-fetch it from at the locked pin.
 #[derive(Args)]
 pub(crate) struct VerifyArgs {
-    /// Kernel checkout to verify the kernel series against. Optional: omit it and
-    /// the locked kernel is auto-fetched at its pinned ref into a durable cache, so
-    /// verification works on a fresh clone with no hand-cloned tree.
+    /// Kernel checkout to verify the kernel series against. Optional. Omit it and
+    /// the locked kernel is auto-fetched at its pinned ref into a durable cache.
+    /// Verification then works on a fresh clone, with no hand-cloned tree.
     #[arg(long)]
     pub(crate) kernel_path: Option<PathBuf>,
     /// Kernel clone source (git URL or local path) for the auto-fetch, in place of
@@ -1080,7 +1091,7 @@ pub(crate) struct VerifyArgs {
     /// the commit, so later runs are hits regardless).
     #[arg(long)]
     pub(crate) kernel_src: Option<String>,
-    /// ffmpeg checkout to verify the ffmpeg series against. Optional: omit it and,
+    /// ffmpeg checkout to verify the ffmpeg series against. Optional. Omit it and,
     /// when the series carries ffmpeg patches, the locked ffmpeg base is
     /// auto-fetched at its pin.
     #[arg(long)]
@@ -1090,7 +1101,7 @@ pub(crate) struct VerifyArgs {
     /// near-instant. Ignored with `--ffmpeg-path`.
     #[arg(long)]
     pub(crate) ffmpeg_base_src: Option<String>,
-    /// u-boot checkout to verify the u-boot series against. Optional: omit it and,
+    /// u-boot checkout to verify the u-boot series against. Optional. Omit it and,
     /// when the recipe pins a u-boot series, the locked u-boot is auto-fetched at
     /// its pin.
     #[arg(long)]
@@ -1099,8 +1110,8 @@ pub(crate) struct VerifyArgs {
     /// the boot method's `uboot_source`. Ignored with `--uboot-path`.
     #[arg(long)]
     pub(crate) uboot_src: Option<String>,
-    /// Userspace (MPP/RGA) checkout to verify the userspace series against. Optional:
-    /// omit it and, when the series carries userspace patches, the locked MPP tree
+    /// Userspace (MPP/RGA) checkout to verify the userspace series against. Optional.
+    /// Omit it and, when the series carries userspace patches, the locked MPP tree
     /// is auto-fetched at its pin.
     #[arg(long)]
     pub(crate) userspace_path: Option<PathBuf>,
@@ -1115,24 +1126,25 @@ pub(crate) struct VerifyArgs {
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
     /// Clone URL for auto-fetching the `patches` series when no local checkout is
-    /// present; default: the repo the lock's patch pin names.
+    /// present. Default: the repo the lock's patch pin names.
     #[arg(long)]
     pub(crate) patches_url: Option<String>,
     /// Verify against this kernel version instead of the one the lock pins, leaving
-    /// the lock untouched — "would this series survive 7.2?" answered before
-    /// adopting 7.2. Takes a kernel tag (`v7.2`, `v7.2-rc3`); pair it with
+    /// the lock untouched. It answers "would this series survive 7.2?" before
+    /// adopting 7.2. Takes a kernel tag (`v7.2`, `v7.2-rc3`). Pair it with
     /// `--kernel-path` or `--kernel-src` pointing at a tree that holds it.
     ///
-    /// A version outside the series' declared `applies_to_kernel` is measured, not
-    /// refused: that is the case worth asking about, and gating on the envelope would
-    /// answer the question by assuming it. The run says so and reports what `git am`
-    /// actually does, so a clean result is the evidence for widening the envelope.
+    /// A version outside the series' declared `applies_to_kernel` is measured rather
+    /// than refused. That is the case worth asking about, and gating on the envelope
+    /// would answer the question by assuming it. The run says so and reports what
+    /// `git am` actually does, so a clean result is the evidence for widening the
+    /// envelope.
     ///
     /// A release candidate is matched against its base release here, so an `-rc`
-    /// tree is answerable; the build path stays release-strict.
+    /// tree is answerable. The build path stays release-strict.
     ///
-    /// Kernel axis only: a recipe that pins no kernel (a `deliverable = "uboot"`
-    /// one) rejects it rather than quietly verifying its u-boot series and
+    /// Kernel axis only. A recipe that pins no kernel (a `deliverable = "uboot"`
+    /// one) rejects it, rather than quietly verifying its u-boot series and
     /// reporting a green that answers nothing.
     #[arg(long, value_name = "VERSION")]
     pub(crate) kernel: Option<String>,
@@ -1140,7 +1152,8 @@ pub(crate) struct VerifyArgs {
     ///
     /// One boundary usually spawns adjacent ones, so the first failure is rarely the
     /// whole story. Note that each failing patch is skipped, so later results are
-    /// measured against a tree missing it — a map of the damage, not a final verdict.
+    /// measured against a tree missing it. That is a map of the damage, not a final
+    /// verdict.
     #[arg(long)]
     pub(crate) keep_going: bool,
 }
@@ -1150,8 +1163,9 @@ pub(crate) struct VerifyArgs {
 #[derive(Args)]
 pub(crate) struct ConfigArgs {
     /// Kernel checkout (at the locked ref, patch series applied) to configure.
-    /// Optional: omit it and the locked kernel is auto-fetched at its pinned ref and
-    /// the kernel patch series applied for you, so the gate works on a fresh clone.
+    /// Optional. Omit it and the locked kernel is auto-fetched at its pinned ref,
+    /// with the kernel patch series applied for you. The gate then works on a fresh
+    /// clone.
     #[arg(long)]
     pub(crate) kernel_path: Option<PathBuf>,
     /// Reference `.config` to check byte-identical `CONFIG_*` parity against. Omit
@@ -1173,7 +1187,7 @@ pub(crate) struct ConfigArgs {
     /// lock's `patches.commit`.
     #[arg(long)]
     pub(crate) patches_path: Option<PathBuf>,
-    /// Clone URL for auto-fetching the `patches` series; default: the kernel
+    /// Clone URL for auto-fetching the `patches` series. Default: the kernel
     /// definition's `patches_url`. Used only when auto-fetching the kernel tree.
     #[arg(long)]
     pub(crate) patches_url: Option<String>,
@@ -1183,8 +1197,8 @@ pub(crate) struct ConfigArgs {
 #[derive(Subcommand)]
 pub(crate) enum PatchAction {
     /// Fetch a patch (patchwork/mbox URL, a file, or `-` for stdin), normalize it to
-    /// canonical `git am`-ready mbox, slot it into a series' scope at a position,
-    /// and — with `--verify-tree` — dry-run `git am`-verify the resulting series.
+    /// canonical `git am`-ready mbox, and slot it into a series' scope at a position.
+    /// With `--verify-tree` it then dry-run `git am`-verifies the resulting series.
     Import {
         /// Patch source: an `http(s)://` URL (a patchwork mbox), a local file path,
         /// or `-` to read from stdin.
@@ -1249,79 +1263,79 @@ pub(crate) struct PatchImportArgs {
 /// The axis overrides `resolve` and `doctor` accept, mapped onto [`Overrides`].
 #[derive(Args, Default)]
 pub(crate) struct OverrideArgs {
-    /// Kernel definition id (`list-kernels` shows the valid values); default: the
+    /// Kernel definition id (`list-kernels` shows the valid values). Default: the
     /// recipe/device `default_kernel`. Must be one of the device's
     /// `supported_kernels`.
     #[arg(long)]
     pub(crate) kernel: Option<String>,
-    /// u-boot patch series (e.g. `rk3576-display`); default: the recipe/device
+    /// u-boot patch series (e.g. `rk3576-display`). Default: the recipe/device
     /// `default_uboot_series`. Must be one of the device's `supported_uboot_series`.
     #[arg(long = "uboot-series")]
     pub(crate) uboot_series: Option<String>,
-    /// Debian suite the image is built for (e.g. `forky`, `trixie`); default: the
+    /// Debian suite the image is built for (e.g. `forky`, `trixie`). Default: the
     /// recipe/device `default_suite`. Re-pinning it for a build is `update`'s job —
     /// here it resolves a different build point.
     #[arg(long)]
     pub(crate) suite: Option<String>,
     /// Image packaging: `combined` (one whole-disk image) or `split` (a
-    /// bootloader-only image plus a separate rootfs image, for a two-medium install);
-    /// default: the recipe/device `default_layout`.
+    /// bootloader-only image plus a separate rootfs image, for a two-medium install).
+    /// Default: the recipe/device `default_layout`.
     #[arg(long, value_parser = parse_layout)]
     pub(crate) layout: Option<Layout>,
     /// How the board boots: `rockchip-rkbin` (u-boot compiled into a raw gap) or
-    /// `depthcharge` (a signed ChromeOS kernel partition); default: the device's own.
+    /// `depthcharge` (a signed ChromeOS kernel partition). Default: the device's own.
     /// Must be one of the device's `supported_boot_methods`.
     #[arg(long = "boot-method", value_parser = parse_boot_method)]
     pub(crate) boot_method: Option<BootMethod>,
     /// Depthcharge board profile (e.g. `speedy-libreboot`). A profile describes the
-    /// *firmware* a unit runs, not the board model — so a unit with replacement
-    /// firmware may take a different one. Must be in the device's
-    /// `supported_boards`; ignored by boot methods with no board profile.
+    /// *firmware* a unit runs, not the board model, so a unit with replacement
+    /// firmware can take a different one. Must be in the device's
+    /// `supported_boards`. Ignored by boot methods with no board profile.
     #[arg(long)]
     pub(crate) board: Option<String>,
     /// Rootfs feature add-in, repeatable (`--feature media-accel-rockchip`). When
     /// any is given, replaces the recipe's feature list.
     #[arg(long = "feature")]
     pub(crate) features: Vec<String>,
-    /// Total image size (e.g. `4G`); default: the recipe/device `image_size`. The
+    /// Total image size (e.g. `4G`). Default: the recipe/device `image_size`. The
     /// rootfs grows to fill its medium on first boot, so this bounds the *artifact*,
     /// not the installed system.
     #[arg(long = "image-size")]
     pub(crate) image_size: Option<String>,
-    /// System locale — the image's `LANG` (e.g. `de_DE.UTF-8`); default: the
+    /// System locale — the image's `LANG` (e.g. `de_DE.UTF-8`). Default: the
     /// recipe/base `locale`. Always generated into the image, so it is safe to name a
     /// locale nothing else lists.
     #[arg(long)]
     pub(crate) locale: Option<String>,
     /// Extra locale to generate into the image, repeatable (`--locale-gen
-    /// fr_FR.UTF-8`). When any is given, replaces the base `locales_generate` list;
-    /// the system locale is generated regardless.
+    /// fr_FR.UTF-8`). When any is given, replaces the base `locales_generate` list.
+    /// The system locale is generated regardless.
     #[arg(long = "locale-gen")]
     pub(crate) locales_generate: Vec<String>,
-    /// System timezone (e.g. `America/New_York`); default: the recipe/base `timezone`.
+    /// System timezone (e.g. `America/New_York`). Default: the recipe/base `timezone`.
     #[arg(long)]
     pub(crate) timezone: Option<String>,
-    /// NTP server the image prefers, repeatable (`--ntp-server ntp.lan`); default: the
+    /// NTP server the image prefers, repeatable (`--ntp-server ntp.lan`). Default: the
     /// recipe/base `ntp_servers`. When any is given, replaces that list. Debian's
     /// fallback pool is kept either way, so this sets a preference rather than the only
-    /// source — worth setting for a board that boots on a network the public pool
+    /// source. It is worth setting for a board that boots on a network the public pool
     /// cannot be reached from.
     #[arg(long = "ntp-server")]
     pub(crate) ntp_servers: Vec<String>,
-    /// Console keyboard layout (e.g. `gb`); default: the recipe/device `keymap`, and
-    /// none at all on a headless board. Sets `XKBLAYOUT`; the model, variant, and
+    /// Console keyboard layout (e.g. `gb`). Default: the recipe/device `keymap`, and
+    /// none at all on a headless board. Sets `XKBLAYOUT`. The model, variant, and
     /// options keep their defaults — set those in the device's `[keymap]` table.
     #[arg(long)]
     pub(crate) keymap: Option<String>,
     /// What `sudo` asks of the default account: `nopasswd` (root with no prompt) or
-    /// `password` (prompts for the account's own); default: the recipe/base `sudo`.
+    /// `password` (prompts for the account's own). Default: the recipe/base `sudo`.
     #[arg(long, value_parser = parse_sudo_policy)]
     pub(crate) sudo: Option<SudoPolicy>,
-    /// Length of the generated per-image first-boot password; default: the recipe/base
-    /// `first_boot_password_length`. Shorter is friendlier to transcribe at a console
-    /// and weaker in exactly one way — an attack on the password hash inside a shared
-    /// image — so authorize an SSH key (`ssh_authorized_keys`) rather than shortening
-    /// this if the goal is to stop typing it.
+    /// Length of the generated per-image first-boot password. Default: the recipe/base
+    /// `first_boot_password_length`. Shorter is friendlier to transcribe at a console,
+    /// and weaker in exactly one way: an attack on the password hash inside a shared
+    /// image. If the goal is to stop typing it, authorize an SSH key
+    /// (`ssh_authorized_keys`) rather than shortening this.
     #[arg(long = "password-length")]
     pub(crate) password_length: Option<u8>,
 }
@@ -1370,7 +1384,7 @@ fn parse_boot_method(s: &str) -> Result<BootMethod, String> {
 fn parse_sudo_policy(s: &str) -> Result<SudoPolicy, String> {
     s.parse()
 }
-/// Parse the `--snapshot` activation mode; matches the lock's serialized form.
+/// Parse the `--snapshot` activation mode, matching the lock's serialized form.
 fn parse_snapshot_mode(s: &str) -> Result<SnapshotMode, String> {
     match s {
         "off" => Ok(SnapshotMode::Off),
@@ -1381,15 +1395,15 @@ fn parse_snapshot_mode(s: &str) -> Result<SnapshotMode, String> {
         )),
     }
 }
-/// Parse the `patch import --scope` value; reuses the model's `FromStr`.
+/// Parse the `patch import --scope` value, reusing the model's `FromStr`.
 fn parse_scope(s: &str) -> Result<Scope, String> {
     s.parse()
 }
 
 /// Parse a `NAME=SRC` clone-source override into its two halves.
 ///
-/// Split at the *first* `=`, because a source may contain one (a URL query, a path)
-/// while a `device_kmods` entry name may not — names are bare identifiers. Both halves
+/// Split at the *first* `=`, because a source can contain one (a URL query, a path)
+/// while a `device_kmods` entry name cannot — names are bare identifiers. Both halves
 /// must be non-empty: `--kmod-src aic8800=` is a truncated command line, not a request
 /// to clone from nowhere.
 fn parse_named_source(s: &str) -> Result<(String, String), String> {

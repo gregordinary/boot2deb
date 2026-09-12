@@ -1,38 +1,38 @@
 //! Host tool-presence preflight for `doctor`.
 //!
-//! Host identity and cross-arch status come from [`crate::preflight`]; this module
+//! Host identity and cross-arch status come from [`crate::preflight`]. This module
 //! adds the concrete tool/capability checks the build needs, with per-platform
 //! remediation. It reports exactly what is present or missing *before* any build
-//! work starts — the same "typed error before any work starts" contract as config
-//! validation.
+//! work starts. That is the same "typed error before any work starts" contract as
+//! config validation.
 //!
 //! The list is short, and its shortness is the design rather than an omission. Every
 //! compiler, packaging tool and build-dependency a build runs is a *package of a
-//! provisioned Debian root* ([`crate::sandbox`]): resolved from the build's own mirror
-//! list and sha256-pinned in that root's manifest, so it is an input the lock names
-//! rather than a fact about the machine. What is asked of the host is what no root can
-//! carry:
+//! provisioned Debian root* ([`crate::sandbox`]). It is resolved from the build's own
+//! mirror list and sha256-pinned in that root's manifest. It is therefore an input the
+//! lock names rather than a fact about the machine. What is asked of the host is what
+//! no root can carry:
 //!
-//! - **Every build:** unprivileged user namespaces. Each root a build provisions — the
-//!   OS rootfs, the target-arch build sandbox, the host-arch cross root, the packaging
-//!   root — is bootstrapped and entered in-process through the ferroday-cage library,
-//!   which needs the capability and no binary at all. No `dpkg`, no `fakeroot`, no
-//!   external sandbox helper.
+//! - **Every build:** unprivileged user namespaces. Each root a build provisions is
+//!   bootstrapped and entered in-process through the ferroday-cage library, which
+//!   needs the capability and no binary at all. That covers the OS rootfs, the
+//!   target-arch build sandbox, the host-arch cross root and the packaging root. No
+//!   `dpkg`, no `fakeroot`, no external sandbox helper.
 //! - **A build that compiles**
 //!   ([`compiles_from_source`](boot2deb_core::model::ResolvedBuild::compiles_from_source)):
-//!   host `git`, which clones the pinned trees and applies the patch series before any
-//!   root sees them, and an unprivileged **overlay**, which is how a compile root layers
-//!   a stage's build-dependencies over its base.
+//!   host `git` and an unprivileged **overlay**. `git` clones the pinned trees and
+//!   applies the patch series before any root sees them. The overlay is how a compile
+//!   root layers a stage's build-dependencies over its base.
 //! - **A build that enters a target-arch root** on a host that cannot execute the
 //!   target's binaries ([`needs_interpreter`](HostInfo::needs_interpreter)): a
 //!   `qemu-<arch>` interpreter and a registered+enabled binfmt handler. That is the
 //!   image path — the OS rootfs runs the target's maintainer scripts, and the media-accel
-//!   `.deb`s compile in a target-arch sandbox. The cross root and the packaging root are
-//!   the *host's* architecture and interpret nothing, so a bootloader-only deliverable
-//!   needs no qemu even when it builds for a foreign target.
+//!   `.deb`s compile in a target-arch sandbox. The cross root and the packaging root
+//!   are the *host's* architecture and interpret nothing. A bootloader-only deliverable
+//!   therefore needs no qemu even when it builds for a foreign target.
 //! - **Image path:** `tar` and `cp`, the two POSIX tools the rootfs and image stages
-//!   invoke directly. No filesystem tooling — the rootfs ext4 is formatted and then
-//!   scanned back in-process by the pure-Rust `ferrosys` formatter; `e2fsck`, when
+//!   invoke directly. No filesystem tooling is needed: the rootfs ext4 is formatted and
+//!   then scanned back in-process by the pure-Rust `ferrosys` formatter. `e2fsck`, when
 //!   present, runs as an optional independent cross-check.
 //!
 //! Detection is a side effect (PATH scan, `/proc` + `/etc/os-release` reads, an `unshare`
@@ -53,7 +53,7 @@ pub struct Check {
     /// What the build needs it for, with a plan section reference.
     pub purpose: &'static str,
     /// A hard requirement (`true`) vs. a fallback-only convenience (`false`).
-    /// A missing required check fails preflight; a missing fallback is a note.
+    /// A missing required check fails preflight, and a missing fallback is a note.
     pub required: bool,
     /// The result of probing for it.
     pub status: CheckStatus,
@@ -192,10 +192,10 @@ enum Pkg {
 /// What a *particular build* needs from the host — the input to [`tool_checks`].
 ///
 /// Not every build needs every tool, and asking for tools a build will never invoke
-/// is not harmless: it turns `doctor` from "here is what you are missing" into a
-/// checklist with items on it that do not apply, which is how a real missing tool gets
+/// is not harmless. It turns `doctor` from "here is what you are missing" into a
+/// checklist with items on it that do not apply. That is how a real missing tool gets
 /// lost in the noise. A board that installs Debian's kernel and boots its own firmware
-/// compiles nothing at all, and should not be told to install a cross compiler.
+/// compiles nothing at all, and is told to install no cross compiler.
 #[derive(Debug, Clone)]
 pub struct ToolNeeds {
     /// The target architecture, which decides *which* `qemu-<arch>` interpreter and
@@ -206,28 +206,30 @@ pub struct ToolNeeds {
     /// that compiles nothing at all
     /// ([`compiles_from_source`](boot2deb_core::model::ResolvedBuild::compiles_from_source)).
     ///
-    /// One field, because the two things compiling asks of a host are asked together:
-    /// host `git`, which fetches the pinned trees and applies the patch series, and an
-    /// unprivileged overlay, which is how every compile root layers a stage's
-    /// build-dependencies over its base. A board that installs Debian's kernel and boots
-    /// its own firmware needs neither, and telling its operator to install a compiler
-    /// would be noise a genuinely missing tool could hide in.
+    /// One field, because the two things compiling asks of a host are asked together.
+    /// They are host `git` and an unprivileged overlay. `git` fetches the pinned trees
+    /// and applies the patch series, and the overlay is how every compile root layers a
+    /// stage's build-dependencies over its base. A board that installs Debian's kernel
+    /// and boots its own firmware needs neither. Telling its operator to install a
+    /// compiler would be noise a genuinely missing tool could hide in.
     ///
-    /// The path is the build's own work dir rather than the host temp dir, so the
-    /// capability is probed on the filesystem that will actually carry the uppers — an
+    /// The path is the build's own work dir rather than the host temp dir. The
+    /// capability is therefore probed on the filesystem that will carry the uppers. An
     /// operator whose work dir is on another volume can get a different answer there.
     pub compiles: Option<PathBuf>,
     /// The build assembles a rootfs and a disk image.
     ///
     /// Two consequences, both keyed on this one fact. It shells out to the two POSIX
-    /// tools the image path uses directly: `cp` merges the layer overlay trees into the
+    /// tools the image path uses directly. `cp` merges the layer overlay trees into the
     /// build's staging tree, and `tar` verifies the rootfs tarball (and, on a
-    /// depthcharge board, extracts the signed kernel partition). And
-    /// it is the only path that enters a **target-arch** root — the rootfs runs the
-    /// target's maintainer scripts, and the media-accel `.deb`s compile in a target-arch
-    /// sandbox — so it is what makes a `qemu-user` interpreter a requirement on a host
-    /// that cannot execute those binaries. A bootloader-only deliverable assembles
-    /// nothing and compiles in a host-arch cross root, so it needs none of the three.
+    /// depthcharge board, extracts the signed kernel partition).
+    ///
+    /// It is also the only path that enters a **target-arch** root. The rootfs runs the
+    /// target's maintainer scripts, and the media-accel `.deb`s compile in a
+    /// target-arch sandbox. That is what makes a `qemu-user` interpreter a requirement
+    /// on a host that cannot execute those binaries. A bootloader-only deliverable
+    /// assembles nothing and compiles in a host-arch cross root, so it needs none of
+    /// the three.
     pub assembles_image: bool,
 }
 
@@ -241,26 +243,27 @@ pub fn tool_checks(needs: &ToolNeeds) -> Vec<Check> {
 ///
 /// Membership is decided by one question: does the answer change with the recipe? Host
 /// `git` does (a board installing Debian's kernel and booting its own firmware clones
-/// nothing), so it is not here. Unprivileged user namespaces do not: every build
-/// provisions at least one Debian root through them — the userland its `.deb`s are
-/// compiled in, the one whose `dpkg` archives them, or the one that becomes the image —
-/// and none of that needs a binary on the host. This is the whole of what boot2deb asks
-/// of a host it does not resolve a recipe for.
+/// nothing), so it is not here. Unprivileged user namespaces do not. Every build
+/// provisions at least one Debian root through them. That root is the userland its
+/// `.deb`s are compiled in, the one whose `dpkg` archives them, or the one that
+/// becomes the image. None of that needs a binary on the host.
 ///
-/// [`tool_checks_on`] emits exactly this set unconditionally, by calling it, so a bare
-/// `doctor` and a targeted one can never report a different verdict for the same
-/// requirement.
+/// This is the whole of what boot2deb asks of a host it does not resolve a recipe for.
+///
+/// [`tool_checks_on`] emits exactly this set unconditionally, by calling it. A bare
+/// `doctor` and a targeted one can therefore never report a different verdict for the
+/// same requirement.
 pub fn host_checks() -> Vec<Check> {
     host_checks_on(HostInfo::detect())
 }
 
 /// [`host_checks`] against an explicit host.
 ///
-/// The shared set happens not to consult the host today — every check it holds is a
+/// The shared set happens not to consult the host today. Every check it holds is a
 /// kernel capability, and kernels do not have package managers. The parameter stays
-/// because the seam is what [`tool_checks_on`] composes this through, and because a
-/// shared check that *did* need a per-manager install hint would otherwise have to
-/// change this signature and every caller at once.
+/// because the seam is what [`tool_checks_on`] composes this through. A shared check
+/// that *did* need a per-manager install hint would otherwise have to change this
+/// signature and every caller at once.
 pub fn host_checks_on(_host: HostInfo) -> Vec<Check> {
     // Every provisioned root is bootstrapped and entered in-process through
     // ferroday-cage — the *OS* rootfs that becomes the image ([`crate::rootfs`]), the
@@ -273,11 +276,12 @@ pub fn host_checks_on(_host: HostInfo) -> Vec<Check> {
 
 /// [`tool_checks`] against an explicit host.
 ///
-/// The host decides one thing here — whether an interpreter is asked for — and the
-/// interesting case is the host that provisions a cross root and still needs none: an
-/// arm64 one building armhf, where `CONFIG_COMPAT=y` runs the result natively. Taking the
-/// host as a parameter is what makes that assertable from a CI machine that is not one,
-/// and it is why the tests below fix the host rather than detecting it.
+/// The host decides one thing here: whether an interpreter is asked for. The
+/// interesting case is the host that provisions a cross root and still needs none.
+/// That is an arm64 one building armhf, where `CONFIG_COMPAT=y` runs the result
+/// natively. Taking
+/// the host as a parameter is what makes that assertable from a CI machine that is not
+/// one. It is why the tests below fix the host rather than detecting it.
 pub fn tool_checks_on(host: HostInfo, needs: &ToolNeeds) -> Vec<Check> {
     let target = needs.target;
     let interpreter = host.needs_interpreter(target);
@@ -521,17 +525,17 @@ fn userns_blocker_detail() -> String {
 /// Whether an unprivileged overlay can be established with its upper layer on the
 /// filesystem hosting `uppers` — what a build root is rooted on.
 ///
-/// Two host properties gate it and the probe reports the first that fails: the
+/// Two host properties gate it, and the probe reports the first that fails. The
 /// filesystem must hold `user.*` extended attributes, which is where an unprivileged
-/// overlay records its whiteouts, and the kernel must accept the mount from inside a
+/// overlay records its whiteouts. The kernel must accept the mount from inside a
 /// user namespace.
 ///
 /// **The filesystem is the subject, not the directory.** Which one the uppers land on
-/// is decided by the work dir, and `/tmp` may well answer differently — a tmpfs `/tmp`
-/// on a pre-6.6 kernel cannot hold the xattrs while the ext4 work dir beside it can. So
-/// the probe is pointed at the real location, and since that directory does not exist
-/// until the first build creates it, it walks up to the nearest existing ancestor:
-/// capability is a property of the filesystem, which an ancestor shares.
+/// is decided by the work dir, and `/tmp` can answer differently. A tmpfs `/tmp` on a
+/// pre-6.6 kernel cannot hold the xattrs while the ext4 work dir beside it can. So the
+/// probe is pointed at the real location. That directory does not exist until the
+/// first build creates it, so the probe walks up to the nearest existing ancestor.
+/// Capability is a property of the filesystem, which an ancestor shares.
 pub fn overlay_check(uppers: &Path) -> Check {
     let status = match nearest_existing(uppers) {
         None => CheckStatus::Missing(format!(

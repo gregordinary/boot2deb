@@ -10,8 +10,8 @@ There are two ways to set these, and both are supported on purpose:
   already compiled onto the disk.
 
 The second is the reason the first is not enough. A pre-built image is something you
-hand to someone else; they should not have to rebuild it — or get it onto a network —
-to type on a German keyboard.
+hand to someone else. Typing on a German keyboard must not cost them a rebuild, or
+getting the board onto a network.
 
 ## The knobs
 
@@ -23,7 +23,7 @@ to type on a German keyboard.
 | `keymap` | `devices/<board>.toml` | none | `/etc/default/keyboard` (the XKB variables) |
 
 Each is overridable in a recipe. `resolve` and `doctor` additionally take `--locale`,
-`--locale-gen` (repeatable), `--timezone`, and `--keymap`, so you can see what a
+`--locale-gen` (repeatable), `--timezone`, and `--keymap`. You can therefore see what a
 different choice resolves to before committing it to config:
 
 ```sh
@@ -31,11 +31,11 @@ boot2deb resolve asus-c201/forky \
     --locale de_DE.UTF-8 --timezone Europe/Berlin --keymap de
 ```
 
-`build` takes none of them, and that is the design: an image's localization comes from
-the config its lock was resolved against, so changing what an image ships means changing
-`base.toml` or the recipe — not a flag at build time. `resolve` closes the loop rather
-than leaving you to find that out: when an override it accepts is one `build` does not,
-it prints the recipe to write, with the keys already filled in.
+`build` takes none of them, and that is the design. An image's localization comes from
+the config its lock was resolved against. Changing what an image ships therefore means
+changing `base.toml` or the recipe, not a flag at build time. `resolve` closes the loop
+rather than leaving you to find that out. When an override it accepts is one `build`
+does not, it prints the recipe to write, with the keys already filled in.
 
 ```
 note: --locale, --timezone, --keymap are resolve-only — `build` reads those axes from
@@ -61,22 +61,23 @@ keymap       : us [pc105]
 The locale and the timezone are **distro policy**: no board has an opinion about them,
 so they sit in `base.toml`.
 
-A keymap is different — whether a console keymap configures anything at all is a
+A keymap is different. Whether a console keymap configures anything at all is a
 property of the hardware. The C201 and the C100P are laptops with keyboards under the
-user's hands and a US layout; the Turing RK1 and the H96 are headless, and a layout
-declared for a console nobody types at is a claim the config cannot back. So `keymap`
-sits on the **device**, and a headless board simply omits it: boot2deb then writes no
-`/etc/default/keyboard` and Debian's own default (`pc105` / `us`) stands.
+user's hands and a US layout. The Turing RK1 and the H96 are headless, and a layout
+declared for a console nobody types at is a claim the config cannot back.
+
+So `keymap` sits on the **device**, and a headless board simply omits it. boot2deb then
+writes no `/etc/default/keyboard`, and Debian's own default (`pc105` / `us`) stands.
 
 The Chromebit CS10 shows what the field is really asking. It has no keyboard at all, and
-it declares `keymap = "us"` anyway — because it is not headless: it drives an HDMI
+it declares `keymap = "us"` anyway, because it is not headless. It drives an HDMI
 console, and a USB keyboard is the only way to type at it. The question is "does a
 console layout configure anything here?", not "does the board ship keys". It does, so it
 answers.
 
-You can still pass `--keymap` to a headless board. `console-setup` ships on every
-image, so a keymap is always *actionable* — plugging a USB keyboard into the RK1's HDMI
-console is a real thing to do. A headless board just has no reason to *default* one.
+You can still pass `--keymap` to a headless board. `console-setup` ships on every image,
+so a keymap is always *actionable*. Plugging a USB keyboard into the RK1's HDMI console
+is a real thing to do. A headless board just has no reason to *default* one.
 
 ### Why the default locale is `C.UTF-8` and not `en_US.UTF-8`
 
@@ -96,22 +97,22 @@ Every image carries these compiled, in addition to the system locale:
 It is a set of widely-spoken languages, not a complete one, and it is deliberately not
 just English. Two reasons it can afford to be this wide:
 
-- **glibc's locale archive shares data aggressively.** Measured on forky/arm64,
+- **The glibc locale archive shares data aggressively.** Measured on forky/arm64,
   `/usr/lib/locale/locale-archive` is 2.9 MiB with `C.UTF-8` + `en_US.UTF-8` alone, and
-  19.2 MiB with the full set — about 1 MiB per added language, not the several MiB a
-  standalone locale suggests.
+  19.2 MiB with the full set. That is about 1 MiB per added language, not the several
+  MiB a standalone locale suggests.
 - **A locale can only be compiled at build time.** `locale-gen` runs during the image
-  build; no package a user installs later will generate one for them. So a first-run
-  desktop wizard offers exactly the languages the *image* chose, and a graphical
-  installer that lists one language is showing the truth about the image, not a bug in
-  the desktop.
+  build, and no package a user installs later will generate one. A first-run desktop
+  wizard therefore offers exactly the languages the *image* chose. A graphical installer
+  that lists one language is showing the truth about the image, not a bug in the
+  desktop.
 
 Anything outside the set is still one `dpkg-reconfigure locales` away with no network —
 see [Adding a language](#adding-a-language).
 
 ## The `Setting locale failed` warning
 
-SSH into a fresh board and you may see:
+SSH into a fresh board and you can see this:
 
 ```
 perl: warning: Setting locale failed.
@@ -130,7 +131,7 @@ tool says so.
 That is one of the reasons `en_US.UTF-8` leads `locales_generate`: it makes the common
 client's forwarded locale resolve.
 
-The shipped set covers most clients, but it is not a general fix — a client forwarding a
+The shipped set covers most clients, but it is not a general fix. A client forwarding a
 locale outside it still warns, and chasing every locale by pre-generating it is
 whack-a-mole. The actual fix is that the locale is **changeable**, which is what the rest
 of this page is about. To silence it for one session without changing anything:
@@ -140,7 +141,7 @@ LANG=C.UTF-8 ssh board
 ```
 
 Do **not** "fix" this by removing `AcceptEnv LANG LC_*` from `sshd_config`. It is
-standard Debian behaviour, and silently dropping it surprises anyone who relies on it.
+standard Debian behavior, and silently dropping it surprises anyone who relies on it.
 
 ## Changing them on a running image, offline
 
@@ -154,11 +155,11 @@ sets the default:
 sudo dpkg-reconfigure locales     # tick the locales to generate, then pick the default
 ```
 
-`localectl` also works on a boot2deb image, and it is worth knowing why: Debian builds
-`systemd-localed` with `locale-gen` support, so `localectl set-locale` will add the
-locale to `/etc/locale.gen` and run `locale-gen` itself — **but only if
-`/usr/sbin/locale-gen` exists**, i.e. only if the `locales` package is installed. On an
-image without it, `localectl` would set a `LANG` naming a locale that was never
+`localectl` also works on a boot2deb image, and it is worth knowing why. Debian builds
+`systemd-localed` with `locale-gen` support, so `localectl set-locale` adds the locale
+to `/etc/locale.gen` and runs `locale-gen` itself. That happens **only if
+`/usr/sbin/locale-gen` exists**, which means only if the `locales` package is installed.
+On an image without it, `localectl` would set a `LANG` naming a locale that was never
 generated. boot2deb ships `locales`, so:
 
 ```sh
@@ -167,8 +168,8 @@ sudo localectl set-locale LANG=de_DE.UTF-8
 
 is safe here. Reconnect for it to take effect on your session.
 
-**Timezone.** Either command works; both write the `/etc/localtime` symlink, which is
-the only thing that reads as the system timezone (forky's `tzdata` no longer keeps an
+**Timezone.** Either command works, and both write the `/etc/localtime` symlink. That
+is the only thing that reads as the system timezone (forky's `tzdata` no longer keeps an
 `/etc/timezone` file at all):
 
 ```sh
@@ -177,8 +178,8 @@ sudo dpkg-reconfigure tzdata      # the menu-driven equivalent
 ```
 
 The zone decides how the clock is *rendered*, not whether it is right. These boards have
-no battery-backed RTC, so the clock is stale for the first seconds of every boot — see
-[The clock and time sync](clock.md) for what the image does about that and how to point
+no battery-backed RTC, so the clock is stale for the first seconds of every boot. See
+[The clock and time sync](clock.md) for what the image does about that, and how to point
 it at a different NTP server.
 
 **Console keymap.**
@@ -194,8 +195,8 @@ sudo dpkg-reconfigure keyboard-configuration   # then: sudo setupcon
 boot2deb writes `/etc/locale.gen`, `/etc/locale.conf`, `/etc/default/keyboard`, and the
 `/etc/localtime` symlink **before** the packages that own them are configured, not
 after. Debian's `locales`, `keyboard-configuration`, and `tzdata` each seed their
-debconf answers from those exact files when they install, so the shipped files, the
-debconf database, and the `console-setup` cached keymap all agree.
+debconf answers from those exact files when they install. The shipped files, the
+debconf database, and the `console-setup` cached keymap therefore all agree.
 
 The practical consequence: `dpkg-reconfigure locales` on the running board opens with
 *your* locales already ticked and *your* default already selected — not Debian's. Had
@@ -214,18 +215,18 @@ sudo dpkg-reconfigure locales        # tick the extra languages, keep or change 
 ```
 
 Tick as many as you like and leave the default alone if you only want the language
-*available* — a desktop's language picker reads the generated set, not the default. The
+*available*. A desktop's language picker reads the generated set, not the default. The
 new locales are compiled on the spot.
 
 **In an image**, so every board built from it ships the language: edit
 `locales_generate` in `base.toml` (all images) or in the recipe (that build point only).
 There is no build-time flag for it, deliberately — see [The knobs](#the-knobs). Each
-entry is a full locale name **with its codeset** —
-`sv_SE.UTF-8`, not `sv_SE`; resolution rejects the bare form rather than let
-`locale-gen` fail mid-build. The system `locale` is always generated whether or not it
-appears in the list, so it never needs repeating.
+entry is a full locale name **with its codeset**, so `sv_SE.UTF-8` and not `sv_SE`.
+Resolution rejects the bare form rather than let `locale-gen` fail mid-build. The system
+`locale` is always generated whether or not it appears in the list, so it never needs
+repeating.
 
-Valid names come from `/usr/share/i18n/SUPPORTED` on any Debian system — it lists
+Valid names come from `/usr/share/i18n/SUPPORTED` on any Debian system. It lists
 `language_TERRITORY.codeset` pairs, not language names, so search by the two-letter
 language code and take the `.UTF-8` line:
 
@@ -247,13 +248,13 @@ Debian has for 231 MiB installed.
 
 - **`/etc/locale.conf`, not `/etc/default/locale`.** Debian makes the latter a symlink
   to the former, and `systemd-tmpfiles` re-asserts that link with a *forcing* rule
-  (`L+`) — so a regular file written at `/etc/default/locale` is deleted and replaced by
-  the symlink on the next boot. Writing the symlink's target satisfies every reader:
-  `pam_env` through the link, `systemd`/`localectl` directly, and the `locales` package,
-  whose config script reads that path to learn the current default.
+  (`L+`). A regular file written at `/etc/default/locale` is therefore deleted and
+  replaced by the symlink on the next boot. Writing the symlink's target satisfies every
+  reader. `pam_env` reads through the link, `systemd`/`localectl` read it directly, and
+  the `locales` package's config script reads that path to learn the current default.
 - **The system locale is always generated**, even `C.UTF-8`, which glibc would provide
   ungenerated. The `locales` package builds the choice list that `dpkg-reconfigure
-  locales` offers for the *default locale* out of `/etc/locale.gen` — so a system locale
+  locales` offers for the *default locale* out of `/etc/locale.gen`. A system locale
   missing from that file is one the user cannot see or re-select on the board.
 - **Not `locales-all`.** It carries every locale Debian has, at 231 MiB installed. The
   three packages boot2deb ships cost about 44 MiB installed (measured on forky/arm64),

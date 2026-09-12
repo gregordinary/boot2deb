@@ -1,9 +1,9 @@
-//! `patch import` engine side: obtain a patch from a URL or file, and slot a
-//! normalized patch into a series by editing the series manifest in place —
-//! inserting the new label into a scope's ordered array while preserving the
-//! file's comments and layout (`toml_edit`).
+//! `patch import` engine side. It obtains a patch from a URL or file, and slots a
+//! normalized patch into a series by editing the series manifest in place. The edit
+//! inserts the new label into a scope's ordered array, while preserving the file's
+//! comments and layout (`toml_edit`).
 //!
-//! The normalization itself is pure and lives in [`boot2deb_core::mbox`]; the
+//! The normalization itself is pure and lives in [`boot2deb_core::mbox`]. The
 //! `git am` dry-run verify reuses [`crate::patches`]. This module owns only the two
 //! side effects normalization cannot do off-host: the fetch and the manifest edit.
 
@@ -19,12 +19,13 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 /// far above any real series, so a larger body is refused rather than buffered.
 const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Obtain the raw bytes of a patch from `source`: an `http(s)://` URL fetched over
-/// pure-Rust TLS (rustls), or any other value read as a local file path.
+/// Obtain the raw bytes of a patch from `source`. That is an `http(s)://` URL
+/// fetched over pure-Rust TLS (rustls), or any other value read as a local file
+/// path.
 ///
 /// A `patchwork.kernel.org` mbox URL and a saved `.patch` file both flow through
-/// here; stdin (`-`) is handled by the caller. A transport/HTTP failure or an
-/// unreadable file is [`EngineError::PatchImportFetch`].
+/// here. The caller handles stdin (`-`). A transport or HTTP failure, and an
+/// unreadable file, are [`EngineError::PatchImportFetch`].
 pub fn fetch(source: &str) -> Result<Vec<u8>, EngineError> {
     if source.starts_with("http://") || source.starts_with("https://") {
         fetch_url(source)
@@ -72,7 +73,7 @@ pub fn safe_label(label: &str) -> Result<(), EngineError> {
 /// at position `index`, preserving the file's comments and layout.
 ///
 /// The manifest is parsed with `toml_edit`, so every comment and blank line outside
-/// the edited array is kept byte-for-byte; only the one array grows. A scope key
+/// the edited array is kept byte-for-byte. Only the one array grows. A scope key
 /// that is absent is created. `index` is clamped to the array length (append). The
 /// array is rendered one-label-per-line with a trailing comma, matching the series
 /// convention. A parse failure or a non-array scope value is

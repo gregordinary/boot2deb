@@ -1,25 +1,28 @@
 //! Vendored apt keyring auditing: enumerate an OpenPGP keyring's primary-key
 //! fingerprints and hold them to a checked-in manifest.
 //!
-//! A keyring under `blobs/keyrings/` is a *trust anchor*: it decides whose
-//! `Release` signatures the bootstrap accepts. As a binary blob it is also the one
-//! vendored file a human cannot review — a diff reports `Bin 55918 -> 55934 bytes`
-//! and nothing about which keys changed. So every vendored keyring ships a sibling
-//! `<name>.fingerprints` manifest naming the primary keys it is allowed to contain,
-//! and [`verify`] fails closed unless the keyring holds exactly that set. Swapping a
-//! key now shows up in review as a line of text, and the trusted set is a list anyone
-//! can check against `debian.org` without trusting this repo.
+//! A keyring under `blobs/keyrings/` is a *trust anchor*. It decides whose `Release`
+//! signatures the bootstrap accepts. As a binary blob it is also the one vendored
+//! file a human cannot review. A diff reports `Bin 55918 -> 55934 bytes` and nothing
+//! about which keys changed.
 //!
-//! Only **primary** keys (packet tag 6) are listed. A subkey cannot be added without a
-//! binding signature from its primary key, which `gpgv` verifies during the bootstrap
-//! and which an attacker cannot forge without the primary secret — so pinning the
-//! primaries pins the whole certificate.
+//! So every vendored keyring ships a sibling `<name>.fingerprints` manifest naming
+//! the primary keys it is allowed to contain. [`verify`] fails closed unless the
+//! keyring holds exactly that set. Swapping a key now shows up in review as a line
+//! of text. The trusted set is a list anyone can check against `debian.org` without
+//! trusting this repo.
 //!
-//! Parsing is pure-Rust and deliberately narrow: walk the packet stream (RFC 4880
-//! §4.2), take the v4 public-key packets, and fingerprint each as
-//! `SHA-1(0x99 ‖ len_be16 ‖ body)` (RFC 4880 §12.2). Anything it does not understand — a
-//! partial length, an unknown key version — is an error, never a skipped packet, so a
-//! keyring this module cannot fully account for is never declared verified.
+//! Only **primary** keys (packet tag 6) are listed. A subkey cannot be added without
+//! a binding signature from its primary key. `gpgv` verifies that signature during
+//! the bootstrap, and an attacker cannot forge it without the primary secret.
+//! Pinning the primaries therefore pins the whole certificate.
+//!
+//! Parsing is pure-Rust and deliberately narrow. It walks the packet stream (RFC
+//! 4880 §4.2), takes the v4 public-key packets, and fingerprints each as
+//! `SHA-1(0x99 ‖ len_be16 ‖ body)` (RFC 4880 §12.2). Anything it does not
+//! understand, such as a partial length or an unknown key version, is an error
+//! rather than a skipped packet. A keyring this module cannot fully account for is
+//! therefore never declared verified.
 
 use crate::error::EngineError;
 use sha1::{Digest, Sha1};
@@ -39,11 +42,12 @@ pub fn manifest_path(keyring: &Path) -> PathBuf {
 
 /// Verify a vendored keyring against its sibling fingerprint manifest.
 ///
-/// The manifest is **mandatory**: a vendored keyring with no manifest is
-/// [`EngineError::KeyringManifestMissing`], not an unchecked pass, so deleting the
-/// manifest cannot silently disable the check. The keyring's primary-key set must
-/// equal the manifest's exactly — an extra key is an injected trust anchor, a missing
-/// one is a stale manifest, and both are
+/// The manifest is **mandatory**. A vendored keyring with no manifest is
+/// [`EngineError::KeyringManifestMissing`] rather than an unchecked pass, so
+/// deleting the manifest cannot silently disable the check.
+///
+/// The keyring's primary-key set must equal the manifest's exactly. An extra key is
+/// an injected trust anchor, a missing one is a stale manifest, and both are
 /// [`EngineError::KeyringFingerprintMismatch`].
 ///
 /// Returns the verified fingerprints in manifest order, for callers that want to
@@ -120,7 +124,7 @@ impl std::fmt::Display for Key {
 /// with `#` comments and blank lines ignored.
 ///
 /// Pure, so the format is testable without a keyring. A duplicate fingerprint is an
-/// error rather than a silently collapsed set — it means the file was edited wrong,
+/// error rather than a silently collapsed set. It means the file was edited wrong,
 /// and the point of the manifest is that it is read carefully.
 pub fn parse_manifest(text: &str) -> Result<Vec<Key>, String> {
     let mut keys: Vec<Key> = Vec::new();
@@ -160,7 +164,7 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Key>, String> {
 /// keyring, in packet order.
 ///
 /// Pure: the whole keyring is one byte slice in, fingerprints out. `Err` carries a
-/// human-readable reason; the caller wraps it with the keyring's path.
+/// human-readable reason. The caller wraps it with the keyring's path.
 pub fn fingerprints(bytes: &[u8]) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for packet in packets(bytes)? {

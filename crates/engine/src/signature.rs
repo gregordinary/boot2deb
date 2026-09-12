@@ -1,29 +1,31 @@
-//! Build signatures — a content hash of a node's resolved inputs, with
-//! dependency signatures folded in, so the build graph is a Merkle DAG and its
-//! edges are the cache-invalidation edges.
+//! Build signatures: a content hash of a node's resolved inputs, with dependency
+//! signatures folded in. The build graph is therefore a Merkle DAG, and its edges are
+//! the cache-invalidation edges.
 //!
-//! **Tier 1.** Each built tree/artifact is stamped with its input
-//! signature; on the reuse path the engine recomputes the signature and rebuilds
-//! unless it matches. This replaces unsound directory-existence reuse — a reused
-//! tree is otherwise never re-checked against the lock, so a changed pin/patch is
-//! silently built on a stale checkout. The bias is deliberate: a spurious
-//! *miss* only wastes time, a spurious *hit* ships a stale artifact, so a node
-//! folds every input that can change its tree and treats a missing/unreadable
-//! stamp or any mismatch as "rebuild".
+//! **Tier 1.** Each built tree or artifact is stamped with its input signature. On
+//! the reuse path the engine recomputes the signature and rebuilds unless it matches.
+//! This replaces unsound directory-existence reuse. A reused tree is otherwise never
+//! re-checked against the lock, so a changed pin or patch is silently built on a
+//! stale checkout.
+//!
+//! The bias is deliberate. A spurious *miss* only wastes time, and a spurious *hit*
+//! ships a stale artifact. So a node folds every input that can change its tree, and
+//! treats a missing or unreadable stamp, or any mismatch, as "rebuild".
 //!
 //! **Diffable stamp.** The `<tree>.sig` stamp is a [`SignatureManifest`]: the rolled
 //! signature *plus* the labeled input records that produced it. The rolled hash is
-//! the reuse key ([`is_fresh`]); the retained records are what let `why-rebuild`
-//! ([`crate::plan`]) explain a rebuild *in input terms* — "kernel.commit changed,
-//! patches.commit +1" — rather than "the hash differs" (the payoff of
-//! structure). [`SignatureManifest::diff`] computes that per-label delta.
+//! the reuse key ([`is_fresh`]). The retained records are what let `why-rebuild`
+//! ([`crate::plan`]) explain a rebuild *in input terms*, reading "kernel.commit
+//! changed, patches.commit +1" rather than "the hash differs".
+//! [`SignatureManifest::diff`] computes that per-label delta.
 //!
-//! Pure: the folding + canonicalization is deterministic and unit-tested; the
-//! on-disk stamp is the only I/O ([`read_manifest`] / [`write_manifest`]). The
-//! hash's algebra mirrors the input's — [`SignatureBuilder::fold_ordered`] is
-//! order-sensitive (patch series, last-wins fragments), [`fold_set`] is not (the
-//! order-insensitive package union) — and every record is length-prefixed so
-//! distinct inputs can never collide by concatenation.
+//! Pure: the folding and canonicalization are deterministic and unit-tested. The
+//! on-disk stamp is the only I/O ([`read_manifest`] and [`write_manifest`]).
+//!
+//! The hash's algebra mirrors the input's. [`SignatureBuilder::fold_ordered`] is
+//! order-sensitive (patch series, last-wins fragments), and [`fold_set`] is not (the
+//! order-insensitive package union). Every record is length-prefixed, so distinct
+//! inputs can never collide by concatenation.
 //!
 //! [`fold_set`]: SignatureBuilder::fold_set
 
@@ -61,11 +63,11 @@ pub struct Record {
 }
 
 /// Accumulates a node's inputs into a canonical byte stream (for the hash) and a
-/// parallel list of labeled records (for explanation), then produces either the
+/// parallel list of labeled records (for explanation). It then produces either the
 /// bare [`Signature`] or the full [`SignatureManifest`].
 ///
-/// Every `fold_*` writes length-prefixed, labeled records into the hash stream, so
-/// `["a","b"]` and `["ab"]` — or a scalar `"ab"` — never produce the same stream.
+/// Every `fold_*` writes length-prefixed, labeled records into the hash stream. So
+/// `["a","b"]`, `["ab"]`, and a scalar `"ab"` never produce the same stream.
 /// Construct with the node name and its stage-recipe version (: a node's own
 /// build logic is an input, so bump the version when the stage's logic changes to
 /// force a rebuild), fold the resolved inputs, then [`finish`](Self::finish) (hash
@@ -164,17 +166,17 @@ impl SignatureBuilder {
     }
 }
 
-/// A tree's stamped signature and the inputs that produced it — the on-disk
-/// `<tree>.sig` document. The `signature` field is the reuse key; `records` is the
+/// A tree's stamped signature and the inputs that produced it, as the on-disk
+/// `<tree>.sig` document. The `signature` field is the reuse key. `records` is the
 /// per-input breakdown `why-rebuild` diffs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureManifest {
     /// The build node this stamp belongs to (e.g. `kernel`, `userspace:mpp`).
     pub node: String,
-    /// The stage-recipe version at stamp time; a bump alone changes
+    /// The stage-recipe version at stamp time. A bump alone changes
     /// `signature` with no record delta.
     pub stage_version: u32,
-    /// The rolled sha256 hex — the reuse key.
+    /// The rolled sha256 hex, which is the reuse key.
     pub signature: String,
     /// The labeled input records that rolled into `signature`.
     pub records: Vec<Record>,
@@ -191,11 +193,11 @@ impl SignatureManifest {
         self.signature == other.signature
     }
 
-    /// The per-label change set from `old` to `new`. Records are grouped by
-    /// label (aggregating any repeats), then compared: a label only in `new` is
+    /// The per-label change set from `old` to `new`. Records are grouped by label
+    /// (aggregating any repeats), then compared. A label only in `new` is
     /// [`ChangeKind::Added`], only in `old` is [`ChangeKind::Removed`], and one whose
     /// values differ is [`ChangeKind::Changed`]. An empty result on differing
-    /// signatures means only `node`/`stage_version` moved (a build-logic bump).
+    /// signatures means only `node` or `stage_version` moved (a build-logic bump).
     /// Deterministic: labels are compared in sorted order.
     pub fn diff(old: &SignatureManifest, new: &SignatureManifest) -> Vec<RecordChange> {
         let group = |recs: &[Record]| -> BTreeMap<String, Vec<String>> {
@@ -266,8 +268,8 @@ pub struct RecordChange {
 
 impl RecordChange {
     /// A one-line human summary of the change, for `why-rebuild` output. A scalar
-    /// change reads `label: old → new`; a list change reads the removed (`-`) and
-    /// added (`+`) items; an add/remove names the values.
+    /// change reads `label: old → new`. A list change reads the removed (`-`) and
+    /// added (`+`) items. An add or a remove names the values.
     pub fn summary(&self) -> String {
         match self.kind {
             ChangeKind::Changed if self.old.len() == 1 && self.new.len() == 1 => {
@@ -293,9 +295,9 @@ impl RecordChange {
     }
 }
 
-/// The stamp path for a built tree: a `<tree>.sig` sidecar, kept *outside* the
-/// tree so it never shows up as an untracked file in the git checkout (which would
-/// disturb the patch-apply clean check).
+/// The stamp path for a built tree: a `<tree>.sig` sidecar, kept *outside* the tree.
+/// It therefore never shows up as an untracked file in the git checkout, which would
+/// disturb the patch-apply clean check.
 pub fn stamp_path(tree: &Path) -> PathBuf {
     let mut s = tree.as_os_str().to_os_string();
     s.push(".sig");

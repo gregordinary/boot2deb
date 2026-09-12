@@ -4,8 +4,8 @@
 [kernel]
 id = "rk3288-libre-7.2"
 source = "git://linux-libre.fsfla.org/releases.git"
-ref = "sources/v7.2.2-gnu"
-commit = "b270e5a794f7c7d64ae3dd63f21f350ab0929ff6"
+ref = "sources/v7.2.3-gnu"
+commit = "c9574d344b54c2fd60c177a98167a0ae8998c9c5"
 
 [patches]
 series = ["rk3288-fixes"]

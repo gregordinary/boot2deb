@@ -1,8 +1,8 @@
 //! Typed configuration errors.
 //!
-//! Every failure of loading or resolving config is one of these variants, so the
-//! whole "is this build well-formed?" question is answered — with an actionable
-//! message — *before* any build work starts.
+//! Every failure of loading or resolving config is one of these variants. The whole
+//! "is this build well-formed?" question is therefore answered, with an actionable
+//! message, *before* any build work starts.
 
 /// An error from loading a config layer or resolving a build.
 #[derive(Debug, thiserror::Error)]
@@ -34,7 +34,7 @@ pub enum ConfigError {
     /// A flat layer name or manifest filename (from a CLI argument or a config
     /// cross-reference) is not a bare identifier, so it cannot be trusted to join
     /// into a filesystem path. Names must match `[A-Za-z0-9._-]`, be non-empty, not
-    /// start with a dot, and contain no path separators or `..` — this stops a `../`
+    /// start with a dot, and contain no path separators or `..`. This stops a `../`
     /// traversal or an absolute path from escaping the config root (both a read *and*,
     /// via `lock_path`, a write target). Recipe references, which nest one level and
     /// so admit a single `/`, are validated separately ([`InvalidRecipeRef`](Self::InvalidRecipeRef)).
@@ -48,9 +48,10 @@ pub enum ConfigError {
 
     /// A device slug is not a valid host name. Tighter than
     /// [`InvalidName`](Self::InvalidName), which the slug also has to satisfy and
-    /// automatically does: a board's slug is the host name its image comes up under
-    /// unless the board states another, so a slug outside the host-name shape would
-    /// make the default `boot2deb new-device` writes one no image could carry.
+    /// automatically does. A board's slug is the host name its image comes up under,
+    /// unless the board states another. A slug outside the host-name shape would
+    /// therefore make the default `boot2deb new-device` writes one no image could
+    /// carry.
     #[error(
         "invalid device name '{name}': {why} — the slug is also the image's default \
          hostname, so it must be a valid host name (e.g. 'my-board')"
@@ -74,9 +75,9 @@ pub enum ConfigError {
     },
 
     /// A device's `extends` is present but not a string, so it names no parent
-    /// device. Caught while walking the chain — before deserialization, which is
-    /// where the key's own type would otherwise be checked — so the message names
-    /// the device rather than a merged value's field.
+    /// device. Caught while walking the chain, before deserialization, which is
+    /// where the key's own type would otherwise be checked. The message therefore
+    /// names the device rather than a merged value's field.
     #[error("device '{device}': extends must be a device name (a string), found {found}")]
     InvalidDeviceExtends {
         /// The device whose file carries the bad value.
@@ -90,7 +91,7 @@ pub enum ConfigError {
     /// not an array.
     ///
     /// Caught while walking the `extends` chain rather than at deserialization, so the
-    /// message names the file that holds it. That attribution is the whole point: the
+    /// message names the file that holds it. That attribution is the whole point. The
     /// merge is last-wins, so a malformed value in an ancestor that the child overrides
     /// would deserialize cleanly and never be reported.
     #[error("{path}: {field} must be an array, found {found}")]
@@ -105,11 +106,11 @@ pub enum ConfigError {
 
     /// A recipe reference (a CLI argument or config cross-reference) is not a valid
     /// `<device>/<leaf>` — or bare `<leaf>` — path. Recipes are the one layer that
-    /// nests one level under a device folder, so a reference may carry a *single*
-    /// interior `/`; both halves must be bare identifiers (`[A-Za-z0-9._-]`, non-empty,
+    /// nests one level under a device folder, so a reference can carry a *single*
+    /// interior `/`. Both halves must be bare identifiers (`[A-Za-z0-9._-]`, non-empty,
     /// no leading dot). That bars `..`, a leading/trailing/absolute/doubled slash, and
-    /// more than one separator, so a reference can never escape `recipes/` when joined
-    /// into `recipes/<ref>.toml`, its `.lock`, or its manifest sibling.
+    /// more than one separator. A reference can therefore never escape `recipes/` when
+    /// joined into `recipes/<ref>.toml`, its `.lock`, or its manifest sibling.
     #[error(
         "invalid recipe name '{name}': must be `<device>/<leaf>` or a bare identifier \
          (at most one '/', each part [A-Za-z0-9._-], no '..')"
@@ -123,8 +124,8 @@ pub enum ConfigError {
     /// keyring) that the shipped root also provides. Overlays are operator-supplied
     /// but not necessarily audited line-by-line, and honoring an overlay's archive
     /// keyring silently changes which `Release` signatures apt accepts — a
-    /// trust-anchor swap. Resolution fails closed rather than pick the
-    /// overlay's copy; `--unsafe-overlay-keyring` opts into the overlay explicitly.
+    /// trust-anchor swap. Resolution fails closed rather than pick the overlay's
+    /// copy. `--unsafe-overlay-keyring` opts into the overlay explicitly.
     #[error(
         "overlay trust-anchor conflict: an overlay ships '{asset}', which shadows the \
          shipped archive keyring — refusing to trust an unaudited keyring. Pass \
@@ -157,8 +158,8 @@ pub enum ConfigError {
     },
 
     /// A kernel definition has no `flavor`. The flavor selects which *shape* the
-    /// definition has — a compiled kernel's source ref and fragments, or a distro
-    /// kernel's package name — so without it there is no struct to validate the file
+    /// definition has: a compiled kernel's source ref and fragments, or a distro
+    /// kernel's package name. Without it there is no struct to validate the file
     /// against.
     #[error("kernel '{kernel}' has no `flavor` (expected mainline, vendor, or distro-package) in {path}")]
     MissingKernelFlavor {
@@ -171,8 +172,8 @@ pub enum ConfigError {
     /// A solved package manifest has a line that is not
     /// `name version arch sha256` — see [`manifest::parse`](crate::manifest::parse).
     ///
-    /// Attributed to a line rather than to the file as a whole because a manifest is a
-    /// content pin: dropping the line would silently shrink the package set the file
+    /// Attributed to a line rather than to the file as a whole, because a manifest is
+    /// a content pin. Dropping the line would silently shrink the package set the file
     /// claims to pin, and a reader could not tell that had happened.
     #[error("{path}:{line}: not a `name version arch sha256` manifest line: {content}")]
     InvalidManifest {
@@ -184,7 +185,7 @@ pub enum ConfigError {
         content: String,
     },
 
-    /// A generated artifact (e.g. a lockfile) could not be serialized to TOML.
+    /// A generated artifact (e.g. a lock) could not be serialized to TOML.
     #[error("failed to serialize {what}: {source}")]
     Serialize {
         /// What was being serialized.
@@ -232,13 +233,13 @@ pub enum ConfigError {
         boot_method: String,
     },
 
-    /// An override was set on an axis the resolved deliverable does not have — a
-    /// rootfs axis (`--suite`, `--feature`, `--locale`, …) on a `deliverable = "uboot"`
-    /// recipe, which resolves no kernel, no suite, and no rootfs.
+    /// An override was set on an axis the resolved deliverable does not have. A
+    /// `deliverable = "uboot"` recipe resolves no kernel, suite, or rootfs, so a rootfs
+    /// axis such as `--suite` or `--feature` has nothing to apply to.
     ///
-    /// Named rather than dropped: an inapplicable *stage* is already a user error worth
-    /// naming rather than a silent skip, and an inapplicable *axis* is the same mistake
-    /// one level up. Silently discarding it would accept a misspelled feature name, or
+    /// Named rather than dropped. An inapplicable *stage* is already a user error worth
+    /// naming rather than a silent skip. An inapplicable *axis* is the same mistake one
+    /// level up. Silently discarding it would accept a misspelled feature name, or
     /// an `--image-size` that is a hard error on every other path, and exit 0.
     #[error(
         "{flag} does not apply to a u-boot-only build of '{device}': the deliverable is \
@@ -300,10 +301,10 @@ pub enum ConfigError {
     },
 
     /// The device omits a field the *resolved boot method* requires. The
-    /// requirement is method-scoped, not universal — a board that boots depthcharge
-    /// has no `uboot_defconfig` because it compiles no u-boot, and one that boots
-    /// rkbin has no `[depthcharge]` block — so the error names the method that wants
-    /// it rather than implying every device must carry it.
+    /// requirement is method-scoped, not universal. A board that boots depthcharge
+    /// has no `uboot_defconfig`, because it compiles no u-boot, and one that boots
+    /// rkbin has no `[depthcharge]` block. The error therefore names the method that
+    /// wants it, rather than implying every device must carry it.
     #[error("device '{device}' boots via '{boot_method}', which requires `{what}` — add it to devices/{device}.toml")]
     MissingBootField {
         /// The device being resolved.
@@ -316,8 +317,8 @@ pub enum ConfigError {
 
     /// The requested depthcharge board profile is not in the device's
     /// `supported_boards`. A profile describes the *firmware* the unit runs (a stock
-    /// C201 and a libreboot'd one differ), so picking the wrong one produces an image
-    /// that firmware will not boot — caught here rather than on the hardware.
+    /// C201 and a libreboot'd one differ). Picking the wrong one produces an image
+    /// that firmware will not boot, caught here rather than on the hardware.
     #[error("device '{device}' does not support board profile '{board}' (supported: {supported})")]
     UnknownBoardProfile {
         /// The device being resolved.
@@ -330,7 +331,7 @@ pub enum ConfigError {
 
     /// The derived rootfs offset (`kpart_offset + slots × kpart_size`) overflows
     /// [`u64`]. Only reachable from author-supplied sizes near the type's ceiling, and
-    /// reported rather than wrapped: a wrapped value would place the rootfs partition
+    /// reported rather than wrapped. A wrapped value would place the rootfs partition
     /// inside the kernel slots.
     #[error(
         "depthcharge geometry overflows: kpart offset {offset} + {slots} × {size} does \
@@ -368,7 +369,7 @@ pub enum ConfigError {
     },
 
     /// `kpart_slots` is outside `1..=MAX_KPART_SLOTS`. Zero slots would leave the
-    /// firmware nothing to boot; above the cap is a typo, not an intent — see
+    /// firmware nothing to boot. Above the cap is a typo, not an intent — see
     /// [`MAX_KPART_SLOTS`](crate::chromeos::MAX_KPART_SLOTS).
     #[error(
         "kpart_slots = {value} is out of range (1-{max}); 2 is what gives a kernel \
@@ -381,9 +382,9 @@ pub enum ConfigError {
         max: u8,
     },
 
-    /// The device declares an input that only a *compiled* kernel consumes — a board
-    /// device tree, or board kconfig fragments — while the resolved kernel is a
-    /// distro package that compiles nothing. Nothing would ever build the DTB or merge
+    /// The device declares an input that only a *compiled* kernel consumes, such as a
+    /// board device tree or board kconfig fragments. The resolved kernel is a distro
+    /// package that compiles nothing. Nothing would ever build the DTB or merge
     /// the fragments, so the board would read as configured and boot as broken.
     #[error(
         "device '{device}' declares `{what}`, but kernel '{kernel}' is a distro-package \
@@ -398,8 +399,8 @@ pub enum ConfigError {
         what: &'static str,
     },
 
-    /// A selected feature contributes a kernel input — kconfig fragments or a patch
-    /// series — while the resolved kernel is a distro package that compiles
+    /// A selected feature contributes a kernel input, either kconfig fragments or a
+    /// patch series. The resolved kernel is a distro package that compiles
     /// nothing. The capability's driver would never be patched in or configured on,
     /// so the feature would install its userspace against hardware support that is
     /// not there.
@@ -430,9 +431,9 @@ pub enum ConfigError {
     },
 
     /// A `device_dts` entry is not a contained, relative device-tree source path.
-    /// The entries are joined onto every config-root search path, so an absolute
-    /// path or a `..` component would read — and later copy into the kernel tree —
-    /// a file from outside the config tree.
+    /// The entries are joined onto every config-root search path. An absolute path or
+    /// a `..` component would read a file from outside the config tree, and later copy
+    /// it into the kernel tree.
     #[error(
         "device '{device}' has an invalid device_dts entry '{path}': {why} \
          (expected a config-root-relative path to a .dts or .dtsi)"
@@ -446,8 +447,8 @@ pub enum ConfigError {
         why: &'static str,
     },
 
-    /// A board lists `device_dts` sources but none of them compiles the DTB named
-    /// by `kernel_dtb` — the boot would look for a DTB the kernel never builds. The
+    /// A board lists `device_dts` sources, but none of them compiles the DTB named
+    /// by `kernel_dtb`. The boot would look for a DTB the kernel never builds. The
     /// basenames must correspond (`rockchip/board.dtb` ← `.../board.dts`).
     #[error(
         "device '{device}': kernel_dtb '{kernel_dtb}' is not built by any device_dts \
@@ -467,7 +468,7 @@ pub enum ConfigError {
     /// A `kmods/<name>.toml` layer is malformed: a non-package-safe name, or a
     /// `subdir`/`patch_dir`/patch/module path that is absolute or escapes the tree it is
     /// joined onto. The subdir feeds `make M=` and the local patches are read from the
-    /// config root, so an escaping value would build or read a file from outside the
+    /// config root. An escaping value would build or read a file from outside the
     /// intended tree.
     #[error("kmod '{kmod}' is invalid (kmods/{kmod}.toml): {why}")]
     InvalidKmod {
@@ -479,7 +480,7 @@ pub enum ConfigError {
     },
 
     /// A device's `device_kmods` names the same kmod twice. One kmod is one build node,
-    /// one deb, and one lock pin, so a repeat is a config mistake with no meaning rather
+    /// one deb, and one lock pin. A repeat is a config mistake with no meaning, rather
     /// than a request to build it twice.
     #[error("device '{device}' names kmod '{kmod}' more than once")]
     DuplicateKmod {
@@ -540,7 +541,7 @@ pub enum ConfigError {
 
     /// A kernel definition names one or more patch series but no `patches_url`. The
     /// lock records the source beside the commit, and a commit id is meaningless
-    /// outside the repo it came from, so a series without a source cannot be pinned
+    /// outside the repo it came from. A series without a source cannot be pinned
     /// honestly.
     #[error(
         "kernel '{kernel}' names patch series [{series}] but no patches_url — \
@@ -624,7 +625,7 @@ pub enum ConfigError {
     },
 
     /// A recipe's `[[data_volumes]]` label cannot serve as the volume's identity
-    /// across a reimage — empty, too long for the filesystem, holding a character
+    /// across a reimage. It is empty, too long for the filesystem, holding a character
     /// that would need quoting in `/etc/fstab`, or declared twice.
     #[error("data volume label '{label}' {why}")]
     DataVolumeLabel {
@@ -646,10 +647,10 @@ pub enum ConfigError {
 
     /// A recipe declares `[[data_volumes]]` without selecting the `data-volume`
     /// feature, or selects that feature without declaring any volume. The two
-    /// halves are useless apart — the feature carries the first-boot hook that
-    /// acts on the declarations, and the declarations are inert without it — and
-    /// pulling the feature in implicitly would be the provider auto-resolution
-    /// this config model does not do.
+    /// halves are useless apart. The feature carries the first-boot hook that acts
+    /// on the declarations, and the declarations are inert without it. Pulling the
+    /// feature in implicitly would be the provider auto-resolution this config
+    /// model does not do.
     #[error(
         "recipe '{recipe}' {problem} — a data volume needs both the 'data-volume' \
          feature (which carries the first-boot hook) and at least one \
@@ -664,12 +665,11 @@ pub enum ConfigError {
 
     /// A recipe declares a `[support]` claim while selecting a feature that builds
     /// FFmpeg `--enable-nonfree`. A claim is a statement that a configuration is fit
-    /// to publish, and this one may not be published at all, so the two cannot both
-    /// stand.
+    /// to publish. This one cannot be published at all, so the two cannot both stand.
     ///
-    /// It is a gate on *authored* recipes only. The nonfree flavour is reached as a
+    /// It is a gate on *authored* recipes only. The nonfree flavor is reached as a
     /// feature-variant reference (`<recipe>+<feature>`), which carries no claim of its
-    /// own and appears in no support matrix — that path is unaffected.
+    /// own and appears in no support matrix. That path is unaffected.
     #[error(
         "recipe '{recipe}' declares a [support] claim but selects '{feature}', which \
          builds FFmpeg with --enable-nonfree — the result may be built and used but \
@@ -713,7 +713,7 @@ pub enum ConfigError {
 
     /// Two selected features contribute an apt source with the same `name` but
     /// differing definitions, so the rootfs solve cannot tell which repo to
-    /// activate. Identical duplicates are fine (de-duplicated); a genuine
+    /// activate. Identical duplicates are fine (de-duplicated). A genuine
     /// clash is rejected.
     #[error(
         "features '{feature}' and '{other}' both define apt source '{name}' with \
@@ -729,17 +729,16 @@ pub enum ConfigError {
     },
 
     /// An `apt_sources` field cannot be rendered into the apt one-line source
-    /// (`deb [signed-by=…] <uri> <suite> <components…>`): the line is positional
-    /// and space-separated, so an empty value or one carrying whitespace or
-    /// `[`/`]` would be parsed as line structure rather than content — and a
-    /// non-http(s) URI would point the bootstrap solve at an arbitrary
-    /// transport.
+    /// (`deb [signed-by=…] <uri> <suite> <components…>`). The line is positional and
+    /// space-separated. An empty value, or one carrying whitespace or `[`/`]`, would
+    /// be parsed as line structure rather than content. A non-http(s) URI would point
+    /// the bootstrap solve at an arbitrary transport.
     ///
     /// `name` and `signed_by` are held to the tighter rule that they be portable
-    /// file-name stems (`[A-Za-z0-9._-]`, not `.` or `..`), because each names a
-    /// file: `name` the rootfs's `sources.list.d` entry and keyring, `signed_by` the
-    /// vendored keyring the repo is verified against. A separator or dot segment in
-    /// either would place a file — or read a trust anchor — outside the directory
+    /// file-name stems (`[A-Za-z0-9._-]`, not `.` or `..`), because each names a file.
+    /// `name` is the rootfs's `sources.list.d` entry and keyring, and `signed_by` is
+    /// the vendored keyring the repo is verified against. A separator or dot segment
+    /// in either would place a file — or read a trust anchor — outside the directory
     /// that holds it.
     #[error("feature '{feature}': apt source '{name}' has an unusable {field}: {value:?}")]
     AptSourceBadField {
@@ -759,9 +758,9 @@ pub enum ConfigError {
     /// than silently deduplicated.
     ///
     /// Also raised when building a [`BuildPoint`](crate::buildpoint::BuildPoint),
-    /// which rejects it earlier still: folding a repeat there would make the
-    /// reference disagree with what was asked for, and the reference is what names
-    /// the lock, the solved manifest, and the build directory.
+    /// which rejects it earlier still. Folding a repeat there would make the
+    /// reference disagree with what was asked for. The reference is what names the
+    /// lock, the solved manifest, and the build directory.
     #[error("feature '{feature}' selected more than once")]
     DuplicateFeature {
         /// The repeated feature name.
@@ -778,14 +777,14 @@ pub enum ConfigError {
         conflicts_with: String,
     },
 
-    /// A selected feature requires a capability no other selected feature provides —
-    /// an incomplete composition, caught at resolve because the image it would build
-    /// is bootable but broken (`jellyfin` with no FFmpeg provider installs a server
-    /// that exits at startup).
+    /// A selected feature requires a capability no other selected feature provides.
+    /// That is an incomplete composition, caught at resolve because the image it would
+    /// build is bootable but broken (`jellyfin` with no FFmpeg provider installs a
+    /// server that exits at startup).
     ///
     /// The message names the providers the config tree carries, because the fix is
-    /// always to add one and the user cannot be expected to know which features
-    /// declare the capability.
+    /// always to add one. The user cannot be expected to know which features declare
+    /// the capability.
     #[error("feature '{feature}' requires capability '{capability}', which no selected feature provides{}", providers_hint(.providers))]
     MissingCapability {
         /// The feature whose requirement is unmet.
@@ -799,16 +798,25 @@ pub enum ConfigError {
     },
 
     /// A configured value cannot be carried to the file, line, or command line it has
-    /// to reach, so resolution refuses it rather than emitting an image built around it.
+    /// to reach. Resolution refuses it rather than emitting an image built around it.
     ///
-    /// **One variant for eight axes** — locale, timezone, NTP server, keymap field,
-    /// hostname, suite, kernel cmdline, depthcharge board profile — because they are one
-    /// failure: a value the config authored is not a value its destination can hold. The
-    /// message says which axis and why, and its `what` field carries the axis as
-    /// data, so a test asserting `what == "hostname"` pins more than a variant name did.
+    /// **One variant for eight axes**, because they are one failure: a value the config
+    /// authored is not a value its destination can hold. The eight are:
     ///
-    /// The value is rendered with `{:?}`, not quoted by hand: several of these are
-    /// rejected *for* carrying a newline or a quote, and printing one raw would put the
+    /// - Locale
+    /// - Timezone
+    /// - NTP server
+    /// - Keymap field
+    /// - Hostname
+    /// - Suite
+    /// - Kernel cmdline
+    /// - Depthcharge board profile
+    ///
+    /// The message says which axis and why. Its `what` field carries the axis as data,
+    /// so a test asserting `what == "hostname"` pins more than a variant name did.
+    ///
+    /// The value is rendered with `{:?}`, not quoted by hand. Several of these are
+    /// rejected *for* carrying a newline or a quote. Printing one raw would put the
     /// thing being rejected into the operator's terminal unescaped.
     ///
     /// Axes with more to say keep their own variant — [`InvalidKmod`](Self::InvalidKmod)
@@ -827,10 +835,11 @@ pub enum ConfigError {
     },
 
     /// The resolved suite is well-formed but not in the device's `supported_suites`.
-    /// Separate from [`InvalidField`](Self::InvalidField) with `what = "suite"`: that
-    /// one asks whether the string could name a suite at all, this one whether *this
-    /// board* is built for it. Catches both a typo and a suite whose kernel predates the SoC — either of
-    /// which would otherwise fail minutes into a bootstrap.
+    /// Separate from [`InvalidField`](Self::InvalidField) with `what = "suite"`. That
+    /// one asks whether the string could name a suite at all, and this one whether
+    /// *this board* is built for it. Catches both a typo and a suite whose kernel
+    /// predates the SoC — either of which would otherwise fail minutes into a
+    /// bootstrap.
     #[error("device '{device}' does not support suite '{suite}' (supported: {supported})")]
     UnsupportedSuite {
         /// The device being resolved.
@@ -843,7 +852,8 @@ pub enum ConfigError {
 
     /// A device's `supported_suites` mixes the `*` wildcard with named codenames.
     /// The wildcard already admits everything, so the named entries can only be a
-    /// narrowing the list does not perform — two incompatible claims in one field.
+    /// narrowing the list does not perform. They are two incompatible claims in one
+    /// field.
     #[error(
         "device '{device}' lists supported_suites = [{supported}]: the '*' wildcard \
          admits every codename, so naming others alongside it states two different \
@@ -856,8 +866,8 @@ pub enum ConfigError {
         supported: String,
     },
 
-    /// A device declares an empty `supported_suites`, which admits nothing: every
-    /// suite — including its own `default_suite` — would be rejected, so no image
+    /// A device declares an empty `supported_suites`, which admits nothing. Every
+    /// suite, including its own `default_suite`, would be rejected, so no image
     /// could ever be built for it.
     #[error(
         "device '{device}' declares an empty supported_suites, so no suite resolves — \
@@ -911,8 +921,8 @@ pub enum ConfigError {
 
     /// An `extra_debs` `path` locator escapes the config root: it is absolute or
     /// contains a `..` component. A `path` deb is resolved relative to a config root
-    /// (an overlay may ship it), so it must stay within one — an out-of-root
-    /// read is a config-containment breach, not a valid source.
+    /// (an overlay can ship it), so it must stay within one. An out-of-root read is a
+    /// config-containment breach, not a valid source.
     #[error("extra_deb path '{value}' must be a relative path within the config root (no leading `/`, no `..`)")]
     ExtraDebUnsafePath {
         /// The offending path string.
@@ -928,16 +938,16 @@ pub enum ConfigError {
     #[error("patch has no diff (no `diff --git`/`--- a/…` payload found)")]
     PatchNoDiff,
 
-    /// A patch handed to `patch import` has no subject and none could be
-    /// derived — a bare diff whose changed file could not be named, or an mbox
+    /// A patch handed to `patch import` has no subject and none could be derived.
+    /// That is a bare diff whose changed file could not be named, or an mbox
     /// missing its `Subject:` header. Pass `--subject`.
     #[error("patch has no subject and none could be derived (pass --subject)")]
     PatchMissingSubject,
 
     /// `patch import` could not choose a filename prefix for the requested position.
     /// Consecutive integer neighbors auto-degrade to a lettered sub-prefix
-    /// ([`derive_prefix`](crate::series::derive_prefix)), so this remains only for
-    /// the one case with no room below it: prepending before a `000`-prefixed first
+    /// ([`derive_prefix`](crate::series::derive_prefix)). This remains only for the
+    /// one case with no room below it, prepending before a `000`-prefixed first
     /// entry. Pass an explicit destination label with `--as`.
     #[error(
         "cannot place a patch before prefix {after:03} (nothing sorts below it); \
@@ -951,7 +961,7 @@ pub enum ConfigError {
 
     /// An `ssh_authorized_keys` entry is not a usable `authorized_keys` line. Rejected
     /// at resolution because `sshd` reports a line it cannot parse only in its own log,
-    /// on a board that may have no console — so the alternative to this error is an
+    /// and the board need not have a console. The alternative to this error is an
     /// image whose key silently does not work.
     ///
     /// The entry is quoted back truncated: a key blob is ~70 to ~700 characters, and a
@@ -970,8 +980,8 @@ pub enum ConfigError {
     },
 
     /// A `first_boot_password_length` outside the accepted range. A short generated
-    /// password is the one setting whose weakness is invisible on the finished image:
-    /// nothing about a booted board reveals how much entropy its first credential had.
+    /// password is the one setting whose weakness is invisible on the finished image.
+    /// Nothing about a booted board reveals how much entropy its first credential had.
     #[error(
         "first_boot_password_length {value} is outside {min}..={max} — \
          {min} is the floor at which guessing the login over the network stays \

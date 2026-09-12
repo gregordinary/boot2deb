@@ -1,13 +1,13 @@
-//! Patch normalization: turn a fetched patch — a `git format-patch` /
-//! patchwork mbox, a bare `git show`, or a freeform unified diff — into the
-//! canonical `git am`-ready mbox the patches repo stores, so the whole series
-//! applies uniformly.
+//! Patch normalization: turn a fetched patch into the canonical `git am`-ready mbox
+//! the patches repo stores, so the whole series applies uniformly. A fetched patch
+//! is a `git format-patch` or patchwork mbox, a bare `git show`, or a freeform
+//! unified diff.
 //!
 //! Pure: string classification and reshaping only, unit-testable without a host.
 //! Fetching the patch (HTTP or file) and running `git am` are engine side effects.
-//! A `git format-patch`/patchwork mbox is already canonical, so it is
-//! passed through untouched (only a missing `From ` mbox separator is prepended);
-//! the freeform shapes are synthesized into the same form, a synthesized commit
+//! A `git format-patch` or patchwork mbox is already canonical, so it is passed
+//! through untouched, and only a missing `From ` mbox separator is prepended.
+//! The freeform shapes are synthesized into the same form, a synthesized commit
 //! message wrapping a bare diff.
 
 use crate::error::ConfigError;
@@ -56,7 +56,7 @@ pub struct Normalized {
 #[derive(Debug, Clone, Default)]
 pub struct ImportMeta {
     /// `From:` author for a synthesized header. Applied to `git-show` (as a
-    /// fallback only) and `bare-diff`; a pass-through mbox keeps its own `From:`.
+    /// fallback only) and `bare-diff`. A pass-through mbox keeps its own `From:`.
     pub author: Option<String>,
     /// Subject override — the title for a `bare-diff` that carries none, or an
     /// override for `git-show`. Ignored for a pass-through mbox (it is canonical).
@@ -76,9 +76,9 @@ const MBOX_SEPARATOR_DATE: &str = "Mon Sep 17 00:00:00 2001";
 
 /// Classify a fetched patch by its leading structure.
 ///
-/// Checks the metadata markers before the diff marker, since both a `git show`
-/// and an mbox *contain* a `diff --git` further down — only the freeform bare
-/// diff *starts* with one.
+/// Checks the metadata markers before the diff marker, since both a `git show` and
+/// an mbox *contain* a `diff --git` further down. Only the freeform bare diff
+/// *starts* with one.
 pub fn classify(text: &str) -> PatchKind {
     let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     if is_git_show_header(first) {
@@ -106,9 +106,9 @@ pub fn normalize(text: &str, meta: &ImportMeta) -> Result<Normalized, ConfigErro
 
 /// A URL-and-punctuation-free kebab-case slug for a patch filename, from a subject.
 ///
-/// Lowercases, turns every run of non-alphanumeric characters into a single `-`,
-/// trims leading/trailing `-`, and caps the length at a word boundary (≤60 chars)
-/// so the numeric prefix stays legible. An all-punctuation subject yields
+/// Lowercases, turns every run of non-alphanumeric characters into a single `-`, and
+/// trims leading and trailing `-`. The length is capped at a word boundary (≤60
+/// chars) so the numeric prefix stays legible. An all-punctuation subject yields
 /// `"patch"`.
 pub fn slugify(subject: &str) -> String {
     let mut slug = String::new();

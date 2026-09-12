@@ -1,15 +1,15 @@
 //! Where a build's time went: the per-step summary printed when it finishes.
 //!
-//! A [`Timeline`] is fed the whole [`Event`] stream and keeps the one thing the
-//! stream carries that no other output surfaces — how long each build-graph node
-//! ran, and whether it ran at all or restored its outputs from the artifact cache.
-//! Those two together are the point: a thirty-second kernel step is a cache hit,
-//! and without the second column a reader has to infer that from the first.
+//! A [`Timeline`] is fed the whole [`Event`] stream. It keeps the one thing the
+//! stream carries that no other output surfaces. That is how long each build-graph
+//! node ran, and whether it ran at all or restored its outputs from the artifact
+//! cache. Those two together are the point. A thirty-second kernel step is a cache
+//! hit, and without the second column a reader has to infer that from the first.
 //!
 //! No *duration* here is recorded in the provenance manifest: that document is
 //! reproducibility evidence, and a wall clock is not reproducible. The outcome column
-//! is a different kind of fact — which parts of the image this run actually built — so
-//! [`Timeline::restored_nodes`] hands that half to the manifest.
+//! is a different kind of fact, namely which parts of the image this run actually
+//! built. [`Timeline::restored_nodes`] hands that half to the manifest.
 
 use boot2deb_engine::event::{Event, StepOutcome};
 use std::cell::RefCell;

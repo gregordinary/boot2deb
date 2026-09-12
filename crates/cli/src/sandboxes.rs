@@ -1,12 +1,13 @@
 //! The provisioned roots a run stands up, and the trust anchor they bootstrap under.
 //!
-//! Two commands enter these roots — `build`, which compiles in them, and `shell`, which
-//! opens a session in one — and they must land on the *same trees*. A root's directory
-//! is keyed by its role, architecture, suite, mirror list and package set, and
-//! `ensure_ready` reuses an existing directory without re-checking any of it. So a
-//! second site that composed the key from, say, the image suite where this one composes
-//! it from the packaging suite would not fail: it would quietly bootstrap a second tree
-//! and open a session in a root the build never used.
+//! Two commands enter these roots: `build`, which compiles in them, and `shell`, which
+//! opens a session in one. They must land on the *same trees*. A root's directory is
+//! keyed by its role, architecture, suite, mirror list and package set.
+//! `ensure_ready` reuses an existing directory without re-checking any of it.
+//!
+//! So a second site that composed the key from the image suite, where this one
+//! composes it from the packaging suite, would not fail. It would quietly bootstrap a
+//! second tree and open a session in a root the build never used.
 //!
 //! One definition of the three, here, is what makes that impossible.
 

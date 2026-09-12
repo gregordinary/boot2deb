@@ -1,11 +1,11 @@
 //! `resolve`: resolve a device or recipe to a complete build and print it.
 //!
-//! The documented first coherence gate — it does no build work, but it validates the
-//! cheap local invariants (geometry, fragments, keyrings) after the printout, so the
+//! The documented first coherence gate. It does no build work. It validates the cheap
+//! local invariants (geometry, fragments, keyrings) after the printout, so the
 //! resolved values sit beside any failure they explain.
 //!
 //! It accepts a wider override set than any command that can *build* the result,
-//! deliberately: the point of the command is to see what a choice resolves to before
+//! deliberately. The point of the command is to see what a choice resolves to before
 //! committing it to config. [`unbuildable_note`] closes the gap that opens, by saying
 //! so at the moment a resolution names a point only config can reach.
 

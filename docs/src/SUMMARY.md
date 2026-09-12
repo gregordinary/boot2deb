@@ -47,3 +47,4 @@
 
 - [Adding a board](contributing/adding-a-board.md)
 - [Adding a patch](contributing/adding-a-patch.md)
+- [Prose](contributing/prose.md)

@@ -1,8 +1,10 @@
-//! `try`: boot a built image under QEMU before it is flashed — see
+//! `try`: boot a built image under QEMU before it is flashed. See
 //! [`boot2deb_engine::tryboot`] for what the run asserts and how the guest is
-//! driven. This module owns the config half: locating the recipe's image
-//! artifact and provenance manifest, standing up the target-arch sandbox the
-//! fixture kernel harvests in, and reporting the result.
+//! driven.
+//!
+//! This module owns the config half. It locates the recipe's image artifact and
+//! provenance manifest, stands up the target-arch sandbox the fixture kernel
+//! harvests in, and reports the result.
 
 use crate::args::TryArgs;
 use crate::fsutil::absolutize;

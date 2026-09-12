@@ -38,14 +38,17 @@ image_size = "2G"
 # An image from this recipe was booted and measured on the board on 2026-08-30, on the
 # v7.2 kernel with the `076-080` media series: VP9 decodes bit-exact against libvpx at
 # both profiles and scores 224/305 on Fluster, the 10-bit NV15 filter path works at
-# width 1920, and the tone-map and burn-in tables were re-earned. The claim stays
-# `expected` rather than `validated` because the lock now pins `patches` past that
-# image, and this time the intervening commits are real build inputs rather than
-# comment churn: kernel 081 pads the AV1 NV15 capture stride, ffmpeg 0016 sends the
-# HEVC SPS RPS tables, and ffmpeg 0017-0019 add the V4L2 JPEG encoder. Each was
-# validated on hardware in its own right, but not from an image this recipe produced,
-# so what stands between here and `validated` is a build at the current pin, flashed
-# and re-measured.
+# width 1920, and the tone-map and burn-in tables were re-earned. The media stack this
+# recipe carries is measured on hardware at the patches pin: kernel 082 (8K 10-bit
+# bit-exact, no IOVA collision at 6x concurrent), 083 (HEVC conformance holds at
+# 141/147 against a same-box software control), 084 (AV1 bit-exact to 8192x4352) and
+# 085 (the JPEG cap is honest at 8176), with ffmpeg 0016-0021 exercised alongside them.
+#
+# `expected` until an image from this pin boots. The last image on the board is the
+# feature variant `forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode`
+# at v7.2.2 and patches 6e886797a212, booted 2026-09-02; it exercised the kernel,
+# u-boot, device layers and the media stack end to end, and only the kernel pin has
+# moved since.
 [support]
 status = "expected"
-date   = "2026-08-30"
+date   = "2026-09-05"

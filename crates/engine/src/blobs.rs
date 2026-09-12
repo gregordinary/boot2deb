@@ -1,13 +1,13 @@
 //! rkbin blob hashing and verification.
 //!
 //! Blobs (the ATF/BL31 ELF and DDR TPL) are vendored under `blobs/<soc>/` and
-//! read through a `(filename, sha256)` key. `boot2deb update` records each as a
-//! lock pin `"<filename>@sha256:<hex>"` ([`pin`]); the u-boot build [`verify`]s
-//! the vendored file against that pin before consuming it, so a swapped or
-//! corrupted blob is a typed error, never a silently different bootloader.
+//! read through a `(filename, sha256)` key. `boot2deb update` records each as a lock
+//! pin `"<filename>@sha256:<hex>"` ([`pin`]). The u-boot build [`verify`]s the
+//! vendored file against that pin before consuming it. A swapped or corrupted blob
+//! is therefore a typed error rather than a silently different bootloader.
 //!
-//! Hashing is pure-Rust (`sha2`); the pure helpers ([`sha256_hex`],
-//! [`parse_pin`]) are unit-tested without I/O.
+//! Hashing is pure-Rust (`sha2`). The pure helpers ([`sha256_hex`], [`parse_pin`]) are
+//! unit-tested without I/O.
 
 use crate::error::EngineError;
 use sha2::{Digest, Sha256};
@@ -30,7 +30,7 @@ pub fn pin(filename: &str, bytes: &[u8]) -> String {
 }
 
 /// Split a pin `"<filename>@sha256:<hex>"` into `(filename, hex)`. Pure, so the
-/// parse is testable; returns `None` if the shape is wrong.
+/// parse is testable. Returns `None` if the shape is wrong.
 pub fn parse_pin(pin: &str) -> Option<(&str, &str)> {
     let (filename, rest) = pin.rsplit_once("@sha256:")?;
     if filename.is_empty() || rest.is_empty() {
@@ -43,7 +43,7 @@ pub fn parse_pin(pin: &str) -> Option<(&str, &str)> {
 /// hash, returning the blob's path on success.
 ///
 /// The filename comes from the pin itself, so this checks exactly the file the
-/// lock names. A malformed pin is [`EngineError::BlobPinMalformed`]; a hash
+/// lock names. A malformed pin is [`EngineError::BlobPinMalformed`]. A hash
 /// mismatch is [`EngineError::BlobMismatch`].
 pub fn verify(dir: &Path, expected_pin: &str) -> Result<PathBuf, EngineError> {
     let (filename, _) = read_verified(dir, expected_pin)?;
@@ -51,10 +51,10 @@ pub fn verify(dir: &Path, expected_pin: &str) -> Result<PathBuf, EngineError> {
 }
 
 /// Verify the pinned blob and copy the **verified bytes** into `stage_dir`,
-/// returning the staged path. The consumer reads the staged copy, so the
-/// bytes it uses are exactly the ones that were hashed — closing the
-/// verify-then-read TOCTOU where the vendored source could be swapped between the
-/// hash check and `make` re-reading it.
+/// returning the staged path. The consumer reads the staged copy, so the bytes it
+/// uses are exactly the ones that were hashed. That closes the verify-then-read
+/// TOCTOU where the vendored source could be swapped between the hash check and
+/// `make` re-reading it.
 pub fn verify_to(dir: &Path, expected_pin: &str, stage_dir: &Path) -> Result<PathBuf, EngineError> {
     let (filename, bytes) = read_verified(dir, expected_pin)?;
     std::fs::create_dir_all(stage_dir).map_err(|source| EngineError::io(stage_dir, source))?;

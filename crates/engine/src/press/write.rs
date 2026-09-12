@@ -1,16 +1,15 @@
 //! Stream a built image artifact into its destination file: decompress-as-written,
 //! one pass, with a digest tap.
 //!
-//! The image artifact is `.img` raw or `.img.xz` / `.img.gz` as the
-//! build compressed it ([`Container::of`] reads the extension), and the stream
-//! goes straight from the decoder into the destination — no staged raw file, no
-//! temp space. The SHA-256 of the *decompressed* bytes is computed on the way
-//! through, so [verification](super::verify) costs one re-read rather than a
-//! second decompress.
+//! The image artifact is `.img` raw, or `.img.xz` or `.img.gz` as the build
+//! compressed it ([`Container::of`] reads the extension). The stream goes straight
+//! from the decoder into the destination, with no staged raw file and no temp space.
+//! The SHA-256 of the *decompressed* bytes is computed on the way through, so
+//! [verification](super::verify) costs one re-read rather than a second decompress.
 //!
 //! Progress is reported from the compressed input's consumption against its file
-//! length — the honest coordinate: it advances at the rate the operation actually
-//! proceeds, whatever the compression ratio does locally.
+//! length. That is the honest coordinate. It advances at the rate the operation
+//! actually proceeds, whatever the compression ratio does locally.
 
 use crate::error::EngineError;
 use crate::event::Step;
@@ -40,8 +39,8 @@ impl Container {
     /// # Errors
     ///
     /// [`EngineError::ArtifactMissing`]-shaped invalidity is not this function's
-    /// business; an unrecognized extension is a typed error naming the accepted
-    /// set, since it means the caller pointed at something a build did not write.
+    /// business. An unrecognized extension is a typed error naming the accepted set,
+    /// since it means the caller pointed at something a build did not write.
     pub fn of(artifact: &Path) -> Result<Container, EngineError> {
         let name = artifact.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if name.ends_with(".img") {
@@ -87,9 +86,8 @@ impl<R: Read> Read for CountingReader<R> {
 /// Decompress `artifact` into `dest`, hashing the decompressed stream, reporting
 /// progress on `step`.
 ///
-/// `dest` is any writer — in practice the output file `press` creates. The
-/// caller owns durability (`fsync`); this function only moves and measures
-/// bytes.
+/// `dest` is any writer, in practice the output file `press` creates. The caller
+/// owns durability (`fsync`). This function only moves and measures bytes.
 ///
 /// # Errors
 ///
@@ -159,14 +157,14 @@ pub fn stream_image(
     })
 }
 
-/// Decompress just the first `len` bytes of `artifact` — enough to read the
-/// primary GPT (34 sectors) out of a compressed image without streaming the
-/// rest, which is what feeds the size report and the post-write table check.
+/// Decompress just the first `len` bytes of `artifact`. That is enough to read the
+/// primary GPT (34 sectors) out of a compressed image without streaming the rest.
+/// It is what feeds the size report and the post-write table check.
 ///
 /// # Errors
 ///
-/// [`EngineError`] for an unreadable artifact or a corrupt stream; a stream
-/// shorter than `len` returns what there is.
+/// [`EngineError`] for an unreadable artifact or a corrupt stream. A stream shorter
+/// than `len` returns what there is.
 pub fn decompressed_prefix(artifact: &Path, len: usize) -> Result<Vec<u8>, EngineError> {
     let file = File::open(artifact).map_err(|e| EngineError::io(artifact, e))?;
     let reader = std::io::BufReader::with_capacity(1 << 20, file);

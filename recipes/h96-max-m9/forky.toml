@@ -26,8 +26,12 @@ image_size = "2G"
 # A device that lands at 480 Mb/s there is a seating problem — see the `.dts`.
 #
 # What the move from v7.1.7 to the v7.2 generation changes on this SoC's paths. The pin
-# is v7.2.2, the current stable point release; 7.2 -> 7.2.2 touches no Rockchip driver,
-# no device tree and no defconfig.
+# is v7.2.3, the current stable point release; no 7.2.y point release so far touches a
+# Rockchip driver, a device tree or a defconfig.
+#
+# The aic8800 module follows radxa's `main`, whose tip splits the firmware path into a
+# compiled-in root and a per-chip subdirectory; `kmods/aic8800.toml` takes both halves,
+# so the driver still requests its firmware from `aic8800_fw/SDIO/aic8800D80`.
 #
 # The `rk3576-fixes` series crosses unchanged -- all six patches read the same on both
 # generations, so nothing in it was rebased. `rockchip-iommu` clears the AUTO_GATING

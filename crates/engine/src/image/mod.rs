@@ -1,27 +1,32 @@
 //! The image node — unprivileged image assembly with no loop mount, no `dd`,
 //! and no `sudo`.
 //!
-//! It takes a rootfs tarball plus the boot method's payload and writes a
-//! bootable disk image with no `sudo`, no loop device, and no mount: the ext4
-//! filesystem is formatted in-process by the pure-Rust `ferrosys` formatter, straight
-//! from the rootfs tar (the `ext4` submodule), the partition table is written
-//! in Rust (`gpt`), the boot payload is placed by seek+write, and the result is
-//! compressed with pure-Rust encoders — `.xz` via `lzma-rust2`, `.gz` via `flate2`
-//! ([`ImageCompression`]). All byte/LBA arithmetic is resolved and validated up front
-//! by the `geometry` submodule.
+//! It takes a rootfs tarball plus the boot method's payload and writes a bootable disk
+//! image with no `sudo`, no loop device, and no mount:
+//!
+//! - The ext4 filesystem is formatted in-process by the pure-Rust `ferrosys` formatter,
+//!   straight from the rootfs tar (the `ext4` submodule).
+//! - The partition table is written in Rust (`gpt`).
+//! - The boot payload is placed by seek+write.
+//! - The result is compressed with pure-Rust encoders, `.xz` via `lzma-rust2` and `.gz`
+//!   via `flate2` ([`ImageCompression`]).
+//!
+//! All byte/LBA arithmetic is resolved and validated up front by the `geometry`
+//! submodule.
 //!
 //! **Where the boot payload comes from is the boot method's business.** Under
 //! `rockchip-rkbin` it is two blobs the u-boot stage compiled, written into a raw gap
 //! outside any partition. Under `depthcharge` it is one vboot-signed kernel FIT that
-//! `depthchargectl` built *inside the rootfs*, which this node reads back out of the
-//! tarball and places in a ChromeOS kernel partition (the `depthcharge` submodule).
+//! `depthchargectl` built *inside the rootfs*. This node reads that back out of the
+//! tarball and places it in a ChromeOS kernel partition (the `depthcharge` submodule).
 //!
 //! Two layouts, selected by the resolved [`Layout`]:
-//! - **combined** — one image, boot payload and rootfs on a single medium.
-//! - **split** — a bootloader-only image for the boot medium (eMMC/SPI) plus a
-//!   bootloader-agnostic rootfs image for a separate disk; mainline u-boot's
+//!
+//! - **Combined** — one image, boot payload and rootfs on a single medium.
+//! - **Split** — a bootloader-only image for the boot medium (eMMC/SPI), plus a
+//!   bootloader-agnostic rootfs image for a separate disk. Mainline u-boot's
 //!   distro-boot discovers the rootfs at runtime, so both share one rootfs build.
-//!   Only `rockchip-rkbin` has a bootloader to split off; resolution rejects the
+//!   Only `rockchip-rkbin` has a bootloader to split off, and resolution rejects the
 //!   combination for any method that does not.
 
 mod depthcharge;
@@ -59,11 +64,11 @@ const GZ_LEVEL: u32 = 6;
 
 /// A container a finished image is compressed into.
 ///
-/// The two are not interchangeable, and each has a distinct reason to exist: `.xz`
-/// is the smallest and is what an operator pipes through `xzcat` into `dd`; `.gz`
-/// exists because **u-boot has no xz decompressor** — its `gzwrite` command reads
-/// gzip only — so an image meant to be written to a disk by the bootloader itself
-/// has to be in that container.
+/// The two are not interchangeable, and each has a distinct reason to exist. `.xz`
+/// is the smallest, and is what an operator pipes through `xzcat` into `dd`. `.gz`
+/// exists because **u-boot has no xz decompressor**, since its `gzwrite` command reads
+/// gzip only. An image meant to be written to a disk by the bootloader itself
+/// therefore has to be in that container.
 ///
 /// Size and speed run in opposite directions: `.xz` is the smaller and the slower
 /// to produce, `.gz` the larger and the faster.
@@ -122,8 +127,8 @@ impl std::fmt::Display for ImageCompression {
 
 /// One compressed artifact, and the raw image it came from.
 ///
-/// A build may ask for more than one container, so this names its `source`
-/// rather than relying on position: with two formats there is no longer one
+/// A build can ask for more than one container, so this names its `source`
+/// rather than relying on position. With two formats there is no longer one
 /// compressed file per raw image to pair index-wise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressedImage {
@@ -154,7 +159,7 @@ pub enum BootPayload<'a> {
         uboot_itb: &'a Path,
     },
     /// `depthcharge`: the signed kernel FIT, which carries no path because it is not
-    /// produced by a compile stage at all — `depthchargectl` built it *inside the
+    /// produced by a compile stage at all. `depthchargectl` built it *inside the
     /// rootfs*, so the image node reads it out of the rootfs tarball (see the
     /// `depthcharge` submodule for why that is the right place for it to be built).
     Depthcharge,
@@ -164,7 +169,7 @@ pub enum BootPayload<'a> {
 pub struct ImageOptions<'a> {
     /// Rootfs as a `tar` archive — the artifact of the rootfs backend, staged
     /// and formatted by the `ext4` submodule. It holds `./dev/` and nothing under
-    /// it: the export filters the tree's `/dev` contents out, because the kernel
+    /// it. The export filters the tree's `/dev` contents out, because the kernel
     /// mounts devtmpfs over the mount point at boot. Under `depthcharge` it also
     /// carries the signed kernel partition image.
     pub rootfs_tar: &'a Path,
@@ -174,8 +179,8 @@ pub struct ImageOptions<'a> {
     pub out_dir: &'a Path,
     /// The build point's
     /// [artifact stem](boot2deb_core::buildpoint::BuildPoint::artifact_stem) — the
-    /// finished images are `<stem>.img`, `<stem>-boot.img`, `<stem>-rootfs.img`. Named
-    /// for the point rather than the board because a board has several recipes and
+    /// finished images are `<stem>.img`, `<stem>-boot.img`, `<stem>-rootfs.img`. It is
+    /// named for the point rather than the board. A board has several recipes, and
     /// only one of their images can hold a given file name.
     pub stem: &'a str,
     /// Scratch directory for the intermediate ext4 partition image.
@@ -191,9 +196,9 @@ pub struct ImageOptions<'a> {
     /// Ordered rather than a set because the two formats serve different
     /// consumers: see [`ImageCompression`].
     pub compress: &'a [ImageCompression],
-    /// Keep the raw `.img` after compressing it. Default (`false`): with
-    /// compression on, the raw image is derivable from any of its containers, so
-    /// it is deleted once every requested one is written, to save disk on the
+    /// Keep the raw `.img` after compressing it. The default is `false`. With
+    /// compression on, the raw image is derivable from any of its containers. It is
+    /// therefore deleted once every requested one is written, to save disk on the
     /// largest artifact. Ignored when [`compress`](Self::compress) is empty.
     pub keep_raw: bool,
     /// Upper bound on the `.xz` encoder's worker pool — the build's
@@ -201,21 +206,21 @@ pub struct ImageOptions<'a> {
     /// parallelism.
     ///
     /// Compression is the one image-node step with real concurrency, so `--jobs N`
-    /// has to reach it: a flag that bounds the compile and then fans the encode
+    /// has to reach it. A flag that bounds the compile and then fans the encode
     /// across every core does not mean what it says on a shared machine.
     pub jobs: Option<usize>,
 }
 
 /// The image's on-disk identifiers, all derived from one lock-stable seed rather
-/// than drawn from `/dev/urandom` — so a rebuild from the same lock reproduces them,
-/// which is the reproducibility contract, while distinct recipes (or devices) still
-/// get distinct values.
+/// than drawn from `/dev/urandom`. A rebuild from the same lock therefore reproduces
+/// them, which is the reproducibility contract, while distinct recipes (or devices)
+/// still get distinct values.
 ///
-/// It is computed **once, by the caller**, and shared by the rootfs and image nodes,
-/// because under `depthcharge` the rootfs's own `/etc/fstab` has to name the
-/// partition the signed kernel will root on. That makes the rootfs PARTUUID an input
-/// to the rootfs, not an output of the partition table — the one identifier that must
-/// be known before the filesystem that references it exists.
+/// It is computed **once, by the caller**, and shared by the rootfs and image nodes.
+/// Under `depthcharge` the rootfs's own `/etc/fstab` has to name the partition the
+/// signed kernel will root on. That makes the rootfs PARTUUID an input to the rootfs,
+/// not an output of the partition table. It is the one identifier that must be known
+/// before the filesystem that references it exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageIdentity {
     /// The ext4 superblock UUID of the rootfs filesystem.
@@ -225,17 +230,17 @@ pub struct ImageIdentity {
     /// The rootfs partition's GUID — its **PARTUUID**.
     pub rootfs_partuuid: Uuid,
     /// The seed partition's GUID. Its leading four bytes double as the seed
-    /// FAT's volume serial, so the volume needs no identity source of its own
-    /// and a `--seed-only` rewrite (which reads the GUID back off the GPT)
+    /// FAT's volume serial, so the volume needs no identity source of its own.
+    /// A `--seed-only` rewrite (which reads the GUID back off the GPT)
     /// reproduces the same serial.
     pub seed_partuuid: Uuid,
     /// The ChromeOS kernel slots' partition GUIDs, in on-disk order. Unused under a
     /// boot method that writes no kernel partition.
     ///
     /// **Distinct per slot, and that is load-bearing.** depthcharge substitutes the
-    /// booted slot's PARTUUID into `kern_guid=` on the kernel command line, which is
-    /// how the running system knows *which* slot it came up from — and therefore which
-    /// slot it may safely overwrite on the next kernel upgrade. Two slots sharing a
+    /// booted slot's PARTUUID into `kern_guid=` on the kernel command line. That is
+    /// how the running system knows *which* slot it came up from. It is therefore how
+    /// it knows which slot to overwrite on the next kernel upgrade. Two slots sharing a
     /// GUID would make that answer ambiguous, and the upgrade could overwrite the
     /// kernel it is running.
     pub kpart_guids: [Uuid; MAX_KPART_SLOTS as usize],
@@ -245,8 +250,8 @@ impl ImageIdentity {
     /// Derive every identifier from a lock-stable `seed` and the `device`.
     ///
     /// `seed` identifies the build point (the recipe), so two images of the same
-    /// recipe reproduce each other and two different recipes — `asus-c201/forky` and
-    /// `asus-c201/trixie`, say — never collide on a PARTUUID, which would make two
+    /// recipe reproduce each other. Two different recipes, `asus-c201/forky` and
+    /// `asus-c201/trixie` say, never collide on a PARTUUID. A collision would make two
     /// cards indistinguishable to a kernel that has both in front of it.
     pub fn derive(seed: &str, device: &str) -> Self {
         ImageIdentity {
@@ -319,42 +324,43 @@ pub struct ImageArtifacts {
     /// consumer knows only the compressed forms remain.
     pub raw_removed: bool,
     /// The per-image first-boot password spliced into [`crate::rootfs::DEFAULT_USER`]'s
-    /// account — unique per build, expired so it must be changed at first
-    /// login. The caller surfaces it and records it in the provenance manifest; it
+    /// account. It is unique per build, and expired so it must be changed at first
+    /// login. The caller surfaces it and records it in the provenance manifest. It
     /// is written to no committed file.
     pub password: String,
     /// The checks the rootfs filesystem passed before it shipped, in the order they
-    /// ran. Reported rather than re-probed by the caller: one of them is present only
+    /// ran. Reported rather than re-probed by the caller. One of them is present only
     /// where the build host carries `e2fsprogs`, so the record has to come from the
     /// node that actually ran it. Recorded in the provenance manifest's
     /// `[verification]`.
     pub rootfs_verified_with: Vec<String>,
     /// The on-disk contract the rootfs filesystem was formatted to, and the geometry
-    /// that came out. Reported for the same reason as the checks above: the geometry is
+    /// that came out. Reported for the same reason as the checks above. The geometry is
     /// a function of the image's size as well as of the formatter's settings, so it
     /// cannot be computed without repeating the format. Recorded in the provenance
     /// manifest's `[filesystem]`.
     pub rootfs_filesystem: FilesystemProvenance,
     /// The whole-disk size this build laid out, in bytes.
     ///
-    /// Reported rather than re-parsed from the recipe because under a fitted
-    /// `image_size` the recipe does not carry it: the format decided how large the
-    /// rootfs is and the disk was sized around the answer, so this node is the only
-    /// place the number exists. Recorded in the provenance manifest's `[image]`.
+    /// Reported rather than re-parsed from the recipe, because under a fitted
+    /// `image_size` the recipe does not carry it. The format decided how large the
+    /// rootfs is, and the disk was sized around the answer. This node is therefore the
+    /// only place the number exists. Recorded in the provenance manifest's `[image]`.
     pub image_bytes: u64,
 }
 
 /// Validate the resolved build's image geometry (offsets, size, GPT/rootfs fit)
-/// without writing anything — the cheap up-front check `build` runs right after
-/// resolution so a bad layout fails before any stage compiles.
+/// without writing anything. It is the cheap up-front check `build` runs right after
+/// resolution, so a bad layout fails before any stage compiles.
 ///
-/// A fitted `image_size` has no disk size to check: the rootfs decides it, and the rootfs
-/// does not exist until several stages later. What *is* checkable now is the slack spec
-/// and the head of the disk — which is where a mis-authored offset lives, and the whole
-/// of what this check was ever catching for an authored size beyond the size itself.
+/// A fitted `image_size` has no disk size to check. The rootfs decides it, and the
+/// rootfs does not exist until several stages later. What *is* checkable now is the
+/// slack spec and the head of the disk. That is where a mis-authored offset lives, and
+/// the whole of what this check was ever catching for an authored size beyond the size
+/// itself.
 ///
 /// A u-boot deliverable has neither a size nor a rootfs, so only the boot region is
-/// resolved: that is the whole of the disk it writes.
+/// resolved. That is the whole of the disk it writes.
 pub fn validate_geometry(build: &ResolvedBuild) -> Result<(), EngineError> {
     let Some(image) = build.image.as_ref() else {
         return geometry::BootRegion::resolve(&build.boot).map(|_| ());
@@ -619,13 +625,13 @@ pub fn build_image(
     })
 }
 
-/// Assemble just the bootloader image from the u-boot payloads, returning its
-/// path — a flashable, GPT-less raw medium sized to the raw gap, holding
+/// Assemble just the bootloader image from the u-boot payloads, returning its path.
+/// It is a flashable, GPT-less raw medium sized to the raw gap, holding
 /// `idbloader.img` and `u-boot.itb` at their offsets.
 ///
-/// Unlike [`build_image`] this needs no rootfs, so a `--stage uboot` run can emit
-/// a directly-flashable boot medium — an eMMC (or SPI) that chain-loads the OS
-/// from a separate disk — without bootstrapping a Debian rootfs first. The image
+/// Unlike [`build_image`] this needs no rootfs. A `--stage uboot` run can therefore
+/// emit a directly-flashable boot medium without bootstrapping a Debian rootfs first.
+/// That is an eMMC (or SPI) that chain-loads the OS from a separate disk. The image
 /// is the same `<stem>-boot.img` the [`Split`](Layout::Split) layout produces, named
 /// for the build point's
 /// [artifact stem](boot2deb_core::buildpoint::BuildPoint::artifact_stem).
@@ -686,9 +692,9 @@ pub struct PressOptions<'a> {
 /// What [`press_image`] produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PressedImage {
-    /// The pressed image's own first-boot password — fresh for this file, since
+    /// The pressed image's own first-boot password, fresh for this file, since
     /// re-assembly runs the same per-image credential step a build does. The
-    /// caller surfaces it; the recipe's provenance manifest still describes the
+    /// caller surfaces it. The recipe's provenance manifest still describes the
     /// build's artifact, not this derivative.
     pub password: String,
     /// The whole-disk size this press laid out, in bytes. Under a fitted
@@ -700,19 +706,19 @@ pub struct PressedImage {
 /// [`TreeAdditions`] merged into the rootfs and the `[pressed]` marker stamped
 /// into its `/etc/boot2deb/image.toml`.
 ///
-/// The same assembly a build runs — geometry, ext4-from-tar, seed template, GPT,
-/// splice — pointed at one output file: no compression, no artifact directory,
-/// and the recipe's artifacts untouched. Under a `fit`-sized recipe the
-/// filesystem grows to hold whatever was added; under a fixed `image_size` a
-/// press that does not fit fails in the format, naming the size. The rootfs is
-/// verified exactly as a build's is (the in-process scan, plus `e2fsck -fn`
-/// where present) before the disk is laid out.
+/// The same assembly a build runs, pointed at one output file: geometry,
+/// ext4-from-tar, seed template, GPT, splice. There is no compression, no artifact
+/// directory, and the recipe's artifacts are untouched. Under a `fit`-sized recipe the
+/// filesystem grows to hold whatever was added. Under a fixed `image_size` a press
+/// that does not fit fails in the format, naming the size. The rootfs is verified
+/// exactly as a build's is (the in-process scan, plus `e2fsck -fn` where present)
+/// before the disk is laid out.
 ///
 /// # Errors
 ///
-/// [`EngineError::StageNotApplicable`] for a role that carries no rootfs or a
-/// combined press without its boot payload; [`EngineError::PressAddition`] when
-/// an addition cannot be placed; otherwise the image node's own geometry,
+/// [`EngineError::StageNotApplicable`] for a role that carries no rootfs, or a
+/// combined press without its boot payload. [`EngineError::PressAddition`] when
+/// an addition cannot be placed. Otherwise the image node's own geometry,
 /// format, and I/O errors.
 pub fn press_image(
     ib: ImageBuild,

@@ -1,18 +1,22 @@
-//! Passive capture of a compile that could not open a file it should have found.
+//! Passive capture of a compile that could not open a file it was expected to find.
 //!
-//! A build root is an overlay: a provisioned base as the lower, the stage's own
-//! `stage_layer` increment as the upper, and one fresh mount per command
-//! ([`BuildRoot::run`](crate::sandbox::BuildRoot::run)). A parallel `make` in such a
-//! root has twice hit `fatal error: <header>: No such file or directory` on a header
-//! that was present — once for a header the same stage's `./configure` had compiled a
-//! probe against minutes earlier. Neither instance reproduced on demand, and both were
-//! lost because nothing was watching.
+//! A build root is an overlay:
+//!
+//! - A provisioned base as the lower.
+//! - The stage's own `stage_layer` increment as the upper.
+//! - One fresh mount per command
+//!   ([`BuildRoot::run`](crate::sandbox::BuildRoot::run)).
+//!
+//! A parallel `make` in such a root has twice hit `fatal error: <header>: No such file
+//! or directory` on a header that was present. One of those was a header the same
+//! stage's `./configure` had compiled a probe against minutes earlier. Neither
+//! instance reproduced on demand, and both were lost because nothing was watching.
 //!
 //! [`wrap`] is what watches, on the runs that set
 //! [`SandboxRun::probe`](crate::sandbox::SandboxRun::probe). It costs one `sh` and two
-//! `tee`s on every run and nothing at all on a successful one, so it captures the
-//! *next* occurrence rather than needing an occurrence to be arranged. Four questions,
-//! each a grep-able verdict:
+//! `tee`s on every run, and nothing at all on a successful one. It therefore captures
+//! the *next* occurrence, rather than needing an occurrence to be arranged. Each
+//! verdict is a single grep-able token:
 //!
 //! - **`FOUND-ON-RESTAT`** — the same path opens, in the same mount, moments later.
 //!   The file was momentarily unfindable and the mount is intact. The attempt number
@@ -22,36 +26,39 @@
 //!   of the underlying layers can explain and the overlay itself therefore must. This
 //!   is the signature the two occurrences would have left.
 //! - **`PRESENT-NOT-OPENABLE`** — the path stats but will not open, which is a
-//!   permission or IO fault and deliberately not folded in with the one above: only a
-//!   genuine failure to resolve implicates the overlay.
+//!   permission or IO fault. It is deliberately not folded in with the one above,
+//!   because only a genuine failure to resolve implicates the overlay.
 //! - **`FIRST-ABSENT-COMPONENT`** — the leading path component that does not resolve.
 //!   A header under a package's own subdirectory can fail because the *directory* went
 //!   missing rather than the file, and the two are different faults.
 //! - **`STILL-MISSING`** — it does not open on any attempt. The mount is durably wrong,
 //!   which is worse than a transient.
 //!
-//! Because heavy load is the one variable both occurrences shared and none of the clean
-//! audits reproduced, the report also carries the load average and the reclaimable-memory
-//! lines of `/proc/meminfo` **read before the retries**, so the machine's state at the
-//! moment of failure is recorded rather than inferred.
+//! Heavy load is the one variable both occurrences shared, and none of the clean
+//! audits reproduced. The report therefore also carries the load average and the
+//! reclaimable-memory lines of `/proc/meminfo`, **read before the retries**. The
+//! machine's state at the moment of failure is thereby recorded rather than inferred.
 //!
 //! The report is written through the stage's read-write bind, so it survives the cage
-//! that produced it, and echoed to the command's own output so it reaches the build log
-//! unprompted.
+//! that produced it. It is also echoed to the command's own output, so it reaches the
+//! build log unprompted.
 //!
 //! It re-tests against the **compiler's own default search path**, asked of the
-//! compiler rather than reconstructed, not against the failing command's `-I` set — a
-//! wrapper around the command cannot see per-invocation flags. Both headers that have
-//! gone missing here came from a `-dev` package under `/usr/include`, which is on that
-//! path; a `STILL-MISSING` for a header the build reaches only through its own `-I`
-//! says nothing, and the recorded search list is printed so a reader can tell the two
-//! apart.
+//! compiler rather than reconstructed. It does not re-test against the failing
+//! command's `-I` set, because a wrapper around the command cannot see per-invocation
+//! flags.
 //!
-//! Each re-test is a real `open`, not a stat: the fault under investigation is a failed
-//! `open`, and a path that stats but will not open is a distinction worth keeping.
+//! Both headers that have gone missing here came from a `-dev` package under
+//! `/usr/include`, which is on that path. A `STILL-MISSING` for a header the build
+//! reaches only through its own `-I` says nothing. The recorded search list is
+//! printed, so a reader can tell the two apart.
+//!
+//! Each re-test is a real `open`, not a stat. The fault under investigation is a
+//! failed `open`, and a path that stats but will not open is a distinction worth
+//! keeping.
 //!
 //! It deliberately does not wrap the *compiler*. `./configure` writes `CC` into
-//! `config.mak`, so an environment `CC` never reaches the compile; reaching it through
+//! `config.mak`, so an environment `CC` never reaches the compile. Reaching it through
 //! `--cc=` instead would change the toolchain string the produced `.deb` records. The
 //! command is wrapped so the build's own shape stays exactly what it was.
 

@@ -5,20 +5,24 @@
 //! **Layer search path & overlays.** A [`ConfigRoot`] holds an *ordered*
 //! search path: the shipped root first, then zero or more out-of-tree overlay
 //! directories (`--overlay <dir>`), later ones winning. A layer file present only
-//! in an overlay adds a new target; a file present under a shipped name is
-//! **deep-merged last-wins** over the shipped one — tables merge key-by-key with
+//! in an overlay adds a new target. A file present under a shipped name is
+//! **deep-merged last-wins** over the shipped one. Tables merge key-by-key with
 //! the overlay winning, while a scalar or array key is replaced wholesale (the
-//! simplest predictable last-wins). Each layer file is parsed to a
-//! [`toml::Value`], the values are merged across the path, and the merged value is
-//! deserialized into the strict `deny_unknown_fields` struct, so validation is
-//! unchanged and the authored structs stay untouched. This lets a user retune one
-//! device's `image_size` or add a `supported_kernel` — or drop in a whole new
-//! device/soc/kernel — without forking the vendored config.
+//! simplest predictable last-wins).
 //!
-//! **Device variants.** A device may also name another device as its parent
-//! ([`extends`](DeviceLayer::extends)), which is merged by the same rules along a
-//! second axis: the `extends` chain is flattened base-most-first, then the search
-//! path merges over the result. So a variant board states only its deltas, and an
+//! Each layer file is parsed to a [`toml::Value`]. The values are merged across the
+//! path, and the merged value is deserialized into the strict
+//! `deny_unknown_fields` struct. Validation is unchanged, and the authored structs
+//! stay untouched.
+//!
+//! This lets a user retune one device's `image_size` or add a `supported_kernel`,
+//! without forking the vendored config. A whole new device, SoC, or kernel can be
+//! dropped in the same way.
+//!
+//! **Device variants.** A device can also name another device as its parent
+//! ([`extends`](DeviceLayer::extends)), merged by the same rules along a second
+//! axis. The `extends` chain is flattened base-most-first, then the search path
+//! merges over the result. So a variant board states only its deltas, and an
 //! overlay can still retune either the variant or what it extends. See
 //! [`device_with_lineage`](ConfigRoot::device_with_lineage) for the asset ordering
 //! that falls out of it.
@@ -29,8 +33,8 @@ use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 
 /// A boot2deb config root — an ordered search path of directories, each holding
-/// the config-layer subtrees. Lookups walk the path; overlays (later entries) win
-/// over the shipped root (first entry). Tests and alternate checkouts just point
+/// the config-layer subtrees. Lookups walk the path, and overlays (later entries)
+/// win over the shipped root (first entry). Tests and alternate checkouts just point
 /// at a different path.
 pub struct ConfigRoot {
     /// Low→high precedence: `roots[0]` is the shipped/primary root; later entries
@@ -40,7 +44,7 @@ pub struct ConfigRoot {
 
 impl ConfigRoot {
     /// Wrap a single directory as a config root (no overlays). Does not touch the
-    /// filesystem; missing files surface as [`ConfigError::NotFound`] on lookup.
+    /// filesystem. Missing files surface as [`ConfigError::NotFound`] on lookup.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             roots: vec![root.into()],
@@ -53,8 +57,8 @@ impl ConfigRoot {
     ///
     /// Each overlay must be an existing directory. An empty path would silently
     /// resolve every asset against the process's current directory, and a mistyped
-    /// one would shadow nothing at all — in both cases the build proceeds against a
-    /// config tree the operator did not intend, which is precisely the failure an
+    /// one would shadow nothing at all. In both cases the build proceeds against a
+    /// config tree the operator did not intend. That is precisely the failure an
     /// overlay exists to make explicit. Both are [`ConfigError::InvalidOverlay`].
     pub fn with_overlays(
         root: impl Into<PathBuf>,
@@ -83,7 +87,7 @@ impl ConfigRoot {
     }
 
     /// The primary (shipped) root — the base of the search path. Non-config assets
-    /// resolved by direct join (blobs, fragments, overlay trees) start here; use
+    /// resolved by direct join (blobs, fragments, overlay trees) start here. Use
     /// [`find_asset`](Self::find_asset) to make those overlay-aware.
     pub fn path(&self) -> &Path {
         &self.roots[0]
@@ -271,8 +275,8 @@ impl ConfigRoot {
     /// `name` itself. A device that extends nothing has a one-entry lineage.
     ///
     /// The lineage is the order the devices' assets stack in, which is why it is
-    /// returned rather than recomputed: the merged [`DeviceLayer`] cannot express it
-    /// (a merge collapses the chain to one value), and the overlay trees of every
+    /// returned rather than recomputed. The merged [`DeviceLayer`] cannot express it,
+    /// because a merge collapses the chain to one value. The overlay trees of every
     /// device in it are laid into the rootfs in this order, so a variant's files win
     /// over the parent's.
     pub fn device_with_lineage(
@@ -355,9 +359,9 @@ impl ConfigRoot {
     ///
     /// The [`BootMethod`] *is* the variant selector, so the file is deserialized
     /// straight into that method's struct. Fields belonging to another method are
-    /// unknown fields here and are rejected — an `idbloader_offset` in
-    /// `boot-methods/depthcharge.toml` is a parse error naming the file, not a value
-    /// silently carried into a build that has no raw gap to write it to.
+    /// unknown fields here and are rejected. An `idbloader_offset` in
+    /// `boot-methods/depthcharge.toml` is a parse error naming the file. It is not a
+    /// value silently carried into a build that has no raw gap to write it to.
     pub fn boot_method(&self, bm: BootMethod) -> Result<BootMethodLayer, ConfigError> {
         let rel = format!("boot-methods/{}.toml", bm.as_str());
         let (value, path) = self.merge_value("boot-method", bm.as_str(), &rel)?;
@@ -370,10 +374,10 @@ impl ConfigRoot {
     }
 
     /// Load `kernels/<id>.toml`, dispatching on its `flavor` to the variant that
-    /// flavor's fields belong to: a compiled kernel carries a source ref, defconfig,
-    /// fragments, and patch series; a `distro-package` kernel carries only a package
-    /// name. Each variant is strict, so a fragment list on a distro kernel — which
-    /// nothing would ever read — fails at load rather than being ignored.
+    /// flavor's fields belong to. A compiled kernel carries a source ref, a
+    /// defconfig, fragments and patch series. A `distro-package` kernel carries only
+    /// a package name. Each variant is strict, so a fragment list on a distro kernel
+    /// fails at load rather than being ignored. Nothing would ever read it.
     pub fn kernel(&self, id: &str) -> Result<KernelDef, ConfigError> {
         validate_name("kernel", id)?;
         let rel = format!("kernels/{id}.toml");
@@ -399,12 +403,12 @@ impl ConfigRoot {
     }
     /// Load a recipe by its `<device>/<leaf>` reference
     /// (`recipes/<device>/<leaf>.toml`). The one config key that carries a directory
-    /// separator: a recipe lives under its device's folder, and the reference is the
-    /// path to it (minus the extension), so the leaf drops the redundant device
-    /// prefix — `turing-rk1/media-accel-forky`, not `turing-rk1-media-accel-forky`.
-    /// The reference admits at most one interior `/`, both halves bare identifiers
-    /// with no `.`/`..`, absolute, or repeated separator — so it cannot traverse out
-    /// of `recipes/`.
+    /// separator. A recipe lives under its device's folder, and the reference is the
+    /// path to it (minus the extension). The leaf therefore drops the redundant
+    /// device prefix: `turing-rk1/media-accel-forky`, not
+    /// `turing-rk1-media-accel-forky`. The reference admits at most one interior
+    /// `/`, both halves bare identifiers with no `.`/`..`, absolute, or repeated
+    /// separator. It therefore cannot traverse out of `recipes/`.
     pub fn recipe(&self, name: &str) -> Result<Recipe, ConfigError> {
         validate_recipe_ref(name)?;
         let rel = format!("recipes/{name}.toml");
@@ -424,21 +428,21 @@ impl ConfigRoot {
     }
 
     /// Load `base.toml` — the distro-generic rootfs substrate. Unlike the
-    /// other layers it is a single file at each root, not a named file in a subdir;
-    /// it deep-merges across the search path like the rest.
+    /// other layers it is a single file at each root, not a named file in a subdir.
+    /// It deep-merges across the search path like the rest.
     pub fn base(&self) -> Result<BaseLayer, ConfigError> {
         self.load_merged("base", "base", "base.toml")
     }
 
     /// Load `recipes/<name>.lock` — the resolved exact pins for a recipe.
-    /// `boot2deb build` reads only this; `boot2deb update` writes it. A lock is an
-    /// *atomic* artifact (exact pins), not a mergeable layer, and it is read from
-    /// the root that **owns the recipe** — the same root
-    /// [`lock_path`](Self::lock_path) writes to — so `update`'s write target and
-    /// `build`'s read source can never address two different locks for one
-    /// recipe. An overlay that wants different pins overlays the recipe
-    /// and its lock as a unit; an overlay retuning a shipped recipe owns both
-    /// automatically.
+    /// `boot2deb build` reads only this. `boot2deb update` writes it. A lock is an
+    /// *atomic* artifact (exact pins), not a mergeable layer. It is read from the
+    /// root that **owns the recipe**, the same root [`lock_path`](Self::lock_path)
+    /// writes to. `update`'s write target and `build`'s read source can therefore
+    /// never address two different locks for one recipe.
+    ///
+    /// An overlay that wants different pins overlays the recipe and its lock as a
+    /// unit. An overlay retuning a shipped recipe owns both automatically.
     pub fn lock(&self, name: &str) -> Result<crate::lock::Lock, ConfigError> {
         validate_build_ref(name)?;
         let path = self
@@ -480,14 +484,16 @@ impl ConfigRoot {
     }
 
     /// Filesystem path of a file that lives beside `recipe` in the recipe's own
-    /// directory (`recipes/<device>/<filename>`) — e.g. that recipe's committed solved
-    /// package manifest, next to its `.toml` and `.lock`. Anchored to the root that
-    /// *owns* `recipe`, the same way [`lock_path`](Self::lock_path) is, so an overlay
-    /// recipe's manifest lands in that overlay beside its lock rather than diverging
-    /// into the primary root. `recipe` is validated as a recipe reference (a single
-    /// `<device>/<leaf>` separator, no traversal) and `filename` as a bare name (no
-    /// separator at all), since this is a *write* target: an unchecked `../` or
-    /// absolute component would let `build --save-manifest` write outside `recipes/`.
+    /// directory (`recipes/<device>/<filename>`). An example is that recipe's
+    /// committed solved package manifest, next to its `.toml` and `.lock`.
+    ///
+    /// Anchored to the root that *owns* `recipe`, the same way
+    /// [`lock_path`](Self::lock_path) is. An overlay recipe's manifest therefore
+    /// lands in that overlay beside its lock, rather than diverging into the primary
+    /// root. `recipe` is validated as a recipe reference (a single `<device>/<leaf>`
+    /// separator, no traversal), and `filename` as a bare name (no separator at all).
+    /// This is a *write* target: an unchecked `../` or absolute component would let
+    /// `build --save-manifest` write outside `recipes/`.
     pub fn recipe_sibling(&self, recipe: &str, filename: &str) -> Result<PathBuf, ConfigError> {
         validate_build_ref(recipe)?;
         validate_name("manifest", filename)?;
@@ -519,9 +525,9 @@ impl ConfigRoot {
     }
 
     /// Stems of every `*.toml` in `subdir`, unioned across the search path, sorted
-    /// and de-duplicated — so an overlay's targets list alongside the shipped ones,
-    /// and a target present in both (an overlay retuning a shipped device) appears
-    /// once. An absent directory in a root contributes nothing; any *other*
+    /// and de-duplicated. An overlay's targets therefore list alongside the shipped
+    /// ones, and a target present in both (an overlay retuning a shipped device)
+    /// appears once. An absent directory in a root contributes nothing. Any *other*
     /// `read_dir` failure (a wrong/unreadable root, a permission error) is surfaced
     /// as [`ConfigError::Io`] rather than silently yielding a success exit.
     pub fn list(&self, subdir: &str) -> Result<Vec<String>, ConfigError> {
@@ -551,16 +557,18 @@ impl ConfigRoot {
     }
 
     /// Recipe references across the search path, as `<device>/<leaf>` strings, sorted
-    /// and de-duplicated. Unlike [`list`](Self::list) — which is a flat single-level
-    /// scan for the strictly-flat layers (devices, socs, kernels, features) — recipes
-    /// nest one level under their device's folder (`recipes/<device>/<leaf>.toml`), so
-    /// this descends exactly one level: each `recipes/<device>/` directory contributes
-    /// its `*.toml` stems as `<device>/<stem>`. Non-`.toml` siblings (`.lock`,
-    /// `.pkgs.lock`) and any deeper sidecar subdirectory are ignored; a stray
-    /// top-level `recipes/*.toml` is listed by its bare stem for robustness, though the
-    /// shipped layout nests every recipe. An overlay's recipes union with the shipped
-    /// ones, a reference present in both appears once, and an absent `recipes/`
-    /// contributes nothing while any other read failure is [`ConfigError::Io`].
+    /// and de-duplicated. [`list`](Self::list) is a flat single-level scan for the
+    /// strictly-flat layers (devices, socs, kernels, features). Recipes nest one
+    /// level under their device's folder (`recipes/<device>/<leaf>.toml`), so this
+    /// descends exactly one level. Each `recipes/<device>/` directory contributes
+    /// its `*.toml` stems as `<device>/<stem>`.
+    ///
+    /// Non-`.toml` siblings (`.lock`, `.pkgs.lock`) and any deeper sidecar
+    /// subdirectory are ignored. A stray top-level `recipes/*.toml` is listed by its
+    /// bare stem for robustness, though the shipped layout nests every recipe. An
+    /// overlay's recipes union with the shipped ones, and a reference present in both
+    /// appears once. An absent `recipes/` contributes nothing, while any other read
+    /// failure is [`ConfigError::Io`].
     pub fn list_recipes(&self) -> Result<Vec<String>, ConfigError> {
         let mut names = std::collections::BTreeSet::new();
         for root in &self.roots {
@@ -1653,10 +1661,10 @@ packages = [
 /// One conditional package entry whose `suites` name nothing this config tree builds.
 ///
 /// Almost always a typo. Enumerating suites is what makes a conditional entry checkable
-/// against the archive (see [`crate::model::PackageEntry`]), and the price
-/// of enumerating is that a misspelt suite name is silent: the entry simply never
-/// applies, so the package goes missing from every image with nothing said. This is the
-/// check that pays that price back.
+/// against the archive (see [`crate::model::PackageEntry`]). The price of enumerating
+/// is that a misspelled suite name is silent. The entry simply never applies, so the
+/// package goes missing from every image with nothing said. This is the check that
+/// pays that price back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnreachableSuite {
     /// The layer or feature the entry was read from.
@@ -1670,14 +1678,21 @@ pub struct UnreachableSuite {
 impl ConfigRoot {
     /// Conditional package entries naming a suite no recipe in this tree builds.
     ///
-    /// Walks the layers every recipe reaches — base, its SoC, its boot method, its
-    /// device, and its features — and reports each `suites` name that appears in none of
-    /// the tree's recipes. A layer no recipe reaches is not walked: it contributes to no
-    /// image, so a suite name in it is a different kind of dead config.
+    /// Walks the layers every recipe reaches:
     ///
-    /// A report is advice, not a verdict. A tree that legitimately carries a layer ahead
-    /// of the recipe that will use it — a suite being prepared for — produces one, and
-    /// that is a thing a caller should say rather than refuse.
+    /// - Base
+    /// - Its SoC
+    /// - Its boot method
+    /// - Its device
+    /// - Its features
+    ///
+    /// Each `suites` name that appears in none of the tree's recipes is reported. A
+    /// layer no recipe reaches is not walked. It contributes to no image, so a suite
+    /// name in it is a different kind of dead config.
+    ///
+    /// A report is advice, not a verdict. A tree that legitimately carries a layer
+    /// ahead of the recipe that will use it produces one. A suite being prepared for
+    /// is such a layer, and a caller says so rather than refusing.
     pub fn unreachable_suites(&self) -> Result<Vec<UnreachableSuite>, ConfigError> {
         let recipes = self.list_recipes()?;
         let mut built: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();

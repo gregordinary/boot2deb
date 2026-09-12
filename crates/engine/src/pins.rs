@@ -1,8 +1,8 @@
 //! Lock resolution: turn a [`ResolvedBuild`] plus the recipe's ref
 //! constraints into an exact [`Lock`] — the sole path that consults upstream.
 //!
-//! The assembly (`assemble_lock`) is pure and unit-tested; the resolution
-//! ([`resolve_lock`]) is the side-effecting shell: it peels refs to commits with
+//! The assembly (`assemble_lock`) is pure and unit-tested. The resolution
+//! ([`resolve_lock`]) is the side-effecting shell. It peels refs to commits with
 //! `git ls-remote`, hashes the vendored rkbin blobs, and reads the patches-repo
 //! HEAD. `boot2deb build` never runs this — it reads the committed lock.
 
@@ -20,32 +20,32 @@ use std::path::Path;
 /// Inputs for `boot2deb update` beyond the resolved build itself.
 ///
 /// The refs are the exact tags to pin. Auto-resolving a kernel `track` to its
-/// latest tag is a later refinement; today the lock is seeded by pinning
-/// `v7.1.1` explicitly, which is also how any specific historical build is pinned.
+/// latest tag is a later refinement. Today the lock is seeded by pinning `v7.2.3`
+/// explicitly, which is also how any specific historical build is pinned.
 pub struct UpdateOptions<'a> {
-    /// Kernel ref to pin and resolve to a commit (e.g. `v7.1.1`).
+    /// Kernel ref to pin and resolve to a commit (e.g. `v7.2.3`).
     pub kernel_ref: &'a str,
     /// u-boot ref to pin (defaults to the boot-method's `uboot_ref`).
     pub uboot_ref: &'a str,
     /// Per-tree refs to pin the media-accel userspace sources at (`(name, ref)`), in
     /// any order. A tree absent here falls back to its own `[[userspace]]` declared
-    /// `ref`; the caller seeds it from the previous lock (inheritance) or a
-    /// `--userspace-ref` flag — the same rule the out-of-tree modules follow.
+    /// `ref`. The caller seeds it from the previous lock (inheritance) or a
+    /// `--userspace-ref` flag, the same rule the out-of-tree modules follow.
     pub userspace_refs: &'a [(String, String)],
     /// ffmpeg base (V4L2) ref to pin (defaults to the SoC layer's `ffmpeg.base`).
     pub ffmpeg_base_ref: &'a str,
     /// ffmpeg Rockchip provenance-tree ref to pin (defaults to the SoC layer's
-    /// `ffmpeg.rockchip`). Recorded as provenance for the graft series; not
+    /// `ffmpeg.rockchip`). Recorded as provenance for the graft series. Not
     /// fetched at build time.
     pub ffmpeg_rockchip_ref: &'a str,
     /// Per-name refs to pin the device's out-of-tree modules at (`(name, ref)`), in
     /// any order. A name absent here falls back to that `device_kmods` entry's declared
-    /// `ref`; the caller seeds it from the previous lock (inheritance) or a flag.
+    /// `ref`. The caller seeds it from the previous lock (inheritance) or a flag.
     pub kmod_refs: &'a [(String, String)],
     /// Directory holding the vendored rkbin blobs to hash.
     pub blobs_dir: &'a Path,
     /// Checkout of the `patches` repo whose HEAD pins the series. Consulted only when
-    /// the resolved kernel names a patch series; a build that applies no patches
+    /// the resolved kernel names a patch series. A build that applies no patches
     /// leaves this unread and locks no `[patches]` table, so it needs no checkout.
     pub patches_path: &'a Path,
     /// Path recorded for the solved package manifest the rootfs stage writes
@@ -56,15 +56,15 @@ pub struct UpdateOptions<'a> {
 /// Resolve a build to an exact [`Lock`] by consulting upstream and the vendored
 /// blobs. This is the only function that reaches the network.
 ///
-/// The patches checkout is pinned first, and a missing one
+/// The patches checkout is pinned first. A missing one
 /// ([`EngineError::PatchesCheckoutMissing`]) or a dirty one
 /// ([`EngineError::PatchesDirty`]) is refused before any upstream ref is
-/// consulted: the pin is `HEAD`, so `update` needs a local clone, and
-/// uncommitted changes — typically a just-imported patch — would be silently
-/// absent from the lock and resurface at the next build as a pin mismatch.
+/// consulted. The pin is `HEAD`, so `update` needs a local clone. Uncommitted
+/// changes, typically a just-imported patch, would be silently absent from the
+/// lock and resurface at the next build as a pin mismatch.
 /// Failing on the local problem first also keeps the refusal instant.
 ///
-/// A kernel with no patch series skips that step entirely: there is no series to pin,
+/// A kernel with no patch series skips that step entirely. There is no series to pin,
 /// so the `patches` checkout is never read and the resulting lock omits `[patches]`.
 /// Pinning a commit nothing consumes would both record a phantom dependency and make
 /// `update` fail on a machine with no `patches` clone.
@@ -264,10 +264,10 @@ fn git_pin(url: &str, reference: &str) -> Result<GitPin, EngineError> {
 
 /// Write a lock to `recipes/<name>.lock` in its canonical committed form.
 ///
-/// The write is atomic — a uniquely-named temp beside the destination, renamed into
-/// place — because the lock is the build's source of truth: an interruption
-/// or storage fault mid-write must never leave a truncated `.lock` a later `build`
-/// would parse or partially trust. The temp shares the destination's directory so
+/// The write is atomic: a uniquely-named temp beside the destination, renamed into
+/// place. The lock is the build's source of truth. An interruption or storage fault
+/// mid-write must never leave a truncated `.lock` a later `build` would parse or
+/// partially trust. The temp shares the destination's directory so
 /// the rename stays on one filesystem (where rename is atomic).
 pub fn write_lock(path: &Path, lock: &Lock) -> Result<(), EngineError> {
     let text = lock.to_toml_string()?;
@@ -343,26 +343,34 @@ fn assemble_lock(
 }
 
 /// Assert the committed lock still agrees with a fresh resolution on every axis the
-/// lock records *from the resolved build*: the kernel definition id, every commit
-/// pin's source repo (kernel / u-boot / userspace / ffmpeg / out-of-tree modules), the
-/// rkbin blob file names, the patch series, the suite, the resolved extra-deb set, the
-/// out-of-tree module set, and media-accel presence (the exact fields `assemble_lock`
-/// copies out of the [`ResolvedBuild`]).
+/// lock records *from the resolved build*:
+///
+/// - The kernel definition id
+/// - Every commit pin's source repo (kernel / u-boot / userspace / ffmpeg /
+///   out-of-tree modules)
+/// - The rkbin blob file names
+/// - The patch series
+/// - The suite
+/// - The resolved extra-deb set
+/// - The out-of-tree module set
+/// - Media-accel presence
+///
+/// Those are the exact fields `assemble_lock` copies out of the [`ResolvedBuild`].
 ///
 /// A mismatch means the config drifted since `update` (a device/recipe/suite/feature
 /// change), so the lock's pins no longer describe the point the recipe now resolves
 /// to. `build` calls this up front and hard-errors with the drifted axes named, rather
-/// than building a hybrid of newly resolved axes and stale pins — which would also
+/// than building a hybrid of newly resolved axes and stale pins. A hybrid would also
 /// leave the cache keyed inconsistently (some stages fold lock suite, runtime setup
-/// uses resolved suite). The source-repo comparisons are what keep a commit
-/// pin meaningful: a boot-method or SoC-layer flip to a different repo would
-/// otherwise fetch that repo at the old commit — a commit that need not exist there,
-/// or worse, names an unrelated object.
+/// uses resolved suite). The source-repo comparisons are what keep a commit pin
+/// meaningful. A boot-method or SoC-layer flip to a different repo would otherwise
+/// fetch that repo at the old commit. That commit need not exist there, or worse,
+/// names an unrelated object.
 ///
 /// Deliberately *not* checked: the refs, commits, and hashes (they come from
 /// `update`'s refs plus upstream resolution, so they have no fresh-resolve
 /// counterpart), the manifest name (update-derived), and layout/image-size (not
-/// recorded in the lock; `build` accepts them as per-invocation overrides).
+/// recorded in the lock, because `build` accepts them as per-invocation overrides).
 ///
 /// Kept beside `assemble_lock` so the two stay in lockstep — every resolved-derived
 /// field written there is checked here.
@@ -606,13 +614,13 @@ fn blob_pin_file(pin: &str) -> &str {
 }
 
 /// How a `patches` checkout departs from a lock's pin, or `None` when it sits on the
-/// pin with a clean worktree — the one state in which a series read from that checkout
-/// is exactly the series the lock names.
+/// pin with a clean worktree. That is the one state in which a series read from that
+/// checkout is exactly the series the lock names.
 ///
-/// Read-only and non-enforcing, for the survey commands: they verify the *working
-/// tree* on purpose, because that is what patch co-development needs, and so they owe
-/// the reader a note that their green says nothing about the pinned series. The build
-/// path is where the pin is enforced instead — see `build::verify_patches_pin`.
+/// Read-only and non-enforcing, for the survey commands. They verify the *working
+/// tree* on purpose, because that is what patch co-development needs. They therefore
+/// owe the reader a note that their green says nothing about the pinned series. The
+/// build path is where the pin is enforced instead — see `build::verify_patches_pin`.
 pub fn patches_drift(patches_root: &Path, expected: &str) -> Result<Option<String>, EngineError> {
     let head = git::rev_parse_head(patches_root)?;
     let clean = git::is_clean(patches_root)?;
@@ -651,8 +659,8 @@ pub(crate) fn describe_patches_drift(
     format!("patches checkout {root} is at {head}{dirt}, but the lock pins {expected}")
 }
 
-/// Upstream URL for a kernel source: a known named tree resolves to a git.kernel.org
-/// URL; an explicit `{ git, ref }` uses its URL directly. Also the default
+/// Upstream URL for a kernel source. A known named tree resolves to a git.kernel.org
+/// URL, and an explicit `{ git, ref }` uses its URL directly. Also the default
 /// clone source for the kernel build stage when `--kernel-src` is not given.
 pub fn kernel_source_url(source: &KernelSource) -> Result<String, EngineError> {
     match source {

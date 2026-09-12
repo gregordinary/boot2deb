@@ -4,13 +4,13 @@
 //! each so they cannot drift:
 //!
 //! - **Presence** ([`have`]) is whether the probe **spawns**. A tool that rejects the
-//!   version flag and exits non-zero is still present — `e2fsck --version` exits 16
-//!   and is the reason this rule is written down rather than assumed. Keying presence
+//!   version flag and exits non-zero is still present. `e2fsck --version` exits 16,
+//!   which is why this rule is written down rather than assumed. Keying presence
 //!   on exit status silently reports such a tool absent, which downgrades a real check
 //!   into a skipped one.
 //! - **Version** ([`version`]) is the first line the tool prints, from stdout *or*
 //!   stderr, since which stream carries it is per-tool (`e2fsck -V` writes to stderr).
-//!   Only for a caller that must gate on a version floor; presence never needs it.
+//!   Only for a caller that must gate on a version floor. Presence never needs it.
 //!
 //! Side-effecting (it spawns processes), so it lives in the engine rather than `core`.
 

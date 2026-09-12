@@ -1,13 +1,16 @@
 //! `shell`: open an interactive session in the root a build stage compiles in.
 //!
 //! A thin client over [`boot2deb_engine::shell`], like every other command here. What
-//! it owns is the part that is config: which build point's roots these are, which of
-//! them the requested stage has, what outside the work dir the session should see, and
-//! the one host value the sandbox environment deliberately does not carry — `TERM`.
+//! it owns is the part that is config:
 //!
-//! The roots come from [`crate::sandboxes`], the same construction `build` uses, so a
-//! session enters the tree a build made rather than a second one keyed slightly
-//! differently.
+//! - Which build point's roots these are.
+//! - Which of them the requested stage has.
+//! - What outside the work dir the session sees.
+//! - The one host value the sandbox environment deliberately does not carry, `TERM`.
+//!
+//! The roots come from [`crate::sandboxes`], the same construction `build` uses. A
+//! session therefore enters the tree a build made, rather than a second one keyed
+//! slightly differently.
 
 use crate::args::ShellArgs;
 use crate::config::{device_dts_paths, fragment_paths};

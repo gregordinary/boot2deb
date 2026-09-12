@@ -1,13 +1,18 @@
 //! `diff`: what moved between two build points.
 //!
-//! Reads the documents a build already leaves behind — a recipe's `.lock`, a
-//! published `.provenance.toml`, the solved package manifest each names, and the
-//! kernel fragments the config tree holds — normalizes each side into a
-//! [`boot2deb_core::diff::Side`], and renders the comparison. All the deciding
-//! happens in [`boot2deb_core::diff`]; this module reads files and prints.
+//! Reads the documents a build already leaves behind:
 //!
-//! The one section that reaches outside those documents is the per-patch file delta,
-//! which needs the `patches` repo to resolve a moved commit into named files. It
+//! - A recipe's `.lock`.
+//! - A published `.provenance.toml`.
+//! - The solved package manifest each names.
+//! - The kernel fragments the config tree holds.
+//!
+//! It normalizes each side into a [`boot2deb_core::diff::Side`] and renders the
+//! comparison. All the deciding happens in [`boot2deb_core::diff`]. This module
+//! reads files and prints.
+//!
+//! The one section that reaches outside those documents is the per-patch file delta.
+//! It needs the `patches` repo to resolve a moved commit into named files. It
 //! degrades to a note rather than failing, since a comparison missing one section is
 //! worth more than no comparison.
 

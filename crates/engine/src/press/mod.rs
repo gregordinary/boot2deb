@@ -2,16 +2,20 @@
 //! `boot2deb press`, the verification of what was written, and the per-unit seed
 //! partition.
 //!
-//! boot2deb does not write devices — flashing is a flasher's job, and any dd-like
+//! boot2deb does not write devices. Flashing is a flasher's job, and any dd-like
 //! tool can take the file `press` emits. What lives here is everything up to that
-//! file: [`mod@write`] streams a (compressed) artifact into a destination with a
-//! digest tap; [`verify`] re-reads what was written and holds it to the digest
-//! and to the GPT the artifact carries; [`seed`] regenerates the per-unit
-//! personalization partition inside the file. Re-assembly with tree additions —
-//! the other way `press` produces a file — is the image node's
-//! [`press_image`](crate::image::press_image), fed by the [`additions`] model
-//! defined here — whose `.tmpl` entries are expanded against the image's own
-//! identity by [`mod@template`].
+//! file:
+//!
+//! - [`mod@write`] streams a (compressed) artifact into a destination with a digest
+//!   tap.
+//! - [`verify`] re-reads what was written and holds it to the digest, and to the GPT
+//!   the artifact carries.
+//! - [`seed`] regenerates the per-unit personalization partition inside the file.
+//!
+//! Re-assembly with tree additions is the other way `press` produces a file. It is
+//! the image node's [`press_image`](crate::image::press_image), fed by the
+//! [`additions`] model defined here. That model's `.tmpl` entries are expanded
+//! against the image's own identity by [`mod@template`].
 //!
 //! Everything runs against ordinary files, so the whole path is unit-tested on
 //! any host with no root and no device.

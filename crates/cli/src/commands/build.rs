@@ -1,11 +1,10 @@
 //! `build`: drive the compile / rootfs / image pipeline from the recipe's lock.
 //!
-//! Reads only the lock for pinned sources (re-pinning is `update`'s job); the
-//! resolved build supplies the axes, and the lock-independent image knobs (layout,
-//! size) are the only build-time overrides. Every stage streams the structured event
-//! stream — rendered for a human, or as NDJSON under `--json` — and every produced
-//! artifact travels on it as an [`Event::Artifact`], so both modes share one stdout
-//! contract.
+//! Reads only the lock for pinned sources, since re-pinning is `update`'s job. The
+//! resolved build supplies the axes. The lock-independent image knobs, layout and
+//! size, are the only build-time overrides. Every stage streams the structured event
+//! stream, rendered for a human or as NDJSON under `--json`. Every produced artifact
+//! travels on it as an [`Event::Artifact`], so both modes share one stdout contract.
 
 use crate::args::{BuildArgs, StageArg};
 use crate::artifacts::{

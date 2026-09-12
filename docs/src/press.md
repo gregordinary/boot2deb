@@ -8,26 +8,26 @@ boot2deb press turing-rk1/forky card.img
 ```
 
 The command resolves the recipe exactly as `build` does and derives the rest
-from it: a `combined` build presses one whole-disk image, a u-boot deliverable
-presses its standalone boot image, and a `--layout split` build is two files
-for two media — `--boot-out` for the eMMC/SPI half, `--rootfs-out` for the OS
-disk. A split build pressed with one positional output is an error naming both
-flags, not a wrong file.
+from it. A `combined` build presses one whole-disk image, and a u-boot
+deliverable presses its standalone boot image. A `--layout split` build is two
+files for two media: `--boot-out` for the eMMC/SPI half, `--rootfs-out` for the
+OS disk. A split build pressed with one positional output is an error naming
+both flags, not a wrong file.
 
-A plain press streams the build's compressed artifact into the output —
-pressing a card never costs a rebuild — and then verifies the file it wrote:
-the bytes are re-read against the digest computed while streaming, and the
-partition table is read back and compared entry-for-entry against the one the
-artifact carries. What you hand the flasher is what the build made.
+A plain press streams the build's compressed artifact into the output, so
+pressing a card never costs a rebuild. It then verifies the file it wrote. The
+bytes are re-read against the digest computed while streaming. The partition
+table is read back and compared entry-for-entry against the one the artifact
+carries. What you hand the flasher is what the build made.
 `--dry-run` prints what would be pressed, including the medium size the image
 needs, without writing anything.
 
 ## Flashing the pressed file
 
 boot2deb does not write devices. The pressed image is an ordinary raw disk
-image; write it with whatever flasher you trust:
+image, so write it with whatever flasher you trust:
 
-- **pyrographer** — a flasher with a plan→confirm→write gate, device safety
+- **Pyrographer** — a flasher with a plan→confirm→write gate, device safety
   checks, and native rockusb.
 - **Plain `dd`**, the universal fallback:
 
@@ -39,7 +39,7 @@ image; write it with whatever flasher you trust:
 - A board's own route — the Turing Pi BMC (`tpi flash -n 2 -l -i card.img` or
   the web UI), a vendor tool — anything that writes a raw image.
 
-Boards' pages say which media each board boots from; `build` also prints the
+Boards' pages say which media each board boots from. `build` also prints the
 matching `dd` line for the artifact it just made.
 
 ## Per-unit personalization
@@ -61,28 +61,30 @@ first boot:
 | `hostname=` | `--hostname` | `hostnamectl` plus `/etc/hosts` |
 | `authorized_key=` | `--ssh-key` (repeatable) | appends to the default account's `authorized_keys` |
 | `wifi_ssid=` | `--wifi-ssid` | writes a NetworkManager connection profile and joins the network |
-| `wifi_psk=` | `--wifi-psk` | the WPA passphrase for `wifi_ssid`; omit it for an open network |
+| `wifi_psk=` | `--wifi-psk` | the WPA passphrase for `wifi_ssid`, omitted for an open network |
 | `static_ip=` | `--static-ip` | pins a static IPv4 (`address/prefix[,gateway[,dns...]]`) on the connection the seed sets up |
 
 The Wi-Fi keys are the canonical per-site values that must never sit in a
-committed recipe. They apply on images that carry NetworkManager — every
-Wi-Fi-capable board's does — and degrade to a logged skip elsewhere; like
+committed recipe. They apply on images that carry NetworkManager, which every
+Wi-Fi-capable board's image does, and degrade to a logged skip elsewhere. Like
 every seed key, they are plain text in the seed partition, which personalizes
 a unit rather than keeping secrets. An image pressed with no keys carries the
 empty template and behaves exactly as an unpersonalized image always has.
 
-`static_ip=` follows the connection the other keys define: seeded together
+`static_ip=` follows the connection the other keys define. Seeded together
 with `wifi_ssid` it makes that Wi-Fi profile static, and seeded alone it pins
-the first wired interface — through NetworkManager where the image carries it,
-through `dhcpcd.conf` where it carries dhcpcd, with a logged skip where it
-carries neither. Fields beyond the address are optional: no gateway field
-means no default route is written, no DNS fields mean no resolvers are — the
-key personalizes exactly what it names. Only the syntax is validated at press
-time (IPv4 dotted quads, a `/1`–`/32` prefix); the address plan is yours.
+the first wired interface. It works through NetworkManager where the image
+carries it, through `dhcpcd.conf` where it carries dhcpcd, and with a logged
+skip where it carries neither.
 
-Because the seed is FAT, an operator can also edit it with no tooling at all:
-plug the card into any laptop, open `seed.txt` on the `B2D-SEED` volume,
-change the hostname, eject. The file documents its own keys.
+Fields beyond the address are optional. No gateway field means no default route
+is written, and no DNS fields mean no resolvers are. The key personalizes
+exactly what it names. Only the syntax is validated at press time (IPv4 dotted
+quads, a `/1`–`/32` prefix), and the address plan is yours.
+
+Because the seed is FAT, an operator can also edit it with no tooling at all.
+Plug the card into any laptop, open `seed.txt` on the `B2D-SEED` volume,
+change the hostname, and eject. The file documents its own keys.
 
 To re-personalize a pressed **file** without re-pressing it:
 
@@ -92,10 +94,10 @@ boot2deb seed rk1-03.img --hostname rk1-04
 
 `seed` takes no recipe — the seed partition is found by its GPT label, so the
 file is the whole input. With no keys it resets the seed to the empty
-template. It refuses block devices (boot2deb does not write them); a card that
+template. It refuses block devices (boot2deb does not write them). A card that
 is already written is re-personalized by editing `seed.txt` directly.
 
-The first-boot password stays per *image*, not per unit: boards pressed from
+The first-boot password stays per *image*, not per unit. Boards pressed from
 one streamed artifact share that build's expired password, and `--ssh-key` is
 the answer to a fleet. (A press with additions re-assembles, and so draws a
 fresh password of its own — printed when it happens.)
@@ -103,7 +105,7 @@ fresh password of its own — printed when it happens.)
 ## Tree additions
 
 What belongs to a unit or a site, rather than to the recipe? A recipe
-describes every board of a kind; `press` stamps one card. Additions put
+describes every board of a kind, and `press` stamps one card. Additions put
 arbitrary files into the pressed image's filesystem:
 
 ```sh
@@ -114,16 +116,16 @@ boot2deb press turing-rk1/forky site.img \
 
 - **`--copy SRC:DEST`** (repeatable) — a host file placed at an absolute path
   in the tree: a site config, a one-off script, a data file. Mode `0644`
-  (`0755` when the source is executable), owner root; missing parent
+  (`0755` when the source is executable), owner root. Missing parent
   directories are created. Copying over a shipped file replaces it.
 - **`--copy-tree DIR`** (repeatable) — a whole directory that **mirrors the
   target rootfs**: `DIR/etc/myapp/site.conf` lands at `/etc/myapp/site.conf`.
   See [A directory that mirrors the rootfs](#a-directory-that-mirrors-the-rootfs).
 - **`--deb PATH`** (repeatable) — a local `.deb` staged into
   `/var/lib/boot2deb/firstboot-debs/`, installed at first boot with `dpkg -i`
-  (alphabetical). The honest caveat: `dpkg -i` resolves nothing, so a
+  (alphabetical). The honest caveat is that `dpkg -i` resolves nothing. A
   dependency not already in the image leaves the package unconfigured until
-  `apt-get -f install` can run — which the hook attempts only if the board has
+  `apt-get -f install` can run. The hook attempts that only if the board has
   network by then. The use case is the locally-built, self-contained deb you
   are iterating on.
 - **`--embed-image`** — see [Installing to internal storage](#installing-to-internal-storage).
@@ -148,20 +150,24 @@ site/
 ```
 
 Every **regular file and symlink** under `DIR` is placed at its corresponding
-absolute path. Directories are not placed as entries of their own — the parents
+absolute path. Directories are not placed as entries of their own. The parents
 each file needs are created root-owned `0755`, so your site tree's umask never
 reaches the image. Files land `0644`, or `0755` when they are executable on the
-host, exactly as `--copy` does; a symlink is recorded as a symlink and never
+host, exactly as `--copy` does. A symlink is recorded as a symlink and never
 followed, so a link pointing outside the tree lands as the link it is.
 
-The refusals are per file and name what they found: a destination the reserved
-set owns (`/etc/shadow`, `/etc/boot2deb/image.toml`), a path under `/dev`, or an
-entry that is neither a regular file, a symlink, nor a directory — a device
-node, FIFO, socket, or hard link is refused rather than silently dropped. A
-directory that names no files at all is an error too, since a `--copy-tree` that
-quietly added nothing would leave you with a plain streamed image.
+The refusals are per file and name what they found:
 
-There is no `patch.sh`, and that is deliberate: `--copy-tree` places files, and
+- A destination the reserved set owns (`/etc/shadow`, `/etc/boot2deb/image.toml`)
+- A path under `/dev`
+- An entry that is neither a regular file, a symlink, nor a directory
+
+Anything else — a device node, a FIFO, a socket, a hard link — is refused rather
+than silently dropped. A directory that names no files at all is an error too. A
+`--copy-tree` that quietly added nothing would leave you with a plain streamed
+image.
+
+There is no `patch.sh`, and that is deliberate. `--copy-tree` places files, and
 anything needing logic rather than placement belongs in a feature, where it runs
 with package resolution and maintainer scripts behind it.
 
@@ -181,13 +187,13 @@ built    = {{image.recipe}}            built    = turing-rk1/forky
 ```
 
 The point of it is the identifiers. `rootfs_partuuid`, `rootfs_uuid` and the
-rest are *derived by boot2deb* from the recipe, so without a template naming one
+rest are *derived by boot2deb* from the recipe. Without a template, naming one
 in a config file would mean pressing the image, reading its GPT back, editing,
 and pressing again. Everything else in the set is a convenience.
 
-The vocabulary is **the image's identity** — every name is a field of the
-`/etc/boot2deb/image.toml` the image carries, or one of the identifiers stamped
-into its GPT and superblock — and it is closed:
+The vocabulary is **the image's identity**, and it is closed. Every name is a
+field of the `/etc/boot2deb/image.toml` the image carries, or one of the
+identifiers stamped into its GPT and superblock:
 
 | reference | what it expands to |
 | --- | --- |
@@ -207,33 +213,33 @@ into its GPT and superblock — and it is closed:
 | `{{image.disk_guid}}` | the GPT header's disk GUID, hyphenated |
 
 A name outside the set is an **error at press time**, listing the whole
-vocabulary — never an empty string in a shipped config that only fails on the
-board. Names are checked when the flags are parsed, so a typo fails before any
-artifact is read.
+vocabulary. It is never an empty string in a shipped config that only fails on
+the board. Names are checked when the flags are parsed, so a typo fails before
+any artifact is read.
 
-`{{` is claimed **only** when `image.` follows it, so a file that carries braces
-of its own — a Go, Helm, or Jinja template shipped as data — passes through
-untouched. The flip side is that a mistyped namespace (`{{iamge.suite}}`) is
-literal text rather than an error, which is why `press` reports the reference
-count per template: expecting four expansions and being told three is how you
-find it.
+`{{` is claimed **only** when `image.` follows it. A file that carries braces
+of its own, such as a Go, Helm, or Jinja template shipped as data, passes
+through untouched. The flip side is that a mistyped namespace
+(`{{iamge.suite}}`) is literal text rather than an error. That is why `press`
+reports the reference count per template: expecting four expansions and being
+told three is how you find it.
 
 ```
 template -> /etc/myapp/node.conf (3 reference(s))
 ```
 
-`--copy` honours the same suffix — `--copy node.conf.tmpl:/etc/myapp/node.conf`
-expands — but the destination there is exactly what you named; the suffix
-decides a destination only in a tree, where the destination is derived. To ship
-a file that really is called `*.tmpl`, name it `foo.tmpl.tmpl`: it expands and
-lands as `foo.tmpl`. A template must be UTF-8 and is read whole to be parsed, so
-it is capped at 1 MiB — drop the suffix to copy a large file verbatim.
+`--copy` honors the same suffix, so `--copy node.conf.tmpl:/etc/myapp/node.conf`
+expands. The destination there is exactly what you named. The suffix decides a
+destination only in a tree, where the destination is derived. To ship a file
+that really is called `*.tmpl`, name it `foo.tmpl.tmpl`: it expands and lands as
+`foo.tmpl`. A template must be UTF-8 and is read whole to be parsed, so it is
+capped at 1 MiB. Drop the suffix to copy a large file verbatim.
 
-A press with additions cannot stream: it **re-assembles** the image from the
+A press with additions cannot stream. It **re-assembles** the image from the
 build's kept artifacts (the rootfs tar, the boot payloads), merging the
 additions into the filesystem before it is formatted. The build must have run
-on this machine; the recipe's artifacts are read, never modified. Under a
-`fit`-sized recipe the filesystem grows to hold whatever was added; under a
+on this machine, and the recipe's artifacts are read, never modified. Under a
+`fit`-sized recipe the filesystem grows to hold whatever was added. Under a
 fixed `image_size` a press that does not fit fails in the format. The
 re-assembled rootfs passes the same verification a build's does (the
 in-process scan, plus `e2fsck -fn` where the host has it).
@@ -244,12 +250,14 @@ that needs those is a build — the recipe and feature path exists for it.
 ### What a pressed image says about itself
 
 A pressed image with additions is **derived, not canonical**. The recipe's
-artifacts and their provenance stay untouched; the pressed file records its
-own ancestry in `/etc/boot2deb/image.toml` as a `[pressed]` table — the source
-artifact stem and what was added, by kind and destination, never by content. A
-tree's entries are recorded there one destination at a time, exactly as a
-`--copy` is, and a template by the name it landed under rather than the one it
-was authored as.
+artifacts and their provenance stay untouched. The pressed file records its
+own ancestry in `/etc/boot2deb/image.toml` as a `[pressed]` table. That table
+holds the source artifact stem and what was added, by kind and destination,
+never by content.
+
+A tree's entries are recorded there one destination at a time, exactly as a
+`--copy` is. A template is recorded by the name it landed under, rather than
+the one it was authored as.
 `reproduce` reproduces builds, not pressings. The seed partition is not
 summarized there: it is self-describing, and `boot2deb seed` can rewrite it
 later without touching the filesystem.
@@ -266,16 +274,16 @@ boot2deb press asus-c201/forky card.img --embed-image
 ```
 
 On the booted board, `boot2deb-install-to` (in every image) writes the
-embedded artifact to the internal disk, wrapping the documented `dd` procedure
-with the checks that matter: the target must be a whole disk, must not be the
-disk the system is running from, must have nothing mounted — and the
+embedded artifact to the internal disk. It wraps the documented `dd` procedure
+with the checks that matter. The target must be a whole disk, must not be the
+disk the system is running from, and must have nothing mounted. The
 confirmation requires typing the device's name.
 
 ```sh
 sudo boot2deb-install-to /dev/mmcblk0
 ```
 
-The pressed card is a derived copy that *carries* the artifact; the embedded
+The pressed card is a derived copy that *carries* the artifact. The embedded
 image is the artifact itself, byte for byte. `--embed-image` needs a
 combined-layout recipe built with compression on (the default).
 
@@ -286,7 +294,7 @@ boot2deb press turing-rk1/forky --layout split \
     --boot-out emmc-boot.img --rootfs-out nvme.img
 ```
 
-The boot image goes to the medium the board boots from (eMMC or SPI), the
-rootfs image to whatever disk the OS lives on. The seed — and any addition —
-rides with the rootfs, so personalization lands on the disk the OS reads; the
+The boot image goes to the medium the board boots from (eMMC or SPI), and the
+rootfs image to whatever disk the OS lives on. The seed, and any addition,
+rides with the rootfs, so personalization lands on the disk the OS reads. The
 boot image is streamed unchanged.

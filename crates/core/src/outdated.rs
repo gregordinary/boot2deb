@@ -3,7 +3,7 @@
 //! Pure and deterministic: given a lock's `(reference, commit)` and the refs a
 //! remote advertises, decide whether anything newer exists and what it is. The
 //! `git ls-remote` that produces those refs is the engine's job
-//! (`boot2deb_engine::sources`); everything here is a comparison, so the whole
+//! (`boot2deb_engine::sources`). Everything here is a comparison, so the whole
 //! policy is unit-testable without a network.
 //!
 //! This is a different question from durability ([`crate::sources`] and
@@ -13,8 +13,8 @@
 //!
 //! The policy in one line: **the pin states its own naming scheme, and only tags
 //! spelled the same way are candidates.** No per-axis table of version patterns is
-//! needed — [`TagShape`] reads the scheme off the pinned tag, so the kernel axis
-//! compares `v7.1.6` against other `vX.Y.Z` tags, the Linux-libre axis compares
+//! needed. [`TagShape`] reads the scheme off the pinned tag, so the kernel axis
+//! compares `v7.1.6` against other `vX.Y.Z` tags. The Linux-libre axis compares
 //! `sources/v7.1.6-gnu` only against other deblobbed trees, and u-boot's `vYYYY.MM`
 //! falls out of the same rule. A release pin is never offered a prerelease.
 
@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 /// points at. Borrowed, so the caller's parsed advertisement is not copied.
 ///
 /// `name` is the whole ref (`refs/tags/v7.1.6`, `refs/heads/master`), including the
-/// `^{}` suffix on a peeled annotated-tag line — [`compare`] does the peeling, so a
+/// `^{}` suffix on a peeled annotated-tag line. [`compare`] does the peeling, so a
 /// caller hands over the advertisement exactly as it was parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteRef<'a> {
@@ -113,8 +113,8 @@ impl Upgrade {
 
 /// Compare one pin against what `refs` advertises.
 ///
-/// `reference` and `commit` are the lock's; `refs` is the parsed `ls-remote`
-/// advertisement of the pin's configured URL. Total — every input yields a verdict,
+/// `reference` and `commit` are the lock's. `refs` is the parsed `ls-remote`
+/// advertisement of the pin's configured URL. Total: every input yields a verdict,
 /// because a survey across every recipe must not fail on one repo with an odd tag.
 ///
 /// The three pin forms are answered differently, and which one this is comes from

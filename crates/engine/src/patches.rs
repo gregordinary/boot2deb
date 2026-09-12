@@ -1,16 +1,16 @@
 //! The verify-applies gate: dry-run an ordered patch series against a source tree
-//! with `git am --3way`, naming the failing patch and the target when one does not
-//! apply. Patches are never fuzzed in; the series' ranges are the declared
-//! intent, this is the enforcement.
+//! with `git am --3way`. When a patch does not apply, the gate names it and the
+//! target. Patches are never fuzzed in. The series' ranges are the declared intent,
+//! and this is the enforcement.
 //!
 //! "Dry-run" means the tree is restored to its starting commit afterwards, so a
 //! verify has no lasting effect. The build stage reuses the same `git am --3way`
 //! pass but leaves the series applied.
 //!
-//! Two failure behaviours ([`OnFailure`]): a build stops at the first patch that
-//! does not apply, because there is no point compiling a tree with a hole in it; a
-//! survey keeps going and reports every boundary at once, because one boundary
-//! usually spawns adjacent ones.
+//! Two failure behaviors ([`OnFailure`]). A build stops at the first patch that does
+//! not apply, because there is no point compiling a tree with a hole in it. A survey
+//! keeps going and reports every boundary at once, because one boundary usually spawns
+//! adjacent ones.
 
 use crate::error::EngineError;
 use crate::git;
@@ -38,6 +38,8 @@ fn resolve_paths(patches_root: &Path, labels: &[&str]) -> Vec<ResolvedPatch> {
 /// Verify that `labels` (one tree's ordered series from a
 /// [`SeriesIdentity`](boot2deb_core::PatchSeries), e.g. its `kernel` list) applies
 /// to the checkout at `repo`.
+///
+/// The other parameters:
 ///
 /// - `patches_root` is the patches-repo checkout the labels are relative to.
 /// - `tree` labels the tree for messages (`"kernel"`, `"ffmpeg"`, …).
@@ -116,13 +118,13 @@ pub enum OnFailure {
     Stop,
     /// Skip a failing patch and keep going, collecting every failure.
     ///
-    /// What **candidate verification** wants. One boundary usually spawns
-    /// adjacent ones — reworking a patch shifts the context every later patch
-    /// applies against — so stopping at the first turns a survey into serial
-    /// discovery: fix, re-run, find the next, re-run.
+    /// What **candidate verification** wants. One boundary usually spawns adjacent
+    /// ones, because reworking a patch shifts the context every later patch applies
+    /// against. Stopping at the first therefore turns a survey into serial discovery:
+    /// fix, re-run, find the next, re-run.
     ///
-    /// Later results are measured against a tree missing the skipped patch, so a
-    /// batch pass is a map of the damage rather than a final verdict; a rework can
+    /// Later results are measured against a tree missing the skipped patch. A batch
+    /// pass is therefore a map of the damage rather than a final verdict. A rework can
     /// still change what comes after it.
     KeepGoing,
 }
@@ -211,8 +213,8 @@ fn indent(s: &str) -> String {
 ///
 /// The target rides with the tree rather than being one label for the whole run
 /// because a verify spans two independent axes. The kernel-family trees are checked
-/// at the kernel tag and the `uboot` tree at the u-boot tag, so a single target
-/// would have to misreport one of them.
+/// at the kernel tag, and the `uboot` tree at the u-boot tag. A single target would
+/// have to misreport one of them.
 pub struct VerifyTree<'a> {
     /// Tree label for messages (`"kernel"`, `"ffmpeg"`, `"uboot"`, …).
     pub label: &'a str,
@@ -226,14 +228,14 @@ pub struct VerifyTree<'a> {
 
 /// Verify a set of [`VerifyTree`]s.
 ///
-/// The caller selects which trees to exercise — e.g. only `kernel` before the
-/// ffmpeg/MPP checkouts exist — pairing each
+/// The caller selects which trees to exercise, for example only `kernel` before the
+/// ffmpeg/MPP checkouts exist. The caller pairs each
 /// [`SeriesIdentity`](boot2deb_core::PatchSeries) series (already filtered to the
 /// version under test) with the checkout to verify it against.
 ///
 /// Returns the per-tree verified counts in order, plus every failure collected
 /// across all trees. Under [`OnFailure::Stop`] it hard-errors on the first tree
-/// that fails; under [`OnFailure::KeepGoing`] it visits every tree and the failure
+/// that fails. Under [`OnFailure::KeepGoing`] it visits every tree and the failure
 /// list is the report.
 pub fn verify_series(
     patches_root: &Path,

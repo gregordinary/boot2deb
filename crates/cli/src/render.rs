@@ -1,9 +1,10 @@
 //! Output rendering: the one stdout contract for every command.
 //!
 //! A build streams [`Event`]s, rendered either for a human ([`print_event_at`], at the
-//! caller's [`Verbosity`]) or as NDJSON under `--json` ([`print_event_json`]); artifact
-//! locations travel on that same stream ([`emit_artifact`]) rather than as stray
-//! prints, and status lines go through [`note`] so both modes carry the same facts. The
+//! caller's [`Verbosity`]) or as NDJSON under `--json` ([`print_event_json`]).
+//! Artifact locations travel on that same stream ([`emit_artifact`]) rather than as
+//! stray prints. Status lines go through [`note`], so both modes carry the same
+//! facts. The
 //! remaining helpers format the non-streaming commands' output — [`print_columns`]
 //! sizing every `list-*` table from its own data.
 

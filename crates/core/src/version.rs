@@ -1,17 +1,18 @@
 //! How an upstream tag is spelled, and the version read out of it.
 //!
-//! Pure: string handling over `semver`, no I/O. One place decides what
-//! `sources/v7.1.6-gnu`, `v2026.04`, and `v7.2-rc1` mean, because two places
-//! deciding it differently is a silent wrong answer — a range gate that admits a
-//! tag an upgrade survey calls incomparable, or the reverse.
+//! Pure string handling over `semver`, with no I/O anywhere in it.
+//!
+//! One place decides what `sources/v7.1.6-gnu`, `v2026.04`, and `v7.2-rc1` mean.
+//! Two places deciding it differently is a silent wrong answer. One example is a
+//! range gate that admits a tag an upgrade survey calls incomparable, or the reverse.
 //!
 //! Two questions live here:
 //!
 //! - **What version is this tag?** [`parse_tag`], used by the patch-series range
 //!   gate ([`crate::series`]) to decide whether a series claims a kernel, and by the
 //!   upgrade survey ([`crate::outdated`]) to order releases.
-//! - **Is this tag spelled like that one?** [`TagShape`], used only by the survey:
-//!   a repo advertises tags from several naming schemes at once, and only the ones
+//! - **Is this tag spelled like that one?** [`TagShape`], used only by the survey.
+//!   A repo advertises tags from several naming schemes at once, and only the ones
 //!   spelled like the pin are candidates to upgrade it to.
 
 use crate::error::ConfigError;
@@ -21,12 +22,16 @@ use semver::Version;
 /// `EXTRAVERSION`, and the tail of every tag it publishes (`sources/v7.1.6-gnu`).
 const LIBRE_SUFFIX: &str = "-gnu";
 
-/// Parse a version tag into a [`Version`], tolerating a namespaced tag
-/// (`sources/v7.1.6-gnu` → `7.1.6`), a leading `v`, a missing patch component
-/// (`v7.1` → `7.1.0`), zero-padded components (`v2026.04` → `2026.4.0`), and the
-/// GNU Linux-libre `-gnu` suffix. Prerelease suffixes (`-rc2`) are preserved as
-/// semver prereleases, so a release-only range excludes them and an upgrade survey
-/// can decline to offer one.
+/// Parse a version tag into a [`Version`]. The tag can carry any of:
+///
+/// - A namespace (`sources/v7.1.6-gnu` → `7.1.6`).
+/// - A leading `v`.
+/// - A missing patch component (`v7.1` → `7.1.0`).
+/// - Zero-padded components (`v2026.04` → `2026.4.0`).
+/// - The GNU Linux-libre `-gnu` suffix.
+///
+/// Prerelease suffixes (`-rc2`) are preserved as semver prereleases, so a
+/// release-only range excludes them and an upgrade survey can decline to offer one.
 ///
 /// Serves every axis: kernel tags (`v7.1.3`), u-boot's `vYYYY.MM` release tags, and
 /// the `patches` repo's release tags.
@@ -76,18 +81,19 @@ pub fn parse_tag(s: &str) -> Result<Version, ConfigError> {
 /// How a tag is spelled, apart from its numbers: the namespace it sits under, the
 /// `v` prefix, and the Linux-libre `-gnu` marker.
 ///
-/// A repo advertises tags from more than one scheme at once — `linux-stable` carries
+/// A repo advertises tags from more than one scheme at once. `linux-stable` carries
 /// `v7.1.6` beside `v2.6.11`, and the Linux-libre mirror carries `sources/v7.1.6-gnu`
-/// beside upstream's own — so an upgrade survey that compared every parseable tag
-/// would offer a deblobbed tree to a build that pinned an ordinary one, or the
-/// reverse. Comparing only tags spelled like the pin keeps the candidate set to the
-/// release line the pin actually came from, without a per-axis table of patterns:
+/// beside upstream's own. An upgrade survey that compared every parseable tag would
+/// offer a deblobbed tree to a build that pinned an ordinary one, or the reverse.
+///
+/// Comparing only tags spelled like the pin keeps the candidate set to the release
+/// line the pin actually came from. No per-axis table of patterns is needed, because
 /// the pin states its own scheme.
 ///
 /// The component *count* is deliberately not part of the shape. Upstream drops the
 /// patch component on a `.0` release (`v7.2`, then `v7.2.1`), and u-boot publishes
-/// the occasional `vYYYY.MM.NN` point release, so requiring the same count would
-/// hide exactly the upgrade being looked for.
+/// the occasional `vYYYY.MM.NN` point release. Requiring the same count would hide
+/// exactly the upgrade being looked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagShape {
     /// Everything before the last `/`, if the tag is namespaced (`sources` in

@@ -43,10 +43,11 @@ provides = ["ffmpeg"]
 
 # Limits of the capability itself, inherited by every recipe that composes it.
 caveats = [
-  "10-bit content decodes in hardware, but nothing downstream can use the result without a copy. The decoder emits `NV12` for 8-bit and `NV15` — 10-bit packed 4:2:0 — for 10-bit. Nothing in this image consumes `NV15`: Vulkan has no such format, Mesa and ffmpeg's filters cannot import it, and the decoder cannot be asked for `P010` instead because the hardware writes `NV15` natively. A 10-bit transcode therefore converts on the CPU. RGA can convert `NV15` to `P010`, but ffmpeg cannot reach RGA here (see the next caveat); a program speaking librga directly can. The display controller scans `NV15` out unconverted, so playback to a KMS plane is unaffected.",
-  "ffmpeg has no RGA filters here. `scale_rkrga` and `vpp_rkrga` need `--enable-rkmpp`, and MPP needs the vendor `mpp_service` kernel framework that mainline does not have. ffmpeg scales on CPU or GPU; RGA is reached through librga by a program that speaks its API.",
-  "RGA colour conversion covers BT.601 limited and full range and BT.709, but not BT.2020.",
-  "Pass RGA its buffers as DMA-BUF file descriptors (`importbuffer_fd`). librga's virtual-address import, which builds an IOMMU mapping per call over ordinary process memory, faults the RGA IOMMU on roughly a third of jobs: the job times out after a second, the core is soft-reset, and the destination is left untouched. The same operations over DMA-BUF run clean and about seven times faster.",
+  "10-bit content decodes in hardware, but nothing downstream can use the result without a copy. The decoder emits `NV12` for 8-bit and `NV15` — 10-bit packed 4:2:0 — for 10-bit. Nothing in this image consumes `NV15`: Vulkan has no such format, and Mesa and ffmpeg's filters cannot import it. The decoder cannot be asked for `P010` instead, because the hardware writes `NV15` natively. A 10-bit transcode therefore converts on the CPU.",
+  "RGA can convert `NV15` to `P010`, but ffmpeg cannot reach RGA here (see the next caveat). A program speaking librga directly can. The display controller scans `NV15` out unconverted, so playback to a KMS plane is unaffected.",
+  "ffmpeg has no RGA filters here. `scale_rkrga` and `vpp_rkrga` need `--enable-rkmpp`, and MPP needs the vendor `mpp_service` kernel framework that mainline does not have. ffmpeg scales on CPU or GPU. RGA is reached through librga by a program that speaks its API.",
+  "RGA color conversion covers BT.601 limited and full range and BT.709, but not BT.2020.",
+  "Pass RGA its buffers as DMA-BUF file descriptors (`importbuffer_fd`). librga's virtual-address import builds an IOMMU mapping per call over ordinary process memory. That faults the RGA IOMMU on roughly a third of jobs. The job then times out after a second, the core is soft-reset, and the destination is left untouched. The same operations over DMA-BUF run clean and about seven times faster.",
 ]
 
 # The capability's own proof, checked by boot2deb-selftest wherever this feature

@@ -6,12 +6,13 @@ userspace, u-boot) before it compiles. The series is declared by a
 lives in the separate `patches` repo. Adding a patch means getting it into that series
 and then into a build. This page walks the loop end to end.
 
-This page is about getting a *new* patch into a series. Carrying an existing series across
-a kernel version — measuring what breaks, and encoding the boundary in the series — is
-[Moving a board to a newer kernel](../tutorials/newer-kernel.md).
+This page is about getting a *new* patch into a series. Carrying an existing series
+across a kernel version is
+[Moving a board to a newer kernel](../tutorials/newer-kernel.md). That page measures
+what breaks, and encodes the boundary in the series.
 
 It applies to a kernel that names a series. A kernel with `patch_series = "none"`
-applies no series and never reads the `patches` repo; giving such a board a patch means
+applies no series and never reads the `patches` repo. Giving such a board a patch means
 first authoring a series for its kernel.
 
 ## The loop
@@ -21,20 +22,20 @@ patch import  ->  commit in ../patches  ->  boot2deb update  ->  boot2deb build
                           (verify-patches at any point along the way)
 ```
 
-The linchpin is the middle two steps: **`update` re-pins the `patches` repo's current
+The linchpin is the middle two steps. **`update` re-pins the `patches` repo's current
 commit into the lock, and `build` reads the series at exactly that pinned commit.** So a
 patch sitting on disk does nothing until it is *committed* in the patches repo and the
 lock is *re-pinned* to include that commit. `patch import` prints these follow-ups for
-you; the rest of this page is the same steps, with their failure modes.
+you, and the rest of this page is the same steps, with their failure modes.
 
 The running example imports a kernel patch into the `rk3588-accel` series and builds the
 `turing-rk1/forky` recipe.
 
 ## 1. Import the patch
 
-`patch import` fetches a patch (a patchwork/mbox URL, a local file, or `-` for stdin),
-normalizes it to canonical `git am`-ready mbox, writes it into the series' tree, and
-slots it into the series manifest at the right position:
+`patch import` fetches a patch (a patchwork/mbox URL, a local file, or `-` for stdin)
+and normalizes it to canonical `git am`-ready mbox. It writes it into the series' tree,
+and slots it into the series manifest at the right position:
 
 ```sh
 boot2deb patch import \
@@ -44,10 +45,10 @@ boot2deb patch import \
 
 - `--scope` selects which tree's series to insert into: `kernel`, `ffmpeg`, `userspace`,
   or `uboot`.
-- The filename prefix is chosen to sort the patch at its list position; pass `--position`
-  to insert at a specific index (default: append). If the neighbours leave no numeric gap
-  (e.g. `070`/`071`), the import falls back to a lettered sub-prefix (`070a`)
-  automatically.
+- The filename prefix is chosen to sort the patch at its list position. Pass
+  `--position` to insert at a specific index (default: append). If the neighbors leave
+  no numeric gap (e.g. `070`/`071`), the import falls back to a lettered sub-prefix
+  (`070a`) automatically.
 - Add `--verify-tree <kernel-checkout>` to dry-run `git am` the resulting series during
   the import (it rolls back the write on failure). Without it, the patch is written
   unverified — see [verify](#3-verify).
@@ -69,10 +70,12 @@ next steps — no build reads the patch until the series is committed and re-pin
 ```
 
 The re-pin line names each recipe that applies the series you imported into, on either
-axis — a device's `default_uboot_series` counts the same as a kernel's `patch_series`,
-so importing into a u-boot series names the recipes that carry it. The checkout path it
-prints is the one it wrote to: `--patches-path` when you passed one, else the config
-root's sibling `../patches` — anchored to `--root`, not to the directory you ran from.
+axis. A device's `default_uboot_series` counts the same as a kernel's `patch_series`, so
+importing into a u-boot series names the recipes that carry it.
+
+The checkout path it prints is the one it wrote to: `--patches-path` when you passed one,
+else the config root's sibling `../patches`. That path is anchored to `--root`, not to
+the directory you ran from.
 
 ## 2. Commit in the patches repo
 
@@ -97,15 +100,15 @@ boot2deb verify-patches turing-rk1/forky
 ```
 
 With no `--kernel-path`, `verify-patches` **auto-fetches the locked kernel at its pin** —
-no hand-cloned tree needed. The first run on a cold cache clones linux-stable (large); if
-you already have a checkout, point `--kernel-src` at it to skip the clone:
+no hand-cloned tree needed. The first run on a cold cache clones linux-stable, which is
+large. If you already have a checkout, point `--kernel-src` at it to skip the clone:
 
 ```sh
 boot2deb verify-patches turing-rk1/forky --kernel-src ../linux
 ```
 
 A `--scope uboot` import verifies the same way, against the recipe that carries the
-u-boot series — the locked u-boot is auto-fetched at its pin, and the run reports the
+u-boot series. The locked u-boot is auto-fetched at its pin, and the run reports the
 `uboot` series at the u-boot tag rather than a kernel one:
 
 ```sh
@@ -137,18 +140,24 @@ The build reads the series at the pinned commit and applies it with `git am --3w
 
 ## Failure modes
 
-**Dirty patches checkout.** `update` refuses a `patches` repo with uncommitted changes
+### Dirty patches checkout
+
+`update` refuses a `patches` repo with uncommitted changes
 (`PatchesDirty`): a dirty pin would be wrong in every case, so commit first. This guard
 turns "I imported but forgot to commit" into an instant, offline error instead of a
 confusing build-time one.
 
-**Stale / mismatched pin.** If the checkout `build` reads is at a different commit than
-the lock pins, you get `PatchesPinMismatch`. Its remedy text distinguishes the cases: if
-your local HEAD is *ahead* of the pin (you committed but did not re-pin), run `update`;
-if the checkout is *behind* the pin (stale), `git checkout` the pinned commit. Re-pinning
+### Stale or mismatched pin
+
+If the checkout `build` reads is at a different commit than
+the lock pins, you get `PatchesPinMismatch`. Its remedy text distinguishes the cases. If
+your local HEAD is *ahead* of the pin (you committed but did not re-pin), run `update`.
+If the checkout is *behind* the pin (stale), `git checkout` the pinned commit. Re-pinning
 after a commit is the usual fix.
 
-**Auto-fetch can't find the commit.** A zero-clone build (no local `../patches`) fetches
+### Auto-fetch cannot find the commit
+
+A zero-clone build (no local `../patches`) fetches
 the series at the pinned commit from the series' `patches_url`. That only works if the
 commit has been **pushed** — an unpushed local commit resolves fine against a local
 checkout but not on another machine. Push the patches repo before relying on the
@@ -156,7 +165,7 @@ auto-fetch.
 
 ## Co-developing the series
 
-While iterating on a patch you may not want to commit-and-re-pin on every change. Point
+While iterating on a patch you might not want to commit-and-re-pin on every change. Point
 `build` (and `verify-patches`) at your working checkout instead:
 
 ```sh

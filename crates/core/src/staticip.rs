@@ -1,30 +1,33 @@
 //! The shape of the `static_ip=` seed key.
 //!
 //! Its own module for the same reason [`wifi`](crate::wifi) is: the value crosses
-//! a trust boundary. It is typed at press time, travels as a line of `seed.txt`,
-//! and is rendered by the device's first-boot hook into whichever line-based
-//! format the image's network stack reads — a NetworkManager keyfile or a
-//! `dhcpcd.conf` stanza. The check here holds the grammar those two renderings
-//! share, so a bad value is a press-time error naming the flag, not a board that
-//! silently never gets an address.
+//! a trust boundary. It is typed at press time and travels as a line of `seed.txt`.
+//! The device's first-boot hook renders it into whichever line-based format the
+//! image's network stack reads, either a NetworkManager keyfile or a `dhcpcd.conf`
+//! stanza. The check here holds the grammar those two renderings share. A bad value
+//! is then a press-time error naming the flag, rather than a board that silently
+//! never gets an address.
 //!
-//! The grammar is `address/prefix[,gateway[,dns...]]`, IPv4 throughout:
-//! comma-separated fields, the first a dotted quad with a `/1`-`/32` prefix
-//! length, then an optional gateway and any number of DNS servers. The check is
-//! syntax, not policy — whether the gateway is inside the subnet or the DNS
-//! servers answer is the network's business, and refusing a value the operator
-//! deliberately chose would be wrong more often than it would help.
+//! The grammar is `address/prefix[,gateway[,dns...]]`, IPv4 throughout. The fields
+//! are comma-separated:
 //!
-//! Pure and host-independent; nothing here touches the filesystem or the network.
+//! - The first is a dotted quad with a `/1`-`/32` prefix length.
+//! - An optional gateway follows it.
+//! - Any number of DNS servers follow that.
+//!
+//! The check is syntax rather than policy. Whether the gateway is inside the subnet,
+//! or whether the DNS servers answer, is the network's business. Refusing a value the
+//! operator deliberately chose would be wrong more often than it would help.
+//!
+//! Pure and host-independent. Nothing here touches the filesystem or the network.
 
 use std::net::Ipv4Addr;
 
 /// Check a `static_ip=` value: `address/prefix[,gateway[,dns...]]`.
 ///
-/// Every field must be IPv4 — the seed grammar does not carry IPv6, whose
-/// addresses would need an escaping story for `:` against the renderings'
-/// own separators; on every image both stacks keep IPv6 autoconfiguration on
-/// regardless of this key.
+/// Every field must be IPv4. The seed grammar does not carry IPv6, whose addresses
+/// would need an escaping story for `:` against the renderings' own separators. On
+/// every image both stacks keep IPv6 autoconfiguration on regardless of this key.
 ///
 /// # Errors
 ///

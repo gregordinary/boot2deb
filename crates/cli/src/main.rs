@@ -1,24 +1,32 @@
 //! boot2deb CLI — a thin client over the config core and the engine.
 //!
-//! Subcommands: `list-devices`, `list-recipes`, `list-kernels`, `list-features`,
-//! `list-kmods`, `resolve`, and `doctor` (config inspection + host preflight);
-//! `support-matrix` (each shipped recipe's support claim joined to its lock's pins);
-//! `new-device` (scaffold a new device + recipe from the typed model); `update`
-//! (resolve upstream refs into the lock); `outdated` (survey, read-only, what has
-//! moved upstream since); `verify-patches`, `verify-config`, and `verify-sources`
-//! (the patch, kernel-config, and source-durability gates); `patch import` (fetch +
-//! normalize + slot a patch into a series); `build` (drive the compile / rootfs /
-//! image pipeline from the lock); `diff` (compare two build points, offline, from the
-//! documents a build already wrote); `sbom` (export an image's bill of materials as
-//! SPDX or CycloneDX); `size` (break down what an image's package set weighs, from the
-//! published plan); `why-rebuild` (explain, offline, which compile nodes the next
-//! build reuses vs. rebuilds); `shell` (open an interactive session in the root a build
-//! stage compiles in); `try` (boot the built image under QEMU and assert the
-//! userland works before flashing); and `clean` (remove a recipe's build scratch).
+//! The subcommands:
 //!
-//! This module is the entry point only: it parses the argument tree ([`crate::args`]),
-//! composes the config root, and dispatches to the handler in [`crate::commands`] that
-//! owns each subcommand. Every error surfaces here once, as the process's exit code —
+//! - The five `list-*` commands, with `resolve` and `doctor`: config inspection and
+//!   host preflight.
+//! - `support-matrix`: each shipped recipe's support claim, joined to its lock's
+//!   pins.
+//! - `new-device`: scaffold a new device and recipe from the typed model.
+//! - `update`: resolve upstream refs into the lock.
+//! - `outdated`: survey, read-only, what has moved upstream since.
+//! - `verify-patches`, `verify-config`, and `verify-sources`: the patch,
+//!   kernel-config, and source-durability gates.
+//! - `patch import`: fetch, normalize, and slot a patch into a series.
+//! - `build`: drive the compile, rootfs and image pipeline from the lock.
+//! - `diff`: compare two build points, offline, from the documents a build already
+//!   wrote.
+//! - `sbom`: export an image's bill of materials as SPDX or CycloneDX.
+//! - `size`: break down what an image's package set weighs, from the published plan.
+//! - `why-rebuild`: explain, offline, which compile nodes the next build reuses and
+//!   which it rebuilds.
+//! - `shell`: open an interactive session in the root a build stage compiles in.
+//! - `try`: boot the built image under QEMU and assert the userland works before
+//!   flashing.
+//! - `clean`: remove a recipe's build scratch.
+//!
+//! This module is the entry point only. It parses the argument tree
+//! ([`crate::args`]), composes the config root, and dispatches to the handler in
+//! [`crate::commands`] that owns each subcommand. Every error surfaces here once, as the process's exit code —
 //! with one exception, `shell`, whose result is a command's own exit status.
 
 mod args;

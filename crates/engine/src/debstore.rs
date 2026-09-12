@@ -2,15 +2,17 @@
 //! sha256, holding the pre-built `extra_debs` a layer or feature pulls from outside
 //! the Debian mirror.
 //!
-//! `update` fills the store (fetch → verify → put) so a later `build` is offline; a
+//! `update` fills the store (fetch, verify, put) so a later `build` is offline. A
 //! build materializes from it, re-fetching only to fill a miss ([`crate::extradebs`]).
-//! Content addressing makes the store self-verifying: a file at `<sha256>.deb` is
-//! written only after its bytes hash back to that name, so a store *hit* is trusted
-//! (the deb is re-verified again at install time against the solved manifest),
-//! and two layers pulling identical bytes share one entry. The store is durable — it
-//! is a build-host cache outside the per-recipe work dir, so cleaning one leaves it and
-//! the build "no longer depends on [the source] staying put". `clean --all-caches` is
-//! what reaches it.
+//!
+//! Content addressing makes the store self-verifying. A file at `<sha256>.deb` is
+//! written only after its bytes hash back to that name, so a store *hit* is trusted.
+//! The deb is re-verified again at install time against the solved manifest. Two
+//! layers pulling identical bytes share one entry.
+//!
+//! The store is durable. It is a build-host cache outside the per-recipe work dir.
+//! Cleaning one leaves it, and the build "no longer depends on [the source] staying
+//! put". `clean --all-caches` is what reaches it.
 
 use crate::blobs::sha256_hex;
 use crate::error::EngineError;
@@ -24,7 +26,7 @@ pub struct DebStore {
 
 impl DebStore {
     /// Open the store rooted at `dir`, creating it if needed. Opportunistically sweeps
-    /// stale `.partial` temps a hard-killed `put_bytes` may have left.
+    /// the stale `.partial` temps a hard-killed `put_bytes` leaves behind.
     pub fn open(dir: &Path) -> Result<DebStore, EngineError> {
         std::fs::create_dir_all(dir).map_err(|s| EngineError::io(dir, s))?;
         crate::gc::sweep_stale_temps(dir);
@@ -46,7 +48,7 @@ impl DebStore {
     /// Store `bytes` after verifying they hash to `expected_sha256`, returning the
     /// stored path. A hash mismatch is [`EngineError::ExtraDebHashMismatch`] and
     /// stores nothing (`locator` labels the source in the error). The write is
-    /// atomic — a uniquely-named temp renamed into place — so an interrupted put
+    /// atomic, a uniquely-named temp renamed into place. An interrupted put therefore
     /// never leaves a truncated `<sha256>.deb` that a later build would trust.
     pub fn put_bytes(
         &self,

@@ -1,14 +1,18 @@
 //! `patch import`: fetch a patch, normalize it, and slot it into a series.
 //!
-//! Fetches from a URL/file/stdin, normalizes to canonical `git am`-ready mbox, writes
-//! it into the patches repo, inserts its label into the series' scope at the
-//! requested position, and — with `--verify-tree` — dry-run `git am`-verifies the
-//! resulting series. The file write and the series edit are rolled back if the
-//! verify fails, so a rejected patch leaves the repo untouched.
+//! Fetches from a URL, a file, or stdin, then:
 //!
-//! A successful import is deliberately inert: builds read the series at the lock's
-//! pinned commit, so the patch reaches a build only after a commit in the patches repo
-//! and a `boot2deb update` re-pin. The success output prints that exact loop (naming
+//! - Normalizes to canonical `git am`-ready mbox.
+//! - Writes it into the patches repo.
+//! - Inserts its label into the series' scope at the requested position.
+//! - Dry-run `git am`-verifies the resulting series, under `--verify-tree`.
+//!
+//! The file write and the series edit are rolled back if the verify fails, so a
+//! rejected patch leaves the repo untouched.
+//!
+//! A successful import is deliberately inert. Builds read the series at the lock's
+//! pinned commit. The patch therefore reaches a build only after a commit in the
+//! patches repo and a `boot2deb update` re-pin. The success output prints that exact loop (naming
 //! the recipes whose locks the import invalidates) rather than leaving it to surface
 //! as a build-time pin mismatch.
 

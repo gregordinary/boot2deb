@@ -5,22 +5,23 @@
 //! u-boot stage already emits the two raw download payloads
 //! ([`MaskromImages`](super::uboot::MaskromImages)) — `usb471` (the DDR TPL,
 //! CODE471) and `usb472` (SPL + FIT, CODE472). This module packs them into the
-//! container `db` consumes, so the build hands out a directly-flashable loader
-//! instead of leaving a `boot_merger` step to run by hand.
+//! container `db` consumes. The build therefore hands out a directly-flashable
+//! loader, instead of leaving a `boot_merger` step to run by hand.
 //!
-//! The layout is reproduced from a hardware-proven RK3576 loader, not guessed:
-//! the 102-byte header and 57-byte entry descriptors match rkdeveloptool's
-//! `rk_boot_header`/`rk_boot_entry`, and the CODE471 group carries the generated
-//! `UsbHead` RKNS block that the closed rkbin `boot_merger` writes
-//! under `CREATE_IDB`/`NEWIDB`. `rkdeveloptool db` downloads only the CODE471 and
-//! CODE472 entries, so the container omits the LOADER section (the storage-write
-//! blobs, which `db` never touches) — that section is also the only part carrying
-//! an encrypted/signed header, which is why omitting it keeps the writer pure and
-//! deterministic.
+//! The layout is reproduced from a hardware-proven RK3576 loader, rather than
+//! guessed. The 102-byte header and 57-byte entry descriptors match rkdeveloptool's
+//! `rk_boot_header` and `rk_boot_entry`. The CODE471 group carries the generated
+//! `UsbHead` RKNS block that the closed rkbin `boot_merger` writes under
+//! `CREATE_IDB` and `NEWIDB`.
 //!
-//! Blobs are stored plaintext (RC4 off; `rc4Flag = 1` signals "not encrypted"),
-//! padded up to the 4096-byte RKNS page, and the file ends with the Rockchip
-//! CRC32 ([`rk_crc32`]).
+//! `rkdeveloptool db` downloads only the CODE471 and CODE472 entries, so the
+//! container omits the LOADER section. That section holds the storage-write blobs,
+//! which `db` never touches. It is also the only part carrying an encrypted or
+//! signed header, which is why omitting it keeps the writer pure and deterministic.
+//!
+//! Blobs are stored plaintext, with RC4 off (`rc4Flag = 1` signals "not
+//! encrypted"). They are padded up to the 4096-byte RKNS page, and the file ends
+//! with the Rockchip CRC32 ([`rk_crc32`]).
 
 use sha2::{Digest, Sha256};
 

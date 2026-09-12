@@ -9,8 +9,8 @@ driver revision it was validated with.
 
 **Licensing is UNSTATED.** AICSemi ships no explicit firmware license, and radxa
 redistributes the blobs without a stated grant. boot2deb therefore hosts none of these
-bytes: they are pulled from radxa's public repository at a pinned commit, not stored
-here or in `boot2deb-blobs`. **Their redistribution terms must be reviewed before any
+bytes: they are pulled from radxa's public repository at a pinned commit rather than
+stored in this project. **Their redistribution terms must be reviewed before any
 image built with this firmware is published.**
 
 ## Source and install
