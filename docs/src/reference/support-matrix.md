@@ -36,7 +36,7 @@ at the end of a build of that recipe.
 | `asus-chromebit-cs10/forky` | asus-chromebit-cs10 | forky | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
 | `asus-chromebit-cs10/trixie` | asus-chromebit-cs10 | trixie | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |
 | `h96-max-m9/forky` | h96-max-m9 | forky | `rk3576-mainline-7.2` `v7.2.3` | `rk3576-fixes`, `rk3576-npu` `main` (`314b1b34b561`) | `rk3576-display` `main` (`314b1b34b561`) | `aic8800` `main` (`516e3b087763`) | `expected` | 2026-08-21 |
-| `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.2` `v7.2.3` | `rk3576-fixes`, `rk3576-npu`, `rk3576-rga` `main` (`314b1b34b561`) | `rk3576-display` `main` (`314b1b34b561`) | `aic8800` `main` (`516e3b087763`) | `experimental` | 2026-08-21 |
+| `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.2` `v7.2.3` | `rk3576-fixes`, `rk3576-npu`, `rk3576-rga`, `rk3576-media` `main` (`daa40edf0c9b`) | `rk3576-display` `main` (`daa40edf0c9b`) | `aic8800` `main` (`516e3b087763`) | `experimental` | 2026-08-21 |
 | `h96-max-m9/util` | h96-max-m9 | — | (u-boot only) | none | `h96-max-m9-util` `main` (`6e886797a212`) | none | `expected` | 2026-07-22 |
 | `rk3576-evb1-v10/forky` | rk3576-evb1-v10 | forky | `rk3576-mainline-7.2` `v7.2.3` | `rk3576-fixes` `main` (`6e886797a212`) | `rk3576-loader` `main` (`6e886797a212`) | none | `expected` | 2026-08-21 |
 | `rk3576-generic/loader` | rk3576-generic | — | (u-boot only) | none | `rk3576-loader` `main` (`6e886797a212`) | none | `expected` | 2026-07-21 |
