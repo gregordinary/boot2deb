@@ -74,6 +74,24 @@ use std::path::{Path, PathBuf};
 /// one archive by construction rather than by two strings staying in step.
 const LOCAL_REPO_NAME: &str = crate::repo::POOL_LABEL;
 
+/// What the **published** plan document records as the local pool's mirror, in place
+/// of the `file://` URL the resolve used.
+///
+/// The real URL is a path on the build host, under a per-run directory that the node
+/// deletes before the build ends. It therefore names nothing a reader of the artifact
+/// can open, on that machine or any other, while naming the build user, the checkout
+/// and the process that ran — the same reason the provenance manifest drops it from
+/// `[[archives]]` and the sandbox record carries no working or artifact path.
+///
+/// The scheme stays `file://`, because that is what says the row is a local pool and
+/// is what [`archive_records`] reads to mark it one. `/nonexistent` is Debian's own
+/// idiom for a path that is deliberately not there.
+///
+/// Nothing dereferences it. A plan's package names its archive **by index** into the
+/// repository list the bootstrap is configured with, so a `reproduce` run replaying
+/// this document fetches through the pool that run assembles for itself.
+const PUBLISHED_POOL_URL: &str = "file:///nonexistent/boot2deb-local";
+
 /// Header line of the solved rootfs manifest — the lock's `[rootfs].manifest`, whose
 /// sha256 covers this line too, so it is part of the pinned identity.
 const ROOTFS_MANIFEST_HEADER: &str =
@@ -202,10 +220,13 @@ pub fn build_rootfs(
                     opts.mirrors.len(),
                     opts.repo_debs.len()
                 ));
-                let document = plan.to_document().map_err(|e| EngineError::Bootstrap {
-                    context: "render the rootfs plan document".into(),
-                    message: e.to_string(),
-                })?;
+                let document =
+                    published_plan(&plan)
+                        .to_document()
+                        .map_err(|e| EngineError::Bootstrap {
+                            context: "render the rootfs plan document".into(),
+                            message: e.to_string(),
+                        })?;
                 (plan, document)
             }
         };
@@ -426,6 +447,23 @@ pub struct PlanWeights {
     /// the provenance manifest's `[[archives]]` carries. A `file://` pool is marked
     /// local, and its build-host path is dropped here too.
     pub archives: Vec<boot2deb_core::provenance::ArchiveProvenance>,
+}
+
+/// The plan as it ships: every `file://` archive's URL replaced with
+/// [`PUBLISHED_POOL_URL`], and everything else as the resolve reported it.
+///
+/// A copy rather than an edit of the plan the node goes on to install from, so what is
+/// redacted is the *record* and not the run. The install is unaffected either way — a
+/// package names its archive by index — but a build whose behaviour depended on which
+/// of the two values it held would be a build that reads its own provenance.
+fn published_plan(plan: &Plan) -> Plan {
+    let mut published = plan.clone();
+    for archive in &mut published.archives {
+        if archive.mirror.starts_with("file://") {
+            archive.mirror = PUBLISHED_POOL_URL.to_string();
+        }
+    }
+    published
 }
 
 /// Project a plan's archive states into the provenance manifest's `[[archives]]` rows.
@@ -1219,6 +1257,68 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "the document is carried verbatim, not re-rendered"
         );
+    }
+
+    /// The published document is what a reader of the artifact set opens, so the one
+    /// row naming a build-host path has to be the one row that does not ship as
+    /// resolved. The external mirror is untouched, because it is a location anyone can
+    /// open.
+    #[test]
+    fn the_published_plan_drops_the_local_pool_path_and_keeps_every_other_mirror() {
+        let plan = Plan::parse_document(&format!(
+            "Format: ferroday-cage-plan 2\n\
+             Suite: forky\n\
+             Architecture: arm64\n\
+             \n\
+             Archive: 0\n\
+             Mirror: https://deb.debian.org/debian\n\
+             Suite: forky\n\
+             Components: main\n\
+             Release-SHA256: {zeros}\n\
+             Signed-By:\n\
+             Signing-Key:\n\
+             \n\
+             Archive: 1\n\
+             Mirror: file:///home/someone/build/cache/provisioner-pool-4242\n\
+             Suite: forky\n\
+             Components: main\n\
+             Release-SHA256: {zeros}\n\
+             Signed-By:\n\
+             Signing-Key:\n\
+             \n\
+             Package: base-files\n\
+             Version: 13\n\
+             Architecture: arm64\n\
+             SHA256: {zeros}\n\
+             Filename: pool/main/b/base-files/base-files_13_arm64.deb\n\
+             Archive: 1\n",
+            zeros = "0".repeat(64),
+        ))
+        .expect("the document is well-formed");
+
+        let published = published_plan(&plan);
+        assert_eq!(
+            published.archives[0].mirror,
+            "https://deb.debian.org/debian"
+        );
+        assert_eq!(published.archives[1].mirror, PUBLISHED_POOL_URL);
+        let document = published.to_document().unwrap();
+        assert!(
+            !document.contains("/home/someone"),
+            "the build-host path reached the shipped document:\n{document}"
+        );
+
+        // The plan the node installs from is untouched, and the package still names
+        // its archive by the index the repository list is sliced with.
+        assert!(plan.archives[1].mirror.contains("provisioner-pool-4242"));
+        assert_eq!(published.packages[0].archive, 1);
+
+        // The row still reads as the local pool it is, which is what the provenance
+        // projection keys on.
+        let rows = archive_records(&published);
+        assert!(rows[1].local, "the redacted pool stopped reading as local");
+        assert_eq!(rows[1].mirror, None);
+        assert!(!rows[0].local);
     }
 
     /// The provenance rows are the manifest's account of what the packages were selected

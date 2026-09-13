@@ -127,6 +127,7 @@ use ferroday_cage::{
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Base packages installed in a [`SandboxRole::Target`] sandbox at bootstrap — the
 /// minimum to run `dpkg-buildpackage`. Stage-specific build-deps are layered over this
@@ -456,9 +457,10 @@ pub trait BuildSandbox {
     ///
     /// The base is the toolchain that compiles the build's target `.deb`s, and no
     /// source pin covers it. This is therefore the record of what produced them, and it
-    /// is what the image's provenance reports. `None` until
-    /// [`ensure_ready`](Self::ensure_ready) has published a base, which a build with
-    /// no package stage never does.
+    /// is what the image's provenance reports. `None` until **this run's**
+    /// [`ensure_ready`](Self::ensure_ready) has published a base, which a build with no
+    /// package stage never does. A tree an earlier command left in the work dir is not
+    /// a root this build compiled in, and does not report itself as one.
     fn base_manifest(&self) -> Option<PathBuf>;
 
     /// A disposable build root: the immutable base plus `spec`'s packages, resolved
@@ -513,6 +515,15 @@ struct SandboxBase {
     /// published by rename, so a cache two provisioners write is the same file they
     /// both name.
     cache_dir: Option<PathBuf>,
+    /// Whether **this run** has stood the base up, set by [`ensure`](Self::ensure).
+    ///
+    /// A published tree outlives the run that made it, so the tree's presence says
+    /// only that some run once needed one. What the build's provenance has to record
+    /// is the roots *this* build compiled in, and a root nothing entered contributed
+    /// nothing to the artifacts. Hence [`published_manifest`](Self::published_manifest)
+    /// reads this as well as the file: a leftover tree in the work dir must not add a
+    /// root to the record.
+    used: AtomicBool,
 }
 
 /// What a sandbox is provisioned from. It says where its tree lives, which suite and
@@ -568,6 +579,7 @@ impl SandboxBase {
             },
             keyring: spec.keyring,
             cache_dir: spec.cache_dir,
+            used: AtomicBool::new(false),
         }
     }
 
@@ -584,9 +596,18 @@ impl SandboxBase {
         self.rootfs.with_file_name(name)
     }
 
-    /// The manifest path if a published base stands behind it, else `None` — the
+    /// The manifest path if **this run** stood a published base up, else `None` — the
     /// accessor behind both roots' `base_manifest`.
+    ///
+    /// Both conditions are required. The file says a base was published; the
+    /// [`used`](Self::used) flag says this run entered it. A work dir holding a tree
+    /// some earlier command left behind satisfies the first and not the second, and
+    /// reporting it would put a root in the image's provenance that produced none of
+    /// the build's `.deb`s.
     fn published_manifest(&self) -> Option<PathBuf> {
+        if !self.used.load(Ordering::Relaxed) {
+            return None;
+        }
         let path = self.manifest_path();
         path.is_file().then_some(path)
     }
@@ -761,6 +782,9 @@ impl SandboxBase {
                 self.rootfs.display()
             ));
         }
+        // Marked only on success, and marked here rather than at the stage that asked:
+        // this is the point past which a command in this build has a tree to run in.
+        self.used.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -2652,8 +2676,9 @@ mod tests {
         assert!(discard_unrecordable_base(&rootfs, &manifest).unwrap());
         assert!(!rootfs.exists(), "the unrecordable tree survived");
 
-        // With a manifest beside it the tree is a base: it is kept, and it reports
-        // itself.
+        // With a manifest beside it the tree is a base and is kept. It still reports
+        // nothing, because reporting also asks whether this run entered it — see
+        // `a_base_this_run_never_stood_up_is_not_in_the_record`.
         std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
         std::fs::write(&manifest, "# empty\n").unwrap();
         assert!(!discard_unrecordable_base(&rootfs, &manifest).unwrap());
@@ -2661,7 +2686,6 @@ mod tests {
             rootfs.join("usr/bin").is_dir(),
             "a recorded base was removed"
         );
-        assert_eq!(sb.base_manifest(), Some(manifest.clone()));
 
         // Nothing to discard where no tree stands, whether or not a manifest is left
         // over — so a first build is not a special case.
@@ -2669,6 +2693,40 @@ mod tests {
         assert!(!discard_unrecordable_base(&rootfs, &manifest).unwrap());
         std::fs::remove_file(&manifest).unwrap();
         assert!(!discard_unrecordable_base(&rootfs, &manifest).unwrap());
+    }
+
+    /// A base the *work dir* holds is not a base the *build* used, and only the
+    /// second belongs in the image's provenance. A leftover tree from an unrelated
+    /// command satisfies the manifest-on-disk half and must still report nothing.
+    #[test]
+    fn a_base_this_run_never_stood_up_is_not_in_the_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("arm64-forky-0123456789ab");
+        std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
+        let sb = RootlessSandbox::new(
+            SandboxRole::Target,
+            SandboxSpec {
+                rootfs,
+                suite: "forky".into(),
+                arch: "arm64".into(),
+                mirrors: vec![DEFAULT_MIRROR.to_string()],
+                keyring: None,
+                cache_dir: None,
+            },
+            PathBuf::from("/w/sandbox/layers"),
+        );
+        let manifest = sb.base.manifest_path();
+        std::fs::write(&manifest, "# empty\n").unwrap();
+        assert_eq!(
+            sb.base_manifest(),
+            None,
+            "a tree this run never entered was reported as a root it compiled in"
+        );
+
+        // What `ensure` records on success is the other half, and with both the base
+        // reports itself.
+        sb.base.used.store(true, Ordering::Relaxed);
+        assert_eq!(sb.base_manifest(), Some(manifest));
     }
 
     /// Writes a dpkg status database into a throwaway upper and returns its root.

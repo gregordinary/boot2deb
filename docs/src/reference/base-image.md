@@ -67,6 +67,14 @@ brings NetworkManager exclude `dhcpcd` in turn.
   `i2c-tools` and `ir-keytable` are.
 - **Development toolchains.** Nothing on an image builds software. That happens in the
   builder's sandbox.
+- **`uidmap`.** A boot2deb image does not build boot2deb images as it ships, and this
+  is the package that would be half of making it. `doctor` on a booted board reports
+  `newuidmap was not found on PATH`, because the shadow suite's setuid helpers are a
+  separate package. `uidmap` is cheap — two packages and 759 KiB over this set — and
+  the other half is not. `cargo install` needs a host C compiler, and `build-essential`
+  adds 47 packages and just over 1 GiB. Shipping the cheap half turns two `apt install`
+  lines into one and leaves the board no more able to build. So the image ships
+  neither, and `doctor` names what is missing with the command for your distribution.
 
 ## Adding to it yourself
 

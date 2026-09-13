@@ -1148,6 +1148,11 @@ fn write_provenance(r: Provenance) -> Result<(), Box<dyn std::error::Error>> {
         // that compiles no kernel, u-boot or module, and no packaging root by one whose
         // archived artifacts all came back from the artifact cache. A `None` here is
         // therefore "nothing of this kind was produced", never "not recorded".
+        //
+        // Each root answers for the run and not for the directory. A work dir can hold
+        // a published tree an earlier command stood up, and a record naming a root this
+        // build never entered would claim a provenance it does not have — so
+        // `base_manifest` reports only a base this run's own `ensure_ready` published.
         let build_sandbox = match (
             Some(&r.ib.image.suite),
             r.sandbox.and_then(|s| s.base_manifest()),
