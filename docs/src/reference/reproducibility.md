@@ -174,6 +174,19 @@ front of it.
 A single binary building two different config trees is the ordinary case, not an exotic
 one.
 
+The section carries one more coordinate, `ferroday_cage`. It is a version rather than a
+commit, because it names a released dependency instead of a checkout. That library is
+what boot2deb sandboxes every build command with, and what it provisions every Debian
+root through.
+That library versions on its own schedule. Neither commit above bounds it, and a defect
+in containment or provisioning belongs to it rather than to the binary that linked it.
+
+A reader with the boot2deb checkout could reach the same number through its lock file.
+The two cases that matter cannot. A builder with no commit has no checkout to consult,
+and a dirty one has no commit that identifies what it held. `ferroday_cage` answers in
+both. `boot2deb diff` reports it moving between two builds, and `boot2deb doctor` prints
+the version the running binary links.
+
 The binary's commit is stamped at **compile** time rather than read at run time, and that
 is deliberate. The binary *is* the builder, so its identity has to travel with it. An
 installed boot2deb has no source tree in reach. Reading whatever checkout happened to be

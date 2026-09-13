@@ -1218,6 +1218,10 @@ fn write_provenance(r: Provenance) -> Result<(), Box<dyn std::error::Error>> {
             builder_version: env!("CARGO_PKG_VERSION"),
             builder_commit: crate::builder::commit(),
             builder_dirty: crate::builder::dirty(),
+            // Read from the engine, which is the crate that links it. A defect in
+            // containment or provisioning is the library's, and its version is not
+            // derivable from the two coordinates above.
+            cage_version: boot2deb_engine::CAGE_VERSION,
             // The other half of "what produced this image": the config tree the layers,
             // recipe and lock were read from. Probed here rather than stamped, because
             // unlike the binary it is a run-time input — the same boot2deb resolves

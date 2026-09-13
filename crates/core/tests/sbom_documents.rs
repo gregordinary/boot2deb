@@ -67,6 +67,7 @@ fn facts<'a>(
         user: "debian",
         password: "not-a-real-password",
         builder_version: env!("CARGO_PKG_VERSION"),
+        cage_version: "0.4.4",
         builder_commit: None,
         builder_dirty: false,
         config_commit: None,

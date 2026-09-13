@@ -79,6 +79,10 @@ pub struct BuildFacts<'a> {
     pub password: &'a str,
     /// boot2deb crate version that ran the build (`CARGO_PKG_VERSION`).
     pub builder_version: &'a str,
+    /// Version of the sandbox and Debian provisioning library the build ran on
+    /// (`ferroday-cage`). Engine-owned for the same reason [`archives`](Self::archives)
+    /// is: the value comes from a library the engine links and the pure core does not.
+    pub cage_version: &'a str,
     /// Short git commit of the boot2deb checkout that ran the build, or `None` when
     /// built outside a git checkout (e.g. from a source tarball).
     pub builder_commit: Option<&'a str>,
@@ -1197,7 +1201,7 @@ pub struct QemuProvenance {
     pub version: Option<String>,
 }
 
-/// Which boot2deb built the image — the builder axis of "exactly what went into this
+/// Which builder produced the image — the builder axis of "exactly what went into this
 /// image".
 ///
 /// It is an *as-built* record rather than a requirement. The exact version reproduces
@@ -1216,6 +1220,11 @@ pub struct QemuProvenance {
 /// resolved layers, recipes and locks from. One checkout can supply both, and in the
 /// layout boot2deb is developed in it does. A released binary run against a config tree
 /// is the case that shows why one field cannot answer for the other.
+///
+/// [`ferroday_cage`](Self::ferroday_cage) is the third coordinate, and it is a version
+/// rather than a commit because it names a released dependency instead of a checkout.
+/// The program and the library it links version on separate schedules, so neither
+/// number bounds the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuiltWithProvenance {
     /// boot2deb crate version, from `Cargo.toml` (e.g. `0.1.0`).
@@ -1242,6 +1251,22 @@ pub struct BuiltWithProvenance {
     /// tree means the *inputs* are. A build can easily be one without the other.
     #[serde(default)]
     pub config_dirty: bool,
+    /// Version of `ferroday-cage`, the library that sandboxed every build command and
+    /// provisioned the roots they ran in.
+    ///
+    /// Its own coordinate because nothing else here answers for it.
+    /// [`version`](Self::version) cannot imply it, since the two version independently.
+    /// [`commit`](Self::commit) reaches it only through a lock file, which the reader
+    /// needs the checkout to consult. That is the indirection this manifest exists to
+    /// remove. A builder with no commit does not reach it at all, and neither does a
+    /// dirty one.
+    ///
+    /// Distinct from [`sandbox`](ProvenanceManifest::sandbox). That records the
+    /// *profile* a command ran under, because those values sit outside the library's
+    /// compatibility promise and cannot be inferred from a version. This field is the
+    /// complement: which library code applied the profile and bootstrapped the rootfs.
+    /// No other field in the document answers a containment or provisioning defect.
+    pub ferroday_cage: String,
 }
 
 /// The image's initial first-boot credential, and the rest of what can reach the
@@ -1493,6 +1518,7 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
             dirty: facts.builder_dirty,
             config_commit: facts.config_commit.map(str::to_string),
             config_dirty: facts.config_dirty,
+            ferroday_cage: facts.cage_version.to_string(),
         },
         credentials: CredentialsProvenance {
             user: facts.user.to_string(),
@@ -1972,6 +1998,7 @@ pub(crate) mod tests {
                 user: "debian",
                 password: "pw",
                 builder_version: "0.1.0",
+                cage_version: "0.4.4",
                 builder_commit: Some("abc1234"),
                 builder_dirty: false,
                 config_commit: None,
@@ -2031,6 +2058,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "Kp7rTx",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: None,
             builder_dirty: false,
             config_commit: None,
@@ -2102,6 +2130,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "Kp7rTx",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: Some("deadbeef1234"),
             builder_dirty: false,
             config_commit: None,
@@ -2198,6 +2227,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: None,
             builder_dirty: false,
             config_commit: None,
@@ -2264,6 +2294,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: None,
             builder_dirty: false,
             config_commit: None,
@@ -2310,6 +2341,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "pw",
             builder_version: "0.4.2",
+            cage_version: "0.4.4",
             builder_commit: Some("deadbeef1234"),
             builder_dirty: false,
             config_commit: None,
@@ -2403,6 +2435,7 @@ pub(crate) mod tests {
                 user: "debian",
                 password: "pw",
                 builder_version: "0.4.2",
+                cage_version: "0.4.4",
                 builder_commit: Some("deadbeef1234"),
                 builder_dirty: true,
                 config_commit: None,
@@ -2444,6 +2477,7 @@ pub(crate) mod tests {
                 user: "debian",
                 password: "pw",
                 builder_version: "0.4.2",
+                cage_version: "0.4.4",
                 builder_commit: None,
                 builder_dirty: false,
                 config_commit: None,
@@ -2537,6 +2571,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "Kp7rTx",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: Some("cafef00dbabe"),
             builder_dirty: false,
             config_commit: Some("0ddba11c0ffe"),
@@ -2736,6 +2771,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: None,
             builder_dirty: false,
             config_commit: None,
@@ -2802,6 +2838,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: None,
             builder_dirty: false,
             config_commit: None,
@@ -2863,6 +2900,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: None,
             builder_dirty: false,
             config_commit: None,
@@ -2948,6 +2986,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: None,
             builder_dirty: false,
             config_commit: None,
@@ -3025,6 +3064,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: None,
             builder_dirty: false,
             config_commit: None,
@@ -3115,6 +3155,7 @@ pub(crate) mod tests {
             user: "debian",
             password: "pw",
             builder_version: "0.0.0-test",
+            cage_version: "0.4.4",
             builder_commit: None,
             builder_dirty: false,
             config_commit: None,
@@ -3174,5 +3215,29 @@ pub(crate) mod tests {
         // Absent for a board that installs Debian's kernel and boots its own firmware,
         // which compiles neither of the two.
         assert!(!render(None, None).contains("[cross_sandbox]"));
+    }
+
+    /// The provisioning library's version is a coordinate of its own, recorded even
+    /// where the builder has no commit — which is exactly the case that cannot reach it
+    /// through a lock file instead.
+    #[test]
+    fn the_provisioner_version_is_recorded_beside_a_builder_that_has_no_commit() {
+        let stamp = BuiltWithProvenance {
+            version: "0.4.2".to_string(),
+            commit: None,
+            dirty: false,
+            config_commit: None,
+            config_dirty: false,
+            ferroday_cage: "0.4.4".to_string(),
+        };
+        let text = toml::to_string(&stamp).expect("the stamp serializes");
+        assert!(text.contains("ferroday_cage = \"0.4.4\""), "{text}");
+        // The builder's own version is not it, so a reader cannot take one for the
+        // other — the point of carrying both.
+        assert!(text.contains("version = \"0.4.2\""), "{text}");
+        assert_eq!(
+            toml::from_str::<BuiltWithProvenance>(&text).expect("and reads back"),
+            stamp
+        );
     }
 }

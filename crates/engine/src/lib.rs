@@ -101,6 +101,19 @@ pub use bootstrap::DEFAULT_MIRROR;
 pub use error::EngineError;
 pub use event::{Event, EventSink, Step, Stream};
 
+/// Version of `ferroday-cage`, the library that sandboxes every build command
+/// ([`sandbox`]) and provisions the Debian roots they run in ([`rootfs`]).
+///
+/// Surfaced here because nothing else states it. The library versions on its own
+/// schedule, so boot2deb's version does not imply it. A defect in containment or
+/// provisioning belongs to the library rather than to the binary that linked it.
+/// Deriving the number from boot2deb's own sends the report to the wrong project.
+///
+/// Re-exported rather than read at each use site, because this is the only crate in
+/// the workspace that links the library. The pure core defines the provenance field
+/// and the CLI fills it in. Neither can see the value without this.
+pub const CAGE_VERSION: &str = ferroday_cage::VERSION;
+
 /// Shared fixtures for the stage tests, so the resolved-RK1 build is defined once
 /// rather than copied into each stage module.
 #[cfg(test)]

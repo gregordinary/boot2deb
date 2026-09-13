@@ -105,7 +105,7 @@ pub(crate) fn run(
 }
 
 /// One line comparing the builder that produced the image with the running one, plus
-/// the config tree where both sides can answer for it.
+/// the config tree and the provisioning library where each can answer for itself.
 ///
 /// Advisory in both directions. A match is worth stating because it is the case that
 /// needs no action; a mismatch names the checkout to step back to without claiming the
@@ -119,10 +119,36 @@ pub(crate) fn run(
 /// layers from disk, so a moved config tree changes what is rebuilt even when the
 /// binary is identical — the failure mode the builder comparison alone would miss.
 fn advice(stamp: &BuiltWithProvenance, current_config: Option<(String, bool)>) -> String {
-    match config_advice(stamp, current_config) {
-        Some(extra) => format!("{} {extra}", builder_advice(stamp)),
-        None => builder_advice(stamp),
+    let mut line = builder_advice(stamp);
+    for extra in [
+        config_advice(stamp, current_config),
+        provisioner_advice(stamp),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        line.push(' ');
+        line.push_str(&extra);
     }
+    line
+}
+
+/// The provisioning half of [`advice`], or `None` where the library has not moved.
+///
+/// Silence for an unchanged version, for the same reason [`config_advice`] is silent: a
+/// dependency that held still does not need a sentence.
+///
+/// It matters to a replay because this library bootstraps the rootfs. A change in it can
+/// move bytes that the lock and the config tree both held still, which is the one cause
+/// the other two halves of the line cannot name.
+fn provisioner_advice(stamp: &BuiltWithProvenance) -> Option<String> {
+    let running = boot2deb_engine::CAGE_VERSION;
+    (stamp.ferroday_cage != running).then(|| {
+        format!(
+            "The rootfs was provisioned by ferroday-cage {}, and {running} is linked now.",
+            stamp.ferroday_cage
+        )
+    })
 }
 
 /// The config-tree half of [`advice`], or `None` where there is nothing to compare —
@@ -222,7 +248,43 @@ mod tests {
             dirty,
             config_commit: None,
             config_dirty: false,
+            ferroday_cage: "0.4.4".to_string(),
         }
+    }
+
+    /// A provisioner that moved is named, and one that held still says nothing — the
+    /// replay's rootfs comes out of this library, so it is the cause the builder and
+    /// config comparisons cannot see.
+    #[test]
+    fn a_provisioner_that_moved_is_named_and_an_unchanged_one_is_silent() {
+        let mut moved = stamp("0.1.0", Some("abc1234"), false);
+        moved.ferroday_cage = "0.4.3".to_string();
+        let line = provisioner_advice(&moved).expect("a moved provisioner is worth saying");
+        assert!(line.contains("0.4.3"), "{line}");
+        assert!(line.contains(boot2deb_engine::CAGE_VERSION), "{line}");
+
+        let mut held = stamp("0.1.0", Some("abc1234"), false);
+        held.ferroday_cage = boot2deb_engine::CAGE_VERSION.to_string();
+        assert!(provisioner_advice(&held).is_none());
+    }
+
+    /// The three halves join into one line, in order, separated by single spaces. The
+    /// shape is what a reader sees, so it is asserted rather than assumed.
+    #[test]
+    fn the_line_joins_the_builder_config_and_provisioner_halves() {
+        let mut s = with_config(stamp("0.1.0", Some("abc1234"), false), "cafe1234", false);
+        s.ferroday_cage = "0.4.3".to_string();
+        let line = advice(&s, Some(("cafe1234".to_string(), false)));
+        assert!(line.starts_with("built with boot2deb"), "{line}");
+        assert!(
+            line.contains("The config tree is unchanged at cafe1234."),
+            "{line}"
+        );
+        assert!(
+            line.contains("provisioned by ferroday-cage 0.4.3"),
+            "{line}"
+        );
+        assert!(!line.contains("  "), "no double spaces: {line}");
     }
 
     /// A stamp that also names the config tree it resolved from.
@@ -330,7 +392,8 @@ mod tests {
              [built_with]\n\
              version = \"0.1.0\"\n\
              commit = \"abc1234\"\n\
-             dirty = false\n",
+             dirty = false\n\
+             ferroday_cage = \"0.4.4\"\n",
         )
         .unwrap();
         let stamp = builder_stamp(&path).unwrap().expect("the stamp is present");

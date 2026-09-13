@@ -494,6 +494,7 @@ fn print_builder(c: &BuilderChanges) {
         ("dirty", &c.dirty),
         ("config commit", &c.config_commit),
         ("config dirty", &c.config_dirty),
+        ("ferroday-cage", &c.ferroday_cage),
         ("host arch", &c.host_arch),
         ("target arch", &c.target_arch),
         ("CROSS_COMPILE", &c.cross_compile),

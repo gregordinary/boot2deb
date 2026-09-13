@@ -36,12 +36,20 @@ pub(crate) fn run(
             "commit": crate::builder::commit(),
             "dirty": crate::builder::dirty(),
             "matches_checkout": freshness.note().is_none(),
+            // The library every sandboxed command and every provisioned root goes
+            // through. Reported beside the builder because it is the same question —
+            // which code is about to run — and it answers to a different version.
+            "ferroday_cage": boot2deb_engine::CAGE_VERSION,
         },
     });
     if !json {
         println!("host arch : {}", host.arch);
         println!("host os   : {}", host.os);
         println!("builder   : {}", crate::builder::identity());
+        println!(
+            "sandbox   : ferroday-cage {}",
+            boot2deb_engine::CAGE_VERSION
+        );
         if let Some(line) = freshness.note() {
             println!("          ! {line}");
         }

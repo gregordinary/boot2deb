@@ -139,6 +139,10 @@ pub struct BuilderFacts {
     pub config_commit: Option<String>,
     /// Whether that config tree was dirty.
     pub config_dirty: bool,
+    /// Version of `ferroday-cage`, the sandbox and provisioning library the build ran
+    /// on. Moves independently of [`version`](Self::version), so a build whose builder
+    /// is unchanged can still have provisioned its rootfs with different code.
+    pub ferroday_cage: String,
     /// Build-host architecture.
     pub host_arch: String,
     /// Target architecture.
@@ -312,6 +316,7 @@ impl Side {
                 dirty: prov.built_with.dirty,
                 config_commit: prov.built_with.config_commit.clone(),
                 config_dirty: prov.built_with.config_dirty,
+                ferroday_cage: prov.built_with.ferroday_cage.clone(),
                 host_arch: prov.toolchain.host_arch.clone(),
                 target_arch: prov.toolchain.target_arch.clone(),
                 cross_compile: prov.toolchain.cross_compile.clone(),
@@ -656,6 +661,8 @@ pub struct BuilderChanges {
     pub config_commit: Option<Change>,
     /// Whether the config tree was dirty.
     pub config_dirty: Option<Change>,
+    /// The `ferroday-cage` version the build sandboxed and provisioned with.
+    pub ferroday_cage: Option<Change>,
     /// The build host's architecture.
     pub host_arch: Option<Change>,
     /// The target architecture.
@@ -674,6 +681,7 @@ impl IsEmpty for BuilderChanges {
             && self.dirty.is_none()
             && self.config_commit.is_none()
             && self.config_dirty.is_none()
+            && self.ferroday_cage.is_none()
             && self.host_arch.is_none()
             && self.target_arch.is_none()
             && self.cross_compile.is_none()
@@ -950,6 +958,7 @@ fn compare_builder(left: &Side, right: &Side) -> Section<BuilderChanges> {
                 Some(bool_str(l.config_dirty)),
                 Some(bool_str(r.config_dirty)),
             ),
+            ferroday_cage: Change::between(Some(&l.ferroday_cage), Some(&r.ferroday_cage)),
             host_arch: Change::between(Some(&l.host_arch), Some(&r.host_arch)),
             target_arch: Change::between(Some(&l.target_arch), Some(&r.target_arch)),
             cross_compile: Change::between(Some(&l.cross_compile), Some(&r.cross_compile)),
@@ -1325,6 +1334,7 @@ mod tests {
                 dirty: false,
                 config_commit: None,
                 config_dirty: false,
+                ferroday_cage: "0.4.4".into(),
                 host_arch: "x86_64".into(),
                 target_arch: "arm64".into(),
                 cross_compile: "aarch64-linux-gnu-".into(),
@@ -1353,6 +1363,7 @@ mod tests {
             dirty: false,
             config_commit: None,
             config_dirty: false,
+            ferroday_cage: "0.4.4".into(),
             host_arch: "x86_64".into(),
             target_arch: "arm64".into(),
             cross_compile: "aarch64-linux-gnu-".into(),
@@ -1383,6 +1394,50 @@ mod tests {
                 to: Some("bbb".into())
             }
         );
+    }
+
+    /// The builder and the config can both hold still while the library that
+    /// sandboxed and provisioned the build moves underneath them, which is a change to
+    /// what produced the image and has to read as one.
+    #[test]
+    fn a_provisioner_that_moved_under_an_unchanged_builder_is_its_own_change() {
+        let facts = |cage: &str| BuilderFacts {
+            version: "0.4.2".into(),
+            commit: Some("deadbeef".into()),
+            dirty: false,
+            config_commit: None,
+            config_dirty: false,
+            ferroday_cage: cage.into(),
+            host_arch: "x86_64".into(),
+            target_arch: "arm64".into(),
+            cross_compile: "aarch64-linux-gnu-".into(),
+            archives: BTreeMap::new(),
+        };
+        let left = Side {
+            label: "before".into(),
+            builder: Some(facts("0.4.3")),
+            ..Side::default()
+        };
+        let right = Side {
+            label: "after".into(),
+            builder: Some(facts("0.4.4")),
+            ..Side::default()
+        };
+        let Section::Compared { changes } = compare(&left, &right).builder else {
+            panic!("both sides have a provenance manifest");
+        };
+        assert_eq!(
+            changes.ferroday_cage,
+            Some(Change {
+                from: Some("0.4.3".into()),
+                to: Some("0.4.4".into())
+            })
+        );
+        // Everything the builder itself states held still, so the report must not
+        // suggest otherwise — the whole point is that this moved on its own.
+        assert!(changes.version.is_none());
+        assert!(changes.commit.is_none());
+        assert!(!changes.is_empty());
     }
 
     #[test]
