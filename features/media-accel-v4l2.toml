@@ -4,9 +4,10 @@
 # sibling is the same capability provided by Rockchip's vendor MPP stack instead).
 #
 # What this delivers on RK3576:
-#  - HW decode of H.264 and HEVC to NV12, via the in-kernel VDPU383 driver
+#  - HW decode of H.264 and HEVC via the in-kernel VDPU383 driver
 #    (`rockchip_vdec`, enabled on the SoC layer) and an ffmpeg built
-#    `--enable-v4l2-request`. No vendor userspace is involved in the decode path.
+#    `--enable-v4l2-request`. 8-bit content decodes to `NV12`, 10-bit to `NV15`.
+#    No vendor userspace is involved in the decode path.
 #  - The RGA 2D raster accelerator: the out-of-tree vendor driver and the DT nodes
 #    that bind it (the `rk3576-rga` patch series + `accel/rk3576-rga` fragment,
 #    both contributed below), and `librga2` for programs that speak its API.
@@ -18,7 +19,17 @@
 # build that did not ask for this capability does not carry a 19k-line out-of-tree
 # driver it has no consumer for.
 description  = "HW video decode via V4L2 stateless (VDPU383) + RGA 2D, for RK3576"
-packages     = ["ffmpeg-rk", "librga2"]
+#
+# `mesa-vulkan-drivers` is panvk, the Vulkan driver for this SoC's Mali-G52. The
+# FFmpeg this feature builds is configured `--enable-vulkan --enable-libplacebo`,
+# so without an installed ICD its Vulkan filters and its libplacebo renderer fail
+# at device creation — a binary advertising what it cannot do. `libegl1` and
+# `libgles2` are the EGL and GLES loaders: Mesa ships the panfrost backend and the
+# `libEGL_mesa` implementation underneath them, but a program links the loader, so
+# without the pair nothing can open a context on a bound and clocked GPU. All three
+# are here rather than on the SoC layer because they serve this feature's media
+# paths, and a board that asked for no media capability has no consumer for them.
+packages     = ["ffmpeg-rk", "librga2", "mesa-vulkan-drivers", "libegl1", "libgles2"]
 requires_soc = ["rk3576"]
 
 # Builds from the SoC's `[userspace]`/`[ffmpeg]` source trees rather than the Debian
@@ -28,7 +39,11 @@ requires_media_accel = true
 
 # The RGA driver: the patch series that adds it to the tree, and the kconfig that
 # compiles it. Both are needed — a fragment can only turn on code the tree has.
-patch_series   = ["rk3576-rga"]
+#
+# `rk3576-media` is the FFmpeg half: NV15/NV20 format support, so a 10-bit frame the
+# VDPU383 decodes can leave the decoder, and the HEVC SPS reference-picture-set
+# controls this SoC's rkvdec exposes.
+patch_series   = ["rk3576-rga", "rk3576-media"]
 config_fragments = ["accel/rk3576-rga"]
 
 # The two media-accel providers are alternatives, not layers: both build an
@@ -43,8 +58,9 @@ provides = ["ffmpeg"]
 
 # Limits of the capability itself, inherited by every recipe that composes it.
 caveats = [
-  "10-bit content decodes in hardware, but nothing downstream can use the result without a copy. The decoder emits `NV12` for 8-bit and `NV15` — 10-bit packed 4:2:0 — for 10-bit. Nothing in this image consumes `NV15`: Vulkan has no such format, and Mesa and ffmpeg's filters cannot import it. The decoder cannot be asked for `P010` instead, because the hardware writes `NV15` natively. A 10-bit transcode therefore converts on the CPU.",
-  "RGA can convert `NV15` to `P010`, but ffmpeg cannot reach RGA here (see the next caveat). A program speaking librga directly can. The display controller scans `NV15` out unconverted, so playback to a KMS plane is unaffected.",
+  "10-bit content decodes to `NV15`, packed 10-bit 4:2:0. The decoder cannot be asked for `P010` instead, because the hardware writes `NV15` natively. ffmpeg here carries the `NV15` format patches, so a 10-bit frame reaches `hwdownload` and the software filters. What that costs is a CPU conversion, because no filter in this build reads `NV15` directly. Vulkan has no such format and Mesa cannot import it, so a Vulkan or libplacebo graph is 8-bit only.",
+  "The zero-copy route for 10-bit is the display, not a filter. The display controller scans `NV15` out unconverted. A player that hands the decoder's DMA-BUF straight to a KMS plane therefore plays 10-bit unconverted. RGA also converts `NV15` to `P010` for a program speaking librga directly, though ffmpeg cannot reach RGA here.",
+  "Nothing packaged by Debian can use this decoder. `ffmpeg-rk` installs to `/opt`, so it coexists with the system FFmpeg. Debian's own libavcodec is built without `--enable-v4l2-request`. It carries no `h264_v4l2request` or `hevc_v4l2request` hwaccel at all. mpv, Kodi and VLC from the archive link that libavcodec, so they decode in software. Reaching the hardware from a player means building the player against this FFmpeg.",
   "ffmpeg has no RGA filters here. `scale_rkrga` and `vpp_rkrga` need `--enable-rkmpp`, and MPP needs the vendor `mpp_service` kernel framework that mainline does not have. ffmpeg scales on CPU or GPU. RGA is reached through librga by a program that speaks its API.",
   "RGA color conversion covers BT.601 limited and full range and BT.709, but not BT.2020.",
   "Pass RGA its buffers as DMA-BUF file descriptors (`importbuffer_fd`). librga's virtual-address import builds an IOMMU mapping per call over ordinary process memory. That faults the RGA IOMMU on roughly a third of jobs. The job then times out after a second, the core is soft-reset, and the destination is left untouched. The same operations over DMA-BUF run clean and about seven times faster.",

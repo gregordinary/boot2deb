@@ -2819,15 +2819,18 @@ mod tests {
     fn groups_union_across_the_hardware_layers_and_a_recipe_replaces_the_set() {
         let root = repo_root();
 
-        // The RK1's SoC layer declares no groups, so a board there gets the base pair.
+        // The RK1's SoC layer declares no groups, so a board there gets the base set.
         let rk1 = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
-        assert_eq!(image_of(&rk1).groups, vec!["video", "render"]);
+        assert_eq!(image_of(&rk1).groups, vec!["video", "render", "adm"]);
 
         // The RK3576 layer ships the sound stack and declares `audio`, so every board
         // on it gets the group without a recipe naming it — which is the point of the
         // union: a board added to that SoC later inherits it.
         let h96 = resolve_recipe(&root, "h96-max-m9/forky", &Overrides::default()).unwrap();
-        assert_eq!(image_of(&h96).groups, vec!["video", "render", "audio"]);
+        assert_eq!(
+            image_of(&h96).groups,
+            vec!["video", "render", "adm", "audio"]
+        );
         assert!(
             image_of(&h96)
                 .rootfs_packages
@@ -3475,13 +3478,16 @@ mod tests {
         .unwrap();
         let k = image_of(&accel).kernel.compiled().unwrap();
         // Composed last: after the kernel's own series, then the device's, then the
-        // feature's — the same low-to-high order the fragments follow.
+        // feature's — the same low-to-high order the fragments follow. The feature
+        // contributes two: the RGA driver's series and the ffmpeg-scope one, in the
+        // order it names them.
         assert_eq!(
             k.patch_series,
             vec![
                 "rk3576-fixes".to_string(),
                 "rk3576-npu".to_string(),
-                "rk3576-rga".to_string()
+                "rk3576-rga".to_string(),
+                "rk3576-media".to_string()
             ]
         );
         assert_eq!(

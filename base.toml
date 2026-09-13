@@ -141,17 +141,23 @@ ssh_authorized_keys = []
 #
 # `video` and `render` are the pair those rules key on, so they are the default. Group
 # membership lives in /etc/group, which the package install writes — so this cannot be
-# an overlay file, and a feature cannot contribute one either; it is config or it is a
+# an overlay file, and a feature cannot contribute one either. It is config, or it is a
 # manual `usermod` on a booted board.
+#
+# `adm` is the one entry that is not hardware. It is what `journalctl` checks before it
+# will show anything outside the caller's own unit. Without it the account asks why a
+# unit failed and is told "No entries", which reads as the unit never having run. The
+# kernel ring buffer is readable either way, so this covers the other half of the boot
+# record.
 #
 # A recipe **replaces** this list rather than adding to it, so name all of them:
 #
-#   groups = ["video", "render", "audio"]
+#   groups = ["video", "render", "adm", "audio"]
 #
 # `audio` is the usual addition and is not the default — a base image ships no sound
-# stack, and the recipes that do (the media-accel ones) name it themselves. Each group
-# must already exist on the target; one that does not fails the build.
-groups = ["video", "render"]
+# stack, and the SoC layers that do name it themselves. Each group must already exist
+# on the target. One that does not fails the build.
+groups = ["video", "render", "adm"]
 
 # --- Packages -----------------------------------------------------------------
 # The base system is Debian's `required` + `important` priority set; everything below

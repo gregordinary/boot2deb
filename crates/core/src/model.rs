@@ -1641,13 +1641,12 @@ pub struct BaseLayer {
     /// Supplementary groups the default account is added to, beyond the login group
     /// `useradd` derives.
     ///
-    /// This is the account's standing hardware access. Group membership lives in
-    /// `/etc/group`, which is why it is config here rather than something a feature's
-    /// overlay could contribute. An overlay would replace the file the package install
-    /// just wrote.
+    /// This is the account's standing hardware access, plus the log access it takes to
+    /// diagnose the board. Group membership lives in `/etc/group`, which is why it is
+    /// config here rather than something a feature's overlay could contribute. An
+    /// overlay would replace the file the package install just wrote.
     ///
-    /// Defaults to `video` and `render`, the pair the SoC udev rules key their device
-    /// permissions on. A recipe overrides.
+    /// Defaults to `video`, `render` and `adm`. A recipe overrides.
     ///
     /// Each name must exist on the target, and a name that does not fails the build rather
     /// than being created. Naming a group no package provides is a typo, not a request.
@@ -1657,15 +1656,20 @@ pub struct BaseLayer {
 }
 
 /// The supplementary groups a config root falls back to: `video` and `render`, the two
-/// Debian groups the SoC udev rules key their device permissions on. Without them the
-/// account cannot open a decoder, a DRM render node, or a DMA-BUF heap on any board
-/// here, so the default is the one that makes a booted image usable rather than an
-/// empty set.
+/// Debian groups the SoC udev rules key their device permissions on, and `adm`.
+/// Without the first two the account cannot open a decoder, a DRM render node, or a
+/// DMA-BUF heap on any board here, so the default is the one that makes a booted image
+/// usable rather than an empty set.
+///
+/// `adm` is what `journalctl` checks before showing anything outside the caller's own
+/// unit. Without it the account on a single-user board asks why a unit failed and is
+/// told "No entries", which reads as the unit never having run. `dmesg` is readable
+/// either way, so this covers the half of the boot record that is not the kernel's.
 ///
 /// `audio` is deliberately not here. It is a media-recipe concern, and a base image
 /// that ships no sound stack has no reason to hand out the group.
 fn default_groups() -> Vec<String> {
-    vec!["video".to_string(), "render".to_string()]
+    vec!["video".to_string(), "render".to_string(), "adm".to_string()]
 }
 
 // ---------------------------------------------------------------------------

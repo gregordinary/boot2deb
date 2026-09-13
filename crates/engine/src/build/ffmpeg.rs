@@ -635,7 +635,12 @@ pub fn build_ffmpeg(
     step.progress(90);
 
     let version = deb_version(&ffmpeg.base.reference, &ffmpeg.base.commit);
-    let control = control_text(arch, &version, &depends);
+    let control = control_text(
+        arch,
+        &version,
+        &depends,
+        &configure_flags(opts.trees, opts.nonfree, opts.libs),
+    );
     write_control(&pkg_stage, &control)?;
     let deb_name = format!("{PKG_NAME}_{version}_{arch}.deb");
     let deb_in_stage = stage_root.join(&deb_name);
@@ -1298,9 +1303,42 @@ fn write_control(pkg_stage: &Path, control: &str) -> Result<(), EngineError> {
 }
 
 /// The `DEBIAN/control` contents for `arch` at `version`, with the
-/// `dpkg-shlibdeps`-derived runtime `depends`. Pure, so the control stanza
-/// is testable.
-fn control_text(arch: &str, version: &str, depends: &str) -> String {
+/// `dpkg-shlibdeps`-derived runtime `depends` and the `flags` this build's
+/// `./configure` ran with. Pure, so the control stanza is testable.
+///
+/// The Description is composed from `flags` rather than written out, because the
+/// configure surface is itself derived from what the SoC declares
+/// ([`configure_flags`]): a part with no vendor MPP builds no rkmpp encoder, and a
+/// stanza naming one would be describing a different deb. Deriving both from the
+/// same list is what keeps `apt show ffmpeg-rk` and the binary in agreement.
+fn control_text(arch: &str, version: &str, depends: &str, flags: &[String]) -> String {
+    let has = |flag: &str| flags.iter().any(|f| f == flag);
+
+    let mut caps: Vec<&str> = Vec::new();
+    if has("--enable-v4l2-request") {
+        caps.push("* -hwaccel v4l2request decode, through the kernel's stateless V4L2 API");
+    }
+    if has("--enable-rkmpp") {
+        caps.push("* h264_rkmpp / hevc_rkmpp encode via MPP userspace");
+    }
+    if has("--enable-rkrga") {
+        caps.push("* scale_rkrga / vpp_rkrga via librga");
+    }
+    if has("--enable-vulkan") {
+        caps.push("* Vulkan filters and the libplacebo renderer");
+    }
+
+    // The synopsis names the hardware paths the flags actually delivered. An ffmpeg
+    // with neither is still a complete FFmpeg, so it says so rather than claiming an
+    // acceleration it does not have.
+    let synopsis = match (has("--enable-v4l2-request"), has("--enable-rkmpp")) {
+        (true, true) => "FFmpeg with V4L2 stateless decode and Rockchip MPP encode",
+        (true, false) => "FFmpeg with V4L2 stateless hardware decode",
+        (false, true) => "FFmpeg with Rockchip MPP hardware encode",
+        (false, false) => "FFmpeg built for this board",
+    };
+
+    let body: String = caps.iter().map(|c| format!("\x20{c}\n")).collect();
     format!(
         "Package: {PKG_NAME}\n\
          Version: {version}\n\
@@ -1309,11 +1347,8 @@ fn control_text(arch: &str, version: &str, depends: &str) -> String {
          Architecture: {arch}\n\
          Depends: {depends}\n\
          Maintainer: boot2deb <build@boot2deb>\n\
-         Description: FFmpeg with V4L2 stateless decode + Rockchip RKMPP encode for RK3588\n\
-        \x20Hybrid pipeline for the RK3588 media stack:\n\
-        \x20* -hwaccel v4l2request decode (rkvdec / hantro)\n\
-        \x20* h264_rkmpp / hevc_rkmpp encode via VEPU580 + MPP userspace\n\
-        \x20* scale_rkrga / vpp_rkrga via librga\n\
+         Description: {synopsis}\n\
+        {body}\
         \x20Installs to {INSTALL_PREFIX} so it coexists with the system FFmpeg.\n"
     )
 }
@@ -2045,6 +2080,7 @@ mod tests {
             "arm64",
             "8.1-19-g942418aa06",
             "librockchip-mpp1, librga2, libc6",
+            &configure_flags(&all_trees(), false, NO_LIBS),
         );
         assert!(c.contains("Package: ffmpeg-rk"));
         assert!(c.contains("Version: 8.1-19-g942418aa06"));
@@ -2054,6 +2090,46 @@ mod tests {
         // Continuation lines of the Description are space-prefixed per deb-control.
         assert!(c.lines().any(|l| l.starts_with(" * -hwaccel")));
         assert!(c.contains(INSTALL_PREFIX));
+    }
+
+    /// The stanza describes the build it belongs to. A SoC with no vendor MPP gets
+    /// no rkmpp or rkrga line, because `configure_flags` asked for neither — the
+    /// case that previously shipped an RK3588 MPP description on an RK3576 deb.
+    #[test]
+    fn control_text_describes_only_the_flags_the_build_ran_with() {
+        let rga = control_text(
+            "arm64",
+            "1.0",
+            "libc6",
+            &configure_flags(&rga_only(), false, NO_LIBS),
+        );
+        assert!(rga.contains("Description: FFmpeg with V4L2 stateless hardware decode\n"));
+        assert!(rga
+            .lines()
+            .any(|l| l.starts_with(" * -hwaccel v4l2request")));
+        assert!(!rga.contains("rkmpp"));
+        assert!(!rga.contains("rkrga"));
+
+        let full = control_text(
+            "arm64",
+            "1.0",
+            "libc6",
+            &configure_flags(&all_trees(), false, NO_LIBS),
+        );
+        assert!(full
+            .contains("Description: FFmpeg with V4L2 stateless decode and Rockchip MPP encode\n"));
+        assert!(full.lines().any(|l| l.starts_with(" * h264_rkmpp")));
+        assert!(full.lines().any(|l| l.starts_with(" * scale_rkrga")));
+
+        // No SoC tree at all is still a complete FFmpeg, and says so.
+        let none = control_text(
+            "arm64",
+            "1.0",
+            "libc6",
+            &configure_flags(&no_trees(), false, NO_LIBS),
+        );
+        assert!(none.contains("Description: FFmpeg with V4L2 stateless hardware decode\n"));
+        assert!(!none.contains("rkmpp"));
     }
 
     #[test]
