@@ -3,8 +3,8 @@
 //! driven.
 //!
 //! This module owns the config half. It locates the recipe's image artifact and
-//! provenance manifest, stands up the target-arch sandbox the fixture kernel
-//! harvests in, and reports the result.
+//! provenance manifest, says where the fixture root is provisioned from, and reports
+//! the result.
 
 use crate::args::TryArgs;
 use crate::fsutil::absolutize;
@@ -69,33 +69,27 @@ pub(crate) fn run(
         format!("{e} — if this manifest is from an earlier build, rebuild: boot2deb build {recipe}")
     })?;
 
-    // The target-arch sandbox the fixture kernel installs in — the same root
-    // the package stages build in, so `try` adds no provisioning of its own.
-    let pf = boot2deb_engine::preflight(resolved.arch);
-    let host_deb_arch = crate::sandboxes::host_deb_arch(&pf)?;
+    // Where the fixture root is provisioned from. It is the image's own suite and
+    // architecture, resolved against the same archive and cached in the same download
+    // cache the build's provisioner runs use — but it is a root of `try`'s own, for
+    // the reason [`tryboot::FixtureSpec`] gives.
     let keyring = crate::sandboxes::keyring(root, args.keyring.clone(), false)?;
     let mirrors = vec![boot2deb_engine::DEFAULT_MIRROR.to_string()];
-    let roots = crate::sandboxes::roots(
-        &resolved,
-        &crate::sandboxes::RootInputs {
-            work_dir: &work_dir,
-            host_deb_arch,
-            mirrors: &mirrors,
-            keyring,
-            deb_cache: work_dir.join("cache").join("provisioner-debs"),
-        },
-    );
-    let sandbox = roots
-        .target
-        .expect("an image build resolves a suite and a target sandbox");
+    let deb_cache = work_dir.join("cache").join("provisioner-debs");
 
     let sink = move |e: Event| print_event_at(verbosity, &e);
     let try_dir = work_dir.join("try");
     let fixture = {
-        let step = boot2deb_engine::Step::start(&sink, "try-fixture");
+        let step = boot2deb_engine::Step::start(&sink, tryboot::FIXTURE_STAGE);
         let fixture = tryboot::fixture_kernel(
-            sandbox.as_ref(),
-            resolved.arch,
+            &tryboot::FixtureSpec {
+                arch: resolved.arch,
+                suite: &resolved_image.suite,
+                mirrors: &mirrors,
+                keyring: keyring.as_deref(),
+                deb_cache: &deb_cache,
+                scratch_dir: &work_dir,
+            },
             &try_dir.join("fixture"),
             args.refresh_fixture,
             &step,

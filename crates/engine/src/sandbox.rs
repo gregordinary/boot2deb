@@ -404,8 +404,7 @@ impl BuildRoot {
     /// with writes landing in the increment. `spec`'s binds still expose host paths at
     /// their host path, so artifacts land back on the host rather than in the upper.
     pub fn run(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
-        let cage = build_cage(self.profile(), spec)?;
-        run_cage(cage, spec, step)
+        run_in(self.profile(), spec, step)
     }
 
     /// The rooted profile a command in this build root launches under: the shared
@@ -1133,8 +1132,7 @@ impl PackagingSandbox {
     ///
     /// Requires [`ensure_ready`](Self::ensure_ready) to have published the root.
     pub fn run(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
-        let cage = build_cage(self.profile(), spec)?;
-        run_cage(cage, spec, step)
+        run_in(self.profile(), spec, step)
     }
 
     /// The rooted profile a packaging command launches under: the shared [`baseline`]
@@ -1195,6 +1193,22 @@ pub(crate) fn build_cage(
         context: spec.context.to_string(),
         source,
     })
+}
+
+/// Run one command per `spec` in the root `profile` names, streaming its output to
+/// `step`.
+///
+/// Pairing [`build_cage`] with [`run_cage`] is what "run a command in a root" means
+/// here, and every root that runs one reaches it through this: a [`BuildRoot`]'s
+/// overlay, a [`PackagingSandbox`], and the fixture root [`crate::tryboot`] harvests
+/// in. A caller supplies only the profile, which is the one thing that differs
+/// between them.
+pub(crate) fn run_in(
+    profile: ferroday_cage::CageBuilder,
+    spec: &SandboxRun,
+    step: &Step,
+) -> Result<(), EngineError> {
+    run_cage(build_cage(profile, spec)?, spec, step)
 }
 
 /// Run a built [`Cage`], relaying its output to `step` and mapping a non-zero exit to

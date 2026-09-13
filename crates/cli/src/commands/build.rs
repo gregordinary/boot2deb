@@ -15,7 +15,9 @@ use crate::config::{
     overlay_dirs, preflight_config, resolve_patches_source, OverlayStage,
 };
 use crate::fsutil::absolutize;
-use crate::render::{emit_artifact, note, print_event_at, print_event_json, short, Verbosity};
+use crate::render::{
+    emit_artifact, note, print_event_at, print_event_json, short, Verbosity, LABEL_WIDTH,
+};
 use crate::timing::Timeline;
 use crate::workdir::mark_work_dir;
 use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
@@ -1695,9 +1697,11 @@ fn image_stage(s: ImageStage) -> Result<(), Box<dyn std::error::Error>> {
         s.sink,
         "image",
         format!(
-            "first-boot pw: {}  (user {}, expired — change at first login)",
+            "{:<width$}: {}  (user {}, expired — change at first login)",
+            "first-boot pw",
             artifacts.password,
-            rootfs::DEFAULT_USER
+            rootfs::DEFAULT_USER,
+            width = LABEL_WIDTH
         ),
     );
     s.state.first_boot_password = Some(artifacts.password);

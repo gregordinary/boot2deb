@@ -32,14 +32,18 @@
 
 use crate::error::EngineError;
 use crate::event::{EventSink, Step, Stream};
-use crate::sandbox::{BuildRootSpec, BuildSandbox, SandboxRun};
+use crate::rootfs::{provisioned_dir, sweep_provisioned, ProvisionedRoot};
+use crate::sandbox::{forward_bootstrap_event, SandboxRun};
 use boot2deb_core::model::{Arch, ResolvedBuild, ResolvedImage, SudoPolicy};
+use ferroday_cage::provision;
+use ferroday_cage::provision::debian::{Debian, DebianEvent};
+use ferroday_cage::IdentityMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Where a recipe's fixture kernel is cached under its work dir, and the
-/// build-root stage name the harvest layers under.
+/// Names the fixture harvest: the step a `try` run reports it under, and the label
+/// its transient root carries in the work dir.
 pub const FIXTURE_STAGE: &str = "try-fixture";
 
 /// How long the guest gets to power off after the assertions, before the
@@ -95,20 +99,61 @@ pub struct FixtureKernel {
     pub initrd: PathBuf,
 }
 
-/// Obtain the fixture kernel for `arch`, cached under `dir`.
+/// What the fixture root is provisioned from: a suite, an architecture, an archive to
+/// resolve it against, and the two directories a transient tree needs.
 ///
-/// The suite's `linux-image-*` metapackage and `initramfs-tools` are layered over the
-/// target-arch build sandbox's base ([`BuildSandbox::build_root`]). The kernel's own
-/// postinst therefore builds the initramfs inside a real userland of the pinned
-/// suite. That is the same machinery every package stage uses, and the reason this
-/// needs no host `dpkg`.
+/// `try` stands this root up for itself rather than borrowing the build's.
 ///
-/// The pair is copied out and reused on later runs. `refresh` discards the cached
-/// pair and harvests again, which is how a new point release of the suite kernel is
-/// picked up.
+/// A `systemd` postinst cannot be configured under the **single-identity** map, which
+/// is the map every [`BuildSandbox`](crate::sandbox::BuildSandbox) root carries. The
+/// postinst `fchownat`s `/var/lib/systemd/network` to `systemd-network` and sets a
+/// POSIX ACL naming `adm`. A user namespace that maps no id but root returns `EINVAL`
+/// for both.
+///
+/// The map decides this and the overlay does not: an overlay upper under a subordinate
+/// map takes the same chown and the same ACL. A build root's map is nonetheless fixed
+/// by its base. `stage_layer` requires a layer to match the base it increments. A build
+/// root is mapped single so that the artifacts it writes back through a bind belong to
+/// the calling user.
+///
+/// So the fixture gets a root of its own, provisioned the way the image's userland is
+/// ([`crate::rootfs`]). It is a plain directory under the subordinate map, where the
+/// postinst's real ids exist.
+pub struct FixtureSpec<'a> {
+    /// The guest architecture, which names both the kernel package and the emulator.
+    pub arch: Arch,
+    /// The Debian suite the fixture kernel comes from — the image's, so the guest
+    /// boots the generic kernel of the release it runs.
+    pub suite: &'a str,
+    /// Ordered mirror list, primary first. Non-empty.
+    pub mirrors: &'a [String],
+    /// Debian archive keyring verifying the suite's `Release` signature. `None` falls
+    /// back to the host apt trust store, as everywhere else.
+    pub keyring: Option<&'a Path>,
+    /// Where downloaded `.deb`s are cached, shared with the build's own provisioner
+    /// runs so a `try` after a `build` refetches nothing it already holds.
+    pub deb_cache: &'a Path,
+    /// The work dir the transient root is provisioned under. Not `TMPDIR`: the tree is
+    /// a Debian userland with real ownership, and `clean` reclaims it from here.
+    pub scratch_dir: &'a Path,
+}
+
+/// Obtain the fixture kernel for `spec`, cached under `dir`.
+///
+/// The suite's `linux-image-*` metapackage and `initramfs-tools` are installed into a
+/// freshly provisioned target-arch root. The kernel's own postinst therefore builds the
+/// initramfs inside a real userland of the pinned suite. That is what puts the virtio
+/// drivers in it, and the reason this needs no host `dpkg`.
+///
+/// The root is a plain directory under the subordinate identity map, and is removed
+/// through that map when the harvest returns. [`FixtureSpec`] says why it cannot be one
+/// of the build's layered roots.
+///
+/// The kernel and initramfs are copied out and reused on later runs. `refresh`
+/// discards the cached pair and harvests again, which is how a new point release of
+/// the suite kernel is picked up.
 pub fn fixture_kernel(
-    sandbox: &dyn BuildSandbox,
-    arch: Arch,
+    spec: &FixtureSpec,
     dir: &Path,
     refresh: bool,
     step: &Step,
@@ -123,29 +168,39 @@ pub fn fixture_kernel(
         return Ok(FixtureKernel { kernel, initrd });
     }
     std::fs::create_dir_all(dir).map_err(|s| EngineError::io(dir, s))?;
-    let package = fixture_package(arch)?;
+    let package = fixture_package(spec.arch)?;
+    let arch = spec.arch.debian_arch();
     step.log(format!(
-        "harvesting the fixture kernel: {package} + initramfs-tools in a {} build root",
-        sandbox.describe()
+        "harvesting the fixture kernel: {package} + initramfs-tools in a {arch} {} root",
+        spec.suite
     ));
-    sandbox.ensure_ready(step)?;
-    let root = sandbox.build_root(
-        &BuildRootSpec {
-            // busybox is named outright: initramfs-tools only Recommends it,
-            // and an initramfs built without it has no rescue shell.
-            packages: &[package, "initramfs-tools", "busybox"],
-            pool: None,
-            stage: FIXTURE_STAGE,
-        },
-        step,
-    )?;
-    // One kernel exists in a fresh increment, so the globs are unambiguous.
+
+    std::fs::create_dir_all(spec.scratch_dir).map_err(|s| EngineError::io(spec.scratch_dir, s))?;
+    sweep_provisioned(spec.scratch_dir);
+    let root = provisioned_dir(spec.scratch_dir, "fixture");
+    let mut debian = fixture_provisioner(spec, package)?;
+    let mut sink = |event: DebianEvent<'_>| forward_bootstrap_event(step, event);
+    provision::ensure(&root, &mut debian.observe(&mut sink)).map_err(|source| {
+        EngineError::Bootstrap {
+            context: format!("provision the {arch} {} fixture root", spec.suite),
+            message: source.to_string(),
+        }
+    })?;
+    let _provisioned = ProvisionedRoot::new(root.clone());
+
+    // One kernel exists in a fresh root, so the globs are unambiguous. The copy runs
+    // inside the root because `initramfs-tools` writes its initrd `0600 root:root`,
+    // which the calling user cannot read from outside; inside the subordinate map the
+    // command is that root, and `dir` is bound at its own path so the pair lands on the
+    // host. The map's inside-root is the calling user, so the harvested pair belongs to
+    // the caller rather than to a subuid.
     let script = format!(
         "set -e; cp /boot/vmlinuz-* '{dir}/vmlinuz'; cp /boot/initrd.img-* '{dir}/initrd.img'; \
          chmod 0644 '{dir}/vmlinuz' '{dir}/initrd.img'",
         dir = dir.display()
     );
-    root.run(
+    crate::sandbox::run_in(
+        crate::sandbox::baseline(&root).identity_map(IdentityMap::Subordinate),
         &SandboxRun {
             work: dir,
             binds: &[dir.to_path_buf()],
@@ -157,6 +212,49 @@ pub fn fixture_kernel(
         step,
     )?;
     Ok(FixtureKernel { kernel, initrd })
+}
+
+/// The provisioner the fixture root is bootstrapped with: `spec`'s archive, the
+/// subordinate identity map, and the kernel packages as the only includes over a
+/// `required`-priority base.
+///
+/// `busybox` is named outright because `initramfs-tools` only Recommends it, and
+/// Recommends are never installed — an initramfs built without it has no rescue shell.
+/// The base stays at the library's `required` floor: this root exists to run one
+/// postinst, not to be a userland anyone works in.
+fn fixture_provisioner(spec: &FixtureSpec, package: &str) -> Result<Debian<'static>, EngineError> {
+    let (primary, fallbacks) = spec
+        .mirrors
+        .split_first()
+        .ok_or_else(|| EngineError::TryBoot {
+            context: "provision the fixture root".into(),
+            message: "no mirror to resolve the fixture kernel from".into(),
+        })?;
+    let mut b = Debian::builder(spec.suite)
+        .architecture(spec.arch.debian_arch())
+        .components(crate::bootstrap::COMPONENTS.split(','))
+        .identity_map(IdentityMap::Subordinate)
+        .cache_dir(spec.deb_cache)
+        .mirror(primary)
+        .include([package, "initramfs-tools", "busybox"]);
+    for fallback in fallbacks {
+        b = b.mirror_fallback(fallback);
+    }
+    // A point-in-time archive's release is expired by design, as everywhere else.
+    if crate::snapshot::has_snapshot(spec.mirrors) {
+        b = b.allow_stale_release(true);
+    }
+    if let Some(keyring) = spec.keyring {
+        b = b.keyring(keyring);
+    }
+    b.build().map_err(|source| EngineError::Bootstrap {
+        context: format!(
+            "configure the {} {} fixture bootstrap",
+            spec.arch.debian_arch(),
+            spec.suite
+        ),
+        message: source.to_string(),
+    })
 }
 
 /// One `try` run: what to boot, as what, and how patient to be.
@@ -318,6 +416,86 @@ fn err(context: &str, message: impl Into<String>) -> EngineError {
 // The serial console
 // ---------------------------------------------------------------------------
 
+/// Largest control sequence held while waiting for its terminator. A shell's
+/// semantic-prompt marker is a few hundred bytes; past this the stream is not
+/// speaking a terminal protocol, and [`VtFilter`] stops treating it as one.
+const MAX_SEQUENCE: usize = 4096;
+
+/// Reduces the guest's console bytes to the text they carry: control sequences
+/// dropped, and `\r` with them.
+///
+/// Every sentinel here is anchored at a line start (`\nB2D-READY`, `\nB2D-RC-`), and
+/// on a real console **nothing** sits at a line start. A terminal ends a line `\r\n`,
+/// and the guest's shell then announces the command with an OSC marker and a
+/// bracketed-paste `CSI`. So the byte after the newline is a carriage return or an
+/// escape, and against a raw stream none of the sentinels ever matches. Stripping is
+/// also what keeps a marker's payload from matching by accident: it names the user,
+/// the host and the command, which are the words the login conversation looks for.
+///
+/// Dropping `\r` outright is what a driver reading line-oriented output wants. A
+/// terminal's `\r` is carriage control, not content: it ends a line together with
+/// `\n`, or it returns the cursor for a redraw — and a transcript has no cursor, so
+/// a redrawn line reads as its successive states either way.
+///
+/// A sequence can straddle a read, so a partial one is held until its terminator
+/// arrives.
+#[derive(Default)]
+struct VtFilter {
+    /// The control sequence being read, from its `ESC` onwards. Empty between
+    /// sequences.
+    pending: Vec<u8>,
+}
+
+impl VtFilter {
+    /// Feed `chunk`; return the printable text it carried.
+    fn push(&mut self, chunk: &[u8]) -> String {
+        const ESC: u8 = 0x1b;
+        let mut out: Vec<u8> = Vec::with_capacity(chunk.len());
+        for &byte in chunk {
+            if self.pending.is_empty() {
+                match byte {
+                    ESC => self.pending.push(byte),
+                    b'\r' => {}
+                    _ => out.push(byte),
+                }
+                continue;
+            }
+            self.pending.push(byte);
+            if Self::complete(&self.pending) {
+                self.pending.clear();
+            } else if self.pending.len() > MAX_SEQUENCE {
+                // Never swallow the guest's output. An unterminated sequence this
+                // long is not one, so the bytes after the `ESC` are text after all.
+                out.extend_from_slice(&self.pending[1..]);
+                self.pending.clear();
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Whether `seq` — which starts with `ESC` — is a whole control sequence.
+    ///
+    /// The three families that matter are the CSI sequences a terminal draws with,
+    /// the string sequences (`OSC`, `DCS`, `SOS`, `PM`, `APC`) a shell writes its
+    /// markers as, and the short two- and three-byte escapes. A string sequence ends
+    /// at `BEL` or at `ST`, and `ST` is itself an `ESC`, which is why the terminator
+    /// is read as the last two bytes rather than the last one.
+    fn complete(seq: &[u8]) -> bool {
+        if seq.len() < 2 {
+            return false;
+        }
+        match seq[1] {
+            b'[' => seq.len() >= 3 && (0x40..=0x7e).contains(&seq[seq.len() - 1]),
+            b']' | b'P' | b'X' | b'^' | b'_' => {
+                let last = seq[seq.len() - 1];
+                last == 0x07 || (seq.len() >= 4 && seq[seq.len() - 2] == 0x1b && last == b'\\')
+            }
+            b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' | b'%' | b'#' | b' ' => seq.len() >= 3,
+            _ => true,
+        }
+    }
+}
+
 /// The guest's serial console: bytes in from a reader thread, lines out through
 /// a writer, and an accumulated transcript the expect calls scan.
 ///
@@ -327,7 +505,9 @@ fn err(context: &str, message: impl Into<String>) -> EngineError {
 struct Console {
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
     writer: Box<dyn Write + Send>,
-    /// The transcript so far, lossy UTF-8.
+    /// Strips the guest's control sequences before anything is matched or relayed.
+    filter: VtFilter,
+    /// The transcript so far, lossy UTF-8 and free of control sequences and `\r`.
     buf: String,
     /// Where the next expect scan starts — advanced past each match so a prompt
     /// is never matched twice.
@@ -361,6 +541,7 @@ impl Console {
         Console {
             rx,
             writer: Box::new(writer),
+            filter: VtFilter::default(),
             buf: String::new(),
             cursor: 0,
             line_start: 0,
@@ -380,8 +561,7 @@ impl Console {
     fn relay_lines(&mut self, step: &Step) {
         while let Some(nl) = self.buf[self.line_start..].find('\n') {
             let end = self.line_start + nl;
-            let line = self.buf[self.line_start..end].trim_end_matches('\r');
-            step.relay(Stream::Stdout, line.to_string());
+            step.relay(Stream::Stdout, self.buf[self.line_start..end].to_string());
             self.line_start = end + 1;
         }
     }
@@ -390,10 +570,12 @@ impl Console {
     /// `wait`.
     fn pump(&mut self, wait: Duration, step: &Step) {
         if let Ok(chunk) = self.rx.recv_timeout(wait) {
-            self.buf.push_str(&String::from_utf8_lossy(&chunk));
+            let text = self.filter.push(&chunk);
+            self.buf.push_str(&text);
             // Drain anything else already queued.
             while let Ok(more) = self.rx.try_recv() {
-                self.buf.push_str(&String::from_utf8_lossy(&more));
+                let text = self.filter.push(&more);
+                self.buf.push_str(&text);
             }
             self.relay_lines(step);
         }
@@ -870,6 +1052,129 @@ mod tests {
         |_e| {}
     }
 
+    /// What a `turing-rk1/forky` guest actually puts between a newline and the first
+    /// character of a command's output: a carriage return, the shell's
+    /// bracketed-paste `CSI`, and its OSC command marker. Every one of them made a
+    /// line-anchored sentinel unmatchable.
+    const OSC_MARKER: &str = concat!(
+        "\r",
+        "\u{1b}[?2004l",
+        "\u{1b}]3008;start=1a64bfa4;user=debian;hostname=turing-rk1;",
+        "type=command\u{1b}\\"
+    );
+
+    /// The matching end-of-command marker, which precedes the next prompt.
+    const OSC_END: &str = "\u{1b}]3008;end=1a64bfa4;exit=success\u{1b}\\";
+
+    #[test]
+    fn a_shell_marker_between_the_newline_and_the_sentinel_is_stripped() {
+        let mut vt = VtFilter::default();
+        let text = vt.push(format!("\r\n{OSC_MARKER}B2D-READY\r\n").as_bytes());
+        assert_eq!(text, "\nB2D-READY\n");
+        assert!(
+            text.contains("\nB2D-READY"),
+            "the sentinel is still unmatchable: {text:?}"
+        );
+    }
+
+    /// A read can end anywhere, including inside a sequence, so the filter has to
+    /// carry the partial one across chunks. One byte at a time is the worst case.
+    #[test]
+    fn a_sequence_split_across_reads_is_still_stripped() {
+        let raw = format!("up\r\n{OSC_MARKER}B2D-RC-0\r\n");
+        let mut vt = VtFilter::default();
+        let mut text = String::new();
+        for byte in raw.as_bytes() {
+            text.push_str(&vt.push(&[*byte]));
+        }
+        assert_eq!(text, "up\nB2D-RC-0\n");
+        assert!(text.contains("\nB2D-RC-"), "{text:?}");
+    }
+
+    /// The families a terminal actually sends, each ending its own way: CSI at a
+    /// final byte, a string sequence at `BEL` or at `ST`, and a two-byte escape at
+    /// its second byte.
+    #[test]
+    fn every_sequence_family_is_recognized_and_plain_text_survives() {
+        let mut vt = VtFilter::default();
+        let text = vt.push(
+            concat!(
+                "\u{1b}[0;32m",
+                "ok",
+                "\u{1b}[0m",
+                "\u{1b}]0;a title\u{7}",
+                "\u{1b}(B",
+                "\u{1b}7",
+                " done\n",
+            )
+            .as_bytes(),
+        );
+        assert_eq!(text, "ok done\n");
+    }
+
+    /// Losing the guest's output is worse than showing noise, so an `ESC` that never
+    /// terminates is eventually read as the text it evidently is.
+    #[test]
+    fn an_unterminated_escape_gives_the_output_back_rather_than_eating_it() {
+        let mut vt = VtFilter::default();
+        let mut raw = String::from("\u{1b}]");
+        raw.push_str(&"x".repeat(MAX_SEQUENCE + 8));
+        let text = vt.push(raw.as_bytes());
+        assert!(
+            text.ends_with("xxxx"),
+            "the stream was swallowed: {} bytes out",
+            text.len()
+        );
+    }
+
+    /// A spec standing in for a `try` run's, carrying only what the provisioner reads.
+    fn fixture_spec<'a>(mirrors: &'a [String], dirs: &'a Path) -> FixtureSpec<'a> {
+        FixtureSpec {
+            arch: Arch::Arm64,
+            suite: "forky",
+            mirrors,
+            keyring: None,
+            deb_cache: dirs,
+            scratch_dir: dirs,
+        }
+    }
+
+    /// The identity map is the whole reason this root exists rather than a build root,
+    /// so it is the one setting worth asserting. The rest is what makes the root
+    /// resolve the image's own kernel: its suite, its architecture, and the packages
+    /// whose postinst builds the initramfs.
+    #[test]
+    fn the_fixture_root_is_provisioned_under_the_subordinate_map() {
+        let mirrors = vec!["http://deb.debian.org/debian".to_string()];
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = fixture_spec(&mirrors, tmp.path());
+        let rendered = format!(
+            "{:?}",
+            fixture_provisioner(&spec, fixture_package(Arch::Arm64).unwrap()).unwrap()
+        );
+        assert!(
+            rendered.contains("identity_map: Subordinate"),
+            "the fixture root was configured under some other map: {rendered}"
+        );
+        assert!(rendered.contains(r#"suite: "forky""#), "{rendered}");
+        assert!(rendered.contains(r#"architecture: "arm64""#), "{rendered}");
+        for package in ["linux-image-arm64", "initramfs-tools", "busybox"] {
+            assert!(rendered.contains(package), "{package} missing: {rendered}");
+        }
+        // Nothing layers this root, so it carries no base to increment.
+        assert!(rendered.contains("base_layer: None"), "{rendered}");
+    }
+
+    /// An empty mirror list is refused where it is read, rather than reaching the
+    /// provisioner as a bootstrap with nowhere to resolve from.
+    #[test]
+    fn a_fixture_root_with_no_mirror_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fixture_provisioner(&fixture_spec(&[], tmp.path()), "linux-image-arm64")
+            .expect_err("a fixture root resolved from nothing");
+        assert!(err.to_string().contains("no mirror"), "{err}");
+    }
+
     #[test]
     fn the_qemu_invocation_names_the_machine_the_root_and_the_mask() {
         let fixture = FixtureKernel {
@@ -929,7 +1234,10 @@ mod tests {
                 let _ = reader.read_line(&mut l);
                 l.trim_end().to_string()
             };
-            send("[  OK  ] Reached target multi-user.target\r\n");
+            // Coloured status lines and the shell's own markers, as a forky guest
+            // sends them. Without them the driver is tested against a stream no
+            // guest produces, and a sentinel it can never match reads as passing.
+            send("[\u{1b}[0;32m  OK  \u{1b}[0m] Reached target multi-user.target\r\n");
             send("\r\nDebian GNU/Linux forky testhost ttyAMA0\r\n\r\ntesthost login: ");
             let _user = read_line();
             send("Password: ");
@@ -966,22 +1274,25 @@ mod tests {
                 if line.is_empty() {
                     break;
                 }
-                send(&format!("{line}\r\n")); // tty echo
+                // tty echo, then the marker the shell writes before the command's
+                // own output — which lands between the newline and the first
+                // character of every line the driver anchors a sentinel to.
+                send(&format!("{line}\r\n{OSC_MARKER}")); // tty echo
                 if line.starts_with("PS1=") {
-                    send("B2D-READY\r\nB2D> ");
+                    send(&format!("B2D-READY\r\n{OSC_END}B2D> "));
                 } else if let Some(cmd) = line.strip_suffix("; echo B2D-RC-$?") {
                     match cmd {
                         "systemctl is-system-running --wait" => {
-                            send("running\r\nB2D-RC-0\r\nB2D> ")
+                            send(&format!("running\r\nB2D-RC-0\r\n{OSC_END}B2D> "))
                         }
                         "stat -c %Y /var/lib/boot2deb/first-boot.done" => {
-                            send("1755640000\r\nB2D-RC-0\r\nB2D> ")
+                            send(&format!("1755640000\r\nB2D-RC-0\r\n{OSC_END}B2D> "))
                         }
                         "sudo -n /usr/lib/boot2deb/selftest --mode userland" => {
-                            send("identity\r\n  ok      kernel-release    7.1.6\r\n\r\n9 ok, 4 not applicable.\r\nB2D-RC-0\r\nB2D> ")
+                            send(&format!("identity\r\n  ok      kernel-release    7.1.6\r\n\r\n9 ok, 4 not applicable.\r\nB2D-RC-0\r\n{OSC_END}B2D> "))
                         }
-                        "sync" => send("B2D-RC-0\r\nB2D> "),
-                        _ => send("B2D-RC-127\r\nB2D> "),
+                        "sync" => send(&format!("B2D-RC-0\r\n{OSC_END}B2D> ")),
+                        _ => send(&format!("B2D-RC-127\r\n{OSC_END}B2D> ")),
                     }
                 } else if line == "sudo -n poweroff" {
                     send("[  OK  ] Reached target poweroff.target\r\n");

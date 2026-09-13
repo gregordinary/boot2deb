@@ -61,12 +61,13 @@ fragments and has no reason to carry virtio drivers. Adding them would change
 the shipped kernel to serve the test, which is backwards.
 
 The guest boots the **suite's own generic kernel** (`linux-image-arm64` /
-`linux-image-armmp`), fetched and installed through the same pinned, sandboxed
-machinery as every package stage. Its initramfs is built by `initramfs-tools`
-inside a target-arch root. The kernel is a fixture, and the userland is what is
-under test. For a `distro-package` kernel build the two coincide, and `try` says
-so. The pair is cached under the recipe's work dir, and `--refresh-fixture`
-re-harvests it when the suite's kernel moves.
+`linux-image-armmp`), fetched and installed through the same provisioner every
+root here is built with. Its initramfs is built by `initramfs-tools` inside a
+target-arch root `try` provisions for the harvest and discards afterwards. The
+kernel is a fixture, and the userland is what is under test. For a
+`distro-package` kernel build the two coincide, and `try` says so. The pair is
+cached under the recipe's work dir, and `--refresh-fixture` re-harvests it when
+the suite's kernel moves.
 
 ## Mechanics worth knowing
 
@@ -82,6 +83,12 @@ re-harvests it when the suite's kernel moves.
 - Runtime is minutes under TCG emulation on an x86 host — this replaces a
   flash-and-serial cycle, not a unit test. On a matching host with `/dev/kvm`
   (an arm64 box building arm64 images), KVM makes it fast.
+- The fixture root is `try`'s own rather than one of the build's compile roots.
+  It is provisioned with a real range of ids. The `systemd` in it chowns to
+  `systemd-network` as it configures, and sets a POSIX ACL naming `adm`. A
+  compile root maps one id, so it could not configure that package at all. The
+  practical consequence is that `try` needs the same `newuidmap`/`newgidmap`
+  helpers and subuid range a build does, which `doctor` already checks.
 - `qemu-system-aarch64` / `qemu-system-arm` is the one host tool involved, and
   it is optional. `boot2deb doctor <recipe>` lists it as such, with the package
   name for the host distro.

@@ -84,10 +84,19 @@ pub(crate) fn print_event_at(verbosity: Verbosity, event: &Event) {
         Event::StepFinished { step, outcome, .. } => {
             println!("==> [{step}] done ({})", outcome.as_str())
         }
-        Event::Artifact { role, path, .. } => println!("{role:<14}: {path}"),
+        Event::Artifact { role, path, .. } => {
+            println!("{role:<width$}: {path}", width = LABEL_WIDTH)
+        }
         Event::Error { step, context } => eprintln!("==> [{step}] error: {context}"),
     }
 }
+
+/// Width of the label column on every line a build labels.
+///
+/// Set by `packaging-manifest`, the longest role [`emit_artifact`] is called with. A
+/// build's closing lines mix artifact roles with the first-boot credential, so they share
+/// one width rather than each stepping in and out by the length of its own label.
+pub(crate) const LABEL_WIDTH: usize = 18;
 
 /// Emit one event as a line of NDJSON on stdout — the `--json` wire form
 /// ([`Event`]'s serde tagging is the schema).
@@ -570,6 +579,29 @@ mod tests {
         for e in [&stage, &subprocess, &started] {
             assert!(!Verbosity::Quiet.shows(e), "{e:?}");
         }
+    }
+
+    #[test]
+    fn every_labelled_line_puts_its_colon_in_one_column() {
+        // A build's closing block mixes artifact roles with the first-boot credential,
+        // and the getting-started page shows them aligned. The longest role sets the
+        // column, so adding a longer one has to move it rather than break the block.
+        for label in [
+            "compressed",
+            "first-boot pw",
+            "cross-manifest",
+            "packaging-manifest",
+            "sandbox-manifest",
+            "provenance",
+        ] {
+            let line = format!("{label:<width$}: path", width = LABEL_WIDTH);
+            assert_eq!(
+                line.find(':'),
+                Some(LABEL_WIDTH),
+                "{label} misses the shared column"
+            );
+        }
+        assert_eq!(LABEL_WIDTH, "packaging-manifest".len());
     }
 
     #[test]

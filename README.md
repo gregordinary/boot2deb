@@ -87,13 +87,15 @@ driver at all, and hardware H.264 decode is not yet reliable. See
 
 ## Quick start
 
-Build the base Turing RK1 image on an x86_64 or arm64 Debian or Ubuntu host. The build is
-rootless and needs no `sudo`. From a clean host:
+Build the base Turing RK1 image on an x86_64 or arm64 Debian or Ubuntu host. The build
+itself is rootless and needs no `sudo`, though installing host packages does. From a clean
+host:
 
 1. Install Rust from [rustup.rs](https://rustup.rs), clone this repository, and install the
-   binary:
+   binary. Cargo links it with a host C compiler, so install one first:
 
    ```sh
+   sudo apt install build-essential   # or your distribution's C toolchain
    cd boot2deb
    cargo install --path crates/cli    # puts `boot2deb` on your PATH
    ```
@@ -101,6 +103,8 @@ rootless and needs no `sudo`. From a clean host:
    The crate is `boot2deb-cli`, and the binary it installs is `boot2deb`. Every command
    below assumes it is on `PATH`, and so does every hint the tool prints. To work from a
    checkout without installing, prefix each one with `cargo run -p boot2deb-cli --`.
+   That compiler is the only one boot2deb wants from your host. `doctor` cannot report it
+   missing, because `doctor` is the binary that did not build.
 
 2. Ask `doctor` what your host is missing:
 

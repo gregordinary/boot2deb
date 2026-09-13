@@ -259,16 +259,9 @@ pub fn build_rootfs(
         // the caller cannot unlink; the guard removes it through the map. Kept
         // out of `work` so its TempDir drop is not asked to remove ids it
         // cannot, and out of `TMPDIR` because it is the whole target userland —
-        // see [`RootfsOptions::scratch_dir`]. `provision::ensure` requires a
-        // non-existent destination.
-        //
-        // Per-pid so two concurrent builds of one recipe do not collide, and swept
-        // by prefix first: a hard-killed run leaves a tree only `provision::remove`
-        // can reclaim, and it sits in the work dir a later `clean` will try to
-        // delete as the caller.
-        let rootfs_dir = opts
-            .scratch_dir
-            .join(format!("{PROVISIONED_PREFIX}{}", std::process::id()));
+        // see [`RootfsOptions::scratch_dir`]. Placement and sweeping are
+        // [`provisioned_dir`]'s.
+        let rootfs_dir = provisioned_dir(opts.scratch_dir, "image");
         sweep_provisioned(opts.scratch_dir);
         // The bootstrap installs the plan resolved above, verbatim. That is what
         // makes the cache key, the installed set, and the manifest one claim
@@ -293,7 +286,7 @@ pub fn build_rootfs(
                 message: e.to_string(),
             },
         )?;
-        let _provisioned = ProvisionedRoot(rootfs_dir.clone());
+        let _provisioned = ProvisionedRoot::new(rootfs_dir.clone());
         step.progress(55);
 
         customize(
@@ -469,12 +462,37 @@ fn archive_records(plan: &Plan) -> Vec<boot2deb_core::provenance::ArchiveProvena
 /// bundled delegate chain (including the `subid` `newuidmap`/`newgidmap` helpers)
 /// re-enters the map to delete it. Best-effort: a removal failure is swallowed, as
 /// there is nothing more to do with it in a destructor.
-struct ProvisionedRoot(PathBuf);
+///
+/// Held by every node that provisions such a tree: this one for the image's userland,
+/// and [`crate::tryboot`] for the root it harvests the fixture kernel out of.
+pub(crate) struct ProvisionedRoot(PathBuf);
+
+impl ProvisionedRoot {
+    /// Guard the tree at `dir`, which the caller has just provisioned.
+    pub(crate) fn new(dir: PathBuf) -> Self {
+        ProvisionedRoot(dir)
+    }
+}
 
 impl Drop for ProvisionedRoot {
     fn drop(&mut self) {
         let _ = provision::remove(&self.0);
     }
+}
+
+/// Where a transient provisioned tree goes: under `scratch_dir`, named for the node
+/// that asked (`label`) and the process that owns it.
+///
+/// Per-pid so two concurrent builds of one recipe do not collide, and under the
+/// [`PROVISIONED_PREFIX`] so [`sweep_provisioned`] reclaims whichever node left one
+/// behind. The caller sweeps before it provisions: `provision::ensure` requires a
+/// destination that does not exist, and a hard-killed run's tree is one only the map
+/// can remove.
+pub(crate) fn provisioned_dir(scratch_dir: &Path, label: &str) -> PathBuf {
+    scratch_dir.join(format!(
+        "{PROVISIONED_PREFIX}{label}-{}",
+        std::process::id()
+    ))
 }
 
 /// Name prefix of a transient provisioned rootfs under the build's scratch tree.

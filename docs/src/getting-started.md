@@ -24,6 +24,16 @@ once.
   and Ubuntu are the primary targets, and Fedora and Arch work too (`doctor` knows
   their package names). macOS can run the read-only commands but cannot build.
 - **A recent stable Rust toolchain**, installed via [rustup](https://rustup.rs).
+- **A host C compiler and linker.** Cargo links the `boot2deb` binary with one, and the
+  proc-macro build scripts need it too. On Debian and Ubuntu:
+
+  ```sh
+  sudo apt install build-essential
+  ```
+
+  This is the only host compiler boot2deb asks for, and it builds the tool rather than
+  anything the tool produces. `doctor` cannot report it missing, because `doctor` is the
+  binary that did not build.
 - **`boot2deb` on your `PATH`.** From a clone of this repo:
 
   ```sh
@@ -45,8 +55,8 @@ once.
 
 Rather than hand-installing a package list, run `doctor`. It probes for every tool
 the build needs and, for anything absent, prints the exact install command **for
-your distro**. You never guess a package name. `doctor` itself needs nothing but
-Rust, so it is the first thing to run after cloning:
+your distro**. You never guess a package name. `doctor` itself needs nothing
+beyond the toolchain above, so it is the first thing to run after cloning:
 
 ```sh
 boot2deb doctor turing-rk1/forky
@@ -79,9 +89,12 @@ there is nothing here to drift out of date.
 The list is short, and that is the design rather than an omission. **Every compiler,
 packaging tool and build dependency a build runs is a package of a provisioned Debian
 root.** Each is resolved from your build's own mirror list and sha256-pinned in that
-root's manifest. It is therefore an input your lock names, not a fact about your machine. There
-is no host `gcc`, no `make`, no `dpkg`, no `fakeroot` in the list, because none of them
-is what compiles or archives anything. What remains is the handful of things no root can
+root's manifest. It is therefore an input your lock names, not a fact about your machine.
+
+There is no host `gcc`, no `make`, no `dpkg`, no `fakeroot` in the list, because none of
+them is what compiles or archives anything. The C compiler
+[What you need](#what-you-need) asks for is not an exception. It links the `boot2deb`
+binary, and no build stage invokes it. What remains is the handful of things no root can
 carry:
 
 | Group | What it covers | When |
@@ -256,9 +269,11 @@ Every artifact is named for the whole build point, device and recipe together
 The build prints the exact paths on its final lines, including the credential:
 
 ```
-compressed    : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.img.xz
-first-boot pw : <generated>  (user debian, expired — change at first login)
-provenance    : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.provenance.toml
+compressed        : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.img.xz
+first-boot pw     : <generated>  (user debian, expired — change at first login)
+cross-manifest    : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.cross.pkgs
+packaging-manifest: .../build/turing-rk1/forky/artifacts/turing-rk1-forky.packaging.pkgs
+provenance        : .../build/turing-rk1/forky/artifacts/turing-rk1-forky.provenance.toml
 ```
 
 **Note the first-boot password down.** It is unique per image, shown once here, and

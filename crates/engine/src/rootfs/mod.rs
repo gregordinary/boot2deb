@@ -34,10 +34,10 @@
 //! other package and needs no separate fetch step.
 
 mod provisioner;
-pub(crate) use provisioner::feature_repositories;
 pub use provisioner::{
     build_rootfs, read_plan_record, read_plan_weights, sweep_provisioned, PlanRecord, PlanWeights,
 };
+pub(crate) use provisioner::{feature_repositories, provisioned_dir, ProvisionedRoot};
 
 use crate::error::EngineError;
 use crate::event::Step;
