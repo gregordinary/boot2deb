@@ -10,8 +10,8 @@ use crate::blobs;
 use crate::error::EngineError;
 use crate::git;
 use boot2deb_core::lock::{
-    BlobsPin, FfmpegPins, GitPin, KernelPin, KmodPin, Lock, PatchesPin, RootfsPin, UbootPin,
-    UserspacePin,
+    AppPin, BlobsPin, FfmpegPins, GitPin, KernelPin, KmodPin, Lock, PatchesPin, RootfsPin,
+    UbootPin, UserspacePin,
 };
 use boot2deb_core::model::KernelSource;
 use boot2deb_core::ResolvedBuild;
@@ -235,6 +235,24 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
             })
         })
         .collect::<Result<Vec<_>, EngineError>>()?;
+    // Pin each application a selected feature compiles from source, in resolution
+    // order. There is no `--app-ref` flag: unlike a userspace tree or an out-of-tree
+    // module, an app is upstream software pinned at a release tag, and moving it is
+    // an edit to the feature rather than a per-build choice.
+    let apps = image
+        .map(|i| i.apps.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .map(|a| -> Result<AppPin, EngineError> {
+            let pin = git_pin(&a.git, &a.git_ref)?;
+            Ok(AppPin {
+                name: a.name.clone(),
+                source: pin.source,
+                reference: pin.reference,
+                commit: pin.commit,
+            })
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
     Ok(assemble_lock(
         build,
         opts,
@@ -246,6 +264,7 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
         ffmpeg,
         blobs,
         kmods,
+        apps,
     ))
 }
 
@@ -307,6 +326,7 @@ fn assemble_lock(
     ffmpeg: Option<FfmpegPins>,
     blobs: Option<BlobsPin>,
     kmods: Vec<KmodPin>,
+    apps: Vec<AppPin>,
 ) -> Lock {
     Lock {
         kernel,
@@ -318,6 +338,8 @@ fn assemble_lock(
         // One pin per device `device_kmods` entry; empty (and omitted from the committed
         // lock) for a board that carries no out-of-tree module.
         kmods,
+        // One pin per app a selected feature compiles; empty, and omitted, otherwise.
+        apps,
         // The rootfs pin exists only for an image build; a u-boot-only build resolves
         // no suite, so the lock omits `[rootfs]`.
         rootfs: build.image.as_ref().map(|image| RootfsPin {
@@ -960,6 +982,7 @@ mod tests {
                 bl32: None,
             }),
             Vec::new(), // kmods
+            Vec::new(), // apps
         );
         assert!(lock.patches.is_none());
         assert!(!lock.to_toml_string().unwrap().contains("[patches]"));
@@ -1022,6 +1045,7 @@ mod tests {
                 bl32: None,
             }),
             kmods: vec![],
+            apps: vec![],
             extra_debs: vec![],
             snapshot: None,
         };
@@ -1095,6 +1119,7 @@ mod tests {
                 bl32: None,
             }),
             Vec::new(), // kmods
+            Vec::new(), // apps
         );
         let kernel_pin = lock.kernel.as_ref().unwrap();
         assert_eq!(kernel_pin.id, "rk3588-mainline-7.1");
@@ -1337,6 +1362,7 @@ mod tests {
                 bl32: boot.rkbin.bl32.as_ref().map(|f| format!("{f}@sha256:cc")),
             }),
             kmods: vec![],
+            apps: vec![],
             extra_debs: image_of(build).extra_debs.clone(),
             snapshot: None,
         }

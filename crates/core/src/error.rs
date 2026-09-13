@@ -911,6 +911,17 @@ pub enum ConfigError {
         locator: String,
     },
 
+    /// Two selected features declare an app of the same name but do not agree on it.
+    /// De-duplicating by name alone would keep the first and drop the second without
+    /// saying so. On a differing `ref` that builds a version nobody asked for.
+    #[error("feature '{feature}' declares app '{app}' differently from an earlier feature")]
+    ConflictingApp {
+        /// The app both features name.
+        app: String,
+        /// The feature whose declaration disagrees with the one already merged.
+        feature: String,
+    },
+
     /// An `extra_debs` entry's sha256 is not a 64-character lowercase-hex string,
     /// so it cannot be the content pin the build verifies the fetched bytes against.
     #[error("extra_deb sha256 '{value}' is not 64 lowercase hex characters")]

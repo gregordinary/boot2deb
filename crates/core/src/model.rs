@@ -1136,6 +1136,57 @@ pub struct FfmpegLib {
     pub links: Vec<String>,
 }
 
+/// An application this build compiles from source against its own FFmpeg, rather
+/// than installing from the Debian mirror.
+///
+/// It exists for one reason. `ffmpeg-rk` installs under `/opt` so it coexists with
+/// the system FFmpeg, and nothing Debian packages links it. Debian's own
+/// `libavcodec` carries no `v4l2request` hwaccel at all. A player from the archive
+/// therefore decodes in software, on a board whose decoder is the point of the
+/// image. Compiling the player here is what puts the two on the same libraries.
+///
+/// Declared by a *feature*, never by a hardware layer. Which silicon is present
+/// decides what the accelerated FFmpeg can do. Whether an image also carries a
+/// player is a capability someone asked for. The feature names the FFmpeg it needs
+/// through [`requires_capability`](crate::feature::Feature::requires_capability), so
+/// it composes with either media-accel provider without naming one.
+///
+/// The *build* surface is not here. Configure and meson options are engine knowledge
+/// keyed on [`name`](Self::name), the way the userspace stage keys its patch handling
+/// on a tree's name. This declares the pin and what comes out of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct App {
+    /// The application's name. It is its directory under `<work>/app/`, its
+    /// `app:<name>` artifact-cache node, and its key in the lock. It is also what the
+    /// engine stage matches on to know how to build it. Resolution holds it to a bare
+    /// identifier, since it becomes a path component and a cache key.
+    pub name: String,
+    /// Clone URL of the upstream tree.
+    pub git: String,
+    /// The branch or tag constraint. The exact commit is pinned in the lock
+    /// (TOML key `ref`).
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// The `.deb` this app's build produces, and the name the rootfs solve installs.
+    ///
+    /// Named rather than derived from [`name`](Self::name), because it has to differ
+    /// from the archive's package for the same program. An `mpv` built here would
+    /// otherwise collide with Debian's `mpv` in the local repo. Apt would then pick
+    /// between them by version, rather than by which one can reach the decoder.
+    pub deb: String,
+    /// Install prefix, which is also where the FFmpeg it links lives.
+    ///
+    /// Sharing the prefix is what makes the binary find those libraries without an
+    /// `ld.so.conf` entry or a wrapper. The FFmpeg stage already builds with an
+    /// `-rpath` on its own `lib` directory, and a binary staged beside it inherits the
+    /// same relationship. Installing to `/usr` would instead put the player on the
+    /// default search path, where it loads Debian's libraries. The player then refuses
+    /// to start. It compares its build-time and runtime library versions, and exits on
+    /// a mismatch.
+    pub prefix: String,
+}
+
 /// Where an [`ExtraDeb`]'s bytes come from — the validated single locator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtraDebLocator<'a> {
@@ -2977,6 +3028,14 @@ pub struct ResolvedImage {
     /// axis of the build point that the selected features decide, not a source the lock has
     /// to pin. The pins are the debs' own hashes. Empty when no feature adds one.
     pub ffmpeg_libs: Vec<FfmpegLib>,
+    /// Applications the selected features compile from source against this build's
+    /// FFmpeg, unioned across them and de-duplicated by name in selection order.
+    ///
+    /// Resolved rather than pinned here, like [`ffmpeg_libs`](Self::ffmpeg_libs) —
+    /// which features were selected is what decides it. The *commits* are pinned, in
+    /// the lock's `[[apps]]`. Empty when no selected feature declares one, and the
+    /// app compile and plan nodes are then skipped entirely.
+    pub apps: Vec<App>,
     /// The layers' selftest expectations, one group per declaring layer in merge
     /// order — SoC, boot method, device, kernel, features (selection order), then
     /// each kmod. The rootfs stage writes each group as its own

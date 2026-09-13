@@ -343,6 +343,7 @@ pub fn resolve_device(
     // mid-build.
     let extra_debs = merge_extra_debs(&base, &soc, &bm, &device, &loaded_features)?;
     let ffmpeg_libs = merge_ffmpeg_libs(&loaded_features);
+    let apps = merge_apps(&loaded_features)?;
 
     let image_size = overrides
         .image_size
@@ -467,6 +468,7 @@ pub fn resolve_device(
             apt_sources,
             extra_debs,
             ffmpeg_libs,
+            apps,
             expectations,
             // A recipe field; `resolve_recipe` sets it, and a direct device build
             // (no recipe) ships the unit disabled.
@@ -1246,6 +1248,97 @@ fn merge_ffmpeg_libs(
         }
     }
     merged
+}
+
+/// The union of the selected features' [`Feature::apps`](crate::feature::Feature::apps),
+/// de-duplicated by `name` in first-appearance order.
+///
+/// Features only, for the same reason [`merge_ffmpeg_libs`] takes features only: which
+/// silicon is present decides what the accelerated FFmpeg can do, and whether an image
+/// also carries a player is a capability someone asked for.
+///
+/// Two features naming the same app is only allowed when they agree on it completely.
+/// De-duplicating by name alone would silently drop the second declaration, so a build
+/// that asked for `mpv` at two different refs would get one of them with nothing said.
+/// That is the same reasoning as the `extra_debs` sha256 de-duplication, applied to a
+/// pin rather than to bytes.
+fn merge_apps(
+    features: &[(String, crate::feature::Feature)],
+) -> Result<Vec<crate::model::App>, ConfigError> {
+    let mut merged: Vec<crate::model::App> = Vec::new();
+    for (feat_name, feat) in features {
+        for app in &feat.apps {
+            check_app(app)?;
+            match merged.iter().find(|a| a.name == app.name) {
+                Some(prior) if prior != app => {
+                    return Err(ConfigError::ConflictingApp {
+                        app: app.name.clone(),
+                        feature: feat_name.clone(),
+                    })
+                }
+                Some(_) => {}
+                None => merged.push(app.clone()),
+            }
+        }
+    }
+    Ok(merged)
+}
+
+/// Reject an app declaration the build stage could not act on.
+///
+/// The name becomes a work directory, an artifact-cache node and a lock key, so it is
+/// held to a bare identifier for the same reason [`UserspaceTree::name`] is. The deb
+/// name has to satisfy dpkg, and the prefix has to be absolute — a relative one would
+/// resolve against whatever the stage's working directory happened to be.
+fn check_app(app: &crate::model::App) -> Result<(), ConfigError> {
+    let bad = |what: &'static str, value: &str, why| {
+        Err(ConfigError::InvalidField {
+            what,
+            value: value.to_string(),
+            why,
+        })
+    };
+    if app.name.is_empty()
+        || !app
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return bad(
+            "app name",
+            &app.name,
+            "is not a bare identifier (lowercase letters, digits, `-` and `_`)",
+        );
+    }
+    let deb_ok =
+        app.deb
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            && app.deb.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '+' | '.')
+            });
+    if !deb_ok {
+        return bad(
+            "app deb",
+            &app.deb,
+            "is not dpkg-package-safe (lowercase alphanumeric plus `-`, `+`, `.`, starting alphanumeric)",
+        );
+    }
+    if !app.prefix.starts_with('/') || app.prefix.contains("..") {
+        return bad(
+            "app prefix",
+            &app.prefix,
+            "is not an absolute path without a parent reference",
+        );
+    }
+    if app.git.is_empty() {
+        return bad("app git", &app.git, "is empty");
+    }
+    if app.git_ref.is_empty() {
+        return bad("app ref", &app.git_ref, "is empty");
+    }
+    Ok(())
 }
 
 /// One field of the apt one-line source format: non-empty printable ASCII with
@@ -3548,6 +3641,7 @@ mod tests {
             apt_sources: vec![],
             extra_debs: vec![],
             ffmpeg_libs: vec![],
+            apps: vec![],
             conflicts: vec![],
             provides: vec![],
             requires_capability: vec![],
@@ -4604,6 +4698,7 @@ mod tests {
             apt_sources: sources,
             extra_debs: vec![],
             ffmpeg_libs: vec![],
+            apps: vec![],
             conflicts: vec![],
             provides: vec![],
             requires_capability: vec![],
@@ -5595,6 +5690,143 @@ mod fixture_tests {
             .map(|l| l.flag.as_str())
             .collect();
         assert_eq!(flags, ["--enable-libdavs2", "--enable-libuavs3d"]);
+    }
+
+    /// The same app declared twice is one app. Two features can both want a player
+    /// without the selection having to know which of them is "the" declaration.
+    #[test]
+    fn apps_union_across_features_and_dedup_by_name() {
+        let tree = Tree {
+            features: vec![
+                Feat {
+                    name: "f1",
+                    packages: &["p1"],
+                    exclude: &[],
+                },
+                Feat {
+                    name: "f2",
+                    packages: &["p2"],
+                    exclude: &[],
+                },
+            ],
+            ..Default::default()
+        };
+        let dir = tree.write();
+        let p = dir.path();
+        let app = "{ name = \"mpv\", git = \"https://x/mpv.git\", ref = \"v0.41.0\",                    deb = \"mpv-rk\", prefix = \"/opt/ffmpeg-rk\" }";
+        fs::write(
+            p.join("features/f1.toml"),
+            format!(
+                "description = \"f\"\npackages = [\"p1\"]\nrequires_soc = [\"rk3588\"]\n\
+                 apps = [{app}]\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            p.join("features/f2.toml"),
+            format!(
+                "description = \"f\"\npackages = [\"p2\"]\nrequires_soc = [\"rk3588\"]\n\
+                 apps = [{app}]\n"
+            ),
+        )
+        .unwrap();
+        let root = ConfigRoot::new(p);
+        let ov = Overrides {
+            features: Some(vec!["f1".into(), "f2".into()]),
+            ..Default::default()
+        };
+        let b = resolve_device(&root, "dev", &ov).unwrap();
+        let apps = &image_of(&b).apps;
+        assert_eq!(apps.len(), 1, "the second declaration is the same app");
+        assert_eq!(apps[0].name, "mpv");
+        assert_eq!(apps[0].deb, "mpv-rk");
+        assert_eq!(apps[0].prefix, "/opt/ffmpeg-rk");
+    }
+
+    /// Two features naming one app at different refs is refused rather than silently
+    /// resolved to whichever was selected first — a build would otherwise carry a
+    /// version neither feature asked for.
+    #[test]
+    fn apps_that_disagree_are_a_resolve_error() {
+        let tree = Tree {
+            features: vec![
+                Feat {
+                    name: "f1",
+                    packages: &["p1"],
+                    exclude: &[],
+                },
+                Feat {
+                    name: "f2",
+                    packages: &["p2"],
+                    exclude: &[],
+                },
+            ],
+            ..Default::default()
+        };
+        let dir = tree.write();
+        let p = dir.path();
+        for (f, r) in [("f1", "v0.41.0"), ("f2", "v0.40.0")] {
+            fs::write(
+                p.join(format!("features/{f}.toml")),
+                format!(
+                    "description = \"f\"\npackages = [\"p1\"]\nrequires_soc = [\"rk3588\"]\n\
+                     apps = [{{ name = \"mpv\", git = \"https://x/mpv.git\", ref = \"{r}\", \
+                     deb = \"mpv-rk\", prefix = \"/opt/ffmpeg-rk\" }}]\n"
+                ),
+            )
+            .unwrap();
+        }
+        let root = ConfigRoot::new(p);
+        let ov = Overrides {
+            features: Some(vec!["f1".into(), "f2".into()]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_device(&root, "dev", &ov),
+            Err(ConfigError::ConflictingApp { .. })
+        ));
+    }
+
+    /// The name becomes a work directory and a cache key, and the deb name has to
+    /// satisfy dpkg. Both are checked at resolve rather than discovered in the stage.
+    #[test]
+    fn an_app_with_an_unusable_name_or_prefix_is_refused() {
+        let bad = [
+            ("../escape", "mpv-rk", "/opt/ffmpeg-rk"),
+            ("mpv", "MPV_RK", "/opt/ffmpeg-rk"),
+            ("mpv", "mpv-rk", "opt/ffmpeg-rk"),
+            ("mpv", "mpv-rk", "/opt/../etc"),
+        ];
+        for (name, deb, prefix) in bad {
+            let tree = Tree {
+                features: vec![Feat {
+                    name: "f1",
+                    packages: &["p1"],
+                    exclude: &[],
+                }],
+                ..Default::default()
+            };
+            let dir = tree.write();
+            let p = dir.path();
+            fs::write(
+                p.join("features/f1.toml"),
+                format!(
+                    "description = \"f\"\npackages = [\"p1\"]\nrequires_soc = [\"rk3588\"]\n\
+                     apps = [{{ name = \"{name}\", git = \"https://x/a.git\", ref = \"v1\", \
+                     deb = \"{deb}\", prefix = \"{prefix}\" }}]\n"
+                ),
+            )
+            .unwrap();
+            let root = ConfigRoot::new(p);
+            let ov = Overrides {
+                features: Some(vec!["f1".into()]),
+                ..Default::default()
+            };
+            assert!(
+                resolve_device(&root, "dev", &ov).is_err(),
+                "accepted name={name} deb={deb} prefix={prefix}"
+            );
+        }
     }
 
     #[test]

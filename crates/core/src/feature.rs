@@ -103,6 +103,15 @@ pub struct Feature {
     /// the bytes. Unioned across features at resolution and read by the ffmpeg stage.
     #[serde(default)]
     pub ffmpeg_libs: Vec<crate::model::FfmpegLib>,
+    /// Applications this feature compiles from source against the build's own
+    /// FFmpeg, rather than installing from the Debian mirror.
+    ///
+    /// A feature declaring one almost always also declares
+    /// `requires_capability = ["ffmpeg"]`, since that is what guarantees there is an
+    /// accelerated FFmpeg for it to link. The two are separate because the
+    /// capability gate is about the *selection* and this is about what gets built.
+    #[serde(default)]
+    pub apps: Vec<crate::model::App>,
     /// Other features, by name, that cannot be combined with this one. The check
     /// is symmetric: resolution rejects a selection holding this feature and any
     /// it names, or that names it. Declaring the conflict on either side is
@@ -425,6 +434,7 @@ mod tests {
             apt_sources: vec![],
             extra_debs: vec![],
             ffmpeg_libs: vec![],
+            apps: vec![],
             conflicts: conflicts.into_iter().map(String::from).collect(),
             provides: vec![],
             requires_capability: vec![],

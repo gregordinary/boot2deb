@@ -167,6 +167,12 @@ pub struct Lock {
     /// patches, and builds against the kernel tree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kmods: Vec<KmodPin>,
+    /// Exact application source pins — one per resolved
+    /// [`App`](crate::model::App), in the order the selected features declare them.
+    /// Present iff a selected feature declares one. The committed lock omits the
+    /// `[[apps]]` array entirely when empty, like [`kmods`](Self::kmods).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<AppPin>,
     /// Rootfs suite + content-pinned package manifest. Present iff the build
     /// produces an image. A u-boot-only build resolves no rootfs, so the committed
     /// lock omits the `[rootfs]` table (as it already omits `[kernel]` for a build
@@ -368,6 +374,31 @@ pub struct UserspacePin {
     pub commit: String,
 }
 
+/// Pinned application source — one per resolved [`App`](crate::model::App), in the
+/// order the selected features declare them. A named git pin, the same shape as
+/// [`UserspacePin`], because it answers the same question: which commit of which
+/// tree did this build compile.
+///
+/// The `deb` and `prefix` that shape the build are config, re-resolved each build
+/// and folded into the node signature. They are not pinned here — they say what to
+/// do with the tree, not which tree it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppPin {
+    /// Matches the feature's `[[app]]` entry name. The drift gate compares the two.
+    pub name: String,
+    /// Clone URL the commit was pinned from, compared against a fresh resolve by the
+    /// drift gate. A re-pointed upstream then re-pins, rather than fetching an old
+    /// commit from a repository that need not contain it.
+    pub source: String,
+    /// The human-readable ref this pin came from (TOML key `ref`).
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The exact commit the ref pointed at.
+    #[serde(deserialize_with = "de_commit")]
+    pub commit: String,
+}
+
 /// Pinned out-of-tree kernel-module source — one per device `device_kmods` entry. A
 /// named git pin. The `subdir`/patch-subset/`make_args` that shape the build are config
 /// (re-resolved each build and folded into the node signature), not pinned here. The
@@ -559,6 +590,7 @@ mod tests {
                 bl32: None,
             }),
             kmods: vec![],
+            apps: vec![],
             extra_debs: vec![
                 ExtraDeb {
                     url: Some("https://vendor.example/foo_1.2_arm64.deb".into()),
@@ -653,6 +685,7 @@ mod tests {
                 bl32: None,
             }),
             kmods: vec![],
+            apps: vec![],
             extra_debs: vec![],
             snapshot: None,
         }
@@ -719,6 +752,7 @@ mod tests {
                 bl32: None,
             }),
             kmods: vec![],
+            apps: vec![],
             extra_debs: vec![],
             snapshot: None,
         };
@@ -746,6 +780,7 @@ mod tests {
             }),
             blobs: None,
             kmods: vec![],
+            apps: vec![],
             extra_debs: vec![],
             snapshot: None,
         };

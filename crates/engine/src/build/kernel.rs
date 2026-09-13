@@ -963,6 +963,7 @@ mod tests {
                 bl32: None,
             }),
             kmods: vec![],
+            apps: vec![],
             extra_debs: vec![],
             snapshot: None,
         }
