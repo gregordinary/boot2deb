@@ -12,6 +12,11 @@ features   = []                # a base image, same surface as asus-c201/forky
 layout     = "combined"
 image_size = "2G"
 
+# `sudo` prompts for the account's own password on this image. A laptop leaves the desk,
+# and an open session in someone else's hands should not be root as well.
+# `asus-c201/forky` keeps the shipped `nopasswd` default.
+sudo       = "password"
+
 # The last pin that booted was v7.1.3, so this one has not been on the board. The pin is
 # v7.2.3, the current stable point release; no 7.2.y point release so far touches a
 # Rockchip driver, a device tree or a defconfig. Three things move from v7.1.7
