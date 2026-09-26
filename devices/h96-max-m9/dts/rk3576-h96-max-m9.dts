@@ -458,11 +458,10 @@
 			};
 
 			/*
-			 * always-on because rocket cannot claim it: see the
-			 * &rknn_core_0 note below.
+			 * Switched with the NPU power domain, which takes it as
+			 * pd_npu's domain-supply: see the &rknn_core_0 note below.
 			 */
 			vdd_npu_s0: dcdc-reg2 {
-				regulator-always-on;
 				regulator-boot-on;
 				regulator-min-microvolt = <550000>;
 				regulator-max-microvolt = <950000>;
@@ -829,10 +828,14 @@
  * floor rather than parallelism; adding core 1 lands inside that range at small
  * shapes and below it at 128x1024x1024.
  *
- * The rail needs regulator-always-on, *in addition to* npu-supply. Mainline rocket
- * references no regulator API, so npu-supply is inert and nothing claims
- * vdd_npu_s0; the regulator core then disables it as unused at t~33 s, long after
- * a clean probe at t~8 s. It presents as a runtime failure, not a boot failure.
+ * The rail belongs to the power domain. Mainline rocket references no regulator
+ * API, so npu-supply is inert, and a rail nothing claims is disabled as unused at
+ * t~33 s, long after a clean probe at t~8 s -- a runtime failure, not a boot
+ * failure. RK3576_PD_NPU carries need_regulator, so domain-supply on pd_npu makes
+ * the domain the rail's consumer: vdd_npu_s0 comes up before the domain powers and
+ * goes down after it drops, the way vdd_gpu_s0 follows pd_gpu. The rail keeps
+ * regulator-boot-on and does not take regulator-always-on, which would hold it up
+ * whatever the domain does. npu-supply stays because the binding requires it.
  *
  * The power domains are not a board's business: rknn_core_0 carries both
  * RK3576_PD_NPU0 and RK3576_PD_NPU1 in the SoC dtsi, because the convolution
@@ -841,6 +844,10 @@
  * whatever the node lists, so trimming one would run half fed rather than fail;
  * the binding pins it at two. See rk3576/npu/README.md in the patches repo.
  */
+&pd_npu {
+	domain-supply = <&vdd_npu_s0>;
+};
+
 &rknn_core_0 {
 	npu-supply = <&vdd_npu_s0>;
 	status = "okay";

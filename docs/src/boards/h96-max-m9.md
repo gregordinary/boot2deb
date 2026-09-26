@@ -455,18 +455,27 @@ machine parameters (CBUF size, core count, datatype set) have to be confirmed on
 part before it drives this board. Until then, driving the NPU here means writing your own
 regcmd encoder against `/dev/accel`.
 
-Two properties of the board's DTS are load-bearing, and fail in ways that do not point
-at themselves:
+The NPU clock is set to 594 MHz. `CLK_RKNN_DSU0` feeds both cores and the convolution
+buffer they share, and left alone it free-runs at 786 MHz. That is above the 800 MHz OPP
+step, which asks 800 mV. This board's `vdd_npu_s0` comes up at 750 mV and nothing
+re-rates it.
 
-- Both power domains (`NPU0` *and* `NPU1`) go on the one core node. Otherwise the
-  driver's own domain attach loses to the device core's, and there is no `/dev/accel`.
-- `regulator-always-on` goes on `vdd_npu_s0`. Otherwise the rail is torn down as unused
-  about 33 s into boot, long after a successful probe.
+The rate asked for instead sits between the 500 and 600 MHz steps. Both of those ask
+725 mV, so the clock is inside the voltage the board already provides. It costs about
+23% of throughput on a single core, which is what this board ships.
 
-The board `.dts` states both with the reasoning.
+The NPU rail, `vdd_npu_s0`, follows the NPU's power domain. The board `.dts` names the
+rail as that domain's `domain-supply`. The domain turns the rail on before the NPU
+powers up, and off after it goes idle. An image that never opens the accel node holds
+no NPU supply up.
 
-That always-on rail is the standing cost of carrying the NPU in the base image. It holds
-a supply up on a board that might never open the accel node.
+The rail has to be wired this way. `rocket` claims no regulator itself. A rail given
+only to the NPU core node is torn down as unused about 33 s into boot, long after a
+successful probe.
+
+Both NPU core domains sit on the one core node, in the SoC `.dtsi`. The convolution
+buffer is read through the second domain whichever core computes. The board `.dts`
+states the reasoning for both.
 
 ## Related pages
 
