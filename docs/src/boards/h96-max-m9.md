@@ -135,8 +135,10 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | Analog audio (3.5 mm) | fixed in tree — the DAC is on `sdo2`. End-to-end confirmation on a shipped image still owed |
 | HW video decode, HEVC | works — 1080p and 4K on the VDPU383, bit-exact against software |
 | HW video decode, H.264 | works — a silicon power-up erratum exists, and the shipped kernel works around it. See below |
+| HW video decode, 10-bit | works — Main 10 and High 10 land as `NV15` and unpack on the CPU, bit-exact. See below |
 | HW video encode | no mainline driver |
 | RGA 2D accelerator | works — both RGA2 cores, over DMA-BUF only. See below |
+| GPU compute and Vulkan | works — a GLES 3.1 context on Panfrost, and ffmpeg's Vulkan filters and libplacebo on panvk |
 | SD card | absent — the slot is depopulated |
 | USB 3.0 SuperSpeed | works on the blue port — 5 Gbps sustained over 92 GB with no link error. The black ports cannot, see below |
 
@@ -221,6 +223,20 @@ HEVC runs at real time for about 1/130th of the CPU.
 So anything that consumes the output has to speak DMA-BUF — a KMS plane, a GL or Vulkan
 importer, or librga. A filter chain that cannot takes the download and the loss with it.
 
+What the decoder is worth, over 300-frame clips on the shipped image:
+
+| stream | software | VDPU383 |
+| --- | --- | --- |
+| 1080p H.264 | 199 fps, 6.2 cores | 242 fps, 0.23 cores |
+| 4K H.264 | 76 fps, 6.4 cores | 84 fps, 0.19 cores |
+| 1080p HEVC | 131 fps, 5.4 cores | 500 fps, 0.55 cores |
+| 4K HEVC | 53 fps, 6.4 cores | 136 fps, 0.35 cores |
+| 4K HEVC Main 10 | 34 fps, 6.5 cores | 134 fps, 0.40 cores |
+
+Four concurrent 4K30 HEVC streams hold real time at 1.17x. A fifth falls to 0.95x, so
+four is the ceiling for live playback. The gain is in CPU cost far more than in wall
+clock. The decoder frees the cores rather than racing them.
+
 ### H.264 decode: a power-up erratum, worked around in the shipped kernel
 
 This SoC's decoder has a silicon erratum. Whether hardware H.264 comes up correct is
@@ -263,17 +279,35 @@ faults roughly a third of jobs. The job times out after a second, the core is so
 reset, and the destination is left untouched. It is also about seven times slower when
 it does work. The same operations over DMA-BUF run clean on both cores.
 
+**Bracket every CPU access to a dma-heap buffer in `DMA_BUF_IOCTL_SYNC`.** Use `START`
+with `WRITE` before filling a source and `END` after. Use `START` with `READ` before
+checking a result. These buffers are cached.
+
+Skip the bracket and the engine reads a stale source while the CPU reads a stale
+destination. That looks exactly like an RGA correctness bug and is not one. The trap
+catches the destination pre-fill as readily as the source.
+
 One consequence is worth knowing if a client dies without a message. Failing to open
 `/dev/rga` or a DMA-BUF heap makes librga segfault rather than fail gracefully. The
 image ships udev rules that make both accessible. A segfault on a board where they were
 removed is therefore a permissions problem rather than a library bug.
 
-### 10-bit stops at the decoder
+### 10-bit: `NV15` out of the decoder, unpacked on the CPU
 
-10-bit content decodes in hardware, but the VDPU383 writes `NV15` — packed 10-bit 4:2:0
-— and nothing downstream in this image can take it. Vulkan has no such format, and
-neither Mesa nor ffmpeg's filters can import it. A 10-bit transcode therefore converts
-on the CPU.
+10-bit content decodes in hardware and the VDPU383 writes `NV15` — packed 10-bit 4:2:0,
+with no byte-aligned samples. The decoder cannot be asked for anything else, because
+that is what the hardware writes natively.
+
+This ffmpeg reads it. The `rk3576-media` patch series teaches libavutil and libswscale
+the format, and tags it on the V4L2-request frames context. `hwdownload` therefore
+accepts a 10-bit surface, and `format=yuv420p10le` unpacks it. HEVC Main 10 at 1080p and 4K and
+H.264 High 10 at 1080p all decode **bit-exact** against this same build's software
+decoder, frame by frame. A plain `-hwaccel v4l2request` transcode of 10-bit content
+works, and 4K Main 10 decodes at about 134 fps for under half a core.
+
+What it costs is that CPU unpack, because no filter in this build reads `NV15` directly.
+Vulkan has no packed 10-bit 4:2:0 format at all, so a `scale_vulkan` or `libplacebo`
+graph is 8-bit only. Tone mapping a 10-bit source means unpacking first.
 
 RGA does not close the gap. This SoC has RGA2 cores only, which take `NV15` in but write
 no 10-bit format out. `P010` output is an RGA3 capability, and there is no RGA3 here. A
@@ -282,8 +316,12 @@ hardware 10-bit-to-10-bit conversion therefore does not exist on this part, stru
 The VDPP block this SoC does carry is not a way round it either. Its pixel path takes
 `NV12` or `NV21` and nothing else, with a two-bit format field that has no bit-depth
 selector at all. The 10-bit formats it does name feed a histogram engine that produces
-statistics rather than a picture. The display controller scans `NV15` out unconverted, so
-playback straight to a KMS plane is unaffected.
+statistics rather than a picture.
+
+The one route with no conversion at all is the display. The controller scans `NV15` out
+unconverted, so a player that hands the decoder's DMA-BUF straight to a KMS plane plays
+10-bit with nothing in between. The CPU unpack above is the price of *filtering* or
+transcoding, not of playback.
 
 ## HDMI-CEC
 
