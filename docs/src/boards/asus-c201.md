@@ -66,7 +66,9 @@ new kernel fails to boot, the firmware falls back to the old one by itself. See
 `asus-c201/mainline-forky` is the same board and the same suite, with the kernel compiled
 here from **mainline 7.2.y** instead of installed from the archive. Its kconfig comes from
 the fragments, a Debian-parity baseline plus the RK3288 slice, on top of the in-tree
-`multi_v7_defconfig`. The `rk3288-fixes` patch series rides along. Everything else is
+`multi_v7_defconfig`. The slice turns off every other SoC family that base builds in,
+which keeps the kernel small enough for the signed payload. The `rk3288-fixes` patch
+series rides along. Everything else is
 identical: the same signed-kernel boot payload, the same board profiles, the same
 `combined` layout.
 

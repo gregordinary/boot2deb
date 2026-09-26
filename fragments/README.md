@@ -16,6 +16,8 @@ dependency-resolve).
 | `soc/rk3588` | curated | RK3588 platform drivers: clk / pinctrl / phy / pcie / thermal / saradc / crypto / nvmem / regulator / sound-soc / display. Shared by every RK3588 board. |
 | `accel/full` | curated | RK3588 media + compute accel: VDPU decode, VEPU encode, RGA multicore (OOT), rocket NPU, Hantro, ISP, VSI IOMMU. These symbols exist only after the `rk3588-accel` patch series is applied. |
 | `device/turing-rk1` | curated | Board-only kconfig. Empty for the RK1 — its board delta is in the device tree, not kconfig. |
+| `base/debian-armhf` | generated | The Debian-generic modular armhf kernel policy — the delta from `multi_v7_defconfig` to Debian's armmp config, less what the `soc/rk3288` slice turns off. Not hand-edited. |
+| `soc/rk3288` | curated | RK3288 platform drivers for the Veyron boards, and the switches that turn off every other SoC family `multi_v7_defconfig` builds in, along with PCI and raw NAND. |
 
 Merge order is base → soc → accel → device (device last so a board can override).
 
@@ -71,3 +73,11 @@ curated slices and the toolchain-probed symbols, and take the fixpoint under
 drop the promptless symbols. The curated `soc/`, `accel/`, and `device/` slices are
 then reviewed by hand against the kernel's config-drift report — that human
 curation is the point of the split.
+
+Last, merge the new baseline with its slices and drop every baseline line the final
+`.config` does not hold. A slice that turns a whole subsystem off voids the
+baseline's requests inside it. `soc/rk3288` turns off the other SoC families, PCI
+and raw NAND, so Debian's `=m` for a PCI network card can never take on that kernel.
+Carried anyway, each such line is a clean-merge failure no edit could fix. Dropping
+them leaves the resulting `.config` unchanged, since the slice already decided those
+symbols.
