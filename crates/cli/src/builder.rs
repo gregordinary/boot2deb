@@ -22,11 +22,7 @@
 use boot2deb_core::ConfigRoot;
 use std::path::Path;
 
-/// Tracked paths whose content decides what the compiled binary does. A change
-/// anywhere else in the repo — a device `.toml`, a `.dts`, a doc page — is build
-/// *input*, recorded by the lock and the config stamp, and leaves the binary's
-/// identity intact.
-const SOURCE_PATHS: [&str; 3] = ["crates", "Cargo.toml", "Cargo.lock"];
+include!("../source_paths.rs");
 
 /// Width the build script abbreviates the binary's commit to (`rev-parse --short=12`).
 /// The config tree's commit is cut to the same width so both coordinates in one
@@ -113,14 +109,16 @@ impl Freshness {
                  Run `cargo build` (seconds) to re-stamp it."
             )),
             Self::SourceEdited { head } => Some(format!(
-                "this boot2deb was compiled from {head}, and the sources under \
-                 crates/ have been edited since — so it does not contain them. \
-                 Run `cargo build` to pick them up."
+                "this boot2deb was compiled from {head}, and its sources ({}) have been \
+                 edited since — so it does not contain them. Run `cargo build` to pick \
+                 them up.",
+                SOURCE_PATHS.join(", ")
             )),
             Self::Unverifiable { built } => Some(format!(
-                "this boot2deb was compiled from a tree with uncommitted changes to \
-                 crates/, so {built} does not identify it and an image built now records \
-                 `dirty = true`. Commit the source to make the build identifiable."
+                "this boot2deb was compiled from a tree with uncommitted changes to its \
+                 sources ({}), so {built} does not identify it and an image built now \
+                 records `dirty = true`. Commit the source to make the build identifiable.",
+                SOURCE_PATHS.join(", ")
             )),
         }
     }
@@ -269,6 +267,32 @@ mod tests {
         // It must not tell the operator their binary is behind: that is unknown here,
         // and naming it would send them to rebuild something that may be current.
         assert!(!note.contains("checkout is at"), "{note}");
+        // It names every path the flag covers, so an edit to Cargo.lock alone is not
+        // reported as an edit under crates/.
+        for path in SOURCE_PATHS {
+            assert!(note.contains(path), "{note}");
+        }
+    }
+
+    /// The compiled dirty stamp asks the run-time check's question: tracked changes
+    /// under [`SOURCE_PATHS`], not anywhere in the repo. This test binary was compiled
+    /// from this checkout, so the two answers agree unless the build script got it
+    /// wrong. That happens in two ways. It counts an edit outside the source paths, such
+    /// as a recipe or a doc page. Or a rebuild compiles an edit under crates/ without
+    /// re-running the script.
+    #[test]
+    fn the_compiled_dirty_stamp_covers_the_source_paths_only() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if commit().is_none() || !is_source_checkout(&root) {
+            // Compiled outside a checkout: there is no stamp to compare.
+            return;
+        }
+        assert_eq!(
+            dirty(),
+            boot2deb_engine::git::has_tracked_changes(&root, &SOURCE_PATHS),
+            "BOOT2DEB_GIT_DIRTY disagrees with `git diff --quiet HEAD -- {}`",
+            SOURCE_PATHS.join(" ")
+        );
     }
 
     #[test]
