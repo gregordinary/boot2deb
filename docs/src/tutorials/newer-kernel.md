@@ -143,8 +143,8 @@ obsolete at the candidate drops out instead of counting as a failure.
 Every failure is one of three things, and each has its own encoding in the series manifest:
 
 **Upstreamed.** The patch is in the new kernel already, and the failure is the code being
-there twice. Give the entry an upper bound rather than deleting it, since an older kernel
-still needs it. This is what happened to the Verisilicon IOMMU at 7.2:
+there twice. Give the entry an upper bound while an older kernel in the envelope still
+needs it. Delete it once the floor passes the version that took it:
 
 ```toml
 kernel = [
@@ -152,11 +152,23 @@ kernel = [
 ]
 ```
 
-Read what upstream took, not just that it applied. 050's driver, binding and DT node
-landed, but its `CONFIG_VSI_IOMMU=m` defconfig line did not. Dropping the patch therefore
-stopped building the driver until a kconfig fragment picked the symbol up. A patch that
-is *partly* absorbed is the dangerous shape, because nothing in the apply path reports
-it.
+Read what upstream took, not just that it applied, and check that a clean apply still
+builds. Three shapes get through the `git am` pass:
+
+*Partial absorption.* The Verisilicon IOMMU's driver, binding and DT node landed in 7.2
+but its `CONFIG_VSI_IOMMU=m` defconfig line did not. Dropping the patch therefore stopped
+building the driver, until a kconfig fragment picked the symbol up.
+
+*A conflicting fix in the same function.* 7.2.5 added its own bounds check to
+`st_ref_pic_set_prediction()`, returning `void` — inside a function `media-accel/kernel/083`
+retypes to `int`. Every hunk applied strictly and the compile then failed on `'return'
+with no value`. Only a build finds that one.
+
+*An equivalent fix beside yours.* 7.2.7 bounds the HEVC and AV1 tile counts in the V4L2
+core's control validation. `media-accel/kernel/073` and `074` made the same check in the
+drivers. Both still applied strictly and still built, so every gate passed with each
+bound checked twice. Only reading the incremental patch finds that one. Retiring the pair
+then moved the context `083` applies against, so it was rebased in the same round.
 
 **Reworked.** The patch is still needed but no longer applies. Rebase it, keep both
 versions, and give them complementary ranges. One list then builds both generations
@@ -164,7 +176,8 @@ correctly from a single checkout, which a list mutated in place cannot do.
 
 The RK3588 RGA device-tree wiring is the worked example. In 7.1 the device tree
 describes one RGA core, and in 7.2 it describes all three. The patch that points them at
-the out-of-tree driver therefore reads differently on each:
+the out-of-tree driver therefore read differently on each, for as long as the envelope
+covered both:
 
 ```toml
 kernel = [
@@ -172,6 +185,11 @@ kernel = [
   { path = "media-accel/kernel/072-rk3588-rga-dts-7.2.patch", kernels = ">=7.2" },
 ]
 ```
+
+A rebase needs no pair when the floor has moved past the divergence. `rocket/083` keeps
+the IOMMU domain attached across jobs, and 7.2.4 rewrote the error handling around the
+`iommu_attach_group()` call it replaces. With the floor past 7.2.4 that patch is rebased
+onto the kernel's `goto err_put_pm`, with no second variant to carry.
 
 Regenerate a rebased patch with `git format-patch` rather than hand-editing the diff —
 `git am --3way` needs the index lines a hand-written hunk does not carry.

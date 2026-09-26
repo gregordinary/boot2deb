@@ -18,8 +18,9 @@ image_size = "2G"
 sudo       = "password"
 
 # The last pin that booted was v7.1.3, so this one has not been on the board. The pin is
-# v7.2.3, the current stable point release; no 7.2.y point release so far touches a
-# Rockchip driver, a device tree or a defconfig. Three things move from v7.1.7
+# v7.2.8, the current stable point release. No 7.2.y point release touches an RK3288
+# device tree or a defconfig. The drivers they do reach here, brcmfmac, the crypto hash
+# engine and the eDP glue among them, take fixes only. Three things move from v7.1.7
 # that this board reaches, and the `rk3288-fixes` series applies to all of it
 # unchanged.
 #

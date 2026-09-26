@@ -27,8 +27,9 @@ layout     = "combined"
 image_size = "2G"
 
 # The deblobbed 7.2 tree is byte-identical to the blobbed one everywhere this board's
-# drivers live — the release's deblob log touches nothing under rockchip/, hantro,
-# panfrost or analogix — and the `rk3288-fixes` series applies to it unchanged. So the
+# drivers live. Under `drivers/gpu/drm/rockchip/` the deblob changes only the RK3399's
+# CDN DP firmware loader, and it touches nothing under hantro, panfrost or analogix. The
+# `rk3288-fixes` series applies to it unchanged. So the
 # reasoning that backs asus-c201/mainline-forky's claim carries over intact, and this
 # recipe stands exactly where that one does: `expected` until an image built from this
 # pin boots. The radio being dead is by construction, not a defect, and is not what the

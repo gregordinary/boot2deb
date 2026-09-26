@@ -25,20 +25,28 @@ image_size = "3G"
 sudo       = "password"
 
 # The kernel's GPU fix and the u-boot chain are hardware-validated on this board,
-# and Panfrost + Mesa render first-party at 4K. The decode and RGA paths in this
-# recipe are not yet exercised on hardware, so the recipe as a whole is
-# `experimental` until an image built from it decodes and binds RGA on the box.
+# and Panfrost + Mesa render first-party at 4K.
 #
 # What the move from v7.1.7 to the v7.2 generation changes on this SoC's paths. The pin
-# is v7.2.3, the current stable point release; no 7.2.y point release so far touches a
-# Rockchip driver, a device tree or a defconfig.
+# is v7.2.8, the current stable point release. No 7.2.y point release touches an RK3576
+# device tree or a defconfig, but 7.2.4, 7.2.5 and 7.2.7 do reach the drivers this recipe
+# builds: `drivers/accel/rocket` gains the job-push, task-array, domain-reference and
+# run-path error handling this board's NPU series used to carry, so four of those
+# patches retire and four more are rebased onto the kernel's own error paths; and the
+# V4L2 core bounds the HEVC tile counts the VDPU383 reads, so the SoC's fix series
+# carries no patch for it.
 #
 # The aic8800 module follows radxa's `main`, whose tip splits the firmware path into a
 # compiled-in root and a per-chip subdirectory; `kmods/aic8800.toml` takes both halves,
 # so the driver still requests its firmware from `aic8800_fw/SDIO/aic8800D80`.
 #
-# The `rk3576-fixes` series crosses unchanged -- all six patches read the same on both
-# generations, so nothing in it was rebased. `rockchip-iommu` clears the AUTO_GATING
+# Nothing in the `rk3576-fixes` series is specific to the generation: rk3576/100-104
+# read the same on 7.1.7 and 7.2, and the other five are written against 7.2. Two of
+# them answer a point release. media-accel/083 makes the `delta_idx_minus1` guard 7.2.5
+# adds return `-EINVAL`, a bound its own validation already enforces. rk3576/109 applies
+# over 7.2.5's `platform_get_irq()` check in the probe.
+#
+# `rockchip-iommu` clears the AUTO_GATING
 # fetch-DTE time limit, which upstream reports as the cause of RGA3 hangs and of the
 # vendor kernel's VOP black screens; every accelerator here maps through that IOMMU.
 # `rkvdec` moves its H.264 and HEVC backends off local bitfield structs onto a shared
@@ -59,12 +67,25 @@ sudo       = "password"
 # driver these cores map through. And `rkvdec`'s bitwriter move is on the decode path
 # this recipe exists to exercise.
 #
-# The board evidence behind this recipe was taken on the v7.1.6 pin, not this one: an
-# image from that build boots to a login and brings up the GPU, NPU core 0, HDMI,
-# Wi-Fi, Bluetooth and both USB controllers, and it is where usb_drd0's SuperSpeed is
-# measured -- 5 Gbps, ~154 MB/s over 92 GB of continuous reads, no link error. What
-# keeps the claim `experimental` is the decode and RGA paths alone, which no pin has
-# exercised.
+# What the claim rests on. An image built from this recipe boots on the board and every
+# path the recipe exists to provide is exercised there: `boot2deb-selftest` passes all
+# twenty of its hardware checks; decode is bit-exact against this same ffmpeg's software
+# decoder, frame by frame across 300-frame clips, for H.264 Baseline and High and HEVC
+# Main at 1080p, H.264 High and HEVC Main at 4K, and the 10-bit H.264 High 10 and HEVC
+# Main 10 profiles whose frames leave the decoder as `NV15`; 4K HEVC decodes at 136 fps
+# for a third of one core, and four concurrent 4K30 streams hold real time; RGA converts
+# colour and downscales exactly over DMA-BUF imports, with no IOMMU fault over 600 jobs;
+# Panfrost opens a GLES 3.1 context that rasterises, and the Vulkan filters and the
+# libplacebo renderer both run on panvk.
+#
+# The claim is `expected` rather than `validated` because the lock has moved since that
+# image: it booted kernel v7.2.3 with patches `daa40ed`, and the pins here are v7.2.8
+# with patches `ec8acfd`. The kernel bump retires four of the NPU patches that image
+# carried, which 7.2.4 now supplies itself, and rebases four more onto its error paths.
+# In the media path one thing moved: the HEVC tile-count bound that image took from the
+# series now comes from the kernel, which leaves the decode of a conforming stream as it
+# was. None of the exercised paths above has a reason to change; the claim returns to
+# `validated` when an image at these pins boots the board.
 [support]
-status = "experimental"
-date   = "2026-08-21"
+status = "expected"
+date   = "2026-09-14"

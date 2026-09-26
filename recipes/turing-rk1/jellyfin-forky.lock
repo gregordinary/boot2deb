@@ -4,14 +4,14 @@
 [kernel]
 id = "rk3588-mainline-7.2"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.2.3"
-commit = "58e7295cfecaddec94629160386412e0f2b1e8fe"
+ref = "v7.2.8"
+commit = "9a66fdc0d7fd55f54235524a73435af99051e46f"
 
 [patches]
 series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "314b1b34b561e0b7f92a9893798eda3f3a8abf16"
+commit = "ec8acfdcdb2a50359abfe7f3023168e539fb97fa"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,7 +22,7 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["turing-rk1-recovery"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "314b1b34b561e0b7f92a9893798eda3f3a8abf16"
+commit = "ec8acfdcdb2a50359abfe7f3023168e539fb97fa"
 
 [[userspace]]
 name = "mpp"

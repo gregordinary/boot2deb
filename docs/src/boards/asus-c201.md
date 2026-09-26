@@ -111,7 +111,8 @@ when you need a kernel change, and stay on `asus-c201/forky` when you do not.
 comes from the [GNU Linux-libre](https://www.fsfla.org/ikiwiki/selibre/linux-libre/)
 tree instead of `linux-stable`. Same 7.2 release, same `multi_v7_defconfig` base, same
 fragments, same `rk3288-fixes` series. The source is deblobbed, and nothing else
-differs. The two locks are worth a diff, and the kernel's three lines are all of it.
+differs. The two locks are worth a diff. Apart from the manifest's file name, which each
+recipe names after itself, only the kernel table's four lines differ.
 
 ```sh
 boot2deb build asus-c201/libre-forky              # stock firmware, or libreboot
@@ -403,7 +404,7 @@ kernel and the `rk3288-fixes` patch are therefore both proven on silicon. A late
 of it also booted from USB and **installed cleanly to internal eMMC**. That exercises the
 whole image path rather than just the boot.
 
-That was `v7.1.3`. The recipe now pins `v7.2.3`, which is why its claim reads `expected`
+That was `v7.1.3`. The recipe now pins `v7.2.8`, which is why its claim reads `expected`
 rather than `validated`. That kernel has not been on the board.
 
 ### What the first minutes look like

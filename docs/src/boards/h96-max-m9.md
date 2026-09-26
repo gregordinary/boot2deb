@@ -16,7 +16,7 @@ having a bootloader that can recover the board without a cable. That is what the
 | Recipe | Deliverable | Status |
 | --- | --- | --- |
 | `h96-max-m9/forky` | Whole-disk Debian image (forky) | expected — the board has booted this configuration, but not at this pin |
-| `h96-max-m9/media-accel` | The same image plus HW video decode and the RGA 2D accelerator | experimental |
+| `h96-max-m9/media-accel` | The same image plus HW video decode and the RGA 2D accelerator | expected — every path is exercised on the board, but not at this pin |
 | `h96-max-m9/util` | u-boot only — the recovery tool, with this board's ethernet | builds, and its ethernet is validated |
 
 The base image carries the NPU — see [The NPU](#the-npu) below.

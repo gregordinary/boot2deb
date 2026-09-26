@@ -26,15 +26,21 @@ image_size = "2G"
 # A device that lands at 480 Mb/s there is a seating problem — see the `.dts`.
 #
 # What the move from v7.1.7 to the v7.2 generation changes on this SoC's paths. The pin
-# is v7.2.3, the current stable point release; no 7.2.y point release so far touches a
-# Rockchip driver, a device tree or a defconfig.
+# is v7.2.8, the current stable point release. No 7.2.y point release touches an RK3576
+# device tree or a defconfig. 7.2.4, 7.2.5 and 7.2.7 do reach the NPU and decoder drivers
+# this recipe's patch series modifies, as `h96-max-m9/media-accel` describes.
 #
 # The aic8800 module follows radxa's `main`, whose tip splits the firmware path into a
 # compiled-in root and a per-chip subdirectory; `kmods/aic8800.toml` takes both halves,
 # so the driver still requests its firmware from `aic8800_fw/SDIO/aic8800D80`.
 #
-# The `rk3576-fixes` series crosses unchanged -- all six patches read the same on both
-# generations, so nothing in it was rebased. `rockchip-iommu` clears the AUTO_GATING
+# Nothing in the `rk3576-fixes` series is specific to the generation: rk3576/100-104
+# read the same on 7.1.7 and 7.2, and the other five are written against 7.2. Two of
+# them answer a point release. media-accel/083 makes the `delta_idx_minus1` guard 7.2.5
+# adds return `-EINVAL`, a bound its own validation already enforces. rk3576/109 applies
+# over 7.2.5's `platform_get_irq()` check in the probe.
+#
+# `rockchip-iommu` clears the AUTO_GATING
 # fetch-DTE time limit, which upstream reports as the cause of RGA3 hangs and of the
 # vendor kernel's VOP black screens; every accelerator here maps through that IOMMU.
 # `rkvdec` moves its H.264 and HEVC backends off local bitfield structs onto a shared
