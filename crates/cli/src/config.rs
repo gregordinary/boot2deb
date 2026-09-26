@@ -1180,6 +1180,43 @@ mod tests {
     }
 
     #[test]
+    fn every_veyron_initramfs_leaves_the_hardware_database_out() {
+        // Silent the other way round: a hook that is never collected, or that lands
+        // without its execute bit (mkinitramfs skips those without a word), costs
+        // nothing at build time and puts udev's hardware database back into the signed
+        // payload, about 1.7 MB of the stock 16 MiB ceiling.
+        use std::os::unix::fs::PermissionsExt;
+        let root = ConfigRoot::new(repo_root_path());
+        let family = root
+            .find_asset("socs/rk3288/overlay-pre")
+            .expect("the SoC layer ships a pre-install tree");
+        let hook = family.join("etc/initramfs-tools/hooks/boot2deb-drop-hwdb");
+        let mode = std::fs::metadata(&hook)
+            .expect("the hook is a real file")
+            .permissions()
+            .mode();
+        assert!(mode & 0o111 != 0, "{hook:?} is not executable ({mode:o})");
+        let body = std::fs::read_to_string(&hook).unwrap();
+        assert!(
+            body.contains(r#"rm -f "${DESTDIR}/usr/lib/udev/hwdb.bin""#),
+            "{hook:?} no longer removes the database from the initramfs tree"
+        );
+
+        for device in [
+            "asus-c201",
+            "asus-c201-libreboot",
+            "asus-c100p",
+            "asus-chromebit-cs10",
+        ] {
+            let b = resolve_device(&root, device, &Overrides::default()).unwrap();
+            assert!(
+                overlay_dirs(&root, &b, OverlayStage::PreInstall).contains(&family),
+                "{device} does not collect the RK3288 pre-install tree"
+            );
+        }
+    }
+
+    #[test]
     fn a_libre_build_lays_in_no_vendored_blob() {
         // The failure this guards is the one that matters most on this axis and is the
         // least visible: an image advertised as free that quietly carries two Broadcom

@@ -113,8 +113,11 @@ from, and the board keeps booting. The change that triggered the rebuild has not
 reached the slot, and nothing will until the payload fits again.
 
 The payload is kernel + device tree + initramfs, and the part that grows is the
-initramfs. Under the stock ceiling the image ships it deliberately small — an explicit
-module list (`MODULES=list`) and xz compression, which leaves about 2 MB of headroom. A
+initramfs. Under the stock ceiling the image ships it deliberately small: an explicit
+module list (`MODULES=list`), xz compression, and no copy of udev's hardware database.
+Debian's udev hook would otherwise add that database at 1.7 MB. On the C201 this leaves
+about 3.6 MiB of headroom.
+
 A board with a roomier firmware buffer spends that margin instead. `boot2deb resolve`
 shows which compressor a build gets on its `initramfs` line. A board at `COMPRESS=zstd`
 has slot to spare and is unlikely to meet this failure at all.

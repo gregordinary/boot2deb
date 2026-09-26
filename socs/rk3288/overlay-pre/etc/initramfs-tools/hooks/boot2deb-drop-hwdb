@@ -1,0 +1,31 @@
+#!/bin/sh
+# Leave udev's compiled hardware database out of the Veyron initramfs.
+#
+# Debian's udev hook copies /usr/lib/udev/hwdb.bin into every initramfs it builds, and
+# on these boards it is the largest file there: 13.7 MB unpacked, 1.7 MB after xz. The
+# initramfs travels inside the signed kernel payload, which the stock firmware caps at
+# 16 MiB, so that is 1.7 MB taken from the budget the kernel and initramfs share.
+#
+# Nothing in this initramfs needs it. The rules that consult hwdb here attach vendor
+# and model names to USB, HID, PCI and network devices. None of them takes part in
+# finding or mounting the root filesystem, and a Veyron initramfs brings up no network.
+# Once the real root is mounted, udev processes every device again against the full
+# database installed there, so the names are still set, only later in boot.
+#
+# A local hook: mkinitramfs runs /etc/initramfs-tools/hooks after every packaged hook,
+# so the file udev's hook copied is already in place when this runs. It stays on the
+# installed system, and an on-device kernel upgrade builds the same initramfs.
+PREREQ=""
+
+prereqs() {
+    echo "$PREREQ"
+}
+
+case "$1" in
+prereqs)
+    prereqs
+    exit 0
+    ;;
+esac
+
+rm -f "${DESTDIR}/usr/lib/udev/hwdb.bin"

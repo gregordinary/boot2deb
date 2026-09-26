@@ -81,13 +81,14 @@ hid-generic
 
 # NO DISPLAY STACK on a 16 MiB board -- a headroom policy, not a size limit.
 #
-# The DRM stack (rockchipdrm + analogix_dp + panel + backlight) compresses to
-# only ~575 KB of xz and fits under even the stock 16 MiB ceiling, but the forky
-# payload already sits above 90% with it included, and kernels grow at every
-# Debian update. A board at that ceiling therefore leaves it out and accepts a
-# console that appears only after the real root mounts. A board whose firmware
-# buffers 32 MiB has the headroom, and carries it as its own modules.d drop-in
-# beside this one -- see devices/asus-c201-libreboot/.
+# The DRM stack (rockchipdrm + analogix_dp + panel + backlight, with the DRM
+# helpers they pull in) is 15 modules and about 490 KB of the initramfs. It fits
+# under even the stock 16 MiB ceiling, but the kernel and the initramfs both grow
+# from release to release, and the headroom is what absorbs that growth. A board
+# at that ceiling therefore leaves the stack out and accepts a console that
+# appears only after the real root mounts. A board whose firmware buffers 32 MiB
+# has headroom to spend, and carries the stack as its own modules.d drop-in beside
+# this one -- see devices/asus-c201-libreboot/.
 #
 # Because an initramfs failure is invisible on a board without the display stack,
 # three things back this list up: the rootfs stage asserts every module here
