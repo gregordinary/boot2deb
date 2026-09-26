@@ -34,12 +34,12 @@
 # `+vulkan` when its operator wants the command line too.
 #
 # The gate below is `requires_arch`, not `requires_soc`, but the *default* is scoped to
-# RK3588 by the recipes rather than by this file, because conformance is per-GPU: PanVk
-# is conformant on the RK3588's Mali-G610 and is not on the RK3576's Mali-G52. Widening
-# the gate to arm64 as a default would hand the RK3576 boards 305 MiB they cannot use
-# conformantly.
+# RK3588 by the recipes rather than by this file, because Vulkan support is per-GPU:
+# PanVk is conformant on the RK3588's Mali-G610 and declines the RK3576's Mali-G52
+# unless forced. Widening the gate to arm64 as a default would hand the RK3576 boards
+# 305 MiB whose only working Vulkan device is the software one.
 #
-# `mesa-vulkan-drivers` supplies PanVk for the Mali in these SoCs. It also supplies
+# `mesa-vulkan-drivers` supplies PanVk for the RK3588's Mali-G610. It also supplies
 # `lvp` (llvmpipe), a software Vulkan device that enumerates alongside PanVk — pin the
 # device explicitly in anything that measures, or a run can silently succeed on the
 # CPU while appearing to use the GPU.
@@ -54,14 +54,14 @@
 description  = "Vulkan GPU userspace (Mesa ICDs + loader) for the GPU filter path"
 packages     = ["mesa-vulkan-drivers", "libvulkan1", "vulkan-tools"]
 
-# arm64 only. PanVk targets Valhall and Bifrost; the armv7 boards here are RK3288
-# with a Midgard T760, which panfrost drives for GL and PanVk does not drive at all,
-# so the 147 MB would buy that board nothing but llvmpipe.
+# arm64 only. PanVk drives Valhall, and Bifrost only when forced; the armv7 boards
+# here are RK3288 with a Midgard T760, which panfrost drives for GL and PanVk does not
+# drive at all, so the 147 MB would buy that board nothing but llvmpipe.
 requires_arch = ["arm64"]
 
 caveats = [
   "This feature adds 25 packages and roughly 305 MiB to the installed system, measured against the RK3588 media-accel package set on forky. Two thirds of it is not the driver. `mesa-vulkan-drivers` is 144 MiB, and it depends on `libllvm21` (127 MiB) and through it `libz3-4` (25 MiB). Those two are there for the `lvp` software rasterizer Debian ships in the same package, rather than for PanVk.",
   "Debian offers no per-driver package. `mesa-vulkan-drivers` carries the AMD, Intel, NVIDIA, virtio and software back ends as well as the Mali one this hardware uses. An image that wants PanVk therefore takes all of them and the LLVM they imply.",
-  "Vulkan conformance is a per-GPU fact, not a per-feature one. PanVk is conformant on the RK3588's Mali-G610 and is not conformant on the RK3576's Mali-G52. The same package installs on both, and only the first carries a conformance claim.",
+  "Vulkan support is a per-GPU fact, not a per-feature one. PanVk is conformant on the RK3588's Mali-G610. On the RK3576's Mali-G52 it declines the device unless `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER` is set. With it set, Mesa 26.1 and 26.2 compute wrong chroma in ffmpeg's Vulkan filters. The same package installs on both, and on the RK3576 its only working device is `lvp`.",
   "A software Vulkan device (`lvp`, llvmpipe) enumerates alongside the hardware one. Anything that leaves device selection to the default can bind it and run GPU work on the CPU. That is slower than not using this feature at all, and it does not announce itself.",
 ]

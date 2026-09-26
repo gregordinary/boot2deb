@@ -8,9 +8,9 @@
 # VDPU383, and the out-of-tree RGA driver with librga2. Decode is the kernel's own
 # stateless V4L2 path -- no vendor MPP is involved, and none exists for this SoC.
 #
-# Encode is software: mainline has no RK3576 encoder driver. Scaling is CPU or GPU,
-# because the rkrga ffmpeg filters require MPP. See features/media-accel-v4l2.toml
-# for the full capability statement.
+# Encode is software: mainline has no RK3576 encoder driver. Scaling is on the CPU,
+# because the rkrga ffmpeg filters require MPP and this GPU has no Vulkan driver. See
+# features/media-accel-v4l2.toml for the full capability statement.
 device     = "h96-max-m9"
 kernel     = "rk3576-mainline-7.2"
 uboot_series = "rk3576-display"
@@ -75,8 +75,9 @@ sudo       = "password"
 # Main 10 profiles whose frames leave the decoder as `NV15`; 4K HEVC decodes at 136 fps
 # for a third of one core, and four concurrent 4K30 streams hold real time; RGA converts
 # colour and downscales exactly over DMA-BUF imports, with no IOMMU fault over 600 jobs;
-# Panfrost opens a GLES 3.1 context that rasterises, and the Vulkan filters and the
-# libplacebo renderer both run on panvk.
+# and Panfrost opens a GLES 3.1 context that rasterises. That image also carried
+# `mesa-vulkan-drivers`, which this recipe does not. On this GPU it provided only the
+# software `lvp` device, and none of the paths above used it.
 #
 # The claim is `expected` rather than `validated` because the lock has moved since that
 # image: it booted kernel v7.2.3 with patches `daa40ed`, and the pins here are v7.2.8

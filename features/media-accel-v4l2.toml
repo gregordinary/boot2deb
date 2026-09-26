@@ -20,16 +20,19 @@
 # driver it has no consumer for.
 description  = "HW video decode via V4L2 stateless (VDPU383) + RGA 2D, for RK3576"
 #
-# `mesa-vulkan-drivers` is panvk, the Vulkan driver for this SoC's Mali-G52. The
-# FFmpeg this feature builds is configured `--enable-vulkan --enable-libplacebo`,
-# so without an installed ICD its Vulkan filters and its libplacebo renderer fail
-# at device creation — a binary advertising what it cannot do. `libegl1` and
-# `libgles2` are the EGL and GLES loaders: Mesa ships the panfrost backend and the
-# `libEGL_mesa` implementation underneath them, but a program links the loader, so
-# without the pair nothing can open a context on a bound and clocked GPU. All three
-# are here rather than on the SoC layer because they serve this feature's media
-# paths, and a board that asked for no media capability has no consumer for them.
-packages     = ["ffmpeg-rk", "librga2", "mesa-vulkan-drivers", "libegl1", "libgles2"]
+# `libegl1` and `libgles2` are the EGL and GLES loaders. Mesa ships the panfrost
+# backend and the `libEGL_mesa` implementation underneath them, but a program links
+# the loader, so without the pair nothing can open a context on a bound and clocked
+# GPU. They are here rather than on the SoC layer because they serve this feature's
+# media paths, and a board that asked for no media capability has no consumer for them.
+#
+# No Vulkan driver is installed. The FFmpeg this feature builds is configured
+# `--enable-vulkan --enable-libplacebo`, but Mesa's PanVk declines this SoC's Mali-G52
+# unless forced, and forced it computes wrong chroma. `mesa-vulkan-drivers` would add
+# only `lvp`, a software device that runs the Vulkan filters on the CPU more slowly
+# than swscale, under a name that reads as a GPU path. Without a driver those filters
+# fail at device creation and say so.
+packages     = ["ffmpeg-rk", "librga2", "libegl1", "libgles2"]
 requires_soc = ["rk3576"]
 
 # Builds from the SoC's `[userspace]`/`[ffmpeg]` source trees rather than the Debian
@@ -58,10 +61,11 @@ provides = ["ffmpeg"]
 
 # Limits of the capability itself, inherited by every recipe that composes it.
 caveats = [
-  "10-bit content decodes to `NV15`, packed 10-bit 4:2:0. The decoder cannot be asked for `P010` instead, because the hardware writes `NV15` natively. ffmpeg here carries the `NV15` format patches, so a 10-bit frame reaches `hwdownload` and the software filters. What that costs is a CPU conversion, because no filter in this build reads `NV15` directly. Vulkan has no such format and Mesa cannot import it, so a Vulkan or libplacebo graph is 8-bit only.",
+  "10-bit content decodes to `NV15`, packed 10-bit 4:2:0. The decoder cannot be asked for `P010` instead, because the hardware writes `NV15` natively. ffmpeg here carries the `NV15` format patches, so a 10-bit frame reaches `hwdownload` and the software filters. What that costs is a CPU conversion, because no filter in this build reads `NV15` directly.",
   "The zero-copy route for 10-bit is the display, not a filter. The display controller scans `NV15` out unconverted. A player that hands the decoder's DMA-BUF straight to a KMS plane therefore plays 10-bit unconverted. RGA is no 10-bit route either. It takes `NV15` in but writes no 10-bit format out: this SoC has RGA2 cores only, and `P010` output is an RGA3 capability.",
   "Nothing packaged by Debian can use this decoder. `ffmpeg-rk` installs to `/opt`, so it coexists with the system FFmpeg. Debian's own libavcodec is built without `--enable-v4l2-request`. It carries no `h264_v4l2request` or `hevc_v4l2request` hwaccel at all. mpv, Kodi and VLC from the archive link that libavcodec, so they decode in software. Reaching the hardware from a player means building the player against this FFmpeg.",
-  "ffmpeg has no RGA filters here. `scale_rkrga` and `vpp_rkrga` need `--enable-rkmpp`, and MPP needs the vendor `mpp_service` kernel framework that mainline does not have. ffmpeg scales on CPU or GPU. RGA is reached through librga by a program that speaks its API.",
+  "ffmpeg has no RGA filters here. `scale_rkrga` and `vpp_rkrga` need `--enable-rkmpp`, and MPP needs the vendor `mpp_service` kernel framework that mainline does not have. ffmpeg scales on the CPU. RGA is reached through librga by a program that speaks its API.",
+  "This GPU has no Vulkan driver. Mesa's PanVk declines the Mali-G52 unless `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER` is set. With it set, Mesa 26.1 and 26.2 compute wrong chroma in ffmpeg's Vulkan filters. The image therefore installs none, and `scale_vulkan`, `libplacebo` and the other Vulkan filters fail at device creation. Installing `mesa-vulkan-drivers` adds only `lvp`, the llvmpipe software device, which runs those filters on the CPU more slowly than swscale. OpenGL ES is unaffected: Panfrost drives GLES 3.1 on this GPU.",
   "RGA color conversion covers BT.601 limited and full range and BT.709, but not BT.2020.",
   "Pass RGA its buffers as DMA-BUF file descriptors (`importbuffer_fd`). librga's virtual-address import builds an IOMMU mapping per call over ordinary process memory. That faults the RGA IOMMU on roughly a third of jobs. The job then times out after a second, the core is soft-reset, and the destination is left untouched. The same operations over DMA-BUF run clean and about seven times faster.",
 ]

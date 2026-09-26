@@ -138,7 +138,7 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | HW video decode, 10-bit | works — Main 10 and High 10 land as `NV15` and unpack on the CPU, bit-exact. See below |
 | HW video encode | no mainline driver |
 | RGA 2D accelerator | works — both RGA2 cores, over DMA-BUF only. See below |
-| GPU compute and Vulkan | works — a GLES 3.1 context on Panfrost, and ffmpeg's Vulkan filters and libplacebo on panvk |
+| Vulkan | none — Mesa's PanVk does not drive this GPU. See below |
 | SD card | absent — the slot is depopulated |
 | USB 3.0 SuperSpeed | works on the blue port — 5 Gbps sustained over 92 GB with no link error. The black ports cannot, see below |
 
@@ -220,8 +220,8 @@ have, so the hardware path ends up *slower* than no hardware path. With
 `-hwaccel_output_format drm_prime` the decoded frames stay in DMA-BUF handles, and 4K
 HEVC runs at real time for about 1/130th of the CPU.
 
-So anything that consumes the output has to speak DMA-BUF — a KMS plane, a GL or Vulkan
-importer, or librga. A filter chain that cannot takes the download and the loss with it.
+So anything that consumes the output has to speak DMA-BUF — a KMS plane, a GL importer,
+or librga. A filter chain that cannot takes the download and the loss with it.
 
 What the decoder is worth, over 300-frame clips on the shipped image:
 
@@ -270,8 +270,8 @@ of any build for this board, and appears in the
 
 Both RGA2 cores work, and `librga2` is installed for programs that speak its API.
 ffmpeg is not one of them here. `scale_rkrga` and `vpp_rkrga` need MPP, which needs a
-vendor kernel framework mainline does not have. This ffmpeg therefore scales on CPU or
-GPU, and RGA is reached directly.
+vendor kernel framework mainline does not have. This ffmpeg therefore scales on the CPU,
+and RGA is reached directly.
 
 **Import buffers with `importbuffer_fd`, never `wrapbuffer_virtualaddr`.** The
 virtual-address path builds an IOMMU mapping per call over ordinary process memory, and
@@ -306,8 +306,7 @@ decoder, frame by frame. A plain `-hwaccel v4l2request` transcode of 10-bit cont
 works, and 4K Main 10 decodes at about 134 fps for under half a core.
 
 What it costs is that CPU unpack, because no filter in this build reads `NV15` directly.
-Vulkan has no packed 10-bit 4:2:0 format at all, so a `scale_vulkan` or `libplacebo`
-graph is 8-bit only. Tone mapping a 10-bit source means unpacking first.
+Tone mapping a 10-bit source means unpacking first.
 
 RGA does not close the gap. This SoC has RGA2 cores only, which take `NV15` in but write
 no 10-bit format out. `P010` output is an RGA3 capability, and there is no RGA3 here. A
@@ -322,6 +321,22 @@ The one route with no conversion at all is the display. The controller scans `NV
 unconverted, so a player that hands the decoder's DMA-BUF straight to a KMS plane plays
 10-bit with nothing in between. The CPU unpack above is the price of *filtering* or
 transcoding, not of playback.
+
+### Vulkan: none on this GPU
+
+The image carries no Vulkan driver. Mesa's PanVk declines the Mali-G52 unless
+`PAN_I_WANT_A_BROKEN_VULKAN_DRIVER` is set. With it set, on Mesa 26.1.6 and 26.2.2, every
+ffmpeg Vulkan filter measured computes the chroma planes wrong. `libplacebo` refuses the
+device outright, since PanVk offers Vulkan 1.0 on this GPU and libplacebo needs 1.2.
+
+The one device Debian's `mesa-vulkan-drivers` would add is `lvp`, the llvmpipe software
+rasterizer. It runs the Vulkan filters on the CPU, and more slowly than the CPU filters
+themselves. Decoding 300 frames of 1080p HEVC in hardware and scaling them to 720p costs
+28.6 CPU-seconds with `scale_vulkan` on `lvp`, against 10.5 with swscale.
+
+So ffmpeg's Vulkan filters and `libplacebo` fail here at device creation. Scaling and
+filtering run on the CPU, and RGA is reached through librga. OpenGL ES is unaffected:
+Panfrost drives GLES 3.1 on this GPU, as the status table says.
 
 ## HDMI-CEC
 
