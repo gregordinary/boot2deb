@@ -22,6 +22,17 @@ carries. What you hand the flasher is what the build made.
 `--dry-run` prints what would be pressed, including the medium size the image
 needs, without writing anything.
 
+Beside each output that carries a rootfs, `press` writes its
+[file manifest](reference/reproducibility.md#the-rootfs-file-manifest), named
+for the output: `card.img` gets `card.rootfs.uapi16`. A plain press copies the
+build's, since the rootfs is the build's to the byte. A press with additions
+formats a new rootfs, so it writes a manifest of that one. Seed keys land in
+the seed partition, outside the rootfs, and leave the manifest true.
+
+A press never writes over the build's own artifacts. An output named for the
+build's image, or for a compressed copy of it, is refused before anything is
+written.
+
 ## Flashing the pressed file
 
 boot2deb does not write devices. The pressed image is an ordinary raw disk

@@ -1,13 +1,14 @@
-//! The two UTC timestamp spellings this project writes, and the calendar
-//! conversion behind both.
+//! The three UTC timestamp spellings this project writes, and the calendar
+//! conversion behind all of them.
 //!
 //! Pure: the caller reads the clock and passes whole Unix seconds, so the civil-date
 //! conversion is unit-testable and nothing here is a source of nondeterminism.
 //!
-//! There are two spellings because two external formats demand different ones.
-//! `snapshot.debian.org` wants `YYYYMMDDTHHMMSSZ`, and SPDX and CycloneDX want
-//! RFC 3339. One calendar conversion, because a second copy of it is the kind of
-//! code that is wrong for four years without anyone noticing.
+//! There are three spellings because three external formats demand different ones.
+//! `snapshot.debian.org` wants `YYYYMMDDTHHMMSSZ`, SPDX and CycloneDX want RFC 3339,
+//! and kbuild's `KBUILD_BUILD_TIMESTAMP` wants what `date` prints. One calendar
+//! conversion, because a second copy of it is the kind of code that is wrong for four
+//! years without anyone noticing.
 
 /// Format whole Unix seconds as a `snapshot.debian.org` timestamp,
 /// `YYYYMMDDTHHMMSSZ` in UTC — the spelling a snapshot mirror URL takes.
@@ -31,6 +32,29 @@ pub fn format_compact(unix_secs: u64) -> String {
 pub fn format_rfc3339(unix_secs: u64) -> String {
     let (y, mo, d, h, m, s) = parts(unix_secs);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// Format whole Unix seconds the way `date` prints them in the C locale and UTC,
+/// `Www Mmm dd HH:MM:SS UTC YYYY` with a space-padded day.
+///
+/// It is the spelling kbuild's `KBUILD_BUILD_TIMESTAMP` takes. Kbuild parses the value
+/// with `date -d`, and also copies it verbatim into the kernel's version string. So it is
+/// what `uname -v` shows on the booted board.
+///
+/// ```
+/// use boot2deb_core::datetime::format_date_c;
+/// assert_eq!(format_date_c(0), "Thu Jan  1 00:00:00 UTC 1970");
+/// ```
+pub fn format_date_c(unix_secs: u64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (y, mo, d, h, m, s) = parts(unix_secs);
+    // 1970-01-01 was a Thursday, which is why the table starts there.
+    let weekday = WEEKDAYS[((unix_secs / 86_400) % 7) as usize];
+    let month = MONTHS[(mo - 1) as usize];
+    format!("{weekday} {month} {d:>2} {h:02}:{m:02}:{s:02} UTC {y}")
 }
 
 /// Split whole Unix seconds into UTC `(year, month, day, hour, minute, second)`.
@@ -70,6 +94,20 @@ mod tests {
             let compact = format_compact(secs);
             let rfc = format_rfc3339(secs);
             assert_eq!(compact.replace(['-', ':'], ""), rfc.replace(['-', ':'], ""));
+        }
+    }
+
+    /// Reference strings from GNU `date -d @<secs>` under `LC_ALL=C TZ=UTC`, which is
+    /// the parser kbuild hands the value to. A single-digit day is space-padded.
+    #[test]
+    fn the_date_spelling_matches_gnu_date() {
+        for (secs, want) in [
+            (0, "Thu Jan  1 00:00:00 UTC 1970"),
+            (1_790_347_034, "Fri Sep 25 14:37:14 UTC 2026"),
+            (951_782_400, "Tue Feb 29 00:00:00 UTC 2000"),
+            (1_767_225_600, "Thu Jan  1 00:00:00 UTC 2026"),
+        ] {
+            assert_eq!(format_date_c(secs), want);
         }
     }
 

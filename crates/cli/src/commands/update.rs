@@ -210,8 +210,18 @@ pub(crate) fn run(
         blobs_dir: &blobs_dir,
         patches_path: &patches_path,
         rootfs_manifest: &manifest,
+        source_date_epoch: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("the system clock reads before 1970: {e}"))?
+            .as_secs(),
     };
-    let lock = pins::resolve_lock(&build, &opts)?;
+    let mut lock = pins::resolve_lock(&build, &opts)?;
+    // The rootfs epoch is this update's time only when a pin moved. An update that
+    // re-resolves to the same pins keeps the epoch it had, so it neither changes the
+    // times a rebuild stamps nor invalidates the rootfs cache.
+    if let Some(prev) = &prev {
+        lock.carry_source_date_epoch(prev);
+    }
     // Fetch + verify + store each pre-built extra_deb before committing the lock, so
     // a dead URL, a missing file, or a wrong hash fails now rather than at the next
     // build. Fills the durable content store `build` later reads.

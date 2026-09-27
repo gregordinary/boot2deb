@@ -87,7 +87,7 @@ pub const BUILD_DEPS: &[&str] = &[
 /// compile or package logic changes the produced `.deb`s in a way the folded inputs do
 /// not already capture — a changed `make` invocation, a `.config` generated under
 /// different toolchain variables, a different archive compressor.
-const OUTPUT_STAGE_VERSION: u32 = 4;
+const OUTPUT_STAGE_VERSION: u32 = 6;
 
 /// Filesystem inputs for the kernel stage. The lock and resolved build carry the
 /// pins and axes, and these are the on-disk locations.
@@ -142,26 +142,17 @@ pub fn tree_dir(work_dir: &Path) -> PathBuf {
     work_dir.join("linux")
 }
 
-/// The locked kernel commit's committer date as a `SOURCE_DATE_EPOCH` — the
-/// lock-derived deterministic build timestamp, read from the cloned tree under
-/// `work_dir`. The rootfs node reuses it so its tarball mtimes are stable across builds
-/// of one lock.
+/// The locked kernel commit's committer date as a `SOURCE_DATE_EPOCH`, read from the
+/// cloned tree under `work_dir`. It is the kernel's own epoch, which [`kbuild_env`]
+/// turns into the timestamps a kernel build writes. The interactive kernel shell reads it
+/// here so a command re-run by hand stamps what the stage stamped.
 ///
-/// `None` when there is no such date to read:
+/// `None` when there is no such date to read. The lock pins no kernel commit, or the
+/// tree is absent from this `work_dir`, or the commit object is unreadable.
 ///
-/// - The lock pins no kernel commit (a distro-package kernel is installed from the
-///   mirror, so no source tree exists)
-/// - The kernel tree is absent (a build that has not run the kernel stage in this
-///   `work_dir`)
-/// - The commit object is unreadable
-///
-/// The caller then proceeds without mtime clamping, and that build's tarball carries
-/// build-time mtimes.
-///
-/// That is a scoped loss, not a hole in the reproducibility claim. The guarantee is
-/// the *content pin*, every package by name, version, and sha256 in the solved
-/// manifest, and it is untouched. The ext4 filesystem is not byte-reproducible either,
-/// so the whole-image byte claim already waits on the Phase-F formatter.
+/// The rootfs takes its epoch from the lock instead
+/// ([`RootfsPin::source_date_epoch`](boot2deb_core::lock::RootfsPin::source_date_epoch)),
+/// because a rootfs build often has no kernel tree to read.
 pub fn source_date_epoch(work_dir: &Path, lock: &Lock) -> Option<u64> {
     let pin = lock.kernel.as_ref()?;
     crate::git::commit_epoch(&tree_dir(work_dir), &pin.commit).ok()
@@ -410,7 +401,7 @@ pub fn build_dtb(
         build.kernel_dtb.clone(),
     ];
     let epoch = crate::git::commit_epoch(&tree, &build::kernel_pin(lock)?.commit).ok();
-    let mut vars = kbuild_env(build, epoch);
+    let mut vars = kbuild_env(build, epoch, &[&tree]);
     vars.extend(cross_env(env));
     build::run_in_root(&cr, &tree, &argv, &vars, "make <board>.dtb", &step)?;
 
@@ -834,10 +825,48 @@ fn compile(
     // native build reads exactly the same database and hits the same unmet
     // `python3:native`. Gating on `cross_compile` would leave an arm64 host building an
     // arm64 board failing a check about packages its compile never opens.
-    argv.push("DPKG_FLAGS=-d".to_string());
-    let mut vars = kbuild_env(build, source_date_epoch);
+    if source_date_epoch.is_some() {
+        write_changelog_hook(tree.parent().expect("the kernel tree sits in its work dir"))?;
+    }
+    argv.push(format!("DPKG_FLAGS={}", dpkg_flags(source_date_epoch)));
+    let mut vars = kbuild_env(build, source_date_epoch, &[tree]);
     vars.extend(cross_env(env));
     build::run_in_root(cr, tree, &argv, &vars, "make bindeb-pkg", step)
+}
+
+/// The program that dates the generated `debian/changelog` from `SOURCE_DATE_EPOCH`.
+/// The kernel's `mkdebian` writes the wall clock into it and reads no variable, and
+/// every package the kernel builds ships the file.
+const CHANGELOG_DATE_HOOK: &str = include_str!("kernel-changelog-date.sh");
+
+/// Where [`compile`] writes [`CHANGELOG_DATE_HOOK`]: the work dir, beside the tree.
+const CHANGELOG_DATE_HOOK_NAME: &str = "boot2deb-changelog-date.sh";
+
+/// Write [`CHANGELOG_DATE_HOOK`] into `dir` as an executable, where [`dpkg_flags`]
+/// names it.
+fn write_changelog_hook(dir: &Path) -> Result<(), EngineError> {
+    use std::os::unix::fs::PermissionsExt;
+    let hook = dir.join(CHANGELOG_DATE_HOOK_NAME);
+    std::fs::write(&hook, CHANGELOG_DATE_HOOK).map_err(|s| EngineError::io(&hook, s))?;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+        .map_err(|s| EngineError::io(&hook, s))
+}
+
+/// The `DPKG_FLAGS` `make bindeb-pkg` hands `dpkg-buildpackage`.
+///
+/// `-d` skips the build-dependency check (see [`compile`]). With an epoch, the init hook
+/// runs [`CHANGELOG_DATE_HOOK`], after the changelog is generated and before any
+/// package installs it.
+///
+/// Every flag is one word. The kernel's makefile expands `DPKG_FLAGS` unquoted into a
+/// shell command, so a space would split a flag in two. The hook is therefore an
+/// executable run by its own path, relative to the tree `dpkg-buildpackage` runs in, and
+/// no host path passes through that word splitting.
+fn dpkg_flags(source_date_epoch: Option<u64>) -> String {
+    match source_date_epoch {
+        Some(_) => format!("-d --hook-init=../{CHANGELOG_DATE_HOOK_NAME}"),
+        None => "-d".to_string(),
+    }
 }
 
 /// Locate and stage the produced kernel `.deb`s from beside the tree.
@@ -871,7 +900,18 @@ fn localversion(build: &ResolvedBuild) -> String {
 /// mapping is testable. `CROSS_COMPILE` is added separately (it is a host/target
 /// fact, not a kbuild constant). Exposed so the out-of-tree module node builds its
 /// `make M=` against the same `ARCH`/`SOURCE_DATE_EPOCH` as the kernel it links into.
-pub fn kbuild_env(build: &ResolvedBuild, source_date_epoch: Option<u64>) -> Vec<(String, String)> {
+///
+/// `trees` are the absolute source trees the invocation compiles: the kernel tree, plus
+/// an out-of-tree module's own. Each is mapped to `.` in the debug information the
+/// compiler writes, through `KCFLAGS` and `KAFLAGS`. The linker's build ID is a hash
+/// that covers that debug information. With the work directory's absolute path in it,
+/// each work directory gives every module and the kernel image a build ID of its own.
+/// Nothing they execute differs.
+pub fn kbuild_env(
+    build: &ResolvedBuild,
+    source_date_epoch: Option<u64>,
+    trees: &[&Path],
+) -> Vec<(String, String)> {
     let mut env = vec![
         ("ARCH".to_string(), build.kernel_arch.clone()),
         ("KDEB_CHANGELOG_DIST".to_string(), "stable".to_string()),
@@ -896,6 +936,24 @@ pub fn kbuild_env(build: &ResolvedBuild, source_date_epoch: Option<u64>) -> Vec<
     ];
     if let Some(epoch) = source_date_epoch {
         env.push(("SOURCE_DATE_EPOCH".to_string(), epoch.to_string()));
+        // kbuild dates the version string (`uname -v`), the built-in initramfs and the
+        // `kheaders` archive from its own variable, and falls back to the wall clock
+        // without it. `SOURCE_DATE_EPOCH` alone reaches none of the three.
+        env.push((
+            "KBUILD_BUILD_TIMESTAMP".to_string(),
+            boot2deb_core::datetime::format_date_c(epoch),
+        ));
+    }
+    if !trees.is_empty() {
+        // One flag set for C and assembler alike: a `.S` file carries debug line
+        // information too, and the build ID covers it the same way.
+        let maps = trees
+            .iter()
+            .map(|tree| format!("-fdebug-prefix-map={}=.", tree.display()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        env.push(("KCFLAGS".to_string(), maps.clone()));
+        env.push(("KAFLAGS".to_string(), maps));
     }
     env
 }
@@ -956,6 +1014,7 @@ mod tests {
                 suite: "forky".into(),
                 manifest: "m".into(),
                 manifest_sha256: None,
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
                 atf: "a".into(),
@@ -1306,17 +1365,90 @@ mod tests {
         assert_eq!(localversion(&rk1_build()), "-1-arm64");
     }
 
+    /// Every compiled tree is mapped out of the debug information, for C and assembler
+    /// alike. The build ID hashes that information, so one unmapped absolute path makes
+    /// two builds of a lock in different directories disagree on every module.
+    #[test]
+    fn kbuild_env_maps_each_compiled_tree_out_of_the_debug_info() {
+        let env = kbuild_env(
+            &rk1_build(),
+            None,
+            &[Path::new("/work/linux"), Path::new("/work/kmod/aic8800")],
+        );
+        let want = "-fdebug-prefix-map=/work/linux=. -fdebug-prefix-map=/work/kmod/aic8800=.";
+        for var in ["KCFLAGS", "KAFLAGS"] {
+            assert!(
+                env.contains(&(var.to_string(), want.to_string())),
+                "{var}: {env:?}"
+            );
+        }
+    }
+
+    /// The hook, run the way `dpkg-buildpackage` runs it, rewrites exactly the date of a
+    /// `mkdebian`-shaped changelog, and fails on a changelog it cannot find a trailer in.
+    #[test]
+    fn the_changelog_hook_dates_the_generated_changelog_from_the_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("linux");
+        std::fs::create_dir_all(tree.join("debian")).unwrap();
+        write_changelog_hook(tmp.path()).unwrap();
+        // The shape the kernel's `mkdebian` writes, dated by the wall clock.
+        let generated = "linux-upstream (7.2.8-1) stable; urgency=low\n\n  \
+                         * Custom built Linux kernel.\n\n \
+                         -- boot2deb <boot2deb@boot2deb>  Sat, 26 Sep 2026 17:19:34 +0000\n";
+        std::fs::write(tree.join("debian/changelog"), generated).unwrap();
+        // `dpkg_flags` names the hook as the init hook runs it, in the tree. The makefile
+        // word-splits the flags, so the hook's flag must be one word.
+        let flags = dpkg_flags(Some(1_790_347_034));
+        let command = flags.strip_prefix("-d --hook-init=").unwrap();
+        assert!(!command.contains(char::is_whitespace), "{flags}");
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&tree)
+            .env("SOURCE_DATE_EPOCH", "1790347034")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let dated = std::fs::read_to_string(tree.join("debian/changelog")).unwrap();
+        assert_eq!(
+            dated,
+            generated.replace("Sat, 26 Sep 2026 17:19:34", "Fri, 25 Sep 2026 14:37:14")
+        );
+
+        // A trailer the hook cannot find fails the build rather than passing unchanged.
+        std::fs::write(tree.join("debian/changelog"), "no trailer\n").unwrap();
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&tree)
+            .env("SOURCE_DATE_EPOCH", "1790347034")
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        assert_eq!(dpkg_flags(None), "-d");
+    }
+
     #[test]
     fn kbuild_env_sets_arch_and_optional_epoch() {
         let build = rk1_build();
-        let env = kbuild_env(&build, Some(1_700_000_000));
+        let env = kbuild_env(&build, Some(1_700_000_000), &[Path::new("/work/linux")]);
         assert!(env.contains(&("ARCH".to_string(), "arm64".to_string())));
         assert!(env
             .iter()
             .any(|(k, v)| k == "SOURCE_DATE_EPOCH" && v == "1700000000"));
-        // No epoch → the var is simply absent.
-        let env = kbuild_env(&build, None);
+        // kbuild's own variable, in the `date` spelling it parses with `date -d`. Without
+        // it `uname -v` carries the wall clock of the compile.
+        assert!(env.contains(&(
+            "KBUILD_BUILD_TIMESTAMP".to_string(),
+            "Tue Nov 14 22:13:20 UTC 2023".to_string()
+        )));
+        // No epoch → neither var is set.
+        let env = kbuild_env(&build, None, &[]);
         assert!(!env.iter().any(|(k, _)| k == "SOURCE_DATE_EPOCH"));
+        assert!(!env.iter().any(|(k, _)| k == "KBUILD_BUILD_TIMESTAMP"));
+        // And with no tree named, no prefix map either.
+        assert!(!env.iter().any(|(k, _)| k == "KCFLAGS" || k == "KAFLAGS"));
         // CROSS_COMPILE is never in the kbuild env (added from BuildEnv).
         assert!(!env.iter().any(|(k, _)| k == "CROSS_COMPILE"));
     }
@@ -1331,7 +1463,7 @@ mod tests {
     /// a literal, so the kernel path cannot drift from the u-boot and kmod paths.
     #[test]
     fn the_kernel_debs_state_their_compressor() {
-        let env = kbuild_env(&rk1_build(), None);
+        let env = kbuild_env(&rk1_build(), None, &[]);
         assert_eq!(
             env.iter()
                 .find(|(k, _)| k == "KDEB_COMPRESS")

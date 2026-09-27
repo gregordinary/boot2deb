@@ -261,6 +261,10 @@ Artifacts land under the recipe's work dir, `build/turing-rk1/forky/artifacts/`:
   version and sha256, plus the state of each archive they came from. `boot2deb reproduce`
   replays it to rebuild this exact userland later. See
   [Reproducibility](reference/reproducibility.md).
+- **`turing-rk1-forky.rootfs.uapi16`** — every file the image's rootfs holds, with its
+  owner, mode and sha256. `boot2deb diff` compares two images through it, and
+  `boot2deb verify-image` checks the image against it. See
+  [the rootfs file manifest](reference/reproducibility.md#the-rootfs-file-manifest).
 
 Every artifact is named for the whole build point, device and recipe together
 (`turing-rk1/forky` → `turing-rk1-forky`). Several recipes can therefore share one

@@ -71,6 +71,13 @@ the pin. It also carries `single-kernel`, which restates nothing and belongs to
 no layer. That is a claim about how every boot2deb image is built, and only the
 build is in a position to make it.
 
+It carries one `initramfs-module` line per name in the board's
+[`[initramfs] modules`](config-model.md#the-modules-the-initramfs-must-carry) lists as
+well. The build already checked each against the initramfs it built. The line re-checks
+it on the device, where an on-device kernel upgrade regenerates the initramfs with no
+build watching. A layer that needs a module at early boot names it in that list, which
+is why the kind cannot be authored.
+
 Each line is one check: the kind, then its argument text to the end of the
 line. Blank lines and full-line `#` comments are skipped. There is no quoting
 and no escaping, and the build validates at config load that no argument needs
@@ -83,7 +90,7 @@ any.
 | `file` | the absolute path (globs allowed) matches something | `file /boot/initrd.img-*` |
 | `dtb` | the blob is installed in any layout the shipped kernels use | `dtb rockchip/rk3588-turing-rk1.dtb` |
 | `firmware` | the path exists under `/lib/firmware` (compressed spellings included) | `firmware arm/mali/arch10.8/mali_csffw.bin` |
-| `initramfs-module` | the module is built into the installed kernel **or** present in its initramfs | `initramfs-module dw_mmc-rockchip` |
+| `initramfs-module` | the module is built into the installed kernel **or** present in its initramfs (generated only, one per `[initramfs] modules` name) | `initramfs-module dw_mmc-rockchip` |
 | `driver-bound` | `/sys/bus/*/drivers/<driver>/<device>` exists | `driver-bound fb000000.gpu panthor` |
 | `devnode` | the node exists under `/dev` (globs allowed) | `devnode /dev/dri/renderD128` |
 | `sound-card` | the name appears in `/proc/asound/cards` | `sound-card H96 Analog` |

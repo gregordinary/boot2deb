@@ -229,6 +229,23 @@ impl Lock {
         })
     }
 
+    /// Keep `prev`'s rootfs [`source_date_epoch`](RootfsPin::source_date_epoch) when no
+    /// pin moved between the two locks.
+    ///
+    /// `update` stamps a new lock with the time it ran, and calls this with the lock it
+    /// replaces. An update that moves no pin, by the axes
+    /// [`pin_changes`](crate::support::pin_changes) compares, therefore keeps the epoch.
+    /// The rootfs cache stays warm, and a rebuild stamps the same times. Where either
+    /// lock carries no `[rootfs]`, there is no epoch to keep and this does nothing.
+    pub fn carry_source_date_epoch(&mut self, prev: &Lock) {
+        if !crate::support::pin_changes(prev, self).is_empty() {
+            return;
+        }
+        if let (Some(next), Some(before)) = (self.rootfs.as_mut(), prev.rootfs.as_ref()) {
+            next.source_date_epoch = before.source_date_epoch;
+        }
+    }
+
     /// Every upstream commit this lock pins, across all source axes:
     ///
     /// - The kernel and u-boot trees
@@ -458,6 +475,24 @@ pub struct RootfsPin {
         deserialize_with = "de_opt_sha256"
     )]
     pub manifest_sha256: Option<String>,
+    /// The rootfs build's `SOURCE_DATE_EPOCH`, in Unix seconds: the time of the
+    /// `update` that last moved one of this lock's pins.
+    ///
+    /// Every time the rootfs stage stamps derives from it. It caps each rootfs
+    /// member's mtime, and the target-side customize step runs under it, so
+    /// `mkinitramfs` and `useradd` write it rather than the wall clock. The image's
+    /// filesystem takes its format time from the newest mtime, so the image inherits
+    /// it too.
+    ///
+    /// It lives in the lock rather than being read from a source tree. A board that
+    /// installs Debian's kernel compiles nothing, and a build that restores its kernel
+    /// from the artifact cache clones no tree to read. The compile stages keep their own
+    /// epochs, read from the tree each one builds.
+    ///
+    /// It changes only when a pin moves ([`Lock::carry_source_date_epoch`]). So it joins
+    /// the rootfs cache key without costing a cache hit, and `reproduce` replays it with
+    /// the lock.
+    pub source_date_epoch: u64,
 }
 
 /// Pinned rkbin blobs, each `"<filename>@sha256:<hex>"`, verified before the
@@ -583,6 +618,7 @@ mod tests {
                 suite: "forky".into(),
                 manifest: "turing-rk1-forky.pkgs.lock".into(),
                 manifest_sha256: Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into()),
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
                 atf: "rk3588_bl31_v1.51.elf@sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
@@ -676,6 +712,7 @@ mod tests {
                 suite: "forky".into(),
                 manifest: "rec.pkgs.lock".into(),
                 manifest_sha256: None,
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
                 atf: "atf@sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -689,6 +726,41 @@ mod tests {
             extra_debs: vec![],
             snapshot: None,
         }
+    }
+
+    /// An update that moves no pin keeps the epoch, and one that moves any pin takes
+    /// the new update's time. The epoch is not itself a pin, so two locks differing
+    /// only in it count as unmoved.
+    #[test]
+    fn the_rootfs_epoch_is_carried_until_a_pin_moves() {
+        let prev = base_lock();
+        let mut next = base_lock();
+        next.rootfs.as_mut().unwrap().source_date_epoch = 1_800_000_000;
+        next.carry_source_date_epoch(&prev);
+        assert_eq!(
+            next.rootfs.as_ref().unwrap().source_date_epoch,
+            1_790_347_034
+        );
+
+        let mut moved = base_lock();
+        moved.kernel.as_mut().unwrap().commit = "e".repeat(40);
+        moved.rootfs.as_mut().unwrap().source_date_epoch = 1_800_000_000;
+        moved.carry_source_date_epoch(&prev);
+        assert_eq!(
+            moved.rootfs.as_ref().unwrap().source_date_epoch,
+            1_800_000_000
+        );
+    }
+
+    /// The epoch is required: a lock without it describes a rootfs whose times nothing
+    /// fixes, so it is refused at parse rather than built.
+    #[test]
+    fn a_rootfs_pin_without_an_epoch_is_refused() {
+        let text = base_lock().to_toml_string().unwrap();
+        assert!(text.contains("source_date_epoch = 1790347034"), "{text}");
+        let without = text.replace("source_date_epoch = 1790347034\n", "");
+        let err = toml::from_str::<Lock>(&without).unwrap_err().to_string();
+        assert!(err.contains("source_date_epoch"), "{err}");
     }
 
     #[test]
@@ -745,6 +817,7 @@ mod tests {
                 suite: "forky".into(),
                 manifest: "asus-c201-forky.pkgs.lock".into(),
                 manifest_sha256: None,
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
                 atf: format!("atf@sha256:{}", "0".repeat(64)),
@@ -777,6 +850,7 @@ mod tests {
                 suite: "forky".into(),
                 manifest: "asus-c201-forky.pkgs.lock".into(),
                 manifest_sha256: None,
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: None,
             kmods: vec![],

@@ -67,6 +67,11 @@ pub fn resolve_device(
     // worth failing on whichever recipe finds it first.
     validate_hostname(&device.hostname)?;
 
+    // The initramfs module list, checked here for the same reason as the hostname: a
+    // name no module can match fails the build of every recipe on the board, and the
+    // first one to find it should say so.
+    let initramfs_modules = resolve_initramfs_modules(&soc.initramfs, &device.initramfs)?;
+
     let layout = overrides.layout.unwrap_or(device.default_layout);
 
     // The boot method's *own* requirements, enforced only for the method that has
@@ -455,6 +460,7 @@ pub fn resolve_device(
             first_boot_password_length: account.password_length,
             ssh_authorized_keys: account.authorized_keys,
             groups: account.groups,
+            initramfs_modules,
             device_kmods,
             // Sources ride only when a feature builds the stack; a base build drops
             // them (validated above: `build_media_accel` implies the SoC supplies both).
@@ -1969,6 +1975,29 @@ fn resolve_account(
     })
 }
 
+/// The modules the initramfs must carry: the SoC layer's list, then the device's, in
+/// authored order.
+///
+/// The device list already holds its whole `extends` lineage, accumulated base-most
+/// first by the loader. Each name is checked by
+/// [`check_module_name`](crate::initramfs::check_module_name), and a name a later
+/// layer restates, in either spelling of `-` and `_`, keeps its first position and
+/// spelling.
+fn resolve_initramfs_modules(
+    soc: &InitramfsLayer,
+    device: &InitramfsLayer,
+) -> Result<Vec<String>, ConfigError> {
+    let mut modules = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for name in soc.modules.iter().chain(&device.modules) {
+        crate::initramfs::check_module_name(name)?;
+        if seen.insert(crate::initramfs::module_key(name)) {
+            modules.push(name.clone());
+        }
+    }
+    Ok(modules)
+}
+
 /// Reject a supplementary-group name `usermod` could not act on.
 ///
 /// The resolved list is passed to the target-side customize program as one
@@ -2902,6 +2931,62 @@ mod tests {
             image_of(&tightened).ssh_authorized_keys,
             vec![TEST_KEY, &second]
         );
+    }
+
+    /// The initramfs list is the SoC family's, then the board's. The libreboot C201 adds
+    /// its display stack after the family's root-device drivers, and the stock C201,
+    /// whose 16 MiB payload has no room for it, carries the family's list alone. A board
+    /// on a SoC that names none leaves the choice to `initramfs-tools`.
+    #[test]
+    fn the_initramfs_list_is_the_socs_then_the_boards() {
+        let root = repo_root();
+        let display = ["rockchipdrm", "panel-simple", "pwm_bl", "pwm-rockchip"];
+
+        let stock = resolve_device(&root, "asus-c201", &Overrides::default()).unwrap();
+        let family = &image_of(&stock).initramfs_modules;
+        assert_eq!(family.len(), 21, "{family:?}");
+        for needed in [
+            "i2c-rk3x",
+            "rk808-regulator",
+            "dw_mmc-rockchip",
+            "io-domain",
+            "ext4",
+        ] {
+            assert!(family.iter().any(|m| m == needed), "{needed} missing");
+        }
+        assert!(!family.iter().any(|m| display.contains(&m.as_str())));
+
+        let libreboot =
+            resolve_device(&root, "asus-c201-libreboot", &Overrides::default()).unwrap();
+        let modules = &image_of(&libreboot).initramfs_modules;
+        assert_eq!(modules.len(), 25, "{modules:?}");
+        assert_eq!(
+            &modules[..21],
+            family.as_slice(),
+            "the family's list comes first"
+        );
+        assert_eq!(&modules[21..], display);
+
+        let rk1 = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
+        assert!(image_of(&rk1).initramfs_modules.is_empty());
+    }
+
+    /// A name a later layer restates, in either spelling, keeps its first position, and
+    /// a name no module can carry is refused at resolve.
+    #[test]
+    fn the_initramfs_union_dedups_by_module_name_and_refuses_a_bad_one() {
+        let layer = |names: &[&str]| InitramfsLayer {
+            modules: names.iter().map(|s| s.to_string()).collect(),
+        };
+        let merged = resolve_initramfs_modules(
+            &layer(&["dw_mmc-rockchip", "ext4"]),
+            &layer(&["dw_mmc_rockchip", "usbhid", "ext4"]),
+        )
+        .unwrap();
+        assert_eq!(merged, ["dw_mmc-rockchip", "ext4", "usbhid"]);
+
+        let err = resolve_initramfs_modules(&layer(&["ext4.ko"]), &layer(&[])).unwrap_err();
+        assert!(err.to_string().contains("ext4.ko"), "{err}");
     }
 
     /// Groups are the one part of the account axis the hardware layers contribute to,

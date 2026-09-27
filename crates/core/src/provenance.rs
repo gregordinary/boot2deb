@@ -113,6 +113,9 @@ pub struct BuildFacts<'a> {
     /// run did, read off the event stream rather than derived from the lock. See
     /// [`RestoredNode`].
     pub restored_nodes: &'a [RestoredNode],
+    /// Every artifact the build emitted before this manifest, sized and hashed. Engine-owned
+    /// because hashing a file is a side effect. See [`ProvenanceManifest::outputs`].
+    pub outputs: &'a [crate::outputs::Output],
     /// The parallelism the build ran at. See [`ToolchainProvenance::jobs`].
     pub jobs: usize,
     /// The environment and mounts every sandboxed build command ran under. The engine
@@ -503,6 +506,14 @@ pub struct ProvenanceManifest {
     /// [`RestoredNode`]. Declared with the other arrays-of-tables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restored_nodes: Vec<RestoredNode>,
+    /// Every artifact the build emitted, with its size and sha256, sorted by file name.
+    ///
+    /// The inputs above say what went into the image. This says what came out, and it
+    /// is what `reproduce` judges a rebuild against, output by output (see
+    /// [`crate::outputs`]). The rows are taken from the build's own artifact events, so
+    /// they list exactly what it wrote. This manifest and the bills of materials are not
+    /// rows, since they describe the outputs. Declared with the other arrays-of-tables.
+    pub outputs: Vec<crate::outputs::Output>,
     /// Every mount a sandboxed build command runs under, in the order the sandbox
     /// establishes them. It is the half of the sandbox profile no other accessor
     /// reports, down to the `/dev` device nodes and symlinks. Declared last, with the other
@@ -859,6 +870,12 @@ pub struct RootfsProvenance {
     /// So the file is the artifact and this is its digest. Re-rendering to check it
     /// would be checking a different document.
     pub plan_sha256: String,
+    /// The `SOURCE_DATE_EPOCH` the rootfs was built under, in Unix seconds: the lock's
+    /// [`source_date_epoch`](crate::lock::RootfsPin::source_date_epoch). It is the
+    /// ceiling of every mtime the rootfs carries, and the time the customize step
+    /// stamped into it. Two builds that record different values were never meant to
+    /// agree byte for byte.
+    pub source_date_epoch: u64,
 }
 
 /// One repository's state at the moment the rootfs plan resolved against it — the
@@ -1491,6 +1508,7 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
             package_count: facts.package_count,
             plan: facts.plan.to_string(),
             plan_sha256: facts.plan_sha256.to_string(),
+            source_date_epoch: rootfs.source_date_epoch,
         },
         build_sandbox: facts.build_sandbox.clone(),
         cross_sandbox: facts.cross_sandbox.clone(),
@@ -1553,6 +1571,7 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
         // only — the graft ships as patches, so that tree is never cloned).
         source_durability: source_durability_rows(lock),
         restored_nodes: facts.restored_nodes.to_vec(),
+        outputs: facts.outputs.to_vec(),
         sandbox_mounts: facts.sandbox.mounts.clone(),
     }
 }
@@ -1748,6 +1767,7 @@ pub(crate) mod tests {
                 suite: "forky".into(),
                 manifest: "turing-rk1-media-accel-forky.pkgs.lock".into(),
                 manifest_sha256: Some("mh".into()),
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
                 atf: "atf@sha256:0".into(),
@@ -1988,6 +2008,7 @@ pub(crate) mod tests {
             &lock,
             &BuildFacts {
                 restored_nodes: &sample_restored_nodes(),
+                outputs: &[],
                 host_arch: "x86_64",
                 cross: true,
                 manifest_sha256: "3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a",
@@ -2048,6 +2069,7 @@ pub(crate) mod tests {
         // — asserted by reading a document whose other tables are junk.
         let facts = BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -2120,6 +2142,7 @@ pub(crate) mod tests {
         // two documents are being compared, not two spellings of the same thing.
         let facts = BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -2217,6 +2240,7 @@ pub(crate) mod tests {
         let archives = sample_archives();
         let facts = BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc123",
@@ -2284,6 +2308,7 @@ pub(crate) mod tests {
         let archives = sample_archives();
         let facts = |image_bytes| BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc123",
@@ -2331,6 +2356,7 @@ pub(crate) mod tests {
         let archives = sample_archives();
         let facts = BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc123",
@@ -2385,6 +2411,7 @@ pub(crate) mod tests {
                 suite: "forky".into(),
                 manifest: "asus-c201-forky.pkgs.lock".into(),
                 manifest_sha256: None,
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: None,
             kmods: vec![],
@@ -2426,6 +2453,7 @@ pub(crate) mod tests {
             &lock,
             &BuildFacts {
                 restored_nodes: &[],
+                outputs: &[],
                 host_arch: "x86_64",
                 cross: true,
                 manifest_sha256: "abc123",
@@ -2468,6 +2496,7 @@ pub(crate) mod tests {
             &bare_lock(),
             &BuildFacts {
                 restored_nodes: &[],
+                outputs: &[],
                 host_arch: "x86_64",
                 cross: true,
                 manifest_sha256: "abc123",
@@ -2562,6 +2591,7 @@ pub(crate) mod tests {
         let lock = sample_lock();
         let facts = BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc123",
@@ -2762,6 +2792,7 @@ pub(crate) mod tests {
         .unwrap();
         let facts = BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -2829,6 +2860,7 @@ pub(crate) mod tests {
         }];
         let facts = BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -2891,6 +2923,7 @@ pub(crate) mod tests {
     fn the_sandbox_profile_is_recorded_on_both_sides_of_the_table_boundary() {
         let facts = BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             host_arch: "x86_64",
             cross: true,
             manifest_sha256: "abc",
@@ -2975,6 +3008,7 @@ pub(crate) mod tests {
         let archives = sample_archives();
         let facts = |build_sandbox| BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             cross_sandbox: None,
             packaging_root: None,
             host_arch: "x86_64",
@@ -3054,6 +3088,7 @@ pub(crate) mod tests {
         let archives = sample_archives();
         let facts = |build_sandbox, packaging_root| BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             cross_sandbox: None,
             host_arch: "x86_64",
             cross: true,
@@ -3143,6 +3178,7 @@ pub(crate) mod tests {
         let archives = sample_archives();
         let facts = |cross_sandbox, build_sandbox| BuildFacts {
             restored_nodes: &[],
+            outputs: &[],
             cross_sandbox,
             build_sandbox,
             packaging_root: None,

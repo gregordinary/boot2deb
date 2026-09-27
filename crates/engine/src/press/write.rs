@@ -111,13 +111,7 @@ pub fn stream_image(
         inner: std::io::BufReader::with_capacity(1 << 20, file),
         consumed: std::rc::Rc::clone(&consumed),
     };
-    let mut decoder: Box<dyn Read> = match container {
-        Container::Raw => Box::new(counting),
-        // A build writes one stream, but concatenated streams are legal xz and
-        // `xz -T` produces them; accepting both means any file `xzcat` accepts.
-        Container::Xz => Box::new(lzma_rust2::XzReader::new(counting, true)),
-        Container::Gz => Box::new(flate2::read::MultiGzDecoder::new(counting)),
-    };
+    let mut decoder = decode(container, counting);
 
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK];
@@ -153,7 +147,7 @@ pub fn stream_image(
 
     Ok(WrittenImage {
         bytes: written,
-        sha256: hex(&hasher.finalize()),
+        sha256: crate::blobs::hex(&hasher.finalize()),
     })
 }
 
@@ -166,13 +160,7 @@ pub fn stream_image(
 /// [`EngineError`] for an unreadable artifact or a corrupt stream. A stream shorter
 /// than `len` returns what there is.
 pub fn decompressed_prefix(artifact: &Path, len: usize) -> Result<Vec<u8>, EngineError> {
-    let file = File::open(artifact).map_err(|e| EngineError::io(artifact, e))?;
-    let reader = std::io::BufReader::with_capacity(1 << 20, file);
-    let mut decoder: Box<dyn Read> = match Container::of(artifact)? {
-        Container::Raw => Box::new(reader),
-        Container::Xz => Box::new(lzma_rust2::XzReader::new(reader, true)),
-        Container::Gz => Box::new(flate2::read::MultiGzDecoder::new(reader)),
-    };
+    let mut decoder = open_decoded(artifact)?;
     let mut out = vec![0u8; len];
     let mut filled = 0;
     while filled < len {
@@ -188,14 +176,27 @@ pub fn decompressed_prefix(artifact: &Path, len: usize) -> Result<Vec<u8>, Engin
     Ok(out)
 }
 
-/// Lowercase hex of a digest.
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
+/// `inner` read through the decoder `container` names, yielding the image's own bytes.
+///
+/// A build writes one stream, but concatenated streams are legal xz and `xz -T` produces
+/// them; accepting both means any file `xzcat` accepts.
+fn decode<R: Read + 'static>(container: Container, inner: R) -> Box<dyn Read> {
+    match container {
+        Container::Raw => Box::new(inner),
+        Container::Xz => Box::new(lzma_rust2::XzReader::new(inner, true)),
+        Container::Gz => Box::new(flate2::read::MultiGzDecoder::new(inner)),
     }
-    s
+}
+
+/// Open an image artifact for reading its decompressed bytes from the start.
+///
+/// # Errors
+///
+/// [`EngineError`] for an unreadable artifact or one no build writes.
+pub(crate) fn open_decoded(artifact: &Path) -> Result<Box<dyn Read>, EngineError> {
+    let file = File::open(artifact).map_err(|e| EngineError::io(artifact, e))?;
+    let reader = std::io::BufReader::with_capacity(1 << 20, file);
+    Ok(decode(Container::of(artifact)?, reader))
 }
 
 #[cfg(test)]
@@ -228,7 +229,7 @@ mod tests {
     }
 
     fn sha256_hex(data: &[u8]) -> String {
-        hex(&Sha256::digest(data))
+        crate::blobs::hex(&Sha256::digest(data))
     }
 
     #[test]

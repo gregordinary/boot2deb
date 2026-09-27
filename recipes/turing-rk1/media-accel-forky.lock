@@ -55,6 +55,7 @@ commit = "d90e3a1c18d7929383cf88c1b3da2e2d1c966cbf"
 [rootfs]
 suite = "forky"
 manifest = "media-accel-forky.pkgs.lock"
+source_date_epoch = 1790393266
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"

@@ -304,6 +304,7 @@ fn build_one(
             build,
             env,
             ktree: &ktree,
+            tree: &driver_tree,
             subdir: &subdir,
             k,
             cr: &cr,
@@ -444,6 +445,9 @@ struct ModuleMake<'a> {
     /// The built kernel tree, passed as `make -C`. Modules link against its
     /// `Module.symvers`, so it must be the tree whose vermagic the `.deb` claims.
     ktree: &'a Path,
+    /// The fetched driver tree, mapped out of the module's debug information with the
+    /// kernel tree ([`kernel::kbuild_env`](crate::build::kernel::kbuild_env)).
+    tree: &'a Path,
     /// Absolute path to `<driver_tree>/<subdir>`, passed as `M=`.
     subdir: &'a Path,
     /// The kmod descriptor: `make_args` overrides and the module set to ship.
@@ -484,7 +488,7 @@ fn module_root(opts: &KmodOptions, step: &Step) -> Result<BuildRoot, EngineError
 fn compile_module(mk: &ModuleMake, epoch: Option<u64>) -> Result<(), EngineError> {
     // A clean first, so a make_args change (which kbuild does not track per-object) never
     // links stale objects into the module.
-    let vars = kbuild_env(mk.build, mk.env, epoch);
+    let vars = kbuild_env(mk, epoch);
     let clean = vec![
         "make".to_string(),
         "-C".to_string(),
@@ -544,7 +548,7 @@ fn install_modules(mk: &ModuleMake, kver: &str, pkg_stage: &Path) -> Result<(), 
         mk.cr,
         mk.ktree,
         &argv,
-        &kbuild_env(mk.build, mk.env, None),
+        &kbuild_env(mk, None),
         &format!("make M= modules_install ({})", mk.k.name),
         mk.step,
     )?;
@@ -796,12 +800,14 @@ fn package_firmware_deb(
     Ok(deb_out)
 }
 
-/// Apply the kernel's kbuild env (`ARCH`, optional `SOURCE_DATE_EPOCH`) plus the cross
-/// toolchain to a `make` command — shared by the module compile and install steps.
-fn kbuild_env(build: &ResolvedBuild, env: &BuildEnv, epoch: Option<u64>) -> Vec<(String, String)> {
-    let mut vars = crate::build::kernel::kbuild_env(build, epoch);
+/// Apply the kernel's kbuild env (`ARCH`, optional `SOURCE_DATE_EPOCH`, the kernel and
+/// driver trees' prefix maps) plus the cross toolchain to a `make` command — shared by
+/// the module compile and install steps.
+fn kbuild_env(mk: &ModuleMake, epoch: Option<u64>) -> Vec<(String, String)> {
+    let mut vars = crate::build::kernel::kbuild_env(mk.build, epoch, &[mk.ktree, mk.tree]);
     vars.extend(
-        env.cross_compile
+        mk.env
+            .cross_compile
             .iter()
             .map(|prefix| ("CROSS_COMPILE".to_string(), prefix.clone())),
     );

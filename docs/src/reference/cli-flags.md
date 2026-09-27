@@ -325,6 +325,7 @@ Drive the build stages from the recipe's lock, streaming the structured build ev
 | `--snapshot` | `<SNAPSHOT>` | Snapshot activation for the rootfs bootstrap: `off` (live mirror), `fallback` (live first, `snapshot.debian.org` fills 404s), `pin` (snapshot only, fully deterministic). Default: the lock's captured mode (off if none). `fallback`/`pin` need a captured snapshot (`--save-snapshot`) |
 | `--save-snapshot` |  | After a successful build, capture the current UTC time as a `snapshot.debian.org` timestamp into the lock (dormant, `mode = off`). The solved versions then stay fetchable after they rotate off the live mirror. A later build activates it with `--snapshot fallback\|pin` |
 | `--save-manifest` |  | After the rootfs stage, commit the solved package manifest beside the lock and record its sha256 in the lock (`[rootfs].manifest_sha256`). That is the reproducibility pin later builds verify a fresh solve against |
+| `--save-outputs` |  | After a whole build, record the sha256 of every output it wrote as this lock's committed outputs, `recipes/<recipe>.outputs`, under this build host's architecture. `verify-image` then holds a later build of the lock to those bytes. Outputs that carry the per-image password are left out |
 | `--allow-manifest-drift` |  | Downgrade a solved-manifest drift from the committed pin to a warning instead of a hard error — for co-development or a knowingly-moved mirror. Re-pin deliberately with `--save-manifest` (which skips the drift check entirely, so combining the two is rejected as contradictory) |
 | `--sbom` | `spdx` \| `cyclonedx`, repeatable | Also write a software bill of materials beside the image, in this format (repeatable — `--sbom spdx --sbom cyclonedx` writes both). Off by default, so a build never silently gains a file. The same documents can be produced later from the published provenance manifest with `boot2deb sbom`. Set `SOURCE_DATE_EPOCH` for a byte-reproducible document — everything else in it is derived from the image's own content |
 | `--refresh-rootfs` |  | Ignore a rootfs cache hit and re-bootstrap, refreshing the stored tree. The plan is still resolved. The rootfs cache keys on the *solved* set, so a moved mirror already rebuilds automatically. This is the manual escape for when you want a clean bootstrap regardless |
@@ -334,7 +335,7 @@ Drive the build stages from the recipe's lock, streaming the structured build ev
 
 ## reproduce
 
-Rebuild an image from the plan document a previous build published, instead of resolving the archive afresh. The lock pins the sources. The plan pins the package versions the archive served, which the lock cannot. Takes every `build` flag, and differs from it in one way. The rootfs installs the plan's exact set by the digests it records, reading neither a release nor a package index. The plan, not an archive signature, is what those digests chain to
+Rebuild an image from the plan document a previous build published, then judge every output against that build's record. The lock pins the sources, and the plan pins the package versions the archive served, which the lock cannot. The rootfs installs the plan's exact set by the digests it records, reading neither a release nor a package index. The rebuild writes to its own directory (`WORK_DIR/artifacts/reproduce` unless `--out-dir` names one) with both caches off, and exits non-zero when any recorded output differs or is missing. Takes every `build` flag
 
 | argument | required | what it is |
 | --- | --- | --- |
@@ -342,7 +343,8 @@ Rebuild an image from the plan document a previous build published, instead of r
 
 | flag | value | what it does |
 | --- | --- | --- |
-| `--from` | `<FROM>` | Directory holding the published `<stem>.plan` (and, for the builder advisory, `<stem>.provenance.toml`) — the directory the image shipped from. Default: this build point's own output dir, which is where a build on this machine already published them |
+| `--from` | `<FROM>` | Directory holding the published `<stem>.plan` and `<stem>.provenance.toml`, the directory the image shipped from. Default: this build point's own output dir, which is where a build on this machine already published them |
+| `--with-caches` |  | Keep the Tier-2 artifact cache and the rootfs cache on. By default a reproduction restores nothing, since a restored output is the earlier build's and proves nothing about this one |
 | `--feature` | `<FEATURES>`, repeatable | Rootfs feature to select, repeatable — the same selection `update --feature` pinned. It names which lock to build from (`<recipe>+<feature>...`), and does not re-resolve one. `update` must have written that variant's lock first, and a selection with no lock is an error naming the `update` line to run. Passing the reference directly (`build turing-rk1/forky+jellyfin`) is equivalent |
 | `--stage` | `all` \| `kernel` \| `dtb` \| `kmod` \| `uboot` \| `userspace` \| `ffmpeg` \| `rootfs` \| `image` (default `all`) | Which stage(s) to run |
 | `--kernel-src` | `<KERNEL_SRC>` | Kernel clone source (git URL or local path). Default: the kernel definition's source URL. A local clone (e.g. ../linux) is far faster |
@@ -368,6 +370,7 @@ Rebuild an image from the plan document a previous build published, instead of r
 | `--snapshot` | `<SNAPSHOT>` | Snapshot activation for the rootfs bootstrap: `off` (live mirror), `fallback` (live first, `snapshot.debian.org` fills 404s), `pin` (snapshot only, fully deterministic). Default: the lock's captured mode (off if none). `fallback`/`pin` need a captured snapshot (`--save-snapshot`) |
 | `--save-snapshot` |  | After a successful build, capture the current UTC time as a `snapshot.debian.org` timestamp into the lock (dormant, `mode = off`). The solved versions then stay fetchable after they rotate off the live mirror. A later build activates it with `--snapshot fallback\|pin` |
 | `--save-manifest` |  | After the rootfs stage, commit the solved package manifest beside the lock and record its sha256 in the lock (`[rootfs].manifest_sha256`). That is the reproducibility pin later builds verify a fresh solve against |
+| `--save-outputs` |  | After a whole build, record the sha256 of every output it wrote as this lock's committed outputs, `recipes/<recipe>.outputs`, under this build host's architecture. `verify-image` then holds a later build of the lock to those bytes. Outputs that carry the per-image password are left out |
 | `--allow-manifest-drift` |  | Downgrade a solved-manifest drift from the committed pin to a warning instead of a hard error — for co-development or a knowingly-moved mirror. Re-pin deliberately with `--save-manifest` (which skips the drift check entirely, so combining the two is rejected as contradictory) |
 | `--sbom` | `spdx` \| `cyclonedx`, repeatable | Also write a software bill of materials beside the image, in this format (repeatable — `--sbom spdx --sbom cyclonedx` writes both). Off by default, so a build never silently gains a file. The same documents can be produced later from the published provenance manifest with `boot2deb sbom`. Set `SOURCE_DATE_EPOCH` for a byte-reproducible document — everything else in it is derived from the image's own content |
 | `--refresh-rootfs` |  | Ignore a rootfs cache hit and re-bootstrap, refreshing the stored tree. The plan is still resolved. The rootfs cache keys on the *solved* set, so a moved mirror already rebuilds automatically. This is the manual escape for when you want a clean bootstrap regardless |
@@ -377,7 +380,7 @@ Rebuild an image from the plan document a previous build published, instead of r
 
 ## diff
 
-Compare two build points on the packages, the kernel pin and its requested config, and the patch series and the patch files behind them. It also compares every other source pin, the rkbin blobs, and what built each side. Each side is a recipe name, a `.lock`, or a `.provenance.toml`. Mixing is allowed, and a section only one side can answer is reported unavailable rather than as a change. Offline — reads documents the build already wrote
+Compare two build points on the packages, the kernel pin and its requested config, and the patch series and the patch files behind them. It also compares every other source pin, the rkbin blobs, and what built each side. Two images compare file by file. Each side is a recipe name, a `.lock`, or a `.provenance.toml`. Mixing is allowed, and a section only one side can answer is reported unavailable rather than as a change. Offline — reads documents the build already wrote
 
 | argument | required | what it is |
 | --- | --- | --- |
@@ -386,7 +389,7 @@ Compare two build points on the packages, the kernel pin and its requested confi
 
 | flag | value | what it does |
 | --- | --- | --- |
-| `--section` | `packages` \| `kernel` \| `patches` \| `sources` \| `blobs` \| `builder`, repeatable | Report only these sections (repeatable). Default: all of them |
+| `--section` | `packages` \| `kernel` \| `patches` \| `sources` \| `blobs` \| `builder` \| `files`, repeatable | Report only these sections (repeatable). Default: all of them |
 | `--patches-path` | `<PATCHES_PATH>` | `patches` checkout to resolve a moved patches commit into named files. Default: the config root's sibling `../patches` |
 
 

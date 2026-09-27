@@ -185,9 +185,14 @@ pub(crate) fn config_stamp(root: &ConfigRoot) -> Option<(String, bool)> {
     // every file under a config root is potential build input, so an edited `.dts` or
     // device layer is precisely what this flag exists to disclaim. That is the mirror
     // image of the binary's flag, which narrows to what compiles.
+    //
+    // An untracked file counts too, under the paths a build reads. The loader walks
+    // those directories, so a new overlay file ships in the image with no tracked change
+    // to show for it. A scratch file anywhere else is not input and does not count.
     Some((
         head.chars().take(STAMP_WIDTH).collect(),
-        boot2deb_engine::git::has_tracked_changes(path, &[]),
+        boot2deb_engine::git::has_tracked_changes(path, &[])
+            || boot2deb_engine::git::has_untracked(path, boot2deb_core::loader::BUILD_INPUT_PATHS),
     ))
 }
 

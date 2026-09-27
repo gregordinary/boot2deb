@@ -56,6 +56,7 @@ fn facts<'a>(
 ) -> BuildFacts<'a> {
     BuildFacts {
         restored_nodes: &[],
+        outputs: &[],
         host_arch: "x86_64",
         cross: true,
         manifest_sha256,

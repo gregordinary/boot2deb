@@ -22,6 +22,15 @@
 //!     does, and partition 1 is the seed. Nothing about the filesystem's contents
 //!     says whether the bootloader will ever open it.
 //!  6. A fitted `image_size` left the slack it asked for.
+//!  7. **The rootfs holds exactly the files its manifest lists.** The rootfs partition is
+//!     walked where it sits and compared with the `<stem>.rootfs.uapi16` the build
+//!     wrote from the same filesystem, every field of every path. A compressed image
+//!     is decompressed into a sparse temporary file for this, since the walk seeks.
+//!  8. Where the recipe has a committed outputs record (`recipes/<recipe>.outputs`),
+//!     **the artifact directory holds every file it names for this build host, byte for
+//!     byte.** The files are hashed where they sit, so the check holds what would
+//!     ship, whichever run wrote it. A record with no entry for this host passes, saying
+//!     so, since another host's compilers make other bytes.
 //!
 //! Every structure is read by the code that writes it.
 //! [`image::inspect`](boot2deb_engine::image::inspect) reads the GPT and the
@@ -29,7 +38,10 @@
 //! cannot drift from the build by parsing the same bytes differently. The
 //! alternative is a second implementation of both parsers that nothing tests.
 //!
-//! Read-only, and no root: only the head of the artifact is decompressed.
+//! It needs no root, and changes nothing it verifies. Checks 1 to 6 decompress only the
+//! head of the artifact. The seventh walks the whole rootfs, and a walk seeks. A
+//! compressed image is therefore decompressed first, into a sparse temporary file in the
+//! artifact directory that is removed when the check ends. The eighth hashes the recorded files.
 
 use boot2deb_core::model::Overrides;
 use boot2deb_core::provenance::ProvenanceManifest;
@@ -214,6 +226,65 @@ pub(crate) fn run(
         });
     }
 
+    // 6. The files the rootfs holds are the files its manifest lists, down to every field.
+    //    The manifest was written from this filesystem before it was placed, so any
+    //    difference is a defect in the placement or the record, and nothing is set aside.
+    checks.push(match crate::artifacts::files_manifest(&prov, &dir) {
+        Err(e) => Check {
+            what: "rootfs files",
+            detail: format!("could not read the file manifest: {e}"),
+            ok: false,
+        },
+        Ok(None) => Check {
+            what: "rootfs files",
+            detail: "the provenance records no file manifest".into(),
+            ok: false,
+        },
+        Ok(Some(listed)) => match boot2deb_engine::image::files::manifest_of_image(&image, &dir) {
+            Err(e) => Check {
+                what: "rootfs files",
+                detail: format!("could not walk the rootfs partition: {e}"),
+                ok: false,
+            },
+            Ok(found) => {
+                let diff = boot2deb_core::files::compare(&listed, &found);
+                Check {
+                    what: "rootfs files",
+                    detail: if diff.is_empty() {
+                        format!(
+                            "{} paths, each as the manifest lists it",
+                            found.entries.len() + 1
+                        )
+                    } else {
+                        format!(
+                            "{} changed, {} added, {} removed against the manifest{}",
+                            diff.changed.len(),
+                            diff.added.len(),
+                            diff.removed.len(),
+                            diff.changed
+                                .first()
+                                .map(|c| format!(", first {} ({})", c.path, c.fields.join(", ")))
+                                .unwrap_or_default()
+                        )
+                    },
+                    ok: diff.is_empty(),
+                }
+            }
+        },
+    });
+
+    // 7. The bytes a build of this lock wrote before, where the recipe records them.
+    let committed_path = root.outputs_path(reference.as_str())?;
+    if committed_path.is_file() {
+        let committed = boot2deb_core::outputs::CommittedOutputs::from_toml_str(
+            &std::fs::read_to_string(&committed_path)?,
+            &committed_path.display().to_string(),
+        )?;
+        let host = &prov.toolchain.host_arch;
+        let found = found_outputs(&committed, host, &dir)?;
+        checks.push(committed_check(&committed, host, &found));
+    }
+
     let failed = checks.iter().filter(|c| !c.ok).count();
     if json_out {
         println!(
@@ -250,7 +321,8 @@ pub(crate) fn run(
 }
 
 /// The image artifact to read: the raw `.img` if the build kept it, else the compressed
-/// form. Only its head is decompressed either way, so the choice costs nothing.
+/// form. The raw image is read in place, so keeping it saves the file check a
+/// decompression.
 fn find_image(dir: &Path, stem: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let candidates = [
         format!("{stem}.img"),
@@ -269,4 +341,141 @@ fn find_image(dir: &Path, stem: &str) -> Result<PathBuf, Box<dyn std::error::Err
         candidates.join(", ")
     )
     .into())
+}
+
+/// The files `committed` names for `host_arch`, as they are in `dir`: each one present,
+/// hashed. A file that is absent is left out, which the check reports as not written.
+fn found_outputs(
+    committed: &boot2deb_core::outputs::CommittedOutputs,
+    host_arch: &str,
+    dir: &Path,
+) -> Result<Vec<boot2deb_core::outputs::Output>, Box<dyn std::error::Error>> {
+    let mut found = Vec::new();
+    for c in committed.hosts.get(host_arch).into_iter().flatten() {
+        let path = dir.join(&c.file);
+        if !path.is_file() {
+            continue;
+        }
+        let (size, sha256) = boot2deb_engine::blobs::sha256_file(&path)?;
+        found.push(boot2deb_core::outputs::Output {
+            step: c.step.clone(),
+            role: c.role.clone(),
+            file: c.file.clone(),
+            size,
+            sha256,
+            per_image: false,
+        });
+    }
+    Ok(found)
+}
+
+/// The committed-outputs check: the files found in the artifact directory against the
+/// recipe's committed record, for the host that built them.
+///
+/// Passes when the record has no entry for `host_arch`, with a detail that says so,
+/// because a record from one host says nothing about another's bytes. Otherwise it fails
+/// on any output that differs or is missing, and names the first few.
+fn committed_check(
+    committed: &boot2deb_core::outputs::CommittedOutputs,
+    host_arch: &str,
+    outputs: &[boot2deb_core::outputs::Output],
+) -> Check {
+    const WHAT: &str = "outputs";
+    let Some(judged) = committed.check(host_arch, outputs) else {
+        let hosts: Vec<&str> = committed.hosts.keys().map(String::as_str).collect();
+        return Check {
+            what: WHAT,
+            detail: format!(
+                "recorded for {} only, and this build ran on {host_arch}, so not compared",
+                hosts.join(", ")
+            ),
+            ok: true,
+        };
+    };
+    let failures: Vec<String> = judged
+        .outputs
+        .iter()
+        .filter(|o| o.verdict.is_failure())
+        .map(|o| match &o.verdict {
+            boot2deb_core::outputs::Verdict::Differs { detail } => {
+                format!("{} ({detail})", o.file)
+            }
+            _ => format!("{} (not written)", o.file),
+        })
+        .collect();
+    Check {
+        what: WHAT,
+        detail: if failures.is_empty() {
+            format!(
+                "{} outputs byte-identical to the record for {host_arch}",
+                judged.outputs.len()
+            )
+        } else {
+            let shown = failures.len().min(3);
+            let mut detail = format!(
+                "{} of {} differ from the record for {host_arch}: {}",
+                failures.len(),
+                judged.outputs.len(),
+                failures[..shown].join("; ")
+            );
+            if failures.len() > shown {
+                detail.push_str(&format!("; and {} more", failures.len() - shown));
+            }
+            detail
+        },
+        ok: failures.is_empty(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boot2deb_core::outputs::{CommittedOutputs, Output};
+
+    fn out(file: &str, sha: char) -> Output {
+        Output {
+            step: "kernel".into(),
+            role: "image_deb".into(),
+            file: file.into(),
+            size: 1,
+            sha256: sha.to_string().repeat(64),
+            per_image: false,
+        }
+    }
+
+    /// The check passes on the recorded bytes, fails naming a moved output, and passes a
+    /// build from a host the record does not cover, saying why it compared nothing.
+    #[test]
+    fn the_committed_outputs_check_names_what_moved_and_skips_other_hosts() {
+        let mut record = CommittedOutputs::default();
+        record.record("x86_64", &[out("kernel.deb", 'a'), out("rootfs.tar", 'b')]);
+
+        let same = committed_check(
+            &record,
+            "x86_64",
+            &[out("kernel.deb", 'a'), out("rootfs.tar", 'b')],
+        );
+        assert!(same.ok, "{}", same.detail);
+
+        let moved = committed_check(
+            &record,
+            "x86_64",
+            &[out("kernel.deb", 'f'), out("rootfs.tar", 'b')],
+        );
+        assert!(!moved.ok);
+        assert!(
+            moved.detail.starts_with("1 of 2 differ"),
+            "{}",
+            moved.detail
+        );
+        assert!(moved.detail.contains("kernel.deb"), "{}", moved.detail);
+
+        let other = committed_check(&record, "aarch64", &[out("kernel.deb", 'f')]);
+        assert!(other.ok);
+        assert!(
+            other.detail.contains("recorded for x86_64 only"),
+            "{}",
+            other.detail
+        );
+    }
 }

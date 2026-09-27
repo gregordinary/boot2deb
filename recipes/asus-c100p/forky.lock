@@ -4,3 +4,4 @@
 [rootfs]
 suite = "forky"
 manifest = "forky.pkgs.lock"
+source_date_epoch = 1784935734

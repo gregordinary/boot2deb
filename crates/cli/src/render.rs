@@ -482,10 +482,19 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             );
         }
     }
-    // The SoC's initramfs module list is a kernel-axis value, so it has no meaning
-    // for a build that compiles no kernel.
+    // The SoC's force-loaded module list is a kernel-axis value, so it has no meaning
+    // for a build that has no kernel.
     if image.is_some() {
         println!("modules      : {}", b.modules.join(", "));
+    }
+    // The modules the initramfs must carry, SoC first and then the board's. A build
+    // that names none leaves the choice to initramfs-tools, and prints nothing here.
+    if let Some(i) = image.filter(|i| !i.initramfs_modules.is_empty()) {
+        println!(
+            "initramfs    : {} module(s): {}",
+            i.initramfs_modules.len(),
+            i.initramfs_modules.join(", ")
+        );
     }
     println!("cross-compile: {}", b.cross_compile);
     let Some(i) = image else {

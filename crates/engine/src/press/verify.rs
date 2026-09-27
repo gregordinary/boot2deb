@@ -13,9 +13,10 @@
 //! moves it, and it is not a fault. Both reads therefore judge the primary table
 //! only, which is the one the backup is reconstructed from.
 
+use crate::blobs::hex;
 use crate::error::EngineError;
 use crate::event::Step;
-use crate::press::write::{decompressed_prefix, hex, WrittenImage};
+use crate::press::write::{decompressed_prefix, WrittenImage};
 use gpt::disk::LogicalBlockSize;
 use gpt::GptConfig;
 use sha2::{Digest, Sha256};

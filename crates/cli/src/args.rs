@@ -209,28 +209,34 @@ pub(crate) enum Command {
         #[command(flatten)]
         args: BuildArgs,
     },
-    /// Rebuild an image from the plan document a previous build published, instead of
-    /// resolving the archive afresh. The lock pins the sources. The plan pins the
-    /// package versions the archive served, which the lock cannot. Takes every `build`
-    /// flag, and differs from it in one way. The rootfs installs the plan's exact set
-    /// by the digests it records, reading neither a release nor a package index. The
-    /// plan, not an archive signature, is what those digests chain to.
+    /// Rebuild an image from the plan document a previous build published, then judge
+    /// every output against that build's record. The lock pins the sources, and the plan
+    /// pins the package versions the archive served, which the lock cannot. The rootfs
+    /// installs the plan's exact set by the digests it records, reading neither a
+    /// release nor a package index. The rebuild writes to its own directory
+    /// (`WORK_DIR/artifacts/reproduce` unless `--out-dir` names one) with both caches
+    /// off, and exits non-zero when any recorded output differs or is missing. Takes
+    /// every `build` flag.
     Reproduce {
         /// Recipe to reproduce (e.g. turing-rk1/forky). Its `.lock` must exist.
         recipe: String,
-        /// Directory holding the published `<stem>.plan` (and, for the builder
-        /// advisory, `<stem>.provenance.toml`) — the directory the image shipped from.
-        /// Default: this build point's own output dir, which is where a build on this
-        /// machine already published them.
+        /// Directory holding the published `<stem>.plan` and `<stem>.provenance.toml`,
+        /// the directory the image shipped from. Default: this build point's own output
+        /// dir, which is where a build on this machine already published them.
         #[arg(long)]
         from: Option<PathBuf>,
+        /// Keep the Tier-2 artifact cache and the rootfs cache on. By default a
+        /// reproduction restores nothing, since a restored output is the earlier build's
+        /// and proves nothing about this one.
+        #[arg(long)]
+        with_caches: bool,
         #[command(flatten)]
         args: BuildArgs,
     },
     /// Compare two build points on the packages, the kernel pin and its requested
     /// config, and the patch series and the patch files behind them. It also compares
-    /// every other source pin, the rkbin blobs, and what built each side. Each side is
-    /// a recipe name, a
+    /// every other source pin, the rkbin blobs, and what built each side. Two images
+    /// compare file by file. Each side is a recipe name, a
     /// `.lock`, or a `.provenance.toml`. Mixing is allowed, and a section only one
     /// side can answer is reported unavailable rather than as a change. Offline —
     /// reads documents the build already wrote.
@@ -609,6 +615,12 @@ pub(crate) struct BuildArgs {
     /// reproducibility pin later builds verify a fresh solve against.
     #[arg(long)]
     pub(crate) save_manifest: bool,
+    /// After a whole build, record the sha256 of every output it wrote as this lock's
+    /// committed outputs, `recipes/<recipe>.outputs`, under this build host's
+    /// architecture. `verify-image` then holds a later build of the lock to those bytes.
+    /// Outputs that carry the per-image password are left out.
+    #[arg(long)]
+    pub(crate) save_outputs: bool,
     /// Downgrade a solved-manifest drift from the committed pin to a warning instead
     /// of a hard error — for co-development or a knowingly-moved mirror. Re-pin
     /// deliberately with `--save-manifest` (which skips the drift check entirely,

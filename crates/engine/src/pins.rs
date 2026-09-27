@@ -51,6 +51,10 @@ pub struct UpdateOptions<'a> {
     /// Path recorded for the solved package manifest the rootfs stage writes
     /// (the content pin itself is produced then).
     pub rootfs_manifest: &'a str,
+    /// The rootfs `SOURCE_DATE_EPOCH` this lock records, in Unix seconds: the time of
+    /// this update. The caller keeps the previous lock's value instead when no pin moved
+    /// ([`Lock::carry_source_date_epoch`]).
+    pub source_date_epoch: u64,
 }
 
 /// Resolve a build to an exact [`Lock`] by consulting upstream and the vendored
@@ -348,6 +352,7 @@ fn assemble_lock(
             // Set once the solved manifest is committed beside the lock; a bare
             // `update` names the manifest but has not produced it yet.
             manifest_sha256: None,
+            source_date_epoch: opts.source_date_epoch,
         }),
         blobs,
         // The resolved extra-deb pins recorded verbatim — the sha256 is already the
@@ -902,6 +907,7 @@ mod tests {
             blobs_dir: Path::new("/unused"),
             patches_path: repo,
             rootfs_manifest: "unused.pkgs.lock",
+            source_date_epoch: 1_790_347_034,
         };
         let err = resolve_lock(&build, &opts).unwrap_err();
         match &err {
@@ -946,6 +952,7 @@ mod tests {
             blobs_dir: Path::new("/unused"),
             patches_path: Path::new("/definitely/not/a/git/repo"),
             rootfs_manifest: "unused.pkgs.lock",
+            source_date_epoch: 1_790_347_034,
         };
         if let Err(e) = resolve_lock(&build, &opts) {
             assert!(
@@ -1034,6 +1041,7 @@ mod tests {
                 suite: "forky".into(),
                 manifest: "m.lock".into(),
                 manifest_sha256: None,
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
                 atf:
@@ -1077,6 +1085,7 @@ mod tests {
             blobs_dir: Path::new("/unused"),
             patches_path: Path::new("/unused"),
             rootfs_manifest: "turing-rk1-forky.pkgs.lock",
+            source_date_epoch: 1_790_347_034,
         };
         let git_pin = |r: &str, c: &str| boot2deb_core::lock::GitPin {
             source: "https://src.example/repo.git".into(),
@@ -1231,6 +1240,7 @@ mod tests {
             blobs_dir: Path::new("/unused"),
             patches_path: Path::new("/definitely/not/a/checkout"),
             rootfs_manifest: "unused.pkgs.lock",
+            source_date_epoch: 1_790_347_034,
         };
         match resolve_lock(&build, &opts).unwrap_err() {
             EngineError::PatchesCheckoutMissing { path } => {
@@ -1355,6 +1365,7 @@ mod tests {
                 suite: image_of(build).suite.clone(),
                 manifest: "m".into(),
                 manifest_sha256: None,
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
                 atf: format!("{}@sha256:aa", boot.rkbin.atf),

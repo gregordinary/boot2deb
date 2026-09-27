@@ -93,7 +93,9 @@ pub fn check_authorized_key(entry: &str) -> Result<(), &'static str> {
              or their sk- security-key forms (an options prefix is not accepted)",
         );
     }
-    let decoded = decode_base64(blob).ok_or("key blob is not valid base64")?;
+    let decoded = crate::base64::decode(blob)
+        .filter(|d| !d.is_empty())
+        .ok_or("key blob is not valid base64")?;
     match embedded_type(&decoded) {
         None => Err("key blob is truncated or not an SSH key encoding"),
         Some(embedded) if embedded != key_type.as_bytes() => {
@@ -128,48 +130,6 @@ fn embedded_type(decoded: &[u8]) -> Option<&[u8]> {
     rest.get(..len)
 }
 
-/// Decode standard (`+/`) base64 with optional `=` padding, or `None` on any character
-/// outside the alphabet, a misplaced pad, or a truncated group.
-///
-/// Hand-rolled rather than taken from a dependency because this is the only base64 in
-/// `core`, and the decode exists solely to read the key blob's first field — a
-/// 20-line table lookup against a crate in the pure, dependency-light config layer.
-fn decode_base64(s: &str) -> Option<Vec<u8>> {
-    /// Sextet value of a base64 character, or `None` for anything else.
-    fn sextet(c: u8) -> Option<u32> {
-        match c {
-            b'A'..=b'Z' => Some((c - b'A') as u32),
-            b'a'..=b'z' => Some((c - b'a') as u32 + 26),
-            b'0'..=b'9' => Some((c - b'0') as u32 + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let bytes = s.as_bytes();
-    // Padding is only ever the last one or two characters, and the body must be whole
-    // 4-character groups once it is accounted for.
-    let pad = bytes.iter().rev().take_while(|&&c| c == b'=').count();
-    if pad > 2 || !bytes.len().is_multiple_of(4) || bytes.len() < 4 {
-        return None;
-    }
-    let body = &bytes[..bytes.len() - pad];
-    let mut out = Vec::with_capacity(body.len() / 4 * 3);
-    for group in body.chunks(4) {
-        let mut acc = 0u32;
-        for &c in group {
-            acc = (acc << 6) | sextet(c)?;
-        }
-        // A partial final group carries 6 bits per character; `acc` is left-aligned to
-        // the group's full 24 bits so the same shifts read every case.
-        acc <<= 6 * (4 - group.len());
-        let full = [(acc >> 16) as u8, (acc >> 8) as u8, acc as u8];
-        // 2 characters encode 1 byte, 3 encode 2, 4 encode 3.
-        out.extend_from_slice(&full[..group.len().saturating_sub(1)]);
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,7 +151,7 @@ mod tests {
     #[test]
     fn reads_the_type_name_out_of_a_real_key_blob() {
         let blob = ED25519.split(' ').nth(1).unwrap();
-        let decoded = decode_base64(blob).expect("a real key blob decodes");
+        let decoded = crate::base64::decode(blob).expect("a real key blob decodes");
         assert_eq!(embedded_type(&decoded), Some(&b"ssh-ed25519"[..]));
     }
 
@@ -215,7 +175,7 @@ mod tests {
         // own first field reads `ssh-rsa` — so only the cross-check catches it.
         let mismatched = "ssh-ed25519 AAAAB3NzaC1yc2EA";
         assert_eq!(
-            embedded_type(&decode_base64("AAAAB3NzaC1yc2EA").unwrap()),
+            embedded_type(&crate::base64::decode("AAAAB3NzaC1yc2EA").unwrap()),
             Some(&b"ssh-rsa"[..]),
             "the fixture must really carry the other type"
         );
@@ -260,24 +220,5 @@ mod tests {
         // Two keys in one entry: the second line would reach the file unvalidated.
         assert!(check_authorized_key(&format!("{ED25519}\n{ED25519}")).is_err());
         assert!(check_authorized_key(&format!("{ED25519_NO_COMMENT} tab\there")).is_err());
-    }
-
-    /// Padding, group boundaries, and the byte counts each group length produces —
-    /// the cases a hand-rolled decoder gets wrong.
-    #[test]
-    fn base64_decode_handles_padding_and_rejects_malformed_input() {
-        assert_eq!(decode_base64("AAAA"), Some(vec![0, 0, 0]));
-        // "man" / "ma" / "m" — RFC 4648's own worked examples, one per pad length.
-        assert_eq!(decode_base64("bWFu"), Some(b"man".to_vec()));
-        assert_eq!(decode_base64("bWE="), Some(b"ma".to_vec()));
-        assert_eq!(decode_base64("bQ=="), Some(b"m".to_vec()));
-        // Both non-standard alphabets and stray characters are out.
-        assert_eq!(decode_base64("bW-u"), None);
-        assert_eq!(decode_base64("bW u"), None);
-        // Unpadded remainders, over-padding, and a misplaced pad.
-        assert_eq!(decode_base64("bWF"), None);
-        assert_eq!(decode_base64("bQ==="), None);
-        assert_eq!(decode_base64("b=Fu"), None);
-        assert_eq!(decode_base64(""), None);
     }
 }

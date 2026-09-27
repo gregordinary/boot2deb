@@ -27,6 +27,7 @@ commit = "ec8acfdcdb2a50359abfe7f3023168e539fb97fa"
 [rootfs]
 suite = "forky"
 manifest = "forky.pkgs.lock"
+source_date_epoch = 1790393266
 
 [blobs]
 atf = "rk3576_bl31_v1.24.elf@sha256:e2cf4e0e920dfe1daa6412c05f49dc7e5c0f9888d3a3e8eecc85fbe1e86a23d1"

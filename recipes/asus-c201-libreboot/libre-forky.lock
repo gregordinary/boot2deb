@@ -16,3 +16,4 @@ commit = "ec8acfdcdb2a50359abfe7f3023168e539fb97fa"
 [rootfs]
 suite = "forky"
 manifest = "libre-forky.pkgs.lock"
+source_date_epoch = 1790393266

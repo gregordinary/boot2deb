@@ -582,6 +582,37 @@ pub enum EngineError {
         detail: String,
     },
 
+    /// The built initramfs does not cover the image's initramfs module list: a listed
+    /// module is neither in the initrd nor built into the kernel.
+    ///
+    /// `initramfs-tools` drops such a name without a word, so the build is where it
+    /// surfaces. A listed module is one a board needs before its root mounts. On a
+    /// board without a display stack, a missing one looks like a boot that never
+    /// reaches its root and says nothing. The decision is
+    /// [`coverage`](boot2deb_core::initramfs::coverage).
+    #[error(
+        "the initramfs built for kernel {kernel} lacks {} listed module(s), each neither \
+         in the initrd nor built into the kernel: {}. Build each one for this kernel, as \
+         a module or built in, or remove it from its layer's `[initramfs] modules`",
+        .modules.len(),
+        .modules.join(", ")
+    )]
+    InitramfsModulesMissing {
+        /// The kernel release the initrd was built for.
+        kernel: String,
+        /// The listed names the initrd does not cover, in list order.
+        modules: Vec<String>,
+    },
+
+    /// The initrd report program's output could not be read, so the initramfs module
+    /// check did not run. Refused rather than passed, since a check that did not run
+    /// has established nothing.
+    #[error("the initrd report could not be read: {message}")]
+    InitrdReport {
+        /// What was wrong with the output.
+        message: String,
+    },
+
     /// The solved rootfs manifest could not be fully content-pinned: some
     /// installed packages had no captured `.deb` to hash, so their sha256 is
     /// unknown. Surfaced rather than shipping a partially pinned manifest,

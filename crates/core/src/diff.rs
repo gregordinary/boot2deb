@@ -56,6 +56,10 @@ pub struct Side {
     /// What built it. Recorded only by a provenance manifest: a lock describes a
     /// build point, and this is a property of a run.
     pub builder: Option<BuilderFacts>,
+    /// Every file its image's rootfs holds — read from the file manifest a provenance
+    /// manifest names, which is why the caller fills it. A lock describes no image, so
+    /// a side read from one never answers this.
+    pub files: Option<crate::files::FileManifest>,
 }
 
 /// The kernel a build point names.
@@ -232,6 +236,7 @@ impl Side {
             packages: None,
             kconfig: None,
             builder: None,
+            files: None,
         }
     }
 
@@ -332,6 +337,7 @@ impl Side {
                     })
                     .collect(),
             }),
+            files: None,
         }
     }
 
@@ -397,6 +403,7 @@ impl Side {
         self.packages = self.packages.or(other.packages);
         self.kconfig = self.kconfig.or(other.kconfig);
         self.builder = self.builder.or(other.builder);
+        self.files = self.files.or(other.files);
         self
     }
 }
@@ -480,6 +487,10 @@ pub struct Report {
     pub blobs: Section<Vec<Change>>,
     /// What built each side.
     pub builder: Section<BuilderChanges>,
+    /// The files each image's rootfs holds, path by path. Every difference is reported,
+    /// the per-image password's `/etc/shadow` included, since this compares two images
+    /// rather than judging a reproduction.
+    pub files: Section<crate::files::FilesDiff>,
 }
 
 impl Report {
@@ -492,6 +503,7 @@ impl Report {
             && self.sources.is_quiet()
             && self.blobs.is_quiet()
             && self.builder.is_quiet()
+            && self.files.is_quiet()
     }
 }
 
@@ -713,6 +725,31 @@ pub fn compare(left: &Side, right: &Side) -> Report {
         sources: compare_sources(left, right),
         blobs: compare_blobs(left, right),
         builder: compare_builder(left, right),
+        files: compare_files(left, right),
+    }
+}
+
+/// The two images' files, when both sides name a file manifest.
+fn compare_files(left: &Side, right: &Side) -> Section<crate::files::FilesDiff> {
+    match (&left.files, &right.files) {
+        (Some(l), Some(r)) => Section::Compared {
+            changes: crate::files::compare(l, r),
+        },
+        (l, r) => Section::Unavailable {
+            why: missing(
+                left,
+                right,
+                l.is_some(),
+                r.is_some(),
+                "a rootfs file manifest",
+            ),
+        },
+    }
+}
+
+impl IsEmpty for crate::files::FilesDiff {
+    fn is_empty(&self) -> bool {
+        crate::files::FilesDiff::is_empty(self)
     }
 }
 
@@ -1044,6 +1081,7 @@ mod tests {
                 suite: "forky".into(),
                 manifest: "m.pkgs.lock".into(),
                 manifest_sha256: None,
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
                 atf: format!("bl31.elf@sha256:{}", "1".repeat(64)),
@@ -1352,6 +1390,66 @@ mod tests {
         assert!(merged.builder.is_some());
         // The label is the left side's: merge folds facts in, it does not rename.
         assert_eq!(merged.label, "turing-rk1/forky");
+    }
+
+    /// Two images' files compare path by path, the per-image `/etc/shadow` included; a
+    /// side with no file manifest makes the section unavailable and names that side.
+    #[test]
+    fn the_files_section_compares_two_images_and_names_a_side_without_one() {
+        use crate::files::{FileEntry, FileManifest, FileType};
+        let entry = |name: &str, sha: char| FileEntry {
+            name: name.into(),
+            file_type: FileType::Reg,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            mtime_nsec: 0,
+            size: 1,
+            sha256: Some(sha.to_string().repeat(64)),
+            target: None,
+            device: None,
+            inode_token: 0,
+            xattrs: BTreeMap::new(),
+        };
+        let root = FileEntry {
+            file_type: FileType::Dir,
+            mode: 0o755,
+            size: 0,
+            sha256: None,
+            ..entry("", 'a')
+        };
+        let manifest = |shadow: char| FileManifest {
+            root: root.clone(),
+            entries: vec![entry("etc", 'a'), entry("etc/shadow", shadow)],
+        };
+        let left = Side {
+            label: "one".into(),
+            files: Some(manifest('a')),
+            ..Side::default()
+        };
+        let right = Side {
+            label: "two".into(),
+            files: Some(manifest('b')),
+            ..Side::default()
+        };
+        let Section::Compared { changes } = compare(&left, &right).files else {
+            panic!("both sides have a file manifest");
+        };
+        assert_eq!(changes.changed.len(), 1);
+        assert_eq!(changes.changed[0].path, "/etc/shadow");
+        assert_eq!(changes.changed[0].fields, ["sha256"]);
+
+        let bare = Side {
+            label: "turing-rk1/forky".into(),
+            ..Side::default()
+        };
+        let Section::Unavailable { why } = compare(&left, &bare).files else {
+            panic!("one side has no file manifest");
+        };
+        assert_eq!(
+            why,
+            "turing-rk1/forky does not record a rootfs file manifest"
+        );
     }
 
     /// The case the report exists to make mechanical: the config held still and the

@@ -739,6 +739,53 @@ value, so the board wins:
 kernel_cmdline = "loglevel=7"
 ```
 
+### The modules the initramfs must carry
+
+A SoC or device layer names the modules its hardware needs before the root filesystem
+mounts, in an `[initramfs]` table. Each entry's reason is a TOML comment beside it,
+because the reason is what a later editor needs before removing one:
+
+```toml
+[initramfs]
+modules = [
+    # The SD slot's power rails are RK808 LDOs. That is a device-tree dependency, so
+    # nothing pulls the regulator driver in on its own.
+    "i2c-rk3x",
+    "rk808-regulator",
+    "dw_mmc-rockchip",
+    "ext4",
+]
+```
+
+The SoC's list comes first and the device's follows. A variant device accumulates its
+parent's list, and `boot2deb resolve` prints the result. The build writes the list into a
+`modules.d` drop-in before any package installs, so the first initramfs the kernel package
+builds already has it. The drop-in ships in the image, and an on-device kernel upgrade
+regenerates the initramfs from the same list.
+
+**Every name must land.** `initramfs-tools` skips a listed module it cannot find without
+a word. The rootfs stage therefore checks the initramfs it built. A name that is neither
+in it nor built into the kernel (`modules.builtin`) fails the build:
+
+```console
+error: the initramfs built for kernel 7.2.8-1-armv7 lacks 1 listed module(s), each
+neither in the initrd nor built into the kernel: rk808-regulator. Build each one for this
+kernel, as a module or built in, or remove it from its layer's `[initramfs] modules`
+```
+
+Names match exactly by basename, with `-` and `_` equivalent and any compression suffix
+accepted. `ext4` is not satisfied by `fsck.ext4`. A module in the initramfs that declares
+firmware the initramfs does not hold is reported as a warning, since a driver's firmware
+declarations name alternatives.
+
+Each name is also an `initramfs-module` check in the
+[on-image self-test](self-test.md). That catches an on-device regeneration that loses one,
+where no build is watching.
+
+A board that names no module leaves the choice to `initramfs-tools`, which on a
+`rockchip-rkbin` board is `MODULES=most`. A depthcharge board builds with `MODULES=list`,
+where its list is the whole of what reaches the root device.
+
 ### A variant board extends another
 
 Sometimes two devices are the same board with one difference: a block enabled for
@@ -824,16 +871,17 @@ so which suite is being built decides whether the name is right. An exclude name
 something that must not be installed, and is satisfied just as well by a suite that
 never had it. Excluding a name a suite does not carry is therefore already a no-op.
 
-**Five arrays are the exception and accumulate**: `caveats`, `expect`,
-`nonfree_firmware_packages`, `packages` and `exclude`. Each level's entries are
-concatenated base-most first and de-duplicated, so a variant inherits its parent's and
-adds its own. The line is between *describing or supplying the running system* and
+**Six arrays are the exception and accumulate**: `caveats`, `expect`,
+`nonfree_firmware_packages`, `packages`, `exclude` and `initramfs.modules`. Each level's
+entries are concatenated base-most first and de-duplicated, so a variant inherits its
+parent's and adds its own. The line is between *describing or supplying the running system* and
 *selecting a build input*.
 
 A variant is the same hardware, so it is bound by everything its parent said about that
 hardware. A caveat cannot be un-said, and a runtime check that held on the parent holds
 here. A radio that needed firmware still needs it, and a board package the parent
-installs is one this board wants too.
+installs is one this board wants too. A module the parent's initramfs needed to reach the
+root device is one the variant's initramfs needs.
 
 Replacing any of them would let a variant that adds one entry silently drop every entry
 it inherits. That is a support claim that is wrong, or a self-test that passes while
@@ -941,6 +989,7 @@ that is quietly wrong:
 | `locale` / `timezone` / `keymap` | see [Locale, timezone, and keyboard](../localization.md) | `/etc/locale.gen`, the `/etc/localtime` target, shell-sourced `/etc/default/keyboard` |
 | `ntp_servers` | a bare host per entry: hostname or IP, no scheme, port, or whitespace — see [The clock and time sync](../clock.md) | the space-separated `NTP=` line of a `timesyncd.conf.d` drop-in |
 | `ssh_authorized_keys` | one line per entry: a known key type, a base64 blob whose own embedded type name agrees with it, an optional comment. Private key material and options prefixes are refused — see [The account, sudo, and SSH keys](../access.md) | a line of `~debian/.ssh/authorized_keys`, written through a quoted heredoc |
+| `initramfs.modules` | a module name as `modules.order` spells it: letters, digits, `-` and `_`, with no `.ko` suffix and no path | one line of a generated `modules.d` drop-in, which `mkinitramfs` reads word by word |
 | `groups` | Debian's `NAME_REGEX` per entry: a lowercase letter or `_`, then lowercase letters, digits, `_` and `-`, ≤ 32 characters. A comma is refused by name, since it would split one entry into two groups — see [The account, sudo, and SSH keys](../access.md) | the comma-separated argument of one `usermod -aG` |
 
 The rule these share is that a value is **rejected, never repaired**. A hostname with a
@@ -1025,10 +1074,18 @@ exactly one table:
 [rootfs]
 suite = "forky"
 manifest = "forky.pkgs.lock"
+source_date_epoch = 1784935734
 ```
 
 That is the whole truth about what it depends on. The package manifest beside it pins
 every one of those packages by name, version, and sha256.
+
+`source_date_epoch` is the time the rootfs stamps wherever it records one, in Unix
+seconds. That covers every file's modification time, the initrd's members, and the
+created account's password-change day. `update` sets it to the time of the `update`
+that last moved a pin, and carries it forward when nothing moved. An unchanged
+re-pin therefore leaves the lock byte-identical.
+[Time and paths](reproducibility.md#time-and-paths) says where else it reaches.
 
 The split between the two is what makes a build reproducible:
 
@@ -1146,7 +1203,7 @@ the board, since they hold for every recipe on it. It groups the feature and rec
 under each recipe, since those depend on what that recipe selected.
 
 `caveats` **accumulates** down an `extends` chain rather than being replaced by it. It is
-one of [the five arrays that do](#a-variant-board-extends-another). A variant
+one of [the six arrays that do](#a-variant-board-extends-another). A variant
 shares its parent's hardware, so last-wins there would let a variant that adds one
 caveat silently drop every limitation it inherits. A variant cannot un-say one of its
 parent's. A board that genuinely lacks the limitation is its own device rather than a

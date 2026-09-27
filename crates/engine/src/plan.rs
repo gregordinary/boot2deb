@@ -560,6 +560,7 @@ mod tests {
                 suite: "forky".into(),
                 manifest: "m".into(),
                 manifest_sha256: None,
+                source_date_epoch: 1_790_347_034,
             }),
             blobs: Some(BlobsPin {
                 atf: "a".into(),

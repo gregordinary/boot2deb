@@ -1,4 +1,5 @@
-//! The output dir's artifact ledger and the kernel package it names.
+//! The output dir's artifact ledger and the kernel package it names, and the record of
+//! every artifact a build emitted.
 //!
 //! The rootfs stage stands up a `[trusted=yes]` local apt repo from the `.deb`s the
 //! compile stages produced. Its input set is this explicit ledger, the artifacts the
@@ -251,6 +252,83 @@ pub(crate) fn kmod_packages(
     Ok(names)
 }
 
+/// Every artifact a build emitted, recorded off its event stream as it runs, for the
+/// provenance manifest's `[[outputs]]`.
+///
+/// Fed from the build's own sink, so the rows name exactly the files the stages
+/// announced, and a stage cannot write an output the record misses. Interior mutability,
+/// because an event sink is handed only `&self`.
+#[derive(Default)]
+pub(crate) struct EmittedArtifacts {
+    seen: std::cell::RefCell<Vec<(String, String, PathBuf)>>,
+}
+
+impl EmittedArtifacts {
+    /// Note one event, keeping it when it announces an artifact.
+    pub(crate) fn record(&self, event: &boot2deb_engine::event::Event) {
+        if let boot2deb_engine::event::Event::Artifact { step, role, path } = event {
+            self.seen
+                .borrow_mut()
+                .push((step.clone(), role.clone(), PathBuf::from(path)));
+        }
+    }
+
+    /// The artifacts recorded so far as `[[outputs]]` rows, sized and hashed, sorted by
+    /// file name. A file announced twice is one row, as its last announcement names it.
+    ///
+    /// `per_image` holds the paths that carry the per-image first-boot password, which the
+    /// image stage names ([`Output::per_image`](boot2deb_core::outputs::Output::per_image)).
+    pub(crate) fn rows(
+        &self,
+        per_image: &[PathBuf],
+    ) -> Result<Vec<boot2deb_core::outputs::Output>, Box<dyn std::error::Error>> {
+        let mut by_file = BTreeMap::new();
+        for (step, role, path) in self.seen.borrow().iter() {
+            let file = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| format!("artifact {} has no file name", path.display()))?
+                .to_string();
+            by_file.insert(file, (step.clone(), role.clone(), path.clone()));
+        }
+        by_file
+            .into_iter()
+            .map(|(file, (step, role, path))| {
+                let (size, sha256) = boot2deb_engine::blobs::sha256_file(&path)?;
+                Ok(boot2deb_core::outputs::Output {
+                    per_image: per_image.contains(&path),
+                    step,
+                    role,
+                    file,
+                    size,
+                    sha256,
+                })
+            })
+            .collect()
+    }
+}
+
+/// The rootfs file manifest a provenance manifest's `[[outputs]]` names, read from `dir`,
+/// or `None` when the build recorded none.
+pub(crate) fn files_manifest(
+    prov: &boot2deb_core::provenance::ProvenanceManifest,
+    dir: &Path,
+) -> Result<Option<boot2deb_core::files::FileManifest>, Box<dyn std::error::Error>> {
+    let Some(row) = prov
+        .outputs
+        .iter()
+        .find(|o| o.step == "image" && o.role == "files-manifest")
+    else {
+        return Ok(None);
+    };
+    let path = dir.join(&row.file);
+    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    Ok(Some(
+        boot2deb_core::files::FileManifest::parse(&bytes)
+            .map_err(|e| format!("{}: {e}", path.display()))?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +541,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = ledger_debs(dir.path()).unwrap_err().to_string();
         assert!(err.contains("run the compile stages first"), "{err}");
+    }
+
+    /// The `[[outputs]]` rows are the artifact events and nothing else: sorted by file,
+    /// one row per file however often it was announced, hashed from the bytes on disk,
+    /// and marked per-image exactly where the image stage said so.
+    #[test]
+    fn outputs_are_the_announced_artifacts_hashed_once_each() {
+        use boot2deb_engine::event::Event;
+        let dir = tempfile::tempdir().unwrap();
+        let deb = dir.path().join("linux-image.deb");
+        let image = dir.path().join("board.img.xz");
+        std::fs::write(&deb, b"abc").unwrap();
+        std::fs::write(&image, b"image").unwrap();
+        let artifact = |step: &str, role: &str, path: &Path| Event::Artifact {
+            step: step.into(),
+            role: role.into(),
+            path: path.display().to_string(),
+        };
+        let emitted = EmittedArtifacts::default();
+        emitted.record(&artifact("kernel", "image_deb", &deb));
+        emitted.record(&artifact("image", "compressed", &image));
+        emitted.record(&artifact("kernel", "image_deb", &deb));
+        emitted.record(&Event::Error {
+            step: "image".into(),
+            context: "not an artifact".into(),
+        });
+
+        let rows = emitted.rows(std::slice::from_ref(&image)).unwrap();
+        let files: Vec<&str> = rows.iter().map(|r| r.file.as_str()).collect();
+        assert_eq!(files, ["board.img.xz", "linux-image.deb"]);
+        assert!(rows[0].per_image && !rows[1].per_image);
+        assert_eq!(rows[1].step, "kernel");
+        assert_eq!(rows[1].size, 3);
+        assert_eq!(
+            rows[1].sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

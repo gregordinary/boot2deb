@@ -94,8 +94,9 @@ board.
 ## Locks land in the owning overlay
 
 `update` writes a recipe's lock, and `build --save-manifest` writes its solved manifest,
-into the **root that owns the recipe**. An overlay recipe's lock and manifest therefore
-land in that overlay, beside the recipe, not in the shipped tree. An out-of-tree recipe
+into the **root that owns the recipe**. `build --save-outputs` writes its outputs record
+there too. An overlay recipe's lock and manifest therefore land in that overlay, beside
+the recipe, not in the shipped tree. An out-of-tree recipe
 stays fully self-contained: recipe, lock, and manifest are all versioned together in
 your repo.
 

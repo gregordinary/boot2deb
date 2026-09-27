@@ -4,3 +4,4 @@
 [rootfs]
 suite = "trixie"
 manifest = "trixie.pkgs.lock"
+source_date_epoch = 1784935734

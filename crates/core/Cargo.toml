@@ -8,6 +8,9 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+# The strict reader for the file manifests boot2deb writes (`files`). A UAPI.16 manifest
+# carries nanosecond timestamps past 2^53, which this parser keeps exact as `u64`.
+serde_json.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 semver.workspace = true
@@ -15,6 +18,3 @@ semver.workspace = true
 [dev-dependencies]
 # Fixture config roots for resolution tests, decoupled from the shipped layers.
 tempfile.workspace = true
-# The `--json` shapes of the reports rendered here are part of their contract, so
-# the tests assert on the serialized document rather than on the Rust value alone.
-serde_json.workspace = true

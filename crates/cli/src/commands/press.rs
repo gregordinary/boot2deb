@@ -11,7 +11,11 @@
 //! - A press with tree additions **re-assembles** the image from the kept rootfs
 //!   tar, through [`boot2deb_engine::image::press_image`].
 //!
-//! Either way the seed keys are written last, into the finished file.
+//! Either way the seed keys are written last, into the finished file, and a rootfs file
+//! manifest lands beside it as `<output stem>.rootfs.uapi16`. A streamed press copies
+//! the build's, since its rootfs is the build's to the byte. A re-assembly formats a new
+//! rootfs and writes its own. The seed partition sits outside the rootfs, so the keys
+//! leave either listing true.
 //!
 //! What this module owns is config:
 //!
@@ -94,6 +98,7 @@ pub(crate) fn run(
     }
 
     let bound = bind_outputs(&roles, output, &args)?;
+    refuse_build_artifacts(&bound, &out_dir, &stem)?;
 
     if args.dry_run {
         return dry_run(&bound, &out_dir, &stem, &keys, &additions);
@@ -138,6 +143,23 @@ fn stream(
     sink: &impl Fn(Event),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let artifact = find_artifact(out_dir, stem, role)?;
+    // Found before anything is written, so a press that cannot give its output a
+    // listing fails without leaving an unlisted image behind.
+    let listing = role
+        .carries_rootfs()
+        .then(|| {
+            let path = out_dir.join(boot2deb_engine::image::files::manifest_name(stem));
+            if path.exists() {
+                Ok(path)
+            } else {
+                Err(format!(
+                    "no rootfs file manifest at {} — every build writes one beside its \
+                     image; rebuild with `boot2deb build`",
+                    path.display()
+                ))
+            }
+        })
+        .transpose()?;
     let step = Step::start(sink, "press");
     step.log(format!(
         "{}: {} -> {}",
@@ -171,6 +193,14 @@ fn stream(
             }
             Err(_) => step.log("verified: digest matches (no partition table to compare)"),
         }
+    }
+    if let Some(listing) = listing {
+        let dest = out.with_extension("rootfs.uapi16");
+        std::fs::copy(&listing, &dest)?;
+        step.log(format!(
+            "copied the build's rootfs file manifest to {}",
+            dest.display()
+        ));
     }
     step.finish();
     Ok(())
@@ -267,6 +297,38 @@ fn reassemble(
         boot2deb_engine::rootfs::DEFAULT_USER
     ));
     step.finish();
+    Ok(())
+}
+
+/// Refuse an output that would land on the build's own artifacts.
+///
+/// Streaming an image onto the file it streams from destroys both. A pressed output named
+/// for the build's raw image also puts its file manifest on the build's, which then
+/// describes another image. Either way the build's record stops being true, so the press
+/// fails before it writes anything.
+fn refuse_build_artifacts(
+    bound: &[(ArtifactRole, PathBuf)],
+    out_dir: &Path,
+    stem: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listing = out_dir.join(boot2deb_engine::image::files::manifest_name(stem));
+    for (role, out) in bound {
+        let out = absolutize(out.clone());
+        let base = role.file_name(stem);
+        let artifacts = [base.clone(), format!("{base}.xz"), format!("{base}.gz")];
+        let on_artifact = artifacts.iter().any(|name| out == out_dir.join(name));
+        let on_listing = role.carries_rootfs() && out.with_extension("rootfs.uapi16") == listing;
+        if on_artifact || on_listing {
+            return Err(format!(
+                "{} would overwrite the build's own {} artifacts in {} — press to a path \
+                 of its own",
+                out.display(),
+                role.describe(),
+                out_dir.display()
+            )
+            .into());
+        }
+    }
     Ok(())
 }
 
@@ -512,4 +574,29 @@ pub(crate) fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A press never lands on the build's image, a compressed copy of it, or, through its
+    /// listing, on the build's file manifest. A path of its own, even in the same
+    /// directory, is fine.
+    #[test]
+    fn a_press_output_never_overwrites_the_builds_artifacts() {
+        let out_dir = Path::new("/work/artifacts");
+        let press = |role: ArtifactRole, out: &str| {
+            refuse_build_artifacts(&[(role, PathBuf::from(out))], out_dir, "board-forky")
+        };
+        assert!(press(ArtifactRole::Combined, "/work/artifacts/board-forky.img").is_err());
+        assert!(press(ArtifactRole::Combined, "/work/artifacts/board-forky.img.xz").is_err());
+        assert!(press(
+            ArtifactRole::Rootfs,
+            "/work/artifacts/board-forky-rootfs.img"
+        )
+        .is_err());
+        assert!(press(ArtifactRole::Combined, "/work/artifacts/card.img").is_ok());
+        assert!(press(ArtifactRole::Combined, "/cards/board-forky.img").is_ok());
+    }
 }

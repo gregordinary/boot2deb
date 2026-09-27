@@ -161,9 +161,12 @@ fn run(
         Command::Build { recipe, args } => {
             commands::build::run(root, &recipe, args, None, json, verbosity)
         }
-        Command::Reproduce { recipe, from, args } => {
-            commands::reproduce::run(root, &recipe, from, args, json, verbosity)
-        }
+        Command::Reproduce {
+            recipe,
+            from,
+            with_caches,
+            args,
+        } => commands::reproduce::run(root, &recipe, from, with_caches, args, json, verbosity),
         Command::Diff {
             left,
             right,

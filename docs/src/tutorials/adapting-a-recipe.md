@@ -219,9 +219,9 @@ tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
 `extends` inherits the parent device's keys *and* its `overlay/` file tree. The parent's
 driver tuning, units, and keymaps therefore reach your image. You override any single
 file by shipping your own copy at the same path. Most arrays replace rather than append
-across the merge, so restate any list you extend. The exceptions are the five that
+across the merge, so restate any list you extend. The exceptions are the six that
 describe the board (`caveats`, `expect`, `nonfree_firmware_packages`, `packages`,
-`exclude`), which accumulate. Details:
+`exclude`, `initramfs.modules`), which accumulate. Details:
 [A variant board extends another](../reference/config-model.md#a-variant-board-extends-another).
 
 Reach for a variant device only when the difference needs a device-layer field — a device

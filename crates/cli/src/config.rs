@@ -723,6 +723,39 @@ mod tests {
     use super::*;
     use crate::testsupport::{repo_root, repo_root_path};
 
+    /// Every committed lock is exactly what `update` writes for its pins. The file says
+    /// "do not hand-edit", and this is what holds it to that: a hand edit, or a lock left
+    /// in a shape the format no longer has, fails here rather than at the next build.
+    #[test]
+    fn every_committed_lock_is_in_the_form_update_writes() {
+        let recipes = repo_root_path().join("recipes");
+        let mut checked = 0;
+        for device in std::fs::read_dir(&recipes).unwrap() {
+            let device = device.unwrap().path();
+            if !device.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&device).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if !name.ends_with(".lock") || name.ends_with(".pkgs.lock") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let lock = boot2deb_core::lock::Lock::from_toml_str(&text, &name)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                assert_eq!(
+                    lock.to_toml_string().unwrap(),
+                    text,
+                    "{} is not in the form `update` writes",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 20, "only {checked} locks were found to check");
+    }
+
     #[test]
     fn preflight_accepts_shipped_config_and_rejects_bad_geometry_or_fragment() {
         // Geometry + fragment existence are validated up front (by both update
@@ -1136,47 +1169,6 @@ mod tests {
             encoding_text.contains("<EncoderAppPath>/opt/ffmpeg-rk/bin/ffmpeg</EncoderAppPath>"),
             "the seeded encoder path is what the cleared argument falls through to"
         );
-    }
-
-    #[test]
-    fn the_libreboot_c201_ships_its_display_stack_into_the_initramfs() {
-        // Also a silent failure: a modules.d drop-in that is never collected costs
-        // nothing at build time and simply does not exist at boot, leaving the board on
-        // the firmware's blank screen exactly as if the file had never been written.
-        let root = ConfigRoot::new(repo_root_path());
-        let b = resolve_device(&root, "asus-c201-libreboot", &Overrides::default()).unwrap();
-        let dirs = overlay_dirs(&root, &b, OverlayStage::PreInstall);
-
-        let display = root
-            .find_asset("devices/asus-c201-libreboot/overlay-pre")
-            .expect("the libreboot device ships a pre-install tree");
-        assert!(
-            dirs.contains(&display),
-            "the libreboot display stack is missing from {dirs:?}"
-        );
-        let list = display.join("usr/share/initramfs-tools/modules.d/veyron-display");
-        let modules = std::fs::read_to_string(&list).expect("the module list is a real file");
-        for module in ["rockchipdrm", "panel-simple", "pwm_bl", "pwm-rockchip"] {
-            assert!(modules.contains(module), "{module} missing from {list:?}");
-        }
-
-        // It adds to the SoC family's list rather than replacing it — mkinitramfs reads
-        // every file in the directory — so the drivers that reach the root device have
-        // to still be coming from the layer that owns them.
-        let family = root
-            .find_asset("socs/rk3288/overlay-pre")
-            .expect("the SoC layer ships the family's list");
-        let family_at = dirs.iter().position(|d| d == &family).unwrap();
-        let display_at = dirs.iter().position(|d| d == &display).unwrap();
-        assert!(family_at < display_at, "the family's list comes first");
-        assert!(family
-            .join("usr/share/initramfs-tools/modules.d/veyron")
-            .is_file());
-
-        // And the stock board does not pick it up: its 16 MiB payload has no room for a
-        // display stack, which is the whole reason the two are different devices.
-        let stock = resolve_device(&root, "asus-c201", &Overrides::default()).unwrap();
-        assert!(!overlay_dirs(&root, &stock, OverlayStage::PreInstall).contains(&display));
     }
 
     #[test]

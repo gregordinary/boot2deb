@@ -1,5 +1,5 @@
 //! `reproduce`: rebuild an image from a published plan document rather than from a
-//! fresh archive resolve.
+//! fresh archive resolve, and judge the rebuild against the original's record.
 //!
 //! A recipe's `.lock` pins sources, patches, and the builder. It does not pin *which
 //! package versions the archive served*, so the same lock a month later resolves a
@@ -22,10 +22,21 @@
 //! reports how the running checkout compares, and leaves the decision to the
 //! operator. A stamped commit is a floor rather than a ceiling, and a newer builder
 //! usually reproduces the image and can carry fixes.
+//!
+//! What *is* enforced is the result. The rebuild writes to a directory of its own, so the
+//! originals survive to be compared against. It runs with both caches off, since a
+//! restored output is the earlier build's and says nothing about this one.
+//!
+//! Each output the original's provenance manifest recorded then gets a [`Verdict`] from
+//! [`boot2deb_core::outputs::judge`]. An image carries a fresh first-boot password, so it
+//! is judged through its file manifest and the disk around it. The disk is the partition
+//! table, the filesystem record, and the disk's size. A difference or a missing output
+//! exits non-zero.
 
 use crate::args::BuildArgs;
 use crate::render::{note, Verbosity};
-use boot2deb_core::provenance::BuiltWithProvenance;
+use boot2deb_core::outputs::Verdict;
+use boot2deb_core::provenance::{BuiltWithProvenance, ProvenanceManifest};
 use boot2deb_core::ConfigRoot;
 use std::path::{Path, PathBuf};
 
@@ -34,7 +45,8 @@ pub(crate) fn run(
     root: &ConfigRoot,
     recipe: &str,
     from: Option<PathBuf>,
-    args: BuildArgs,
+    with_caches: bool,
+    mut args: BuildArgs,
     json: bool,
     verbosity: Verbosity,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -46,14 +58,33 @@ pub(crate) fn run(
     let stem = point.artifact_stem();
 
     // Where the earlier build published. Defaulted to where this build point's own
-    // artifacts land, so reproducing in place — the common case while checking that a
-    // build is reproducible at all — needs no flag.
-    let published = from.unwrap_or_else(|| {
-        crate::fsutil::absolutize(args.out_dir.clone().unwrap_or_else(|| {
-            crate::workdir::work_dir_for(root, reference.as_str(), args.work_dir.clone())
-                .join("artifacts")
-        }))
-    });
+    // artifacts land, so checking a build made on this machine needs no flag.
+    let own_artifacts =
+        crate::workdir::work_dir_for(root, reference.as_str(), args.work_dir.clone())
+            .join("artifacts");
+    let published = crate::fsutil::absolutize(from.unwrap_or_else(|| own_artifacts.clone()));
+    // Where the rebuild writes: a directory of its own, so the originals it is judged
+    // against are still there afterwards.
+    let rebuilt = crate::fsutil::absolutize(
+        args.out_dir
+            .clone()
+            .unwrap_or_else(|| own_artifacts.join("reproduce")),
+    );
+    if rebuilt == published {
+        return Err(format!(
+            "the reproduction would write over the build it is judged against ({}) — \
+             pass an --out-dir of its own",
+            published.display()
+        )
+        .into());
+    }
+    args.out_dir = Some(rebuilt.clone());
+    // A restored output is the earlier build's. Off unless asked for, so every output
+    // judged below is this run's own.
+    if !with_caches {
+        args.no_artifact_cache = true;
+        args.refresh_rootfs = true;
+    }
 
     let plan = published.join(format!("{stem}.plan"));
     if !plan.exists() {
@@ -101,7 +132,176 @@ pub(crate) fn run(
     };
     note(json, verbosity, &sink, "reproduce", line);
 
-    super::build::run(root, recipe, args, Some(&plan), json, verbosity)
+    super::build::run(root, recipe, args, Some(&plan), json, verbosity)?;
+
+    // The judgment needs the original's record. A plan alone is enough to replay, and
+    // then there is nothing recorded to hold the rebuild to.
+    if !provenance.exists() {
+        note(
+            json,
+            verbosity,
+            &sink,
+            "reproduce",
+            "no provenance manifest recorded the original's outputs, so the rebuild is not \
+             judged"
+                .into(),
+        );
+        return Ok(());
+    }
+    let judged = judge(&published, &rebuilt, &stem)?;
+    report(&judged, &published, &rebuilt, &stem, json);
+    if judged.reproduced() {
+        Ok(())
+    } else {
+        let failed = judged
+            .outputs
+            .iter()
+            .filter(|o| o.verdict.is_failure())
+            .count();
+        Err(format!(
+            "{failed} of {} recorded outputs did not reproduce",
+            judged.outputs.len()
+        )
+        .into())
+    }
+}
+
+/// Judge the rebuild in `rebuilt` against the original in `published`, from the two
+/// provenance manifests and, for the image, the two rootfs file manifests they name and
+/// the disks around them.
+fn judge(
+    published: &Path,
+    rebuilt: &Path,
+    stem: &str,
+) -> Result<boot2deb_core::outputs::Reproduction, Box<dyn std::error::Error>> {
+    let read = |dir: &Path| -> Result<ProvenanceManifest, Box<dyn std::error::Error>> {
+        let path = dir.join(format!("{stem}.provenance.toml"));
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        Ok(ProvenanceManifest::from_toml_str(
+            &text,
+            &path.display().to_string(),
+        )?)
+    };
+    let (original, rebuild) = (read(published)?, read(rebuilt)?);
+    let images = match (
+        crate::artifacts::files_manifest(&original, published)?,
+        crate::artifacts::files_manifest(&rebuild, rebuilt)?,
+    ) {
+        (Some(a), Some(b)) => Some(boot2deb_core::outputs::ImageComparison {
+            files: boot2deb_core::files::compare(&a, &b),
+            disk: disk_differences(&original, published, &rebuild, rebuilt),
+        }),
+        _ => None,
+    };
+    Ok(boot2deb_core::outputs::judge(
+        &original.outputs,
+        &rebuild.outputs,
+        images,
+    ))
+}
+
+/// What differs between two builds' disks outside the rootfs's files, one sentence each.
+///
+/// The partition table of each disk image the original recorded, read from both builds'
+/// copies. The table carries every partition's placement, type, GUID, name and
+/// attributes, and a split rootfs image carries one too. The filesystem record
+/// (`[filesystem]`) carries the format contract and the geometry it realized, and the
+/// disk's size is compared as recorded.
+fn disk_differences(
+    original: &ProvenanceManifest,
+    published: &Path,
+    rebuild: &ProvenanceManifest,
+    rebuilt: &Path,
+) -> Vec<String> {
+    use boot2deb_engine::press::verify;
+    let mut disk = Vec::new();
+    if original.image.image_bytes != rebuild.image.image_bytes {
+        disk.push(format!(
+            "the disk is {} bytes, not {}",
+            rebuild.image.image_bytes, original.image.image_bytes
+        ));
+    }
+    if original.filesystem != rebuild.filesystem {
+        disk.push("the rootfs filesystem record ([filesystem]) differs".into());
+    }
+    for o in original.outputs.iter().filter(|o| o.is_disk_image()) {
+        let theirs = rebuilt.join(&o.file);
+        if !theirs.exists() {
+            // A missing output has its own verdict.
+            continue;
+        }
+        match (
+            verify::planned_table(&published.join(&o.file)),
+            verify::planned_table(&theirs),
+        ) {
+            (Ok(a), Ok(b)) => {
+                if let Err(e) = verify::compare_tables(&o.file, &a, &b) {
+                    disk.push(format!("the partition table of {} differs: {e}", o.file));
+                }
+            }
+            (Err(_), Err(_)) => {}
+            (Ok(_), Err(e)) | (Err(e), Ok(_)) => disk.push(format!(
+                "only one build's {} has a readable partition table: {e}",
+                o.file
+            )),
+        }
+    }
+    disk
+}
+
+/// Print the verdicts: one NDJSON `reproduction` record under `--json`, a table
+/// otherwise. Printed whatever the result, since an identical output is as much the
+/// answer as a different one.
+///
+/// A verdict names the first few paths an image differs in. When an image differs, the
+/// table ends with the `diff` command that lists every one.
+fn report(
+    judged: &boot2deb_core::outputs::Reproduction,
+    published: &Path,
+    rebuilt: &Path,
+    stem: &str,
+    json: bool,
+) {
+    if json {
+        let mut value = serde_json::to_value(judged).unwrap_or_default();
+        if let Some(map) = value.as_object_mut() {
+            map.insert("event".into(), "reproduction".into());
+        }
+        println!("{value}");
+        return;
+    }
+    println!("\nreproduction, output by output:");
+    for o in &judged.outputs {
+        let verdict = match &o.verdict {
+            Verdict::Identical => "identical".to_string(),
+            Verdict::Differs { detail } => format!("DIFFERS  {detail}"),
+            Verdict::Missing => "MISSING  not written by the rebuild".to_string(),
+            Verdict::NotComparable { reason } => format!("not comparable: {reason}"),
+        };
+        println!("  {:<48} {verdict}", o.file);
+    }
+    if !judged.set_aside.is_empty() {
+        println!(
+            "  (set aside as different by design: {})",
+            judged.set_aside.join(", ")
+        );
+    }
+    for file in &judged.unrecorded {
+        println!("  {file:<48} written by the rebuild, recorded by no original");
+    }
+    let image_differs = judged
+        .outputs
+        .iter()
+        .any(|o| o.role == "files-manifest" && o.verdict.is_failure());
+    if image_differs {
+        let record = format!("{stem}.provenance.toml");
+        println!(
+            "\nevery path the images differ in:\n  boot2deb diff {} {} --section files",
+            published.join(&record).display(),
+            rebuilt.join(&record).display()
+        );
+    }
 }
 
 /// One line comparing the builder that produced the image with the running one, plus

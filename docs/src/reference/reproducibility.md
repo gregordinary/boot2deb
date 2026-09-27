@@ -167,6 +167,11 @@ that move independently:
 | `commit` / `dirty` | the *program* — the boot2deb binary that ran | stamped into the binary when it is compiled |
 | `config_commit` / `config_dirty` | the *data* — the config tree it read layers, recipes and the lock from | read from `--root` when the build starts |
 
+A config tree is dirty when a tracked file has changed. It is also dirty when an
+untracked file sits under a directory the build reads layers, overlays or recipes from.
+A new overlay file ships in the image before anyone commits it, so it counts. A scratch
+file elsewhere in the checkout does not.
+
 One checkout can supply both, and in the layout boot2deb is developed in it does. They
 still cannot answer for each other. An installed `boot2deb` run against a config tree
 has a `commit` from wherever it was built. Its `config_commit` comes from the tree in
@@ -188,7 +193,8 @@ both. `boot2deb diff` reports it moving between two builds, and `boot2deb doctor
 the version the running binary links.
 
 The binary's commit is stamped at **compile** time rather than read at run time, and that
-is deliberate. The binary *is* the builder, so its identity has to travel with it. An
+is deliberate. It is stamped only from boot2deb's own checkout. A source tree unpacked
+inside some other repository stamps no commit, rather than that repository's. The binary *is* the builder, so its identity has to travel with it. An
 installed boot2deb has no source tree in reach. Reading whatever checkout happened to be
 nearby would record a different claim than the field makes.
 
@@ -344,9 +350,10 @@ What is kept out:
   RAM-backed `tmpfs` on most desktops, making "does the build fit" a property of your
   mount table.
 - **Your shell environment.** Every build command runs with `TZ=UTC` and
-  `LC_ALL=C.UTF-8`, and with `KCFLAGS`/`KAFLAGS`/`KCPPFLAGS`/`MAKEFLAGS` cleared. A flag
-  exported in your shell therefore cannot shape kernel bytes that a lock-keyed cache
-  entry claims to reproduce.
+  `LC_ALL=C.UTF-8`, and with `KCPPFLAGS` and `MAKEFLAGS` cleared. `KCFLAGS` and
+  `KAFLAGS` carry the build's own path map (see [Time and paths](#time-and-paths)) and
+  nothing of yours. A flag exported in your shell therefore cannot shape kernel bytes
+  that a lock-keyed cache entry claims to reproduce.
 - **Your `openssl`.** The image's first-boot `/etc/shadow` entry is hashed in-process. No
   host binary sits on the credential path.
 
@@ -471,6 +478,27 @@ What is recorded, because it genuinely does reach the image:
   `.deb`s that an earlier run produced, in a root that need not be the one named here.
   Pin a snapshot (`--snapshot pin`) when you need the stronger claim, or build with
   `--no-artifact-cache` to make every `.deb` this run's own.
+- **`[[outputs]]`** — one row per artifact the build wrote: the step and role that wrote
+  it, its file name, its size, and its sha256.
+
+  ```toml
+  [[outputs]]
+  step = "kernel"
+  role = "image_deb"
+  file = "linux-image-7.2.8-1-arm64_7.2.8-1_arm64.deb"
+  size = 71953728
+  sha256 = "…"
+  per_image = false
+  ```
+
+  The rows come from the build's own artifact events, so the record lists exactly what
+  the build wrote. The provenance manifest and the bills of materials describe the
+  outputs, and are not rows themselves. A run of some stages alone, such as
+  `--stage image`, writes a provenance manifest whose rows are that run's outputs.
+
+  `per_image = true` marks an output that carries the first-boot password: the image,
+  each compressed copy of it, and its file manifest. No rebuild can match those byte for
+  byte. [`reproduce`](#reproducing-a-frozen-image) judges a rebuild against these rows.
 - **`[sandbox]`, `[sandbox_env]` and `[[sandbox_mounts]]`** — the posture, the environment
   and the complete mount series every sandboxed build command runs under, as the sandbox
   library resolves them. All three sit outside that library's compatibility promise, so
@@ -550,6 +578,89 @@ blocks buy. `max_grow_blocks` is how large a disk the image can still grow onto 
 boot. This record answers to the image's size as well as to the policy. A larger
 partition therefore moves every number in it with both pins unchanged.
 
+## Time and paths
+
+A build reads no clock. Every time an output records comes from a `SOURCE_DATE_EPOCH`
+that the lock fixes. Two builds of one lock therefore stamp the same times, whenever
+they run.
+
+Each compiled tree takes the committer date of the commit it compiles. That holds for
+the kernel, u-boot, each out-of-tree module, and each userspace and ffmpeg tree. The
+kernel needs two more settings, because parts of it read no `SOURCE_DATE_EPOCH`:
+
+- The kernel's build system dates the version string (`uname -v`), the built-in
+  initramfs and the `kheaders` archive from `KBUILD_BUILD_TIMESTAMP`. The build sets it
+  to the same instant.
+- The kernel's Debian packaging writes the wall clock into the changelog that every
+  package ships. A `dpkg-buildpackage` init hook re-dates it from the epoch before any
+  package installs it.
+
+The rootfs takes its epoch from the lock, as `[rootfs] source_date_epoch`. `update`
+writes it: the time of the `update` that last moved a pin. An `update` that moves
+nothing carries it forward, so the lock stays byte-identical. The rootfs epoch reaches
+three places:
+
+- It is the ceiling that every rootfs tar member's modification time is clamped to.
+- It is set in the customize step's environment. There `mkinitramfs` dates the initrd's
+  members, and `useradd` dates the account it creates. On a depthcharge board, `mkimage`
+  dates the signed kernel partition that packs the initrd.
+- It dates the `Release` file of the build's own package pool.
+
+A board that installs Debian's kernel compiles nothing, and still gets an epoch this
+way. The value is folded into the rootfs cache key. It moves only when a pin does, so a
+rolling build loses no cache hit to it.
+
+The export applies the ceiling in its encoder, which records each mtime as
+`min(mtime, epoch)` as it writes. The encoder is the one place that can. Under the
+subordinate id-map that gives the tree its real ownership, the provisioned files sit at
+ids the host user cannot set times on.
+
+The export also emits entries in sorted order, with directory children and extended
+attributes by name. A content-identical tree therefore encodes to a byte-identical
+archive.
+
+Paths are the other thing a compile records. The compiler writes each source file's
+absolute path into the debug information, and the linker's build ID is a hash that
+covers it. So each kernel and out-of-tree module compile maps its tree to `.`, with
+`-fdebug-prefix-map` in `KCFLAGS` and `KAFLAGS`. Two work directories then produce one
+build ID.
+
+## The rootfs file manifest
+
+Every image ships with a listing of the files its rootfs holds, `<stem>.rootfs.uapi16`,
+beside it. The build reads it back from the formatted filesystem, so it describes the
+bytes on the partition. `/lost+found` is in it, and so is the `/etc/shadow` the password
+splice wrote. Each hard link appears as one shared inode.
+
+One JSON object per file records:
+
+- Its name, type, mode, owner and group, and its modification time in nanoseconds
+- Its size, and a regular file's sha256
+- A symlink's target, and a device node's major and minor numbers
+- An `inodeToken` that every name of one hard-linked inode shares
+- Its extended attributes, under `xBoot2debXattrs`
+
+The attributes are there because file capabilities (`security.capability`) ship in the
+image, and a comparison has to see them.
+
+The format is the UAPI group's File Manifest draft, UAPI.16. It is an open pull request
+rather than a published specification, so boot2deb names the revision it writes: version
+0.1, uapi-group/specifications#213 at `8c732b1`. The file is an RFC 7464 JSON text
+sequence. A root object comes first, and a closing trailer last. Between them every
+other entry follows in pre-order, with siblings sorted by name bytes.
+
+A press with additions formats a new rootfs, so it writes a new listing beside the image
+it presses. A plain press copies the build's. A listing always describes the image next
+to it.
+
+Three commands read it:
+
+- `reproduce` compares two images through their listings, with the content of
+  `/etc/shadow` set aside.
+- `diff` reports the files two images differ in, path by path.
+- `verify-image` walks the image's rootfs again, and checks the result against the
+  published listing.
+
 ## Two audiences
 
 Because reproducibility is a property of a lock, the story splits by who owns the lock.
@@ -585,16 +696,41 @@ the result:
    The build refuses a binary that is behind the checkout, but nothing can make a
    *dirty* one identify itself. A release stamped `dirty = true` names no commit anyone
    can return to.
-4. **Publish the image together with its `.provenance.toml` and its `.plan`.** The
-   manifest names the builder that produced it and the archives it resolved against. The
-   plan is the document that replays them. The committed lock, recoverable at that
-   commit, carries the snapshot timestamp and every source pin.
+
+   Build with `--save-outputs`, and with both caches off (`--no-artifact-cache
+   --refresh-rootfs`), so every byte it records is this run's own.
+4. **Publish the image together with its `.provenance.toml`, its `.plan` and its
+   `.rootfs.uapi16`.** The manifest names the builder that produced it and the archives
+   it resolved against, and records every output. The plan is the document that replays
+   them. The file manifest is what a rebuilt image is compared through. The committed
+   lock, recoverable at that commit, carries the snapshot timestamp and every source pin.
 5. **Ship a bill of materials with it**, for the consumers who read one rather than a
    provenance manifest: `--sbom spdx --sbom cyclonedx` on the build, or
    [`boot2deb sbom`](cli.md#bill-of-materials) later from the manifest in step 4. It is
    deterministic on the same terms as everything else here. Its identity is derived from
    the solved package set, so set `SOURCE_DATE_EPOCH` and two renderings of one image are
    byte-identical.
+6. **Commit the outputs record once the image passes on hardware.** Step 3 wrote it
+   beside the lock as `recipes/<recipe>.outputs`. It names the sha256 of every output
+   that build wrote, under the build host's architecture.
+
+   `verify-image` then holds every later build of the lock to those bytes, and so does
+   the gate script that runs it. A validated pin then names the bytes that were flashed,
+   and not only the inputs they came from.
+
+The record leaves out the disk images and their compressed copies. Which of them a build
+writes follows its flags (`--keep-raw`, `--compress`, `--layout`), and they carry the
+per-image password. It also leaves out the file manifest, which lists that password's
+file. The rootfs tar stands in for them. The account in it is still locked, and the
+image is that tar through a deterministic formatter plus the password splice. The
+bootloader payloads stand in for a split layout's boot image.
+
+A record is keyed by the build host's architecture because a cross build and a native
+build compile with different compilers. A record from an x86_64 host says nothing about
+an arm64 host's bytes, and `verify-image` says so rather than failing.
+
+Only a lock that replays can carry a record. The outputs follow the solved package set,
+and a rolling mirror moves that daily. A snapshot pin (step 1) is what holds it still.
 
 ## Reproducing a frozen image
 
@@ -609,6 +745,35 @@ plan's exact package set instead of solving for a new one.
 Point `--from` at wherever the image, its provenance manifest and its `.plan` were
 published. Omit it to use this build point's own output directory, which is where a build
 on this machine already wrote them.
+
+The rebuild writes into a directory of its own, `artifacts/reproduce/` under the work
+dir unless `--out-dir` names another. The originals are then still there to compare
+against. Both caches are off, since a restored output is the earlier build's and proves
+nothing about this one. `--with-caches` turns them back on.
+
+When the build finishes, each output the original's provenance manifest recorded gets a
+verdict:
+
+| verdict | meaning |
+| --- | --- |
+| `identical` | the rebuild wrote the same bytes |
+| `differs` | the rebuild wrote other bytes, named by digest or by the paths that moved |
+| `missing` | the rebuild wrote no such output |
+| `not comparable` | the two records cannot decide it, and the reason says why |
+
+An output that carries the per-image password never matches byte for byte. The image,
+each compressed copy of it, and its file manifest are that kind. They are judged
+through the two images instead, in two parts:
+
+- **The disk.** The partition tables, the `[filesystem]` records and the disk sizes must
+  agree.
+- **The files.** The two [file manifests](#the-rootfs-file-manifest) must agree on every
+  path. The one exception is the content of `/etc/shadow`, which the password splice
+  rewrites. A `/etc/shadow` that is missing, or whose mode or owner moved, is still a
+  difference.
+
+A `differs` or a `missing` exits non-zero. `--json` prints the verdicts as one
+`reproduction` record after the build's own event stream.
 
 `reproduce` reproduces **builds, not pressings**. An image `press` extended with
 per-site additions is a derived copy (marked as such in its own
@@ -632,18 +797,22 @@ mechanical. Freeze fewer and it is reproducible to whatever strength you chose.
 
 ## What is deliberately outside the claim
 
-The per-image first-boot password is unique per build by design, so `/etc/shadow` is
-intentionally not byte-reproducible. Everything else in the rootfs is, given the same
-three layers frozen.
+The per-image first-boot password is unique per build by design. `/etc/shadow` is
+therefore never byte-reproducible, and neither is an output that carries it: the image,
+its compressed copies, and its file manifest. `reproduce` compares those through the
+file manifests, with the content of `/etc/shadow` set aside.
 
-The rootfs export clamps every tar member's mtime to `SOURCE_DATE_EPOCH`, so a
-bootstrap's wall-clock stamps do not leak into the image. Its encoder records each mtime
-as `min(mtime, epoch)` as it writes.
+The package install writes three more files that differ between any two builds. The
+provisioning library, ferroday-cage, performs that install:
 
-The encoder is the one place that can apply the ceiling. Under the subordinate id-map
-that gives the tree its real ownership, the provisioned files sit at ids the host user
-cannot set times on.
+- `/var/log/dpkg.log` and `/var/log/alternatives.log` record when each step ran.
+- `/var/cache/ldconfig/aux-cache` records each library's inode and change time.
 
-The export also emits entries in sorted order, with directory children and extended
-attributes by name. A content-identical tree therefore encodes to a byte-identical
-archive.
+A fourth differs between builds on different days. The `lastchg` field of each system
+account holds the day the account was created. Maintainer scripts create those
+accounts without `SOURCE_DATE_EPOCH`, and `/etc/shadow-` carries the same field.
+
+These are the library's to fix, and boot2deb has reported them there. A file that two
+tools write has two owners, so boot2deb does not rewrite them. Until the library
+changes, the rootfs tar and the image differ in these files, and `reproduce` reports
+them.

@@ -66,9 +66,9 @@ That is not an aspiration. The ASUS [C100P](../boards/asus-c100p.md) and
 Chromebit is a stick PC with no SD slot, no keyboard, no EC and no analog audio.
 
 The rule that makes it work is simple. Anything true of the whole family belongs on the
-**SoC layer**, not on the board that happened to need it first. `socs/rk3288/` carries
-the family's radio blobs, initramfs module list and network stack for exactly that
-reason. When you find yourself copying a file from one board to another, move it up
+**SoC layer**, not on the board that happened to need it first. `socs/rk3288.toml` and
+`socs/rk3288/` carry the family's initramfs module list, radio blobs and network stack
+for exactly that reason. When you find yourself copying a file from one board to another, move it up
 instead.
 
 ### 1. The arch layer
@@ -170,8 +170,9 @@ driver tuning, units, and keymaps therefore reach your image. Any file of them c
 overridden by shipping your own copy at the same path.
 
 Do not hand-copy the other device's file. Most arrays replace rather than append across
-the merge, so restate any list you extend. The five that describe the board (`caveats`,
-`expect`, `nonfree_firmware_packages`, `packages`, `exclude`) accumulate instead. See
+the merge, so restate any list you extend. The six that describe the board (`caveats`,
+`expect`, `nonfree_firmware_packages`, `packages`, `exclude`, `initramfs.modules`)
+accumulate instead. See
 [A variant board extends another](../reference/config-model.md#a-variant-board-extends-another).
 
 ### 5. The kmod layer
@@ -218,13 +219,14 @@ Each layer can ship two trees of files that are copied into the rootfs:
   packages shipped, which is what nearly all config wants.
 - **`overlay-pre/`** — laid in **before** any package is installed. This is for config a
   package's own maintainer scripts must see *while they run*, where winning afterwards is
-  too late because the package already acted. The Veyron Chromebooks are the clearest
-  case. The initramfs module list under `usr/share/initramfs-tools/modules.d/` has to
-  precede the kernel package. Otherwise the first initramfs is built without the drivers
-  that reach the root device, then thrown away and rebuilt.
+  too late because the package already acted. Jellyfin's `/etc/jellyfin/encoding.xml`
+  is the clearest case. The service user rewrites it on every start, so it has to end
+  up owned by a user the package allocates at install. `jellyfin-server`'s postinst
+  chowns the whole directory, and a file laid in beforehand is inside that sweep.
 
-Some boot-method config is derived by resolution: the `depthcharge-tools` board profile,
-the signed cmdline, and the initramfs `MODULES=`/`COMPRESS=` settings. It is *generated*
+Some boot config is derived by resolution. That is the `depthcharge-tools` board profile,
+the signed cmdline and the initramfs `MODULES=`/`COMPRESS=` settings. It is also the
+initramfs module list, from each layer's `[initramfs] modules`. It is *generated*
 into the same pre-install stage rather than authored as an overlay file, for the same
 before-the-package reason. A layer does not ship those. It states the values they come
 from.

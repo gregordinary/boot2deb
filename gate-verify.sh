@@ -6,6 +6,8 @@
 # GPT and the ext4 superblock with the code that *wrote* them, and are covered by that
 # crate's tests. What is left here is the gate's own job: which recipes this pass
 # covered, whether each one's build actually ran, and one exit status for all of them.
+# Where a recipe commits an outputs record (`recipes/<recipe>.outputs`), verify-image
+# also holds the build to the bytes it names for this build host.
 set -u
 cd "$(dirname "$0")"
 

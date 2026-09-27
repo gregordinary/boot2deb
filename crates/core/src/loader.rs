@@ -32,6 +32,29 @@ use crate::model::*;
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 
+/// The paths under a config root that a build reads: every layer directory, the base
+/// layer, and the vendored assets the layers name.
+///
+/// A file under one of these is build input whether or not git tracks it. The loader
+/// finds layers and overlay trees by walking directories. A new file in a device's
+/// `overlay/` therefore ships in the image the moment it exists. Everything else under the root
+/// (documentation, logs, a scratch file) is not read by a build.
+pub const BUILD_INPUT_PATHS: &[&str] = &[
+    "arches",
+    "base",
+    "base.toml",
+    "blobs",
+    "boot-methods",
+    "debs",
+    "devices",
+    "features",
+    "fragments",
+    "kernels",
+    "kmods",
+    "recipes",
+    "socs",
+];
+
 /// A boot2deb config root — an ordered search path of directories, each holding
 /// the config-layer subtrees. Lookups walk the path, and overlays (later entries)
 /// win over the shipped root (first entry). Tests and alternate checkouts just point
@@ -341,7 +364,7 @@ impl ConfigRoot {
         }
         if let toml::Value::Table(table) = &mut merged {
             for (key, entries) in accumulated {
-                table.insert(key.to_string(), toml::Value::Array(entries));
+                set_key(table, key, entries);
             }
         }
         lineage.reverse();
@@ -481,6 +504,15 @@ impl ConfigRoot {
             .owning_root("recipes", recipe_half(name))
             .join("recipes")
             .join(format!("{name}.lock")))
+    }
+
+    /// Filesystem path of `recipes/<name>.outputs`, whether or not it exists: the
+    /// [committed outputs](crate::outputs::CommittedOutputs) that `build --save-outputs`
+    /// writes and `verify-image` reads. It sits beside the lock, in the root that owns
+    /// the recipe, and the name is validated for the same reason
+    /// [`lock_path`](Self::lock_path)'s is.
+    pub fn outputs_path(&self, name: &str) -> Result<PathBuf, ConfigError> {
+        Ok(self.lock_path(name)?.with_extension("outputs"))
     }
 
     /// Filesystem path of a file that lives beside `recipe` in the recipe's own
@@ -643,7 +675,11 @@ fn deserialize_at<T: DeserializeOwned>(value: toml::Value, path: &Path) -> Resul
 /// These describe or supply it. A variant is the same hardware with a delta, so it is
 /// bound by everything its parent said about that hardware: a caveat cannot be un-said,
 /// a runtime check that held on the parent holds here, a radio that needed firmware
-/// still needs it, and a board package the parent installs is one this board wants too.
+/// still needs it, a board package the parent installs is one this board wants too, and
+/// a module the parent's initramfs needed to reach its root is one this board's needs.
+///
+/// A key is a dotted path into the device table. `initramfs.modules` is the array
+/// inside the `[initramfs]` table, which merges key-by-key like any other table.
 /// Last-wins on any of them would let a variant that adds one entry silently drop every
 /// entry it inherits — publishing a support claim that is wrong, or a
 /// `boot2deb-selftest` that passes while testing less than the parent's.
@@ -653,13 +689,38 @@ fn deserialize_at<T: DeserializeOwned>(value: toml::Value, path: &Path) -> Resul
 /// one package would be a conflict, not a sum), and every `supported_*`/`default_*` list
 /// names the alternatives a build may pick from. A variant makes its own selection, so
 /// those replace.
-const ACCUMULATED: [&str; 5] = [
+const ACCUMULATED: [&str; 6] = [
     "caveats",
     "expect",
     "nonfree_firmware_packages",
     "packages",
     "exclude",
+    "initramfs.modules",
 ];
+
+/// The value at a dotted [`ACCUMULATED`] key in one level's device table, or `None`
+/// where any segment is absent or an intermediate value is not a table. A malformed
+/// intermediate reaches the deserializer through the merge and is refused there.
+fn at_key<'a>(value: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
+    key.split('.').try_fold(value, |v, segment| v.get(segment))
+}
+
+/// Write `entries` at a dotted [`ACCUMULATED`] key of the merged device table. The
+/// enclosing tables exist, because some level of the chain declared the key and the
+/// merge carried its tables up. A malformed intermediate is left for the deserializer
+/// to refuse.
+fn set_key(table: &mut toml::Table, key: &str, entries: Vec<toml::Value>) {
+    let mut segments: Vec<&str> = key.split('.').collect();
+    let last = segments.pop().expect("a key has at least one segment");
+    let mut current = table;
+    for segment in segments {
+        match current.get_mut(segment) {
+            Some(toml::Value::Table(next)) => current = next,
+            _ => return,
+        }
+    }
+    current.insert(last.to_string(), toml::Value::Array(entries));
+}
 
 /// Every [`ACCUMULATED`] key's entries across an `extends` chain, base-most first and
 /// de-duplicated — the lists [`ConfigRoot::device_with_lineage`] writes back over the
@@ -684,7 +745,7 @@ fn accumulated_arrays(
         let mut entries: Vec<toml::Value> = Vec::new();
         let mut seen = false;
         for (value, path) in chain.iter().rev() {
-            match value.get(key) {
+            match at_key(value, key) {
                 None => {}
                 Some(toml::Value::Array(level)) => {
                     seen = true;
@@ -1013,6 +1074,12 @@ packages = [
     fn lock_path_rejects_traversal() {
         let root = ConfigRoot::new("/cfg");
         assert!(root.lock_path("turing-rk1/forky").is_ok());
+        assert!(root.outputs_path("../../etc/cron.d/x").is_err());
+        // A feature variant's record sits beside its own lock.
+        assert_eq!(
+            root.outputs_path("turing-rk1/forky+jellyfin").unwrap(),
+            Path::new("/cfg/recipes/turing-rk1/forky+jellyfin.outputs")
+        );
         assert!(matches!(
             root.lock_path("../../etc/cron.d/x"),
             Err(ConfigError::InvalidRecipeRef { .. })
@@ -1247,11 +1314,12 @@ packages = [
         assert!(base.extends.is_none());
     }
 
-    /// The five device lists that accumulate down an `extends` chain instead of being
+    /// The six device lists that accumulate down an `extends` chain instead of being
     /// replaced by it. Each describes or supplies the running system, and a variant is
     /// the same hardware — so last-wins would let a variant that adds one entry silently
     /// drop every entry it inherits: a support claim that is wrong, a selftest that
-    /// tests less than the parent's, a radio with no firmware.
+    /// tests less than the parent's, a radio with no firmware, an initramfs that cannot
+    /// reach the root device.
     #[test]
     fn the_additive_lists_accumulate_where_a_selecting_list_is_replaced() {
         let (_tmp, root) = device_root(&[
@@ -1263,6 +1331,7 @@ packages = [
                      packages = [\"p-base\"]\nexclude = [\"x-base\"]\n\
                      nonfree_firmware_packages = [\"firmware-radio\"]\n\
                      caveats = [\"no SuperSpeed on any port\"]\n\
+                     [initramfs]\nmodules = [\"i2c-rk3x\", \"ext4\"]\n\
                      [[expect]]\ncheck = \"file\"\npath = \"/sys/class/net/eth0\"\n",
                 ),
             ),
@@ -1282,6 +1351,7 @@ packages = [
                      packages = [\"p-leaf\"]\nexclude = [\"x-leaf\"]\n\
                      nonfree_firmware_packages = [\"firmware-wifi\"]\n\
                      caveats = [\"no SuperSpeed on any port\", \"the jack is unrouted\"]\n\
+                     [initramfs]\nmodules = [\"ext4\", \"rockchipdrm\"]\n\
                      [[expect]]\ncheck = \"devnode\"\npath = \"/dev/mmcblk0\"\n",
                 ),
             ),
@@ -1306,6 +1376,11 @@ packages = [
         // The parent's check survives the variant adding its own, which is the whole
         // point: a selftest that silently tests less than its parent's passes.
         assert_eq!(d.expect.len(), 2);
+        // A nested key accumulates the same way, through a level (`mid`) that has no
+        // `[initramfs]` table at all, and a name the leaf restates appears once.
+        assert_eq!(d.initramfs.modules, ["i2c-rk3x", "ext4", "rockchipdrm"]);
+        let (mid, _) = root.device_with_lineage("mid").unwrap();
+        assert_eq!(mid.initramfs.modules, ["i2c-rk3x", "ext4"]);
         // A *selecting* array still replaces, so the two rules are both live and the
         // difference is which question the key answers.
         assert_eq!(d.device_kmods, ["z"]);
@@ -1354,6 +1429,16 @@ packages = [
         let (_tmp, root) = device_root(&[("badpkgs", device_toml("badpkgs", "packages = 7\n"))]);
         let err = root.device_with_lineage("badpkgs").unwrap_err().to_string();
         assert!(err.contains("packages must be an array"), "{err}");
+        // A nested one is named by its dotted path.
+        let (_tmp, root) = device_root(&[(
+            "badinitrd",
+            device_toml("badinitrd", "[initramfs]\nmodules = \"ext4\"\n"),
+        )]);
+        let err = root
+            .device_with_lineage("badinitrd")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("initramfs.modules must be an array"), "{err}");
     }
 
     #[test]
@@ -1470,7 +1555,7 @@ packages = [
         format!(
             "[kernel]\nid = \"k\"\nsource = \"s\"\nref = \"v\"\ncommit = \"{c}\"\n\
              [uboot]\nsource = \"s\"\nref = \"v\"\ncommit = \"{c}\"\n\
-             [rootfs]\nsuite = \"forky\"\nmanifest = \"m.pkgs.lock\"\n\
+             [rootfs]\nsuite = \"forky\"\nmanifest = \"m.pkgs.lock\"\nsource_date_epoch = 1790347034\n\
              [blobs]\natf = \"a.elf@sha256:{h}\"\ntpl = \"t.bin@sha256:{h}\"\n"
         )
     }

@@ -11,7 +11,7 @@
 # What the pairing buys is a signed payload up to 32 MiB, and this file spends it. The
 # budget is what forces a 16 MiB board to build a slow initramfs and boot blind; with it
 # lifted, resolution picks zstd over xz for the initramfs (see `InitramfsCompress`) and
-# the overlay-pre tree beside this file adds the display stack to it. Together those
+# the `[initramfs]` list below adds the display stack to it. Together those
 # bring the panel up during the initramfs instead of after the rootfs mounts, which
 # shortens the firmware's blank screen and makes a failed boot something you can read.
 #
@@ -34,3 +34,42 @@ supported_boards = ["speedy-libreboot"]
 # The slot the 32 MiB profile needs. Resolution derives the rootfs offset from it:
 # 12 MiB + 2 x 32 MiB = 76 MiB, where the stock geometry puts it at 44 MiB.
 kpart_size       = "32MiB"
+
+# The display stack, carried in the initramfs so the panel comes up during it rather
+# than after it. The build unions this list after the SoC layer's (socs/rk3288.toml),
+# so a board adds to the family's list rather than restating it.
+#
+# It is a device-layer list for the same reason `kpart_size` is. The signed payload
+# shares one fixed budget between the kernel image and the initramfs, and only a board
+# whose firmware buffers 32 MiB has room for a display stack inside it — so the profile,
+# the slot, and this list are one decision, made once, in one place.
+#
+# What it buys: on a board without it nothing can draw until the real root is mounted
+# and udev loads these same modules, so a boot is a blank firmware screen from Ctrl+U
+# until systemd is well underway, and an initramfs that *fails* is a blank screen
+# forever. With it the panel lights during the initramfs, which is both a faster-looking
+# boot and the difference between a diagnosable failure and a silent one.
+#
+# Names are the .ko basenames from the kernel's modules.order. Only drivers that bind a
+# device-tree node are listed: initramfs-tools resolves symbol dependencies itself, so
+# rockchipdrm pulls analogix_dp (the eDP bridge, which its built-in Rockchip glue calls
+# into), drm, drm_kms_helper, drm_display_helper and drm_client_lib along with it.
+[initramfs]
+modules = [
+    # The display controller and its eDP output. CONFIG_DRM_FBDEV_EMULATION gives the
+    # console a framebuffer to land on, so loading this is what makes the panel show
+    # text.
+    "rockchipdrm",
+
+    # The panel itself — rk3288-veyron-edp.dtsi declares an `innolux,n116bge`, which is
+    # a panel-simple entry rather than a driver of its own.
+    "panel-simple",
+
+    # Backlight. Without these the panel is driven and black, which looks exactly like
+    # a panel that is not driven at all. The DT wires a `pwm-backlight` (pwm_bl) to
+    # `&pwm0` on the SoC's PWM controller (pwm-rockchip), and both ends have to be
+    # present. Their supplies are `regulator-fixed`, which is built in, and the RK808
+    # rails feeding those are already in the SoC layer's list.
+    "pwm_bl",
+    "pwm-rockchip",
+]

@@ -55,7 +55,9 @@ all pure Rust. An x86_64 host builds an arm64 image without `sudo`.
 
 The `.lock` pins every input: source commits, firmware-blob hashes, and the solved apt
 manifest. Each image ships a provenance manifest recording exactly what went into it, down
-to the boot2deb commit that built it. Package churn in a rolling suite is pinned against
+to the boot2deb commit that built it. It also records the sha256 of every output, and a
+listing of every file in the image ships beside it. `boot2deb reproduce` rebuilds an image and judges each
+output against the original's record. Package churn in a rolling suite is pinned against
 `snapshot.debian.org` on demand. See
 [Reproducibility](https://gregordinary.github.io/boot2deb/reference/reproducibility.html).
 

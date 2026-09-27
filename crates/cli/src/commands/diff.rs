@@ -50,6 +50,9 @@ pub(crate) enum SectionArg {
     Blobs,
     /// What built each side, and the archive state it resolved against.
     Builder,
+    /// Every file each image's rootfs holds, from the file manifests two provenance
+    /// manifests name.
+    Files,
 }
 
 /// Run `diff <a> <b>`.
@@ -111,6 +114,9 @@ pub(crate) fn run(
     if wanted(SectionArg::Builder) {
         quiet &= section("builder", &report.builder, print_builder);
     }
+    if wanted(SectionArg::Files) {
+        quiet &= section("files", &report.files, print_files);
+    }
     // Over the sections that were *asked for*, not the whole report: under
     // `--section kernel` the claim has to be about the kernel alone, or it would
     // vouch for sections this run never printed.
@@ -137,11 +143,12 @@ fn read_side(root: &ConfigRoot, spec: &str) -> Result<Side> {
 
 /// Read a side from a `.lock` or a `.provenance.toml` on disk.
 ///
-/// The solved manifest is looked for beside the named file, since that is where both
-/// documents' `manifest` key points: a lock's manifest is committed beside it in
-/// `recipes/`, and a published manifest sits beside the provenance in the artifact
-/// directory. A manifest that is not there leaves the packages section unavailable
-/// rather than failing the whole comparison.
+/// The solved manifest is looked for beside the named file. A lock's is committed beside
+/// it in `recipes/`, under the name its `manifest` key gives. A build publishes its own
+/// beside the provenance, named for the artifact stem as the provenance is. The name
+/// the provenance's `manifest` key gives is the committed one, which is not in the
+/// artifact directory. A manifest that is not there leaves the packages section
+/// unavailable rather than failing the whole comparison.
 ///
 /// A document names no fragments, so a side read this way never answers the kconfig
 /// delta. That is what the recipe form is for: a fragment set is a property of the
@@ -151,13 +158,13 @@ fn read_document(path: &Path) -> Result<Side> {
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let label = path.display().to_string();
     let dir = path.parent().unwrap_or(Path::new("."));
-    if path
-        .file_name()
-        .is_some_and(|n| n.to_string_lossy().ends_with(".provenance.toml"))
-    {
+    if let Some(published) = published_manifest(path) {
         let prov = ProvenanceManifest::from_toml_str(&text, &label)?;
         let mut side = Side::from_provenance(&label, &prov);
-        side.packages = read_manifest(&dir.join(&prov.rootfs.manifest));
+        side.packages = read_manifest(&published);
+        // Best-effort like the packages above: a listing that is not beside the record,
+        // or will not parse, leaves the files section unavailable and the rest compared.
+        side.files = crate::artifacts::files_manifest(&prov, dir).ok().flatten();
         return Ok(side);
     }
     let lock = boot2deb_core::lock::Lock::from_toml_str(&text, &label)?;
@@ -227,6 +234,17 @@ fn read_fragments(
 /// have been swept, and every other section still compares. A manifest that *is*
 /// there and does not parse is also `None` — the file is a content pin, so a
 /// partially-read one would understate the set and silently misreport the diff.
+/// The solved manifest a build published beside the provenance manifest at `path`,
+/// `<stem>.pkgs.lock` for `<stem>.provenance.toml`. `None` when `path` is not named as a
+/// published provenance manifest.
+fn published_manifest(path: &Path) -> Option<std::path::PathBuf> {
+    let stem = path
+        .file_name()?
+        .to_str()?
+        .strip_suffix(".provenance.toml")?;
+    Some(path.with_file_name(boot2deb_core::manifest::manifest_name(stem)))
+}
+
 fn read_manifest(path: &Path) -> Option<Vec<boot2deb_core::manifest::Package>> {
     let text = std::fs::read_to_string(path).ok()?;
     boot2deb_core::manifest::parse(&text, &path.display().to_string()).ok()
@@ -302,6 +320,19 @@ fn section<T: boot2deb_core::diff::IsEmpty>(
         }
     }
     section.is_quiet()
+}
+
+/// The files section: each added, removed and changed path, with what changed.
+fn print_files(c: &boot2deb_core::files::FilesDiff) {
+    for path in &c.added {
+        println!("  + {path}");
+    }
+    for path in &c.removed {
+        println!("  - {path}");
+    }
+    for changed in &c.changed {
+        println!("  ~ {} ({})", changed.path, changed.fields.join(", "));
+    }
 }
 
 /// A [`Change`]'s two sides, with `-` for a side that does not state the value.
@@ -538,6 +569,20 @@ fn delta_json((axis, delta): &(String, SeriesDelta)) -> serde_json::Value {
 mod tests {
     use super::*;
     use boot2deb_core::diff::Change;
+
+    /// A provenance side reads the manifest its own build published, named for the
+    /// artifact stem, and not the committed name its `manifest` key carries.
+    #[test]
+    fn a_provenance_side_reads_the_manifest_published_beside_it() {
+        assert_eq!(
+            published_manifest(Path::new("out/asus-c201-forky.provenance.toml")),
+            Some(Path::new("out/asus-c201-forky.pkgs.lock").to_path_buf())
+        );
+        assert_eq!(
+            published_manifest(Path::new("recipes/asus-c201/forky.lock")),
+            None
+        );
+    }
 
     #[test]
     fn an_arrow_marks_a_side_that_does_not_state_the_value() {

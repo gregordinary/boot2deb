@@ -208,8 +208,8 @@ until the real root is mounted and udev loads one. The board sits on the firmwar
 blank screen for the whole of it.
 
 At 32 MiB neither constraint is worth keeping. Resolution picks `zstd` for the initramfs
-(visible as the `initramfs` line in `boot2deb resolve`). The device's `overlay-pre/` tree
-adds the display stack to the initramfs module list: `rockchipdrm`, `panel-simple`,
+(visible as the `initramfs` line in `boot2deb resolve`). The device's `[initramfs]` list
+adds the display stack to the family's initramfs modules: `rockchipdrm`, `panel-simple`,
 `pwm_bl`, `pwm-rockchip`. The panel then lights during the initramfs rather than after
 it. That shortens the blank screen and, more usefully, means an initramfs that *fails*
 says so on the panel instead of hanging silently.

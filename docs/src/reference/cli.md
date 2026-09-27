@@ -242,6 +242,10 @@ Resolves upstream refs to commits and hashes the vendored blobs, writing
 `recipes/<device>/<leaf>.lock`. This is the **only** command that consults upstream.
 `build` reads only the lock, so a build is reproducible from its committed pins.
 
+The lock also records the rootfs's `source_date_epoch`, the time every rootfs timestamp
+takes. An `update` that moves a pin sets it to the current time. One that moves nothing
+keeps the previous value, so it rewrites the lock byte for byte.
+
 One flag is worth calling out:
 
 - **`--feature <name>`**, repeatable, pins a [feature
@@ -530,6 +534,18 @@ and the sha256 of the release body that was verified. It also records that relea
 `--from` names the directory holding that document. It defaults to this build point's
 own output directory, so re-running a build to check that it *is* reproducible needs no
 flag.
+
+The rebuild writes to `artifacts/reproduce/` under the work dir, or to `--out-dir`, and
+never over the build it is judged against. Both caches are off, since a restored output
+proves nothing about this run. `--with-caches` turns them back on.
+
+When the build ends, every output the original's provenance manifest recorded gets a
+verdict: `identical`, `differs`, `missing` or `not comparable`. An image carries a fresh
+first-boot password, so it is compared through its disk and its
+[file manifest](reproducibility.md#the-rootfs-file-manifest). The partition tables must
+agree, and the files must agree everywhere but in the content of `/etc/shadow`. A
+`differs` or a `missing` exits non-zero. `--json` adds one `reproduction`
+record after the build's event stream.
 
 The provenance manifest beside it is read for one advisory line: which boot2deb produced
 the image, and how the running checkout compares. That is advice and never a gate. A
@@ -820,8 +836,16 @@ Per image it checks:
   pool is marked `local` and carries no mirror URL, since a per-run path is not
   portable provenance.
 - That **the ext4 filesystem is exactly its GPT partition**.
+- That the rootfs GPT entry is marked bootable, since U-Boot's `bootflow scan` looks
+  only at marked partitions once any partition carries the mark.
 - For a fitted `--image-size`, that the slack the recipe asked for actually survived
   into the shipped filesystem.
+- That **the rootfs holds exactly the files its
+  [file manifest](reproducibility.md#the-rootfs-file-manifest) lists**, every field of
+  every path.
+- Where the recipe commits an outputs record (`recipes/<recipe>.outputs`), that the
+  artifact directory holds every file it names for this build host, byte for byte. See
+  [the release ritual](reproducibility.md#the-release-ritual).
 
 The filesystem and partition check is the one that matters most. Larger and it will not
 mount at all, and smaller and the difference is wasted. It is checked on every image,
@@ -829,10 +853,13 @@ not only the fitted one, because it is the invariant the fit ordering exists to 
 
 Every structure is read by the code that *wrote* it, meaning the same Rust GPT and ext4
 readers the image node uses. The check therefore cannot drift from the build by parsing
-the same bytes differently. Read-only and no root: only the head of the artifact is
-decompressed, so a
-compressed multi-gigabyte image costs a few hundred kilobytes. A failing invariant exits
-non-zero, and `--json` gives the whole run as one document.
+the same bytes differently. It needs no root, and changes nothing it verifies.
+
+The file check walks the whole rootfs, and a walk seeks, which a compressed stream
+cannot. A `.img.xz` is therefore decompressed into a sparse temporary file in the
+artifact directory first, and a raw `.img` from `--keep-raw` is read in place. Every
+other check reads only the head of the artifact. A failing invariant exits non-zero,
+and `--json` gives the whole run as one document.
 
 ### verify-sources
 
@@ -884,7 +911,7 @@ Each side is a **recipe name**, a path to a **`.lock`**, or a path to a
 **`.provenance.toml`**. The two sides need not be the same kind. Everything it
 reads is a document the build already wrote, so it runs offline and builds nothing.
 
-Six sections, in the order they answer the question:
+Seven sections, in the order they answer the question:
 
 | section | what it compares |
 | --- | --- |
@@ -894,6 +921,7 @@ Six sections, in the order they answer the question:
 | `sources` | every other pinned tree: u-boot, MPP, RGA, Mali, ffmpeg, each out-of-tree module |
 | `blobs` | the rkbin pins, by sha256 |
 | `builder` | which boot2deb ran, the host it cross-compiled from, and the archive state the rootfs resolved against |
+| `files` | every file the image's rootfs holds: added, removed, and changed, with the fields that changed |
 
 Narrow it with `--section`, which is repeatable. `--json` gives the whole report as one
 document, with the patch-file deltas under `patch_files`.
@@ -908,6 +936,21 @@ the builder and archive state are recorded
 
 Which side is silent is named when only one is. You then know whether to go find the
 other document, or accept that it does not exist.
+
+The `files` section needs a provenance manifest on both sides. It reads the
+[rootfs file manifest](reproducibility.md#the-rootfs-file-manifest) that each one
+names, and a lock describes no image. It reports every difference, `/etc/shadow`
+included:
+
+```
+files:
+  + /usr/lib/aarch64-linux-gnu/libdav1d.so.7
+  ~ /etc/shadow (size, sha256)
+  ~ /usr/bin/ffmpeg (size, sha256)
+```
+
+That `/etc/shadow` line is the per-image first-boot password, which differs between
+any two builds. `reproduce` is the command that sets it aside.
 
 Two sections answer more when you name a **recipe** than when you name a document.
 The kconfig delta is one. A fragment set is resolved from the config tree, and no

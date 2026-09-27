@@ -165,6 +165,26 @@ pub fn has_tracked_changes(repo: &Path, paths: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `repo` holds a file under `paths` that git does not track and does not
+/// ignore.
+///
+/// The complement of [`has_tracked_changes`] for a tree whose untracked files are input.
+/// A config tree is one. Its loader collects layer files and overlay trees by walking
+/// directories. A new file under a device's `overlay/` therefore ships in the image
+/// while `git diff` sees nothing. An ignored file is excluded the way `git status` excludes it. That
+/// keeps a build's own output under an ignored `build/` out of the answer.
+///
+/// Best-effort, and false on anything that is not a clean question, as
+/// [`has_tracked_changes`] is.
+pub fn has_untracked(repo: &Path, paths: &[&str]) -> bool {
+    let ctx = format!("ls-files --others in {}", repo.display());
+    let mut args = vec!["ls-files", "--others", "--exclude-standard", "-z", "--"];
+    args.extend_from_slice(paths);
+    run(Some(repo), &args, &ctx)
+        .map(|out| out.status.success() && !out.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 /// Whether `repo` holds `commit` as a commit object.
 ///
 /// The question a read-only query over a *historical* pin has to ask first. A checkout
@@ -424,6 +444,47 @@ c9acdc466e9aa96352f658b9276aa8a45b8e817d\trefs/tags/v7.1.1^{}\n";
         assert!(is_full_sha("C9ACDC466E9AA96352F658B9276AA8A45B8E817D"));
         assert!(!is_full_sha("v7.1.1"));
         assert!(!is_full_sha("c9acdc46")); // short
+    }
+
+    /// An untracked file counts only under the paths asked about, and never when git
+    /// ignores it.
+    #[test]
+    fn an_untracked_file_counts_only_under_the_paths_asked_about() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@boot2deb"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::create_dir_all(repo.join("devices/board/overlay/etc")).unwrap();
+        std::fs::write(repo.join("devices/board.toml"), "x").unwrap();
+        std::fs::write(repo.join(".gitignore"), "/build\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "one"]);
+        assert!(!has_untracked(repo, &["devices"]));
+
+        // A scratch file elsewhere, and a build's own output under an ignored path.
+        std::fs::write(repo.join("notes.txt"), "x").unwrap();
+        std::fs::create_dir_all(repo.join("build")).unwrap();
+        std::fs::write(repo.join("build/devices"), "x").unwrap();
+        assert!(!has_untracked(repo, &["devices"]));
+
+        // A new overlay file is input the moment it exists.
+        std::fs::write(repo.join("devices/board/overlay/etc/motd"), "x").unwrap();
+        assert!(has_untracked(repo, &["devices"]));
+        assert!(
+            !has_tracked_changes(repo, &[]),
+            "and git diff alone does not see it"
+        );
     }
 
     #[test]

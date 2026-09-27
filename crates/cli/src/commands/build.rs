@@ -60,6 +60,15 @@ pub(crate) fn run(
     // Resolved before any work: a contradictory `--compress` is an argument error,
     // and discovering it after a multi-hour compile would waste the whole build.
     let compress = crate::args::image_compression(&args.compress)?;
+    // A record of what a build of this lock writes has to hold every output. A single
+    // stage writes some of them, and recording that would drop the rest from the record.
+    if args.save_outputs && args.stage != StageArg::All {
+        return Err(
+            "--save-outputs records every output of a whole build — run it \
+                    without --stage"
+                .into(),
+        );
+    }
     // Checked here for the same reason, and it is the one preflight whose failure is
     // otherwise invisible until the end: a stale binary compiles a perfectly good image
     // and then stamps it with a commit that is not what ran. Two `git` reads now, or a
@@ -331,6 +340,8 @@ pub(crate) fn run(
     };
     // Started before the first step, so its total covers the work outside every step.
     let timeline = Timeline::new();
+    // Every artifact the stages announce, for the provenance manifest's `[[outputs]]`.
+    let emitted = crate::artifacts::EmittedArtifacts::default();
     // The one stdout contract for a build: human rendering, or NDJSON under
     // --json — artifact locations travel as Event::Artifact either way.
     // A closure rather than a `fn` pointer: the human renderer has to carry the
@@ -341,6 +352,7 @@ pub(crate) fn run(
     // property of the build rather than of how it is being rendered.
     let sink = |e: Event| {
         timeline.record(&e);
+        emitted.record(&e);
         if json {
             print_event_json(&e)
         } else {
@@ -861,8 +873,8 @@ pub(crate) fn run(
     // dozen of the run's locals and none of the stages' — and because a build that
     // stopped before the image node writes none of it, which is a decision worth
     // making in one place.
-    if let Some(ib) = image {
-        write_provenance(Provenance {
+    let recorded = match image {
+        Some(ib) => write_provenance(Provenance {
             ib,
             state: &state,
             stem: &stem,
@@ -882,8 +894,10 @@ pub(crate) fn run(
             verbosity,
             sink: &sink,
             timeline: &timeline,
-        })?;
-    }
+            emitted: &emitted,
+        })?,
+        None => None,
+    };
     // Only the record above reads the stages' outputs as a whole; what is left is the
     // two lock updates and the closing summary, each of which names its own field.
     let BuildState {
@@ -892,6 +906,40 @@ pub(crate) fn run(
         solved_manifest_digest,
         ..
     } = state;
+
+    // `--save-outputs`: record what this build wrote as the lock's committed outputs,
+    // for this build host. Every stage ran (checked before the first one), so a build
+    // that wrote no provenance stopped short of the image.
+    if args.save_outputs {
+        let outputs = recorded.as_ref().ok_or(
+            "--save-outputs records the outputs the provenance manifest lists, and this \
+             build wrote none",
+        )?;
+        let path = root.outputs_path(recipe)?;
+        let mut committed = match std::fs::read_to_string(&path) {
+            Ok(text) => boot2deb_core::outputs::CommittedOutputs::from_toml_str(
+                &text,
+                &path.display().to_string(),
+            )?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(e) => return Err(format!("read {}: {e}", path.display()).into()),
+        };
+        committed.record(pf.host.arch, outputs);
+        std::fs::write(&path, committed.to_toml_string()?)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        note(
+            json,
+            verbosity,
+            &sink,
+            "build",
+            format!(
+                "saved outputs : {} ({} for {})",
+                path.display(),
+                committed.hosts[pf.host.arch].len(),
+                pf.host.arch
+            ),
+        );
+    }
 
     // `--save-snapshot` / `--save-manifest`: persist the captured snapshot timestamp
     // and/or the freshly-solved manifest into the committed lock. Both mutate
@@ -1031,6 +1079,8 @@ struct Provenance<'a> {
     /// What the build's steps did, for the manifest's `[[restored_nodes]]` list — the
     /// one record of which parts of the image this run compiled rather than restored.
     timeline: &'a crate::timing::Timeline,
+    /// Every artifact the build announced, for the manifest's `[[outputs]]`.
+    emitted: &'a crate::artifacts::EmittedArtifacts,
 }
 
 /// Write the provenance manifest for the image this run assembled, and the SBOM beside
@@ -1041,7 +1091,11 @@ struct Provenance<'a> {
 /// the solved manifest, the per-image password, the filesystem contract, the image's
 /// size — only exist once that node has run. Naming them together in one pattern is
 /// what makes "a partial build writes no provenance" structural rather than a comment.
-fn write_provenance(r: Provenance) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// Returns the `[[outputs]]` rows the manifest recorded, or `None` when it wrote none.
+fn write_provenance(
+    r: Provenance,
+) -> Result<Option<Vec<boot2deb_core::outputs::Output>>, Box<dyn std::error::Error>> {
     // The solved manifest describing the rootfs inside the image this run assembled:
     // from this run's own rootfs stage, else the one the rootfs stage left in `out_dir`
     // beside the tar — the same auto-discovery the tar itself gets, and correct for the
@@ -1197,7 +1251,12 @@ fn write_provenance(r: Provenance) -> Result<(), Box<dyn std::error::Error>> {
             )?),
             None => None,
         };
+        // Taken after the root manifests above were published, and before this document
+        // and the bills of materials are, which describe the outputs rather than being
+        // among them.
+        let outputs = r.emitted.rows(&r.state.per_image)?;
         let facts = boot2deb_core::provenance::BuildFacts {
+            outputs: &outputs,
             cross_sandbox,
             packaging_root,
             restored_nodes: &r.timeline.restored_nodes(),
@@ -1272,9 +1331,10 @@ fn write_provenance(r: Provenance) -> Result<(), Box<dyn std::error::Error>> {
         )? {
             emit_artifact(r.sink, "image", "sbom", &path);
         }
+        return Ok(Some(prov.outputs));
     }
 
-    Ok(())
+    Ok(None)
 }
 
 /// What one stage leaves for the stages after it, and for the provenance record at the
@@ -1329,6 +1389,10 @@ struct BuildState {
     /// paired with the medium each goes to. Empty for every run that stops short of the
     /// image node, which is what makes the hint absent rather than wrong there.
     flashables: Vec<crate::nextstep::Flashable>,
+    /// The artifacts that carry the per-image first-boot password: an image holding the
+    /// rootfs partition, each compressed copy of one, and the rootfs file manifest. Set by
+    /// the image stage, which is the only one that knows which of its files those are.
+    per_image: Vec<PathBuf>,
 }
 
 /// One node's own work: everything it does, over the state the nodes before it left.
@@ -1575,11 +1639,9 @@ fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
         cache_dir: Some(s.cache_dir),
         refresh: s.args.refresh_rootfs,
         apt_sources: &apt_repos,
-        // Clamp tarball mtimes to the locked kernel commit's date (the same
-        // lock-derived seed the image identifiers use), so only the deliberate
-        // per-image password varies between builds of one lock. None
-        // on a rootfs-only build with no kernel tree in this work dir.
-        source_date_epoch: kernel::source_date_epoch(s.work_dir, s.lock),
+        // The lock's rootfs epoch: every time the rootfs stage stamps derives from it,
+        // whichever other stages this run compiled or restored.
+        source_date_epoch: rootfs_pin.source_date_epoch,
     };
     let artifacts = rootfs::build_rootfs(s.ib, &opts, s.sink)?;
     emit_artifact(s.sink, "rootfs", "tar", &artifacts.tar);
@@ -1696,6 +1758,24 @@ fn image_stage(s: ImageStage) -> Result<(), Box<dyn std::error::Error>> {
     for c in &artifacts.compressed {
         emit_artifact(s.sink, "image", "compressed", &c.path);
     }
+    emit_artifact(s.sink, "image", "files-manifest", &artifacts.files_manifest);
+    // What carries the password spliced into this image: the rootfs-bearing raw image,
+    // every container compressed from it, and the listing that hashes `/etc/shadow`. A
+    // split layout's boot image carries no rootfs, and neither do its containers.
+    let rootfs_image = match &artifacts.output {
+        ImageOutput::Combined { image } => image.clone(),
+        ImageOutput::Split { rootfs, .. } => rootfs.clone(),
+    };
+    s.state.per_image = std::iter::once(rootfs_image.clone())
+        .chain(
+            artifacts
+                .compressed
+                .iter()
+                .filter(|c| c.source == rootfs_image)
+                .map(|c| c.path.clone()),
+        )
+        .chain(std::iter::once(artifacts.files_manifest.clone()))
+        .collect();
     s.state.flashables = crate::nextstep::flashables(&artifacts.output, &artifacts.compressed);
     // The per-image first-boot password: unique per build, expired so it
     // must be changed at first login. Surfaced here since it exists nowhere else
@@ -1720,18 +1800,18 @@ fn image_stage(s: ImageStage) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The image's deterministic on-disk identifiers, seeded by the **recipe name**.
+/// The image's deterministic on-disk identifiers, seeded by the **recipe reference**
+/// and the device.
 ///
 /// The seed has to be stable across rebuilds (so the image reproduces) and distinct
-/// per build point (so two images never claim the same PARTUUID). The recipe name is
-/// exactly that, and — unlike the kernel commit — every build has one: a
+/// per build point (so two images never claim the same PARTUUID). The recipe reference
+/// is exactly that, and — unlike the kernel commit — every build has one: a
 /// distro-package kernel pins no commit at all, and even where one exists, a kernel
 /// bump is no reason for a board's disk identifiers to change.
 ///
 /// Distinctness is not cosmetic here. Under depthcharge the rootfs PARTUUID is baked
 /// into the kernel's signed command line, so two recipes that shared one would
-/// produce two cards a kernel cannot tell apart — the failure the phase-1 pipeline
-/// lived with by hand ("never insert both cards at once") and this removes.
+/// produce two cards a kernel cannot tell apart.
 fn image_identity(recipe: &str, build: &ResolvedBuild) -> image::ImageIdentity {
     image::ImageIdentity::derive(recipe, &build.device)
 }

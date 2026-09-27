@@ -31,6 +31,7 @@
 
 mod depthcharge;
 mod ext4;
+pub mod files;
 mod geometry;
 mod gpt;
 pub mod inspect;
@@ -340,6 +341,10 @@ pub struct ImageArtifacts {
     /// cannot be computed without repeating the format. Recorded in the provenance
     /// manifest's `[filesystem]`.
     pub rootfs_filesystem: FilesystemProvenance,
+    /// The rootfs file manifest, `<stem>.rootfs.uapi16`: every file the formatted rootfs
+    /// holds, read back from the filesystem after the scan passed it ([`files`]). It
+    /// carries the spliced `/etc/shadow`, so it is as unique to this image as the image.
+    pub files_manifest: PathBuf,
     /// The whole-disk size this build laid out, in bytes.
     ///
     /// Reported rather than re-parsed from the recipe, because under a fitted
@@ -486,6 +491,10 @@ pub fn build_image(
         None,
         &step,
     )?;
+    // The listing of what the formatted filesystem holds, read back from it once the scan
+    // has passed it: the partition's own account of its files, beside the image.
+    let files_manifest = opts.out_dir.join(files::manifest_name(opts.stem));
+    files::write_manifest(&ext4, &files_manifest, &step)?;
     let geom = match geom {
         Some(geom) => geom,
         None => {
@@ -621,6 +630,7 @@ pub fn build_image(
         password,
         rootfs_verified_with: rootfs_fs.verified_with,
         rootfs_filesystem: rootfs_fs.provenance,
+        files_manifest,
         image_bytes: geom.total_size,
     })
 }
@@ -700,6 +710,10 @@ pub struct PressedImage {
     /// The whole-disk size this press laid out, in bytes. Under a fitted
     /// `image_size` it grows with the additions.
     pub image_bytes: u64,
+    /// The pressed rootfs's file manifest, written beside the output with its extension
+    /// replaced by `rootfs.uapi16`. A press formats a new filesystem, so it lists that one
+    /// and not the build's.
+    pub files_manifest: PathBuf,
 }
 
 /// Re-assemble one pressed image from a build's kept artifacts, with
@@ -799,6 +813,8 @@ pub fn press_image(
         Some(opts.additions),
         &step,
     )?;
+    let files_manifest = opts.output.with_extension("rootfs.uapi16");
+    files::write_manifest(&ext4, &files_manifest, &step)?;
     let geom = match geom {
         Some(geom) => geom,
         None => {
@@ -844,6 +860,7 @@ pub fn press_image(
     Ok(PressedImage {
         password,
         image_bytes: geom.total_size,
+        files_manifest,
     })
 }
 

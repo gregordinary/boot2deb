@@ -325,6 +325,14 @@ fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
             Some(git(&k.reference, &k.commit)),
         ));
     }
+    // One axis per compiled application, keyed by its name, for the same reason: an
+    // app's commit decides a binary the image ships.
+    for a in &lock.apps {
+        v.push((
+            format!("app {}", a.name),
+            Some(git(&a.reference, &a.commit)),
+        ));
+    }
     // Pre-built `.deb`s are content pins, so the sha256 *is* the axis — a changed hash
     // is changed shipped bytes with no ref or commit standing between. Keyed by
     // locator, the only stable name they have.
@@ -692,6 +700,7 @@ commit = \"527d03d54ea68a375b814ccb3314901530cb8b32\"
 [rootfs]
 suite = \"forky\"
 manifest = \"r.pkgs.lock\"
+source_date_epoch = 1790347034
 ";
 
     #[test]
@@ -792,6 +801,28 @@ sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
         assert_eq!(
             pin_changes(&lock(WITH_ITEMS), &lock(&dropped)),
             ["kmod sunplus v1.2 (222222222222) -> none"]
+        );
+    }
+
+    /// An application's commit decides a binary the image ships, so moving it is a move
+    /// like any other pin's, keyed by the app's name.
+    #[test]
+    fn moving_an_app_pin_is_a_reported_move() {
+        const WITH_APP: &str = "\
+[[apps]]
+name = \"mpv\"
+source = \"https://example.invalid/mpv.git\"
+ref = \"v0.41.0\"
+commit = \"4444444444444444444444444444444444444444\"
+";
+        assert!(pin_changes(&lock(WITH_APP), &lock(WITH_APP)).is_empty());
+        let bumped = WITH_APP.replace("v0.41.0", "v0.42.0").replace(
+            "4444444444444444444444444444444444444444",
+            "5".repeat(40).as_str(),
+        );
+        assert_eq!(
+            pin_changes(&lock(WITH_APP), &lock(&bumped)),
+            ["app mpv v0.41.0 (444444444444) -> v0.42.0 (555555555555)"]
         );
     }
 }

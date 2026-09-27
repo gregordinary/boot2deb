@@ -1,8 +1,9 @@
 //! Build script: stamp the boot2deb git commit and dirty flag into the binary as
 //! compile-time env vars (`BOOT2DEB_GIT_COMMIT`, `BOOT2DEB_GIT_DIRTY`), so a built
 //! image's provenance manifest records which boot2deb checkout produced it. Absent a
-//! git checkout (e.g. a source tarball) the commit is emitted empty and the crate
-//! version alone identifies the builder.
+//! git checkout of its own (a source tarball, even one unpacked inside another
+//! repository) the commit is emitted empty and the crate version alone identifies the
+//! builder.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,7 +41,15 @@ fn main() {
     }
 
     let root = workspace_root();
-    let commit = git(&root, &["rev-parse", "--short=12", "HEAD"]).unwrap_or_default();
+    // Only this checkout's own repository names this source. `git` walks upward to the
+    // nearest `.git`, so a source tree unpacked inside some other checkout would
+    // otherwise be stamped with that checkout's commit and dirty state. `.git` is a
+    // directory in a clone and a file in a linked worktree, and both are this tree's own.
+    let commit = if root.join(".git").exists() {
+        git(&root, &["rev-parse", "--short=12", "HEAD"]).unwrap_or_default()
+    } else {
+        String::new()
+    };
     // "Dirty" is tracked content under SOURCE_PATHS differing from HEAD (`git diff`),
     // staged or not. Untracked files do not change the build output, and neither does
     // an edit outside SOURCE_PATHS: a recipe or a doc page is build input, which the

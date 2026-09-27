@@ -557,6 +557,36 @@ pub struct FfmpegSources {
     pub rockchip: Option<GitSource>,
 }
 
+/// The initramfs a layer asks for (`[initramfs]` at the SoC and device layers).
+///
+/// A layer names the modules its hardware needs before the root filesystem mounts.
+/// Those are the drivers between the kernel and the root device, plus whatever a rescue
+/// shell needs to be usable. Each entry's reason is a TOML comment beside it, because
+/// the reason is what a later editor needs before removing one.
+///
+/// ```toml
+/// [initramfs]
+/// modules = [
+///     # The SD slot's power rails are RK808 LDOs, a device-tree dependency.
+///     "rk808-regulator",
+///     "dw_mmc-rockchip",
+/// ]
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitramfsLayer {
+    /// Kernel modules the initramfs must carry, as `modules.order` spells them.
+    ///
+    /// Unioned across the SoC and device layers into
+    /// [`ResolvedImage::initramfs_modules`]. The rootfs stage writes the union into a
+    /// generated `modules.d` drop-in. It fails the build when a name is neither in the
+    /// built initrd nor built into the kernel. Each name is also derived into an
+    /// `initramfs-module` selftest check. Empty, the default, adds nothing to what
+    /// `initramfs-tools` selects on its own.
+    #[serde(default)]
+    pub modules: Vec<String>,
+}
+
 /// SoC-level invariants shared across every board using one [`Soc`]
 /// (`socs/<soc>.toml`).
 #[derive(Debug, Clone, Deserialize)]
@@ -578,6 +608,12 @@ pub struct SocLayer {
     /// they are present on first boot even where device-tree auto-probe would
     /// otherwise be enough.
     pub modules: Vec<String>,
+    /// The modules every board on this SoC needs in its initramfs. Reaching a root
+    /// filesystem is usually the same problem on every board in a family. The boards
+    /// share the PMIC, the MMC controller and the USB controllers. A board adds its own
+    /// through [`DeviceLayer::initramfs`].
+    #[serde(default)]
+    pub initramfs: InitramfsLayer,
     /// SoC-specific rootfs packages added to the base set. Empty for the
     /// RK1, whose accel userspace ships via features, not the SoC layer.
     #[serde(default)]
@@ -1384,16 +1420,18 @@ pub struct DeviceLayer {
     /// replaced wholesale. Chains are walked to the base-most device, and a cycle is
     /// [`crate::error::ConfigError::DeviceExtendsCycle`].
     ///
-    /// **Five arrays accumulate instead of replacing**: [`caveats`](Self::caveats),
+    /// **Six arrays accumulate instead of replacing**: [`caveats`](Self::caveats),
     /// [`expect`](Self::expect),
     /// [`nonfree_firmware_packages`](Self::nonfree_firmware_packages),
-    /// [`packages`](Self::packages) and [`exclude`](Self::exclude). Each level's entries
-    /// are concatenated base-most first and de-duplicated. The line is between
-    /// *describing or supplying the running system* and *selecting a build input*.
+    /// [`packages`](Self::packages), [`exclude`](Self::exclude) and
+    /// [`initramfs.modules`](InitramfsLayer::modules). Each level's entries are
+    /// concatenated base-most first and de-duplicated. The line is between *describing
+    /// or supplying the running system* and *selecting a build input*.
     ///
     /// A variant is the same hardware, so it is bound by everything its parent said about
     /// that hardware. A caveat cannot be un-said, a runtime check that held on the parent
-    /// holds here, and a radio that needed firmware still needs it.
+    /// holds here, and a radio that needed firmware still needs it. A root device the
+    /// parent's initramfs had to reach is one this board's has to reach too.
     ///
     /// By contrast [`device_kmods`](Self::device_kmods),
     /// [`device_patch_series`](Self::device_patch_series),
@@ -1553,6 +1591,14 @@ pub struct DeviceLayer {
     /// not carry. Only a recipe replaces the resolved set outright.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// The modules this board adds to its SoC's initramfs, unioned after the SoC's.
+    ///
+    /// Here when the need is one board's. That is a display stack only a board with a
+    /// roomy kernel slot can afford, or a controller only this board wires. `modules`
+    /// accumulates across [`extends`](Self::extends), since a variant is the same
+    /// hardware and still needs what its parent's initramfs carried.
+    #[serde(default)]
+    pub initramfs: InitramfsLayer,
     /// Packages carrying **nonfree firmware** this board's hardware loads at runtime,
     /// under the same contract as [`SocLayer::nonfree_firmware_packages`]. It is dropped
     /// on a [`libre`](CompiledKernelDef::libre) build, and merged in place on any other.
@@ -2968,6 +3014,17 @@ pub struct ResolvedImage {
     /// `usermod` accepts, and that the set is non-empty of nothing. An empty list is legal
     /// and means the account gets its login group only.
     pub groups: Vec<String>,
+    /// Kernel modules the initramfs must carry: the SoC layer's
+    /// [`initramfs`](SocLayer::initramfs) list, then the device lineage's, in authored
+    /// order and de-duplicated by [`module_key`](crate::initramfs::module_key).
+    ///
+    /// Resolution guarantees each name passes
+    /// [`check_module_name`](crate::initramfs::check_module_name). Empty on a board
+    /// that names none, where `initramfs-tools` selects modules on its own. The rootfs
+    /// stage then writes no drop-in and makes no landing check. Non-empty, the
+    /// build fails unless every name is in the built initrd or built into the kernel,
+    /// judged by [`coverage`](crate::initramfs::coverage).
+    pub initramfs_modules: Vec<String>,
     /// Out-of-tree kernel-module sets, in the order the device named them: each
     /// `kmods/<name>.toml` loaded and validated, built against this build's kernel tree
     /// and staged into `/lib/modules/<kver>/updates/`. Empty for a board that carries

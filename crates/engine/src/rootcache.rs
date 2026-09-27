@@ -71,7 +71,7 @@ use std::path::{Path, PathBuf};
 /// bootstrapped tree's dpkg state, apt configuration, and configure ordering, so a
 /// dependency bump that changes the emitted tree for unchanged inputs is a bump here
 /// too.
-const ROOTFS_STAGE_VERSION: u32 = 11;
+const ROOTFS_STAGE_VERSION: u32 = 12;
 
 /// Everything that determines the produced rootfs tree *except* the per-image
 /// password (applied on restore) — the inputs [`cache_key`] hashes.
@@ -132,6 +132,14 @@ pub struct CacheKeyInputs<'a> {
     /// different order is a different file, and the key must describe the bytes rather
     /// than the intent.
     pub authorized_keys: &'a [String],
+    /// The rootfs `SOURCE_DATE_EPOCH`
+    /// ([`RootfsOptions::source_date_epoch`](crate::rootfs::RootfsOptions::source_date_epoch)).
+    ///
+    /// It decides every time the tree carries: the export's mtime ceiling, and what the
+    /// customize step stamps into the initrd and the account databases. It moves only
+    /// when a lock pin moves, so folding it costs no hit a moved pin would not already
+    /// have cost.
+    pub source_date_epoch: u64,
 }
 
 /// The rootfs cache key: a [`Signature`] over [`CacheKeyInputs`]. Pure.
@@ -152,6 +160,7 @@ pub fn cache_key(inputs: &CacheKeyInputs) -> Signature {
         b.fold_scalar("interpreter", interpreter);
     }
     b.fold_scalar("sudo", inputs.sudo);
+    b.fold_scalar("source_date_epoch", &inputs.source_date_epoch.to_string());
     if !inputs.authorized_keys.is_empty() {
         b.fold_ordered("authorized_keys", inputs.authorized_keys);
     }
@@ -415,6 +424,7 @@ mod tests {
             interpreter: None,
             sudo: "nopasswd",
             authorized_keys: &[],
+            source_date_epoch: 1_790_347_034,
         }
     }
 
@@ -479,6 +489,15 @@ mod tests {
             key,
             cache_key(&CacheKeyInputs {
                 suite: "sid",
+                ..base
+            })
+        );
+        // The epoch decides the times the tree carries, so a re-pin that moved it is a
+        // different tree even over the same package set.
+        assert_ne!(
+            key,
+            cache_key(&CacheKeyInputs {
+                source_date_epoch: 1_800_000_000,
                 ..base
             })
         );
@@ -634,7 +653,7 @@ mod tests {
         let debs = vec!["def".to_string()];
         assert_eq!(
             cache_key(&inputs(&solved, &overlay, &debs)).as_str(),
-            "4dcd87874a57cc52f4283a672e8e29b9c4d7ed4b1ab229e0cc301ea5f29ce91d"
+            "ae4c292324c5b9a35ee5798712994d0505bbdf7b92dd90844d44945a89ccf159"
         );
     }
 

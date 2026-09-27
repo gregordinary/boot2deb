@@ -21,13 +21,29 @@
 //! skipped. There are no inline comments and no quoting, so a pattern or a card
 //! name is carried verbatim.
 //!
-//! Three check kinds exist only in the generated stream and cannot be authored.
+//! Four check kinds exist only in the generated stream and cannot be authored.
 //! `kernel-release` and `kernel-flavor` are derived from the image identity by
 //! the build (see the rootfs stage). A layer restating the pinned kernel would
 //! drift from the lock that owns it. `single-kernel` takes no argument at all and
 //! is not a property of any layer. It states that the image carries one kernel.
 //! That is true of every image this builder produces, and is a claim only the
 //! build is in a position to make.
+//!
+//! `initramfs-module` is derived, one line per name, from the resolved
+//! [`initramfs_modules`](crate::model::ResolvedImage::initramfs_modules). The list
+//! puts a module into the initramfs, and the build checks the initramfs against it. The
+//! on-image check is that same list, re-checked after an on-device regeneration. A
+//! module a layer needs at early boot therefore goes in its `[initramfs] modules`,
+//! which a hand-written check could only restate.
+
+/// The check kinds only the build emits, in the `.checks` grammar's spelling. An
+/// `[[expect]]` naming one is refused with a pointer to where its value comes from.
+const DERIVED_KINDS: [&str; 4] = [
+    "kernel-release",
+    "kernel-flavor",
+    "single-kernel",
+    "initramfs-module",
+];
 
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +64,7 @@ pub const CHECKS_DIR: &str = "etc/boot2deb/selftest.d";
 ///
 /// - **Disk content** (checkable on any boot of the rootfs, including under
 ///   `boot2deb try`): [`File`](Self::File), [`Dtb`](Self::Dtb),
-///   [`Firmware`](Self::Firmware), [`InitramfsModule`](Self::InitramfsModule).
+///   [`Firmware`](Self::Firmware).
 /// - **Hardware state** (meaningful only on the board, reported not-applicable
 ///   under emulation): [`DriverBound`](Self::DriverBound),
 ///   [`Devnode`](Self::Devnode), [`SoundCard`](Self::SoundCard),
@@ -83,15 +99,6 @@ pub enum Expectation {
         /// Path relative to `/lib/firmware` (e.g.
         /// `arm/mali/arch10.8/mali_csffw.bin`).
         path: String,
-    },
-    /// A kernel module that must be reachable at early boot: either built into
-    /// the installed kernel or present in its initramfs. The runner checks
-    /// `modules.builtin` first, so a kernel that compiles the driver in passes
-    /// without an initrd copy. The invariant is "the boot path can load it",
-    /// not "the initrd carries it".
-    InitramfsModule {
-        /// Module name; `-` and `_` are interchangeable, as modprobe treats them.
-        module: String,
     },
     /// A driver must be bound to a specific device. This check catches a probe
     /// that deferred forever, or a power domain that never acked. Passes
@@ -147,8 +154,6 @@ struct ExpectRaw {
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
-    module: Option<String>,
-    #[serde(default)]
     device: Option<String>,
     #[serde(default)]
     driver: Option<String>,
@@ -168,7 +173,6 @@ impl TryFrom<ExpectRaw> for Expectation {
         // it ("check = \"firmware\" does not take `driver`").
         let provided: Vec<&str> = [
             raw.path.as_ref().map(|_| "path"),
-            raw.module.as_ref().map(|_| "module"),
             raw.device.as_ref().map(|_| "device"),
             raw.driver.as_ref().map(|_| "driver"),
             raw.name.as_ref().map(|_| "name"),
@@ -179,14 +183,18 @@ impl TryFrom<ExpectRaw> for Expectation {
         .collect();
         let takes: &[&str] = match raw.check.as_str() {
             "file" | "dtb" | "firmware" | "devnode" => &["path"],
-            "initramfs-module" => &["module"],
             "driver-bound" => &["device", "driver"],
             "sound-card" => &["name"],
             "no-dmesg-match" => &["pattern"],
+            derived if DERIVED_KINDS.contains(&derived) => {
+                return Err(format!(
+                    "check kind '{derived}' is derived by the build and cannot be authored"
+                ))
+            }
             other => {
                 return Err(format!(
                     "unknown check kind '{other}' (known: file, dtb, firmware, \
-                     initramfs-module, driver-bound, devnode, sound-card, no-dmesg-match)"
+                     driver-bound, devnode, sound-card, no-dmesg-match)"
                 ))
             }
         };
@@ -209,9 +217,6 @@ impl TryFrom<ExpectRaw> for Expectation {
             },
             "firmware" => Expectation::Firmware {
                 path: take("path", raw.path)?,
-            },
-            "initramfs-module" => Expectation::InitramfsModule {
-                module: take("module", raw.module)?,
             },
             "driver-bound" => Expectation::DriverBound {
                 device: take("device", raw.device)?,
@@ -240,7 +245,6 @@ impl Expectation {
             Expectation::File { .. } => "file",
             Expectation::Dtb { .. } => "dtb",
             Expectation::Firmware { .. } => "firmware",
-            Expectation::InitramfsModule { .. } => "initramfs-module",
             Expectation::DriverBound { .. } => "driver-bound",
             Expectation::Devnode { .. } => "devnode",
             Expectation::SoundCard { .. } => "sound-card",
@@ -258,7 +262,6 @@ impl Expectation {
             | Expectation::Dtb { path }
             | Expectation::Firmware { path }
             | Expectation::Devnode { path } => path.clone(),
-            Expectation::InitramfsModule { module } => module.clone(),
             Expectation::DriverBound { device, driver } => format!("{device} {driver}"),
             Expectation::SoundCard { name } => name.clone(),
             Expectation::NoDmesgMatch { pattern } => pattern.clone(),
@@ -290,19 +293,6 @@ impl Expectation {
                 Ok(())
             }
             Expectation::Firmware { path } => relative_path(self.kind(), path),
-            Expectation::InitramfsModule { module } => {
-                if module.is_empty()
-                    || !module
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-                {
-                    return Err(format!(
-                        "initramfs-module '{module}' is not a module name \
-                         (alphanumeric, '-', '_')"
-                    ));
-                }
-                Ok(())
-            }
             Expectation::DriverBound { device, driver } => {
                 word("driver-bound device", device)?;
                 word("driver-bound driver", driver)
@@ -315,8 +305,8 @@ impl Expectation {
 
 /// Format one `.checks` line: the kind padded to a fixed column, then the
 /// argument text. Shared with the engine's generated identity lines
-/// (`kernel-release`, `kernel-flavor`, `single-kernel`) so authored and derived
-/// checks render identically.
+/// (`kernel-release`, `kernel-flavor`, `single-kernel`, `initramfs-module`) so
+/// authored and derived checks render identically.
 ///
 /// Trailing whitespace is trimmed, so a kind that takes no argument at all
 /// (`single-kernel`) renders as the bare word. The alternative would be a word
@@ -489,11 +479,6 @@ path = "arm/mali/arch10.8/mali_csffw.bin""#,
                 "firmware          arm/mali/arch10.8/mali_csffw.bin",
             ),
             (
-                r#"check = "initramfs-module"
-module = "dw_mmc-rockchip""#,
-                "initramfs-module  dw_mmc-rockchip",
-            ),
-            (
                 r#"check = "driver-bound"
 device = "fb000000.gpu"
 driver = "panthor""#,
@@ -527,6 +512,16 @@ pattern = "SError|Synchronous External Abort""#,
         assert!(err.contains("unknown check kind 'device-node'"), "{err}");
         // The known set rides along so the fix needs no manual lookup.
         assert!(err.contains("devnode"), "{err}");
+    }
+
+    /// A derived kind is refused by name rather than as unknown, so the message says
+    /// the check exists and where it comes from, instead of suggesting a typo.
+    #[test]
+    fn a_derived_kind_cannot_be_authored() {
+        for kind in DERIVED_KINDS {
+            let err = parse(&format!("check = \"{kind}\"")).unwrap_err();
+            assert!(err.contains("derived by the build"), "{kind}: {err}");
+        }
     }
 
     #[test]

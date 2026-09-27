@@ -15,8 +15,25 @@ use std::path::{Path, PathBuf};
 
 /// Lowercase-hex sha256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
+    hex(&Sha256::digest(bytes))
+}
+
+/// The byte length and lowercase-hex sha256 of the file at `path`, streamed through the
+/// hash so a multi-gigabyte image is never held whole.
+///
+/// # Errors
+///
+/// [`EngineError::Io`] when the file cannot be read.
+pub fn sha256_file(path: &Path) -> Result<(u64, String), EngineError> {
+    let mut file = std::fs::File::open(path).map_err(|s| EngineError::io(path, s))?;
+    let mut hasher = Sha256::new();
+    let len = std::io::copy(&mut file, &mut hasher).map_err(|s| EngineError::io(path, s))?;
+    Ok((len, hex(&hasher.finalize())))
+}
+
+/// Lowercase hex of a digest's bytes.
+pub(crate) fn hex(digest: &[u8]) -> String {
+    let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
         use std::fmt::Write;
         let _ = write!(out, "{byte:02x}");

@@ -400,7 +400,22 @@ fn stage_env(
     let mut env = match opts.stage {
         // A kbuild invocation either way: the kmod stage compiles its modules against
         // the kernel tree with the kernel's own variables.
-        ShellStage::Kernel | ShellStage::Kmod => kernel::kbuild_env(build, source_date_epoch),
+        ShellStage::Kernel => kernel::kbuild_env(
+            build,
+            source_date_epoch,
+            &[&kernel::tree_dir(opts.work_dir)],
+        ),
+        // The session is not told which module a command will build, so it maps the
+        // directory holding every driver tree. A module compiled by hand here therefore
+        // records its sources one directory deeper than the stage's own compile does.
+        ShellStage::Kmod => kernel::kbuild_env(
+            build,
+            source_date_epoch,
+            &[
+                &kernel::tree_dir(opts.work_dir),
+                &crate::build::kmod::stage_dir(opts.work_dir),
+            ],
+        ),
         _ => Vec::new(),
     };
     // The three stages that compile in the cross root, which is where a toolchain prefix
@@ -932,7 +947,25 @@ mod tests {
         assert!(has(&kernel, "ARCH", "arm64"));
         assert!(has(&kernel, "SOURCE_DATE_EPOCH", "1700"));
         assert!(has(&kernel, "CROSS_COMPILE", "aarch64-"));
-        assert_eq!(env(ShellStage::Kmod), kernel);
+        assert!(has(
+            &kernel,
+            "KCFLAGS",
+            "-fdebug-prefix-map=/nonexistent/linux=."
+        ));
+        // A kmod session is the kernel's, plus the directory its driver trees live in
+        // mapped out of the debug information as well.
+        let kmod = env(ShellStage::Kmod);
+        assert!(has(
+            &kmod,
+            "KCFLAGS",
+            "-fdebug-prefix-map=/nonexistent/linux=. -fdebug-prefix-map=/nonexistent/kmod=."
+        ));
+        let without_maps = |env: Vec<(String, String)>| {
+            env.into_iter()
+                .filter(|(k, _)| k != "KCFLAGS" && k != "KAFLAGS")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(without_maps(kmod), without_maps(kernel));
 
         // u-boot cross-compiles but is not kbuild: the toolchain prefix, nothing else.
         let uboot = env(ShellStage::Uboot);

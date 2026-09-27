@@ -46,7 +46,7 @@
 
 use super::{
     config, stage_overlay, stage_preinstall_overlay, AptRepo, BootConfig, RootfsArtifacts,
-    RootfsOptions, DEFAULT_USER, REQUIRED_INITRD_MODULES,
+    RootfsOptions, DEFAULT_USER,
 };
 use crate::archfetch::ArchiveFetch;
 use crate::bootstrap::components;
@@ -181,7 +181,7 @@ pub fn build_rootfs(
         opts.repo_debs,
         &image.suite,
         arch,
-        opts.source_date_epoch,
+        Some(opts.source_date_epoch),
         &step,
     )?;
 
@@ -316,6 +316,7 @@ pub fn build_rootfs(
             image,
             opts.boot_config,
             DEFAULT_USER,
+            opts.source_date_epoch,
             &step,
         )?;
         step.progress(65);
@@ -754,6 +755,7 @@ fn rootfs_key(
         interpreter: opts.interpreter_id,
         sudo: image.sudo.as_str(),
         authorized_keys: &image.ssh_authorized_keys,
+        source_date_epoch: opts.source_date_epoch,
     }))
 }
 
@@ -816,12 +818,17 @@ fn write_plan_manifest(plan: &Plan, out: &Path, step: &Step) -> Result<(), Engin
 /// subordinate map, one to write the tree at the ownership it intends and one to read it
 /// back. No host tool is on this path — the same posture the filesystem write and the
 /// bootstrap hold to.
+///
+/// The customize program runs with `SOURCE_DATE_EPOCH` set to `source_date_epoch`.
+/// `mkinitramfs` then stamps the initrd's members with it and builds with single-threaded
+/// compression, and `useradd` records it as the new account's last password change.
 fn customize(
     rootfs: &Path,
     overlay: &Path,
     image: &ResolvedImage,
     boot: Option<BootConfig>,
     user: &str,
+    source_date_epoch: u64,
     step: &Step,
 ) -> Result<(), EngineError> {
     // Lay the customize overlay (layer trees + generated config) into the rootfs
@@ -867,7 +874,96 @@ fn customize(
     // (`useradd`, `run-parts`, `depthchargectl`) run directly, or via the host's
     // `qemu-user` binfmt when cross-arch — as the build sandbox's do.
     step.log("running the target-chroot customize steps in a cage");
-    run_customize_cage(rootfs, &customize_env(user, image, boot), step)
+    run_customize_cage(
+        rootfs,
+        &customize_env(user, image, boot, source_date_epoch),
+        step,
+    )?;
+    check_initramfs_modules(rootfs, &image.initramfs_modules, step)
+}
+
+/// The target-side initrd report program: one committed POSIX `sh` file, like
+/// [`CUSTOMIZE`], that prints what the built initrd holds in the tagged-line grammar
+/// [`InitrdReport`](boot2deb_core::initramfs::InitrdReport) parses. It reports and
+/// never judges. The rule is [`coverage`](boot2deb_core::initramfs::coverage).
+const INITRD_REPORT: &str = include_str!("customize/initrd-report.sh");
+
+/// Fail the build unless the initrd the customize step built covers the image's
+/// [`initramfs_modules`](ResolvedImage::initramfs_modules).
+///
+/// `initramfs-tools` drops a listed name it cannot find without a word, so this is the
+/// check it does not make. It runs after [`CUSTOMIZE`], which built the initrd and, on a
+/// depthcharge board, signed it into the kernel partition. A failure here means neither
+/// ships. A module in the initrd that declares firmware the initrd does not hold is
+/// reported as a warning, since a driver's declarations name alternatives.
+///
+/// Skipped where the list is empty: `initramfs-tools` then selects modules on its own,
+/// and the build declared nothing to hold it to.
+fn check_initramfs_modules(
+    rootfs: &Path,
+    modules: &[String],
+    step: &Step,
+) -> Result<(), EngineError> {
+    if modules.is_empty() {
+        return Ok(());
+    }
+    let report = boot2deb_core::initramfs::InitrdReport::parse(&run_initrd_report(rootfs)?)
+        .map_err(|message| EngineError::InitrdReport { message })?;
+    let verdict = boot2deb_core::initramfs::coverage(modules, &report);
+    for missing in &verdict.missing_firmware {
+        step.log(format!(
+            "warning: initramfs module {} declares firmware the initrd does not hold: {}",
+            missing.module,
+            missing.firmware.join(", ")
+        ));
+    }
+    if !verdict.complete() {
+        return Err(EngineError::InitramfsModulesMissing {
+            kernel: report.kernel,
+            modules: verdict.missing,
+        });
+    }
+    step.log(format!(
+        "the initramfs for kernel {} covers all {} listed module(s): {} in the initrd, \
+         {} built into the kernel",
+        report.kernel,
+        modules.len(),
+        verdict.in_initrd.len(),
+        verdict.built_in.len()
+    ));
+    Ok(())
+}
+
+/// Run [`INITRD_REPORT`] in a cage rooted at the customized `rootfs` and return what it
+/// printed. The same profile and subordinate map as [`run_customize_cage`], because it
+/// reads the tree that cage wrote.
+fn run_initrd_report(rootfs: &Path) -> Result<String, EngineError> {
+    let context = || "report on the built initrd".to_string();
+    let cage = crate::sandbox::baseline(rootfs)
+        .identity_map(IdentityMap::Subordinate)
+        .command("sh")
+        .args(["-c", INITRD_REPORT])
+        .current_dir("/")
+        .build()
+        .map_err(|source| EngineError::Sandbox {
+            context: context(),
+            source,
+        })?;
+    let output = cage.output().map_err(|source| EngineError::Sandbox {
+        context: context(),
+        source,
+    })?;
+    if !output.status.success() {
+        return Err(EngineError::CommandFailed {
+            command: "sh".into(),
+            context: context(),
+            status: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|_| EngineError::InitrdReport {
+        message: "the report is not valid UTF-8".into(),
+    })
 }
 
 /// The target-side customize program: one committed POSIX `sh` file, byte-identical for
@@ -883,17 +979,22 @@ fn customize(
 /// drive these exact bytes through `dash`.
 const CUSTOMIZE: &str = include_str!("customize/customize.sh");
 
-/// The environment [`CUSTOMIZE`] reads, from the resolved build.
+/// The environment [`CUSTOMIZE`] runs under, from the resolved build: the `B2D_*`
+/// values the program reads, and `SOURCE_DATE_EPOCH` for the tools it runs.
 ///
 /// Every entry is a value, never syntax. The absent cases are the empty string rather
 /// than a missing variable, because the script runs under `set -u` and a branch on
 /// `[ -n "$X" ]` reads better than one on whether a variable exists at all: an image
 /// that authorizes nobody, generates no locale, or boots from a raw gap takes the empty
 /// string and the script's own `if` decides.
+///
+/// The program itself never reads `SOURCE_DATE_EPOCH`. `mkinitramfs`, `useradd` and
+/// `mkimage` do, which is why it is set for the whole run rather than passed as a value.
 fn customize_env(
     user: &str,
     image: &ResolvedImage,
     boot: Option<BootConfig>,
+    source_date_epoch: u64,
 ) -> Vec<(String, String)> {
     let depthcharge_board = match boot {
         Some(BootConfig::Depthcharge { board, .. }) => board,
@@ -949,10 +1050,7 @@ fn customize_env(
                 config::depthcharge_config(depthcharge_board, true)
             },
         ),
-        (
-            "B2D_REQUIRED_INITRD_MODULES".into(),
-            REQUIRED_INITRD_MODULES.join(" "),
-        ),
+        ("SOURCE_DATE_EPOCH".into(), source_date_epoch.to_string()),
     ]
 }
 
@@ -1011,13 +1109,11 @@ fn run_customize_cage(
 ///
 /// `source_date_epoch` is the `SOURCE_DATE_EPOCH` ceiling: each member's mtime is
 /// recorded as `min(mtime, epoch)`, pulling the bootstrap's wall-clock stamps down
-/// to the epoch so only the deliberate per-image secret varies between builds of
-/// one lock. `None` (a rootfs-only build with no
-/// kernel tree to date) records the real times.
+/// to the epoch.
 fn export_rootfs_tar(
     rootfs: &Path,
     tarball: &Path,
-    source_date_epoch: Option<u64>,
+    source_date_epoch: u64,
     step: &Step,
 ) -> Result<(), EngineError> {
     step.log(format!(
@@ -1042,9 +1138,7 @@ fn export_rootfs_tar(
     // The tar encoder applies the clamp as it writes: under the subordinate map the
     // provisioned files sit at ids the host user cannot set times on, so the encoder
     // is the one place that can pull an mtime down to the epoch.
-    if let Some(epoch) = source_date_epoch {
-        export = export.clamp_mtime(epoch as i64);
-    }
+    export = export.clamp_mtime(i64::try_from(source_date_epoch).unwrap_or(i64::MAX));
     export.write_to(writer).map_err(|e| EngineError::Bootstrap {
         context: "export the rootfs tar".into(),
         message: e.to_string(),
@@ -1152,7 +1246,7 @@ mod tests {
             cache_dir: None,
             refresh: false,
             apt_sources: &[],
-            source_date_epoch: None,
+            source_date_epoch: 1_790_347_034,
         }
     }
 
@@ -1543,9 +1637,12 @@ mod tests {
     /// program does not read is a value that silently reaches nothing.
     #[test]
     fn every_value_the_program_reads_comes_from_the_environment() {
-        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None);
-        let supplied: std::collections::BTreeSet<&str> =
-            env.iter().map(|(k, _)| k.as_str()).collect();
+        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
+        let supplied: std::collections::BTreeSet<&str> = env
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| k.starts_with("B2D_"))
+            .collect();
 
         let mut read = std::collections::BTreeSet::new();
         for (idx, _) in CUSTOMIZE.match_indices("$B2D_") {
@@ -1563,6 +1660,25 @@ mod tests {
             read, supplied,
             "the program's variables and the environment's must be the same set"
         );
+    }
+
+    /// The tools the program runs read the lock's epoch rather than the wall clock:
+    /// `mkinitramfs` stamps the initrd with it and `useradd` records it as the new
+    /// account's last password change.
+    #[test]
+    fn the_customize_run_carries_the_lock_epoch() {
+        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
+        assert_eq!(env_of(&env, "SOURCE_DATE_EPOCH"), "1790347034");
+    }
+
+    /// No image ships a per-machine identity generated at build time. SSH host keys
+    /// are removed, and the D-Bus machine ID becomes a link to `/etc/machine-id`,
+    /// which ships empty. A real file there would be adopted by systemd as the
+    /// machine ID of every board flashed from the image.
+    #[test]
+    fn the_customize_program_ships_no_build_time_machine_identity() {
+        assert!(CUSTOMIZE.contains("rm -f /etc/ssh/ssh_host_*"));
+        assert!(CUSTOMIZE.contains("ln -sf /etc/machine-id /var/lib/dbus/machine-id"));
     }
 
     /// Cage-native, and the account is created *locked*: the per-image password is
@@ -1595,7 +1711,7 @@ mod tests {
         assert!(CUSTOMIZE.contains(r#"rm -f "/etc/apt/sources.list.d/$B2D_LOCAL_REPO.list""#));
         assert_eq!(
             env_of(
-                &customize_env(DEFAULT_USER, image_of(&rk1()), None),
+                &customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034),
                 "B2D_LOCAL_REPO"
             ),
             "boot2deb-local"
@@ -1614,7 +1730,7 @@ mod tests {
             .find(r#"run-parts --exit-on-error --arg="$kver" /etc/kernel/postinst.d"#)
             .expect("the hooks run");
         assert!(removed < hooks, "removal precedes the hooks");
-        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None);
+        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
         assert_eq!(
             env_of(&env, "B2D_INITRAMFS_STUB"),
             crate::rootfs::INITRAMFS_STUB
@@ -1660,7 +1776,7 @@ mod tests {
         const RSA: &str = "ssh-rsa AAAAB3NzaC1yc2EA laptop";
 
         // The shipped default: root with no prompt, and nobody authorized by key.
-        let plain = customize_env(DEFAULT_USER, image_of(&rk1()), None);
+        let plain = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
         assert_eq!(env_of(&plain, "B2D_SUDOERS"), "NOPASSWD: ALL");
         assert_eq!(env_of(&plain, "B2D_AUTHORIZED_KEYS"), "");
 
@@ -1674,7 +1790,7 @@ mod tests {
             },
         )
         .unwrap();
-        let env = customize_env(DEFAULT_USER, image_of(&build), None);
+        let env = customize_env(DEFAULT_USER, image_of(&build), None, 1_790_347_034);
         // `password` writes the prompting spec. sudo takes the *last* matching rule, so
         // a stale NOPASSWD would not be inert — and there is now nowhere for one to be,
         // since the program writes exactly this value once.
@@ -1764,8 +1880,6 @@ mod tests {
         for expected in [
             "depthchargectl build",
             "vbutil_kernel --verify",
-            "lsinitramfs",
-            "--show-depends",
             "systemctl is-enabled depthcharge-tools.service",
         ] {
             assert!(CUSTOMIZE.contains(expected), "the tail runs {expected}");
@@ -1779,21 +1893,15 @@ mod tests {
                 cmdline: "console=tty1 ro",
                 initramfs_compress: InitramfsCompress::Xz,
             }),
+            1_790_347_034,
         );
         assert_eq!(env_of(&env, "B2D_DEPTHCHARGE_BOARD"), "speedy");
         // Armed — unlike the build-time config in the pre-install overlay, which must
         // not let the hooks hunt the build host's disks.
         assert!(env_of(&env, "B2D_DEPTHCHARGE_CONFIG").contains("enable-system-hooks = True"));
-        let modules = env_of(&env, "B2D_REQUIRED_INITRD_MODULES");
-        for module in REQUIRED_INITRD_MODULES {
-            assert!(
-                modules.split(' ').any(|m| m == *module),
-                "asserts {module} into the initramfs"
-            );
-        }
 
         // A raw-gap board takes the early exit instead: no board, so no tail.
-        let raw = customize_env(DEFAULT_USER, image_of(&rk1()), None);
+        let raw = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
         assert_eq!(env_of(&raw, "B2D_DEPTHCHARGE_BOARD"), "");
         assert_eq!(env_of(&raw, "B2D_DEPTHCHARGE_CONFIG"), "");
         assert!(
@@ -1812,7 +1920,7 @@ mod tests {
         assert!(CUSTOMIZE.contains("is not in this suite's tzdata"));
         assert!(CUSTOMIZE.contains("[ -s /usr/lib/locale/locale-archive ]"));
 
-        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None);
+        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
         assert_eq!(env_of(&env, "B2D_TIMEZONE"), "UTC");
         // The flag is set because the RK1 image generates locales; the check is
         // meaningless on an image that generates none, where the archive is absent by

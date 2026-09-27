@@ -24,7 +24,9 @@
 #   B2D_LOCALES_GENERATED       non-empty when locale-gen was asked for anything
 #   B2D_DEPTHCHARGE_BOARD       the board profile, or empty on a raw-gap board
 #   B2D_DEPTHCHARGE_CONFIG      the armed /etc/depthcharge-tools/config content
-#   B2D_REQUIRED_INITRD_MODULES space-separated modules the signed initramfs must hold
+#
+# The initramfs this builds is checked against the image's initramfs module list
+# afterwards, by initrd-report.sh beside this file and the build's own rule.
 set -eu
 
 # --- The default account -----------------------------------------------------
@@ -64,6 +66,16 @@ fi
 # Regenerated on first boot, so every image does not ship one identity.
 rm -f /etc/ssh/ssh_host_*
 
+# The same for the machine ID. The image ships /etc/machine-id empty, and systemd
+# fills an empty one at first boot from /var/lib/dbus/machine-id whenever that
+# holds an ID, which dbus's postinst generated during the install. Every board
+# flashed from this image would then boot with the same machine ID. The link makes
+# the two files one, as machine-id(5) describes, so systemd generates a fresh ID
+# and D-Bus reads it too.
+if [ -d /var/lib/dbus ]; then
+    ln -sf /etc/machine-id /var/lib/dbus/machine-id
+fi
+
 # The build-time-only local `.deb` repository: its `file://` temp dir is gone by the
 # time the image runs, so leaving the source would fail every on-device `apt-get
 # update`. The feature repositories stay — those are meant to persist.
@@ -89,7 +101,7 @@ else
 fi
 
 # --exit-on-error fails the build rather than shipping a kernel with nothing to boot
-# it. The version is reused by the depthcharge tail below.
+# it.
 kver="$(linux-version list | linux-version sort --reverse | head -n1)"
 run-parts --exit-on-error --arg="$kver" /etc/kernel/postinst.d
 
@@ -141,37 +153,12 @@ ln -sf /usr/lib/systemd/system/systemd-time-wait-sync.service \
 # hardware. Skipped entirely on a raw-gap board, which has no board profile.
 [ -n "$B2D_DEPTHCHARGE_BOARD" ] || exit 0
 
-# Assert every module the initramfs lists actually exists for this kernel: MODULES=list
-# silently drops an unresolvable name, so a typo would ship an initramfs missing (say)
-# the PMIC driver and the board would hang at a white screen. `</dev/null` so the inner
-# command cannot consume the list.
-for list in /usr/share/initramfs-tools/modules.d/*; do
-    [ -f "$list" ] || continue
-    while read -r mod; do
-        case "$mod" in ''|\#*) continue ;; esac
-        modprobe --set-version "$kver" --show-depends "$mod" </dev/null >/dev/null 2>&1 || {
-            echo "initramfs module '$mod' does not exist in kernel $kver (from $(basename "$list"))" >&2
-            exit 1
-        }
-    done < "$list"
-done
-
 # Build the signed payload; board profile and cmdline come from the pre-install
 # overlay's config, root= from /etc/fstab.
 depthchargectl build --verbose
 kpart="$(ls /boot/depthcharge/*.img 2>/dev/null | head -n1)"
 [ -n "$kpart" ] || { echo 'depthchargectl build produced no image' >&2; exit 1; }
 futility vbutil_kernel --verify "/boot/depthcharge/$(basename "$kpart")"
-
-# The initramfs is inside the signature now — last chance to confirm the modules that
-# must be in it actually are.
-initrd_list="$(lsinitramfs "/boot/initrd.img-$kver")"
-for need in $B2D_REQUIRED_INITRD_MODULES; do
-    case "$initrd_list" in *"$need"*) ;; *)
-        echo "the built initramfs is missing $need — MODULES=list did not take" >&2
-        exit 1 ;;
-    esac
-done
 
 # Arm the package's kernel hooks for the shipped system: an on-device apt kernel
 # upgrade re-signs and writes the other slot itself. They were off during the build so
