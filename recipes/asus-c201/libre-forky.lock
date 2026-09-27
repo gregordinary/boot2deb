@@ -4,16 +4,16 @@
 [kernel]
 id = "rk3288-libre-7.2"
 source = "git://linux-libre.fsfla.org/releases.git"
-ref = "sources/v7.2.7-gnu"
-commit = "f4845226170b641ae257607618f0dc30cc29a938"
+ref = "sources/v7.2.8-gnu"
+commit = "ea31b59e482803c5d0a57ee6af3ba1e31790c8bb"
 
 [patches]
 series = ["rk3288-fixes"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "ec8acfdcdb2a50359abfe7f3023168e539fb97fa"
+commit = "14e7a6de48ff89830c0974b2c89682d0e17d636e"
 
 [rootfs]
 suite = "forky"
 manifest = "libre-forky.pkgs.lock"
-source_date_epoch = 1790393266
+source_date_epoch = 1790520611

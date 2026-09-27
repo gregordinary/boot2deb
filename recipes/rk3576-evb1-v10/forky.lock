@@ -11,7 +11,7 @@ commit = "9a66fdc0d7fd55f54235524a73435af99051e46f"
 series = ["rk3576-fixes"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "ec8acfdcdb2a50359abfe7f3023168e539fb97fa"
+commit = "14e7a6de48ff89830c0974b2c89682d0e17d636e"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,12 +22,12 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["rk3576-loader"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "ec8acfdcdb2a50359abfe7f3023168e539fb97fa"
+commit = "14e7a6de48ff89830c0974b2c89682d0e17d636e"
 
 [rootfs]
 suite = "forky"
 manifest = "forky.pkgs.lock"
-source_date_epoch = 1790393266
+source_date_epoch = 1790520596
 
 [blobs]
 atf = "rk3576_bl31_v1.24.elf@sha256:e2cf4e0e920dfe1daa6412c05f49dc7e5c0f9888d3a3e8eecc85fbe1e86a23d1"

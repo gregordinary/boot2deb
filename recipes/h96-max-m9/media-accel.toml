@@ -76,12 +76,15 @@ image_size = "3G"
 #
 # The claim is `expected` rather than `validated` because the lock has moved since that
 # image: it booted kernel v7.2.3 with patches `daa40ed`, and the pins here are v7.2.8
-# with patches `ec8acfd`. The kernel bump retires four of the NPU patches that image
+# with patches `14e7a6d`. The kernel bump retires four of the NPU patches that image
 # carried, which 7.2.4 now supplies itself, and rebases four more onto its error paths.
-# In the media path one thing moved: the HEVC tile-count bound that image took from the
-# series now comes from the kernel, which leaves the decode of a conforming stream as it
-# was. None of the exercised paths above has a reason to change; the claim returns to
-# `validated` when an image at these pins boots the board.
+# The NPU series at this pin follows its upstream v14 posting, which pulses the NPU
+# domain's bus reset before the power-on settle rather than after it, and the board's
+# device tree hands the NPU rail to that domain as its supply. In the media path one
+# thing moved: the HEVC tile-count bound that image took from the series now comes from
+# the kernel, which leaves the decode of a conforming stream as it was. None of the
+# exercised paths above has a reason to change; the claim returns to `validated` when an
+# image at these pins boots the board.
 [support]
 status = "expected"
 date   = "2026-09-14"

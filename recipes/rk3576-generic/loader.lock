@@ -10,7 +10,7 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["rk3576-loader"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "372bc056912d2b5a151d77411642a4d242ad53fa"
+commit = "14e7a6de48ff89830c0974b2c89682d0e17d636e"
 
 [blobs]
 atf = "rk3576_bl31_v1.24.elf@sha256:e2cf4e0e920dfe1daa6412c05f49dc7e5c0f9888d3a3e8eecc85fbe1e86a23d1"

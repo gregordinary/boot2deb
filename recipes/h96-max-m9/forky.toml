@@ -20,6 +20,11 @@ image_size = "2G"
 # fewer node to probe than the image that booted, which enabled a core that never
 # bound.
 #
+# The NPU series follows its upstream v14 posting: the power-domain driver pulses the
+# NPU domain's bus reset before the power-on settle, and the board's `.dts` makes the
+# `vdd_npu_s0` rail that domain's supply, so the rail switches with the domain the way
+# the GPU's does.
+#
 # usb_drd0 runs at SuperSpeed on the usbdp PHY, carrying nothing beyond the SoC dtsi
 # to do it. That is measured, on the sibling media-accel recipe, which shares this
 # board description: 5 Gbps, ~154 MB/s over 92 GB of continuous reads, no link error.
