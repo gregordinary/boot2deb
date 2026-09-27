@@ -45,7 +45,7 @@ locale       = "de_DE.UTF-8"     # omit -> base locale
 locales_generate = []            # omit -> base locales_generate (replaces, not adds)
 timezone     = "Europe/Berlin"   # omit -> base timezone
 keymap       = "de"              # omit -> device keymap
-sudo         = "nopasswd"        # omit -> base sudo ("nopasswd" | "password")
+sudo         = "password"        # omit -> base sudo ("password" | "nopasswd")
 first_boot_password_length = 12   # omit -> base length (8..=64)
 ssh_authorized_keys = []         # omit -> base keys (replaces, not adds)
 groups = ["video", "render"]     # omit -> the layers' union (replaces, not adds)

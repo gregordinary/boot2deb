@@ -382,8 +382,8 @@ Power the node on. On first boot the image does two things:
   disk's capacity. That happens online, in the same boot, with no reboot involved.
 
 Log in as user **`debian`** with the password the build printed. It is expired, so you
-are required to set a new one immediately. The `debian` account has passwordless
-`sudo`, and the hostname is `turing-rk1`.
+are required to set a new one immediately. `sudo` asks for that password, and the
+hostname is `turing-rk1`.
 
 That is a booted Debian system. The kernel's transcode devices come up on **every**
 variant, so check for `/dev/dri` and `/dev/rga`. A **media-accel** image also installs

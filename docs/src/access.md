@@ -8,7 +8,7 @@ resolved before the build.
 
 | field | layer | default | what it sets |
 |---|---|---|---|
-| `sudo` | `base.toml` | `nopasswd` | `/etc/sudoers.d/debian` — whether `sudo` prompts |
+| `sudo` | `base.toml` | `password` | `/etc/sudoers.d/debian` — whether `sudo` prompts |
 | `first_boot_password_length` | `base.toml` | `12` | length of the generated per-image password |
 | `ssh_authorized_keys` | `base.toml` | none | `~debian/.ssh/authorized_keys` |
 | `groups` | `base.toml` + the hardware layers | `video`, `render` | the account's supplementary groups |
@@ -72,9 +72,9 @@ first-boot pw : 7kQmR3xLpAvB  (user debian, expired — change at first login)
 
 Three facts about the base image decide how much that password is guarding.
 `openssh-server` is installed and enabled, and a DHCP client brings the board onto the
-network before anyone has logged in. `sudo` defaults to `nopasswd`. The printed
-password is therefore root, on whatever network the board is plugged into, from the
-moment it powers on.
+network before anyone has logged in. The account reaches root through `sudo`, whose
+prompt asks for that same password. The printed password is therefore root, on whatever
+network the board is plugged into, from the moment it powers on.
 
 **Expiry does not change that.** A login against an expired account is permitted and is
 then required to *set* the new password. That protects against a credential nobody ever
@@ -171,25 +171,24 @@ That is what `sshd`'s default `StrictModes` requires before it will read a key a
 
 ## Choosing a sudo policy
 
-`sudo = "nopasswd"` gives `debian` root with no prompt. `sudo = "password"` prompts for
-the account's own password.
+`sudo = "password"` prompts for the account's own password. `sudo = "nopasswd"` gives
+`debian` root with no prompt.
 
-`nopasswd` is the default because these are single-operator boards. The account's
-password was just set at first login, and re-typing it to reach root adds nothing that
-the login did not already decide. It is also what makes an unattended first-boot setup
-script work without embedding a password in it.
+`password` is the default, and root then costs one more proof than a login. An open
+session left at the console is not root on its own. Neither is a login with an
+authorized key, or a process running as `debian`.
 
-Choose `password` for a board that is shared between people. The same goes for one that
-runs anything reachable from beyond a trusted network, or whose console someone else can
-walk up to. The tradeoff is narrow but real. Under `nopasswd`, anything that can log in
-is root, so
-the password and the keys above are the *whole* boundary.
+`nopasswd` suits a single-operator board that runs nothing reachable from beyond a
+trusted network. It also suits an unattended first-boot setup script, which has to
+reach root without a password embedded in it. The tradeoff is narrow but real. Under `nopasswd`,
+anything that can log in is root, so the password and the keys above are the *whole*
+boundary.
 
 It is also one line to change on a running board, so this is a default rather than a
 commitment:
 
 ```sh
-sudo sh -c 'echo "debian ALL=(ALL) ALL" > /etc/sudoers.d/debian'
+sudo sh -c 'echo "debian ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/debian'
 ```
 
 Note that `passwd root` does **not** change it. The rule belongs to `debian`, not to
@@ -206,7 +205,7 @@ The `.provenance.toml` beside each image carries the full access picture in
 user = "debian"
 password = "7kQmR3xLpAvB"
 note = "expired at first login (passwd -e); unique per built image"
-sudo = "nopasswd"
+sudo = "password"
 authorized_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9... operator@workstation"]
 ```
 

@@ -783,11 +783,29 @@ fn run_cmd(
     }
 }
 
-/// One boot's assertions, already logged in: system state, first-boot stamp,
-/// and the selftest.
+/// The command that runs the on-image selftest as root, in the mode built for a guest
+/// that is not the board. Root is what makes dmesg and the initramfs readable, so both
+/// policies reach it: `nopasswd` directly, and `password` by handing `sudo -S` the
+/// account's `active` password on stdin — the one [`login`] set, which the run's report
+/// already carries. `-p ''` keeps sudo's prompt out of the output the summary is read
+/// from.
+fn selftest_command(sudo: SudoPolicy, active: &str) -> String {
+    const SELFTEST: &str = "/usr/lib/boot2deb/selftest --mode userland";
+    match sudo {
+        SudoPolicy::Nopasswd => format!("sudo -n {SELFTEST}"),
+        SudoPolicy::Password => {
+            let quoted = active.replace('\'', r"'\''");
+            format!("printf '%s\\n' '{quoted}' | sudo -S -p '' {SELFTEST}")
+        }
+    }
+}
+
+/// One boot's assertions, already logged in as the account whose password is `active`:
+/// system state, first-boot stamp, and the selftest.
 fn assert_booted(
     console: &mut Console,
     image: &ResolvedImage,
+    active: &str,
     boot_timeout: Duration,
     step: &Step,
 ) -> Result<BootReport, EngineError> {
@@ -832,14 +850,8 @@ fn assert_booted(
         ));
     }
     let stamp = stamp_out.trim().to_string();
-    // The selftest, in the mode built for a guest that is not the board. Root
-    // where sudo is free (dmesg and the initramfs are then readable); as the
-    // user otherwise — the runner reports what it had to skip.
-    let selftest_cmd = match image.sudo {
-        SudoPolicy::Nopasswd => "sudo -n /usr/lib/boot2deb/selftest --mode userland",
-        SudoPolicy::Password => "/usr/lib/boot2deb/selftest --mode userland",
-    };
-    let (rc, selftest_out) = run_cmd(console, selftest_cmd, COMMAND_TIMEOUT, step)?;
+    let selftest_cmd = selftest_command(image.sudo, active);
+    let (rc, selftest_out) = run_cmd(console, &selftest_cmd, COMMAND_TIMEOUT, step)?;
     let summary = selftest_out
         .lines()
         .rev()
@@ -946,7 +958,13 @@ fn boot_once(
 
     let run = (|| {
         let active = login(&mut console, opts.user, password, opts.boot_timeout, step)?;
-        let report = assert_booted(&mut console, opts.resolved_image, opts.boot_timeout, step)?;
+        let report = assert_booted(
+            &mut console,
+            opts.resolved_image,
+            &active,
+            opts.boot_timeout,
+            step,
+        )?;
         // Sync before poweroff so the stamp and journal survive even a shutdown
         // the harness ends up killing.
         let _ = run_cmd(&mut console, "sync", COMMAND_TIMEOUT, step)?;
@@ -1246,6 +1264,7 @@ mod tests {
                 send("\r\nLogin incorrect\r\ntesthost login: ");
                 return;
             }
+            let mut active = password.clone();
             if expired {
                 send("You are required to change your password immediately (administrator enforced).\r\n");
                 send("Changing password for debian.\r\nCurrent password: ");
@@ -1266,7 +1285,10 @@ mod tests {
                     send("\r\nLogin incorrect\r\n");
                     return;
                 }
+                active = new1;
             }
+            // `sudo -S` answers to the password in force now, not the generated one.
+            let sudo_selftest = selftest_command(SudoPolicy::Password, &active);
             send("Linux testhost 6.12.0 aarch64\r\ndebian@testhost:~$ ");
             // The shell: echo each command line, answer the sentinel probes.
             loop {
@@ -1288,9 +1310,14 @@ mod tests {
                         "stat -c %Y /var/lib/boot2deb/first-boot.done" => {
                             send(&format!("1755640000\r\nB2D-RC-0\r\n{OSC_END}B2D> "))
                         }
-                        "sudo -n /usr/lib/boot2deb/selftest --mode userland" => {
+                        c if c == "sudo -n /usr/lib/boot2deb/selftest --mode userland"
+                            || c == sudo_selftest =>
+                        {
                             send(&format!("identity\r\n  ok      kernel-release    7.1.6\r\n\r\n9 ok, 4 not applicable.\r\nB2D-RC-0\r\n{OSC_END}B2D> "))
                         }
+                        c if c.contains("| sudo -S") => send(&format!(
+                            "sudo: 1 incorrect password attempt\r\nB2D-RC-1\r\n{OSC_END}B2D> "
+                        )),
                         "sync" => send(&format!("B2D-RC-0\r\n{OSC_END}B2D> ")),
                         _ => send(&format!("B2D-RC-127\r\n{OSC_END}B2D> ")),
                     }
@@ -1386,26 +1413,79 @@ mod tests {
     #[test]
     fn the_full_assertion_pass_runs_over_a_scripted_guest() {
         // assert_booted end to end: settle, stamp, selftest — everything the
-        // real boot runs between login and poweroff, minus QEMU.
+        // real boot runs between login and poweroff, minus QEMU. Both sudo policies
+        // reach the root selftest; the prompting one after a forced password change,
+        // so the password sudo is handed is the changed one.
+        for (sudo, expired) in [(SudoPolicy::Nopasswd, false), (SudoPolicy::Password, true)] {
+            let sink = step_sink();
+            let step = Step::start(&sink, "test");
+            let mut console = session("pw", expired);
+            let active =
+                login(&mut console, "debian", "pw", Duration::from_secs(10), &step).unwrap();
+
+            let build = boot2deb_core::resolve_recipe(
+                &crate::test_support::repo_root(),
+                "turing-rk1/forky",
+                &boot2deb_core::Overrides {
+                    sudo: Some(sudo),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let image = build
+                .image
+                .as_ref()
+                .expect("the fixture recipe builds an image");
+            let report =
+                assert_booted(&mut console, image, &active, Duration::from_secs(10), &step)
+                    .unwrap();
+            assert_eq!(report.state, "running", "{sudo:?}");
+            assert_eq!(report.stamp, "1755640000", "{sudo:?}");
+            assert!(
+                report.selftest.contains("9 ok"),
+                "{sudo:?}: {}",
+                report.selftest
+            );
+        }
+    }
+
+    #[test]
+    fn a_prompting_sudo_is_handed_the_password_in_force() {
+        // A stale password is a named selftest failure, not a hang at sudo's prompt.
         let sink = step_sink();
         let step = Step::start(&sink, "test");
-        let mut console = session("pw", false);
+        let mut console = session("pw", true);
         login(&mut console, "debian", "pw", Duration::from_secs(10), &step).unwrap();
-
         let build = boot2deb_core::resolve_recipe(
             &crate::test_support::repo_root(),
             "turing-rk1/forky",
-            &boot2deb_core::Overrides::default(),
+            &boot2deb_core::Overrides {
+                sudo: Some(SudoPolicy::Password),
+                ..Default::default()
+            },
         )
         .unwrap();
-        let image = build
-            .image
-            .as_ref()
-            .expect("the fixture recipe builds an image");
-        let report = assert_booted(&mut console, image, Duration::from_secs(10), &step).unwrap();
-        assert_eq!(report.state, "running");
-        assert_eq!(report.stamp, "1755640000");
-        assert!(report.selftest.contains("9 ok"), "{}", report.selftest);
+        let image = build.image.as_ref().unwrap();
+        let Err(e) = assert_booted(&mut console, image, "pw", Duration::from_secs(10), &step)
+        else {
+            panic!("the selftest passed on a password that is no longer in force");
+        };
+        let e = e.to_string();
+        assert!(e.contains("incorrect password"), "{e}");
+    }
+
+    #[test]
+    fn the_password_reaches_sudo_as_one_shell_word() {
+        assert_eq!(
+            selftest_command(SudoPolicy::Password, "b2d.0123abcd"),
+            "printf '%s\\n' 'b2d.0123abcd' | sudo -S -p '' /usr/lib/boot2deb/selftest --mode userland"
+        );
+        // A quote in the password closes and reopens the quoting around an escaped one.
+        assert!(selftest_command(SudoPolicy::Password, "a'b").contains(r"'a'\''b'"));
+        assert_eq!(
+            selftest_command(SudoPolicy::Nopasswd, "ignored"),
+            "sudo -n /usr/lib/boot2deb/selftest --mode userland"
+        );
     }
 
     #[test]

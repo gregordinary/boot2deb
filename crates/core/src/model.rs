@@ -146,21 +146,21 @@ pub enum Layout {
 /// root through it costs a password.
 ///
 /// It is the multiplier on the first-boot credential. Under
-/// [`Nopasswd`](Self::Nopasswd) the generated password *is* root, because anything
-/// that can log in can then become root without proving anything further.
+/// [`Nopasswd`](Self::Nopasswd) anything that can log in can then become root without
+/// proving anything further. That includes a login with an authorized key, which never
+/// needed the password at all.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SudoPolicy {
-    /// `NOPASSWD: ALL` — root with no further prompt. The default, because these are
-    /// single-operator boards. The account's own password was just set at first login,
-    /// and re-typing it to reach root protects nothing the login did not already
-    /// decide.
-    #[default]
+    /// `NOPASSWD: ALL` — root with no further prompt. Suits a single-operator board
+    /// that runs nothing reachable beyond a trusted network, or a first-boot script
+    /// that has to reach root unattended.
     Nopasswd,
-    /// `ALL` — `sudo` prompts for the account's own password. Worth choosing for a
-    /// board that is shared, or that runs a service exposed beyond a trusted network.
-    /// Also worth it where the console is physically reachable by someone who must not
-    /// have root.
+    /// `ALL` — `sudo` prompts for the account's own password. The default, because root
+    /// then costs one more proof than a login. An open session at the console is not
+    /// root on its own, and neither is a key-based login or a process running as the
+    /// account.
+    #[default]
     Password,
 }
 
@@ -1711,7 +1711,7 @@ pub struct BaseLayer {
     pub extra_debs: Vec<ExtraDeb>,
     /// What `sudo` asks of the default account. Distro policy rather than a hardware
     /// property, so it lives here and not on a device. A recipe or `--sudo` overrides
-    /// it. Defaults to [`SudoPolicy::Nopasswd`].
+    /// it. Defaults to [`SudoPolicy::Password`].
     #[serde(default)]
     pub sudo: SudoPolicy,
     /// Length of the unique first-boot password generated per built image.

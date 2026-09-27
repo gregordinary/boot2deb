@@ -19,11 +19,6 @@ features   = ["media-accel-v4l2"]
 layout     = "combined"
 image_size = "3G"
 
-# `sudo` prompts for the account's own password on this image. The box runs on a shared
-# home network and its console is within anyone's reach, so reaching root costs one more
-# proof than logging in. `h96-max-m9/forky` keeps the shipped `nopasswd` default.
-sudo       = "password"
-
 # The kernel's GPU fix and the u-boot chain are hardware-validated on this board,
 # and Panfrost + Mesa render first-party at 4K.
 #

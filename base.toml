@@ -80,9 +80,9 @@ ntp_servers = []
 # changed at first login. Three facts about the shipped base decide how much that
 # password is protecting, and they are worth knowing before changing anything below:
 # openssh-server is installed and Debian enables it, a DHCP client brings the board onto
-# the network before anyone has logged in, and `sudo` below is `nopasswd`. So the
-# generated password is root on whatever network the board is plugged into, from the
-# moment it powers on.
+# the network before anyone has logged in, and the account can reach root through
+# `sudo`, whose prompt asks for that same password. So the generated password is root on
+# whatever network the board is plugged into, from the moment it powers on.
 #
 # Expiry does not change that. A login against an expired account is permitted and then
 # required to *set* the new password — which protects against a credential nobody ever
@@ -90,15 +90,15 @@ ntp_servers = []
 # Length is what covers that window.
 
 # What `sudo` asks of the default account:
-#   "nopasswd" — root with no prompt.
 #   "password" — prompts for the account's own password.
-# `nopasswd` suits a single-operator board: the account's password was just set at first
-# login, and re-typing it to reach root adds nothing that login did not already decide.
-# Choose `password` for a board that is shared, that runs anything reachable from
-# outside a trusted network, or whose console someone else can walk up to. It is also
-# one line to change afterwards on a running board, by rewriting
+#   "nopasswd" — root with no prompt.
+# `password` makes root cost one more proof than a login. An open session left at the
+# console, a login with an authorized key, or a process running as the account is not
+# root on its own. `nopasswd` suits a single-operator board that runs nothing reachable
+# from outside a trusted network, or a first-boot script that has to reach root
+# unattended. It is also one line to change afterwards on a running board, by rewriting
 # /etc/sudoers.d/debian — so this is a default, not a commitment.
-sudo = "nopasswd"
+sudo = "password"
 
 # Length of the generated per-image first-boot password, in characters drawn from a
 # 56-symbol alphabet with the ambiguous glyphs (0/O/o, 1/l/I) removed — so ~5.8 bits

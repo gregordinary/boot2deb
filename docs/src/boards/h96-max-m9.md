@@ -107,8 +107,8 @@ and a rescue-stick boot are therefore all reachable on the television.
 
 Power on. The image regenerates its SSH host keys and grows the rootfs to fill the
 eMMC, online, in the same boot. Log in as **`debian`** with the password the build
-printed. It is expired, so you set a new one immediately. The account has passwordless
-`sudo` and the hostname is `h96-max-m9`.
+printed. It is expired, so you set a new one immediately. `sudo` asks for that password,
+and the hostname is `h96-max-m9`.
 
 ## Hardware status
 

@@ -2900,11 +2900,11 @@ mod tests {
     fn account_defaults_come_from_the_base_layer_and_a_recipe_overrides_them() {
         let root = repo_root();
 
-        // The shipped default: root with no prompt, a 12-character generated password,
+        // The shipped default: a prompting sudo, a 12-character generated password,
         // and nobody authorized by key — an image a stock build hands out authorizes
         // whoever holds the password it printed, and no one else.
         let b = resolve_recipe(&root, "turing-rk1/forky", &Overrides::default()).unwrap();
-        assert_eq!(image_of(&b).sudo, SudoPolicy::Nopasswd);
+        assert_eq!(image_of(&b).sudo, SudoPolicy::Password);
         assert_eq!(
             image_of(&b).first_boot_password_length,
             crate::model::DEFAULT_PASSWORD_LENGTH
@@ -2914,21 +2914,21 @@ mod tests {
         // Each part overrides independently, and the keys keep the authored order —
         // authorized_keys is a file sshd walks, so the order is part of what was written.
         let second = format!("{TEST_KEY}-two");
-        let tightened = resolve_recipe(
+        let overridden = resolve_recipe(
             &root,
             "turing-rk1/forky",
             &Overrides {
-                sudo: Some(SudoPolicy::Password),
+                sudo: Some(SudoPolicy::Nopasswd),
                 first_boot_password_length: Some(24),
                 ssh_authorized_keys: Some(vec![TEST_KEY.to_string(), second.clone()]),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(image_of(&tightened).sudo, SudoPolicy::Password);
-        assert_eq!(image_of(&tightened).first_boot_password_length, 24);
+        assert_eq!(image_of(&overridden).sudo, SudoPolicy::Nopasswd);
+        assert_eq!(image_of(&overridden).first_boot_password_length, 24);
         assert_eq!(
-            image_of(&tightened).ssh_authorized_keys,
+            image_of(&overridden).ssh_authorized_keys,
             vec![TEST_KEY, &second]
         );
     }

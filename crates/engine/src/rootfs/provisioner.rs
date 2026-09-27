@@ -1775,26 +1775,27 @@ mod tests {
         const ED25519: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe operator@workstation";
         const RSA: &str = "ssh-rsa AAAAB3NzaC1yc2EA laptop";
 
-        // The shipped default: root with no prompt, and nobody authorized by key.
+        // The shipped default: a prompting sudo, and nobody authorized by key. sudo
+        // takes the *last* matching rule, so a stray NOPASSWD beside it would not be
+        // inert — and there is nowhere for one to be, since the program writes exactly
+        // this value once.
         let plain = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
-        assert_eq!(env_of(&plain, "B2D_SUDOERS"), "NOPASSWD: ALL");
+        assert_eq!(env_of(&plain, "B2D_SUDOERS"), "ALL");
         assert_eq!(env_of(&plain, "B2D_AUTHORIZED_KEYS"), "");
 
         let build = resolve_recipe(
             &repo_root(),
             "turing-rk1/forky",
             &Overrides {
-                sudo: Some(SudoPolicy::Password),
+                sudo: Some(SudoPolicy::Nopasswd),
                 ssh_authorized_keys: Some(vec![ED25519.to_string(), RSA.to_string()]),
                 ..Default::default()
             },
         )
         .unwrap();
         let env = customize_env(DEFAULT_USER, image_of(&build), None, 1_790_347_034);
-        // `password` writes the prompting spec. sudo takes the *last* matching rule, so
-        // a stale NOPASSWD would not be inert — and there is now nowhere for one to be,
-        // since the program writes exactly this value once.
-        assert_eq!(env_of(&env, "B2D_SUDOERS"), "ALL");
+        // `nopasswd` writes the no-prompt spec.
+        assert_eq!(env_of(&env, "B2D_SUDOERS"), "NOPASSWD: ALL");
         // Both keys, one per line, in the order the config named them.
         assert_eq!(
             env_of(&env, "B2D_AUTHORIZED_KEYS"),
