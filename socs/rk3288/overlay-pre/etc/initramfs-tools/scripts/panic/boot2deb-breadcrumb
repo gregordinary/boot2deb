@@ -6,11 +6,21 @@
 # `[initramfs]` list in socs/rk3288.toml), so there an initramfs failure is a silent
 # white screen. This script runs from initramfs-tools' panic() -- i.e. exactly when the
 # boot has given up -- and writes the full story (cmdline, block devices, loaded
-# modules, dmesg) to the root of every ext4 partition it can reach. Pulling the medium
-# afterwards and looking for BOOT2DEB-PANIC.txt replaces a serial log. If the file never
-# appears AND the machine still reboots ~30 s after the panic (the cmdline
-# carries panic=30), the initramfs ran but could not reach any storage; if the
-# machine never reboots either, the kernel never got as far as the initramfs.
+# modules, blocked tasks, dmesg) to the root of every ext4 partition it can reach.
+# Pulling the medium afterwards and looking for BOOT2DEB-PANIC.txt replaces a serial
+# log.
+#
+# It then reboots after the kernel's panic timeout. initramfs-tools runs its panic
+# hooks only when the cmdline carries no `panic=` word -- with one, panic() reboots
+# without running any hook -- so the signed cmdline sets the timeout as
+# `sysctl.kernel.panic=30` and the reboot happens here, which keeps the board's
+# contract that a failed boot returns to the firmware. If the file never appears AND the
+# machine still reboots ~30 s after the panic, the initramfs ran but could not reach
+# any storage; if the machine never reboots at all, the boot stalled before it gave
+# up.
+#
+# The initramfs carries klibc's utilities rather than busybox: there is no grep, tail
+# or wc, so the filtering below is done with the shell's own `case` and arithmetic.
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
 case $1 in
@@ -18,6 +28,13 @@ case $1 in
 esac
 
 mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+
+# Put the state of a stalled boot into dmesg before it is captured: every task stuck
+# in uninterruptible sleep with its stack (w), and a backtrace from every CPU (l). A
+# probe that never returns, or a CPU wedged on a bus access, shows up here and nowhere
+# else. Writes to sysrq-trigger are not subject to the kernel.sysrq mask.
+echo w > /proc/sysrq-trigger 2>/dev/null || true
+echo l > /proc/sysrq-trigger 2>/dev/null || true
 
 report=/tmp/BOOT2DEB-PANIC.txt
 {
@@ -36,20 +53,35 @@ report=/tmp/BOOT2DEB-PANIC.txt
     cat /sys/kernel/debug/devices_deferred 2>/dev/null || echo "   (debugfs unavailable)"
     echo "== modules:"
     cat /proc/modules 2>/dev/null
+    echo "== interrupts:"
+    cat /proc/interrupts 2>/dev/null
     echo "== dmesg:"
     dmesg 2>/dev/null
 } > "$report" 2>&1
 
-# The short version goes to the panel too -- on the display-carrying debug
-# builds this is readable directly, and it costs nothing on the blind ones.
+# The short version goes to the panel too -- on the display-carrying builds this is
+# readable directly, and it costs nothing on the blind ones. It is the last 25 dmesg
+# lines that concern storage, its power chain, USB or the display.
+dmesg 2>/dev/null | while IFS= read -r line; do
+    case $line in
+        *mmc*|*rk808*|*egulat*|*i2c*|*pwrseq*|*usb*|*drm*|*analogix*|*panel*|*Oops*|*BUG*)
+            echo "$line" ;;
+    esac
+done > /tmp/bc-summary 2>/dev/null
+total=0
+while IFS= read -r line; do total=$((total + 1)); done < /tmp/bc-summary
 {
     echo "==== boot2deb panic summary ===================================="
     echo "-- /proc/partitions:"
     cat /proc/partitions 2>/dev/null
     echo "-- deferred probes:"
     cat /sys/kernel/debug/devices_deferred 2>/dev/null
-    echo "-- mmc/regulator/i2c dmesg:"
-    dmesg 2>/dev/null | grep -iE 'mmc|dw.mmc|rk808|regulat|i2c|pwrseq' | tail -25
+    echo "-- storage, power, USB and display dmesg:"
+    n=0
+    while IFS= read -r line; do
+        n=$((n + 1))
+        [ "$n" -gt $((total - 25)) ] && echo "$line"
+    done < /tmp/bc-summary
     echo "================================================================"
 } > /dev/console 2>&1 || true
 
@@ -63,5 +95,21 @@ for dev in /dev/mmcblk*p* /dev/sd*[0-9]; do
         cat "$report" >> /tmp/bc-mnt/BOOT2DEB-PANIC.txt 2>/dev/null
         sync
         umount /tmp/bc-mnt 2>/dev/null
+        echo "boot2deb: panic report appended to $dev" > /dev/console 2>&1 || true
     fi
 done
+
+# Return to the firmware after the timeout the cmdline set. A negative timeout reboots
+# at once, as it does for a kernel panic; zero or none falls through to initramfs-tools'
+# rescue shell.
+delay=$(cat /proc/sys/kernel/panic 2>/dev/null)
+case $delay in
+    -*)
+        reboot -f ;;
+    '' | 0 | *[!0-9]*)
+        ;;
+    *)
+        echo "boot2deb: rebooting in $delay s" > /dev/console 2>&1 || true
+        sleep "$delay"
+        reboot -f ;;
+esac

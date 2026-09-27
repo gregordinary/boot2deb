@@ -2940,7 +2940,13 @@ mod tests {
     #[test]
     fn the_initramfs_list_is_the_socs_then_the_boards() {
         let root = repo_root();
-        let display = ["rockchipdrm", "panel-simple", "pwm_bl", "pwm-rockchip"];
+        let display = [
+            "rockchipdrm",
+            "phy-rockchip-dp",
+            "panel-simple",
+            "pwm_bl",
+            "pwm-rockchip",
+        ];
 
         let stock = resolve_device(&root, "asus-c201", &Overrides::default()).unwrap();
         let family = &image_of(&stock).initramfs_modules;
@@ -2959,7 +2965,7 @@ mod tests {
         let libreboot =
             resolve_device(&root, "asus-c201-libreboot", &Overrides::default()).unwrap();
         let modules = &image_of(&libreboot).initramfs_modules;
-        assert_eq!(modules.len(), 25, "{modules:?}");
+        assert_eq!(modules.len(), 26, "{modules:?}");
         assert_eq!(
             &modules[..21],
             family.as_slice(),
@@ -4232,7 +4238,9 @@ mod tests {
             );
         }
         // What the shipped board actually carries.
-        assert!(validate_depthcharge_cmdline("console=tty1 rootwait ro panic=30").is_ok());
+        assert!(
+            validate_depthcharge_cmdline("console=tty1 rootwait ro sysctl.kernel.panic=30").is_ok()
+        );
     }
 
     #[test]

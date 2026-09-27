@@ -81,11 +81,12 @@ A USB keyboard will not help you at these screens either. `CONFIG_LP_USB_HID` is
 this board's libpayload, so depthcharge reads the EC keyboard and nothing else. (The
 Chromebit, which has no EC, is the one board in the family built the other way.)
 
-If a boot fails, the board tells you by rebooting. The signed command line carries
-`panic=30`. A kernel panic, or an initramfs that gives up on root, returns to the firmware
-splash about 30 seconds later. A board that *never* reboots means the kernel never reached
-the initramfs at all. A panic also writes a full dmesg to `BOOT2DEB-PANIC.txt` on every
-ext4 partition it can reach.
+If a boot fails, the board tells you by rebooting. The signed command line sets a
+30-second panic timeout (`sysctl.kernel.panic=30`). A kernel panic, or an initramfs that
+gives up on root, returns to the firmware splash about 30 seconds later. A board that
+*never* reboots means the kernel never reached the initramfs at all. Before rebooting,
+an initramfs that gives up writes its dmesg and every stalled task's stack to
+`BOOT2DEB-PANIC.txt` on each ext4 partition it reaches.
 
 Expect a few seconds of white screen on a healthy boot before the display comes up. The
 image leaves the DRM stack out of the initramfs to keep the signed payload under its

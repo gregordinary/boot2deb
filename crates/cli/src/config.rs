@@ -1209,6 +1209,54 @@ mod tests {
     }
 
     #[test]
+    fn every_veyron_panic_hook_is_reachable_from_its_cmdline() {
+        // initramfs-tools' panic() reboots on a `panic=` cmdline word *without* running
+        // scripts/panic, so that one word silences the breadcrumb on every failed boot
+        // while the board still reboots as if all were well. The timeout has to reach the
+        // kernel as a sysctl, and the hook has to do the reboot the word would have.
+        use boot2deb_core::model::ResolvedBoot;
+        use std::os::unix::fs::PermissionsExt;
+        let root = ConfigRoot::new(repo_root_path());
+        let family = root
+            .find_asset("socs/rk3288/overlay-pre")
+            .expect("the SoC layer ships a pre-install tree");
+        let hook = family.join("etc/initramfs-tools/scripts/panic/boot2deb-breadcrumb");
+        let mode = std::fs::metadata(&hook)
+            .expect("the hook is a real file")
+            .permissions()
+            .mode();
+        assert!(mode & 0o111 != 0, "{hook:?} is not executable ({mode:o})");
+        let body = std::fs::read_to_string(&hook).unwrap();
+        assert!(
+            body.contains("/proc/sys/kernel/panic") && body.contains("reboot -f"),
+            "{hook:?} no longer reboots after the kernel's panic timeout"
+        );
+
+        for device in [
+            "asus-c201",
+            "asus-c201-libreboot",
+            "asus-c100p",
+            "asus-chromebit-cs10",
+        ] {
+            let b = resolve_device(&root, device, &Overrides::default()).unwrap();
+            let ResolvedBoot::Depthcharge(boot) = &b.boot else {
+                panic!("{device} is not a depthcharge board");
+            };
+            let words: Vec<&str> = boot.cmdline.split_whitespace().collect();
+            assert!(
+                !words.iter().any(|w| w.starts_with("panic=")),
+                "{device}'s cmdline {:?} skips every initramfs panic hook",
+                boot.cmdline
+            );
+            assert!(
+                words.contains(&"sysctl.kernel.panic=30"),
+                "{device}'s cmdline {:?} sets no panic timeout",
+                boot.cmdline
+            );
+        }
+    }
+
+    #[test]
     fn a_libre_build_lays_in_no_vendored_blob() {
         // The failure this guards is the one that matters most on this axis and is the
         // least visible: an image advertised as free that quietly carries two Broadcom

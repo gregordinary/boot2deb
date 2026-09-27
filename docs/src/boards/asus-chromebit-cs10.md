@@ -102,12 +102,13 @@ Then reboot and press **Ctrl+U** at the "OS verification is OFF" screen. A 2.4 G
 keyboard with its own USB receiver works as well as a wired one. A Bluetooth keyboard
 does not, because the firmware has no Bluetooth stack.
 
-If a boot fails, the board tells you by rebooting. The signed command line carries
-`panic=30`. A kernel panic, or an initramfs that gives up on root, returns to the
-firmware splash about 30 seconds later. A board that *never* reboots means the kernel
-never reached the initramfs at all. On a machine with no serial console that is the
-single most useful thing a failed boot can say. A panic also writes a full dmesg to
-`BOOT2DEB-PANIC.txt` on every ext4 partition it can reach.
+If a boot fails, the board tells you by rebooting. The signed command line sets a
+30-second panic timeout (`sysctl.kernel.panic=30`). A kernel panic, or an initramfs that
+gives up on root, returns to the firmware splash about 30 seconds later. A board that
+*never* reboots means the kernel never reached the initramfs at all. On a machine with
+no serial console that is the single most useful thing a failed boot can say. Before
+rebooting, an initramfs that gives up writes its dmesg and every stalled task's stack to
+`BOOT2DEB-PANIC.txt` on each ext4 partition it reaches.
 
 Expect several seconds of blank HDMI on a healthy boot before the console appears. The
 standard image leaves the DRM stack out of the initramfs to keep the signed payload under

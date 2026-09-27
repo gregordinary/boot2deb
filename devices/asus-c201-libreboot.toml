@@ -61,6 +61,13 @@ modules = [
     # text.
     "rockchipdrm",
 
+    # The eDP output's PHY. The eDP controller names it in `phys` (the `edp-phy` node
+    # under the GRF), and its driver is a module of its own that no symbol dependency
+    # pulls in. rockchipdrm creates its display device only once both VOPs and every
+    # enabled output have probed, so without this one the eDP output waits for its PHY
+    # and the whole stack stays dark until the real root is mounted.
+    "phy-rockchip-dp",
+
     # The panel itself — rk3288-veyron-edp.dtsi declares an `innolux,n116bge`, which is
     # a panel-simple entry rather than a driver of its own.
     "panel-simple",

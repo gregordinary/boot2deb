@@ -189,7 +189,7 @@ mod tests {
     /// image that boots the hardware.
     fn good_cmdline() -> String {
         format!(
-            "kern_guid=%U console=tty1 rootwait ro panic=30 root=PARTUUID={}",
+            "kern_guid=%U console=tty1 rootwait ro sysctl.kernel.panic=30 root=PARTUUID={}",
             hyphenated_lower(ROOTFS_UUID)
         )
     }

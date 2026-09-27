@@ -663,7 +663,7 @@ mod tests {
                 successful: true,
                 flags: 0x015A_0000_0000_0000,
             },
-            cmdline: "console=tty1 rootwait ro panic=30".into(),
+            cmdline: "console=tty1 rootwait ro sysctl.kernel.panic=30".into(),
             rootfs_offset: rootfs.into(),
             initramfs_compress: InitramfsCompress::Xz,
         })

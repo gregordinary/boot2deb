@@ -209,9 +209,9 @@ blank screen for the whole of it.
 
 At 32 MiB neither constraint is worth keeping. Resolution picks `zstd` for the initramfs
 (visible as the `initramfs` line in `boot2deb resolve`). The device's `[initramfs]` list
-adds the display stack to the family's initramfs modules: `rockchipdrm`, `panel-simple`,
-`pwm_bl`, `pwm-rockchip`. The panel then lights during the initramfs rather than after
-it. That shortens the blank screen and, more usefully, means an initramfs that *fails*
+adds the display stack to the family's initramfs modules: `rockchipdrm`,
+`phy-rockchip-dp`, `panel-simple`, `pwm_bl`, `pwm-rockchip`. The panel then lights
+during the initramfs rather than after it. That shortens the blank screen and, more usefully, means an initramfs that *fails*
 says so on the panel instead of hanging silently.
 
 The wider slots move the rootfs from 44 MiB to 76 MiB into the image, which is the whole
@@ -244,12 +244,13 @@ with **Ctrl+U** at the developer-mode screen. What that takes depends on the fir
 - On **stock firmware**, external boot must first be enabled once, from a ChromeOS
   shell: `crossystem dev_boot_usb=1`.
 
-If a boot fails, the board tells you by rebooting. The signed command line carries
-`panic=30`. A kernel panic, or an initramfs that gives up on root, returns to the
-firmware splash about 30 seconds later. A board that *never* reboots therefore means the
-kernel never reached the initramfs at all. On a machine with no serial console that is
-the single most useful thing a failed boot can say. A panic also writes a full dmesg to
-`BOOT2DEB-PANIC.txt` on every ext4 partition it can reach.
+If a boot fails, the board tells you by rebooting. The signed command line sets a
+30-second panic timeout (`sysctl.kernel.panic=30`). A kernel panic, or an initramfs that
+gives up on root, returns to the firmware splash about 30 seconds later. A board that
+*never* reboots therefore means the kernel never reached the initramfs at all. On a
+machine with no serial console that is the single most useful thing a failed boot can
+say. Before rebooting, an initramfs that gives up writes its dmesg and every stalled
+task's stack to `BOOT2DEB-PANIC.txt` on each ext4 partition it reaches.
 
 Expect white screen before the display comes up, and how much depends on the build. The
 `asus-c201` image leaves the DRM stack out of the initramfs to keep the signed payload

@@ -62,12 +62,18 @@ kpart_successful = true                  # bit 56
 # kern_guid=%U the firmware substitutes is prepended afterwards by mkdepthcharge,
 # past that round-trip. Resolution enforces both rules.
 #
-# panic=30 is this board's only failure signal: it has no serial console, so a kernel
-# panic or an initramfs that gives up on root reboots to the firmware splash ~30 s
-# later. A machine that never reboots therefore means the kernel never reached the
-# initramfs at all — which is the single most useful bit of information a failed boot
-# can give you here.
-cmdline = "console=tty1 rootwait ro panic=30"
+# The 30-second panic timeout is this board's only failure signal: it has no serial
+# console, so a kernel panic or an initramfs that gives up on root reboots to the
+# firmware splash ~30 s later. A machine that never reboots therefore means the kernel
+# never reached the initramfs at all — which is the single most useful bit of
+# information a failed boot can give you here.
+#
+# It is set as `sysctl.kernel.panic=30` and not `panic=30` because initramfs-tools reads
+# the command line too. A `panic=` word makes its panic() sleep and reboot *instead of*
+# running the hooks in scripts/panic, and one of those hooks writes the failed boot's
+# dmesg to disk (socs/rk3288). The sysctl form sets the same kernel timeout without
+# initramfs-tools seeing it, so the hooks run, and the hook does the reboot itself.
+cmdline = "console=tty1 rootwait ro sysctl.kernel.panic=30"
 
 # --- Packages ----------------------------------------------------------------
 # depthcharge-tools both builds the signed payload at image time (inside the rootfs,

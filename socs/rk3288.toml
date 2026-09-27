@@ -143,10 +143,13 @@ caveats = [
 # Because an initramfs failure is invisible on a board without the display stack,
 # three things back this list up: the build fails naming any listed module that is
 # neither in the built initrd nor built into the kernel (so a typo or a module the
-# kernel config dropped fails the build, not the boot); the signed cmdline carries
-# panic=30 (so a failed boot visibly reboots to the splash rather than hanging on a
-# white screen); and scripts/panic/boot2deb-breadcrumb writes the full dmesg to every
-# reachable ext4 partition.
+# kernel config dropped fails the build, not the boot); the signed cmdline sets a
+# 30-second panic timeout (so a failed boot visibly reboots to the splash rather than
+# hanging on a white screen); and scripts/panic/boot2deb-breadcrumb writes the full
+# dmesg to every reachable ext4 partition and then does that reboot itself. The
+# timeout is `sysctl.kernel.panic=30` rather than `panic=30` for the hook's sake:
+# initramfs-tools skips every panic hook when the cmdline carries `panic=` (see
+# boot-methods/depthcharge.toml).
 [initramfs]
 modules = [
     # The RK808 PMIC chain. These are DEVICE-TREE dependencies, not symbol
