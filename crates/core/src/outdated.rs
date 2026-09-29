@@ -16,7 +16,8 @@
 //! needed. [`TagShape`] reads the scheme off the pinned tag, so the kernel axis
 //! compares `v7.1.6` against other `vX.Y.Z` tags. The Linux-libre axis compares
 //! `sources/v7.1.6-gnu` only against other deblobbed trees, and u-boot's `vYYYY.MM`
-//! falls out of the same rule. A release pin is never offered a prerelease.
+//! and FFmpeg's `nX.Y.Z` fall out of the same rule. A release pin is never offered a
+//! prerelease.
 
 use crate::sources::PinForm;
 use crate::version::{parse_tag, TagShape};
@@ -347,6 +348,31 @@ mod tests {
             panic!("expected behind");
         };
         assert_eq!(latest.tag, "sources/v7.2-gnu");
+    }
+
+    #[test]
+    fn an_ffmpeg_pin_reports_its_point_release_line() {
+        // FFmpeg spells releases `nX.Y.Z`, carries `-dev` tags on master, and keeps
+        // the request-API fork's branches in other repos. The line answer is the
+        // point release a graft written against 8.1 can take; the newest release
+        // is a generation change it cannot take unreviewed.
+        let refs = vec![
+            ("refs/tags/n8.1.3".into(), sha('a')),
+            ("refs/tags/n8.1.3^{}".into(), sha('b')),
+            ("refs/tags/n8.1.4".into(), sha('c')),
+            ("refs/tags/n9.0.2".into(), sha('d')),
+            ("refs/tags/n9.1-dev".into(), sha('e')),
+            ("refs/heads/release/8.1".into(), sha('c')),
+        ];
+        let up = compare("n8.1.3", &sha('b'), &advert(&refs));
+        let Upgrade::Behind { line, latest } = &up else {
+            panic!("expected behind, got {up:?}");
+        };
+        assert_eq!(
+            line.as_ref().expect("8.1 has a newer point release").tag,
+            "n8.1.4"
+        );
+        assert_eq!(latest.tag, "n9.0.2", "the -dev tag is a prerelease");
     }
 
     #[test]
