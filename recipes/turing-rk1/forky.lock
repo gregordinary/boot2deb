@@ -11,7 +11,7 @@ commit = "9a66fdc0d7fd55f54235524a73435af99051e46f"
 series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "14e7a6de48ff89830c0974b2c89682d0e17d636e"
+commit = "4350b1a5e405276fbbef2cba6ef4f8b0afba39dc"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,12 +22,12 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["turing-rk1-recovery"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "14e7a6de48ff89830c0974b2c89682d0e17d636e"
+commit = "4350b1a5e405276fbbef2cba6ef4f8b0afba39dc"
 
 [rootfs]
 suite = "forky"
 manifest = "forky.pkgs.lock"
-source_date_epoch = 1790520560
+source_date_epoch = 1790537892
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"

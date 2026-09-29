@@ -59,8 +59,9 @@ server that adds the type was measured driving both halves on the board on
 | Tone mapping | off | This FFmpeg is built without OpenCL |
 
 These are written to `/etc/jellyfin/encoding.xml` before first boot. They are
-**starting values**: Jellyfin rewrites that file on every start, so from first boot
-onward the dashboard is what governs. To change the defaults for the next image,
+**starting values**: Jellyfin rewrites that file on every start. From first boot
+onward the dashboard governs every row but the FFmpeg path, which it only displays
+(see below). To change the defaults for the next image,
 edit `features/jellyfin-rockchip/overlay-pre/etc/jellyfin/encoding.xml` in your
 config tree.
 
@@ -81,14 +82,23 @@ startup and exits if the binary does not run — it does not start with transcod
 switched off. So if you point it at a path that does not exist, the service dies at
 boot. Check with `journalctl -u jellyfin`. The giveaway is
 `Failed to find valid ffmpeg`. If you want the bundled build available as a safety
-net, add `jellyfin-ffmpeg7` to a copy of the `jellyfin` feature's package list.
+net, add `jellyfin-ffmpeg8` to a copy of the `jellyfin` feature's package list.
 
-**Set the path in the dashboard, not on the command line.** The image ships a
+**Change the path in `encoding.xml`, not on the command line.** The image ships a
 `jellyfin.service` drop-in that clears the `--ffmpeg=` argument Debian normally
-passes. Jellyfin therefore reads the path from its config, which is what
-**Dashboard > Playback > Transcoding > FFmpeg path** edits. Putting a path back on
-the command line (by editing `/etc/default/jellyfin-encoder`) would override that
-field and leave the dashboard silently ineffective.
+passes, so Jellyfin reads the path from `<EncoderAppPath>` in
+`/etc/jellyfin/encoding.xml`. The dashboard's **FFmpeg path** field shows that path
+but cannot edit it, because Jellyfin rejects a change to it made through its API.
+Edit the file with the server stopped:
+
+```sh
+sudo systemctl stop jellyfin
+sudoedit /etc/jellyfin/encoding.xml
+sudo systemctl start jellyfin
+```
+
+A path put back on the command line, by editing `/etc/default/jellyfin-encoder`,
+outranks the file without saying so.
 
 ## Keeping it updated
 
@@ -96,6 +106,11 @@ Jellyfin's own apt repository stays configured on the running system, since the
 image writes its `sources.list.d` entry and keyring. `apt upgrade` therefore picks
 up Jellyfin releases the ordinary way. Debian's mirrors are there too. Nothing about
 this image requires a reflash to take a security update to the server.
+
+A build installs whichever release that repository serves at build time. The solved
+manifest published beside the image, `<recipe>.pkgs.lock`, records the version. A
+Jellyfin major release can migrate the database with no path back, so back up
+`/var/lib/jellyfin` and `/etc/jellyfin` before an `apt upgrade` that crosses one.
 
 The exception is `ffmpeg-rk`. It is built from source, pinned by commit in the
 recipe's lock, and comes from no repository, so `apt upgrade` will never move it.
@@ -136,7 +151,7 @@ have. The ones that matter (RKVENC, RKVENC_CCU, RKVDEC, JPEG_DEC) are present.
 
 ## Status
 
-Both recipes are `experimental`, and the gap is Jellyfin rather than the hardware
+Neither recipe is `validated`, and the gap is Jellyfin rather than the hardware
 underneath it.
 
 The transcode path itself is measured on a boot2deb-built RK1 image. `h264_rkmpp` and

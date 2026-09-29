@@ -44,11 +44,16 @@ image_size = "2G"
 # 141/147 against a same-box software control), 084 (AV1 bit-exact to 8192x4352) and
 # 085 (the JPEG cap is honest at 8176), with ffmpeg 0016-0021 exercised alongside them.
 #
+# FFmpeg is the 8.1.3 point release. Kwiboo's request-API hwaccel, the rkmpp/rkrga
+# graft and the fixes apply on top of it unchanged, which leaves the release's own
+# demuxer, decoder and swscale fixes as what differs from the booted build, plus 0022
+# on the RGA rotation path.
+#
 # `expected` until an image from this pin boots. The last image on the board is the
 # feature variant `forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode`
 # at v7.2.2 and patches 6e886797a212, booted 2026-09-02; it exercised the kernel,
-# u-boot, device layers and the media stack end to end, and only the kernel pin has
-# moved since.
+# u-boot, device layers and the media stack end to end. The kernel, its patch series
+# and the FFmpeg base are what have moved since.
 [support]
 status = "expected"
 date   = "2026-09-05"

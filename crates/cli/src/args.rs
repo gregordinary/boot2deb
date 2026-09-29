@@ -502,7 +502,7 @@ pub(crate) struct BuildArgs {
     /// the named tree must contain it.
     #[arg(long = "userspace-src", value_name = "NAME=SRC", value_parser = parse_named_source)]
     pub(crate) userspace_srcs: Vec<(String, String)>,
-    /// ffmpeg base (Kwiboo) clone source. Default: the SoC layer's `ffmpeg.base`
+    /// ffmpeg base clone source. Default: the SoC layer's `ffmpeg.base`
     /// URL. A local checkout makes the fetch near-instant.
     #[arg(long)]
     pub(crate) ffmpeg_base_src: Option<String>,

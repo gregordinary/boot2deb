@@ -7,9 +7,10 @@
 #
 # Empty rather than a path. With no --ffmpeg argument on the command line
 # Jellyfin falls through to <EncoderAppPath> in /etc/jellyfin/encoding.xml, which
-# leaves exactly one place that names the encoder and keeps the dashboard's
-# "FFmpeg path" field working. A path written here would outrank both of those
-# and an operator changing the field would see no effect.
+# leaves exactly one place that names the encoder. A path written here would
+# outrank that file without saying so. The dashboard's "FFmpeg path" field only
+# displays the path that won, because Jellyfin refuses to change EncoderAppPath
+# through its API. To change the encoder, stop the service and edit that file.
 #
 # A separate file, rather than an edit to /etc/default/jellyfin, because that one
 # is a dpkg conffile: rewriting it makes every jellyfin-server upgrade a conffile

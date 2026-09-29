@@ -43,11 +43,11 @@ feature.
 
 `jellyfin-server` and `jellyfin-web`, not the `jellyfin` metapackage.
 
-The metapackage Depends on `jellyfin-server, jellyfin-web, jellyfin-ffmpeg7`, so
+The metapackage Depends on `jellyfin-server, jellyfin-web, jellyfin-ffmpeg8`, so
 it drags in a second complete FFmpeg. `jellyfin-server` only *Recommends*
-`jellyfin-ffmpeg7 | ffmpeg`, and this builder never installs Recommends, so
+`jellyfin-ffmpeg8 | ffmpeg`, and this builder never installs Recommends, so
 naming the two real packages keeps the bundled build out. That is what an image
-supplying its own encoder wants: `jellyfin-ffmpeg7` is linked against the sonames
+supplying its own encoder wants: `jellyfin-ffmpeg8` is linked against the sonames
 its own pocket carries, and pulling it onto a different Debian suite drags that
 pocket's library versions in behind it.
 
@@ -107,9 +107,12 @@ The drop-in's name sorts after `jellyfin.service.conf`, whose commented-out
 
 The value left for step 2 belongs to a glue feature, not to this one:
 `jellyfin-rockchip` seeds `<EncoderAppPath>/opt/ffmpeg-rk/bin/ffmpeg</EncoderAppPath>`.
-Leaving the argument empty rather than writing a path here also keeps the
-dashboard's **FFmpeg path** field working — a command-line path would outrank
-whatever an operator sets there, with no indication why.
+Leaving the argument empty rather than writing a path here keeps one place that
+names the encoder. A command-line path would outrank `encoding.xml` with no
+indication why. The dashboard's **FFmpeg path** field is no second place: it
+displays the path that won, and Jellyfin rejects any change to `EncoderAppPath`
+made through its API. To change the encoder on a running system, stop the service
+and edit `<EncoderAppPath>` in `/etc/jellyfin/encoding.xml`.
 
 ## Package source
 

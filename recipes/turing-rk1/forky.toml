@@ -59,8 +59,8 @@ image_size = "2G"
 # `expected` until an image from this pin boots. The last image on the board is the
 # feature variant `forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode`
 # at v7.2.2 and patches 6e886797a212, booted 2026-09-02; it exercised the kernel,
-# u-boot, device layers and the media stack end to end, and only the kernel pin has
-# moved since.
+# u-boot, device layers and the media stack end to end. The kernel and its patch
+# series are what have moved since.
 [support]
 status = "expected"
 date   = "2026-09-05"

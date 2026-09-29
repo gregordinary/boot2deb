@@ -58,11 +58,11 @@ requires_capability = ["ffmpeg"]
 provides = ["jellyfin"]
 
 # The server and the web client, not the `jellyfin` metapackage. The metapackage's
-# Depends line is `jellyfin-server, jellyfin-web, jellyfin-ffmpeg7`, so it drags in
+# Depends line is `jellyfin-server, jellyfin-web, jellyfin-ffmpeg8`, so it drags in
 # a second complete FFmpeg; `jellyfin-server` itself only *Recommends*
-# `jellyfin-ffmpeg7 | ffmpeg`, and this builder never installs Recommends. Naming
+# `jellyfin-ffmpeg8 | ffmpeg`, and this builder never installs Recommends. Naming
 # the two real packages keeps the bundled FFmpeg out, which is what an image that
-# supplies its own encoder wants: `jellyfin-ffmpeg7` is linked against library
+# supplies its own encoder wants: `jellyfin-ffmpeg8` is linked against library
 # sonames its own pocket carries, so pulling it onto a different Debian suite drags
 # that pocket's versions in behind it and perturbs the codec libraries the rest of
 # the image resolved against.
@@ -113,5 +113,5 @@ signed_by  = "jellyfin.gpg"
 # so several runtimes can sit side by side, and nothing else in the image links
 # the older one. The pin is the sha256; the URL is where those bytes came from.
 [[extra_debs]]
-url    = "http://deb.debian.org/debian/pool/main/i/icu/libicu76_76.1-4+b1_arm64.deb"
-sha256 = "ff00a45df31aba9990fdb281a8def3a06df8a67d97b845b20af4b4796d3c6694"
+url    = "http://deb.debian.org/debian/pool/main/i/icu/libicu76_76.1-4_arm64.deb"
+sha256 = "62eb15577c881b7d02aa861e3eb860902335630cc8174daf525b48c2fa39298f"
