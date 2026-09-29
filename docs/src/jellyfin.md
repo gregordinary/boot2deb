@@ -44,9 +44,8 @@ part that actually would not keep up in software — is in hardware.
 
 FFmpeg on this image *can* decode in hardware, with `-hwaccel v4l2request`. The
 stock Jellyfin server cannot ask for it, because its acceleration type is a fixed
-list with no `v4l2request` in it. This image builds the stock server. A patched
-server that adds the type was measured driving both halves on the board on
-2026-09-02.
+list with no `v4l2request` in it. These two recipes install the stock server.
+[Hardware decode as well](#hardware-decode-as-well) builds one that can.
 
 ## What the image sets up for you
 
@@ -123,6 +122,37 @@ boot2deb update   turing-rk1/jellyfin-forky   # re-pin
 boot2deb build    turing-rk1/jellyfin-forky
 ```
 
+## Hardware decode as well
+
+The `jellyfin-v4l2request` feature builds the Jellyfin server from source with a
+patch series that lets decode and encode name different stacks. It seeds the pairing:
+decode on `rkvdec` through `-hwaccel v4l2request`, encode on the VEPU580.
+
+```sh
+boot2deb update turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan
+boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan
+```
+
+It takes the place of `jellyfin-rockchip` in the selection, since both seed
+`encoding.xml`. What changes against the table above:
+
+| Setting | Value |
+| --- | --- |
+| Hardware decoding type | `v4l2request` |
+| Hardware encoding type | `rkmpp` |
+| Hardware decoding | H.264, HEVC, VP9 |
+
+10-bit content decodes in software, because the `v4l2request` type declines it, and
+still encodes in hardware. The dashboard has no field for the two types. They live in
+`/etc/jellyfin/encoding.xml`, and setting the acceleration type in the dashboard leaves
+them as they are.
+
+**The server is held at its release.** The built `jellyfin-server` carries an epoch, and
+depends on the `jellyfin-web` of its own release, so `apt upgrade` moves neither. The
+Jellyfin repository stays configured for everything else it serves. A newer Jellyfin is
+a change to the app's `ref` in `features/jellyfin-v4l2request.toml`, then an `update` and
+a `build`. See `features/jellyfin-v4l2request/README.md` for how the build works.
+
 ## Where the media lives
 
 The recipes declare no data volume, on purpose. An RK1 running Jellyfin might keep
@@ -165,7 +195,7 @@ and up to 143x at 4K, and HEVC decode is bit-exact against software.
 Driving that path *from Jellyfin* has been measured on the board too. A patched
 server carrying a `v4l2request` acceleration type played files through the API on
 2026-09-02. It emitted exactly the accelerated commands, with no software fallback.
-The image builds the stock server, whose acceleration-type list has no
-`v4l2request` in it, so what ships here is the encoder half. See the
+The two recipes install the stock server, so what ships there is the encoder half.
+The `jellyfin-v4l2request` build ships both. See the
 [support matrix](reference/support-matrix.md) for what each recipe has been taken
 through.

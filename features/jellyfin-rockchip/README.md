@@ -67,9 +67,9 @@ this decode path they never are.
 Hardware decode *is* available to FFmpeg here, as `-hwaccel v4l2request`. It is
 not reachable from this file: Jellyfin's `HardwareAccelerationType` is a closed
 enum with no `v4l2request` member. The `patches/jellyfin` series adds that
-member and a `HardwareDecodingType` field pairing it with rkmpp encode; on a
-server built with it, this list becomes the switch that turns hardware decode
-on.
+member and a `HardwareDecodingType` field pairing it with rkmpp encode. The
+`jellyfin-v4l2request` feature builds a server with it and seeds that pairing, in
+place of this feature.
 
 An empty `<HardwareDecodingCodecs />` deserializes to an empty array rather than
 `null` — .NET's generated array reader passes `isNullable: false` to

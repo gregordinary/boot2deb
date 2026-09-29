@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<EncodingOptions xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <!--
+    Seeded by boot2deb's `jellyfin-v4l2request` feature. Jellyfin rewrites this file
+    on every start, so these are starting values, not enforced ones: change them
+    here for the next image, or on the running server for this one.
+
+    Only the fields that differ from Jellyfin's own defaults appear. Anything
+    absent keeps the default, including EncoderPreset, the CRF values, throttling,
+    and AllowHevcEncoding (off — HEVC output is a per-site decision about what the
+    clients can play, not a property of the hardware).
+  -->
+
+  <!--
+    The absolute prefix path, not the /usr/bin/ffmpeg-rk symlink. Jellyfin takes no
+    ffprobe path; it derives one by replacing the last component of this one. This
+    path yields /opt/ffmpeg-rk/bin/ffprobe, which the ffmpeg-rk package ships.
+  -->
+  <EncoderAppPath>/opt/ffmpeg-rk/bin/ffmpeg</EncoderAppPath>
+
+  <!--
+    Decode and encode on different stacks, which the server this image builds can
+    express and a stock one cannot. HardwareAccelerationType is the pairing's family
+    for anything that reads it directly; the two fields after it override it.
+
+    Decode is rkvdec, a V4L2 stateless driver reached through the request API
+    (`-hwaccel v4l2request`). Encode is the VEPU580 through MPP (`h264_rkmpp`,
+    `hevc_rkmpp`). The rkmpp *decoders* find no MPP decode client on a mainline
+    kernel, which is why decode must not follow HardwareAccelerationType here.
+  -->
+  <HardwareAccelerationType>rkmpp</HardwareAccelerationType>
+  <HardwareDecodingType>v4l2request</HardwareDecodingType>
+  <HardwareEncodingType>rkmpp</HardwareEncodingType>
+  <EnableHardwareEncoding>true</EnableHardwareEncoding>
+
+  <!--
+    What rkvdec decodes on the RK3588. The v4l2request type declines 10-bit content
+    itself, so a 10-bit stream in one of these codecs decodes in software and still
+    encodes in hardware. AV1 is a separate hantro-vpu decoder with known
+    deterministic gaps on some streams; add it only once those have been checked
+    against the content in question.
+  -->
+  <HardwareDecodingCodecs>
+    <string>h264</string>
+    <string>hevc</string>
+    <string>vp9</string>
+  </HardwareDecodingCodecs>
+
+  <!--
+    ffmpeg-rk is built without OpenCL, so there is no hardware tone-map to reach
+    and enabling either of these would only cost CPU on a software path.
+  -->
+  <EnableTonemapping>false</EnableTonemapping>
+  <EnableVppTonemapping>false</EnableVppTonemapping>
+</EncodingOptions>

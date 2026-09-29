@@ -11,7 +11,7 @@ commit = "9a66fdc0d7fd55f54235524a73435af99051e46f"
 series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "4350b1a5e405276fbbef2cba6ef4f8b0afba39dc"
+commit = "4b2e60a38771d1bf4ea9e00195716fb22aaad37e"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,7 +22,7 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["turing-rk1-recovery"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "4350b1a5e405276fbbef2cba6ef4f8b0afba39dc"
+commit = "4b2e60a38771d1bf4ea9e00195716fb22aaad37e"
 
 [[userspace]]
 name = "mpp"
@@ -52,10 +52,38 @@ source = "https://github.com/nyanmisaka/ffmpeg-rockchip.git"
 ref = "f66f2f804627e4464c2d1b10181772b5437bb991"
 commit = "f66f2f804627e4464c2d1b10181772b5437bb991"
 
+[[apps]]
+name = "jellyfin"
+source = "https://github.com/jellyfin/jellyfin.git"
+ref = "v12.1"
+commit = "ee91c75e777da41a9c4f4855e70adc604fbf2ef8"
+
+[apps.patches]
+series = ["jellyfin"]
+source = "https://github.com/gregordinary/patches.git"
+ref = "main"
+commit = "4b2e60a38771d1bf4ea9e00195716fb22aaad37e"
+
+[apps.dotnet.packaging]
+source = "https://github.com/jellyfin/jellyfin-packaging.git"
+ref = "v12.1-202609142034"
+commit = "19f2efc7528cc0ec6c04276e1c62d9cdbfb13b6a"
+
+[apps.dotnet.sdk]
+version = "10.0.401"
+
+[apps.dotnet.sdk.sha512]
+amd64 = "51c8b999af9e8dd9998c9edc5944e19a90788862068acd38694e098889054ce8c23d4f0c5cccfa16bf187d044562359e5ee69a9f8ad0bbe913ba90311fbce25b"
+arm64 = "58ace73ced6b4360754689a686bdfb8a317f4da6cb8bb416dbc7d0ba9f47e43e3c09f5eb1f1a1cfaacbd10df9558da4882bf2a5e195d6ab56a02c1f9f76102ed"
+
+[apps.dotnet.nuget]
+manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan.jellyfin.nuget.lock"
+manifest_sha256 = "0b21ff0e0173df33ffe53e96838548afff44b8665204fbe2785a5cd9c34ecd04"
+
 [rootfs]
 suite = "forky"
-manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan.pkgs.lock"
-source_date_epoch = 1790537925
+manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan.pkgs.lock"
+source_date_epoch = 1790658097
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"

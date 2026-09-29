@@ -70,10 +70,14 @@ rather than the Mali driver itself.
 The `jellyfin-*` pair deliberately does **not** carry it. Jellyfin's
 `HardwareAccelerationType` is a closed enum with no Vulkan member, so the server can
 never emit a Vulkan filter. The packages would be reachable only from a shell. Add
-it there with `turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan`
-if you want the command line too. Pass `--image-size 3G` with it, since a feature
-selection takes the device's 2G and cannot carry the `jellyfin-*` recipes' own larger
-volume.
+it there with a feature selection if you want the command line too.
+
+`turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan` also
+builds the patched Jellyfin server that decodes in hardware, as
+[Accelerated Jellyfin](../jellyfin.md#hardware-decode-as-well) describes. Name
+`jellyfin-rockchip` in place of `jellyfin-v4l2request` for the stock server. Pass
+`--image-size 3G` with either, since a feature selection takes the device's 2G and
+cannot carry the `jellyfin-*` recipes' own larger volume.
 
 Every image here ships a **redistributable** FFmpeg. See
 [The FFmpeg a build ships is redistributable](../reference/config-model.md#the-ffmpeg-a-build-ships-is-redistributable)

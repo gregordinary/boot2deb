@@ -40,10 +40,9 @@
     17.0 CPU-seconds. Jellyfin cannot emit that flag on its own, because
     HardwareAccelerationType is a closed enum with no v4l2request member.
     The `patches/jellyfin` series adds a v4l2request acceleration type and a
-    HardwareDecodingType field that pairs it with rkmpp encode. On a server
-    carrying it, set HardwareDecodingType to v4l2request and fill this list
-    with the codecs rkvdec decodes on this SoC — h264, hevc, vp9. The type
-    declines 10-bit content itself, so that keeps decoding in software.
+    HardwareDecodingType field that pairs it with rkmpp encode. The
+    `jellyfin-v4l2request` feature builds a server carrying it and seeds that
+    pairing, with this list filled with the codecs rkvdec decodes on this SoC.
   -->
   <HardwareDecodingCodecs />
 

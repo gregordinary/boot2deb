@@ -1,0 +1,63 @@
+# features/jellyfin-v4l2request.toml — Jellyfin with hardware decode as well as
+# hardware encode on the Rockchip stack. It builds the Jellyfin server from source
+# with the `patches/jellyfin` series, which adds a `v4l2request` acceleration type
+# and lets decode and encode name different stacks, and seeds the configuration that
+# pairs them: decode on rkvdec through the V4L2 request API, encode on the VEPU580
+# through MPP.
+#
+# It takes the place of `jellyfin-rockchip` rather than adding to it. Both seed
+# `/etc/jellyfin/encoding.xml`, and that file is one document the server rewrites as
+# a whole, so exactly one feature owns it. `conflicts` says so, and a selection
+# naming both is refused at resolve rather than resolved by overlay order.
+#
+# `requires_capability` names both halves it configures: the `jellyfin` feature,
+# which brings the web client, the apt source and the service drop-in this build
+# relies on, and an `ffmpeg` provider. `requires_soc` narrows the provider to the
+# Rockchip one, since the seeded encoder is the VEPU580's.
+#
+# The server it builds replaces the `jellyfin-server` the `jellyfin` feature names:
+# its version carries an epoch, so the rootfs solve takes it over the repository's,
+# and it depends on the `jellyfin-web` of its own release, so the solve takes the
+# matching web client too. On the device the same two properties keep `apt upgrade`
+# from replacing it with a stock server. See README.md.
+description = "Jellyfin with hardware decode (V4L2 request API) and encode (VEPU580), from a patched server built from source"
+requires_soc = ["rk3588"]
+requires_capability = ["jellyfin", "ffmpeg"]
+conflicts = ["jellyfin-rockchip"]
+
+caveats = [
+  "The Jellyfin server is built from source and held at its release. `apt upgrade` moves neither `jellyfin-server` nor `jellyfin-web`. The built server carries an epoch, and it depends on the web client of its own release. A newer Jellyfin arrives by moving the app's `ref` and packaging `ref` in this feature and rebuilding the image.",
+  "Hardware decode covers 8-bit H.264, HEVC and VP9. The `v4l2request` type declines 10-bit content itself, so a 10-bit stream decodes in software and still encodes on the VEPU580.",
+  "The Jellyfin dashboard has no field for the decode/encode split. `HardwareDecodingType` and `HardwareEncodingType` live in `/etc/jellyfin/encoding.xml`, and setting `HardwareAccelerationType` in the dashboard leaves them as they are.",
+]
+
+# The patched server. Its trees, the series applied to them and the SDK that compiles
+# it are pinned in the lock's `[[apps]]` entry; `update` also resolves the NuGet
+# packages its restore needs into a sidecar beside the lock, and the build restores
+# from those alone, offline.
+[[apps]]
+name         = "jellyfin"
+git          = "https://github.com/jellyfin/jellyfin.git"
+ref          = "v12.1"
+deb          = "jellyfin-server"
+patch_series = ["jellyfin"]
+patches_url  = "https://github.com/gregordinary/patches.git"
+
+# Jellyfin's own Debian packaging, at the release tag that packaged the server's
+# `ref`. Its `debian/rules` changes into `jellyfin-server/` and publishes
+# `Jellyfin.Server`, which is where the server tree is laid and what the restore
+# names.
+[apps.build]
+kind       = "dotnet-deb"
+packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.1-202609142034" }
+source_dir = "jellyfin-server"
+project    = "Jellyfin.Server"
+
+# The SDK the server's `global.json` accepts (10.0, latest minor). The hashes are
+# Microsoft's, from its 10.0 releases.json, one per build-host architecture.
+[apps.build.sdk]
+version = "10.0.401"
+
+[apps.build.sdk.sha512]
+amd64 = "51c8b999af9e8dd9998c9edc5944e19a90788862068acd38694e098889054ce8c23d4f0c5cccfa16bf187d044562359e5ee69a9f8ad0bbe913ba90311fbce25b"
+arm64 = "58ace73ced6b4360754689a686bdfb8a317f4da6cb8bb416dbc7d0ba9f47e43e3c09f5eb1f1a1cfaacbd10df9558da4882bf2a5e195d6ab56a02c1f9f76102ed"
