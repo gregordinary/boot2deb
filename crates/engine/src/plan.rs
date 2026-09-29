@@ -189,6 +189,9 @@ pub struct PlanInputs<'a> {
     /// [`ArtifactStatus::Disabled`] for every node, which is what an unusable store
     /// means for the build too.
     pub artifact_store: Option<&'a Path>,
+    /// The build host's Debian architecture. An app's output key folds the SDK tarball
+    /// this host runs, which the host's architecture selects.
+    pub host_arch: &'a str,
 }
 
 /// Predict both cache decisions for every compile node, in build order. Reads only
@@ -455,6 +458,44 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
         }
         nodes.push(plan);
     }
+    // Each compiled app predicts an `app:<name>` tree at `<work>/app/<name>/build`,
+    // keyed exactly as the stage keys it. Its patches are its own pin, so the co-dev
+    // fingerprint is taken over that pin's two app scopes. An app the lock pins no
+    // complete entry for contributes no node: the build refuses it before this matters.
+    for app in inputs.build.image.iter().flat_map(|i| &i.apps) {
+        let Ok((pin, dotnet)) = crate::build::app::dotnet_pins(lock, &app.name) else {
+            continue;
+        };
+        let boot2deb_core::model::AppBuild::DotnetDeb(build) = &app.build;
+        let fp: Vec<String> = fingerprint(pin.patches.as_ref(), crate::build::PatchScope::App)
+            .into_iter()
+            .chain(fingerprint(
+                pin.patches.as_ref(),
+                crate::build::PatchScope::AppPackaging,
+            ))
+            .collect();
+        let series = patch_series(dev && pin.patches.is_some(), &fp);
+        let out = lock.rootfs.as_ref().map(|rootfs| {
+            crate::build::app::output_manifest(&crate::build::app::OutputKeyInputs {
+                app,
+                build,
+                pin,
+                dotnet,
+                series,
+                arch: inputs.build.arch.debian_arch(),
+                suite: &rootfs.suite,
+                toolchain_id: &inputs.env.toolchain_id,
+                host_arch: inputs.host_arch,
+            })
+        });
+        nodes.push(NodePlan::evaluate(
+            &crate::build::app::node_name(&app.name),
+            crate::build::app::tree_dir(w, &app.name),
+            &crate::build::app::tree_manifest(&app.name, pin, dotnet, &build.source_dir, series),
+            out.as_ref(),
+            store,
+        ));
+    }
     nodes
 }
 
@@ -602,6 +643,7 @@ mod tests {
             env: &env,
             fragments: &[],
             artifact_store: None,
+            host_arch: "amd64",
         });
         // No trees on disk yet → every node is a fresh build.
         assert!(plan.iter().all(|n| n.status == NodeStatus::Absent));
@@ -643,6 +685,7 @@ mod tests {
             env: &env,
             fragments: &[],
             artifact_store: None,
+            host_arch: "amd64",
         });
         assert!(with.iter().any(|n| n.node == "userspace:libmali"));
 
@@ -661,6 +704,7 @@ mod tests {
             env: &env,
             fragments: &[],
             artifact_store: None,
+            host_arch: "amd64",
         });
         assert!(!without.iter().any(|n| n.node == "userspace:libmali"));
     }
@@ -688,6 +732,7 @@ mod tests {
             env: &env,
             fragments: &[],
             artifact_store: None,
+            host_arch: "amd64",
         });
         let names: Vec<&str> = plan.iter().map(|n| n.node.as_str()).collect();
         assert_eq!(names, ["kernel", "uboot"]);
@@ -751,6 +796,7 @@ mod tests {
             env: &env,
             fragments: &[],
             artifact_store: None,
+            host_arch: "amd64",
         });
 
         // mpp is unchanged → reuse.
@@ -789,6 +835,7 @@ mod tests {
             env: &env,
             fragments: &[],
             artifact_store: None,
+            host_arch: "amd64",
         });
         assert_eq!(status_of(&plan, "kernel"), &NodeStatus::Unstamped);
     }
@@ -823,6 +870,7 @@ mod tests {
                 env,
                 fragments: &[],
                 artifact_store: store,
+                host_arch: "amd64",
             }
         }
         let inputs = |store| inputs(&lock, &work, &build, &env, store);

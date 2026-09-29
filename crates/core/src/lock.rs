@@ -93,6 +93,21 @@ where
     Ok(s)
 }
 
+/// Deserialize a required digest as 64 lowercase hex.
+fn de_sha256<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    if crate::sources::is_sha256_hex(&s) {
+        Ok(s)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "sha256 '{s}' is not 64 lowercase hex characters"
+        )))
+    }
+}
+
 /// Deserialize the optional manifest digest as 64 lowercase hex.
 fn de_opt_sha256<'de, D>(d: D) -> Result<Option<String>, D::Error>
 where
@@ -252,6 +267,7 @@ impl Lock {
     /// - Both patch-series checkouts
     /// - Each userspace and ffmpeg tree
     /// - Each out-of-tree kmod
+    /// - Each app's tree, its packaging tree, and its patch-series checkout
     ///
     /// Blob, extra-deb, and rootfs pins are content hashes, not commits, so they are
     /// not here.
@@ -268,6 +284,11 @@ impl Lock {
         out.extend(self.uboot_patches.iter().map(|p| p.commit.as_str()));
         out.extend(self.userspace.iter().map(|p| p.commit.as_str()));
         out.extend(self.kmods.iter().map(|p| p.commit.as_str()));
+        for app in &self.apps {
+            out.insert(app.commit.as_str());
+            out.extend(app.patches.iter().map(|p| p.commit.as_str()));
+            out.extend(app.dotnet.iter().map(|d| d.packaging.commit.as_str()));
+        }
         if let Some(ffmpeg) = &self.ffmpeg {
             out.insert(ffmpeg.base.commit.as_str());
             out.extend(ffmpeg.rockchip.iter().map(|p| p.commit.as_str()));
@@ -391,18 +412,20 @@ pub struct UserspacePin {
     pub commit: String,
 }
 
-/// Pinned application source — one per resolved [`App`](crate::model::App), in the
-/// order the selected features declare them. A named git pin, the same shape as
-/// [`UserspacePin`], because it answers the same question: which commit of which
-/// tree did this build compile.
+/// Pinned application — one per resolved [`App`](crate::model::App), in the order
+/// the selected features declare them.
 ///
-/// The `deb` and `prefix` that shape the build are config, re-resolved each build
-/// and folded into the node signature. They are not pinned here — they say what to
-/// do with the tree, not which tree it is.
+/// At its core it is a named git pin, the same shape as [`UserspacePin`]. It answers
+/// the same question: which commit of which tree did this build compile. Around it sit
+/// the other inputs the app's build depends on, each pinned as exactly.
+///
+/// The `deb`, `source_dir` and `project` that shape the build are config, re-resolved
+/// each build and folded into the node signature. They are not pinned here — they say
+/// what to do with the trees, not which trees they are.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppPin {
-    /// Matches the feature's `[[app]]` entry name. The drift gate compares the two.
+    /// Matches the feature's `[[apps]]` entry name. The drift gate compares the two.
     pub name: String,
     /// Clone URL the commit was pinned from, compared against a fresh resolve by the
     /// drift gate. A re-pointed upstream then re-pins, rather than fetching an old
@@ -414,6 +437,50 @@ pub struct AppPin {
     /// The exact commit the ref pointed at.
     #[serde(deserialize_with = "de_commit")]
     pub commit: String,
+    /// The app's own patch-series pin (`[apps.patches]`), present iff the app names
+    /// a series. Independent of the kernel's [`Lock::patches`], so an app patch
+    /// moves only the app's node. The same shape, and the same `update` rule: the
+    /// commit is the local `patches` checkout's HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patches: Option<PatchesPin>,
+    /// What a `dotnet-deb` build pins beyond the app's tree (`[apps.dotnet]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dotnet: Option<DotnetPins>,
+}
+
+/// The pins a [`DotnetDeb`](crate::model::AppBuild::DotnetDeb) app's build depends on
+/// beyond its own tree: the packaging tree, the SDK, and the NuGet packages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DotnetPins {
+    /// The tree whose `debian/` builds the deb.
+    pub packaging: GitPin,
+    /// The SDK, recorded verbatim from config: the version and each host
+    /// architecture's tarball sha512 are already exact, so there is nothing to
+    /// resolve. Recorded because the SDK decides the runtime packs the restore
+    /// takes, which is what [`nuget`](Self::nuget) pins.
+    pub sdk: crate::model::DotnetSdk,
+    /// The NuGet package set the build restores, pinned as a sidecar file.
+    pub nuget: NugetPin,
+}
+
+/// Where the NuGet package pins of one app live, and the digest of that file.
+///
+/// The set is a hundred-odd packages, too many to list in the lock itself. It is a
+/// [`NugetManifest`](crate::nuget::NugetManifest) committed beside the lock instead,
+/// the way the rootfs package manifest is. `update` writes both the file and this pin,
+/// so the digest is always present. A sidecar that drifts from the lock fails the
+/// build before anything is fetched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NugetPin {
+    /// Filename of the sidecar, committed beside the lock
+    /// (`recipes/<device>/<manifest>`). Deserialization enforces a bare filename.
+    #[serde(deserialize_with = "de_bare_filename")]
+    pub manifest: String,
+    /// sha256 of the sidecar, as 64 lowercase hex characters.
+    #[serde(deserialize_with = "de_sha256")]
+    pub manifest_sha256: String,
 }
 
 /// Pinned out-of-tree kernel-module source — one per device `device_kmods` entry. A
@@ -763,6 +830,67 @@ mod tests {
         assert!(err.contains("source_date_epoch"), "{err}");
     }
 
+    /// A `dotnet-deb` app pin with every table filled: the app's own patches pin and
+    /// the packaging, SDK and NuGet pins.
+    fn dotnet_app_pin() -> AppPin {
+        AppPin {
+            name: "jellyfin".into(),
+            source: "https://example.invalid/jellyfin.git".into(),
+            reference: "v12.1".into(),
+            commit: "8".repeat(40),
+            patches: Some(PatchesPin {
+                series: vec!["jellyfin".into()],
+                source: "https://example.invalid/patches.git".into(),
+                reference: "main".into(),
+                commit: "9".repeat(40),
+            }),
+            dotnet: Some(DotnetPins {
+                packaging: GitPin {
+                    source: "https://example.invalid/jellyfin-packaging.git".into(),
+                    reference: "v12.1-202609142034".into(),
+                    commit: "d".repeat(40),
+                },
+                sdk: crate::model::DotnetSdk {
+                    version: "10.0.401".into(),
+                    sha512: [("amd64".to_string(), "e".repeat(128))]
+                        .into_iter()
+                        .collect(),
+                },
+                nuget: NugetPin {
+                    manifest: "forky+jellyfin.jellyfin.nuget.lock".into(),
+                    manifest_sha256: "f".repeat(64),
+                },
+            }),
+        }
+    }
+
+    /// An app's pins survive the committed form intact, table by table, and a
+    /// malformed sidecar digest or filename fails at the parse boundary.
+    #[test]
+    fn an_app_pin_round_trips_and_its_sidecar_pin_is_shape_checked() {
+        let mut lock = base_lock();
+        lock.apps = vec![dotnet_app_pin()];
+        let text = lock.to_toml_string().unwrap();
+        for table in [
+            "[[apps]]",
+            "[apps.patches]",
+            "[apps.dotnet.packaging]",
+            "[apps.dotnet.sdk.sha512]",
+            "[apps.dotnet.nuget]",
+        ] {
+            assert!(text.contains(table), "missing {table} in:\n{text}");
+        }
+        assert_eq!(Lock::from_toml_str(&text, "t").unwrap(), lock);
+
+        let bad_digest = text.replace(&"f".repeat(64), "not-a-digest");
+        assert!(Lock::from_toml_str(&bad_digest, "t").is_err());
+        let bad_name = text.replace(
+            "forky+jellyfin.jellyfin.nuget.lock",
+            "../elsewhere.nuget.lock",
+        );
+        assert!(Lock::from_toml_str(&bad_name, "t").is_err());
+    }
+
     #[test]
     fn pinned_commits_covers_every_source_axis() {
         // The liveness set a commit-addressed cache is swept against, so an axis
@@ -782,6 +910,7 @@ mod tests {
             reference: "main".into(),
             commit: "7".repeat(40),
         }];
+        lock.apps = vec![dotnet_app_pin()];
         let pinned = lock.pinned_commits();
         let expected: std::collections::BTreeSet<String> = [
             "a", // kernel
@@ -792,6 +921,9 @@ mod tests {
             "4", // ffmpeg base
             "5", // ffmpeg rockchip provenance
             "7", // kmod
+            "8", // app
+            "9", // app patches
+            "d", // app packaging
         ]
         .iter()
         .map(|c| c.repeat(40))

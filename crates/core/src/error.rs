@@ -555,6 +555,50 @@ pub enum ConfigError {
         series: String,
     },
 
+    /// A NuGet manifest parses but is not a usable, canonical pin set. An entry is
+    /// malformed or pinned twice, the list is unsorted, or the runtime is not one .NET
+    /// publishes for.
+    #[error("NuGet manifest {path}: {why}")]
+    NugetManifestInvalid {
+        /// The manifest, as the caller names it.
+        path: String,
+        /// What is wrong with it.
+        why: String,
+    },
+
+    /// A feature declares an app with a patch series but no `patches_url`. The app's
+    /// patches pin records the source beside its commit, mirroring
+    /// [`MissingPatchesUrl`](ConfigError::MissingPatchesUrl).
+    #[error(
+        "app '{app}' in feature '{feature}' names patch series [{series}] but no \
+         patches_url — add `patches_url` to the app in features/{feature}.toml"
+    )]
+    MissingAppPatchesUrl {
+        /// The app's name.
+        app: String,
+        /// The feature declaring it.
+        feature: String,
+        /// The series it names, comma-joined.
+        series: String,
+    },
+
+    /// A feature declares an app for a target architecture its toolchain cannot
+    /// build for. A `dotnet-deb` app publishes a self-contained runtime, and .NET
+    /// publishes one only for the architectures [`dotnet_rid`](crate::model::dotnet_rid)
+    /// names.
+    #[error(
+        "app '{app}' in feature '{feature}' cannot be built for {arch}: .NET publishes \
+         no runtime for it"
+    )]
+    AppArchUnsupported {
+        /// The app's name.
+        app: String,
+        /// The feature declaring it.
+        feature: String,
+        /// The target's Debian architecture.
+        arch: String,
+    },
+
     /// A device selects a u-boot patch series but its `rockchip-rkbin` boot method
     /// declares no `patches_url`. The u-boot series has nowhere to be fetched from and
     /// no source to pin beside its commit, mirroring [`MissingPatchesUrl`].
@@ -599,6 +643,22 @@ pub enum ConfigError {
         series: String,
         /// The resolved u-boot version that is out of range.
         uboot_version: String,
+        /// The series' declared range.
+        applies_to: String,
+    },
+
+    /// An app's pinned ref is outside the `applies_to_app` range of a series it
+    /// applies. The app-axis counterpart of
+    /// [`UbootOutsideSeriesRange`](ConfigError::UbootOutsideSeriesRange).
+    #[error(
+        "series '{series}' does not target app version {app_version} \
+         (applies_to_app = '{applies_to}')"
+    )]
+    AppOutsideSeriesRange {
+        /// The patch series.
+        series: String,
+        /// The app's pinned ref that is out of range.
+        app_version: String,
         /// The series' declared range.
         applies_to: String,
     },

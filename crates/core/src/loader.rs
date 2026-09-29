@@ -506,6 +506,30 @@ impl ConfigRoot {
             .join(format!("{name}.lock")))
     }
 
+    /// Filesystem path of `filename` beside the lock of build point `name`, whether or
+    /// not it exists. That is where an app's NuGet sidecar lives, named for the point's
+    /// leaf, so a variant's sidecar sits beside the variant's own lock.
+    ///
+    /// `name` is validated as [`lock_path`](Self::lock_path) validates it, which admits
+    /// a variant's feature suffix. `filename` is held to a bare filename: no separator,
+    /// not `.` or `..`, and not option-like. A variant's leaf carries `+`, which a bare
+    /// identifier would refuse.
+    pub fn lock_sibling(&self, name: &str, filename: &str) -> Result<PathBuf, ConfigError> {
+        let bare = !filename.is_empty()
+            && !filename.contains('/')
+            && !filename.contains('\\')
+            && filename != "."
+            && filename != ".."
+            && !filename.starts_with('-');
+        if !bare {
+            return Err(ConfigError::InvalidName {
+                kind: "lock sibling",
+                name: filename.to_string(),
+            });
+        }
+        Ok(self.lock_path(name)?.with_file_name(filename))
+    }
+
     /// Filesystem path of `recipes/<name>.outputs`, whether or not it exists: the
     /// [committed outputs](crate::outputs::CommittedOutputs) that `build --save-outputs`
     /// writes and `verify-image` reads. It sits beside the lock, in the root that owns
@@ -1084,6 +1108,25 @@ packages = [
             root.lock_path("../../etc/cron.d/x"),
             Err(ConfigError::InvalidRecipeRef { .. })
         ));
+    }
+
+    /// A variant's NuGet sidecar sits beside the variant's own lock, and its name
+    /// carries the `+` the variant's leaf does. A name with a separator is refused.
+    #[test]
+    fn a_lock_sibling_sits_beside_a_variants_lock() {
+        let root = ConfigRoot::new("/cfg");
+        let name = crate::nuget::sidecar_name("forky+jellyfin", "jellyfin");
+        assert_eq!(
+            root.lock_sibling("turing-rk1/forky+jellyfin", &name)
+                .unwrap(),
+            Path::new("/cfg/recipes/turing-rk1/forky+jellyfin.jellyfin.nuget.lock")
+        );
+        for bad in ["../x.nuget.lock", "a/b", "..", "-x", ""] {
+            assert!(
+                root.lock_sibling("turing-rk1/forky", bad).is_err(),
+                "accepted {bad:?}"
+            );
+        }
     }
 
     // ---- TOML deep-merge algebra --------------------------------------

@@ -209,7 +209,9 @@ longer owes.
 A **patch series** (e.g. `rk3588-accel`) is the ordered patch series applied to the
 source trees before they compile. It is **a property of the kernel definition, not a
 user-selected axis**. A kernel names its series via `patch_series` in
-`kernels/<id>.toml`, and there is deliberately no `--series` flag.
+`kernels/<id>.toml`, and there is deliberately no `--series` flag. An application a
+feature compiles names its own series, on its own axis. See
+[Applications a feature compiles](#applications-a-feature-compiles).
 
 A series that applies to one kernel version does not apply to another, so the series is
 version-coupled to the kernel that owns it. Series live in a separate `patches` repo,
@@ -1046,6 +1048,84 @@ clock, and a malformed key fails a login. Advice is enough for them, and a bound
 covers this one. [The account, sudo, and SSH keys](../access.md) explains where the two
 ends of the range come from.
 
+## Applications a feature compiles
+
+A feature can declare an application that the build compiles from source, rather than
+installing the archive's build of it. The case it serves is an archive build that lacks
+patches this build carries. `jellyfin-v4l2request` compiles the Jellyfin server with the
+`patches/jellyfin` series, whose stock build has no way to ask for the V4L2 request API
+decoder.
+
+```toml
+# features/jellyfin-v4l2request.toml
+[[apps]]
+name         = "jellyfin"
+git          = "https://github.com/jellyfin/jellyfin.git"
+ref          = "v12.1"
+deb          = "jellyfin-server"
+patch_series = ["jellyfin"]
+patches_url  = "https://github.com/gregordinary/patches.git"
+
+[apps.build]
+kind       = "dotnet-deb"
+packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.1-202609142034" }
+source_dir = "jellyfin-server"
+project    = "Jellyfin.Server"
+
+[apps.build.sdk]
+version = "10.0.401"
+
+[apps.build.sdk.sha512]
+amd64 = "51c8b999…"
+arm64 = "58ace73c…"
+```
+
+`deb` is added to the image's package set, and it takes the archive's name on purpose:
+the built package replaces the archive's. Its version carries an epoch, so the rootfs
+solve prefers it over any release the archive publishes later, and so does a device's
+`apt upgrade`.
+
+A `dotnet-deb` build is the app's own Debian packaging at work. The packaging tree is
+checked out at its pinned commit, and the app's tree is laid inside it at `source_dir`.
+The packaging's `debian/` then builds the deb with `dpkg-buildpackage -B`. It runs in the
+host-architecture cross root, so the SDK runs natively and publishes for the target.
+
+Debian packages no .NET SDK, so `sdk` pins Microsoft's tarball: one release, and one
+sha512 per build-host architecture. A host whose architecture has no entry cannot build
+the app, and says so before fetching anything.
+
+### An app's patch series is its own axis
+
+`patch_series` names series in the same `patches` repo the kernel reads, pinned in the
+app's own `[apps.patches]` table rather than the kernel's `[patches]`. A change to the
+app's patches then moves only the app's node, never the kernel's.
+
+Two scopes of a series belong to apps: `app` patches the app's tree, and
+`app_packaging` patches the packaging tree. Both are gated by `applies_to_app`, matched
+against the app's `ref`, since an application is its own axis as u-boot is:
+
+```toml
+# series/jellyfin.toml, in the patches repo
+applies_to_app = ">=12.1, <12.2"
+app            = ["jellyfin/0001-….patch", "jellyfin/0002-….patch"]
+app_packaging  = ["jellyfin/packaging/0001-….patch"]
+```
+
+### The NuGet packages are pinned, and the build is offline
+
+Every build command runs with no network. A .NET restore fetches packages, so
+the build restores from a folder the engine fills beforehand. Each package in it is
+fetched from nuget.org and verified against its pinned sha512.
+
+The pins come from `update`, which runs one restore with the network. It runs in the
+same cross root, over the same patched trees, and evaluates the project as the
+packaging's publish does. What that restore downloaded becomes a sidecar beside the lock,
+`<leaf>.<app>.nuget.lock`, and the lock pins the sidecar's digest. A build whose restore
+needed a package outside the set fails offline rather than reaching the network.
+
+That restore is the one networked command boot2deb runs, and only `update` runs it. The
+posture every build command runs under is unchanged.
+
 ## Recipes and the lock
 
 A **recipe** (`recipes/<device>/<leaf>.toml`) pins one buildable point: it names the device
@@ -1063,7 +1143,8 @@ carries.
 **A lock records what the build depends on, and nothing else.** Each table is present
 only when the build actually has that dependency. `[kernel]` appears when a kernel is
 compiled, and `[uboot]` and `[blobs]` when a bootloader is. `[patches]` appears when a
-series is applied, and `[[userspace]]`/`[ffmpeg]` when the media-accel stack is.
+series is applied, `[[userspace]]`/`[ffmpeg]` when the media-accel stack is, and
+`[[apps]]` when a feature compiles an application.
 
 Pinning a commit nothing consumes would record provenance for a dependency that does not
 exist. It would also make `update` demand a checkout the build never reads. Taken to its
@@ -1090,13 +1171,13 @@ re-pin therefore leaves the lock byte-identical.
 The split between the two is what makes a build reproducible:
 
 - **`update`** is the only command that consults upstream. It resolves refs to commits,
-  hashes blobs, and writes the lock.
+  hashes blobs, resolves an app's NuGet packages, and writes the lock.
 - **`build`** reads only the lock. It touches no network for its pins, so the same lock
   always produces the same inputs.
 
   Before building, it checks the lock against a fresh resolution on every axis the lock
   records from config. Those are the source repos, blob file names, kernel id, suite,
-  patch series, and extra debs. It refuses on drift, so a config edit after `update`
+  patch series, extra debs, and each app's refs and SDK. It refuses on drift, so a config edit after `update`
   (say a boot-method flip to a different u-boot repo) is a named error rather than a
   build against stale pins.
 

@@ -301,7 +301,7 @@ Drive the build stages from the recipe's lock, streaming the structured build ev
 | flag | value | what it does |
 | --- | --- | --- |
 | `--feature` | `<FEATURES>`, repeatable | Rootfs feature to select, repeatable — the same selection `update --feature` pinned. It names which lock to build from (`<recipe>+<feature>...`), and does not re-resolve one. `update` must have written that variant's lock first, and a selection with no lock is an error naming the `update` line to run. Passing the reference directly (`build turing-rk1/forky+jellyfin`) is equivalent |
-| `--stage` | `all` \| `kernel` \| `dtb` \| `kmod` \| `uboot` \| `userspace` \| `ffmpeg` \| `rootfs` \| `image` (default `all`) | Which stage(s) to run |
+| `--stage` | `all` \| `kernel` \| `dtb` \| `kmod` \| `uboot` \| `userspace` \| `ffmpeg` \| `app` \| `rootfs` \| `image` (default `all`) | Which stage(s) to run |
 | `--kernel-src` | `<KERNEL_SRC>` | Kernel clone source (git URL or local path). Default: the kernel definition's source URL. A local clone (e.g. ../linux) is far faster |
 | `--uboot-src` | `<UBOOT_SRC>` | u-boot clone source (git URL or local path). Default: the boot method's `uboot_source` |
 | `--userspace-src` | `<NAME=SRC>`, repeatable | Media-accel userspace clone source, as `NAME=SRC`, repeatable. Default: that tree's own `[[userspace]]` URL. The SoC declares which trees it has, so each override names one (`--userspace-src mpp=../mpp-rockchip`). A local checkout is far faster than a fresh clone. The clone is still made at the locked commit, so the named tree must contain it |
@@ -346,7 +346,7 @@ Rebuild an image from the plan document a previous build published, then judge e
 | `--from` | `<FROM>` | Directory holding the published `<stem>.plan` and `<stem>.provenance.toml`, the directory the image shipped from. Default: this build point's own output dir, which is where a build on this machine already published them |
 | `--with-caches` |  | Keep the Tier-2 artifact cache and the rootfs cache on. By default a reproduction restores nothing, since a restored output is the earlier build's and proves nothing about this one |
 | `--feature` | `<FEATURES>`, repeatable | Rootfs feature to select, repeatable — the same selection `update --feature` pinned. It names which lock to build from (`<recipe>+<feature>...`), and does not re-resolve one. `update` must have written that variant's lock first, and a selection with no lock is an error naming the `update` line to run. Passing the reference directly (`build turing-rk1/forky+jellyfin`) is equivalent |
-| `--stage` | `all` \| `kernel` \| `dtb` \| `kmod` \| `uboot` \| `userspace` \| `ffmpeg` \| `rootfs` \| `image` (default `all`) | Which stage(s) to run |
+| `--stage` | `all` \| `kernel` \| `dtb` \| `kmod` \| `uboot` \| `userspace` \| `ffmpeg` \| `app` \| `rootfs` \| `image` (default `all`) | Which stage(s) to run |
 | `--kernel-src` | `<KERNEL_SRC>` | Kernel clone source (git URL or local path). Default: the kernel definition's source URL. A local clone (e.g. ../linux) is far faster |
 | `--uboot-src` | `<UBOOT_SRC>` | u-boot clone source (git URL or local path). Default: the boot method's `uboot_source` |
 | `--userspace-src` | `<NAME=SRC>`, repeatable | Media-accel userspace clone source, as `NAME=SRC`, repeatable. Default: that tree's own `[[userspace]]` URL. The SoC declares which trees it has, so each override names one (`--userspace-src mpp=../mpp-rockchip`). A local checkout is far faster than a fresh clone. The clone is still made at the locked commit, so the named tree must contain it |

@@ -65,6 +65,7 @@ mod bootstrap;
 pub mod build;
 pub mod checks;
 pub mod debstore;
+pub mod dotnet;
 pub mod error;
 pub mod event;
 pub mod extradebs;

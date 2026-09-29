@@ -95,7 +95,7 @@ pub struct CdxComponent {
 /// A CycloneDX hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Hash {
-    /// Always `SHA-256` — CycloneDX spells it with the separator SPDX omits.
+    /// `SHA-256` or `SHA-512` — CycloneDX spells them with the separator SPDX omits.
     pub alg: &'static str,
     /// Lowercase-hex digest.
     pub content: String,
@@ -164,9 +164,10 @@ fn component(c: &Component) -> CdxComponent {
             ComponentKind::Image => "operating-system",
             // No CycloneDX type says "source tree", so a pinned tree is a library
             // whose `vcs` reference and description carry what it actually is.
-            ComponentKind::DebianPackage | ComponentKind::Source | ComponentKind::ExtraDeb => {
-                "library"
-            }
+            ComponentKind::DebianPackage
+            | ComponentKind::Source
+            | ComponentKind::ExtraDeb
+            | ComponentKind::NugetPackage => "library",
             ComponentKind::Blob => "file",
         },
         bom_ref: c.id.clone(),
@@ -181,6 +182,10 @@ fn component(c: &Component) -> CdxComponent {
                 alg: "SHA-256",
                 content: hex.clone(),
             })
+            .chain(c.sha512.iter().map(|hex| Hash {
+                alg: "SHA-512",
+                content: hex.clone(),
+            }))
             .collect(),
         external_references: c
             .download

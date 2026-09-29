@@ -274,12 +274,13 @@ pub(crate) fn run(
 }
 
 /// The package names this build compiles rather than installs: those contributed by a
-/// selected feature declaring `requires_media_accel`.
+/// selected feature declaring `requires_media_accel`, and each app's deb.
 ///
 /// That flag is the config tree's own statement that a feature's `.deb`s come from the
 /// SoC's `[userspace]`/`[ffmpeg]` source trees instead of the Debian mirror, so it is
-/// the one place this can be read from rather than guessed. A build that selects no such
-/// feature returns an empty set and every name it lists is asked of the archives.
+/// the one place this can be read from rather than guessed. An app declares its deb by
+/// name. A build that selects neither returns an empty set and every name it lists is
+/// asked of the archives.
 fn locally_built(
     root: &ConfigRoot,
     build: &ResolvedBuild,
@@ -305,6 +306,15 @@ fn locally_built(
             );
         }
     }
+    // Each app's deb is compiled by this build, whatever the archive also carries under
+    // that name: the image installs the build's own.
+    built.extend(
+        build
+            .image
+            .iter()
+            .flat_map(|i| &i.apps)
+            .map(|a| a.deb.clone()),
+    );
     Ok(built)
 }
 

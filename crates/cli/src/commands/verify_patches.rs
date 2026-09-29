@@ -1,12 +1,14 @@
 //! `verify-patches`: the patch gate — dry-run the locked series with `git am --3way`.
 //!
-//! Both patch axes are covered. The kernel axis verifies the `kernel` scope, plus
+//! Every patch axis is covered. The kernel axis verifies the `kernel` scope, plus
 //! `ffmpeg` and `userspace` when the series carries patches for them. The u-boot
-//! axis verifies the `uboot` scope.
+//! axis verifies the `uboot` scope. Each app that applies a series verifies its `app`
+//! scope against the app's tree and its `app_packaging` scope against the packaging
+//! tree.
 //!
-//! A recipe carrying one axis verifies that one. A recipe carrying both verifies
-//! both, each against its own version. A u-boot series makes no claim about a
-//! kernel, so reporting them at one target would misdescribe one of them.
+//! A recipe verifies every axis it carries, each against its own version. A u-boot
+//! series makes no claim about a kernel, nor an app series about either. Reporting
+//! them at one target would misdescribe all but one of them.
 //!
 //! Each tree is either an explicit `--<tree>-path` checkout, or, when omitted,
 //! auto-fetched at its locked pin into a durable cache. A fresh clone can therefore
@@ -40,8 +42,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// the borrowed [`VerifyTree`] list can be assembled once at the end.
 #[derive(Debug)]
 struct ResolvedTree {
-    /// Tree label for messages (`"kernel"`, `"uboot"`, …).
-    label: &'static str,
+    /// Tree label for messages (`"kernel"`, `"uboot"`, `"app jellyfin"`, …).
+    label: String,
     /// Patches-repo-relative labels this version selects, in apply order.
     series: Vec<String>,
     /// The checkout to apply them to.
@@ -71,7 +73,12 @@ pub(crate) fn run(
     // once from whichever pin this recipe has. Nothing to verify when it has
     // neither: report it and succeed, rather than failing on a checkout the build
     // would never read.
-    let Some(checkout_pin) = lock.patches.as_ref().or(lock.uboot_patches.as_ref()) else {
+    let Some(checkout_pin) = lock
+        .patches
+        .as_ref()
+        .or(lock.uboot_patches.as_ref())
+        .or(lock.apps.iter().find_map(|a| a.patches.as_ref()))
+    else {
         if json_out {
             // A recipe with no series is a pass over an empty axis list, not a
             // different document: the same fields, all empty.
@@ -114,6 +121,7 @@ pub(crate) fn run(
         .patches
         .iter()
         .chain(lock.uboot_patches.iter())
+        .chain(lock.apps.iter().filter_map(|a| a.patches.as_ref()))
         .flat_map(|p| &p.series)
         .collect();
     for name in &named {
@@ -138,6 +146,7 @@ pub(crate) fn run(
         &args,
         &sink,
     )?);
+    trees.extend(app_axes(&lock, &patches_root, &cache_root, &sink)?);
 
     let on_failure = if args.keep_going {
         patches::OnFailure::KeepGoing
@@ -154,7 +163,7 @@ pub(crate) fn run(
         .iter()
         .zip(&slices)
         .map(|(t, series)| VerifyTree {
-            label: t.label,
+            label: &t.label,
             series,
             checkout: &t.checkout,
             target: &t.target,
@@ -332,7 +341,7 @@ fn kernel_axis(
     let userspace_series = narrow(&series, Scope::Userspace, reference, mode)?;
 
     let mut trees = vec![ResolvedTree {
-        label: "kernel",
+        label: "kernel".into(),
         series: kernel_series,
         checkout: kernel_tree,
         target: target.clone(),
@@ -358,7 +367,7 @@ fn kernel_axis(
             sink,
         )? {
             trees.push(ResolvedTree {
-                label: "ffmpeg",
+                label: "ffmpeg".into(),
                 series: ffmpeg_series,
                 checkout,
                 target: target.clone(),
@@ -390,7 +399,7 @@ fn kernel_axis(
             sink,
         )? {
             trees.push(ResolvedTree {
-                label: "userspace",
+                label: "userspace".into(),
                 series: userspace_series,
                 checkout,
                 target,
@@ -444,11 +453,91 @@ fn uboot_axis(
         )?,
     };
     Ok(vec![ResolvedTree {
-        label: "uboot",
+        label: "uboot".into(),
         series: uboot_series,
         checkout,
         target,
     }])
+}
+
+/// Each app's two trees, for every app that applies a series: its own tree with the
+/// `app` scope, and its packaging tree with the `app_packaging` scope. Gated and
+/// narrowed against the app's pinned ref, which is the version `applies_to_app` makes
+/// its claim about. A scope the series leaves empty contributes no tree.
+fn app_axes(
+    lock: &boot2deb_core::lock::Lock,
+    patches_root: &Path,
+    cache_root: &Path,
+    sink: &dyn EventSink,
+) -> Result<Vec<ResolvedTree>> {
+    let mut trees = Vec::new();
+    for app in &lock.apps {
+        let Some(pin) = &app.patches else {
+            continue;
+        };
+        let series = load_all(patches_root, &pin.series)?;
+        for (name, s) in &series {
+            s.ensure_applies_app(name, &app.reference)?;
+        }
+        let app_series = narrow(&series, Scope::App, &app.reference, RangeMatch::Release)?;
+        if let Some(checkout) = tree_for_scope(
+            None,
+            &app_series,
+            &VerifySource {
+                source: &app.source,
+                reference: &app.reference,
+                commit: &app.commit,
+                what: &app.name,
+            },
+            cache_root,
+            sink,
+        )? {
+            trees.push(ResolvedTree {
+                label: format!("app {}", app.name),
+                series: app_series,
+                checkout,
+                target: format!("{} @ {}", app.name, app.reference),
+            });
+        }
+        let packaging_series = narrow(
+            &series,
+            Scope::AppPackaging,
+            &app.reference,
+            RangeMatch::Release,
+        )?;
+        let Some(dotnet) = &app.dotnet else {
+            if packaging_series.is_empty() {
+                continue;
+            }
+            return Err(format!(
+                "the lock pins app '{}' patches for a packaging tree it does not pin — \
+                 re-run `boot2deb update`",
+                app.name
+            )
+            .into());
+        };
+        let what = format!("{}-packaging", app.name);
+        if let Some(checkout) = tree_for_scope(
+            None,
+            &packaging_series,
+            &VerifySource {
+                source: &dotnet.packaging.source,
+                reference: &dotnet.packaging.reference,
+                commit: &dotnet.packaging.commit,
+                what: &what,
+            },
+            cache_root,
+            sink,
+        )? {
+            trees.push(ResolvedTree {
+                label: format!("app {} packaging", app.name),
+                series: packaging_series,
+                checkout,
+                target: format!("{what} @ {}", dotnet.packaging.reference),
+            });
+        }
+    }
+    Ok(trees)
 }
 
 /// Load every named series from the pinned checkout, keeping the lock's order.

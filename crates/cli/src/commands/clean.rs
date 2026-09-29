@@ -102,8 +102,12 @@ fn pinned_commits(
         };
         // A solved package manifest sits beside the lock it belongs to and shares the
         // `.lock` extension, but it is a line-oriented package list, not TOML — so
-        // selecting by extension alone would abort every sweep on the first one.
-        if !name.ends_with(".lock") || boot2deb_core::manifest::is_manifest_name(name) {
+        // selecting by extension alone would abort every sweep on the first one. An
+        // app's NuGet sidecar shares it too, and is not a lock either.
+        if !name.ends_with(".lock")
+            || boot2deb_core::manifest::is_manifest_name(name)
+            || boot2deb_core::nuget::is_sidecar_name(name)
+        {
             return Ok(());
         }
         let text = std::fs::read_to_string(path)

@@ -326,12 +326,33 @@ fn axis_pins(lock: &Lock) -> Vec<AxisPin> {
         ));
     }
     // One axis per compiled application, keyed by its name, for the same reason: an
-    // app's commit decides a binary the image ships.
+    // app's commit decides a binary the image ships. So does every other input its
+    // build pins, each on an axis of its own: the app's patches, its packaging tree,
+    // the SDK that compiles it, and the NuGet packages it restores (whose sidecar
+    // digest stands for the whole set).
+    let short = |h: &str| h.chars().take(SHORT_COMMIT).collect::<String>();
     for a in &lock.apps {
         v.push((
             format!("app {}", a.name),
             Some(git(&a.reference, &a.commit)),
         ));
+        if let Some(p) = &a.patches {
+            v.push((
+                format!("app {} patches", a.name),
+                Some(git(&p.reference, &p.commit)),
+            ));
+        }
+        if let Some(d) = &a.dotnet {
+            v.push((
+                format!("app {} packaging", a.name),
+                Some(git(&d.packaging.reference, &d.packaging.commit)),
+            ));
+            v.push((format!("app {} sdk", a.name), Some(d.sdk.version.clone())));
+            v.push((
+                format!("app {} nuget", a.name),
+                Some(short(&d.nuget.manifest_sha256)),
+            ));
+        }
     }
     // Pre-built `.deb`s are content pins, so the sha256 *is* the axis — a changed hash
     // is changed shipped bytes with no ref or commit standing between. Keyed by
@@ -808,21 +829,53 @@ sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
     /// like any other pin's, keyed by the app's name.
     #[test]
     fn moving_an_app_pin_is_a_reported_move() {
-        const WITH_APP: &str = "\
+        let with_app = format!(
+            "\
 [[apps]]
-name = \"mpv\"
-source = \"https://example.invalid/mpv.git\"
-ref = \"v0.41.0\"
-commit = \"4444444444444444444444444444444444444444\"
-";
-        assert!(pin_changes(&lock(WITH_APP), &lock(WITH_APP)).is_empty());
-        let bumped = WITH_APP.replace("v0.41.0", "v0.42.0").replace(
-            "4444444444444444444444444444444444444444",
-            "5".repeat(40).as_str(),
+name = \"jellyfin\"
+source = \"https://example.invalid/jellyfin.git\"
+ref = \"v12.1\"
+commit = \"{app}\"
+
+[apps.dotnet.packaging]
+source = \"https://example.invalid/jellyfin-packaging.git\"
+ref = \"v12.1-1\"
+commit = \"{packaging}\"
+
+[apps.dotnet.sdk]
+version = \"10.0.401\"
+
+[apps.dotnet.sdk.sha512]
+amd64 = \"{sha512}\"
+
+[apps.dotnet.nuget]
+manifest = \"x.jellyfin.nuget.lock\"
+manifest_sha256 = \"{nuget}\"
+",
+            app = "4".repeat(40),
+            packaging = "6".repeat(40),
+            sha512 = "a".repeat(128),
+            nuget = "7".repeat(64),
         );
+        assert!(pin_changes(&lock(&with_app), &lock(&with_app)).is_empty());
+        let bumped = with_app
+            .replace("v12.1\"", "v12.2\"")
+            .replace(&"4".repeat(40), &"5".repeat(40));
         assert_eq!(
-            pin_changes(&lock(WITH_APP), &lock(&bumped)),
-            ["app mpv v0.41.0 (444444444444) -> v0.42.0 (555555555555)"]
+            pin_changes(&lock(&with_app), &lock(&bumped)),
+            ["app jellyfin v12.1 (444444444444) -> v12.2 (555555555555)"]
+        );
+        // Each other input the app's build pins moves on its own axis, so a new SDK
+        // or a re-resolved NuGet set is reported even when the app's commit holds.
+        let rebuilt = with_app
+            .replace("10.0.401", "10.0.402")
+            .replace(&"7".repeat(64), &"8".repeat(64));
+        assert_eq!(
+            pin_changes(&lock(&with_app), &lock(&rebuilt)),
+            [
+                "app jellyfin sdk 10.0.401 -> 10.0.402",
+                "app jellyfin nuget 777777777777 -> 888888888888",
+            ]
         );
     }
 }

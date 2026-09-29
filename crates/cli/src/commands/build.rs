@@ -24,7 +24,7 @@ use boot2deb_core::lock::{SnapshotMode, SnapshotPin};
 use boot2deb_core::model::{ExtraDebTarget, Overrides, ResolvedBoot, ResolvedBuild};
 use boot2deb_core::series::Scope;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
-use boot2deb_engine::build::{ffmpeg, kernel, kmod, uboot, userspace, BuildEnv};
+use boot2deb_engine::build::{app, ffmpeg, kernel, kmod, uboot, userspace, BuildEnv};
 use boot2deb_engine::debstore::DebStore;
 use boot2deb_engine::event::{Event, Step};
 use boot2deb_engine::image::{self, ImageOutput};
@@ -429,6 +429,7 @@ pub(crate) fn run(
             | StageArg::Uboot
             | StageArg::Userspace
             | StageArg::Ffmpeg
+            | StageArg::App
     );
     // The kernel and u-boot patch axes read the same `patches` repo checkout (both pins
     // sit at the same commit), so resolve it once from whichever pin this build has.
@@ -538,6 +539,30 @@ pub(crate) fn run(
     // its own message, so the pair cannot drift apart.
     let has_kmods = !device_kmods.is_empty();
     let media_accel = !userspace.is_empty();
+    let apps = image.map(|ib| ib.image.apps.as_slice()).unwrap_or(&[]);
+    // Each app's patch series is its own pin, read from the `patches` repo at that
+    // pin's commit: resolved here, once per app that applies one, for the same stages
+    // the kernel's checkout is resolved for.
+    let app_checkouts: Vec<Option<(PathBuf, bool)>> = apps
+        .iter()
+        .map(|a| -> Result<_, Box<dyn std::error::Error>> {
+            let pin = lock
+                .apps
+                .iter()
+                .find(|p| p.name == a.name)
+                .and_then(|p| p.patches.as_ref());
+            match (pin, stage_applies_patches) {
+                (Some(pin), true) => Ok(Some(resolve_patches_source(
+                    args.patches_path.as_deref(),
+                    args.patches_url.as_deref(),
+                    pin,
+                    root,
+                    &sink,
+                )?)),
+                _ => Ok(None),
+            }
+        })
+        .collect::<Result<_, _>>()?;
 
     // Kernel-tree inputs, shared by the kernel/dtb stages and the kmod stage (which
     // builds its modules against the same `<work>/linux` tree). Resolved once when the
@@ -792,6 +817,67 @@ pub(crate) fn run(
                 Ok(())
             }),
         },
+        // Each application a selected feature compiles from source, in the host-arch
+        // cross root. After the media-accel nodes, since an app is a consumer of the
+        // image's stack rather than a part of it, and before the rootfs that installs it.
+        Stage {
+            selectors: &[StageArg::App],
+            applies: !apps.is_empty(),
+            inapplicable: format!(
+                "recipe '{recipe}' selects no feature that compiles an application from \
+                 source, so there is no app stage to run"
+            ),
+            run: Box::new(|_state: &mut BuildState| {
+                let dotnet =
+                    boot2deb_engine::dotnet::DotnetCache::open(&crate::config::cache_dir(root))?;
+                for (a, checkout) in apps.iter().zip(&app_checkouts) {
+                    let (pin, pins) = app::dotnet_pins(&lock, &a.name)?;
+                    // The sidecar beside the lock, checked against the digest the lock
+                    // pins before anything is fetched from it, then published beside the
+                    // image under its stem, where an SBOM of the image reads it.
+                    let sidecar = root.lock_sibling(recipe, &pins.nuget.manifest)?;
+                    let nuget = boot2deb_engine::dotnet::read_pinned_manifest(
+                        &a.name,
+                        &sidecar,
+                        &pins.nuget.manifest_sha256,
+                    )?;
+                    boot2deb_engine::dotnet::write_manifest(
+                        &out_dir.join(boot2deb_core::nuget::sidecar_name(&stem, &a.name)),
+                        &nuget,
+                    )?;
+                    let patches =
+                        checkout
+                            .as_ref()
+                            .zip(pin.patches.as_ref())
+                            .map(|((root, dev), p)| boot2deb_engine::build::PatchSource {
+                                root,
+                                pin: p,
+                                dev: *dev,
+                                version: &pin.reference,
+                            });
+                    let artifacts = app::build_app(
+                        &lock,
+                        &app::AppOptions {
+                            app: a,
+                            patches,
+                            nuget: &nuget,
+                            dotnet: &dotnet,
+                            host_arch: host_deb_arch,
+                            work_dir: &work_dir,
+                            out_dir: &out_dir,
+                            store: artifact_store.as_deref(),
+                        },
+                        resolved.arch,
+                        &build_env,
+                        &cross,
+                        &sink,
+                    )?;
+                    emit_artifact(&sink, "app", "deb", &artifacts.deb);
+                    record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
+                }
+                Ok(())
+            }),
+        },
         Stage {
             selectors: &[StageArg::Rootfs],
             applies: image.is_some(),
@@ -814,7 +900,10 @@ pub(crate) fn run(
                     keyring: keyring.as_deref(),
                     toolchain: &toolchain,
                     pinned_plan,
-                    produces_debs: compiles_kernel || builds_uboot || media_accel,
+                    produces_debs: compiles_kernel
+                        || builds_uboot
+                        || media_accel
+                        || !apps.is_empty(),
                     json,
                     verbosity,
                     sink: &sink,

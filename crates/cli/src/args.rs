@@ -446,8 +446,8 @@ pub(crate) fn image_compression(
 /// Which stage(s) `build` runs.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum StageArg {
-    /// The full pipeline: kernel, u-boot, userspace, ffmpeg, rootfs, then the
-    /// disk image. A complete device image from the lock.
+    /// The full pipeline: kernel, u-boot, userspace, ffmpeg, the apps, rootfs, then
+    /// the disk image. A complete device image from the lock.
     All,
     /// Only the kernel `.deb`s.
     Kernel,
@@ -465,6 +465,9 @@ pub(crate) enum StageArg {
     Userspace,
     /// Only the ffmpeg-rk `.deb` (build the userspace stage first).
     Ffmpeg,
+    /// Only the `.deb`s of the applications the selected features compile from source
+    /// (the patched `jellyfin-server`).
+    App,
     /// Only the rootfs tarball + solved manifest. Installs the built
     /// `.deb`s from the output dir, so run the compile stages first.
     Rootfs,

@@ -1,6 +1,10 @@
-//! Patch-series model: a kernel-version-scoped manifest —
-//! `series/<name>.toml` in the `patches` repo — declaring the kernel
-//! range a series targets plus ordered per-tree patch lists.
+//! Patch-series model: a version-scoped manifest — `series/<name>.toml` in the
+//! `patches` repo — declaring the range a series targets plus ordered per-tree patch
+//! lists.
+//!
+//! Most series belong to a kernel and are scoped by the kernel version. A series an
+//! application applies (its `app` and `app_packaging` scopes) is scoped by the
+//! application's version instead, through `applies_to_app`.
 //!
 //! A series belongs to a *kernel definition*, not a device. A series that applies to
 //! one kernel version will not apply to another, so the series lives with the kernel
@@ -188,6 +192,12 @@ pub struct PatchSeries {
     /// [`ensure_applies_uboot`](Self::ensure_applies_uboot).
     #[serde(default)]
     pub applies_to_uboot: Option<String>,
+    /// Version range the `app` and `app_packaging` scopes target, matched against the
+    /// application's own pinned ref (`v12.1`). An application is its own axis, just as
+    /// u-boot is. `None` means those scopes apply to any version of the app that names
+    /// the series. Gated by [`ensure_applies_app`](Self::ensure_applies_app).
+    #[serde(default)]
+    pub applies_to_app: Option<String>,
     /// Kernel-tree patches, in apply order (can span the `media-accel` and
     /// `rocket` scopes).
     #[serde(default)]
@@ -202,19 +212,28 @@ pub struct PatchSeries {
     /// u-boot claim, such as a kernel-only fixes series).
     #[serde(default)]
     pub uboot: Vec<PatchEntry>,
+    /// Application-tree patches, in apply order: the tree an app's own ref pins.
+    #[serde(default)]
+    pub app: Vec<PatchEntry>,
+    /// Patches to the tree holding an application's Debian packaging, in apply order.
+    #[serde(default)]
+    pub app_packaging: Vec<PatchEntry>,
 }
 
 impl PatchSeries {
-    /// The version-range envelope gating `scope`, if the series declares one: the
-    /// [`applies_to_kernel`](Self::applies_to_kernel) range for the kernel-family
-    /// scopes, the [`applies_to_uboot`](Self::applies_to_uboot) range for `uboot`.
+    /// The version-range envelope gating `scope`, if the series declares one.
+    ///
+    /// That is [`applies_to_kernel`](Self::applies_to_kernel) for the kernel-family
+    /// scopes and [`applies_to_uboot`](Self::applies_to_uboot) for `uboot`. The two app
+    /// scopes read [`applies_to_app`](Self::applies_to_app).
     ///
     /// `None` means the scope claims every version, so a report that names the
     /// declared range spells that `*`.
     pub fn envelope(&self, scope: Scope) -> Option<&str> {
         match scope {
             Scope::Uboot => self.applies_to_uboot.as_deref(),
-            _ => self.applies_to_kernel.as_deref(),
+            Scope::App | Scope::AppPackaging => self.applies_to_app.as_deref(),
+            Scope::Kernel | Scope::Ffmpeg | Scope::Userspace => self.applies_to_kernel.as_deref(),
         }
     }
 
@@ -383,6 +402,23 @@ impl PatchSeries {
         }
     }
 
+    /// The app scopes' declared-intent gate: returns
+    /// [`ConfigError::AppOutsideSeriesRange`] when `app_version` (the app's pinned
+    /// ref) is outside the series' [`applies_to_app`](Self::applies_to_app) envelope.
+    /// A no-op when the series declares none.
+    pub fn ensure_applies_app(&self, series: &str, app_version: &str) -> Result<(), ConfigError> {
+        match &self.applies_to_app {
+            Some(range) if !matches_range(series, range, app_version, RangeMatch::Release)? => {
+                Err(ConfigError::AppOutsideSeriesRange {
+                    series: series.to_string(),
+                    app_version: app_version.to_string(),
+                    applies_to: range.clone(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The ordered entry list for one [`Scope`], unfiltered — the tree
     /// `patch import` slots a new patch into. Use
     /// [`series_for`](Self::series_for) to get the paths a given kernel selects.
@@ -392,12 +428,14 @@ impl PatchSeries {
             Scope::Ffmpeg => &self.ffmpeg,
             Scope::Userspace => &self.userspace,
             Scope::Uboot => &self.uboot,
+            Scope::App => &self.app,
+            Scope::AppPackaging => &self.app_packaging,
         }
     }
 }
 
-/// One of the four source trees a series orders independently. The variant
-/// name matches the series' TOML array key, so it doubles as the key to edit.
+/// One of the source trees a series orders independently. The variant name matches
+/// the series' TOML array key, so it doubles as the key to edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     /// The kernel tree (spans the `media-accel` and `rocket` scopes).
@@ -408,12 +446,23 @@ pub enum Scope {
     Userspace,
     /// The u-boot tree.
     Uboot,
+    /// An application's own tree.
+    App,
+    /// The tree holding an application's Debian packaging.
+    AppPackaging,
 }
 
 impl Scope {
     /// Every scope, in series-declaration order — so a check that must cover the
     /// whole manifest cannot silently miss one when a scope is added.
-    pub const ALL: [Scope; 4] = [Scope::Kernel, Scope::Ffmpeg, Scope::Userspace, Scope::Uboot];
+    pub const ALL: [Scope; 6] = [
+        Scope::Kernel,
+        Scope::Ffmpeg,
+        Scope::Userspace,
+        Scope::Uboot,
+        Scope::App,
+        Scope::AppPackaging,
+    ];
 
     /// The series TOML array key for this scope (`"kernel"`, `"ffmpeg"`, …).
     pub fn as_str(self) -> &'static str {
@@ -422,6 +471,8 @@ impl Scope {
             Scope::Ffmpeg => "ffmpeg",
             Scope::Userspace => "userspace",
             Scope::Uboot => "uboot",
+            Scope::App => "app",
+            Scope::AppPackaging => "app_packaging",
         }
     }
 }
@@ -434,8 +485,10 @@ impl FromStr for Scope {
             "ffmpeg" => Ok(Scope::Ffmpeg),
             "userspace" => Ok(Scope::Userspace),
             "uboot" => Ok(Scope::Uboot),
+            "app" => Ok(Scope::App),
+            "app_packaging" => Ok(Scope::AppPackaging),
             other => Err(format!(
-                "unknown scope '{other}' (expected kernel|ffmpeg|userspace|uboot)"
+                "unknown scope '{other}' (expected kernel|ffmpeg|userspace|uboot|app|app_packaging)"
             )),
         }
     }
@@ -699,6 +752,9 @@ mod tests {
 
     fn series() -> PatchSeries {
         PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: Some(">=7.0, <7.2".into()),
             applies_to_uboot: None,
             kernel: vec![
@@ -783,6 +839,9 @@ mod tests {
     #[test]
     fn series_for_selects_the_entries_the_kernel_admits() {
         let p = PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: Some(">=7.0, <7.4".into()),
             applies_to_uboot: None,
             kernel: vec![
@@ -844,6 +903,9 @@ mod tests {
     #[test]
     fn unreachable_reports_only_entries_the_envelope_cannot_select() {
         let p = PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: Some(">=7.8, <8.0".into()),
             applies_to_uboot: None,
             kernel: vec![
@@ -870,6 +932,9 @@ mod tests {
         // `^` is not bounded by Interval::of, so the lint stays silent rather than
         // report a live entry. One-sided by design.
         let p = PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: Some(">=7.8, <8.0".into()),
             applies_to_uboot: None,
             kernel: vec![ranged("k/010-x.patch", "^6.1")],
@@ -885,6 +950,9 @@ mod tests {
         // A prerelease bound orders below its release core, so modelling it as the
         // core would narrow the span and could call a live entry dead. Declined.
         let p = PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: Some(">=7.2.0-rc1, <7.3".into()),
             applies_to_uboot: None,
             kernel: vec![ranged("k/010-x.patch", "<7.0")],
@@ -903,6 +971,9 @@ mod tests {
         // 7 — so each of these overlaps an envelope opening at 7.1.5 and none is dead.
         for range in ["=7.1", "<=7.1", "=7", "<=7", ">7.0"] {
             let p = PatchSeries {
+                applies_to_app: None,
+                app: vec![],
+                app_packaging: vec![],
                 applies_to_kernel: Some(">=7.1.5, <7.2".into()),
                 applies_to_uboot: None,
                 kernel: vec![ranged("k/010-live.patch", range)],
@@ -932,6 +1003,9 @@ mod tests {
         // dead — including `>7`, which starts at 8.0.0 and so sits *above* it.
         for range in ["=7.1", "<=7.1", "<7", ">7"] {
             let p = PatchSeries {
+                applies_to_app: None,
+                app: vec![],
+                app_packaging: vec![],
                 applies_to_kernel: Some(">=7.8, <8.0".into()),
                 applies_to_uboot: None,
                 kernel: vec![ranged("k/010-dead.patch", range)],
@@ -955,6 +1029,9 @@ mod tests {
         // admits all of 7.1.x: an entry pinned into 7.1 is live, one capped below it
         // is dead.
         let p = PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: Some("=7.1".into()),
             applies_to_uboot: None,
             kernel: vec![
@@ -979,6 +1056,9 @@ mod tests {
         // Scope::ALL is what keeps a newly added scope from escaping the lint. Each
         // scope is judged against its own envelope, so the u-boot scope gets one too.
         let p = PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: Some(">=7.8, <8.0".into()),
             applies_to_uboot: Some(">=2026, <2027".into()),
             kernel: vec![],
@@ -1109,6 +1189,9 @@ mod tests {
         // zero padding, a series with `applies_to_uboot = ">=2026.01"` gated fine and
         // then made `verify-patches` hard-error in its unreachable lint instead.
         let p = PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: None,
             applies_to_uboot: Some(">=2026.01, <2027.01".into()),
             kernel: vec![],
@@ -1133,6 +1216,9 @@ mod tests {
         // for the one u-boot generation it runs — so the gate must be a no-op for them
         // rather than defaulting to the kernel envelope, which they also do not declare.
         let p = PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: None,
             applies_to_uboot: None,
             kernel: vec![],
@@ -1150,6 +1236,9 @@ mod tests {
         // The per-entry half of the same axis: a patch that a later u-boot absorbed
         // drops out at that version instead of failing to apply.
         let p = PatchSeries {
+            applies_to_app: None,
+            app: vec![],
+            app_packaging: vec![],
             applies_to_kernel: None,
             applies_to_uboot: None,
             kernel: vec![],
@@ -1192,6 +1281,40 @@ mod tests {
         p.applies_to_kernel = Some("not a range".into());
         let err = p.applies_to("rk3588-accel", "7.1.1").unwrap_err();
         assert!(matches!(err, ConfigError::InvalidVersionReq { .. }));
+    }
+
+    /// An application's series is scoped by the app's own version, not the kernel's:
+    /// the two app scopes read `applies_to_app`, and a kernel envelope in the same file
+    /// has no say over them.
+    #[test]
+    fn app_scopes_are_gated_by_the_apps_own_version() {
+        let text = r#"
+applies_to_kernel = ">=7.0, <7.2"
+applies_to_app = ">=12.1, <12.2"
+app = ["jellyfin/0001-a.patch", { path = "jellyfin/0002-b.patch", kernels = ">=12.1.1" }]
+app_packaging = ["jellyfin/packaging/0001-c.patch"]
+"#;
+        let p: PatchSeries = toml::from_str(text).unwrap();
+        assert_eq!(p.envelope(Scope::App), Some(">=12.1, <12.2"));
+        assert_eq!(p.envelope(Scope::AppPackaging), Some(">=12.1, <12.2"));
+        assert_eq!(p.envelope(Scope::Kernel), Some(">=7.0, <7.2"));
+        p.ensure_applies_app("jellyfin", "v12.1").unwrap();
+        assert!(matches!(
+            p.ensure_applies_app("jellyfin", "v12.2"),
+            Err(ConfigError::AppOutsideSeriesRange { .. })
+        ));
+        assert_eq!(
+            p.series_for(Scope::App, "jellyfin", "v12.1", RangeMatch::Release)
+                .unwrap(),
+            ["jellyfin/0001-a.patch"],
+            "the per-entry range narrows against the app version"
+        );
+        assert_eq!(p.scope(Scope::AppPackaging).len(), 1);
+        assert_eq!(
+            "app_packaging".parse::<Scope>().unwrap(),
+            Scope::AppPackaging
+        );
+        assert_eq!(Scope::App.as_str(), "app");
     }
 
     #[test]

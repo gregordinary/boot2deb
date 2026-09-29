@@ -769,6 +769,89 @@ pub enum EngineError {
         actual: String,
     },
 
+    /// A pinned .NET input — the SDK tarball or a NuGet package — could not be fetched
+    /// from its URL. The build reads only the pins, so an unfetchable one is a hard
+    /// error. It never becomes a restore that goes to the network for something else.
+    #[error("failed to fetch {what} from {url}: {detail}")]
+    DotnetFetch {
+        /// What was being fetched (`.NET SDK 10.0.401`, `NuGet package skiasharp 3.119.0`).
+        what: String,
+        /// The URL it was fetched from.
+        url: String,
+        /// What went wrong (HTTP status, transport or size-cap detail).
+        detail: String,
+    },
+
+    /// A fetched .NET input's bytes did not hash to its pinned sha512. The server
+    /// handed back different bytes than were pinned, which is a verification failure,
+    /// never a silent swap.
+    #[error("{what} from {url} hash mismatch: pinned sha512 {expected}, got {actual}")]
+    DotnetHashMismatch {
+        /// What was fetched.
+        what: String,
+        /// The URL it came from.
+        url: String,
+        /// The sha512 the pin names.
+        expected: String,
+        /// The sha512 of the bytes received.
+        actual: String,
+    },
+
+    /// An app's SDK is pinned for no tarball this build host can run: its
+    /// `sdk.sha512` table has no entry for the host's Debian architecture.
+    #[error(
+        "app '{app}' pins no .NET SDK tarball for this {host} build host — add a \
+         `{host}` entry to the app's `sdk.sha512` table (Microsoft publishes the hash in \
+         its releases.json)"
+    )]
+    DotnetHostUnsupported {
+        /// The app's name.
+        app: String,
+        /// The build host's Debian architecture.
+        host: String,
+    },
+
+    /// A NuGet global-packages folder a restore wrote could not be read into a
+    /// manifest. A package directory lacks its `.nupkg`, or a `.nupkg` disagrees with
+    /// the digest the restore recorded beside it.
+    #[error("NuGet packages folder {dir}: {detail}")]
+    NugetPackagesUnreadable {
+        /// The packages folder.
+        dir: String,
+        /// What is wrong with it.
+        detail: String,
+    },
+
+    /// An app's NuGet sidecar does not hash to the digest its lock pins: the file
+    /// beside the lock was edited, or belongs to another lock. Re-run `update` to
+    /// regenerate both together.
+    #[error(
+        "app '{app}' NuGet manifest {manifest} hashes to {actual}, but the lock pins \
+         {expected} — re-run `boot2deb update`"
+    )]
+    NugetManifestMismatch {
+        /// The app's name.
+        app: String,
+        /// The sidecar's path.
+        manifest: String,
+        /// The digest the lock pins.
+        expected: String,
+        /// The digest of the file on disk.
+        actual: String,
+    },
+
+    /// The app stage was scheduled for an app the lock pins no build inputs for. Its
+    /// `[[apps]]` entry is missing, or lacks the tables its build kind needs. The CLI
+    /// schedules the stage from the lock's own entries, so this is an internal
+    /// scheduling bug or a hand-edited lock.
+    #[error("app '{app}' has no complete pin in the lock ({missing}) — re-run `boot2deb update`")]
+    MissingAppPin {
+        /// The app's name.
+        app: String,
+        /// What the entry lacks.
+        missing: &'static str,
+    },
+
     /// The `patches` repo could not be auto-fetched at the lock-pinned commit,
     /// because a clone/checkout via `gix` failed (offline, a bad URL, or the pinned
     /// commit not reachable from the fetched history). Patches are never silently

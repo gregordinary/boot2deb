@@ -1172,55 +1172,147 @@ pub struct FfmpegLib {
     pub links: Vec<String>,
 }
 
-/// An application this build compiles from source against its own FFmpeg, rather
-/// than installing from the Debian mirror.
+/// An application this build compiles from source, rather than installing the
+/// archive's build of it, because the archive's build lacks patches this build
+/// carries.
 ///
-/// It exists for one reason. `ffmpeg-rk` installs under `/opt` so it coexists with
-/// the system FFmpeg, and nothing Debian packages links it. Debian's own
-/// `libavcodec` carries no `v4l2request` hwaccel at all. A player from the archive
-/// therefore decodes in software, on a board whose decoder is the point of the
-/// image. Compiling the player here is what puts the two on the same libraries.
+/// Jellyfin's own `jellyfin-server` has no acceleration type that reaches a V4L2
+/// request-API decoder. The patched server is built here from Jellyfin's source and
+/// Jellyfin's own packaging, and replaces the archive's package.
 ///
 /// Declared by a *feature*, never by a hardware layer. Which silicon is present
-/// decides what the accelerated FFmpeg can do. Whether an image also carries a
-/// player is a capability someone asked for. The feature names the FFmpeg it needs
+/// decides what the accelerated FFmpeg can do. Whether an image carries an
+/// application is a capability someone asked for. The feature names what it needs
 /// through [`requires_capability`](crate::feature::Feature::requires_capability), so
-/// it composes with either media-accel provider without naming one.
+/// it composes with any provider of it without naming one.
 ///
-/// The *build* surface is not here. Configure and meson options are engine knowledge
-/// keyed on [`name`](Self::name), the way the userspace stage keys its patch handling
-/// on a tree's name. This declares the pin and what comes out of it.
+/// What is declared here is what the build depends on: the source pin, the patch
+/// series, the packaging tree and the toolchain. How each kind of build drives its
+/// tools is engine knowledge, keyed on [`AppBuild`]'s kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct App {
     /// The application's name. It is its directory under `<work>/app/`, its
-    /// `app:<name>` artifact-cache node, and its key in the lock. It is also what the
-    /// engine stage matches on to know how to build it. Resolution holds it to a bare
-    /// identifier, since it becomes a path component and a cache key.
+    /// `app:<name>` artifact-cache node, and its key in the lock. Resolution holds it
+    /// to a bare identifier, since it becomes a path component and a cache key.
     pub name: String,
     /// Clone URL of the upstream tree.
     pub git: String,
     /// The branch or tag constraint. The exact commit is pinned in the lock
-    /// (TOML key `ref`).
+    /// (TOML key `ref`). Also the version the series' `applies_to_app` range is
+    /// matched against, so a release tag (`v12.1`) is what an app pins.
     #[serde(rename = "ref")]
     pub git_ref: String,
-    /// The `.deb` this app's build produces, and the name the rootfs solve installs.
+    /// The `.deb` this app's build produces. Resolution adds it to the image's
+    /// package set, so a feature need not name it twice.
     ///
-    /// Named rather than derived from [`name`](Self::name), because it has to differ
-    /// from the archive's package for the same program. An `mpv` built here would
-    /// otherwise collide with Debian's `mpv` in the local repo. Apt would then pick
-    /// between them by version, rather than by which one can reach the decoder.
+    /// It takes the archive's package name on purpose (`jellyfin-server`), and the
+    /// build replaces the archive's package. See
+    /// [`DotnetDeb`](AppBuild::DotnetDeb) for how the version keeps it preferred.
     pub deb: String,
-    /// Install prefix, which is also where the FFmpeg it links lives.
+    /// Patch series this app applies, by name, from the `patches` repo, in apply
+    /// order. Each series' `app` scope patches the app's tree and its `app_packaging`
+    /// scope patches the packaging tree. Empty builds the trees as pinned.
     ///
-    /// Sharing the prefix is what makes the binary find those libraries without an
-    /// `ld.so.conf` entry or a wrapper. The FFmpeg stage already builds with an
-    /// `-rpath` on its own `lib` directory, and a binary staged beside it inherits the
-    /// same relationship. Installing to `/usr` would instead put the player on the
-    /// default search path, where it loads Debian's libraries. The player then refuses
-    /// to start. It compares its build-time and runtime library versions, and exits on
-    /// a mismatch.
-    pub prefix: String,
+    /// Pinned as the app's own `[apps.patches]`, independent of the kernel's
+    /// `[patches]`. A change to an app's patches then moves only the app's node,
+    /// never the kernel's.
+    #[serde(default)]
+    pub patch_series: Vec<String>,
+    /// Clone URL of the `patches` repo the series come from. Required when
+    /// [`patch_series`](Self::patch_series) names any, and resolution refuses a series
+    /// without one.
+    #[serde(default)]
+    pub patches_url: Option<String>,
+    /// The `patches` ref the series are pinned at. Defaults to
+    /// [`DEFAULT_PATCHES_REF`].
+    #[serde(default)]
+    pub patches_ref: Option<String>,
+    /// How the tree becomes the [`deb`](Self::deb), and what that needs beyond the
+    /// source (TOML table `[apps.build]`, keyed by `kind`).
+    pub build: AppBuild,
+}
+
+/// How an [`App`] is built, tagged by `kind` in TOML.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum AppBuild {
+    /// A .NET application whose Debian packaging lives in a tree of its own
+    /// (`kind = "dotnet-deb"`).
+    ///
+    /// The app's tree is laid inside the packaging tree at
+    /// [`source_dir`](DotnetDebBuild::source_dir), and the packaging's own
+    /// `debian/` builds the deb with `dpkg-buildpackage -B`. The compile runs
+    /// offline. The engine fetches the SDK and every NuGet package the restore needs,
+    /// verifies each against its pin, and hands them to the build.
+    ///
+    /// The produced deb carries an epoch in its version. The rootfs solve takes the
+    /// highest version across its repositories, and a device's `apt upgrade` does
+    /// the same. The epoch makes both prefer this build over any release the archive
+    /// publishes later. Without it, that release would replace this build with one
+    /// that lacks its patches.
+    DotnetDeb(DotnetDebBuild),
+}
+
+/// The inputs of an [`AppBuild::DotnetDeb`] build beyond the app's own tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DotnetDebBuild {
+    /// The tree whose `debian/` directory builds the deb, pinned like any git
+    /// source. Its ref is the packaging release that matches the app's ref.
+    pub packaging: GitSource,
+    /// Where the app's tree sits inside the packaging tree, as a relative path. It
+    /// is the directory the packaging's `debian/rules` changes into to publish the
+    /// app. Resolution refuses an absolute path or a parent reference.
+    pub source_dir: String,
+    /// The project the packaging publishes, as a path relative to
+    /// [`source_dir`](Self::source_dir). The NuGet restore at `update` time names it
+    /// identically, so the pinned package set is the one the build needs.
+    pub project: String,
+    /// The .NET SDK the restore and the build run.
+    pub sdk: DotnetSdk,
+}
+
+/// A .NET SDK, pinned to one release and to the bytes of that release's tarball for
+/// each build-host architecture.
+///
+/// Debian does not package .NET, so the SDK is Microsoft's tarball, fetched and
+/// verified by the engine. The SDK runs on the build host and publishes for the
+/// target, so it is the *host* architecture that selects a tarball. The SDK version
+/// also decides which runtime packs a self-contained publish restores, which is why
+/// changing it moves the pinned NuGet package set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DotnetSdk {
+    /// The SDK release, e.g. `10.0.401`. It names the tarball
+    /// ([`dotnet_sdk_url`]).
+    pub version: String,
+    /// The sha512 of each host architecture's tarball, keyed by the Debian
+    /// architecture name of the build host (`amd64`, `arm64`), as 128 lowercase hex
+    /// characters. The values are Microsoft's published hashes. A host with no entry
+    /// cannot build the app.
+    pub sha512: std::collections::BTreeMap<String, String>,
+}
+
+/// The .NET runtime identifier for a Debian architecture: the platform a .NET SDK
+/// runs on, or a self-contained publish targets. `None` for an architecture .NET
+/// does not publish for.
+pub fn dotnet_rid(debian_arch: &str) -> Option<&'static str> {
+    match debian_arch {
+        "amd64" => Some("linux-x64"),
+        "arm64" => Some("linux-arm64"),
+        "armhf" => Some("linux-arm"),
+        _ => None,
+    }
+}
+
+/// Where Microsoft publishes the SDK tarball for `version` on a `host_arch` build host.
+/// `None` for a Debian architecture .NET publishes no SDK for.
+pub fn dotnet_sdk_url(version: &str, host_arch: &str) -> Option<String> {
+    let rid = dotnet_rid(host_arch)?;
+    Some(format!(
+        "https://builds.dotnet.microsoft.com/dotnet/Sdk/{version}/dotnet-sdk-{version}-{rid}.tar.gz"
+    ))
 }
 
 /// Where an [`ExtraDeb`]'s bytes come from — the validated single locator.
@@ -3085,8 +3177,9 @@ pub struct ResolvedImage {
     /// axis of the build point that the selected features decide, not a source the lock has
     /// to pin. The pins are the debs' own hashes. Empty when no feature adds one.
     pub ffmpeg_libs: Vec<FfmpegLib>,
-    /// Applications the selected features compile from source against this build's
-    /// FFmpeg, unioned across them and de-duplicated by name in selection order.
+    /// Applications the selected features compile from source, unioned across them
+    /// and de-duplicated by name in selection order. Each one's
+    /// [`deb`](App::deb) is also in [`rootfs_packages`](Self::rootfs_packages).
     ///
     /// Resolved rather than pinned here, like [`ffmpeg_libs`](Self::ffmpeg_libs) —
     /// which features were selected is what decides it. The *commits* are pinned, in
@@ -3223,8 +3316,9 @@ impl ResolvedBuild {
         )
     }
 
-    /// Whether this build compiles **anything** from source: a kernel, a bootloader, or
-    /// the media-accel userspace stack. The out-of-tree modules ride with the kernel. A
+    /// Whether this build compiles **anything** from source. That is a kernel, a
+    /// bootloader, the media-accel userspace stack, or an application a feature declares.
+    /// The out-of-tree modules ride with the kernel. A
     /// module is built by the compiler that produced the `Module.symvers` it links
     /// against, so a build with no kernel compile builds none either.
     ///
@@ -3237,7 +3331,10 @@ impl ResolvedBuild {
     pub fn compiles_from_source(&self) -> bool {
         self.compiles_kernel()
             || self.rkbin_boot().is_some()
-            || self.image.as_ref().is_some_and(|i| !i.userspace.is_empty())
+            || self
+                .image
+                .as_ref()
+                .is_some_and(|i| !i.userspace.is_empty() || !i.apps.is_empty())
     }
 
     /// Whether this build produces a full image (kernel + rootfs + `.img`), as

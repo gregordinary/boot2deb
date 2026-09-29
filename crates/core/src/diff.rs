@@ -160,6 +160,50 @@ pub struct BuilderFacts {
     pub archives: BTreeMap<String, String>,
 }
 
+/// What a `dotnet-deb` app's build pins beyond its tree, borrowed from whichever
+/// document records it.
+struct AppDotnetFacts<'a> {
+    packaging_ref: Option<&'a String>,
+    packaging_commit: Option<&'a String>,
+    sdk_version: &'a str,
+    nuget_manifest: &'a str,
+    nuget_sha256: &'a str,
+}
+
+/// The source axes one app contributes: its tree (`app:<name>`), and for a
+/// `dotnet-deb` build its packaging tree, its SDK release and its NuGet sidecar. The
+/// SDK has a release and no commit, and the sidecar has a file and a digest; both ride
+/// the same ref-and-commit pair, so a moved one reads as a moved pin.
+fn app_sources(
+    name: &str,
+    (reference, commit): (Option<&String>, Option<&String>),
+    dotnet: Option<AppDotnetFacts>,
+) -> Vec<SourcePin> {
+    let mut pins = vec![SourcePin {
+        axis: format!("app:{name}"),
+        reference: reference.cloned(),
+        commit: commit.cloned(),
+    }];
+    if let Some(d) = dotnet {
+        pins.push(SourcePin {
+            axis: format!("app:{name}:packaging"),
+            reference: d.packaging_ref.cloned(),
+            commit: d.packaging_commit.cloned(),
+        });
+        pins.push(SourcePin {
+            axis: format!("app:{name}:sdk"),
+            reference: Some(d.sdk_version.to_string()),
+            commit: None,
+        });
+        pins.push(SourcePin {
+            axis: format!("app:{name}:nuget"),
+            reference: Some(d.nuget_manifest.to_string()),
+            commit: Some(d.nuget_sha256.to_string()),
+        });
+    }
+    pins
+}
+
 impl Side {
     /// Normalize a [`Lock`] into a side.
     ///
@@ -204,12 +248,34 @@ impl Side {
                 commit: Some(k.commit.clone()),
             });
         }
+        for a in &lock.apps {
+            sources.extend(app_sources(
+                &a.name,
+                (Some(&a.reference), Some(&a.commit)),
+                a.dotnet.as_ref().map(|d| AppDotnetFacts {
+                    packaging_ref: Some(&d.packaging.reference),
+                    packaging_commit: Some(&d.packaging.commit),
+                    sdk_version: &d.sdk.version,
+                    nuget_manifest: &d.nuget.manifest,
+                    nuget_sha256: &d.nuget.manifest_sha256,
+                }),
+            ));
+        }
         let patch_axis = |axis: &str, pin: &crate::lock::PatchesPin| PatchAxis {
             axis: axis.to_string(),
             series: pin.series.clone(),
             reference: Some(pin.reference.clone()),
             commit: Some(pin.commit.clone()),
         };
+        let app_patch_axes: Vec<PatchAxis> = lock
+            .apps
+            .iter()
+            .filter_map(|a| {
+                a.patches
+                    .as_ref()
+                    .map(|p| patch_axis(&format!("app:{}", a.name), p))
+            })
+            .collect();
         Side {
             label: label.into(),
             kernel: lock.kernel.as_ref().map(|k| KernelFacts {
@@ -226,6 +292,7 @@ impl Side {
             ]
             .into_iter()
             .flatten()
+            .chain(app_patch_axes)
             .collect(),
             sources,
             blobs: lock.blobs.as_ref().map(|b| BlobFacts {
@@ -284,6 +351,19 @@ impl Side {
                 commit: Some(ma.ffmpeg_base_commit.clone()),
             });
         }
+        for a in &prov.apps {
+            sources.extend(app_sources(
+                &a.name,
+                (Some(&a.reference), Some(&a.commit)),
+                a.sdk_version.as_ref().map(|sdk| AppDotnetFacts {
+                    packaging_ref: a.packaging_ref.as_ref(),
+                    packaging_commit: a.packaging_commit.as_ref(),
+                    sdk_version: sdk,
+                    nuget_manifest: a.nuget_manifest.as_deref().unwrap_or_default(),
+                    nuget_sha256: a.nuget_manifest_sha256.as_deref().unwrap_or_default(),
+                }),
+            ));
+        }
         // Stable order regardless of which document filled it, so two sides read out
         // of different documents still line up axis for axis.
         sources.sort_by(|a, b| a.axis.cmp(&b.axis));
@@ -306,7 +386,17 @@ impl Side {
                     reference: None,
                     commit: s.patches_commit.clone(),
                 }]
-            },
+            }
+            .into_iter()
+            .chain(prov.apps.iter().filter_map(|a| {
+                a.patches_commit.as_ref().map(|commit| PatchAxis {
+                    axis: format!("app:{}", a.name),
+                    series: a.patch_series.clone(),
+                    reference: None,
+                    commit: Some(commit.clone()),
+                })
+            }))
+            .collect(),
             sources,
             blobs: prov.blobs.as_ref().map(|b| BlobFacts {
                 atf: b.atf.clone(),
@@ -1336,6 +1426,56 @@ mod tests {
                 from: Some("master".into()),
                 to: Some("multicore".into())
             })
+        );
+    }
+
+    /// An app's build pins more than its tree, and each input is its own axis: a new
+    /// SDK and the NuGet set it re-resolved read as two changes while the app's commit
+    /// holds. Its patches are a patch axis of their own, apart from the kernel's.
+    #[test]
+    fn each_input_of_an_app_build_is_its_own_axis() {
+        let app = |sdk: &str, nuget: char| crate::lock::AppPin {
+            name: "jellyfin".into(),
+            source: "https://example.invalid/jellyfin.git".into(),
+            reference: "v12.1".into(),
+            commit: "1".repeat(40),
+            patches: Some(crate::lock::PatchesPin {
+                series: vec!["jellyfin".into()],
+                source: "https://example.invalid/patches.git".into(),
+                reference: "main".into(),
+                commit: "2".repeat(40),
+            }),
+            dotnet: Some(crate::lock::DotnetPins {
+                packaging: crate::lock::GitPin {
+                    source: "https://example.invalid/jellyfin-packaging.git".into(),
+                    reference: "v12.1-202609142034".into(),
+                    commit: "3".repeat(40),
+                },
+                sdk: crate::model::DotnetSdk {
+                    version: sdk.into(),
+                    sha512: [("amd64".to_string(), "a".repeat(128))]
+                        .into_iter()
+                        .collect(),
+                },
+                nuget: crate::lock::NugetPin {
+                    manifest: "x.jellyfin.nuget.lock".into(),
+                    manifest_sha256: nuget.to_string().repeat(64),
+                },
+            }),
+        };
+        let mut old = base_lock();
+        old.apps = vec![app("10.0.401", 'b')];
+        let mut new = base_lock();
+        new.apps = vec![app("10.0.402", 'c')];
+        let (left, right) = (Side::from_lock("old", &old), Side::from_lock("new", &new));
+        assert!(left.patches.iter().any(|p| p.axis == "app:jellyfin"));
+
+        let Section::Compared { changes } = compare(&left, &right).sources else {
+            panic!("both sides pin sources");
+        };
+        assert_eq!(
+            changes.iter().map(|c| c.axis.as_str()).collect::<Vec<_>>(),
+            vec!["app:jellyfin:nuget", "app:jellyfin:sdk"]
         );
     }
 

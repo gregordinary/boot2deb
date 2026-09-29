@@ -703,6 +703,33 @@ pub(crate) fn source_axes<'a>(
             commit: &pin.commit,
         });
     }
+    // Each compiled app fetches its own tree, its packaging tree, and its patch
+    // series — three pins, each with its own durability question, the patches one for
+    // the kernel patches' reason.
+    for pin in &lock.apps {
+        axes.push(SourceAxis {
+            name: format!("app:{}", pin.name).into(),
+            url: pin.source.clone(),
+            reference: &pin.reference,
+            commit: &pin.commit,
+        });
+        if let Some(d) = &pin.dotnet {
+            axes.push(SourceAxis {
+                name: format!("app:{}:packaging", pin.name).into(),
+                url: d.packaging.source.clone(),
+                reference: &d.packaging.reference,
+                commit: &d.packaging.commit,
+            });
+        }
+        if let Some(p) = &pin.patches {
+            axes.push(SourceAxis {
+                name: format!("app:{}:patches", pin.name).into(),
+                url: p.source.clone(),
+                reference: &p.reference,
+                commit: &p.commit,
+            });
+        }
+    }
     Ok(axes)
 }
 
@@ -723,9 +750,10 @@ mod tests {
     use super::*;
     use crate::testsupport::{repo_root, repo_root_path};
 
-    /// Every committed lock is exactly what `update` writes for its pins. The file says
-    /// "do not hand-edit", and this is what holds it to that: a hand edit, or a lock left
-    /// in a shape the format no longer has, fails here rather than at the next build.
+    /// Every committed lock is exactly what `update` writes for its pins, and so is
+    /// every app's NuGet sidecar beside one. Both files say "do not hand-edit", and this
+    /// is what holds them to that: a hand edit, or a file left in a shape the format no
+    /// longer has, fails here rather than at the next build.
     #[test]
     fn every_committed_lock_is_in_the_form_update_writes() {
         let recipes = repo_root_path().join("recipes");
@@ -738,6 +766,18 @@ mod tests {
             for entry in std::fs::read_dir(&device).unwrap() {
                 let path = entry.unwrap().path();
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if boot2deb_core::nuget::is_sidecar_name(&name) {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let sidecar = boot2deb_core::nuget::NugetManifest::from_toml_str(&text, &name)
+                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    assert_eq!(
+                        sidecar.to_toml_string().unwrap(),
+                        text,
+                        "{} is not in the form `update` writes",
+                        path.display()
+                    );
+                    continue;
+                }
                 if !name.ends_with(".lock") || name.ends_with(".pkgs.lock") {
                     continue;
                 }

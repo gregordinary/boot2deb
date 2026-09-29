@@ -61,7 +61,9 @@ pub(crate) fn run(
     let packages = manifest::parse(&packages_text, &packages_path.display().to_string())?;
 
     let sources = source_index(&path.with_file_name(format!("{stem}.plan")));
-    let sbom = Sbom::from_provenance(&provenance, &packages, &sources, &stem, &created()?);
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let nuget = nuget_sidecars(&provenance, dir, &stem)?;
+    let sbom = Sbom::from_provenance(&provenance, &packages, &sources, &nuget, &stem, &created()?);
     let json = match format {
         FormatArg::Spdx => serde_json::to_string_pretty(&spdx::Document::render(&sbom))?,
         FormatArg::Cyclonedx => serde_json::to_string_pretty(&cyclonedx::Bom::render(&sbom))?,
@@ -131,7 +133,8 @@ pub(crate) fn write_beside(
     })?;
     let packages = manifest::parse(&text, &packages_path.display().to_string())?;
     let sources = source_index(&out_dir.join(format!("{stem}.plan")));
-    let sbom = Sbom::from_provenance(provenance, &packages, &sources, stem, &created()?);
+    let nuget = nuget_sidecars(provenance, out_dir, stem)?;
+    let sbom = Sbom::from_provenance(provenance, &packages, &sources, &nuget, stem, &created()?);
     let mut written = Vec::with_capacity(formats.len());
     for format in formats {
         let path = out_dir.join(format!("{stem}.{}.json", format.extension()));
@@ -144,6 +147,40 @@ pub(crate) fn write_beside(
         written.push(path);
     }
     Ok(written)
+}
+
+/// Each compiled app's NuGet sidecar, published beside the image under its stem.
+///
+/// Required rather than best-effort, unlike the plan: an app's deb ships the assemblies
+/// these packages hold, so without them the document would omit components the image
+/// contains, and read as complete.
+fn nuget_sidecars(
+    provenance: &ProvenanceManifest,
+    dir: &Path,
+    stem: &str,
+) -> Result<Vec<(String, boot2deb_core::nuget::NugetManifest)>> {
+    let mut out = Vec::new();
+    for app in provenance
+        .apps
+        .iter()
+        .filter(|a| a.nuget_manifest.is_some())
+    {
+        let path = dir.join(boot2deb_core::nuget::sidecar_name(stem, &app.name));
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "read app '{}' NuGet manifest {}: {e}\nIt is published beside the provenance \
+                 manifest by the same build; without it an SBOM would omit the packages the \
+                 app's deb ships.",
+                app.name,
+                path.display()
+            )
+        })?;
+        out.push((
+            app.name.clone(),
+            boot2deb_core::nuget::NugetManifest::from_toml_str(&text, &path.display().to_string())?,
+        ));
+    }
+    Ok(out)
 }
 
 /// Which source package each binary package was built from, read from the plan document

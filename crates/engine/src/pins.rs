@@ -10,10 +10,10 @@ use crate::blobs;
 use crate::error::EngineError;
 use crate::git;
 use boot2deb_core::lock::{
-    AppPin, BlobsPin, FfmpegPins, GitPin, KernelPin, KmodPin, Lock, PatchesPin, RootfsPin,
-    UbootPin, UserspacePin,
+    AppPin, BlobsPin, DotnetPins, FfmpegPins, GitPin, KernelPin, KmodPin, Lock, NugetPin,
+    PatchesPin, RootfsPin, UbootPin, UserspacePin,
 };
-use boot2deb_core::model::KernelSource;
+use boot2deb_core::model::{App, AppBuild, DotnetSdk, KernelSource};
 use boot2deb_core::ResolvedBuild;
 use std::path::Path;
 
@@ -55,6 +55,35 @@ pub struct UpdateOptions<'a> {
     /// this update. The caller keeps the previous lock's value instead when no pin moved
     /// ([`Lock::carry_source_date_epoch`]).
     pub source_date_epoch: u64,
+    /// Produces each `dotnet-deb` app's NuGet pin from its pinned trees. Consulted once
+    /// per such app, after its trees are pinned.
+    pub nuget: &'a dyn NugetResolver,
+}
+
+/// The pinned trees and toolchain of one `dotnet-deb` app, as `update` has just
+/// resolved them: everything a restore needs to reproduce the build's package set.
+pub struct AppTreePins<'a> {
+    /// The app's own tree.
+    pub app: &'a GitPin,
+    /// The tree whose `debian/` builds the deb.
+    pub packaging: &'a GitPin,
+    /// The app's patch-series pin, when it applies one.
+    pub patches: Option<&'a PatchesPin>,
+    /// The SDK the restore runs.
+    pub sdk: &'a DotnetSdk,
+}
+
+/// Produces a `dotnet-deb` app's [`NugetPin`] — the one step of `update` that runs a
+/// restore with the network.
+///
+/// A trait because the step needs what only the caller has. That is the sandbox roots
+/// to run the restore in, and the directory beside the lock to write the sidecar into.
+/// [`resolve_lock`] stays the one place that decides *which* pins exist, and asks this
+/// for the one it cannot compute itself.
+pub trait NugetResolver {
+    /// Restore `app`'s package set from `pins`, write it as the sidecar the returned
+    /// pin names, and return that pin.
+    fn resolve(&self, app: &App, pins: &AppTreePins) -> Result<NugetPin, EngineError>;
 }
 
 /// Resolve a build to an exact [`Lock`] by consulting upstream and the vendored
@@ -73,15 +102,16 @@ pub struct UpdateOptions<'a> {
 /// Pinning a commit nothing consumes would both record a phantom dependency and make
 /// `update` fail on a machine with no `patches` clone.
 pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock, EngineError> {
-    // Both patch axes — the kernel's and u-boot's — are pinned at the same local
-    // `patches` checkout's HEAD. Establish it once when either names a series (a
+    // Every patch axis — the kernel's, u-boot's and each app's — is pinned at the same
+    // local `patches` checkout's HEAD. Establish it once when any names a series (a
     // missing checkout gets the tailored setup error, not a raw git failure: this is
     // the one command that *requires* a local clone, where `build` would auto-fetch),
     // then pin each axis against it. A build with neither series never reads it.
     let image = build.image.as_ref();
     let kernel_series = image.map(|i| i.kernel.patch_series()).unwrap_or(&[]);
     let uboot_series = build.rkbin_boot().and_then(|b| b.uboot_series.as_deref());
-    let patches_commit = if !kernel_series.is_empty() || uboot_series.is_some() {
+    let app_series = image.is_some_and(|i| i.apps.iter().any(|a| !a.patch_series.is_empty()));
+    let patches_commit = if !kernel_series.is_empty() || uboot_series.is_some() || app_series {
         if !opts.patches_path.join(".git").exists() {
             return Err(EngineError::PatchesCheckoutMissing {
                 path: opts.patches_path.display().to_string(),
@@ -242,18 +272,54 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     // Pin each application a selected feature compiles from source, in resolution
     // order. There is no `--app-ref` flag: unlike a userspace tree or an out-of-tree
     // module, an app is upstream software pinned at a release tag, and moving it is
-    // an edit to the feature rather than a per-build choice.
+    // an edit to the feature rather than a per-build choice. Its trees are pinned
+    // first, and the NuGet set a `dotnet-deb` build restores is resolved from them.
     let apps = image
         .map(|i| i.apps.as_slice())
         .unwrap_or(&[])
         .iter()
         .map(|a| -> Result<AppPin, EngineError> {
             let pin = git_pin(&a.git, &a.git_ref)?;
+            let patches = (!a.patch_series.is_empty()).then(|| PatchesPin {
+                series: a.patch_series.clone(),
+                source: a
+                    .patches_url
+                    .clone()
+                    .expect("resolution rejects an app series without a patches_url"),
+                reference: a
+                    .patches_ref
+                    .clone()
+                    .expect("resolution pairs an app's patches_ref with its series"),
+                commit: patches_commit
+                    .clone()
+                    .expect("an app series means the checkout was read"),
+            });
+            let dotnet = match &a.build {
+                AppBuild::DotnetDeb(d) => {
+                    let packaging = git_pin(&d.packaging.git, &d.packaging.git_ref)?;
+                    let nuget = opts.nuget.resolve(
+                        a,
+                        &AppTreePins {
+                            app: &pin,
+                            packaging: &packaging,
+                            patches: patches.as_ref(),
+                            sdk: &d.sdk,
+                        },
+                    )?;
+                    Some(DotnetPins {
+                        packaging,
+                        sdk: d.sdk.clone(),
+                        nuget,
+                    })
+                }
+            };
             Ok(AppPin {
                 name: a.name.clone(),
                 source: pin.source,
                 reference: pin.reference,
                 commit: pin.commit,
+                patches,
+                dotnet,
             })
         })
         .collect::<Result<Vec<_>, EngineError>>()?;
@@ -627,10 +693,87 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
             ));
         }
     }
+    app_drift(
+        &mut axes,
+        &lock.apps,
+        image.map(|i| i.apps.as_slice()).unwrap_or(&[]),
+    );
     if axes.is_empty() {
         Ok(())
     } else {
         Err(EngineError::LockConfigDrift { axes })
+    }
+}
+
+/// Record each way the lock's `[[apps]]` disagree with the resolved apps.
+///
+/// Unlike most sources, an app's *refs* come from config rather than from `update`
+/// flags: a feature moving `ref = "v12.1"` to `"v12.2"` is exactly the edit that must
+/// re-pin, so the refs are compared here along with the sources. So is the SDK, which
+/// the lock records verbatim and which decides the NuGet set `update` resolved. Keyed
+/// by name, order-free, like the kmods.
+fn app_drift(axes: &mut Vec<String>, locked: &[AppPin], resolved: &[App]) {
+    for app in resolved {
+        let Some(pin) = locked.iter().find(|p| p.name == app.name) else {
+            axes.push(format!("app '{}': resolved but not in lock", app.name));
+            continue;
+        };
+        let name = &app.name;
+        let mut diff = |axis: &str, locked: &str, resolved: &str| {
+            if locked != resolved {
+                axes.push(format!(
+                    "app '{name}' {axis}: lock '{locked}' vs resolved '{resolved}'"
+                ));
+            }
+        };
+        diff("source", &pin.source, &app.git);
+        diff(
+            "ref",
+            &pin.reference,
+            &boot2deb_core::sources::normalize_ref(&app.git_ref),
+        );
+        let locked_series = pin.patches.as_ref().map(|p| p.series.join(", "));
+        diff(
+            "patch series",
+            locked_series.as_deref().unwrap_or("(none)"),
+            &if app.patch_series.is_empty() {
+                "(none)".to_string()
+            } else {
+                app.patch_series.join(", ")
+            },
+        );
+        if let (Some(p), Some(url)) = (&pin.patches, &app.patches_url) {
+            diff("patches source", &p.source, url);
+        }
+        match (&app.build, &pin.dotnet) {
+            (AppBuild::DotnetDeb(d), Some(locked)) => {
+                diff(
+                    "packaging source",
+                    &locked.packaging.source,
+                    &d.packaging.git,
+                );
+                diff(
+                    "packaging ref",
+                    &locked.packaging.reference,
+                    &boot2deb_core::sources::normalize_ref(&d.packaging.git_ref),
+                );
+                diff("sdk version", &locked.sdk.version, &d.sdk.version);
+                if locked.sdk.sha512 != d.sdk.sha512 {
+                    axes.push(format!("app '{name}' sdk sha512 table changed"));
+                }
+            }
+            (AppBuild::DotnetDeb(_), None) => {
+                axes.push(format!("app '{name}': lock has no dotnet pins"));
+            }
+        }
+    }
+    for pin in locked {
+        if !resolved.iter().any(|a| a.name == pin.name) {
+            axes.push(format!(
+                "app '{}': in lock but no longer resolved",
+                pin.name
+            ));
+        }
     }
 }
 
@@ -730,6 +873,17 @@ fn blob_pin(dir: &Path, filename: &str) -> Result<String, EngineError> {
 
 #[cfg(test)]
 mod tests {
+    /// A resolver for builds that declare no `dotnet-deb` app: reaching it is a bug in
+    /// the test, not a resolution to stub.
+    struct NoApps;
+    impl NugetResolver for NoApps {
+        fn resolve(&self, app: &App, _: &AppTreePins) -> Result<NugetPin, EngineError> {
+            panic!(
+                "no app is declared, yet NuGet was asked to resolve '{}'",
+                app.name
+            )
+        }
+    }
 
     /// A [`UserspacePin`] from a name and a [`GitPin`]-shaped fixture.
     fn named_pin(name: &str, p: GitPin) -> boot2deb_core::lock::UserspacePin {
@@ -908,6 +1062,7 @@ mod tests {
             patches_path: repo,
             rootfs_manifest: "unused.pkgs.lock",
             source_date_epoch: 1_790_347_034,
+            nuget: &NoApps,
         };
         let err = resolve_lock(&build, &opts).unwrap_err();
         match &err {
@@ -953,6 +1108,7 @@ mod tests {
             patches_path: Path::new("/definitely/not/a/git/repo"),
             rootfs_manifest: "unused.pkgs.lock",
             source_date_epoch: 1_790_347_034,
+            nuget: &NoApps,
         };
         if let Err(e) = resolve_lock(&build, &opts) {
             assert!(
@@ -1072,6 +1228,91 @@ mod tests {
         assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
     }
 
+    /// A resolved `dotnet-deb` app and the lock pin `update` would write for it.
+    fn app_and_pin() -> (App, AppPin) {
+        let sdk = DotnetSdk {
+            version: "10.0.401".into(),
+            sha512: [("amd64".to_string(), "a".repeat(128))]
+                .into_iter()
+                .collect(),
+        };
+        let app = App {
+            name: "jellyfin".into(),
+            git: "https://x/jellyfin.git".into(),
+            git_ref: "v12.1".into(),
+            deb: "jellyfin-server".into(),
+            patch_series: vec!["jellyfin".into()],
+            patches_url: Some("https://x/patches.git".into()),
+            patches_ref: Some("main".into()),
+            build: AppBuild::DotnetDeb(boot2deb_core::model::DotnetDebBuild {
+                packaging: boot2deb_core::model::GitSource {
+                    git: "https://x/jellyfin-packaging.git".into(),
+                    git_ref: "v12.1-1".into(),
+                },
+                source_dir: "jellyfin-server".into(),
+                project: "Jellyfin.Server".into(),
+                sdk: sdk.clone(),
+            }),
+        };
+        let pin = AppPin {
+            name: "jellyfin".into(),
+            source: "https://x/jellyfin.git".into(),
+            reference: "v12.1".into(),
+            commit: "1".repeat(40),
+            patches: Some(PatchesPin {
+                series: vec!["jellyfin".into()],
+                source: "https://x/patches.git".into(),
+                reference: "main".into(),
+                commit: "2".repeat(40),
+            }),
+            dotnet: Some(DotnetPins {
+                packaging: GitPin {
+                    source: "https://x/jellyfin-packaging.git".into(),
+                    reference: "v12.1-1".into(),
+                    commit: "3".repeat(40),
+                },
+                sdk,
+                nuget: NugetPin {
+                    manifest: "x.jellyfin.nuget.lock".into(),
+                    manifest_sha256: "4".repeat(64),
+                },
+            }),
+        };
+        (app, pin)
+    }
+
+    /// An app's ref comes from the feature, not an `update` flag, so a feature that
+    /// moves it has drifted from its lock. So has one that changes the SDK, which
+    /// decided the NuGet set the lock pins.
+    #[test]
+    fn an_app_whose_feature_moved_has_drifted_from_its_lock() {
+        let (app, pin) = app_and_pin();
+        let mut axes = Vec::new();
+        app_drift(
+            &mut axes,
+            std::slice::from_ref(&pin),
+            std::slice::from_ref(&app),
+        );
+        assert!(axes.is_empty(), "a matching lock is clean: {axes:?}");
+
+        let mut moved = app.clone();
+        moved.git_ref = "v12.2".into();
+        let AppBuild::DotnetDeb(d) = &mut moved.build;
+        d.sdk.version = "10.0.402".into();
+        let mut axes = Vec::new();
+        app_drift(&mut axes, std::slice::from_ref(&pin), &[moved]);
+        assert_eq!(axes.len(), 2, "{axes:?}");
+        assert!(axes[0].contains("ref: lock 'v12.1' vs resolved 'v12.2'"));
+        assert!(axes[1].contains("sdk version"));
+
+        let mut axes = Vec::new();
+        app_drift(&mut axes, &[], std::slice::from_ref(&app));
+        assert_eq!(axes, ["app 'jellyfin': resolved but not in lock"]);
+        let mut axes = Vec::new();
+        app_drift(&mut axes, &[pin], &[]);
+        assert_eq!(axes, ["app 'jellyfin': in lock but no longer resolved"]);
+    }
+
     #[test]
     fn assembles_lock_from_resolved_build() {
         let build = rk1_build();
@@ -1086,6 +1327,7 @@ mod tests {
             patches_path: Path::new("/unused"),
             rootfs_manifest: "turing-rk1-forky.pkgs.lock",
             source_date_epoch: 1_790_347_034,
+            nuget: &NoApps,
         };
         let git_pin = |r: &str, c: &str| boot2deb_core::lock::GitPin {
             source: "https://src.example/repo.git".into(),
@@ -1241,6 +1483,7 @@ mod tests {
             patches_path: Path::new("/definitely/not/a/checkout"),
             rootfs_manifest: "unused.pkgs.lock",
             source_date_epoch: 1_790_347_034,
+            nuget: &NoApps,
         };
         match resolve_lock(&build, &opts).unwrap_err() {
             EngineError::PatchesCheckoutMissing { path } => {

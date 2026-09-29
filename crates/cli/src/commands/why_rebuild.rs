@@ -126,6 +126,9 @@ pub(crate) fn run(
         env: &env,
         fragments: &fragments,
         artifact_store: artifact_store.as_deref(),
+        // An app's key folds the SDK tarball this host runs. A host with no Debian
+        // name has no tarball either, and no app node matches then, as for a build.
+        host_arch: host_deb_arch.unwrap_or_default(),
     });
 
     println!("why-rebuild {recipe} (work {})", work_dir.display());

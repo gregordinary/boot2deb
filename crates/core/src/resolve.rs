@@ -320,6 +320,20 @@ pub fn resolve_device(
             &format!("feature '{name}'"),
         )?;
     }
+    // Each app's deb is a package the image installs, whether or not the feature that
+    // declares the app also lists it: the build produced it for this image.
+    let apps = merge_apps(&loaded_features, soc.arch)?;
+    let app_debs: Vec<PackageEntry> = apps
+        .iter()
+        .map(|a| PackageEntry::Plain(a.deb.clone()))
+        .collect();
+    extend_unique(
+        &mut rootfs_packages,
+        &mut seen,
+        &app_debs,
+        &suite,
+        "the selected apps",
+    )?;
 
     // Exclude set: every layer's + feature's `exclude`, unioned. A scoped
     // subtraction is the one thing a pure package union cannot express, so it is a
@@ -348,7 +362,6 @@ pub fn resolve_device(
     // mid-build.
     let extra_debs = merge_extra_debs(&base, &soc, &bm, &device, &loaded_features)?;
     let ffmpeg_libs = merge_ffmpeg_libs(&loaded_features);
-    let apps = merge_apps(&loaded_features)?;
 
     let image_size = overrides
         .image_size
@@ -1256,47 +1269,51 @@ fn merge_ffmpeg_libs(
     merged
 }
 
-/// The union of the selected features' [`Feature::apps`](crate::feature::Feature::apps),
-/// de-duplicated by `name` in first-appearance order.
-///
-/// Features only, for the same reason [`merge_ffmpeg_libs`] takes features only: which
-/// silicon is present decides what the accelerated FFmpeg can do, and whether an image
-/// also carries a player is a capability someone asked for.
+/// Union the selected features' apps in selection order, validating and normalizing
+/// each one for the build's target `arch`.
 ///
 /// Two features naming the same app is only allowed when they agree on it completely.
 /// De-duplicating by name alone would silently drop the second declaration, so a build
-/// that asked for `mpv` at two different refs would get one of them with nothing said.
-/// That is the same reasoning as the `extra_debs` sha256 de-duplication, applied to a
-/// pin rather than to bytes.
+/// that asked for one app at two different refs would get one of them with nothing
+/// said. That is the same reasoning as the `extra_debs` sha256 de-duplication, applied
+/// to a pin rather than to bytes. The comparison is made after normalization, so a
+/// declaration that spells out the default patches ref agrees with one that omits it.
 fn merge_apps(
     features: &[(String, crate::feature::Feature)],
+    arch: Arch,
 ) -> Result<Vec<crate::model::App>, ConfigError> {
     let mut merged: Vec<crate::model::App> = Vec::new();
     for (feat_name, feat) in features {
         for app in &feat.apps {
-            check_app(app)?;
+            let app = check_app(app, feat_name, arch)?;
             match merged.iter().find(|a| a.name == app.name) {
-                Some(prior) if prior != app => {
+                Some(prior) if *prior != app => {
                     return Err(ConfigError::ConflictingApp {
                         app: app.name.clone(),
                         feature: feat_name.clone(),
                     })
                 }
                 Some(_) => {}
-                None => merged.push(app.clone()),
+                None => merged.push(app),
             }
         }
     }
     Ok(merged)
 }
 
-/// Reject an app declaration the build stage could not act on.
+/// Reject an app declaration the build stage could not act on, and return it
+/// normalized: the patches ref filled with its default when series are named, and
+/// cleared when none are, so nothing downstream considers a ref without a series.
 ///
 /// The name becomes a work directory, an artifact-cache node and a lock key, so it is
 /// held to a bare identifier for the same reason [`UserspaceTree::name`] is. The deb
-/// name has to satisfy dpkg, and the prefix has to be absolute — a relative one would
-/// resolve against whatever the stage's working directory happened to be.
-fn check_app(app: &crate::model::App) -> Result<(), ConfigError> {
+/// name has to satisfy dpkg. Every other field the stage turns into a path, a URL or a
+/// cache key is checked here, so a typo fails at `resolve` rather than mid-build.
+fn check_app(
+    app: &crate::model::App,
+    feature: &str,
+    arch: Arch,
+) -> Result<crate::model::App, ConfigError> {
     let bad = |what: &'static str, value: &str, why| {
         Err(ConfigError::InvalidField {
             what,
@@ -1331,20 +1348,107 @@ fn check_app(app: &crate::model::App) -> Result<(), ConfigError> {
             "is not dpkg-package-safe (lowercase alphanumeric plus `-`, `+`, `.`, starting alphanumeric)",
         );
     }
-    if !app.prefix.starts_with('/') || app.prefix.contains("..") {
-        return bad(
-            "app prefix",
-            &app.prefix,
-            "is not an absolute path without a parent reference",
-        );
-    }
     if app.git.is_empty() {
         return bad("app git", &app.git, "is empty");
     }
     if app.git_ref.is_empty() {
         return bad("app ref", &app.git_ref, "is empty");
     }
-    Ok(())
+    if app.patch_series.iter().any(|s| s.is_empty()) {
+        return bad("app patch series", "", "names an empty series");
+    }
+    if !app.patch_series.is_empty() && app.patches_url.is_none() {
+        return Err(ConfigError::MissingAppPatchesUrl {
+            app: app.name.clone(),
+            feature: feature.to_string(),
+            series: app.patch_series.join(", "),
+        });
+    }
+    match &app.build {
+        crate::model::AppBuild::DotnetDeb(d) => {
+            if d.packaging.git.is_empty() {
+                return bad("app packaging git", &d.packaging.git, "is empty");
+            }
+            if d.packaging.git_ref.is_empty() {
+                return bad("app packaging ref", &d.packaging.git_ref, "is empty");
+            }
+            if !is_plain_relative_path(&d.source_dir) {
+                return bad(
+                    "app source_dir",
+                    &d.source_dir,
+                    "is not a relative path of plain components",
+                );
+            }
+            if !is_plain_relative_path(&d.project) {
+                return bad(
+                    "app project",
+                    &d.project,
+                    "is not a relative path of plain components",
+                );
+            }
+            let version_ok = d
+                .sdk
+                .version
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+                && d.sdk
+                    .version
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'));
+            if !version_ok {
+                return bad(
+                    "app sdk version",
+                    &d.sdk.version,
+                    "is not a .NET SDK release (digits, letters, `.` and `-`, starting with a digit)",
+                );
+            }
+            if d.sdk.sha512.is_empty() {
+                return bad("app sdk sha512", "", "names no build-host architecture");
+            }
+            for (host, hash) in &d.sdk.sha512 {
+                if crate::model::dotnet_rid(host).is_none() {
+                    return bad(
+                        "app sdk sha512 host",
+                        host,
+                        "is not a Debian architecture .NET publishes an SDK for (amd64, arm64, armhf)",
+                    );
+                }
+                if !crate::sources::is_sha512_hex(hash) {
+                    return bad(
+                        "app sdk sha512",
+                        hash,
+                        "is not 128 lowercase hex characters",
+                    );
+                }
+            }
+            if crate::model::dotnet_rid(arch.debian_arch()).is_none() {
+                return Err(ConfigError::AppArchUnsupported {
+                    app: app.name.clone(),
+                    feature: feature.to_string(),
+                    arch: arch.debian_arch().to_string(),
+                });
+            }
+        }
+    }
+    let mut normalized = app.clone();
+    normalized.patches_ref = (!app.patch_series.is_empty()).then(|| {
+        app.patches_ref
+            .clone()
+            .unwrap_or_else(|| crate::model::DEFAULT_PATCHES_REF.to_string())
+    });
+    Ok(normalized)
+}
+
+/// A relative path made only of plain components: not empty, not absolute, and with
+/// no `.` or `..` component. What a stage can join onto a tree it owns without the
+/// result leaving that tree.
+fn is_plain_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && path
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
 /// One field of the apt one-line source format: non-empty printable ASCII with
@@ -5785,55 +5889,123 @@ mod fixture_tests {
         assert_eq!(flags, ["--enable-libdavs2", "--enable-libuavs3d"]);
     }
 
-    /// The same app declared twice is one app. Two features can both want a player
-    /// without the selection having to know which of them is "the" declaration.
-    #[test]
-    fn apps_union_across_features_and_dedup_by_name() {
+    /// A `dotnet-deb` app declaration as a feature file writes it, with `edit`
+    /// applied to the field set first. The fields are the ones a real declaration
+    /// carries, so a test changes only what it is about.
+    fn dotnet_app_toml(edit: impl FnOnce(&mut std::collections::BTreeMap<&str, String>)) -> String {
+        let mut f: std::collections::BTreeMap<&str, String> = [
+            ("name", "\"jellyfin\"".to_string()),
+            ("git", "\"https://x/jellyfin.git\"".to_string()),
+            ("ref", "\"v12.1\"".to_string()),
+            ("deb", "\"jellyfin-server\"".to_string()),
+            ("patch_series", "[\"jellyfin\"]".to_string()),
+            ("patches_url", "\"https://x/patches.git\"".to_string()),
+            ("kind", "\"dotnet-deb\"".to_string()),
+            (
+                "packaging",
+                "{ git = \"https://x/jellyfin-packaging.git\", ref = \"v12.1-1\" }".to_string(),
+            ),
+            ("source_dir", "\"jellyfin-server\"".to_string()),
+            ("project", "\"Jellyfin.Server\"".to_string()),
+            ("sdk_version", "\"10.0.401\"".to_string()),
+            ("sha512", format!("{{ amd64 = \"{}\" }}", "a".repeat(128))),
+        ]
+        .into_iter()
+        .collect();
+        edit(&mut f);
+        let top = [
+            "name",
+            "git",
+            "ref",
+            "deb",
+            "patch_series",
+            "patches_url",
+            "patches_ref",
+        ];
+        let mut out = String::from("[[apps]]\n");
+        for key in top {
+            if let Some(v) = f.get(key) {
+                out.push_str(&format!("{key} = {v}\n"));
+            }
+        }
+        out.push_str("[apps.build]\n");
+        for key in ["kind", "packaging", "source_dir", "project"] {
+            if let Some(v) = f.get(key) {
+                out.push_str(&format!("{key} = {v}\n"));
+            }
+        }
+        out.push_str("[apps.build.sdk]\n");
+        if let Some(v) = f.get("sdk_version") {
+            out.push_str(&format!("version = {v}\n"));
+        }
+        if let Some(v) = f.get("sha512") {
+            out.push_str(&format!("sha512 = {v}\n"));
+        }
+        out
+    }
+
+    /// Write `features/<name>.toml` declaring `apps` (already-rendered TOML) into a
+    /// one-feature-per-name tree, and resolve the device with those features selected.
+    fn resolve_with_app_features(
+        features: &[(&'static str, String)],
+    ) -> Result<ResolvedBuild, ConfigError> {
         let tree = Tree {
-            features: vec![
-                Feat {
-                    name: "f1",
+            features: features
+                .iter()
+                .map(|(name, _)| Feat {
+                    name,
                     packages: &["p1"],
                     exclude: &[],
-                },
-                Feat {
-                    name: "f2",
-                    packages: &["p2"],
-                    exclude: &[],
-                },
-            ],
+                })
+                .collect(),
             ..Default::default()
         };
         let dir = tree.write();
         let p = dir.path();
-        let app = "{ name = \"mpv\", git = \"https://x/mpv.git\", ref = \"v0.41.0\",                    deb = \"mpv-rk\", prefix = \"/opt/ffmpeg-rk\" }";
-        fs::write(
-            p.join("features/f1.toml"),
-            format!(
-                "description = \"f\"\npackages = [\"p1\"]\nrequires_soc = [\"rk3588\"]\n\
-                 apps = [{app}]\n"
-            ),
-        )
-        .unwrap();
-        fs::write(
-            p.join("features/f2.toml"),
-            format!(
-                "description = \"f\"\npackages = [\"p2\"]\nrequires_soc = [\"rk3588\"]\n\
-                 apps = [{app}]\n"
-            ),
-        )
-        .unwrap();
+        for (name, apps) in features {
+            fs::write(
+                p.join(format!("features/{name}.toml")),
+                format!(
+                    "description = \"f\"\npackages = [\"p1\"]\nrequires_soc = [\"rk3588\"]\n{apps}"
+                ),
+            )
+            .unwrap();
+        }
         let root = ConfigRoot::new(p);
         let ov = Overrides {
-            features: Some(vec!["f1".into(), "f2".into()]),
+            features: Some(features.iter().map(|(n, _)| n.to_string()).collect()),
             ..Default::default()
         };
-        let b = resolve_device(&root, "dev", &ov).unwrap();
+        resolve_device(&root, "dev", &ov)
+    }
+
+    /// The same app declared twice is one app. Two features can both want a server
+    /// without the selection having to know which of them is "the" declaration.
+    #[test]
+    fn apps_union_across_features_and_dedup_by_name() {
+        let app = dotnet_app_toml(|_| {});
+        let b = resolve_with_app_features(&[("f1", app.clone()), ("f2", app)]).unwrap();
         let apps = &image_of(&b).apps;
         assert_eq!(apps.len(), 1, "the second declaration is the same app");
-        assert_eq!(apps[0].name, "mpv");
-        assert_eq!(apps[0].deb, "mpv-rk");
-        assert_eq!(apps[0].prefix, "/opt/ffmpeg-rk");
+        assert_eq!(apps[0].name, "jellyfin");
+        assert_eq!(apps[0].deb, "jellyfin-server");
+        let AppBuild::DotnetDeb(d) = &apps[0].build;
+        assert_eq!(d.source_dir, "jellyfin-server");
+        assert_eq!(d.sdk.version, "10.0.401");
+    }
+
+    /// An app's deb is installed whether or not its feature also lists it: the build
+    /// produced it for this image, and a feature should not have to say it twice.
+    #[test]
+    fn an_apps_deb_is_in_the_image_package_set() {
+        let b = resolve_with_app_features(&[("f1", dotnet_app_toml(|_| {}))]).unwrap();
+        let pkgs = &image_of(&b).rootfs_packages;
+        assert_eq!(
+            pkgs.iter().filter(|p| *p == "jellyfin-server").count(),
+            1,
+            "added once: {pkgs:?}"
+        );
+        assert!(b.compiles_from_source(), "an app is compiled from source");
     }
 
     /// Two features naming one app at different refs is refused rather than silently
@@ -5841,85 +6013,87 @@ mod fixture_tests {
     /// version neither feature asked for.
     #[test]
     fn apps_that_disagree_are_a_resolve_error() {
-        let tree = Tree {
-            features: vec![
-                Feat {
-                    name: "f1",
-                    packages: &["p1"],
-                    exclude: &[],
-                },
-                Feat {
-                    name: "f2",
-                    packages: &["p2"],
-                    exclude: &[],
-                },
-            ],
-            ..Default::default()
-        };
-        let dir = tree.write();
-        let p = dir.path();
-        for (f, r) in [("f1", "v0.41.0"), ("f2", "v0.40.0")] {
-            fs::write(
-                p.join(format!("features/{f}.toml")),
-                format!(
-                    "description = \"f\"\npackages = [\"p1\"]\nrequires_soc = [\"rk3588\"]\n\
-                     apps = [{{ name = \"mpv\", git = \"https://x/mpv.git\", ref = \"{r}\", \
-                     deb = \"mpv-rk\", prefix = \"/opt/ffmpeg-rk\" }}]\n"
-                ),
-            )
-            .unwrap();
-        }
-        let root = ConfigRoot::new(p);
-        let ov = Overrides {
-            features: Some(vec!["f1".into(), "f2".into()]),
-            ..Default::default()
-        };
+        let a = dotnet_app_toml(|_| {});
+        let b = dotnet_app_toml(|f| {
+            f.insert("ref", "\"v12.0\"".into());
+        });
         assert!(matches!(
-            resolve_device(&root, "dev", &ov),
+            resolve_with_app_features(&[("f1", a), ("f2", b)]),
             Err(ConfigError::ConflictingApp { .. })
         ));
     }
 
-    /// The name becomes a work directory and a cache key, and the deb name has to
-    /// satisfy dpkg. Both are checked at resolve rather than discovered in the stage.
+    /// The default patches ref is filled in at resolution, so a declaration that
+    /// spells it out and one that omits it are the same app rather than a conflict.
     #[test]
-    fn an_app_with_an_unusable_name_or_prefix_is_refused() {
-        let bad = [
-            ("../escape", "mpv-rk", "/opt/ffmpeg-rk"),
-            ("mpv", "MPV_RK", "/opt/ffmpeg-rk"),
-            ("mpv", "mpv-rk", "opt/ffmpeg-rk"),
-            ("mpv", "mpv-rk", "/opt/../etc"),
+    fn the_default_patches_ref_is_filled_before_apps_are_compared() {
+        let spelled = dotnet_app_toml(|f| {
+            f.insert("patches_ref", "\"main\"".into());
+        });
+        let b =
+            resolve_with_app_features(&[("f1", dotnet_app_toml(|_| {})), ("f2", spelled)]).unwrap();
+        assert_eq!(image_of(&b).apps[0].patches_ref.as_deref(), Some("main"));
+
+        let unpatched = dotnet_app_toml(|f| {
+            f.remove("patch_series");
+            f.insert("patches_ref", "\"main\"".into());
+        });
+        let b = resolve_with_app_features(&[("f1", unpatched)]).unwrap();
+        assert_eq!(
+            image_of(&b).apps[0].patches_ref,
+            None,
+            "a ref with no series to pin is dropped"
+        );
+    }
+
+    /// Every field the stage turns into a path, a URL or a cache key is checked at
+    /// resolve rather than discovered mid-build.
+    #[test]
+    fn an_app_the_stage_could_not_build_is_refused() {
+        type Edit = fn(&mut std::collections::BTreeMap<&str, String>);
+        let cases: &[(&str, Edit)] = &[
+            ("path-escaping name", |f| {
+                f.insert("name", "\"../escape\"".into());
+            }),
+            ("non-dpkg deb", |f| {
+                f.insert("deb", "\"JELLYFIN_SERVER\"".into());
+            }),
+            ("absolute source_dir", |f| {
+                f.insert("source_dir", "\"/jellyfin-server\"".into());
+            }),
+            ("parent in project", |f| {
+                f.insert("project", "\"../Jellyfin.Server\"".into());
+            }),
+            ("sdk version with a slash", |f| {
+                f.insert("sdk_version", "\"10.0/401\"".into());
+            }),
+            ("short sha512", |f| {
+                f.insert("sha512", "{ amd64 = \"abc\" }".into());
+            }),
+            ("host .NET has no SDK for", |f| {
+                f.insert("sha512", format!("{{ riscv64 = \"{}\" }}", "a".repeat(128)));
+            }),
+            ("series without a patches_url", |f| {
+                f.remove("patches_url");
+            }),
+            ("unknown build kind", |f| {
+                f.insert("kind", "\"meson\"".into());
+            }),
         ];
-        for (name, deb, prefix) in bad {
-            let tree = Tree {
-                features: vec![Feat {
-                    name: "f1",
-                    packages: &["p1"],
-                    exclude: &[],
-                }],
-                ..Default::default()
-            };
-            let dir = tree.write();
-            let p = dir.path();
-            fs::write(
-                p.join("features/f1.toml"),
-                format!(
-                    "description = \"f\"\npackages = [\"p1\"]\nrequires_soc = [\"rk3588\"]\n\
-                     apps = [{{ name = \"{name}\", git = \"https://x/a.git\", ref = \"v1\", \
-                     deb = \"{deb}\", prefix = \"{prefix}\" }}]\n"
-                ),
-            )
-            .unwrap();
-            let root = ConfigRoot::new(p);
-            let ov = Overrides {
-                features: Some(vec!["f1".into()]),
-                ..Default::default()
-            };
+        for (what, edit) in cases {
+            let app = dotnet_app_toml(*edit);
             assert!(
-                resolve_device(&root, "dev", &ov).is_err(),
-                "accepted name={name} deb={deb} prefix={prefix}"
+                resolve_with_app_features(&[("f1", app)]).is_err(),
+                "accepted an app with a {what}"
             );
         }
+        let no_url = dotnet_app_toml(|f| {
+            f.remove("patches_url");
+        });
+        assert!(matches!(
+            resolve_with_app_features(&[("f1", no_url)]),
+            Err(ConfigError::MissingAppPatchesUrl { .. })
+        ));
     }
 
     #[test]

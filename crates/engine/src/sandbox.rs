@@ -408,6 +408,23 @@ impl BuildRoot {
         run_in(self.profile(), spec, step)
     }
 
+    /// Run one command in this build root as [`run`](Self::run) does, but sharing the
+    /// host's network: the one exception to "every command runs offline".
+    ///
+    /// It exists for `update`, never for a build. `update` is the step that resolves
+    /// pins, and only a restore that talks to the feed can resolve a `dotnet-deb` app's
+    /// NuGet package set. That restore runs here, and its result becomes a pinned
+    /// manifest. The build then restores offline, from a folder the engine fills from
+    /// those pins. What reaches an image is still fetched by the engine and verified
+    /// against a pin. The posture the provenance records for every build command is
+    /// unchanged.
+    ///
+    /// The host's `resolv.conf` is bound into the root for name resolution. Everything
+    /// else about the cage is the build profile's.
+    pub fn run_networked(&self, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
+        run_in(self.profile().network(Network::Host), spec, step)
+    }
+
     /// The rooted profile a command in this build root launches under: the shared
     /// [`baseline_overlay`] over this root's base and increment.
     ///

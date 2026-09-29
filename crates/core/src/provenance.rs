@@ -421,7 +421,9 @@ pub struct SandboxMount {
 pub struct ProvenanceManifest {
     /// Resolved device / arch / suite / features build point.
     pub image: ImageProvenance,
-    /// Every pinned source ref + commit (kernel, patches, u-boot, userspace, ffmpeg).
+    /// Every pinned source ref + commit (kernel, patches, u-boot, ffmpeg). The
+    /// variable-count sources ride as their own arrays: [`userspace`](Self::userspace)
+    /// and [`apps`](Self::apps).
     pub sources: SourcesProvenance,
     /// Rootfs suite + the content-pinned solved-manifest reference.
     pub rootfs: RootfsProvenance,
@@ -483,6 +485,11 @@ pub struct ProvenanceManifest {
     /// Declared with the other arrays-of-tables. See [`UserspaceSourceProvenance`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub userspace: Vec<UserspaceSourceProvenance>,
+    /// One row per application this image's build compiled from source, in the order
+    /// the lock pins them. Empty for an image that compiled none. Declared with the
+    /// other arrays-of-tables. See [`AppSourceProvenance`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<AppSourceProvenance>,
     /// Pre-built `extra_debs` pulled from outside the Debian mirror,
     /// each content-pinned by sha256 — part of "exactly what went into this image."
     /// Omitted when none. Declared before the durability list so both arrays-of-tables
@@ -845,6 +852,44 @@ pub struct UserspaceSourceProvenance {
     pub reference: String,
     /// The exact commit that ref pointed at.
     pub commit: String,
+}
+
+/// One compiled application: its tree's `ref` and exact `commit`, and every other
+/// input its build pinned.
+///
+/// The optional keys are present exactly when the lock pins them. The patches commit
+/// appears when the app applies a series, and the packaging, SDK and NuGet keys for a
+/// `dotnet-deb` build. The NuGet set itself is a sidecar too long to repeat here. The
+/// row names the file and its digest instead, which is what the lock pins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppSourceProvenance {
+    /// The app's name, as the feature's `[[apps]]` entry gives it.
+    pub name: String,
+    /// The human-readable ref the app's pin came from.
+    pub reference: String,
+    /// The exact commit that ref pointed at.
+    pub commit: String,
+    /// The patch series the app applied, in apply order. Empty when it applied none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patch_series: Vec<String>,
+    /// The `patches` repo commit the series were read at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patches_commit: Option<String>,
+    /// The packaging tree's ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packaging_ref: Option<String>,
+    /// The packaging tree's exact commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packaging_commit: Option<String>,
+    /// The .NET SDK release that compiled the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_version: Option<String>,
+    /// The NuGet sidecar the build restored from, committed beside the lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nuget_manifest: Option<String>,
+    /// sha256 of that sidecar — the same value the lock pins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nuget_manifest_sha256: Option<String>,
 }
 
 /// The rootfs suite plus the content-pinned solved-manifest reference.
@@ -1563,6 +1608,26 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
                 commit: p.commit.clone(),
             })
             .collect(),
+        apps: lock
+            .apps
+            .iter()
+            .map(|a| AppSourceProvenance {
+                name: a.name.clone(),
+                reference: a.reference.clone(),
+                commit: a.commit.clone(),
+                patch_series: a
+                    .patches
+                    .as_ref()
+                    .map(|p| p.series.clone())
+                    .unwrap_or_default(),
+                patches_commit: a.patches.as_ref().map(|p| p.commit.clone()),
+                packaging_ref: a.dotnet.as_ref().map(|d| d.packaging.reference.clone()),
+                packaging_commit: a.dotnet.as_ref().map(|d| d.packaging.commit.clone()),
+                sdk_version: a.dotnet.as_ref().map(|d| d.sdk.version.clone()),
+                nuget_manifest: a.dotnet.as_ref().map(|d| d.nuget.manifest.clone()),
+                nuget_manifest_sha256: a.dotnet.as_ref().map(|d| d.nuget.manifest_sha256.clone()),
+            })
+            .collect(),
         extra_debs: lock.extra_debs.clone(),
         // Every source axis the build actually *fetches*, classified offline by pin
         // form. A source the build never fetches has no re-fetch durability to report,
@@ -1579,7 +1644,8 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
 /// The `[[source_durability]]` rows for a lock — one per source the build fetches
 /// from git: the kernel and u-boot when they are compiled, the four media-accel trees
 /// (mpp/librga/libmali/ffmpeg-base) when the transcode stack is built, the kernel and
-/// u-boot patch series, and each out-of-tree module.
+/// u-boot patch series, each out-of-tree module, and each app's tree, packaging tree
+/// and patch series.
 ///
 /// The same set `verify-sources` probes online, classified here offline by pin form.
 fn source_durability_rows(lock: &Lock) -> Vec<SourceDurability> {
@@ -1624,6 +1690,30 @@ fn source_durability_rows(lock: &Lock) -> Vec<SourceDurability> {
             &kmod.reference,
             &kmod.commit,
         ));
+    }
+    // An app fetches its own tree, its packaging tree, and its patch series, each a
+    // pin of its own. The patches row matters for the reason the kernel's does: it is
+    // a local checkout's HEAD.
+    for app in &lock.apps {
+        rows.push(source_durability(
+            &format!("app:{}", app.name),
+            &app.reference,
+            &app.commit,
+        ));
+        if let Some(d) = &app.dotnet {
+            rows.push(source_durability(
+                &format!("app:{}:packaging", app.name),
+                &d.packaging.reference,
+                &d.packaging.commit,
+            ));
+        }
+        if let Some(p) = &app.patches {
+            rows.push(source_durability(
+                &format!("app:{}:patches", app.name),
+                &p.reference,
+                &p.commit,
+            ));
+        }
     }
     rows
 }
@@ -2771,6 +2861,58 @@ pub(crate) mod tests {
         assert!(!source_durability_rows(&lock)
             .iter()
             .any(|r| r.source.contains("patches")));
+    }
+
+    /// An app fetches three sources, and each is graded on its own: the app's tree,
+    /// its packaging tree, and its patch series, which like the kernel's is a local
+    /// checkout's HEAD. A build with no app contributes none of the three.
+    #[test]
+    fn an_apps_three_fetched_sources_each_get_a_durability_row() {
+        let mut lock = sample_lock();
+        lock.apps = vec![AppPin {
+            name: "jellyfin".into(),
+            source: "https://example.invalid/jellyfin.git".into(),
+            reference: "v12.1".into(),
+            commit: "1".repeat(40),
+            patches: Some(PatchesPin {
+                series: vec!["jellyfin".into()],
+                source: "https://example.invalid/patches.git".into(),
+                reference: "2".repeat(40),
+                commit: "2".repeat(40),
+            }),
+            dotnet: Some(crate::lock::DotnetPins {
+                packaging: crate::lock::GitPin {
+                    source: "https://example.invalid/jellyfin-packaging.git".into(),
+                    reference: "v12.1-202609142034".into(),
+                    commit: "3".repeat(40),
+                },
+                sdk: crate::model::DotnetSdk {
+                    version: "10.0.401".into(),
+                    sha512: [("amd64".to_string(), "a".repeat(128))]
+                        .into_iter()
+                        .collect(),
+                },
+                nuget: crate::lock::NugetPin {
+                    manifest: "x.jellyfin.nuget.lock".into(),
+                    manifest_sha256: "b".repeat(64),
+                },
+            }),
+        }];
+        let rows = source_durability_rows(&lock);
+        let form = |source: &str| {
+            rows.iter()
+                .find(|r| r.source == source)
+                .unwrap_or_else(|| panic!("no row for {source}"))
+                .form
+                .clone()
+        };
+        assert_eq!(form("app:jellyfin"), "named-ref");
+        assert_eq!(form("app:jellyfin:packaging"), "named-ref");
+        assert_eq!(form("app:jellyfin:patches"), "bare-commit");
+        lock.apps.clear();
+        assert!(!source_durability_rows(&lock)
+            .iter()
+            .any(|r| r.source.starts_with("app:")));
     }
 
     /// `[credentials]` is the whole answer to "who can reach this image": the password,

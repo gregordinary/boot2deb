@@ -246,6 +246,12 @@ The lock also records the rootfs's `source_date_epoch`, the time every rootfs ti
 takes. An `update` that moves a pin sets it to the current time. One that moves nothing
 keeps the previous value, so it rewrites the lock byte for byte.
 
+For an [application a feature compiles](config-model.md#applications-a-feature-compiles)
+from .NET, `update` also runs one NuGet restore with the network. It writes the packages
+that restore needed to a sidecar beside the lock, `<leaf>.<app>.nuget.lock`, which the
+build then restores from offline. It stands up the cross root to do that, so the first
+such `update` on a host bootstraps one.
+
 One flag is worth calling out:
 
 - **`--feature <name>`**, repeatable, pins a [feature
@@ -267,8 +273,9 @@ boot2deb update turing-rk1/forky --feature media-accel-rockchip --feature jellyf
 boot2deb build turing-rk1/forky
 ```
 
-Builds the recipe from its lock: compiles the kernel, u-boot, userspace, and ffmpeg,
-bootstraps the rootfs, and writes the bootable disk image. Notable flags:
+Builds the recipe from its lock. It compiles the kernel, u-boot, userspace, ffmpeg and
+any application a feature declares. It then bootstraps the rootfs and writes the
+bootable disk image. Notable flags:
 
 - **`--feature <name>`**, repeatable, selects which lock to build — the one `update
   --feature` pinned. It does not re-resolve one, so a selection that was never pinned
@@ -283,7 +290,8 @@ bootstraps the rootfs, and writes the bootable disk image. Notable flags:
   lands on the recipe's artifacts.
 
 - **`--stage <node>`** runs a single node, and the default builds everything. The nodes
-  are `kernel`, `dtb`, `kmod`, `uboot`, `userspace`, `ffmpeg`, `rootfs`, and `image`.
+  are `kernel`, `dtb`, `kmod`, `uboot`, `userspace`, `ffmpeg`, `app`, `rootfs`, and
+  `image`.
 
   `kmod` builds the board's out-of-tree module `.deb`s (its
   [`device_kmods`](config-model.md#out-of-tree-modules-are-their-own-layer))
@@ -723,7 +731,8 @@ written.
 # tree is auto-fetched at its pin.
 boot2deb verify-patches turing-rk1/forky
 
-# Both patch axes are covered. A u-boot-only recipe verifies its u-boot series...
+# Every patch axis is covered: kernel, u-boot, and each compiled app's two trees.
+# A u-boot-only recipe verifies its u-boot series...
 boot2deb verify-patches rk3576-generic/loader
 
 # ...and a recipe carrying both reports each at its own version:
@@ -1004,9 +1013,10 @@ documents state the same facts. What is in them:
 | component | how it is identified |
 | --- | --- |
 | every installed package | name, exact version, sha256, and a `pkg:deb/debian/...` purl — carrying `&upstream=<source>` where the source package is named separately |
-| every pinned source tree | the ref and the exact commit — kernel, u-boot, the patch series, and the media-accel trees |
+| every pinned source tree | the ref and the exact commit — kernel, u-boot, the patch series, the media-accel trees, and each compiled app's tree, packaging tree and series |
 | every rkbin blob | its sha256, which is the only identity it has |
 | every externally-fetched `.deb` | its URL and sha256 |
+| every NuGet package a compiled app ships | id, exact version, sha512, and a `pkg:nuget/...` purl |
 
 The `upstream` qualifier is what ties the several binary packages of one source back to
 the thing that was built. `libsystemd0`, `libsystemd-shared` and `systemd` are one
@@ -1040,7 +1050,8 @@ byte-stable.
 It reads a *published build*, not a recipe's lock. A lock says what an image would be
 made of, and only a build says what one is. `sbom <recipe>` therefore reads the
 `.provenance.toml` and `.pkgs.lock` beside that recipe's image, and says so if no build
-has produced them yet.
+has produced them yet. An image with a compiled .NET app also carries the app's
+`.nuget.lock` beside them, and the SBOM refuses to leave it out.
 
 ## Where the size went
 

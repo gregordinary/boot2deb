@@ -1,14 +1,14 @@
-//! The three UTC timestamp spellings this project writes, and the calendar
+//! The four UTC timestamp spellings this project writes, and the calendar
 //! conversion behind all of them.
 //!
 //! Pure: the caller reads the clock and passes whole Unix seconds, so the civil-date
 //! conversion is unit-testable and nothing here is a source of nondeterminism.
 //!
-//! There are three spellings because three external formats demand different ones.
+//! There are four spellings because four external formats demand different ones.
 //! `snapshot.debian.org` wants `YYYYMMDDTHHMMSSZ`, SPDX and CycloneDX want RFC 3339,
-//! and kbuild's `KBUILD_BUILD_TIMESTAMP` wants what `date` prints. One calendar
-//! conversion, because a second copy of it is the kind of code that is wrong for four
-//! years without anyone noticing.
+//! kbuild's `KBUILD_BUILD_TIMESTAMP` wants what `date` prints, and a
+//! `debian/changelog` trailer wants RFC 2822. One calendar conversion, because a second
+//! copy of it is the kind of code that is wrong for four years without anyone noticing.
 
 /// Format whole Unix seconds as a `snapshot.debian.org` timestamp,
 /// `YYYYMMDDTHHMMSSZ` in UTC — the spelling a snapshot mirror URL takes.
@@ -46,16 +46,35 @@ pub fn format_rfc3339(unix_secs: u64) -> String {
 /// assert_eq!(format_date_c(0), "Thu Jan  1 00:00:00 UTC 1970");
 /// ```
 pub fn format_date_c(unix_secs: u64) -> String {
-    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
     let (y, mo, d, h, m, s) = parts(unix_secs);
-    // 1970-01-01 was a Thursday, which is why the table starts there.
     let weekday = WEEKDAYS[((unix_secs / 86_400) % 7) as usize];
     let month = MONTHS[(mo - 1) as usize];
     format!("{weekday} {month} {d:>2} {h:02}:{m:02}:{s:02} UTC {y}")
 }
+
+/// Format whole Unix seconds as RFC 2822 in UTC, `Www, dd Mmm YYYY HH:MM:SS +0000`.
+///
+/// It is the date a `debian/changelog` entry's trailer line carries, which
+/// `dpkg-parsechangelog` reads back as the entry's timestamp.
+///
+/// ```
+/// use boot2deb_core::datetime::format_rfc2822;
+/// assert_eq!(format_rfc2822(1_767_225_600), "Thu, 01 Jan 2026 00:00:00 +0000");
+/// ```
+pub fn format_rfc2822(unix_secs: u64) -> String {
+    let (y, mo, d, h, m, s) = parts(unix_secs);
+    let weekday = WEEKDAYS[((unix_secs / 86_400) % 7) as usize];
+    let month = MONTHS[(mo - 1) as usize];
+    format!("{weekday}, {d:02} {month} {y} {h:02}:{m:02}:{s:02} +0000")
+}
+
+/// Weekday abbreviations, from 1970-01-01, which was a Thursday.
+const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+
+/// Month abbreviations, January first.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 /// Split whole Unix seconds into UTC `(year, month, day, hour, minute, second)`.
 fn parts(unix_secs: u64) -> (i64, u32, u32, u64, u64, u64) {

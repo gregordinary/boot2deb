@@ -46,6 +46,7 @@ pub mod lock;
 pub mod manifest;
 pub mod mbox;
 pub mod model;
+pub mod nuget;
 pub mod outdated;
 pub mod outputs;
 pub mod press;

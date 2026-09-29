@@ -11,12 +11,136 @@
 use crate::args::UpdateArgs;
 use crate::config::{default_patches_checkout, extra_debs_store, preflight_config, source_axes};
 use crate::render::{print_event_at, short, Verbosity};
-use boot2deb_core::model::Overrides;
+use boot2deb_core::lock::NugetPin;
+use boot2deb_core::model::{App, AppBuild, Overrides, ResolvedBuild};
 use boot2deb_core::series::Scope;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
+use boot2deb_engine::build::app;
 use boot2deb_engine::debstore::DebStore;
+use boot2deb_engine::dotnet::DotnetCache;
+use boot2deb_engine::error::EngineError;
 use boot2deb_engine::event::{Event, Step};
+use boot2deb_engine::sandbox::RootlessSandbox;
 use boot2deb_engine::{extradebs, pins, sources};
+use std::path::{Path, PathBuf};
+
+/// What `update` needs to resolve a `dotnet-deb` app's NuGet pins: the host-arch cross
+/// root the restore runs in, the SDK and package caches, and the lock's directory the
+/// sidecar is written into.
+///
+/// It is the one part of `update` that provisions a root. The root is the one `build`
+/// compiles the app in — the same inputs name the same tree — so the SDK's runtime
+/// dependencies it finds are the ones the build will.
+struct AppNuget<'a> {
+    root: &'a ConfigRoot,
+    recipe: &'a str,
+    build: &'a ResolvedBuild,
+    patches_path: &'a Path,
+    cross: RootlessSandbox,
+    dotnet: DotnetCache,
+    host_deb_arch: &'static str,
+    work_dir: PathBuf,
+    verbosity: Verbosity,
+}
+
+impl AppNuget<'_> {
+    /// Stand the context up for `build`, or return `None` when it declares no
+    /// `dotnet-deb` app and so has nothing to resolve. Provisions nothing yet: the
+    /// cross root is bootstrapped the first time a restore enters it.
+    fn for_build<'a>(
+        root: &'a ConfigRoot,
+        recipe: &'a str,
+        build: &'a ResolvedBuild,
+        patches_path: &'a Path,
+        verbosity: Verbosity,
+    ) -> Result<Option<AppNuget<'a>>, Box<dyn std::error::Error>> {
+        let has_dotnet = build.image.as_ref().is_some_and(|i| {
+            i.apps
+                .iter()
+                .any(|a| matches!(a.build, AppBuild::DotnetDeb(_)))
+        });
+        if !has_dotnet {
+            return Ok(None);
+        }
+        let pf = boot2deb_engine::preflight(build.arch);
+        pf.ensure_can_build()?;
+        let host_deb_arch = crate::sandboxes::host_deb_arch(&pf)?;
+        let work_dir = crate::workdir::work_dir_for(root, recipe, None);
+        crate::workdir::mark_work_dir(&work_dir)?;
+        // The live mirror, as a build without a snapshot uses: the root only has to run
+        // the SDK, and the package set the restore resolves comes from NuGet, not Debian.
+        let mirrors = boot2deb_engine::snapshot::resolve_mirrors(
+            boot2deb_engine::DEFAULT_MIRROR,
+            None,
+            boot2deb_core::lock::SnapshotMode::Off,
+        )?;
+        let roots = crate::sandboxes::roots(
+            build,
+            &crate::sandboxes::RootInputs {
+                work_dir: &work_dir,
+                host_deb_arch,
+                mirrors: &mirrors,
+                keyring: crate::sandboxes::keyring(root, None, false)?,
+                deb_cache: work_dir.join("cache").join("provisioner-debs"),
+            },
+        );
+        Ok(Some(AppNuget {
+            root,
+            recipe,
+            build,
+            patches_path,
+            cross: roots.cross,
+            dotnet: DotnetCache::open(&crate::config::cache_dir(root))?,
+            host_deb_arch,
+            work_dir,
+            verbosity,
+        }))
+    }
+}
+
+impl pins::NugetResolver for AppNuget<'_> {
+    fn resolve(&self, app: &App, pins: &pins::AppTreePins) -> Result<NugetPin, EngineError> {
+        let sink = |e: Event| print_event_at(self.verbosity, &e);
+        let manifest = app::resolve_nuget(
+            &app::ResolveNuget {
+                app,
+                app_pin: pins.app,
+                packaging: pins.packaging,
+                patches_pin: pins.patches,
+                patches_root: pins.patches.map(|_| self.patches_path),
+                target_arch: self.build.arch,
+                host_arch: self.host_deb_arch,
+                work_dir: &self.work_dir,
+                dotnet: &self.dotnet,
+            },
+            &self.cross,
+            &sink,
+        )?;
+        // Beside the lock and named for the recipe's leaf, as the rootfs manifest is:
+        // inside `recipes/<device>/` the device is already the folder.
+        let leaf = self.recipe.rsplit('/').next().unwrap_or(self.recipe);
+        let name = boot2deb_core::nuget::sidecar_name(leaf, &app.name);
+        let path = self.root.lock_sibling(self.recipe, &name)?;
+        let manifest_sha256 = boot2deb_engine::dotnet::write_manifest(&path, &manifest)?;
+        Ok(NugetPin {
+            manifest: name,
+            manifest_sha256,
+        })
+    }
+}
+
+/// The resolver for a build that declares no `dotnet-deb` app, which `resolve_lock`
+/// therefore never consults.
+struct NoDotnetApps;
+
+impl pins::NugetResolver for NoDotnetApps {
+    fn resolve(&self, app: &App, _: &pins::AppTreePins) -> Result<NugetPin, EngineError> {
+        Err(EngineError::MissingAppPin {
+            app: app.name.clone(),
+            missing: "a NuGet resolver: the build was classified as having no dotnet-deb app",
+        })
+    }
+}
 
 /// Choose the ref to pin for one source axis and record the choice when it follows a
 /// moved config constraint.
@@ -200,6 +324,11 @@ pub(crate) fn run(
         let leaf = recipe.rsplit('/').next().unwrap_or(recipe);
         boot2deb_core::manifest::manifest_name(leaf)
     });
+    let app_nuget = AppNuget::for_build(root, recipe, &build, &patches_path, verbosity)?;
+    let nuget: &dyn pins::NugetResolver = match &app_nuget {
+        Some(resolver) => resolver,
+        None => &NoDotnetApps,
+    };
     let opts = pins::UpdateOptions {
         kernel_ref: &kernel_ref,
         uboot_ref: &uboot_ref,
@@ -214,6 +343,7 @@ pub(crate) fn run(
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("the system clock reads before 1970: {e}"))?
             .as_secs(),
+        nuget,
     };
     let mut lock = pins::resolve_lock(&build, &opts)?;
     // The rootfs epoch is this update's time only when a pin moved. An update that
@@ -286,6 +416,25 @@ pub(crate) fn run(
                 "  ff-rk    {} {} (graft provenance)",
                 rk.reference,
                 short(&rk.commit)
+            );
+        }
+    }
+    for a in &lock.apps {
+        println!("  app      {} {} {}", a.name, a.reference, short(&a.commit));
+        if let Some(p) = &a.patches {
+            println!("    patches   {} {}", p.series.join(", "), short(&p.commit));
+        }
+        if let Some(d) = &a.dotnet {
+            println!(
+                "    packaging {} {}",
+                d.packaging.reference,
+                short(&d.packaging.commit)
+            );
+            println!("    sdk       {}", d.sdk.version);
+            println!(
+                "    nuget     {} ({})",
+                d.nuget.manifest,
+                short(&d.nuget.manifest_sha256)
             );
         }
     }

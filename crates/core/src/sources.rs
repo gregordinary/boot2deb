@@ -78,9 +78,20 @@ pub fn is_full_sha(s: &str) -> bool {
 /// because the generators (`sha256_hex`) emit lowercase and the pins are
 /// compared as bytes.
 pub fn is_sha256_hex(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64 && is_lower_hex(s)
+}
+
+/// True for a 128-character *lowercase* hex sha512 digest: the shape the .NET SDK
+/// and NuGet package pins are written with. Lowercase-strict for the same reason as
+/// [`is_sha256_hex`].
+pub fn is_sha512_hex(s: &str) -> bool {
+    s.len() == 128 && is_lower_hex(s)
+}
+
+/// Every byte a lowercase hex digit.
+fn is_lower_hex(s: &str) -> bool {
+    s.bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Canonicalize a git reference for a pin. A full 40-hex sha is lowercased to git's

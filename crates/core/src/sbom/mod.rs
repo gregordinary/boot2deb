@@ -59,6 +59,9 @@ pub enum ComponentKind {
     /// A pre-built `.deb` pulled from outside the Debian mirror and content-pinned by
     /// sha256.
     ExtraDeb,
+    /// A NuGet package an app's build restored and shipped inside its deb,
+    /// content-pinned by the sha512 of the `.nupkg`.
+    NugetPackage,
 }
 
 /// How a component relates to the image.
@@ -95,6 +98,10 @@ pub struct Component {
     pub purl: Option<String>,
     /// Lowercase-hex sha256 of the component's bytes, where the build pinned one.
     pub sha256: Option<String>,
+    /// Lowercase-hex sha512 of the component's bytes, where the build pinned that
+    /// instead. NuGet pins a package by sha512, and restating it as a sha256 would
+    /// be a digest the build never checked.
+    pub sha512: Option<String>,
     /// Where the bytes came from: a `git+<url>@<commit>` VCS locator for a source
     /// pin, an HTTPS URL for a fetched `.deb`. Absent where the build records none —
     /// rendered as `NOASSERTION` by SPDX, which requires the field.
@@ -125,7 +132,7 @@ pub struct Sbom {
     /// The image the document describes.
     pub image: Component,
     /// Everything else, in a stable order: packages, then sources, then blobs, then
-    /// extra `.deb`s.
+    /// extra `.deb`s, then each app's NuGet packages.
     pub components: Vec<Component>,
 }
 
@@ -149,10 +156,15 @@ impl Sbom {
     /// thing that was built, which no other document boot2deb writes can answer. Empty
     /// is legitimate — an image handed over without its plan — and simply leaves the
     /// attribution out rather than guessing it from a name.
+    ///
+    /// `nuget` is each compiled app's NuGet sidecar, keyed by the app's name: the
+    /// packages its build restored, which its deb ships as assemblies. Empty for an
+    /// image with no app.
     pub fn from_provenance(
         manifest: &ProvenanceManifest,
         packages: &[Package],
         sources: &BTreeMap<String, String>,
+        nuget: &[(String, crate::nuget::NugetManifest)],
         name: &str,
         created: &str,
     ) -> Sbom {
@@ -171,6 +183,7 @@ impl Sbom {
                     source.map(String::as_str),
                 )),
                 sha256: Some(p.sha256.clone()),
+                sha512: None,
                 // The archive a package came from is recorded per *repository* in the
                 // provenance, and the per-package join lives in the plan document
                 // rather than here — so rather than guess a pool URL, the digest is
@@ -191,6 +204,7 @@ impl Sbom {
                 kind: ComponentKind::Source,
                 purl: Some(generic_purl(&src.purl_name, &src.commit)),
                 sha256: None,
+                sha512: None,
                 download: src.url.map(|url| format!("git+{url}@{}", src.commit)),
                 description: Some(format!("pinned at {}", src.commit)),
                 relation: Relation::GeneratedFrom,
@@ -213,6 +227,7 @@ impl Sbom {
                     kind: ComponentKind::Blob,
                     purl: None,
                     sha256: digest,
+                    sha512: None,
                     download: None,
                     description: Some("vendored Rockchip boot blob".into()),
                     relation: Relation::Contains,
@@ -234,10 +249,29 @@ impl Sbom {
                 kind: ComponentKind::ExtraDeb,
                 purl: None,
                 sha256: Some(deb.sha256.clone()),
+                sha512: None,
                 download: deb.url.clone(),
                 description: Some("pre-built .deb from outside the Debian mirror".into()),
                 relation: Relation::Contains,
             });
+        }
+        let mut n = 0;
+        for (app, set) in nuget {
+            for package in &set.packages {
+                components.push(Component {
+                    id: format!("Nuget-{n}"),
+                    name: package.id.clone(),
+                    version: Some(package.version.clone()),
+                    kind: ComponentKind::NugetPackage,
+                    purl: Some(nuget_purl(&package.id, &package.version)),
+                    sha256: None,
+                    sha512: Some(package.sha512.clone()),
+                    download: Some(package.url()),
+                    description: Some(format!("restored into {app} for {}", set.runtime)),
+                    relation: Relation::Contains,
+                });
+                n += 1;
+            }
         }
 
         let image = &manifest.image;
@@ -263,6 +297,7 @@ impl Sbom {
                 kind: ComponentKind::Image,
                 purl: None,
                 sha256: None,
+                sha512: None,
                 download: None,
                 description: Some(about),
                 relation: Relation::Contains,
@@ -420,6 +455,26 @@ fn source_pins(manifest: &ProvenanceManifest) -> Vec<SourcePin> {
             ma.ffmpeg_rockchip_commit.as_ref(),
         ));
     }
+    // Each app is compiled from its own tree and, for a `dotnet-deb` build, a
+    // packaging tree; a patched one also from the patches repo, whose series names
+    // stand in for a ref as they do for the kernel's.
+    for app in &manifest.apps {
+        pins.extend(pin(&app.name, Some(&app.reference), Some(&app.commit)));
+        pins.extend(pin(
+            &format!("{}-packaging", app.name),
+            app.packaging_ref.as_ref(),
+            app.packaging_commit.as_ref(),
+        ));
+        if let Some(commit) = &app.patches_commit {
+            pins.push(SourcePin {
+                name: format!("{}-patches", app.name),
+                purl_name: format!("{}-patches", app.name),
+                reference: app.patch_series.join(", "),
+                commit: commit.clone(),
+                url: None,
+            });
+        }
+    }
     pins
 }
 
@@ -469,6 +524,15 @@ fn deb_purl(name: &str, version: &str, architecture: &str, source: Option<&str>)
         purl.push_str(&format!("&upstream={}", percent_encode(source)));
     }
     purl
+}
+
+/// A NuGet package's purl: `pkg:nuget/<id>@<version>`.
+fn nuget_purl(id: &str, version: &str) -> String {
+    format!(
+        "pkg:nuget/{}@{}",
+        percent_encode(id),
+        percent_encode(version)
+    )
 }
 
 /// A source tree's purl: `pkg:generic/<name>@<commit>`. `generic` because no package
@@ -527,8 +591,40 @@ pub(crate) mod tests {
     /// [`crate::provenance`]'s own tests assemble, so a rendered document is exercised
     /// against a manifest a build actually produces rather than against a hand-written
     /// copy that could drift from the type.
+    /// The provenance sample with one compiled app, so every source kind the model
+    /// can hold is exercised.
     pub(crate) fn manifest() -> ProvenanceManifest {
-        crate::provenance::tests::sample_manifest()
+        let mut m = crate::provenance::tests::sample_manifest();
+        m.apps = vec![crate::provenance::AppSourceProvenance {
+            name: "jellyfin".into(),
+            reference: "v12.1".into(),
+            commit: "1".repeat(40),
+            patch_series: vec!["jellyfin".into()],
+            patches_commit: Some("2".repeat(40)),
+            packaging_ref: Some("v12.1-202609142034".into()),
+            packaging_commit: Some("3".repeat(40)),
+            sdk_version: Some("10.0.401".into()),
+            nuget_manifest: Some("x.jellyfin.nuget.lock".into()),
+            nuget_manifest_sha256: Some("4".repeat(64)),
+        }];
+        m
+    }
+
+    /// The fixture app's NuGet sidecar: one package.
+    pub(crate) fn nuget() -> Vec<(String, crate::nuget::NugetManifest)> {
+        vec![(
+            "jellyfin".into(),
+            crate::nuget::NugetManifest::new(
+                "linux-arm64",
+                vec![crate::nuget::NugetPackage {
+                    id: "skiasharp".into(),
+                    version: "3.119.0".into(),
+                    sha512: "5".repeat(128),
+                }],
+                "fixture",
+            )
+            .unwrap(),
+        )]
     }
 
     /// The source attribution a published plan supplies, covering one of the two
@@ -546,6 +642,7 @@ pub(crate) mod tests {
             &manifest(),
             &packages(),
             &sources(),
+            &nuget(),
             "turing-rk1-media-accel-forky",
             "2026-08-05T00:00:00Z",
         )
@@ -574,11 +671,24 @@ pub(crate) mod tests {
                 "librga",
                 "libmali",
                 "ffmpeg",
-                "ffmpeg-rockchip"
+                "ffmpeg-rockchip",
+                "jellyfin",
+                "jellyfin-packaging",
+                "jellyfin-patches"
             ]
         );
         assert_eq!(of(ComponentKind::Blob), ["atf", "tpl"]);
         assert_eq!(of(ComponentKind::ExtraDeb), ["foo_1.2_arm64.deb"]);
+        assert_eq!(of(ComponentKind::NugetPackage), ["skiasharp"]);
+        let nuget = sbom
+            .components
+            .iter()
+            .find(|c| c.kind == ComponentKind::NugetPackage)
+            .unwrap();
+        assert_eq!(nuget.purl.as_deref(), Some("pkg:nuget/skiasharp@3.119.0"));
+        assert_eq!(nuget.sha512.as_deref(), Some("5".repeat(128).as_str()));
+        assert_eq!(nuget.sha256, None, "no digest the build did not check");
+        assert_eq!(nuget.relation, Relation::Contains);
         // Every id is unique and SPDX-legal, which is why they are positional rather
         // than derived from names like `libstdc++6`.
         let mut ids: Vec<&str> = sbom.components.iter().map(|c| c.id.as_str()).collect();
@@ -697,8 +807,14 @@ pub(crate) mod tests {
         // A different package set is a different document.
         let mut other = manifest();
         other.rootfs.manifest_sha256 = "f".repeat(64);
-        let other =
-            Sbom::from_provenance(&other, &packages(), &sources(), "x", "2026-08-05T00:00:00Z");
+        let other = Sbom::from_provenance(
+            &other,
+            &packages(),
+            &sources(),
+            &[],
+            "x",
+            "2026-08-05T00:00:00Z",
+        );
         assert_ne!(other.serial_number(), sbom.serial_number());
     }
 
@@ -711,7 +827,7 @@ pub(crate) mod tests {
         let mut dirty = manifest();
         dirty.built_with.dirty = true;
         dirty.built_with.commit = None;
-        let sbom = Sbom::from_provenance(&dirty, &[], &sources(), "x", "2026-08-05T00:00:00Z");
+        let sbom = Sbom::from_provenance(&dirty, &[], &sources(), &[], "x", "2026-08-05T00:00:00Z");
         assert_eq!(sbom.tool.describe(), "boot2deb 0.1.0 (dirty)");
         assert_eq!(sbom.tool.version, "0.1.0");
     }

@@ -83,7 +83,7 @@ pub struct SpdxPackage {
     pub license_declared: &'static str,
     /// `NOASSERTION` — see the [module][super] note.
     pub copyright_text: &'static str,
-    /// Content digests, in practice at most one sha256.
+    /// Content digests: a sha256, or a sha512 for a NuGet package.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub checksums: Vec<Checksum>,
     /// External identifiers — the purl, where the component has one.
@@ -98,7 +98,7 @@ pub struct SpdxPackage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Checksum {
-    /// Always `SHA256` — SPDX spells it without a separator.
+    /// `SHA256` or `SHA512` — SPDX spells them without a separator.
     pub algorithm: &'static str,
     /// Lowercase-hex digest.
     pub checksum_value: String,
@@ -194,6 +194,10 @@ fn package(component: &Component) -> SpdxPackage {
                 algorithm: "SHA256",
                 checksum_value: hex.clone(),
             })
+            .chain(component.sha512.iter().map(|hex| Checksum {
+                algorithm: "SHA512",
+                checksum_value: hex.clone(),
+            }))
             .collect(),
         external_refs: component
             .purl

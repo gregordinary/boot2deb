@@ -18,6 +18,7 @@
 //!
 //! [`Lock`]: boot2deb_core::lock::Lock
 
+pub mod app;
 mod elf;
 pub mod ffmpeg;
 pub mod kernel;
@@ -844,6 +845,10 @@ pub(crate) enum PatchScope {
     /// The userspace-tree series (the MPP CMA fix). Applies to the MPP
     /// tree; librga/libmali carry no userspace patch and never use this scope.
     Userspace,
+    /// An application's own tree.
+    App,
+    /// The tree holding an application's Debian packaging.
+    AppPackaging,
 }
 
 impl PatchScope {
@@ -855,6 +860,8 @@ impl PatchScope {
             PatchScope::Uboot => Scope::Uboot,
             PatchScope::Ffmpeg => Scope::Ffmpeg,
             PatchScope::Userspace => Scope::Userspace,
+            PatchScope::App => Scope::App,
+            PatchScope::AppPackaging => Scope::AppPackaging,
         }
     }
 
@@ -885,6 +892,8 @@ impl PatchScope {
             PatchScope::Uboot => "uboot",
             PatchScope::Ffmpeg => "ffmpeg",
             PatchScope::Userspace => "userspace",
+            PatchScope::App => "app",
+            PatchScope::AppPackaging => "app packaging",
         }
     }
 }
@@ -938,10 +947,12 @@ pub struct PatchSource<'a> {
     /// a pin mismatch is a loud warning rather than an error.
     pub dev: bool,
     /// The version the series' per-entry ranges are filtered against for this scope.
-    /// It is the resolved **kernel** version for the kernel/ffmpeg/userspace scopes,
-    /// and the resolved **u-boot** version for the u-boot scope (u-boot is its own
-    /// axis, so a u-boot-only build has no kernel version to narrow by). The caller
-    /// supplies the one that matches the scope it is applying.
+    ///
+    /// For the kernel/ffmpeg/userspace scopes it is the resolved **kernel** version. For
+    /// the u-boot scope it is the resolved **u-boot** version. u-boot is its own axis,
+    /// and a u-boot-only build has no kernel version to narrow by. For the two app
+    /// scopes it is the app's pinned ref. The caller supplies the one that matches the
+    /// scope it is applying.
     pub version: &'a str,
 }
 
@@ -1066,7 +1077,12 @@ pub(crate) fn apply_series_scope(spec: &ApplyScope, step: &Step) -> Result<usize
         for &(name, ref series) in &loaded {
             match spec.scope {
                 PatchScope::Uboot => series.ensure_applies_uboot(name, reference)?,
-                _ => series.ensure_applies(name, reference)?,
+                PatchScope::App | PatchScope::AppPackaging => {
+                    series.ensure_applies_app(name, reference)?
+                }
+                PatchScope::Kernel | PatchScope::Ffmpeg | PatchScope::Userspace => {
+                    series.ensure_applies(name, reference)?
+                }
             }
         }
     }

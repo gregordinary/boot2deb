@@ -517,6 +517,22 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
         }
         _ => println!("media-accel  : none (no feature builds the transcode stack)"),
     }
+    // Each application a feature compiles from source, with what its build is made
+    // from: the tree, the series, and for a `dotnet-deb` build the packaging tree and
+    // the SDK. Nothing prints for a build that compiles none.
+    for app in &i.apps {
+        println!("app          : {} {} ({})", app.name, app.git, app.git_ref);
+        if !app.patch_series.is_empty() {
+            println!("  series     : {}", app.patch_series.join(", "));
+        }
+        let boot2deb_core::model::AppBuild::DotnetDeb(d) = &app.build;
+        println!(
+            "  packaging  : {} ({})",
+            d.packaging.git, d.packaging.git_ref
+        );
+        println!("  sdk        : .NET {}", d.sdk.version);
+        println!("  deb        : {} (replaces the archive's)", app.deb);
+    }
     // The layers' selftest expectations, one count per declaring layer: the
     // checks themselves live on the image (`/etc/boot2deb/selftest.d/`), so the
     // resolve report says who expects how much rather than repeating every line.

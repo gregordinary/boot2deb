@@ -164,6 +164,8 @@ fn both_formats_render_from_the_shipped_configuration() {
         &provenance,
         &packages,
         &BTreeMap::new(),
+        // This recipe compiles no app, so it has no NuGet sidecar.
+        &[],
         "turing-rk1-media-accel-forky",
         // Fixed, so re-running writes byte-identical documents — the property the
         // `SOURCE_DATE_EPOCH` path exists to give a real run.
