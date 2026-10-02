@@ -1,0 +1,29 @@
+# features/media-capture.toml — capture into the hardware pipeline without a copy.
+#
+# A capture driver writes each image into a buffer that a hardware scaler or encoder
+# can read in place. FFmpeg's V4L2 input device hands every frame out as system memory
+# instead, so reaching RGA or the encoder costs a copy per frame: about 370 MB/s for
+# 1080p60 in RGB, and about 1.5 GB/s at 4K60. The `media-capture` patch series gives
+# that input device a `-drm_prime` option. The option hands out frames that reference
+# the capture buffers themselves, the way `kmsgrab` hands out scanout buffers.
+#
+# It is a capability consumer rather than a provider. It patches whichever `ffmpeg-rk`
+# the selection builds and installs no FFmpeg of its own, so it declares
+# `requires_capability = ["ffmpeg"]` and composes with either provider. The series
+# touches only the V4L2 input device, which neither provider's series patches.
+#
+# `v4l-utils` is here because capture is configured with `v4l2-ctl`: the format, the
+# DV timings a source is sending, and the EDID a receiver presents. The RK3588 SoC
+# layer already installs it, and naming it again costs nothing.
+description         = "V4L2 capture into the hardware pipeline: ffmpeg-rk's V4L2 input hands out DRM PRIME frames instead of copies"
+requires_capability = ["ffmpeg"]
+patch_series        = ["media-capture"]
+packages            = ["v4l-utils"]
+
+caveats = [
+  "Frames reach a hardware consumer without a copy only with `-drm_prime 1` on the V4L2 input. Without it, the input device copies each frame into system memory, as stock FFmpeg does.",
+  "`-drm_prime 1` needs a capture format in one memory plane with a DRM equivalent: `nv12`, `nv16`, `nv24`, `yuyv422`, `uyvy422`, `bgr24` or `rgb24`. A multi-planar format such as `NM12`, or a compressed one such as MJPEG, is refused.",
+  "Under `-drm_prime 1`, a consumer that holds too many frames loses frames rather than stalling capture. The first drop is a warning, and the input logs how many it dropped when it closes.",
+  "Under `-drm_prime 1`, a filter that holds more frames than the driver granted buffers is never handed another frame. `reverse`, or `loop` with a large `size`, stalls that way. Put `hwdownload` in front of such a filter.",
+  "Without `-drm_prime 1`, the V4L2 input assumes packed lines. A driver that pads each line has every frame of such a mode rejected as the wrong size. The Synopsys HDMI RX driver pads to 64 bytes. `-drm_prime 1` takes the pitch from the driver and reads those modes correctly.",
+]
