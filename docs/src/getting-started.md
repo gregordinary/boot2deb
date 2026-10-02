@@ -38,8 +38,13 @@ once.
 
   ```sh
   cd boot2deb
-  cargo install --path crates/cli    # the crate is boot2deb-cli; the binary is boot2deb
+  cargo install --locked --path crates/cli    # the crate is boot2deb-cli; the binary is boot2deb
   ```
+
+  `--locked` builds the tool from the dependency versions in the repository's
+  `Cargo.lock`, which are the ones CI tests and audits. Without it, Cargo ignores that
+  file and takes the newest compatible release of every dependency, the provisioning
+  library included.
 
   Every command on this site is written as `boot2deb …`, which is also how the tool
   writes its own hints. Anything it suggests can therefore be pasted back. Developing from a

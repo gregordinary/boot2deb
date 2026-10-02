@@ -4,7 +4,7 @@ This page explains what the commands are *for*. The exhaustive list of every fla
 every command is [Every flag](cli-flags.md), generated from the binary so it cannot
 drift. `boot2deb <command> --help` answers the same question per command.
 
-The binary is `boot2deb`, installed with `cargo install --path crates/cli` (see
+The binary is `boot2deb`, installed with `cargo install --locked --path crates/cli` (see
 [Getting started](../getting-started.md)). To work from a checkout without installing,
 prefix each command with `cargo run -p boot2deb-cli --`. It defaults `--root .`, so run
 it from inside `boot2deb/` (or pass `--root`).

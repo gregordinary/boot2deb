@@ -99,8 +99,12 @@ host:
    ```sh
    sudo apt install build-essential   # or your distribution's C toolchain
    cd boot2deb
-   cargo install --path crates/cli    # puts `boot2deb` on your PATH
+   cargo install --locked --path crates/cli    # puts `boot2deb` on your PATH
    ```
+
+   `--locked` builds the tool from the dependency versions in this repository's
+   `Cargo.lock`, which are the ones CI tests. Without it, Cargo ignores that file and takes
+   the newest compatible release of every dependency.
 
    The crate is `boot2deb-cli`, and the binary it installs is `boot2deb`. Every command
    below assumes it is on `PATH`, and so does every hint the tool prints. To work from a
