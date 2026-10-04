@@ -507,13 +507,17 @@ impl ConfigRoot {
     }
 
     /// Filesystem path of `filename` beside the lock of build point `name`, whether or
-    /// not it exists. That is where an app's NuGet sidecar lives, named for the point's
-    /// leaf, so a variant's sidecar sits beside the variant's own lock.
+    /// not it exists. The files a lock pins by name live there: the committed solved
+    /// package manifest (`<leaf>.pkgs.lock`) and an app's NuGet sidecar. Both are named
+    /// for the point's leaf, so a variant's sit beside the variant's own lock.
     ///
-    /// `name` is validated as [`lock_path`](Self::lock_path) validates it, which admits
-    /// a variant's feature suffix. `filename` is held to a bare filename: no separator,
-    /// not `.` or `..`, and not option-like. A variant's leaf carries `+`, which a bare
-    /// identifier would refuse.
+    /// Anchored to the root that *owns* the recipe, as [`lock_path`](Self::lock_path)
+    /// is. An overlay recipe's files therefore land in that overlay, not in the primary
+    /// root. `name` is validated as `lock_path` validates it, which admits a variant's
+    /// feature suffix. `filename` is held to a bare filename: no separator, not `.` or
+    /// `..`, and not option-like. A variant's leaf carries `+`, which a bare identifier
+    /// would refuse. This is a *write* target: an unchecked `../` or absolute component
+    /// would let `build --save-manifest` write outside `recipes/`.
     pub fn lock_sibling(&self, name: &str, filename: &str) -> Result<PathBuf, ConfigError> {
         let bare = !filename.is_empty()
             && !filename.contains('/')
@@ -537,30 +541,6 @@ impl ConfigRoot {
     /// [`lock_path`](Self::lock_path)'s is.
     pub fn outputs_path(&self, name: &str) -> Result<PathBuf, ConfigError> {
         Ok(self.lock_path(name)?.with_extension("outputs"))
-    }
-
-    /// Filesystem path of a file that lives beside `recipe` in the recipe's own
-    /// directory (`recipes/<device>/<filename>`). An example is that recipe's
-    /// committed solved package manifest, next to its `.toml` and `.lock`.
-    ///
-    /// Anchored to the root that *owns* `recipe`, the same way
-    /// [`lock_path`](Self::lock_path) is. An overlay recipe's manifest therefore
-    /// lands in that overlay beside its lock, rather than diverging into the primary
-    /// root. `recipe` is validated as a recipe reference (a single `<device>/<leaf>`
-    /// separator, no traversal), and `filename` as a bare name (no separator at all).
-    /// This is a *write* target: an unchecked `../` or absolute component would let
-    /// `build --save-manifest` write outside `recipes/`.
-    pub fn recipe_sibling(&self, recipe: &str, filename: &str) -> Result<PathBuf, ConfigError> {
-        validate_build_ref(recipe)?;
-        validate_name("manifest", filename)?;
-        // The recipe's own directory: the parent of `recipes/<device>/<leaf>.toml`,
-        // i.e. `recipes/<device>` (or `recipes/` for a bare, un-nested reference).
-        let owning = self.owning_root("recipes", recipe_half(recipe));
-        let recipe_rel = format!("recipes/{recipe}.toml");
-        let dir = Path::new(&recipe_rel)
-            .parent()
-            .expect("recipes/<ref>.toml always has a parent");
-        Ok(owning.join(dir).join(filename))
     }
 
     /// Names under `subdir` close enough to `name` to be the one that was meant, for a
@@ -911,7 +891,7 @@ pub(crate) fn check_feature_name(name: &str) -> Result<(), ConfigError> {
 /// [`BuildPoint::reference`](crate::buildpoint::BuildPoint::reference) produces.
 ///
 /// Used by the write targets that a variant build derives ([`ConfigRoot::lock_path`],
-/// [`ConfigRoot::lock`], [`ConfigRoot::recipe_sibling`]), because those name the
+/// [`ConfigRoot::lock`], [`ConfigRoot::lock_sibling`]), because those name the
 /// build point rather than the authored recipe. [`ConfigRoot::recipe`] keeps the
 /// stricter rule: a `.toml` exists for a recipe, never for a variant.
 fn validate_build_ref(name: &str) -> Result<(), ConfigError> {
@@ -1110,8 +1090,9 @@ packages = [
         ));
     }
 
-    /// A variant's NuGet sidecar sits beside the variant's own lock, and its name
-    /// carries the `+` the variant's leaf does. A name with a separator is refused.
+    /// A variant's NuGet sidecar and solved package manifest sit beside the variant's
+    /// own lock, and their names carry the `+` the variant's leaf does. A name with a
+    /// separator is refused.
     #[test]
     fn a_lock_sibling_sits_beside_a_variants_lock() {
         let root = ConfigRoot::new("/cfg");
@@ -1120,6 +1101,12 @@ packages = [
             root.lock_sibling("turing-rk1/forky+jellyfin", &name)
                 .unwrap(),
             Path::new("/cfg/recipes/turing-rk1/forky+jellyfin.jellyfin.nuget.lock")
+        );
+        let manifest = format!("forky+jellyfin{}", crate::manifest::MANIFEST_SUFFIX);
+        assert_eq!(
+            root.lock_sibling("turing-rk1/forky+jellyfin", &manifest)
+                .unwrap(),
+            Path::new("/cfg/recipes/turing-rk1/forky+jellyfin.pkgs.lock")
         );
         for bad in ["../x.nuget.lock", "a/b", "..", "-x", ""] {
             assert!(
@@ -1246,13 +1233,13 @@ packages = [
             o.path().join("recipes/turing-rk1/media-accel-forky.lock")
         );
         assert_eq!(
-            root.recipe_sibling(rref, "media-accel-forky.pkgs.lock")
+            root.lock_sibling(rref, "media-accel-forky.pkgs.lock")
                 .unwrap(),
             o.path()
                 .join("recipes/turing-rk1/media-accel-forky.pkgs.lock")
         );
         // The manifest filename itself must stay a bare name (no separator)...
-        assert!(root.recipe_sibling(rref, "a/b.pkgs.lock").is_err());
+        assert!(root.lock_sibling(rref, "a/b.pkgs.lock").is_err());
         // ...and a two-slash reference is not a valid recipe reference.
         assert!(root.lock_path("a/b/c").is_err());
     }
@@ -1280,18 +1267,18 @@ packages = [
         // The manifest sibling anchors to the same owning root as the lock, so an
         // overlay recipe's manifest lands beside its lock rather than in the primary
         // root (Finding 5). A recipe not on the path defaults to the primary root.
-        let ms = root.recipe_sibling("ov", "ov.pkgs.lock").unwrap();
+        let ms = root.lock_sibling("ov", "ov.pkgs.lock").unwrap();
         assert!(
             ms.starts_with(o.path()),
             "manifest should write into the overlay: {ms:?}"
         );
         assert!(root
-            .recipe_sibling("nowhere", "x.pkgs.lock")
+            .lock_sibling("nowhere", "x.pkgs.lock")
             .unwrap()
             .starts_with(p.path()));
         // A traversal recipe or filename is rejected as a write target.
-        assert!(root.recipe_sibling("../x", "m").is_err());
-        assert!(root.recipe_sibling("ov", "../m").is_err());
+        assert!(root.lock_sibling("../x", "m").is_err());
+        assert!(root.lock_sibling("ov", "../m").is_err());
     }
 
     /// A device file, plus whatever `extra` appends. `image_size` is deliberately not

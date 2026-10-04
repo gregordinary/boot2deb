@@ -158,7 +158,7 @@ pub(crate) fn run(
     // the committed artifact never disagree. Skipped when `--save-manifest` re-pins.
     if let (false, Some(rootfs)) = (args.save_manifest, &lock.rootfs) {
         if let Some(pinned) = &rootfs.manifest_sha256 {
-            let committed = root.recipe_sibling(recipe, &rootfs.manifest)?;
+            let committed = root.lock_sibling(recipe, &rootfs.manifest)?;
             if !committed.exists() {
                 return Err(format!(
                     "lock pins a manifest sha256 but the committed manifest {} is missing \
@@ -1066,7 +1066,7 @@ pub(crate) fn run(
                 .rootfs
                 .as_mut()
                 .expect("--save-manifest requires the rootfs stage, which pins a rootfs");
-            let committed = root.recipe_sibling(recipe, &rootfs_pin.manifest)?;
+            let committed = root.lock_sibling(recipe, &rootfs_pin.manifest)?;
             std::fs::copy(manifest_path, &committed)
                 .map_err(|e| format!("commit manifest to {}: {e}", committed.display()))?;
             rootfs_pin.manifest_sha256 = Some(digest.clone());

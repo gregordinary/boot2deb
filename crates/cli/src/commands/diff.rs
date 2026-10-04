@@ -186,7 +186,7 @@ fn read_recipe(root: &ConfigRoot, recipe: &str) -> Result<Side> {
     // two boards' kernels would otherwise compare as absent on both sides.
     let mut side = Side::from_lock(recipe, &lock).merge(Side::from_resolved(recipe, &build));
     if let Some(rootfs) = &lock.rootfs {
-        side.packages = read_manifest(&root.recipe_sibling(recipe, &rootfs.manifest)?);
+        side.packages = read_manifest(&root.lock_sibling(recipe, &rootfs.manifest)?);
     }
     side.kconfig = read_fragments(root, &build)?;
     Ok(side)
