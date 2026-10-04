@@ -4,14 +4,14 @@
 [kernel]
 id = "rk3588-mainline-7.2"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.2.8"
-commit = "9a66fdc0d7fd55f54235524a73435af99051e46f"
+ref = "v7.2.9"
+commit = "5fce161649b4d779d1b76d9fcd52dc77779774b8"
 
 [patches]
 series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "4350b1a5e405276fbbef2cba6ef4f8b0afba39dc"
+commit = "2fd63c3c02594aa9de4d0edbf8903b2135e689d0"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,7 +22,7 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["turing-rk1-recovery"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "4350b1a5e405276fbbef2cba6ef4f8b0afba39dc"
+commit = "2fd63c3c02594aa9de4d0edbf8903b2135e689d0"
 
 [[userspace]]
 name = "mpp"
@@ -33,7 +33,7 @@ commit = "750e76ec2d9287babfaf08c8bf395ebc5e8778ea"
 [[userspace]]
 name = "librga"
 source = "https://github.com/tsukumijima/librga-rockchip.git"
-ref = "master"
+ref = "2cffdf6f332c3ddb93eb087841d78e8b487db2a3"
 commit = "2cffdf6f332c3ddb93eb087841d78e8b487db2a3"
 
 [[userspace]]
@@ -49,13 +49,13 @@ commit = "1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7"
 
 [ffmpeg.rockchip]
 source = "https://github.com/nyanmisaka/ffmpeg-rockchip.git"
-ref = "8.1"
-commit = "d90e3a1c18d7929383cf88c1b3da2e2d1c966cbf"
+ref = "f66f2f804627e4464c2d1b10181772b5437bb991"
+commit = "f66f2f804627e4464c2d1b10181772b5437bb991"
 
 [rootfs]
 suite = "forky"
 manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode.pkgs.lock"
-source_date_epoch = 1790537931
+source_date_epoch = 1791045544
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"

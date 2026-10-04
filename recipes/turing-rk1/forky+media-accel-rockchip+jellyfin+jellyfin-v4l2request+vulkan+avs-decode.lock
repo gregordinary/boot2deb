@@ -4,14 +4,14 @@
 [kernel]
 id = "rk3588-mainline-7.2"
 source = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-ref = "v7.2.8"
-commit = "9a66fdc0d7fd55f54235524a73435af99051e46f"
+ref = "v7.2.9"
+commit = "5fce161649b4d779d1b76d9fcd52dc77779774b8"
 
 [patches]
 series = ["rk3588-accel"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "4b2e60a38771d1bf4ea9e00195716fb22aaad37e"
+commit = "2fd63c3c02594aa9de4d0edbf8903b2135e689d0"
 
 [uboot]
 source = "https://git.u-boot-project.org/u-boot/u-boot.git"
@@ -22,7 +22,7 @@ commit = "ece349ade2973e220f524ce59e59711cc919263f"
 series = ["turing-rk1-recovery"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "4b2e60a38771d1bf4ea9e00195716fb22aaad37e"
+commit = "2fd63c3c02594aa9de4d0edbf8903b2135e689d0"
 
 [[userspace]]
 name = "mpp"
@@ -62,7 +62,7 @@ commit = "ee91c75e777da41a9c4f4855e70adc604fbf2ef8"
 series = ["jellyfin"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "4b2e60a38771d1bf4ea9e00195716fb22aaad37e"
+commit = "2fd63c3c02594aa9de4d0edbf8903b2135e689d0"
 
 [apps.dotnet.packaging]
 source = "https://github.com/jellyfin/jellyfin-packaging.git"
@@ -77,13 +77,13 @@ amd64 = "51c8b999af9e8dd9998c9edc5944e19a90788862068acd38694e098889054ce8c23d4f0
 arm64 = "58ace73ced6b4360754689a686bdfb8a317f4da6cb8bb416dbc7d0ba9f47e43e3c09f5eb1f1a1cfaacbd10df9558da4882bf2a5e195d6ab56a02c1f9f76102ed"
 
 [apps.dotnet.nuget]
-manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan.jellyfin.nuget.lock"
+manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode.jellyfin.nuget.lock"
 manifest_sha256 = "0b21ff0e0173df33ffe53e96838548afff44b8665204fbe2785a5cd9c34ecd04"
 
 [rootfs]
 suite = "forky"
-manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan.pkgs.lock"
-source_date_epoch = 1790658097
+manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode.pkgs.lock"
+source_date_epoch = 1791045551
 
 [blobs]
 atf = "rk3588_bl31_v1.51.elf@sha256:2847c82a44aff28f1923eea31567c9cf01a7c4bcec4d3b9be1cbf6fcc965f84b"
@@ -92,3 +92,23 @@ tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin@sha256:e109f3e283c86ad74b657
 [[extra_debs]]
 url = "http://deb.debian.org/debian/pool/main/i/icu/libicu76_76.1-4_arm64.deb"
 sha256 = "62eb15577c881b7d02aa861e3eb860902335630cc8174daf525b48c2fa39298f"
+
+[[extra_debs]]
+path = "debs/libdavs2-16_1.7.1-1+dde1+deb14.20260831.b41cf11.843424c_arm64.deb"
+sha256 = "18c079694fd03e7a55c8291508a6ce1b66b074d80062c69d815c1b32b3263484"
+targets = ["image", "ffmpeg"]
+
+[[extra_debs]]
+path = "debs/libuavs3d1_1.2.89+deb14.20260831.0e20d2c.c411a33.70accd8_arm64.deb"
+sha256 = "6186bd3425479202b3c5f7cb060ebda6a03e974647ffb093ec490cc9ee518fa8"
+targets = ["image", "ffmpeg"]
+
+[[extra_debs]]
+path = "debs/libdavs2-dev_1.7.1-1+dde1+deb14.20260831.b41cf11.843424c_arm64.deb"
+sha256 = "20cd89388fcb444ca2769ff2911a20508b6e1bcb249973f4a874e81b29b9ee0d"
+targets = ["ffmpeg"]
+
+[[extra_debs]]
+path = "debs/libuavs3d-dev_1.2.89+deb14.20260831.0e20d2c.c411a33.70accd8_arm64.deb"
+sha256 = "82394267f59ef8584e6b4f756ac2014e5a96993e15446c50ca6b99f4db04f876"
+targets = ["ffmpeg"]

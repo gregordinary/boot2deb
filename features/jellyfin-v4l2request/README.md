@@ -6,8 +6,8 @@ two halves: decode on `rkvdec` through the V4L2 request API, encode on the VEPU5
 through MPP.
 
 ```sh
-boot2deb update turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan
-boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan
+boot2deb update turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode
+boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode --image-size 3G
 ```
 
 It takes the place of `jellyfin-rockchip`, and the two cannot be combined. Both seed

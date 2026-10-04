@@ -72,10 +72,17 @@ The `jellyfin-*` pair deliberately does **not** carry it. Jellyfin's
 never emit a Vulkan filter. The packages would be reachable only from a shell. Add
 it there with a feature selection if you want the command line too.
 
-`turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan` also
-builds the patched Jellyfin server that decodes in hardware, as
-[Accelerated Jellyfin](../jellyfin.md#hardware-decode-as-well) describes. Name
-`jellyfin-rockchip` in place of `jellyfin-v4l2request` for the stock server. Pass
+Two feature selections carry Jellyfin together with `vulkan` and `avs-decode` (see
+[Decode](#decode)), and they differ only in the server:
+
+- `turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode`
+  installs the stock server from Jellyfin's repository. It decodes in software and
+  encodes on the VEPU580.
+- `turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode`
+  builds the patched server that also decodes in hardware, as
+  [Accelerated Jellyfin](../jellyfin.md#hardware-decode-as-well) describes.
+
+Their locks pin the same kernel, patches, userspace and FFmpeg. Pass
 `--image-size 3G` with either, since a feature selection takes the device's 2G and
 cannot carry the `jellyfin-*` recipes' own larger volume.
 

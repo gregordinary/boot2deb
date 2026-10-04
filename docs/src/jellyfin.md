@@ -129,8 +129,8 @@ patch series that lets decode and encode name different stacks. It seeds the pai
 decode on `rkvdec` through `-hwaccel v4l2request`, encode on the VEPU580.
 
 ```sh
-boot2deb update turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan
-boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan
+boot2deb update turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode
+boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode --image-size 3G
 ```
 
 It takes the place of `jellyfin-rockchip` in the selection, since both seed
