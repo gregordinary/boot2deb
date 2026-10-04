@@ -23,7 +23,7 @@ image_size = "3G"
 # and Panfrost + Mesa render first-party at 4K.
 #
 # What the move from v7.1.7 to the v7.2 generation changes on this SoC's paths. The pin
-# is v7.2.8, the current stable point release. No 7.2.y point release touches an RK3576
+# is v7.2.9, the current stable point release. No 7.2.y point release touches an RK3576
 # device tree or a defconfig, but 7.2.4, 7.2.5 and 7.2.7 do reach the drivers this recipe
 # builds: `drivers/accel/rocket` gains the job-push, task-array, domain-reference and
 # run-path error handling this board's NPU series used to carry, so four of those
@@ -75,8 +75,8 @@ image_size = "3G"
 # software `lvp` device, and none of the paths above used it.
 #
 # The claim is `expected` rather than `validated` because the lock has moved since that
-# image: it booted kernel v7.2.3 with patches `daa40ed`, and the pins here are v7.2.8
-# with patches `14e7a6d`. The kernel bump retires four of the NPU patches that image
+# image: it booted kernel v7.2.3 with patches `daa40ed`, and the pins here are v7.2.9
+# with patches `2fd63c3`. The kernel bump retires four of the NPU patches that image
 # carried, which 7.2.4 now supplies itself, and rebases four more onto its error paths.
 # The NPU series at this pin follows its upstream v14 posting, which pulses the NPU
 # domain's bus reset before the power-on settle rather than after it, and the board's

@@ -405,7 +405,7 @@ kernel and the `rk3288-fixes` patch are therefore both proven on silicon. A late
 of it also booted from USB and **installed cleanly to internal eMMC**. That exercises the
 whole image path rather than just the boot.
 
-That was `v7.1.3`. The recipe now pins `v7.2.8`, which is why its claim reads `expected`
+That was `v7.1.3`. The recipe now pins `v7.2.9`, which is why its claim reads `expected`
 rather than `validated`. That kernel has not been on the board.
 
 ### What the first minutes look like

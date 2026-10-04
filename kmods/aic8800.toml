@@ -26,6 +26,8 @@ subdir = "src/SDIO/driver_fw/driver/aic8800"
 # the cfg80211 key and station ops from `net_device *` to `wireless_dev *`; 7.2 removed
 # `strncpy()` from the kernel and gave `remain_on_channel` a trailing receive-address
 # filter. Both patches reach the SDIO tree, so this build needs no local equivalent.
+# radxa's series also carries `fix-linux-7.3-build.patch`. It guards a 7.3 kernel, which
+# no kernel definition here builds, so the list leaves it out until one does.
 #
 # The firmware path is two patches that only work as a pair. `fix-sdio-firmware-path`
 # compiles `/lib/firmware/aic8800_fw/SDIO` into the BSP loader as the root, and

@@ -108,9 +108,13 @@ build_deps     = [
 git = "https://code.ffmpeg.org/FFmpeg/FFmpeg.git"
 ref = "n8.1.3"
 
+# The commit on nyanmisaka's `8.1` branch the graft is cut from, named as a commit
+# rather than as the branch. nyanmisaka rebases the branch onto newer 8.1
+# releases, so its head is a commit that does not contain this one, and a lock that
+# followed it would record a tree the graft did not come from.
 [ffmpeg.rockchip]
 git = "https://github.com/nyanmisaka/ffmpeg-rockchip.git"
-ref = "8.1"
+ref = "f66f2f804627e4464c2d1b10181772b5437bb991"
 
 # What every booted RK3588 image must have, checked by boot2deb-selftest.
 #

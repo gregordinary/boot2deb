@@ -31,7 +31,7 @@ image_size = "2G"
 # A device that lands at 480 Mb/s there is a seating problem — see the `.dts`.
 #
 # What the move from v7.1.7 to the v7.2 generation changes on this SoC's paths. The pin
-# is v7.2.8, the current stable point release. No 7.2.y point release touches an RK3576
+# is v7.2.9, the current stable point release. No 7.2.y point release touches an RK3576
 # device tree or a defconfig. 7.2.4, 7.2.5 and 7.2.7 do reach the NPU and decoder drivers
 # this recipe's patch series modifies, as `h96-max-m9/media-accel` describes.
 #

@@ -19,10 +19,14 @@ features   = []                          # base: accel kernel, no media userspac
 layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
-# The pin is v7.2.8, the current stable point release. The last one that booted was
+# The pin is v7.2.9, the current stable point release. The last one that booted was
 # v7.2.2, on 2026-09-02. No 7.2.y point release touches a defconfig or the RK1's own
 # device-tree source. The one change to the RK3588 SoC's shared device tree gives its two
-# eDP controllers an `hclk`, and this board leaves both disabled. What follows is
+# eDP controllers an `hclk`, and this board leaves both disabled. 7.2.9 fixes the
+# step_wise thermal governor for cooling maps with a non-zero lower bound. The RK1's five
+# fan steps have that shape. Before the fix, a step whose trip no longer applied could
+# keep its vote and hold the fan above the speed the temperature asks for. The same
+# release fixes the stmmac RX path this board's Ethernet runs on. What follows is
 # therefore written against the generation. What the move from v7.1.7 changes, on the
 # paths this image runs:
 #
