@@ -312,6 +312,7 @@ dependencies = [
  "gpt",
  "libc",
  "lzma-rust2",
+ "rsa",
  "serde",
  "serde_json",
  "sha-crypt",

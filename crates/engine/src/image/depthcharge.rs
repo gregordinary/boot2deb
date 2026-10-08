@@ -11,9 +11,12 @@
 //!
 //! So the image node's job here is narrow. It takes the blob out of the rootfs
 //! tarball, checks that it is one *this* image can actually boot, and places it.
+//! A press that gives its image a fresh identity also re-signs it under the new root
+//! ([`resign_kpart`]). It signs with the key the board's own kernel upgrades use.
 
 use crate::error::EngineError;
 use crate::event::Step;
+use crate::image::vboot::{KernelPartition, SigningKey};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
@@ -21,6 +24,30 @@ use uuid::Uuid;
 /// Where `depthchargectl` writes what it builds, inside the rootfs. The filename
 /// carries the kernel version, so the payload is found by glob rather than by name.
 const KPART_GLOB: &str = "./boot/depthcharge/*.img";
+
+/// The directory [`KPART_GLOB`] matches in, as the tree's own absolute path.
+const KPART_DIR: &str = "/boot/depthcharge";
+
+/// The directories `depthcharge-tools` takes its signing keys from, in its own search
+/// order. It signs with the first one that holds any of [`KEY_FILES`], which on a
+/// boot2deb image is the vboot developer key directory.
+const KEY_DIRS: [&str; 3] = [
+    "etc/depthcharge-tools",
+    "usr/share/vboot/devkeys",
+    "usr/local/share/vboot/devkeys",
+];
+
+/// The files that make a directory in [`KEY_DIRS`] the one `depthcharge-tools` uses:
+/// the keyblock, the private data key, and the public subkey. Only the private key is
+/// read here, because the keyblock rides inside the partition already.
+const KEY_FILES: [&str; 3] = [
+    "kernel.keyblock",
+    "kernel_data_key.vbprivk",
+    "kernel_subkey.vbpubk",
+];
+
+/// The private data key's file name, one of [`KEY_FILES`].
+const PRIVATE_KEY_FILE: &str = "kernel_data_key.vbprivk";
 
 /// The magic at the head of a vboot keyblock — the first thing the firmware reads,
 /// and a cheap proof that what we are about to write is a signed image at all rather
@@ -146,6 +173,120 @@ pub(crate) fn verify_kpart(kpart: &Path, rootfs_partuuid: Uuid) -> Result<(), En
         );
     }
     Ok(())
+}
+
+/// The path `kpart` was extracted from, in the tree's own absolute form: where the
+/// rootfs carries the same signed image the kernel slot does.
+pub(crate) fn tree_path(kpart: &Path) -> Vec<u8> {
+    let name = kpart.file_name().map(|n| n.to_string_lossy().into_owned());
+    format!("{KPART_DIR}/{}", name.unwrap_or_default()).into_bytes()
+}
+
+/// Re-sign the extracted kernel partition at `kpart` in place, so its command line roots
+/// on `to` instead of `from`. The caller holds the result to [`verify_kpart`] for `to`,
+/// as it does an unchanged one.
+///
+/// The signing key is the one the board itself would use, read out of `rootfs_tar` by
+/// `depthcharge-tools`' own search order ([`KEY_DIRS`]). That keeps the pressed kernel
+/// and the next on-device upgrade signed alike. A key that is not the one the kernel was
+/// signed with is refused rather than used. Everything outside the `root=` value is
+/// carried over unchanged, `kern_guid=%U` included.
+///
+/// # Errors
+///
+/// [`EngineError::KpartResign`] when the image carries no signing key, the command line
+/// does not name `root=PARTUUID=<from>` exactly once, or the partition cannot be
+/// re-signed (see [`KernelPartition::resign`]).
+pub(crate) fn resign_kpart(
+    kpart: &Path,
+    rootfs_tar: &Path,
+    work_dir: &Path,
+    from: Uuid,
+    to: Uuid,
+    step: &Step,
+) -> Result<(), EngineError> {
+    let (key_dir, key) = extract_signing_key(rootfs_tar, work_dir, step)?;
+    let mut partition =
+        KernelPartition::parse(std::fs::read(kpart).map_err(|s| EngineError::io(kpart, s))?)?;
+    let old = format!("root=PARTUUID={}", hyphenated_lower(from));
+    let new = format!("root=PARTUUID={}", hyphenated_lower(to));
+    let cmdline = partition.cmdline()?;
+    let count = cmdline.matches(&old).count();
+    if count != 1 {
+        return Err(EngineError::KpartResign {
+            detail: format!(
+                "its signed command line names `{old}` {count} time(s), where the build \
+                 writes it exactly once: `{cmdline}`"
+            ),
+        });
+    }
+    let cmdline = cmdline.replace(&old, &new);
+    partition.resign(&cmdline, &key)?;
+    std::fs::write(kpart, partition.into_bytes()).map_err(|s| EngineError::io(kpart, s))?;
+    step.log(format!(
+        "re-signed the kernel partition for `{new}` with the image's own key (/{key_dir})"
+    ));
+    Ok(())
+}
+
+/// Extract the private kernel data key `depthcharge-tools` would sign with, from the
+/// first directory in [`KEY_DIRS`] that holds any of [`KEY_FILES`].
+///
+/// Returns the directory it came from, for the log, and the key. The extracted copy is
+/// removed once read, so the press leaves no key file in its work directory.
+fn extract_signing_key(
+    rootfs_tar: &Path,
+    work_dir: &Path,
+    step: &Step,
+) -> Result<(&'static str, SigningKey), EngineError> {
+    let dir = work_dir.join("signing-key");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|s| EngineError::io(&dir, s))?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|s| EngineError::io(&dir, s))?;
+
+    let mut tar = Command::new("tar");
+    tar.arg("--extract")
+        .arg("--file")
+        .arg(rootfs_tar)
+        .arg("--directory")
+        .arg(&dir)
+        .arg("--");
+    for key_dir in KEY_DIRS {
+        for file in KEY_FILES {
+            tar.arg(format!("./{key_dir}/{file}"));
+        }
+    }
+    // Most of the nine names are absent from any one image, and tar exits non-zero for
+    // each. What was extracted is the answer, as in `extract_kpart`.
+    let _ = crate::build::run(tar, "tar", "extract the kernel signing key", step);
+
+    let found = KEY_DIRS
+        .into_iter()
+        .find(|key_dir| KEY_FILES.iter().any(|f| dir.join(key_dir).join(f).exists()));
+    let result = match found {
+        None => Err(EngineError::KpartResign {
+            detail: format!(
+                "the image carries no kernel signing key in any directory depthcharge-tools \
+                 searches (/{})",
+                KEY_DIRS.join(", /")
+            ),
+        }),
+        Some(key_dir) => {
+            let path = dir.join(key_dir).join(PRIVATE_KEY_FILE);
+            match std::fs::read(&path) {
+                Ok(bytes) => SigningKey::from_vbprivk(&bytes).map(|key| (key_dir, key)),
+                Err(_) => Err(EngineError::KpartResign {
+                    detail: format!(
+                        "/{key_dir} is the directory depthcharge-tools signs from, and it \
+                         holds no {PRIVATE_KEY_FILE}"
+                    ),
+                }),
+            }
+        }
+    };
+    std::fs::remove_dir_all(&dir).map_err(|s| EngineError::io(&dir, s))?;
+    result
 }
 
 /// A UUID in the lowercase hyphenated form the kernel's `PARTUUID=` matcher and

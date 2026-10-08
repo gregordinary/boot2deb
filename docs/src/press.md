@@ -1,7 +1,8 @@
 # Producing images
 
 `boot2deb press` turns a build's artifacts into the file you hand a flasher:
-one master, many cards, each optionally stamped with its own identity.
+one master, many cards, each optionally personalized and given identifiers of
+its own.
 
 ```sh
 boot2deb press turing-rk1/forky card.img
@@ -110,8 +111,53 @@ is already written is re-personalized by editing `seed.txt` directly.
 
 The first-boot password stays per *image*, not per unit. Boards pressed from
 one streamed artifact share that build's expired password, and `--ssh-key` is
-the answer to a fleet. (A press with additions re-assembles, and so draws a
-fresh password of its own — printed when it happens.)
+the answer to a fleet. (A press that re-assembles draws a fresh password of its
+own, printed when it happens.)
+
+## Giving a medium its own identifiers
+
+Every build of a recipe stamps the same identifiers into its image:
+
+- The GPT disk GUID
+- The root partition's PARTUUID, which the kernel command line roots on
+- The ext4 UUID
+- The seed volume serial
+
+Every medium written from that image therefore answers to the same root
+PARTUUID. That is harmless until two of them sit in one machine, such as a USB
+stick and the eMMC install written from the same recipe. The initramfs roots on
+the first partition it finds with that PARTUUID, which can be the other disk's.
+The stick's kernel then runs the eMMC's system.
+
+`--fresh-identity` gives the pressed image identifiers no other image carries:
+
+```sh
+boot2deb press asus-c201/mainline-forky stick.img --fresh-identity
+```
+
+The press draws them at random and re-assembles the image around them. The build
+wrote the root PARTUUID into the rootfs, and the press rewrites each place:
+
+| File | Boards | What the press changes |
+| --- | --- | --- |
+| `/etc/fstab` | every board | the root entry |
+| `/boot/extlinux/extlinux.conf` | `rockchip-rkbin` | the `root=` of every boot entry |
+| `/boot/depthcharge/*.img` | `depthcharge` | the signed kernel, re-signed for the new root and placed in the kernel slot too |
+
+A depthcharge kernel is re-signed with the key the image carries for its own
+kernel upgrades, the vboot developer key. The press refuses a kernel that any
+other key signed. It then reads every file under `/etc` and `/boot` for the
+build's identifiers. When one still names them, the press refuses the image.
+
+`--embed-image` implies `--fresh-identity`. Its card stays in the machine beside
+the disk `boot2deb-install-to` writes, and the two must not share a root
+PARTUUID.
+
+The press draws the identifiers once, and the medium keeps them for life. The
+image records the draw in its `[pressed]` table (see
+[Image identity](reference/image-identity.md#pressed-marks-a-derived-image)). A
+press with a fresh identity re-assembles, so it needs the build's kept
+artifacts, as a press with additions does.
 
 ## Tree additions
 
@@ -246,9 +292,10 @@ that really is called `*.tmpl`, name it `foo.tmpl.tmpl`: it expands and lands as
 `foo.tmpl`. A template must be UTF-8 and is read whole to be parsed, so it is
 capped at 1 MiB. Drop the suffix to copy a large file verbatim.
 
-A press with additions cannot stream. It **re-assembles** the image from the
-build's kept artifacts (the rootfs tar, the boot payloads), merging the
-additions into the filesystem before it is formatted. The build must have run
+A press with additions cannot stream, and neither can one with
+`--fresh-identity`. It **re-assembles** the image from the build's kept
+artifacts (the rootfs tar, the boot payloads), merging the additions into the
+filesystem before it is formatted. The build must have run
 on this machine, and the recipe's artifacts are read, never modified. Under a
 `fit`-sized recipe the filesystem grows to hold whatever was added. Under a
 fixed `image_size` a press that does not fit fails in the format. The
@@ -260,11 +307,12 @@ that needs those is a build — the recipe and feature path exists for it.
 
 ### What a pressed image says about itself
 
-A pressed image with additions is **derived, not canonical**. The recipe's
-artifacts and their provenance stay untouched. The pressed file records its
-own ancestry in `/etc/boot2deb/image.toml` as a `[pressed]` table. That table
-holds the source artifact stem and what was added, by kind and destination,
-never by content.
+A re-assembled image is **derived, not canonical**. The recipe's artifacts
+and their provenance stay untouched. The pressed file records its own ancestry
+in `/etc/boot2deb/image.toml` as a `[pressed]` table. That table holds the
+source artifact stem and what was added, by kind and destination, never by
+content. A press that drew the image's identifiers adds
+`fresh_identity = true`.
 
 A tree's entries are recorded there one destination at a time, exactly as a
 `--copy` is. A template is recorded by the name it landed under, rather than
@@ -295,8 +343,10 @@ sudo boot2deb-install-to /dev/mmcblk0
 ```
 
 The pressed card is a derived copy that *carries* the artifact. The embedded
-image is the artifact itself, byte for byte. `--embed-image` needs a
-combined-layout recipe built with compression on (the default).
+image is the artifact itself, byte for byte. The card gets a
+[fresh identity](#giving-a-medium-its-own-identifiers), so the installed disk
+and the card that installed it never share a root PARTUUID. `--embed-image`
+needs a combined-layout recipe built with compression on (the default).
 
 ## A split build
 

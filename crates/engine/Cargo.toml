@@ -17,7 +17,13 @@ toml.workspace = true
 # the tree as toml's own parser backend.
 toml_edit = "0.22"
 thiserror.workspace = true
-sha2.workspace = true
+# `oid` lets `rsa` build the PKCS#1 v1.5 DigestInfo for SHA-256 from the hash type
+# itself (image::vboot). Already enabled in the tree by `rsa`.
+sha2 = { workspace = true, features = ["oid"] }
+# RSASSA-PKCS1-v1_5 signing and verification for the vboot kernel partition a press
+# re-signs under a fresh identity (image::vboot). Pure Rust, RustCrypto, and already
+# in the tree with these default features as `pgp`'s, so it adds no crate to the build.
+rsa = "0.9.10"
 # v4 OpenPGP fingerprints (keyring.rs) are SHA-1 by definition of the format
 # (RFC 4880 §12.2) — a format constant, not a security choice. Pure Rust, same
 # RustCrypto family as sha2.

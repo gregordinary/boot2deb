@@ -15,12 +15,14 @@
 //! Re-assembly with tree additions is the other way `press` produces a file. It is
 //! the image node's [`press_image`](crate::image::press_image), fed by the
 //! [`additions`] model defined here. That model's `.tmpl` entries are expanded
-//! against the image's own identity by [`mod@template`].
+//! against the image's own identity by [`mod@template`]. A re-assembly can also give the
+//! image identifiers of its own, drawn for that one medium ([`identity`]).
 //!
 //! Everything runs against ordinary files, so the whole path is unit-tested on
 //! any host with no root and no device.
 
 pub mod additions;
+pub mod identity;
 pub mod seed;
 pub mod template;
 pub mod verify;

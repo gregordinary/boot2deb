@@ -237,6 +237,17 @@ unit. `--embed-image` carries the compressed artifact for
 [Producing images](../press.md). Confirm the device with `lsblk` first, because `dd`
 overwrites it whole.
 
+A card for a unit whose eMMC already holds an install of the same recipe needs
+identifiers of its own. Without them, its kernel can root on the eMMC's system instead
+of its own. Press it with `--fresh-identity`, which `--embed-image` already implies:
+
+```sh
+boot2deb press asus-c201-libreboot/mainline-forky stick.img --fresh-identity
+```
+
+The press re-signs the card's kernel for the new root with the developer key the image
+carries. See [Giving a medium its own identifiers](../press.md#giving-a-medium-its-own-identifiers).
+
 The unit must be in **developer mode**. Then, from a full power-off, boot the medium
 with **Ctrl+U** at the developer-mode screen. What that takes depends on the firmware:
 
@@ -389,9 +400,10 @@ A boot2deb-built image boots this board. Confirmed end to end on a libreboot uni
 from USB via Ctrl+U. forky comes up, runs first boot, and reaches a login prompt. The
 per-image password works and is changed at first login, and `nmtui` joins Wi-Fi.
 
-The `root=` baked into the *signed* kernel names the rootfs PARTUUID the image was built
-with, and the device keeps that identity for life. First boot grows the partition but
-never rewrites its PARTUUID, so the signature stays valid with nothing to re-sign.
+The `root=` baked into the *signed* kernel names the rootfs PARTUUID the image carries.
+That is the build's, or the one `press --fresh-identity` drew for the medium. The device
+keeps it for life. First boot grows the partition but never rewrites its PARTUUID, so the
+signature stays valid with nothing to re-sign.
 
 KERN-A ships signed and correct. The empty KERN-B spare is first populated by a kernel
 upgrade. That upgrade writes the slot it is not running from, and leaves the proven one

@@ -799,8 +799,10 @@ mod config {
     /// identity for its whole life: nothing on the device rewrites it (first-boot
     /// grows the partition but keeps its PARTUUID), so the references that carry it —
     /// this file, the extlinux cmdline, the signed depthcharge kernel — never go
-    /// stale. The ext4 label and filesystem UUID still exist (the label is handy for
-    /// rescue mounts) but nothing boots by them.
+    /// stale. A press that draws a fresh identity rewrites all three in the image file,
+    /// before any medium carries it ([`press::identity`](crate::press::identity)). The
+    /// ext4 label and filesystem UUID still exist (the label is handy for rescue mounts)
+    /// but nothing boots by them.
     ///
     /// Per-method notes:
     ///

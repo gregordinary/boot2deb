@@ -8,14 +8,15 @@ set -e
 # which works while the partition is mounted, so no partition-table re-read —
 # and therefore no reboot — is needed.
 #
-# Identity is deliberately not touched. The build stamps one PARTUUID into the
+# Identity is deliberately not touched. The image carries one PARTUUID in the
 # GPT, /etc/fstab, and the bootloader configuration (the extlinux cmdline, or
 # the root= signed into the depthcharge kernel), and that value is the device's
 # boot identity for life. Rewriting it here would open a window where the
-# references and the disk disagree — a power cut inside that window is an
-# unbootable device. The cost is that two devices flashed from the same image
-# share identifiers, which only matters when both disks are attached to one
-# machine at once; never boot with both attached.
+# references and the disk disagree. A power cut inside that window is an
+# unbootable device. Two media written from one image therefore share
+# identifiers, which matters when both are attached to one machine at once.
+# `boot2deb press --fresh-identity` gives a medium identifiers of its own before
+# it is written, where no power cut can split them.
 #
 # `done` in /var/lib/boot2deb marks completion and gates the unit off
 # (ConditionPathExists). Every step below is idempotent, so a run that fails

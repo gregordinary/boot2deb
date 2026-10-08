@@ -582,6 +582,31 @@ pub enum EngineError {
         detail: String,
     },
 
+    /// A press giving its image a fresh identity cannot re-sign the kernel partition
+    /// under the new root.
+    ///
+    /// The partition does not parse as a vboot kernel, or a signature the build wrote
+    /// does not verify. Or the image carries no private key that matches the key the
+    /// kernel was signed with. The press stops here instead of writing a kernel that the
+    /// firmware or the initramfs rejects.
+    #[error("cannot re-sign the kernel partition for a fresh identity: {detail}")]
+    KpartResign {
+        /// What stands in the way.
+        detail: String,
+    },
+
+    /// A press giving its image a fresh identity found the build's identifiers in a place
+    /// it cannot rewrite.
+    ///
+    /// Either a file the press rewrites does not carry them the way the build writes
+    /// them, or another file under `/etc` or `/boot` names them. Both leave the pressed
+    /// image naming a disk it is not.
+    #[error("cannot give the pressed image a fresh identity: {detail}")]
+    IdentityRewrite {
+        /// Which file, and what was found in it.
+        detail: String,
+    },
+
     /// The built initramfs does not cover the image's initramfs module list: a listed
     /// module is neither in the initrd nor built into the kernel.
     ///

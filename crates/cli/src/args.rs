@@ -919,9 +919,17 @@ pub(crate) struct PressArgs {
     /// Carry the recipe's own compressed image artifact inside the pressed image
     /// (at /var/lib/boot2deb/install/), so the booted board can install itself to
     /// internal storage with `boot2deb-install-to`. This is the boot-from-card,
-    /// install-to-eMMC workflow.
+    /// install-to-eMMC workflow. Implies `--fresh-identity`, because the card stays in
+    /// the machine beside the disk it installs.
     #[arg(long)]
     pub(crate) embed_image: bool,
+    /// Give the pressed image identifiers of its own: a new GPT disk GUID, root
+    /// PARTUUID, ext4 UUID and seed serial. `/etc/fstab`, the bootloader's `root=`, and a
+    /// depthcharge board's signed kernel are rewritten to match. Use it for a medium that
+    /// shares a machine with another install of the same recipe. Re-assembles the image
+    /// from the kept rootfs tar.
+    #[arg(long)]
+    pub(crate) fresh_identity: bool,
     /// Skip the post-write verification of the pressed file. The press is not
     /// faster, and only the re-read is saved.
     #[arg(long)]

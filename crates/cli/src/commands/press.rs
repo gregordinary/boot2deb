@@ -8,8 +8,8 @@
 //! - A press with nothing to add **streams** the existing compressed artifact,
 //!   decompressing through a digest tap and verifying. A plain card must not cost
 //!   a rebuild.
-//! - A press with tree additions **re-assembles** the image from the kept rootfs
-//!   tar, through [`boot2deb_engine::image::press_image`].
+//! - A press with tree additions, or with a fresh identity, **re-assembles** the image
+//!   from the kept rootfs tar, through [`boot2deb_engine::image::press_image`].
 //!
 //! Either way the seed keys are written last, into the finished file, and a rootfs file
 //! manifest lands beside it as `<output stem>.rootfs.uapi16`. A streamed press copies
@@ -35,6 +35,7 @@ use boot2deb_core::{resolve_recipe, ConfigRoot, ResolvedBuild};
 use boot2deb_engine::event::{Event, Step};
 use boot2deb_engine::image::{press_image, BootPayload, ImageIdentity, PressOptions};
 use boot2deb_engine::press::additions::TreeAdditions;
+use boot2deb_engine::press::identity::PressIdentity;
 use boot2deb_engine::press::seed::SeedKeys;
 use boot2deb_engine::press::{seed, verify, write};
 use std::path::{Path, PathBuf};
@@ -66,10 +67,21 @@ pub(crate) fn run(
             .unwrap_or_else(|| work_dir.join("artifacts")),
     );
 
-    // The identifiers this recipe's image carries, derived once: the
-    // re-assembly stamps them into the GPT and the superblock, and a template
-    // addition names them before any disk carries them.
-    let identity = ImageIdentity::derive(recipe, &resolved.device);
+    // The identifiers the build derived for this recipe, and the ones the pressed image
+    // carries: the re-assembly stamps them into the GPT and the superblock, and a
+    // template addition names them before any disk carries them. They are the build's
+    // unless the press draws fresh ones for its medium. `--embed-image` implies that,
+    // because its card stays in the machine beside the disk it installs, and two disks
+    // there must not answer to one root PARTUUID.
+    let built = ImageIdentity::derive(recipe, &resolved.device);
+    let identity = if args.fresh_identity || args.embed_image {
+        PressIdentity::Fresh {
+            built,
+            fresh: ImageIdentity::fresh(&resolved.device)?,
+        }
+    } else {
+        PressIdentity::Built(built)
+    };
 
     let keys = seed_keys(&args.keys)?;
     let additions = collect_additions(
@@ -77,7 +89,7 @@ pub(crate) fn run(
         &resolved,
         recipe,
         &stem,
-        identity,
+        &identity,
         keys.as_ref().and_then(|k| k.hostname.clone()),
         &out_dir,
     )?;
@@ -95,18 +107,23 @@ pub(crate) fn run(
                         — tree additions do not apply"
                 .into());
         }
+        if identity.is_fresh() {
+            return Err("this build presses only a boot image, which carries no \
+                        partition table or rootfs — a fresh identity does not apply"
+                .into());
+        }
     }
 
     let bound = bind_outputs(&roles, output, &args)?;
     refuse_build_artifacts(&bound, &out_dir, &stem)?;
 
     if args.dry_run {
-        return dry_run(&bound, &out_dir, &stem, &keys, &additions);
+        return dry_run(&bound, &out_dir, &stem, &keys, &additions, &identity);
     }
 
     let sink = move |e: Event| print_event_at(verbosity, &e);
     for (role, out) in &bound {
-        if role.carries_rootfs() && !additions.is_empty() {
+        if reassembles(*role, &additions, &identity) {
             reassemble(
                 &resolved, recipe, &stem, *role, out, &out_dir, &work_dir, &args, &additions,
                 identity, &sink,
@@ -206,8 +223,16 @@ fn stream(
     Ok(())
 }
 
+/// Whether this output is re-assembled rather than streamed: it carries a rootfs, and
+/// the press either adds to that rootfs or gives the image a fresh identity. Either one
+/// changes bytes the build's artifact fixes, so neither can stream.
+fn reassembles(role: ArtifactRole, additions: &TreeAdditions, identity: &PressIdentity) -> bool {
+    role.carries_rootfs() && (!additions.is_empty() || identity.is_fresh())
+}
+
 /// The re-assembly path: rebuild the image from the kept rootfs tar with the
-/// additions merged in, writing the output file directly.
+/// additions merged in, and the identity it carries stamped, writing the output file
+/// directly.
 #[allow(clippy::too_many_arguments)] // one call site; the args are the press itself
 fn reassemble(
     resolved: &ResolvedBuild,
@@ -219,14 +244,14 @@ fn reassemble(
     work_dir: &Path,
     args: &PressArgs,
     additions: &TreeAdditions,
-    identity: ImageIdentity,
+    identity: PressIdentity,
     sink: &impl Fn(Event),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rootfs_tar = out_dir.join(format!("{stem}-rootfs.tar"));
     if !rootfs_tar.exists() {
         return Err(format!(
-            "rootfs tar not found at {} — tree additions re-assemble the image from \
-             the kept artifacts; run `boot2deb build {recipe}` first",
+            "rootfs tar not found at {} — tree additions and a fresh identity re-assemble \
+             the image from the kept artifacts; run `boot2deb build {recipe}` first",
             rootfs_tar.display()
         )
         .into());
@@ -280,13 +305,28 @@ fn reassemble(
         sink,
     )?;
     let step = Step::start(sink, "press");
+    let root = identity.carried().rootfs_partuuid.hyphenated().to_string();
     if !args.no_verify {
         // The rootfs was already scan-verified inside the assembly; what is left
-        // to hold is the disk around it, whose table must read back whole.
+        // to hold is the disk around it, whose table must read back whole and root
+        // on the PARTUUID this press gave it.
         let table = verify::read_back_table(out)?;
+        if !table.iter().any(|entry| entry.part_guid == root) {
+            return Err(format!(
+                "the pressed image's partition table carries no partition with the root \
+                 PARTUUID {root} it was pressed with"
+            )
+            .into());
+        }
         step.log(format!(
-            "verified: the pressed image carries a readable GPT ({} entries)",
+            "verified: the pressed image carries a readable GPT ({} entries) rooting on {root}",
             table.len()
+        ));
+    }
+    if let PressIdentity::Fresh { built, .. } = identity {
+        step.log(format!(
+            "identity: drawn for this medium, root PARTUUID {root} (the build's is {})",
+            built.rootfs_partuuid.hyphenated()
         ));
     }
     // The pressed file's own credential — it exists nowhere else, so it is
@@ -381,10 +421,10 @@ fn dry_run(
     stem: &str,
     keys: &Option<SeedKeys>,
     additions: &TreeAdditions,
+    identity: &PressIdentity,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (role, out) in bound {
-        let reassembles = role.carries_rootfs() && !additions.is_empty();
-        if reassembles {
+        if reassembles(*role, additions, identity) {
             println!(
                 "{}: re-assemble from {} -> {}",
                 role.describe(),
@@ -393,6 +433,13 @@ fn dry_run(
             );
             for line in additions.describe() {
                 println!("  {line}");
+            }
+            if let PressIdentity::Fresh { built, .. } = identity {
+                println!(
+                    "  identity: fresh, drawn when the image is written (the build's root \
+                     PARTUUID is {})",
+                    built.rootfs_partuuid.hyphenated()
+                );
             }
         } else {
             let artifact = find_artifact(out_dir, stem, *role)?;
@@ -461,7 +508,7 @@ fn collect_additions(
     resolved: &ResolvedBuild,
     recipe: &str,
     stem: &str,
-    identity: ImageIdentity,
+    identity: &PressIdentity,
     seed_hostname: Option<String>,
     out_dir: &Path,
 ) -> Result<TreeAdditions, Box<dyn std::error::Error>> {
@@ -598,5 +645,31 @@ mod tests {
         .is_err());
         assert!(press(ArtifactRole::Combined, "/work/artifacts/card.img").is_ok());
         assert!(press(ArtifactRole::Combined, "/cards/board-forky.img").is_ok());
+    }
+
+    /// An output re-assembles when the press adds to its rootfs or draws a fresh identity,
+    /// and only an output that carries a rootfs can. Everything else streams the build's
+    /// bytes.
+    #[test]
+    fn an_addition_or_a_fresh_identity_re_assembles_and_nothing_else_does() {
+        let built = ImageIdentity::derive("turing-rk1/forky", "turing-rk1");
+        let kept = PressIdentity::Built(built);
+        let fresh = PressIdentity::Fresh {
+            built,
+            fresh: ImageIdentity::derive("a fresh seed", "turing-rk1"),
+        };
+        let empty = TreeAdditions::new("turing-rk1-forky", "turing-rk1/forky", &kept);
+        assert!(!reassembles(ArtifactRole::Combined, &empty, &kept));
+        assert!(reassembles(ArtifactRole::Combined, &empty, &fresh));
+        assert!(reassembles(ArtifactRole::Rootfs, &empty, &fresh));
+        assert!(!reassembles(ArtifactRole::Boot, &empty, &fresh));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site.conf");
+        std::fs::write(&site, b"site\n").unwrap();
+        let mut added = TreeAdditions::new("turing-rk1-forky", "turing-rk1/forky", &kept);
+        added.copy(&site, "/etc/site.conf").unwrap();
+        assert!(reassembles(ArtifactRole::Combined, &added, &kept));
+        assert!(!reassembles(ArtifactRole::Boot, &added, &kept));
     }
 }

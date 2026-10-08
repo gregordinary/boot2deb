@@ -88,11 +88,13 @@ bootloader beside it is looking at an expected state, not a fault.
 
 ## `pressed` marks a derived image
 
-An image `press` re-assembled with tree additions carries one extra table:
+An image `press` re-assembled carries one extra table. Adding files, or drawing
+a fresh identity, makes a press re-assemble:
 
 ```toml
 [pressed]
 source = "turing-rk1-forky"
+fresh_identity = true
 copies = ["/etc/myapp/site.conf"]
 debs = ["myapp_1.2_arm64.deb"]
 embedded_image = "turing-rk1-forky.img.xz"
@@ -100,9 +102,15 @@ embedded_image = "turing-rk1-forky.img.xz"
 
 Its **absence is the claim**: no `[pressed]` table means this filesystem is the
 recipe's canonical artifact, byte for byte. Where it is present, `source` names
-the artifact stem the file derives from. The remaining keys list what was
-added, by kind and destination, never by content. `reproduce` reproduces
-builds, not pressings.
+the artifact stem the file derives from.
+
+`fresh_identity = true` says the press drew the disk's identifiers for this one
+medium (see [Producing images](../press.md#giving-a-medium-its-own-identifiers)).
+None of them match the ones the recipe derives, and this key is how a reader
+knows why. An image carrying the recipe's identifiers has no such key.
+
+The other keys list what was added, by kind and destination, never by content.
+`reproduce` reproduces builds, not pressings.
 
 The seed partition is deliberately not summarized here. It is self-describing, and
 `boot2deb seed` can rewrite it later without touching the filesystem, so a copy of it in

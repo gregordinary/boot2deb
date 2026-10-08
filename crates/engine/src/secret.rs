@@ -37,7 +37,7 @@ const SALT_BYTES: usize = 12;
 
 /// Fill `buf` from the kernel CSPRNG. Fails only if `/dev/urandom` cannot be read,
 /// which on Linux means something is wrong that no fallback should paper over.
-fn fill_random(buf: &mut [u8]) -> Result<(), EngineError> {
+pub(crate) fn fill_random(buf: &mut [u8]) -> Result<(), EngineError> {
     let path = Path::new("/dev/urandom");
     File::open(path)
         .and_then(|mut f| f.read_exact(buf))

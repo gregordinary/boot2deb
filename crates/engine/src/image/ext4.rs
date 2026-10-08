@@ -124,10 +124,10 @@ pub const ROOTFS_FS_KIND: &str = "ext4";
 /// `/etc/fstab` mounts by. `uuid` is the deterministic superblock UUID the caller derived
 /// from the lock, so a rebuild reproduces it. `first_boot` is the per-image credential
 /// spliced into the rootfs's `/etc/shadow` before the filesystem is written.
-/// `additions` is a press re-assembly's tree additions, merged into the parsed
-/// entry list before the credential splice (so the per-image password wins over
-/// anything a press could copy); `None` for a build, whose image carries exactly
-/// the tar.
+/// `press` is what a press re-assembly changes in the tree, applied to the parsed entry
+/// list before the credential splice, so the per-image password wins over anything a
+/// press could copy. See [`PressTree`] for the order. It is `None` for a build, whose
+/// image carries exactly the tar.
 ///
 /// The superblock's format times are deterministic: they take the newest source mtime,
 /// which the rootfs export has already clamped to the lock's `SOURCE_DATE_EPOCH`. The
@@ -144,7 +144,7 @@ pub(crate) fn build_rootfs_ext4(
     label: &str,
     uuid: Uuid,
     first_boot: FirstBoot,
-    additions: Option<&crate::press::additions::TreeAdditions>,
+    press: Option<PressTree<'_>>,
     step: &Step,
 ) -> Result<RootfsFilesystem, EngineError> {
     if let RootfsSize::Exact(bytes) = size {
@@ -181,14 +181,10 @@ pub(crate) fn build_rootfs_ext4(
         })?
         .into_entries();
 
-    // 2. A press re-assembly's tree additions, merged before the password splice
-    //    below so the per-image credential always wins over anything copied in.
-    if let Some(additions) = additions {
-        additions.apply(&mut entries)?;
-        step.log(format!(
-            "merged {} tree addition(s) and stamped the pressed marker",
-            additions.file_count()
-        ));
+    // 2. A press re-assembly's changes, made before the password splice below so the
+    //    per-image credential always wins over anything copied in.
+    if let Some(press) = press {
+        press.apply(&mut entries, step)?;
     }
 
     // 3. Splice the unique per-image first-boot password into /etc/shadow: the one
@@ -493,6 +489,40 @@ fn splice_first_boot_password(
     // range, so it replaces the archive's own /etc/shadow when the file is placed.
     shadow.kind = EntryKind::File(FileContent::Owned(spliced.into_bytes()));
     Ok(())
+}
+
+/// What a press re-assembly changes in the tree it formats.
+///
+/// The identity rewrite runs first, on the build's own files. The additions merge next,
+/// so a file the operator named wins over the build's. The rewrite's check runs last,
+/// over the merged tree, so an added file that names the build's identity is caught too.
+#[derive(Clone, Copy)]
+pub(crate) struct PressTree<'a> {
+    /// The files the press adds, and the `[pressed]` marker every re-assembly stamps.
+    pub(crate) additions: &'a crate::press::additions::TreeAdditions,
+    /// The rewrite of the build's identity, when the press draws a fresh one.
+    pub(crate) rekey: Option<&'a crate::press::identity::TreeRekey>,
+}
+
+impl PressTree<'_> {
+    /// Apply the rewrite, the additions, and the rewrite's check, in that order.
+    fn apply(&self, entries: &mut Vec<SourceEntry>, step: &Step) -> Result<(), EngineError> {
+        if let Some(rekey) = self.rekey {
+            for line in rekey.apply(entries)? {
+                step.log(line);
+            }
+        }
+        self.additions.apply(entries)?;
+        step.log(format!(
+            "merged {} tree addition(s) and stamped the pressed marker",
+            self.additions.file_count()
+        ));
+        if let Some(rekey) = self.rekey {
+            rekey.check(entries)?;
+            step.log("checked /etc and /boot: no file names the build's identifiers");
+        }
+        Ok(())
+    }
 }
 
 /// A parsed, post-processed entry list handed to the formatter as a [`Source`].

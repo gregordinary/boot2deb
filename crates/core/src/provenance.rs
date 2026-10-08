@@ -610,15 +610,15 @@ pub struct SystemIdentity {
     pub image: IdentityImage,
     /// The kernel it boots, and how a new one reaches it.
     pub kernel: IdentityKernel,
-    /// Present only on an image `press` re-assembled with tree additions: what was
-    /// added on top of the recipe's canonical artifact. Absent on every image a
-    /// build emits — its absence is what says "this file is the artifact".
+    /// Present only on an image `press` re-assembled, with tree additions or a fresh
+    /// identity: how it differs from the recipe's canonical artifact. Absent on every
+    /// image a build emits — its absence is what says "this file is the artifact".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pressed: Option<IdentityPressed>,
 }
 
-/// The `[pressed]` table: a pressed-with-additions image's account of how it
-/// differs from the recipe's canonical artifact.
+/// The `[pressed]` table: a re-assembled image's account of how it differs from the
+/// recipe's canonical artifact.
 ///
 /// A pressed image is **derived, not canonical**. `reproduce` reproduces builds, and
 /// the recipe's artifacts and provenance stay untouched. This table is therefore
@@ -632,6 +632,15 @@ pub struct IdentityPressed {
     /// The artifact stem this image derives from (e.g. `turing-rk1-forky`) — which
     /// build's artifacts were re-assembled.
     pub source: String,
+    /// Whether the press drew this image's identifiers for it alone instead of keeping
+    /// the ones every build of the recipe derives.
+    ///
+    /// When true, the GPT disk GUID, the root PARTUUID, the ext4 UUID, the seed serial and
+    /// the kernel-slot GUIDs all differ from the recipe's. A reader holding the disk to
+    /// the identifiers the recipe derives takes this as the reason they do not match.
+    /// Written only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_identity: bool,
     /// Destination paths of `--copy` additions, in the tree's own absolute form.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copies: Vec<String>,
@@ -2659,6 +2668,7 @@ pub(crate) mod tests {
 
         identity.pressed = Some(IdentityPressed {
             source: "asus-c201-forky".into(),
+            fresh_identity: false,
             copies: vec!["/etc/site.conf".into()],
             debs: vec!["myapp_1.0_armhf.deb".into()],
             embedded_image: None,
@@ -2669,6 +2679,31 @@ pub(crate) mod tests {
             !text.contains("embedded_image"),
             "an absent addition kind is omitted, not null: {text}"
         );
+        assert!(
+            !text.contains("fresh_identity"),
+            "the recipe's own identity is the unmarked case: {text}"
+        );
+        assert_eq!(
+            SystemIdentity::from_toml_str(&text, "image.toml").unwrap(),
+            identity
+        );
+    }
+
+    /// A press that drew a fresh identity, and added nothing, still says so: the table is
+    /// what tells a reader the disk's identifiers are not the recipe's.
+    #[test]
+    fn a_fresh_identity_is_recorded_in_the_pressed_marker() {
+        let mut identity = identity_of(depthcharge_build(), &sample_lock());
+        identity.pressed = Some(IdentityPressed {
+            source: "asus-c201-forky".into(),
+            fresh_identity: true,
+            copies: Vec::new(),
+            debs: Vec::new(),
+            embedded_image: None,
+        });
+        let text = identity.to_toml_string().unwrap();
+        assert!(text.contains("fresh_identity = true"), "{text}");
+        assert!(!text.contains("copies"), "{text}");
         assert_eq!(
             SystemIdentity::from_toml_str(&text, "image.toml").unwrap(),
             identity

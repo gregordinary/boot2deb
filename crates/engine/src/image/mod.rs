@@ -35,12 +35,14 @@ pub mod files;
 mod geometry;
 mod gpt;
 pub mod inspect;
+pub(crate) mod vboot;
 
 pub use ext4::ROOTFS_FS_KIND;
 
 use crate::error::EngineError;
 use crate::event::{EventSink, Step};
 use crate::press::additions::TreeAdditions;
+use crate::press::identity::{PressIdentity, TreeRekey};
 use boot2deb_core::chromeos::MAX_KPART_SLOTS;
 use boot2deb_core::model::{Layout, ResolvedBoot};
 use boot2deb_core::press::ArtifactRole;
@@ -217,6 +219,9 @@ pub struct ImageOptions<'a> {
 /// them, which is the reproducibility contract, while distinct recipes (or devices)
 /// still get distinct values.
 ///
+/// Every medium written from one build carries the same values. A press can give one
+/// medium identifiers of its own ([`fresh`](Self::fresh), [`PressIdentity::Fresh`]).
+///
 /// It is computed **once, by the caller**, and shared by the rootfs and image nodes.
 /// Under `depthcharge` the rootfs's own `/etc/fstab` has to name the partition the
 /// signed kernel will root on. That makes the rootfs PARTUUID an input to the rootfs,
@@ -267,6 +272,22 @@ impl ImageIdentity {
                 derive_uuid(seed, device, &format!("gpt-kernel-partition-{i}"))
             }),
         }
+    }
+
+    /// Draw identifiers for one medium, shared with no other image of any recipe.
+    ///
+    /// They are derived exactly as [`derive`](Self::derive) derives them, from a seed
+    /// read out of the kernel CSPRNG instead of from the recipe. Every guarantee that
+    /// does not rest on the seed carries over, the distinct kernel-slot GUIDs among them.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Io`] when `/dev/urandom` cannot be read.
+    pub fn fresh(device: &str) -> Result<Self, EngineError> {
+        let mut seed = [0u8; 32];
+        crate::secret::fill_random(&mut seed)?;
+        let seed: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(Self::derive(&seed, device))
     }
 
     /// The seed FAT's volume serial: the [`seed_partuuid`](Self::seed_partuuid)'s
@@ -691,11 +712,13 @@ pub struct PressOptions<'a> {
     pub work_dir: &'a Path,
     /// ext4 volume label and GPT partition name (≤ 16 bytes), e.g. `rootfs`.
     pub rootfs_label: &'a str,
-    /// The recipe's deterministic on-disk identifiers — the same values the
-    /// build derived, so a pressed image keeps the artifact's identity.
-    pub identity: ImageIdentity,
-    /// What this press adds to the tree. Never empty: a press with nothing to
-    /// add streams the existing artifact instead of re-assembling.
+    /// The identifiers the pressed image carries: the build's, or ones drawn for this
+    /// medium alone. A fresh identity rewrites the tree's references to the build's
+    /// root PARTUUID and re-signs a depthcharge kernel to match.
+    pub identity: PressIdentity,
+    /// What this press adds to the tree. It is empty only when the press draws a fresh
+    /// identity, which re-assembles with nothing added. A press with neither streams the
+    /// existing artifact instead.
     pub additions: &'a TreeAdditions,
 }
 
@@ -728,12 +751,19 @@ pub struct PressedImage {
 /// exactly as a build's is (the in-process scan, plus `e2fsck -fn` where present)
 /// before the disk is laid out.
 ///
+/// Under [`PressIdentity::Fresh`] the disk carries the press's own identifiers. The
+/// tree's references to the build's root PARTUUID are rewritten, and a depthcharge
+/// kernel is re-signed for the new root before it is placed. See
+/// [`press::identity`](crate::press::identity) for what changes and what is refused.
+///
 /// # Errors
 ///
 /// [`EngineError::StageNotApplicable`] for a role that carries no rootfs, or a
 /// combined press without its boot payload. [`EngineError::PressAddition`] when
-/// an addition cannot be placed. Otherwise the image node's own geometry,
-/// format, and I/O errors.
+/// an addition cannot be placed. Under a fresh identity, [`EngineError::KpartResign`]
+/// when the kernel cannot be re-signed, and [`EngineError::IdentityRewrite`] when the
+/// tree names the build's identifiers somewhere the press cannot rewrite. Otherwise
+/// the image node's own geometry, format, and I/O errors.
 pub fn press_image(
     ib: ImageBuild,
     opts: &PressOptions,
@@ -758,13 +788,25 @@ pub fn press_image(
         std::fs::create_dir_all(parent).map_err(|s| EngineError::io(parent, s))?;
     }
 
+    let identity = opts.identity.carried();
     // The boot payload, exactly as the image node resolves it: a combined press
     // places it, and under depthcharge that means taking the signed kernel out
-    // of the rootfs tarball and holding it to this identity's root PARTUUID.
+    // of the rootfs tarball and holding it to this identity's root PARTUUID. The
+    // build signed it for the build's root, so a fresh identity re-signs it first.
     let kpart = match (with_boot, &opts.boot) {
         (true, Some(BootPayload::Depthcharge)) => {
             let kpart = depthcharge::extract_kpart(opts.rootfs_tar, opts.work_dir, &step)?;
-            depthcharge::verify_kpart(&kpart, opts.identity.rootfs_partuuid)?;
+            if let PressIdentity::Fresh { built, fresh } = opts.identity {
+                depthcharge::resign_kpart(
+                    &kpart,
+                    opts.rootfs_tar,
+                    opts.work_dir,
+                    built.rootfs_partuuid,
+                    fresh.rootfs_partuuid,
+                    &step,
+                )?;
+            }
+            depthcharge::verify_kpart(&kpart, identity.rootfs_partuuid)?;
             Some(kpart)
         }
         (true, Some(BootPayload::RockchipRkbin { .. })) => None,
@@ -781,6 +823,20 @@ pub fn press_image(
         let payloads = boot_payloads(boot, kpart.as_deref())?;
         region.check_payload_fit(&payloads)?;
     }
+
+    // A fresh identity rewrites the tree's own references to the build's root. The
+    // tree's copy of the signed kernel becomes the re-signed one the slot carries, so
+    // the two stay identical, as a build leaves them.
+    let rekey = match opts.identity {
+        PressIdentity::Built(_) => None,
+        PressIdentity::Fresh { built, fresh } => {
+            let rekey = TreeRekey::new(built, fresh, &build.boot);
+            Some(match &kpart {
+                Some(kpart) => rekey.with_kpart(depthcharge::tree_path(kpart), kpart.clone()),
+                None => rekey,
+            })
+        }
+    };
 
     // A fresh per-unit credential: the kept rootfs tar has the account locked
     // (the build's password was spliced into the build's image, not the tar),
@@ -805,12 +861,15 @@ pub fn press_image(
         rootfs_size,
         opts.rootfs_tar,
         opts.rootfs_label,
-        opts.identity.ext4_uuid,
+        identity.ext4_uuid,
         ext4::FirstBoot {
             user: crate::rootfs::DEFAULT_USER,
             password_hash: &password_hash,
         },
-        Some(opts.additions),
+        Some(ext4::PressTree {
+            additions: opts.additions,
+            rekey: rekey.as_ref(),
+        }),
         &step,
     )?;
     let files_manifest = opts.output.with_extension("rootfs.uapi16");
@@ -831,7 +890,7 @@ pub fn press_image(
     // caller personalizes it afterwards where keys were named.
     let seed_image = crate::press::seed::partition_image(
         &crate::press::seed::SeedKeys::default(),
-        opts.identity.seed_volume_id(),
+        identity.seed_volume_id(),
         rootfs_fs.time_secs,
         u32::try_from(geom.seed_off / geometry::SECTOR).unwrap_or(0),
     )?;
@@ -845,7 +904,7 @@ pub fn press_image(
         },
         opts.boot.as_ref().filter(|_| with_boot),
         opts.rootfs_label,
-        &opts.identity,
+        &identity,
         &step,
     )?;
     // The scratch ext4 is press-local; a build's is kept for stage reuse, but a
@@ -1232,7 +1291,17 @@ mod tests {
 
     /// Build a tiny rootfs tarball (a few dirs + files) at `path`.
     fn make_rootfs_tar(dir: &Path, path: &Path) {
+        make_rootfs_tar_with(dir, path, &[]);
+    }
+
+    /// [`make_rootfs_tar`] with `extra` files (tree path, content) laid in as well.
+    fn make_rootfs_tar_with(dir: &Path, path: &Path, extra: &[(&str, &[u8])]) {
         let root = dir.join("rootfs");
+        for (tree_path, content) in extra {
+            let dest = root.join(tree_path.trim_start_matches('/'));
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(dest, content).unwrap();
+        }
         std::fs::create_dir_all(root.join("etc/boot2deb")).unwrap();
         std::fs::create_dir_all(root.join("usr/bin")).unwrap();
         std::fs::write(root.join("etc/hostname"), b"turing-rk1\n").unwrap();
@@ -1525,7 +1594,11 @@ mod tests {
         std::fs::write(&deb, b"DEB-BYTES").unwrap();
         let embedded = tmp.path().join("turing-rk1-forky.img.xz");
         std::fs::write(&embedded, b"EMBEDDED-ARTIFACT").unwrap();
-        let mut additions = TreeAdditions::new("turing-rk1-forky", "turing-rk1/forky", identity);
+        let mut additions = TreeAdditions::new(
+            "turing-rk1-forky",
+            "turing-rk1/forky",
+            &PressIdentity::Built(identity),
+        );
         additions.copy(&site, "/opt/site/site.conf").unwrap();
         additions.copy(&hostname, "/etc/hostname").unwrap();
         additions.deb(&deb).unwrap();
@@ -1544,7 +1617,7 @@ mod tests {
                 output: &pressed_path,
                 work_dir: &tmp.path().join("work-press"),
                 rootfs_label: "rootfs",
-                identity,
+                identity: PressIdentity::Built(identity),
                 additions: &additions,
             },
             &sink,
@@ -1662,6 +1735,207 @@ mod tests {
             base_map[b"/etc/shadow".as_slice()].2,
             press_map[b"/etc/shadow".as_slice()].2
         );
+    }
+
+    #[test]
+    fn a_fresh_identity_is_drawn_per_call_and_keeps_its_slots_distinct() {
+        let a = ImageIdentity::fresh("asus-c201").unwrap();
+        let b = ImageIdentity::fresh("asus-c201").unwrap();
+        assert_ne!(a, b, "two draws share an identity");
+        assert_ne!(a, ImageIdentity::derive("asus-c201/forky", "asus-c201"));
+        for (i, slot) in a.kpart_guids.iter().enumerate() {
+            assert!(
+                !a.kpart_guids[i + 1..].contains(slot),
+                "two kernel slots share a GUID"
+            );
+        }
+        for uuid in [a.ext4_uuid, a.disk_guid, a.rootfs_partuuid, a.seed_partuuid] {
+            assert_eq!(uuid.get_version_num(), 4);
+        }
+    }
+
+    /// The ext4 superblock UUID and a file's content, read from the image at `path`.
+    fn read_back_rootfs(path: &Path, file: &[u8]) -> (Uuid, Vec<u8>) {
+        use ferrosys::ext::{OpenOptions as ExtOpen, Reader as ExtReader};
+        let table = crate::press::verify::read_back_table(path).unwrap();
+        let rootfs = table.iter().find(|e| e.name == "rootfs").unwrap();
+        let base = rootfs.first_lba * geometry::SECTOR;
+        let bytes = std::fs::read(path).unwrap();
+        let at = usize::try_from(base).unwrap() + 1024 + 0x68;
+        let uuid = Uuid::from_slice(&bytes[at..at + 16]).unwrap();
+        let mut reader = ExtReader::open_with(
+            std::fs::File::open(path).unwrap(),
+            &ExtOpen::new().base(base),
+        )
+        .unwrap();
+        let entry = reader
+            .walk()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.path == file)
+            .unwrap_or_else(|| panic!("{} missing", String::from_utf8_lossy(file)));
+        (uuid, reader.read_data(&entry.inode).unwrap())
+    }
+
+    /// A u-boot board pressed with a fresh identity: every identifier on disk is the
+    /// fresh one, the two files that name the root follow it, and the marker says so.
+    #[test]
+    fn a_fresh_identity_press_rewrites_an_rkbin_image_end_to_end() {
+        if !require_host_tools(&["tar"]) {
+            return;
+        }
+        let built = ImageIdentity::derive("turing-rk1/forky", "turing-rk1");
+        let fresh = ImageIdentity::derive("a fresh seed", "turing-rk1");
+        let root = |id: &ImageIdentity| id.rootfs_partuuid.hyphenated().to_string();
+        let fstab = |id: &ImageIdentity| format!("PARTUUID={}\t/\text4\tdefaults\t0 1\n", root(id));
+        let extlinux =
+            |id: &ImageIdentity| format!("label l0\n\tappend root=PARTUUID={} rw\n", root(id));
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs_tar = tmp.path().join("rootfs.tar");
+        make_rootfs_tar_with(
+            tmp.path(),
+            &rootfs_tar,
+            &[
+                ("/etc/fstab", fstab(&built).as_bytes()),
+                ("/boot/extlinux/extlinux.conf", extlinux(&built).as_bytes()),
+            ],
+        );
+        let idb = tmp.path().join("idbloader.img");
+        let itb = tmp.path().join("u-boot.itb");
+        std::fs::write(&idb, b"IDBLOADER-PAYLOAD").unwrap();
+        std::fs::write(&itb, b"UBOOT-ITB-PAYLOAD").unwrap();
+        let build = small_rk1_build("fit+20%");
+        let identity = PressIdentity::Fresh { built, fresh };
+        // Nothing added: the fresh identity alone is what this press changes.
+        let additions = TreeAdditions::new("turing-rk1-forky", "turing-rk1/forky", &identity);
+        let card = tmp.path().join("card.img");
+        press_image(
+            pair_of(&build),
+            &PressOptions {
+                rootfs_tar: &rootfs_tar,
+                boot: Some(BootPayload::RockchipRkbin {
+                    idbloader: &idb,
+                    uboot_itb: &itb,
+                }),
+                role: ArtifactRole::Combined,
+                output: &card,
+                work_dir: &tmp.path().join("work-press"),
+                rootfs_label: "rootfs",
+                identity,
+                additions: &additions,
+            },
+            &|_: crate::event::Event| {},
+        )
+        .unwrap();
+
+        let table = crate::press::verify::read_back_table(&card).unwrap();
+        let guid = |name: &str| {
+            table
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap()
+                .part_guid
+                .clone()
+        };
+        assert_eq!(guid("rootfs"), root(&fresh));
+        assert_eq!(
+            guid(boot2deb_core::press::SEED_PARTLABEL),
+            fresh.seed_partuuid.hyphenated().to_string()
+        );
+        let (ext4_uuid, fstab_now) = read_back_rootfs(&card, b"/etc/fstab");
+        assert_eq!(ext4_uuid, fresh.ext4_uuid);
+        assert_eq!(String::from_utf8(fstab_now).unwrap(), fstab(&fresh));
+        let (_, menu) = read_back_rootfs(&card, b"/boot/extlinux/extlinux.conf");
+        assert_eq!(String::from_utf8(menu).unwrap(), extlinux(&fresh));
+        let (_, marker) = read_back_rootfs(&card, b"/etc/boot2deb/image.toml");
+        let marker = boot2deb_core::provenance::SystemIdentity::from_toml_str(
+            std::str::from_utf8(&marker).unwrap(),
+            "image.toml",
+        )
+        .unwrap();
+        assert!(
+            marker
+                .pressed
+                .expect("a re-assembly is marked")
+                .fresh_identity
+        );
+    }
+
+    /// A depthcharge board pressed with a fresh identity: the kernel slot carries a kernel
+    /// re-signed for the fresh root, with the image's own key, and the tree's copy of it
+    /// is the same bytes.
+    #[test]
+    fn a_fresh_identity_press_re_signs_a_depthcharge_kernel_end_to_end() {
+        if !require_host_tools(&["tar"]) {
+            return;
+        }
+        const SIGNED: &[u8] = include_bytes!("testdata/vboot/signed.kpart");
+        const DATA_KEY: &[u8] = include_bytes!("testdata/vboot/kernel_data_key.vbprivk");
+        // The fixture kernel was signed for this root, so the build's identity names it.
+        let mut built = ImageIdentity::derive("asus-c201/forky", "asus-c201");
+        built.rootfs_partuuid = Uuid::parse_str("0a6f3e5c-2b1d-4c8e-9f70-1a2b3c4d5e6f").unwrap();
+        let fresh = ImageIdentity::derive("a fresh seed", "asus-c201");
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs_tar = tmp.path().join("rootfs.tar");
+        let fstab = format!(
+            "PARTUUID={}\t/\text4\terrors=remount-ro\t0 1\n",
+            built.rootfs_partuuid.hyphenated()
+        );
+        make_rootfs_tar_with(
+            tmp.path(),
+            &rootfs_tar,
+            &[
+                ("/etc/fstab", fstab.as_bytes()),
+                ("/boot/depthcharge/7.2.9-1-armv7.img", SIGNED),
+                ("/usr/share/vboot/devkeys/kernel_data_key.vbprivk", DATA_KEY),
+            ],
+        );
+        let mut build =
+            resolve_recipe(&repo_root(), "asus-c201/forky", &Overrides::default()).unwrap();
+        build.image.as_mut().unwrap().image_size = "fit+20%".into();
+        let identity = PressIdentity::Fresh { built, fresh };
+        let additions = TreeAdditions::new("asus-c201-forky", "asus-c201/forky", &identity);
+        let card = tmp.path().join("card.img");
+        press_image(
+            pair_of(&build),
+            &PressOptions {
+                rootfs_tar: &rootfs_tar,
+                boot: Some(BootPayload::Depthcharge),
+                role: ArtifactRole::Combined,
+                output: &card,
+                work_dir: &tmp.path().join("work-press"),
+                rootfs_label: "rootfs",
+                identity,
+                additions: &additions,
+            },
+            &|_: crate::event::Event| {},
+        )
+        .unwrap();
+
+        let table = crate::press::verify::read_back_table(&card).unwrap();
+        let slot = table.iter().find(|e| e.name == "KERN-A").unwrap();
+        let bytes = std::fs::read(&card).unwrap();
+        let start = usize::try_from(slot.first_lba * geometry::SECTOR).unwrap();
+        let in_slot = bytes[start..start + SIGNED.len()].to_vec();
+        let kernel = vboot::KernelPartition::parse(in_slot.clone()).unwrap();
+        assert_eq!(
+            kernel.cmdline().unwrap(),
+            format!(
+                "kern_guid=%U console=tty1 rootwait ro loglevel=4 root=PARTUUID={}",
+                fresh.rootfs_partuuid.hyphenated()
+            )
+        );
+        let (_, in_tree) = read_back_rootfs(&card, b"/boot/depthcharge/7.2.9-1-armv7.img");
+        assert!(
+            in_tree == in_slot,
+            "the tree's kernel and the slot's differ"
+        );
+        let (_, fstab_now) = read_back_rootfs(&card, b"/etc/fstab");
+        assert!(String::from_utf8(fstab_now)
+            .unwrap()
+            .contains(&fresh.rootfs_partuuid.hyphenated().to_string()));
+        // The press leaves no copy of the key behind.
+        assert!(!tmp.path().join("work-press/signing-key").exists());
     }
 
     /// A fitted image is the whole orchestration in the other direction: the format

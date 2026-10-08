@@ -30,6 +30,7 @@
 
 use crate::error::EngineError;
 use crate::image::ImageIdentity;
+use crate::press::identity::PressIdentity;
 use crate::press::template::{self, ImageFacts, Template, MAX_TEMPLATE_BYTES};
 use boot2deb_core::provenance::{IdentityPressed, SystemIdentity};
 use ferrosys::{EntryKind, FileContent, FileRange, Metadata, Source as _, SourceEntry};
@@ -78,9 +79,12 @@ pub struct TreeAdditions {
     seed_hostname: Option<String>,
     /// The identifiers the image node stamps into the GPT and the ext4
     /// superblock. Held so a template can name a PARTUUID that does not exist
-    /// on any disk yet: they are derived from the build point, not drawn when
-    /// the image is written.
+    /// on any disk yet: they are known before the image is written, whether
+    /// derived from the build point or drawn for this press.
     identity: ImageIdentity,
+    /// Whether [`identity`](Self::identity) was drawn for this press rather than
+    /// derived from the recipe, for the marker.
+    fresh_identity: bool,
     /// The validated files, in insertion order; `apply` sorts by destination.
     files: Vec<AddedFile>,
     /// `--copy` and `--copy-tree` destinations, for the marker.
@@ -148,19 +152,20 @@ impl TreeAdditions {
     /// Additions for a press of `source_stem`'s artifacts, initially empty.
     ///
     /// `recipe` is the build point being pressed, and `identity` the identifiers
-    /// its image will carry. Both exist only so a [template] can name them.
-    /// Neither is consulted by a press that adds no template.
+    /// its image will carry. A [template] names them, and the marker records
+    /// whether the press drew them fresh.
     #[must_use]
     pub fn new(
         source_stem: impl Into<String>,
         recipe: impl Into<String>,
-        identity: ImageIdentity,
+        identity: &PressIdentity,
     ) -> Self {
         TreeAdditions {
             source_stem: source_stem.into(),
             recipe: recipe.into(),
             seed_hostname: None,
-            identity,
+            identity: identity.carried(),
+            fresh_identity: identity.is_fresh(),
             files: Vec::new(),
             copies: Vec::new(),
             debs: Vec::new(),
@@ -178,9 +183,9 @@ impl TreeAdditions {
         self
     }
 
-    /// Whether this press adds anything to the tree at all. Empty additions never
-    /// reach `apply`: a press with nothing to add streams the existing artifact
-    /// instead of re-assembling.
+    /// Whether this press adds anything to the tree at all. Empty additions reach
+    /// `apply` only from a press that draws a fresh identity. A press with nothing to
+    /// add and the build's identity streams the existing artifact instead.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
@@ -522,6 +527,7 @@ impl TreeAdditions {
         };
         identity.pressed = Some(IdentityPressed {
             source: self.source_stem.clone(),
+            fresh_identity: self.fresh_identity,
             copies: sorted(&self.copies),
             debs: sorted(&self.debs),
             embedded_image: self.embedded_image.clone(),
@@ -734,7 +740,7 @@ mod tests {
     }
 
     fn additions(stem: &str) -> TreeAdditions {
-        TreeAdditions::new(stem, RECIPE, identity())
+        TreeAdditions::new(stem, RECIPE, &PressIdentity::Built(identity()))
     }
 
     /// A minimal boot2deb-shaped entry list: the directories every rootfs has,
