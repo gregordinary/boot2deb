@@ -1061,14 +1061,14 @@ decoder.
 [[apps]]
 name         = "jellyfin"
 git          = "https://github.com/jellyfin/jellyfin.git"
-ref          = "v12.1"
+ref          = "v12.2"
 deb          = "jellyfin-server"
 patch_series = ["jellyfin"]
 patches_url  = "https://github.com/gregordinary/patches.git"
 
 [apps.build]
 kind       = "dotnet-deb"
-packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.1-202609142034" }
+packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.2-202610051851" }
 source_dir = "jellyfin-server"
 project    = "Jellyfin.Server"
 
@@ -1106,7 +1106,7 @@ against the app's `ref`, since an application is its own axis as u-boot is:
 
 ```toml
 # series/jellyfin.toml, in the patches repo
-applies_to_app = ">=12.1, <12.2"
+applies_to_app = ">=12.2, <12.3"
 app            = ["jellyfin/0001-….patch", "jellyfin/0002-….patch"]
 app_packaging  = ["jellyfin/packaging/0001-….patch"]
 ```

@@ -139,7 +139,7 @@ driver = "panthor"
 check = "devnode"
 path  = "/dev/dri/renderD128"
 
-# The mainline stateless decoder (rkvdec) is first in probe order.
+# The mainline stateless decoder (rkvdec) probes first, so it registers /dev/video0.
 [[expect]]
 check = "devnode"
 path  = "/dev/video0"

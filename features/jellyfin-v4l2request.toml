@@ -27,7 +27,7 @@ conflicts = ["jellyfin-rockchip"]
 
 caveats = [
   "The Jellyfin server is built from source and held at its release. `apt upgrade` moves neither `jellyfin-server` nor `jellyfin-web`. The built server carries an epoch, and it depends on the web client of its own release. A newer Jellyfin arrives by moving the app's `ref` and packaging `ref` in this feature and rebuilding the image.",
-  "Hardware decode covers 8-bit H.264, HEVC and VP9. The `v4l2request` type declines 10-bit content itself, so a 10-bit stream decodes in software and still encodes on the VEPU580.",
+  "Hardware decode covers H.264, HEVC and VP9, at 8 and 10 bits. The CPU unpacks each 10-bit frame from the decoder's packed NV15 layout, and that is most of what a 10-bit transcode costs. One 4K HEVC Main 10 stream transcodes to 1080p at 1.6x realtime. Two at once hold just under realtime each, limited by the CPU rather than the decoder.",
   "The Jellyfin dashboard has no field for the decode/encode split. `HardwareDecodingType` and `HardwareEncodingType` live in `/etc/jellyfin/encoding.xml`, and setting `HardwareAccelerationType` in the dashboard leaves them as they are.",
 ]
 
@@ -38,7 +38,7 @@ caveats = [
 [[apps]]
 name         = "jellyfin"
 git          = "https://github.com/jellyfin/jellyfin.git"
-ref          = "v12.1"
+ref          = "v12.2"
 deb          = "jellyfin-server"
 patch_series = ["jellyfin"]
 patches_url  = "https://github.com/gregordinary/patches.git"
@@ -49,7 +49,7 @@ patches_url  = "https://github.com/gregordinary/patches.git"
 # names.
 [apps.build]
 kind       = "dotnet-deb"
-packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.1-202609142034" }
+packaging  = { git = "https://github.com/jellyfin/jellyfin-packaging.git", ref = "v12.2-202610051851" }
 source_dir = "jellyfin-server"
 project    = "Jellyfin.Server"
 

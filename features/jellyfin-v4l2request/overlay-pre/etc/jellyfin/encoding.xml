@@ -23,7 +23,7 @@
     express and a stock one cannot. HardwareAccelerationType is the pairing's family
     for anything that reads it directly; the two fields after it override it.
 
-    Decode is rkvdec, a V4L2 stateless driver reached through the request API
+    Decode is on the V4L2 stateless decoders, reached through the request API
     (`-hwaccel v4l2request`). Encode is the VEPU580 through MPP (`h264_rkmpp`,
     `hevc_rkmpp`). The rkmpp *decoders* find no MPP decode client on a mainline
     kernel, which is why decode must not follow HardwareAccelerationType here.
@@ -34,9 +34,9 @@
   <EnableHardwareEncoding>true</EnableHardwareEncoding>
 
   <!--
-    What rkvdec decodes on the RK3588. The v4l2request type declines 10-bit content
-    itself, so a 10-bit stream in one of these codecs decodes in software and still
-    encodes in hardware. AV1 is a separate hantro-vpu decoder with known
+    What rkvdec decodes on the RK3588, at 8 and 10 bits. FFmpeg tries the decoder
+    with the widest frame-size range first, so all three land on rkvdec. A 10-bit
+    frame is unpacked from NV15 on the CPU. AV1 is a separate hantro-vpu decoder with known
     deterministic gaps on some streams; add it only once those have been checked
     against the content in question.
   -->

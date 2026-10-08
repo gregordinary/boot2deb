@@ -4,10 +4,10 @@ description = "Rockchip RK3576 (4x Cortex-A72 + 4x Cortex-A53, Mali-G52 MC3)"
 arch        = "arm64"
 dt_dir      = "rockchip"                 # arch/arm64/boot/dts/<dt_dir>
 
-# Force-loaded modules. Empty for now: the in-tree RK3576 drivers auto-probe via
-# DT compat strings, and the media-accel stack (userspace/ffmpeg) is omitted from
-# this SoC layer, so nothing needs pinning at boot yet. HW decode is native
-# mainline (VDPU383); a media-accel feature can add its modules later.
+# Force-loaded modules. Empty: the in-tree RK3576 drivers, the VDPU383 decoder among
+# them, auto-probe via DT compat strings. The one media module that needs naming is
+# the out-of-tree `rga3`, and the `media-accel-v4l2` feature that builds it also
+# loads it.
 modules = []
 
 # Networking + audio userspace. The H96's Wi-Fi is an AIC8800 (out-of-tree driver +
@@ -104,9 +104,9 @@ links           = ["librga2", "librga-dev"]
 ffmpeg_flag     = "--enable-rkrga"
 ffmpeg_requires = ["mpp"]
 
-# The V4L2-request decode base, unmodified: no `[ffmpeg.rockchip]`, because no
-# graft applies. The rk3576 patch series carry an empty `ffmpeg` scope, so the
-# tree builds pristine.
+# The V4L2-request decode base: no `[ffmpeg.rockchip]`, because no graft applies.
+# Its patches come from the `rk3576-media` series the `media-accel-v4l2` feature
+# composes: NV15/NV20 format support and the HEVC SPS reference-picture-set controls.
 [ffmpeg.base]
 git = "https://code.ffmpeg.org/Kwiboo/FFmpeg.git"
 ref = "v4l2-request-n8.1"

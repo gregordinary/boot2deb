@@ -2,8 +2,8 @@
 
 Jellyfin decoding in hardware as well as encoding. It builds the Jellyfin server from
 source with the `patches/jellyfin` series, and seeds the configuration that pairs the
-two halves: decode on `rkvdec` through the V4L2 request API, encode on the VEPU580
-through MPP.
+two halves: decode on the RK3588's stateless decoders through the V4L2 request API,
+encode on the VEPU580 through MPP.
 
 ```sh
 boot2deb update turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode
@@ -39,10 +39,12 @@ measurements are in `patches/jellyfin/README.md`.
 | `HardwareDecodingCodecs` | `h264`, `hevc`, `vp9` |
 | Tone mapping | off |
 
-The codec list is what `rkvdec` decodes on the RK3588. AV1 is a separate `hantro-vpu`
-decoder with known gaps on some streams, so it is left for an operator to add. The
-`v4l2request` type declines 10-bit content itself, so a 10-bit stream in a listed codec
-decodes in software and still encodes in hardware.
+The codec list is what `rkvdec` decodes: H.264, HEVC and VP9, at 8 and 10 bits. FFmpeg
+tries the decoder with the widest frame-size range for a codec first, so all three land
+on `rkvdec` rather than on Hantro's slower VDPU2. A 10-bit frame is unpacked from `NV15`
+on the CPU, and Jellyfin's 10-bit HEVC and VP9 switches apply as for any other type. AV1 is a separate
+`hantro-vpu` decoder with known gaps on some streams, so it is left for an operator to
+add.
 
 The file is an `overlay-pre/` seed for the reason `jellyfin-rockchip`'s is:
 `jellyfin-server`'s postinst hands `/etc/jellyfin` to the service user, and only a file
@@ -72,7 +74,7 @@ The config model page covers the mechanism.
 The built `jellyfin-server` replaces the one Jellyfin's repository serves, and two things
 keep it in place:
 
-- **Its version carries an epoch** (`1:12.1+g…`). The rootfs solve takes the highest
+- **Its version carries an epoch** (`1:12.2+g…`). The rootfs solve takes the highest
   version across its repositories, so it takes this build over any release the
   repository publishes later. A device's `apt upgrade` does the same.
 - **It depends on the `jellyfin-web` of its own release.** The solve installs the

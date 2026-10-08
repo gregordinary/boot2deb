@@ -52,13 +52,13 @@ This is required, not tuning, and it is the one setting an operator must not
 The `*_rkmpp` decoders are compiled into `ffmpeg-rk`, so they appear in
 `ffmpeg -hwaccels` and Jellyfin's capability probe — which reads exactly that —
 concludes hardware decoding is available. It is not: MPP finds no decode client
-on a mainline kernel and the decoder fails to open at runtime. Jellyfin cannot
-see a runtime failure from a static probe, FFmpeg does not fall back to software
-when a decoder fails to open, and Jellyfin does not retry without `-hwaccel`. The
-stream simply fails.
+on a mainline kernel. A codec named in the list makes Jellyfin emit `-hwaccel
+rkmpp`, which finds no MPP decoder, and FFmpeg decodes in software without saying
+so. The transcode runs at the same CPU cost as with no hwaccel, and the log claims
+a hardware decode that never happened.
 
 Jellyfin's default for this field is `["h264", "vc1"]`, so leaving it unset would
-break every H.264 transcode on this hardware. Empty makes Jellyfin emit no
+put that misleading flag on every H.264 transcode. Empty makes Jellyfin emit no
 `-hwaccel` at all: decode runs in software across eight cores, and the encoder
 stays in hardware. On this board that is also the faster arrangement — RGA
 scaling only pays for itself on frames already held in an MPP context, which on

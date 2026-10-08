@@ -449,15 +449,19 @@ support-matrix`](../reference/support-matrix.md).
 
 | Codec | Block / node | 8-bit | 10-bit | Notes |
 |---|---|---|---|---|
-| HEVC | `rkvdec` VDPU381 | `NV12` | `NV15` | 4:2:0, with two cores on one `/dev/video0` |
-| H.264 | `rkvdec` VDPU381 | `NV12`, `NV16` | `NV15`, `NV20` | 4:2:0 and 4:2:2 |
-| VP9 | `rkvdec` VDPU381 | `NV12` (profile 0) | `NV15` (profile 2) | profiles 1 and 3 are 4:2:2/4:4:4, which the hardware cannot do |
-| AV1 | Hantro VPU981 | `NV12` | `NV15`, `P010` | to 8192x4352. Decodes to a 4x4-tiled buffer and post-processes out |
-| VP8 | Hantro VDPU2 | `NV12` | — | |
-| MPEG-2 | Hantro VDPU2 | `NV12` | — | 1080p ceiling. Progressive bit-exact, interlaced output diverges slightly |
+| HEVC | `rkvdec` VDPU381, `/dev/video0` | `NV12` | `NV15` | 4:2:0, with two cores on the one node |
+| H.264 | `rkvdec` VDPU381, `/dev/video0` | `NV12`, `NV16` | `NV15`, `NV20` | 4:2:0 and 4:2:2 |
+| VP9 | `rkvdec` VDPU381, `/dev/video0` | `NV12` (profile 0) | `NV15` (profile 2) | profiles 1 and 3 are 4:2:2/4:4:4, which the hardware cannot do |
+| AV1 | Hantro VPU981, `/dev/video3` | `NV12` | `NV15`, `P010` | to 8192x4352. Decodes to a 4x4-tiled buffer and post-processes out |
+| VP8 | Hantro VDPU2, `/dev/video1` | `NV12` | — | to 3840x2160 |
+| MPEG-2 | Hantro VDPU2, `/dev/video1` | `NV12` | — | 1080p ceiling. Within ±2 of software decode and almost never bit-exact. Bottom-field-first field pictures carry one reference-parity defect |
 
-Hantro's VDPU2 node also advertises H.264, at a 1080p ceiling and 8-bit only. `rkvdec`'s
-is the one to use — it is the newer block, goes to 10-bit, and has two cores. Both score
+FFmpeg's `v4l2request` decides where a stream goes. Of the decoders that take the
+stream's codec, it tries the one reporting the widest frame-size range first
+(`media-accel/ffmpeg/0023`). The table is the result, and every H.264 stream goes to
+`rkvdec`. Hantro's VDPU2 node also decodes H.264, 8-bit 4:2:0 only and up to 1920x1088,
+and takes a stream only if `rkvdec` refuses it. It is the slower block, at about 3x
+realtime of 1080p in total against `rkvdec`'s 18x across two cores. Both score
 identically on conformance (JVT-AVC_V1 129/135, the same six failures).
 
 Conformance, measured on this board against the ITU/ISO suites with the software decoder
@@ -478,10 +482,12 @@ as control:
   changes, and chroma formats the hardware lacks.
 - **VP8** (VP8-TEST-VECTORS): **59/61**, identical to the software score — zero
   hardware-attributable failures.
-- **MPEG-2** (MPEG2_VIDEO-MAIN): progressive streams are bit-exact. Interlaced streams
-  diverge slightly (about 57–60 dB against the reference, accumulating over frames) on
-  both the ffmpeg and GStreamer userspaces, so the divergence is the driver's.
-  MPEG-1-syntax streams do not reach the stateless path at all.
+- **MPEG-2** (MPEG2_VIDEO-MAIN): **20/43**, where a pass means every sample within ±2
+  of the software decoder. The path is almost never bit-exact, progressive streams
+  included. Of the failures traced, nine are IDCT drift the standard permits. Six are
+  one defect, reference field parity on bottom-field-first field pictures, the same
+  under ffmpeg and GStreamer. MPEG-1-syntax streams do not reach the stateless
+  path at all.
 
 The `*_rkmpp` decoders are compiled into `ffmpeg-rk` but never open, because MPP finds no
 decode client on a mainline kernel. Decode is `-hwaccel v4l2request`, for every codec
@@ -538,9 +544,9 @@ ffmpeg-rk -i input.mkv -frames:v 1 -c:v mjpeg_v4l2m2m -quality 80 -update 1 out.
 ```
 
 Two things to expect. **What it buys is CPU, not speed.** It spends 4.9 CPU-seconds per
-300 1080p frames, against 8.1 for a single-threaded software encode of ordinary content
-and nearer 12 on high-detail material. That is a fixed-function cost, steady across
-content, and most of what is left is the copy of each frame into the V4L2 buffer.
+300 1080p frames, against 8.1 for a single-threaded software encode. That is a
+fixed-function cost, steady across content, and most of what is left is the copy of each
+frame into the V4L2 buffer.
 
 Software `mjpeg` threads across all eight cores while this path submits serially. A
 1080p batch therefore finishes about 2.4x *slower* in elapsed time, for roughly half the
@@ -589,15 +595,15 @@ from `-hwaccel v4l2request`. Pass `-init_hw_device rkmpp=rk -filter_hw_device rk
 they fail to configure with `No RKMPP hardware context provided`.
 
 There is no hardware deinterlacer. RGA does not deinterlace. `bwdif_vulkan`
-produces correct fields, but costs the same CPU as the CPU filter at a third of its
-throughput. That is once the upload/download round-trips are paid: 15 fps against
+produces correct fields, but costs the same CPU as the CPU filter at about a seventh of
+its throughput. That is once the upload/download round-trips are paid: 15 fps against
 110 fps at 1080i on this box.
 
 Deinterlace on the CPU with `bwdif`, and budget for it. A hardware-decoded 1080i to
-1080p60 transcode costs 2.8 of the 8 cores at realtime, where the same transcode
-without deinterlacing costs 0.4. `bwdif=mode=send_frame` halves that
-by emitting 30p instead of 60p. Standard-definition interlaced content is free — 576i to
-576p50 runs at 12x realtime, about a fifth of a core.
+1080p60 transcode costs about 1.1 cores per realtime stream, where the same transcode
+without deinterlacing costs 0.15. `bwdif=mode=send_frame` cuts that to 0.66 by emitting
+30p instead of 60p. Standard-definition interlaced content is free — 576i to 576p50 runs
+at 12x realtime, about a fifth of a core.
 
 ### 10-bit, and why `NV15` is the whole story
 

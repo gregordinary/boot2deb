@@ -41,12 +41,12 @@ at the end of a build of that recipe.
 | `rk3576-evb1-v10/forky` | rk3576-evb1-v10 | forky | `rk3576-mainline-7.2` `v7.2.9` | `rk3576-fixes` `main` (`2fd63c3c0259`) | `rk3576-loader` `main` (`2fd63c3c0259`) | none | `expected` | 2026-08-21 |
 | `rk3576-generic/loader` | rk3576-generic | — | (u-boot only) | none | `rk3576-loader` `main` (`14e7a6de48ff`) | none | `expected` | 2026-07-21 |
 | `rk3576-generic/util` | rk3576-generic | — | (u-boot only) | none | `rk3576-util` `main` (`14e7a6de48ff`) | none | `expected` | 2026-07-21 |
-| `turing-rk1/forky` | turing-rk1 | forky | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`2fd63c3c0259`) | `turing-rk1-recovery` `main` (`2fd63c3c0259`) | none | `expected` | 2026-09-05 |
-| `turing-rk1/jellyfin-forky` | turing-rk1 | forky | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`2fd63c3c0259`) | `turing-rk1-recovery` `main` (`2fd63c3c0259`) | none | `expected` | 2026-09-05 |
-| `turing-rk1/jellyfin-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`2fd63c3c0259`) | `turing-rk1-recovery` `main` (`2fd63c3c0259`) | none | `experimental` | 2026-08-21 |
-| `turing-rk1/media-accel-forky` | turing-rk1 | forky | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`2fd63c3c0259`) | `turing-rk1-recovery` `main` (`2fd63c3c0259`) | none | `expected` | 2026-09-05 |
-| `turing-rk1/media-accel-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`2fd63c3c0259`) | `turing-rk1-recovery` `main` (`2fd63c3c0259`) | none | `expected` | 2026-08-21 |
-| `turing-rk1/trixie` | turing-rk1 | trixie | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`2fd63c3c0259`) | `turing-rk1-recovery` `main` (`2fd63c3c0259`) | none | `expected` | 2026-08-21 |
+| `turing-rk1/forky` | turing-rk1 | forky | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`7b945e71fd55`) | `turing-rk1-recovery` `main` (`7b945e71fd55`) | none | `expected` | 2026-09-05 |
+| `turing-rk1/jellyfin-forky` | turing-rk1 | forky | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`7b945e71fd55`) | `turing-rk1-recovery` `main` (`7b945e71fd55`) | none | `expected` | 2026-09-05 |
+| `turing-rk1/jellyfin-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`7b945e71fd55`) | `turing-rk1-recovery` `main` (`7b945e71fd55`) | none | `experimental` | 2026-08-21 |
+| `turing-rk1/media-accel-forky` | turing-rk1 | forky | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`7b945e71fd55`) | `turing-rk1-recovery` `main` (`7b945e71fd55`) | none | `expected` | 2026-09-05 |
+| `turing-rk1/media-accel-trixie` | turing-rk1 | trixie | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`7b945e71fd55`) | `turing-rk1-recovery` `main` (`7b945e71fd55`) | none | `expected` | 2026-08-21 |
+| `turing-rk1/trixie` | turing-rk1 | trixie | `rk3588-mainline-7.2` `v7.2.9` | `rk3588-accel` `main` (`7b945e71fd55`) | `turing-rk1-recovery` `main` (`7b945e71fd55`) | none | `expected` | 2026-08-21 |
 | `turing-rk1/util` | turing-rk1 | — | (u-boot only) | none | `turing-rk1-util` `main` (`4350b1a5e405`) | none | `expected` | 2026-08-05 |
 
 ## Caveats

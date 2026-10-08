@@ -29,9 +29,9 @@ one — `rkvdec` is a V4L2 stateless driver instead. The decoders are still comp
 in, so they appear in `ffmpeg -hwaccels`, and Jellyfin's capability probe reads
 exactly that list and concludes hardware decoding is available. It is not.
 
-Turning a codec on in that list makes Jellyfin emit `-hwaccel rkmpp`, the decoder
-fails to open, and the stream fails. FFmpeg does not fall back to software when a
-decoder cannot open, and Jellyfin does not retry without it.
+Turning a codec on in that list makes Jellyfin emit `-hwaccel rkmpp`. That hwaccel
+finds no MPP decoder, and FFmpeg decodes in software without saying so, at the same CPU
+cost as no hwaccel at all. The list buys nothing and hides what is actually running.
 
 So: leave *Playback → Transcoding → Enable hardware decoding for* empty. Everything
 else in that page is yours to tune.
@@ -126,7 +126,7 @@ boot2deb build    turing-rk1/jellyfin-forky
 
 The `jellyfin-v4l2request` feature builds the Jellyfin server from source with a
 patch series that lets decode and encode name different stacks. It seeds the pairing:
-decode on `rkvdec` through `-hwaccel v4l2request`, encode on the VEPU580.
+decode on the stateless decoders through `-hwaccel v4l2request`, encode on the VEPU580.
 
 ```sh
 boot2deb update turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode
@@ -140,10 +140,14 @@ It takes the place of `jellyfin-rockchip` in the selection, since both seed
 | --- | --- |
 | Hardware decoding type | `v4l2request` |
 | Hardware encoding type | `rkmpp` |
-| Hardware decoding | H.264, HEVC, VP9 |
+| Hardware decoding | H.264, HEVC, VP9, at 8 and 10 bits |
 
-10-bit content decodes in software, because the `v4l2request` type declines it, and
-still encodes in hardware. The dashboard has no field for the two types. They live in
+H.264, HEVC and VP9 all decode on `rkvdec`, the decoder with the widest frame-size
+range for them, which is the one FFmpeg tries first. A 10-bit frame is unpacked
+from the decoder's packed `NV15` layout on the CPU, which is most of what a 10-bit
+transcode costs. A 4K HEVC Main 10 stream transcodes to 1080p at 1.6x realtime, on a
+quarter of the CPU that software decode takes. Two at once hold just under realtime
+each. The dashboard has no field for the two types. They live in
 `/etc/jellyfin/encoding.xml`, and setting the acceleration type in the dashboard leaves
 them as they are.
 
@@ -177,7 +181,8 @@ hardware-decoding list.
 
 Every run also prints `mpp_platform: client N driver is not ready!` for a handful of
 N. That is normal: libmpp probes for vendor client types a mainline kernel does not
-have. The ones that matter (RKVENC, RKVENC_CCU, RKVDEC, JPEG_DEC) are present.
+have. The one the encoders need, RKVENC, is present. RKVDEC (9) and JPEG_DEC (13) are
+among the absent ones, which is why the `*_rkmpp` decoders never open.
 
 ## Status
 
@@ -190,7 +195,7 @@ from software frames and through `hwupload` alike. That was verified against a s
 FFmpeg on another machine, rather than against the build that produced them.
 
 Hardware decode through `-hwaccel v4l2request` cuts decode CPU cost by 53x at 1080p
-and up to 143x at 4K, and HEVC decode is bit-exact against software.
+and by 70-162x at 4K, and HEVC decode is bit-exact against software.
 
 Driving that path *from Jellyfin* has been measured on the board too. A patched
 server carrying a `v4l2request` acceleration type played files through the API on
