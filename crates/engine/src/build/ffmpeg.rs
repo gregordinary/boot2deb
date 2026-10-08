@@ -104,6 +104,7 @@ const FFMPEG_DEPS: &[&str] = &[
     "libass-dev",
     "libx264-dev",
     "libx265-dev",
+    "libdav1d-dev",
     "libssl-dev",
     "libfreetype-dev",
     // Build-root only: headers and loader stub for the three Vulkan flags in
@@ -304,6 +305,10 @@ fn assert_userspace_depends(
 /// ICD loaded at runtime, is not a dependency of anything here, and is opted into per
 /// image by the `vulkan` rootfs feature.
 ///
+/// `--enable-libdav1d` is the software AV1 decoder. FFmpeg's native `av1` decoder only
+/// drives hwaccels, so without it an AV1 stream that no hardware decoder takes cannot
+/// be decoded at all, and an image that decodes in software cannot transcode AV1.
+///
 /// This set is redistributable: `--enable-gpl` and `--enable-version3` admit only
 /// libraries whose licences combine with the GPL, so the binary it produces may be
 /// passed on. The flags that forfeit that are [`NONFREE_CONFIGURE_FLAGS`], and they
@@ -318,6 +323,7 @@ const BASE_CONFIGURE_FLAGS: &[&str] = &[
     "--enable-v4l2-request",
     "--enable-libx264",
     "--enable-libx265",
+    "--enable-libdav1d",
     "--enable-libass",
     "--enable-libfreetype",
     "--enable-openssl",
@@ -1469,6 +1475,20 @@ mod tests {
         for flags in [&full, &rga, &configure_flags(&no_trees(), false, NO_LIBS)] {
             assert!(flags.contains(&"--enable-v4l2-request".to_string()));
         }
+    }
+
+    /// Every flavour carries a software AV1 decoder, and its build root the library it
+    /// links. A build without it succeeds and decodes everything else, so its loss
+    /// would show only as AV1 sources that fail to transcode.
+    #[test]
+    fn every_build_decodes_av1_in_software() {
+        for nonfree in [false, true] {
+            for trees in [all_trees(), rga_only(), no_trees()] {
+                let flags = configure_flags(&trees, nonfree, NO_LIBS);
+                assert!(flags.contains(&"--enable-libdav1d".to_string()));
+            }
+        }
+        assert!(FFMPEG_DEPS.contains(&"libdav1d-dev"));
     }
 
     /// The default build is redistributable, and it takes an explicit ask to make one
