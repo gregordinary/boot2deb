@@ -332,18 +332,12 @@ impl Side {
             });
         }
         if let Some(ma) = &s.media_accel {
-            for (axis, reference, commit) in [(
-                "ffmpeg-rockchip",
-                &ma.ffmpeg_rockchip_ref,
-                &ma.ffmpeg_rockchip_commit,
-            )] {
-                if reference.is_some() || commit.is_some() {
-                    sources.push(SourcePin {
-                        axis: axis.into(),
-                        reference: reference.clone(),
-                        commit: commit.clone(),
-                    });
-                }
+            if ma.ffmpeg_rockchip_ref.is_some() || ma.ffmpeg_rockchip_commit.is_some() {
+                sources.push(SourcePin {
+                    axis: "ffmpeg-rockchip".into(),
+                    reference: ma.ffmpeg_rockchip_ref.clone(),
+                    commit: ma.ffmpeg_rockchip_commit.clone(),
+                });
             }
             sources.push(SourcePin {
                 axis: "ffmpeg-base".into(),
