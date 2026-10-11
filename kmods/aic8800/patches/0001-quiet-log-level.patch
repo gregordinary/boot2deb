@@ -1,3 +1,5 @@
+From: Feng Zhang <feng@radxa.com>
+
 aic8800: lower the default debug log level to errors only
 
 Both AIC8800 modules ship a debug mask that enables every level. The BSP's
