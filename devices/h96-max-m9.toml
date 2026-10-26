@@ -8,11 +8,20 @@ supported_boot_methods  = ["rockchip-rkbin"]
 # Validated against u-boot v2026.07: builds idbloader.img + u-boot.itb.
 uboot_defconfig         = "generic-rk3576_defconfig"
 
-# The board DTS is not upstream, so the kernel builds this DTB from the
-# device_dts source below rather than from its own tree. Resolution checks
-# that the two names agree.
-kernel_dtb              = "rockchip/rk3576-h96-max-m9.dtb"
-device_dts              = ["devices/h96-max-m9/dts/rk3576-h96-max-m9.dts"]
+# The board DTS is not upstream, so the kernel builds these DTBs from the
+# device_dts sources below rather than from its own tree. Resolution checks
+# that kernel_dtb names one of them.
+#  - rk3576-h96-max-m9.dts describes the board without the NPU. Beyond the
+#    `pd_gpu` label rk3576-fixes adds, it names no out-of-tree node, so it is
+#    the file other distributions can carry.
+#  - rk3576-h96-max-m9-npu.dts includes it and enables NPU core 0 and its rail,
+#    on the nodes the rk3576-npu series adds. The image boots this one.
+# Both DTBs ship in the linux-image package.
+kernel_dtb              = "rockchip/rk3576-h96-max-m9-npu.dtb"
+device_dts              = [
+    "devices/h96-max-m9/dts/rk3576-h96-max-m9.dts",
+    "devices/h96-max-m9/dts/rk3576-h96-max-m9-npu.dts",
+]
 
 # Boot-time workarounds this board needs (mk_extlinux appends them after root=):
 #  - cpuidle.off=1: a CPU suspended into the DT CPU_SLEEP state can miss its
@@ -30,7 +39,7 @@ kernel_cmdline          = "cpuidle.off=1"
 
 # Board IR + regdb kconfig deltas, plus the NPU enable (DRM_ACCEL + ROCKCHIP_IOMMU
 # + the rocket driver). The NPU is board opt-in rather than SoC-wide because the
-# enable rides this board's `.dts` and its rail.
+# enable rides this board's NPU `.dts` and its rail.
 device_config_fragments = ["device/h96-max-m9", "accel/rk3576-npu"]
 
 # The RK3576 NPU (rocket) kernel series, composed after the kernel's SoC-wide
@@ -50,9 +59,9 @@ device_kmods            = ["aic8800"]
 #  - bluez + gpiod: the AIC8800D80's BT is UART HCI on ttyS4 (see the DTS &uart4 node
 #    and aic8800-bluetooth.service); bluez provides the hciattach/bluetoothctl and
 #    gpiod's gpioset drives the BT_REG_ON / HST_WAK_BT wake lines.
-#  - ir-keytable: loads the recovered NEC keymap onto the gpio-ir-receiver rc device
-#    (ir-keymap-h96.service + overlay/etc/rc_keymaps/h96.toml) so the bundled IR
-#    handset produces input events.
+#  - ir-keytable: loads the NEC keymap onto the gpio-ir-receiver rc device
+#    (ir-keymap-h96.service + overlay/etc/rc_keymaps/h96.toml) so an IR handset
+#    produces input events. The bundled remote is RF and reaches the box over USB.
 #  - v4l-utils: cec-ctl / cec-follower for the HDMI-CEC units (box drives the TV, or
 #    the TV remote drives the box). The units ship disabled -- opt-in via systemctl.
 #  - libgl1-mesa-dri / libegl-mesa0 / libgbm1: the GPU's userspace. The Mali-G52 is

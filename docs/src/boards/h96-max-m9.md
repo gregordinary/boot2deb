@@ -479,8 +479,13 @@ The rate asked for instead sits between the 500 and 600 MHz steps. Both of those
 725 mV, so the clock is inside the voltage the board already provides. It costs about
 23% of throughput on a single core, which is what this board ships.
 
-The NPU rail, `vdd_npu_s0`, follows the NPU's power domain. The board `.dts` names the
-rail as that domain's `domain-supply`. The domain turns the rail on before the NPU
+The NPU has a device tree of its own. `rk3576-h96-max-m9.dts` describes the board without
+it. `rk3576-h96-max-m9-npu.dts` includes that file and enables NPU core 0 and its rail, on
+the nodes the `rk3576-npu` series adds. The image boots the second, and the `linux-image`
+package ships both.
+
+The NPU rail, `vdd_npu_s0`, follows the NPU's power domain. The NPU `.dts` names the rail
+as that domain's `domain-supply`. The domain turns the rail on before the NPU
 powers up, and off after it goes idle. An image that never opens the accel node holds
 no NPU supply up.
 
@@ -489,8 +494,8 @@ only to the NPU core node is torn down as unused about 33 s into boot, long afte
 successful probe.
 
 Both NPU core domains sit on the one core node, in the SoC `.dtsi`. The convolution
-buffer is read through the second domain whichever core computes. The board `.dts`
-states the reasoning for both.
+buffer is read through the second domain whichever core computes. The NPU `.dts` states
+the reasoning for both.
 
 ## Related pages
 

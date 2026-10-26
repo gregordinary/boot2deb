@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 /*
- * H96 MAX M9 / M9S — RK3576 Android TV box.
+ * Copyright (c) 2024 Rockchip Electronics Co., Ltd.
  *
- * The board is a lightly-modified Rockchip RK3576 EVB1 V10: eMMC, microSD,
- * SDIO Wi-Fi, one RGMII Ethernet port, HDMI, and an HT5010 amplifier on the
- * 3.5 mm AV jack. It differs from the EVB in Ethernet RGMII TX timing, the PHY
- * reset pin, the HDMI data-line bias pin, two status LEDs, a power button, and
- * a Wi-Fi part that sits on SDIO rather than PCIe.
- *
- * DRAM is LPDDR4X-2112, dual-channel, 8 GiB. Wi-Fi/BT is an AIC8800D80, whose
- * driver is out of tree; the SDIO bus and its power sequencing are described
- * here so the module enumerates, but no in-tree driver claims it.
+ * H96 MAX M9 and M9S, an RK3576 TV box. Storage is eMMC only: the microSD
+ * footprint is not populated. Wi-Fi and Bluetooth are an AIC8800D80 on SDIO
+ * and UART4.
  */
 
 /dts-v1/;
@@ -19,21 +13,55 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/soc/rockchip,boot-mode.h>
 #include <dt-bindings/soc/rockchip,vop2.h>
 #include "rk3576.dtsi"
 
 / {
-	model = "H96 MAX M9 (RK3576)";
-	compatible = "h96,max-m9", "rockchip,rk3576";
+	model = "H96 Max M9 TV Box";
+	compatible = "haochuangyi,h96-max-m9", "rockchip,rk3576";
 
 	aliases {
 		ethernet0 = &gmac0;
+	};
+
+	/*
+	 * The analog jack's HT5010 codec has no control interface, so a
+	 * dummy codec stands in for it.
+	 */
+	analog_dummy: analog-codec {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
+	};
+
+	analog_sound: analog-sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "H96 Analog";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,mclk-fs = <256>;
+
+		/*
+		 * Nothing else enables the MCLK output gate. This reference
+		 * holds it on while the card is open.
+		 */
+		simple-audio-card,cpu {
+			sound-dai = <&sai1>;
+			clocks = <&cru CLK_SAI1_MCLKOUT_TO_IO>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&analog_dummy>;
+		};
 	};
 
 	chosen: chosen {
 		stdout-path = "serial0:1500000n8";
 	};
 
+	/*
+	 * No button is fitted to this input. The bundled remote's POWER key
+	 * wakes the box through it.
+	 */
 	gpio_keys: gpio-keys {
 		compatible = "gpio-keys";
 		pinctrl-names = "default";
@@ -48,25 +76,6 @@
 		};
 	};
 
-	/*
-	 * IR receiver for the bundled infrared handset. The demodulated signal sits
-	 * on GPIO0_C4 -- the SoC's PWM0 IR-capture pin, which the vendor kernel drove
-	 * with its out-of-tree pwm-remotectl block. Mainline has no such driver, so the
-	 * pin is used as a plain GPIO and rc-core software-decodes the frames:
-	 * gpio-ir-receiver times the edges, the NEC decoder rebuilds the scancode, and
-	 * ir-keytable applies the h96 keymap (recovered from the vendor device tree,
-	 * shipped in the device overlay). The demodulator idles high and pulls low on
-	 * carrier, hence active-low; it starts on the empty built-in map, which
-	 * userspace replaces.
-	 */
-	ir_receiver: ir-receiver {
-		compatible = "gpio-ir-receiver";
-		gpios = <&gpio0 RK_PC4 GPIO_ACTIVE_LOW>;
-		linux,rc-map-name = "rc-empty";
-		pinctrl-names = "default";
-		pinctrl-0 = <&ir_receiver_pin>;
-	};
-
 	hdmi-con {
 		compatible = "hdmi-connector";
 		type = "a";
@@ -78,10 +87,22 @@
 		};
 	};
 
+	/*
+	 * IR receiver. The bundled remote is RF, not IR, but other H96 IR
+	 * remotes work. Mainline has no driver for the PWM IR capture block,
+	 * so the pin is a GPIO and rc-core decodes the frames.
+	 */
+	ir_receiver: ir-receiver {
+		compatible = "gpio-ir-receiver";
+		gpios = <&gpio0 RK_PC4 GPIO_ACTIVE_LOW>;
+		linux,rc-map-name = "rc-empty";
+		pinctrl-names = "default";
+		pinctrl-0 = <&ir_receiver_pin>;
+	};
+
 	leds: leds {
 		compatible = "gpio-leds";
 
-		/* Physically white on this board (observed); the EVB names it green. */
 		white_led: led-0 {
 			color = <LED_COLOR_ID_WHITE>;
 			default-state = "on";
@@ -95,74 +116,6 @@
 			function = LED_FUNCTION_STANDBY;
 			gpios = <&gpio0 RK_PD0 GPIO_ACTIVE_LOW>;
 		};
-	};
-
-	/*
-	 * The Wi-Fi module's reset line (WL_REG_ON). `vcc_wifi_reg_on` gates the
-	 * module's supply; the reset here is a separate pin. The chip needs time to
-	 * come out of reset before the controller probes it at boot -- too short a
-	 * delay loses the boot-time enumeration to a power-on race (the card then
-	 * only appears on a later re-probe), so hold 500 ms after releasing reset.
-	 */
-	sdio_pwrseq: sdio-pwrseq {
-		compatible = "mmc-pwrseq-simple";
-		pinctrl-names = "default";
-		pinctrl-0 = <&wifi_enable_h>;
-		post-power-on-delay-ms = <500>;
-		reset-gpios = <&gpio0 RK_PD2 GPIO_ACTIVE_LOW>;
-	};
-
-	vcc12v_dcin: regulator-vcc12v-dcin {
-		compatible = "regulator-fixed";
-		regulator-name = "vcc12v_dcin";
-		regulator-always-on;
-		regulator-boot-on;
-		regulator-min-microvolt = <12000000>;
-		regulator-max-microvolt = <12000000>;
-	};
-
-	vcc5v0_device: regulator-vcc5v0-device {
-		compatible = "regulator-fixed";
-		regulator-name = "vcc5v0_device";
-		regulator-always-on;
-		regulator-boot-on;
-		regulator-min-microvolt = <5000000>;
-		regulator-max-microvolt = <5000000>;
-		vin-supply = <&vcc12v_dcin>;
-	};
-
-	vcc5v0_host: regulator-vcc5v0-host {
-		compatible = "regulator-fixed";
-		regulator-name = "vcc5v0_host";
-		regulator-boot-on;
-		regulator-always-on;
-		regulator-min-microvolt = <5000000>;
-		regulator-max-microvolt = <5000000>;
-		enable-active-high;
-		gpio = <&gpio0 RK_PC7 GPIO_ACTIVE_HIGH>;
-		vin-supply = <&vcc5v0_device>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&usb_host_pwren>;
-	};
-
-	vcc_sys: regulator-vcc5v0-sys {
-		compatible = "regulator-fixed";
-		regulator-name = "vcc_sys";
-		regulator-always-on;
-		regulator-boot-on;
-		regulator-min-microvolt = <5000000>;
-		regulator-max-microvolt = <5000000>;
-		vin-supply = <&vcc12v_dcin>;
-	};
-
-	vcc3v3_rtc_s5: regulator-vcc3v3-rtc-s5 {
-		compatible = "regulator-fixed";
-		regulator-name = "vcc3v3_rtc_s5";
-		regulator-boot-on;
-		regulator-always-on;
-		regulator-min-microvolt = <3300000>;
-		regulator-max-microvolt = <3300000>;
-		vin-supply = <&vcc_sys>;
 	};
 
 	vcc_1v1_nldo_s3: regulator-vcc-1v1-nldo-s3 {
@@ -205,71 +158,85 @@
 		vin-supply = <&vcc_3v3_s3>;
 	};
 
+	vcc12v_dcin: regulator-vcc12v-dcin {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc12v_dcin";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <12000000>;
+		regulator-max-microvolt = <12000000>;
+	};
+
+	vcc3v3_rtc_s5: regulator-vcc3v3-rtc-s5 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_rtc_s5";
+		regulator-boot-on;
+		regulator-always-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vcc_sys>;
+	};
+
+	vcc5v0_device: regulator-vcc5v0-device {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_device";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		vin-supply = <&vcc12v_dcin>;
+	};
+
+	vcc5v0_host: regulator-vcc5v0-host {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_host";
+		regulator-boot-on;
+		regulator-always-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		enable-active-high;
+		gpios = <&gpio0 RK_PC7 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&usb_host_pwren>;
+		vin-supply = <&vcc5v0_device>;
+	};
+
+	vcc_sys: regulator-vcc5v0-sys {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		vin-supply = <&vcc12v_dcin>;
+	};
+
 	vcc_wifi_reg_on: regulator-wifi-reg-on {
 		compatible = "regulator-fixed";
-		enable-active-high;
-		gpios = <&gpio1 RK_PC6 GPIO_ACTIVE_HIGH>;
-		pinctrl-0 = <&wifi_reg_on>;
-		pinctrl-names = "default";
 		regulator-name = "wifi_reg_on";
 		regulator-always-on;
 		regulator-boot-on;
 		regulator-min-microvolt = <1800000>;
 		regulator-max-microvolt = <1800000>;
+		enable-active-high;
+		gpios = <&gpio1 RK_PC6 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_reg_on>;
 		vin-supply = <&vcc_1v8_s3>;
 	};
 
 	/*
-	 * Analog line-out on the 3.5 mm jack. The amplifier is an HT5010, a
-	 * control-less part with no I2C interface, so it is modelled as a dummy
-	 * codec (linux,spdif-dit): SAI1 drives it over I2S and provides the master
-	 * clock. SAI1 is wired to sdo2 on this board (see &sai1), not the EVB's sdo0.
-	 *
-	 * The EVB's ES8388 at i2c3 0x10 is not this board's codec and i2c3 is left
-	 * disabled: nothing answers on that bus, on this stack or the vendor's.
-	 *
-	 * The amplifier's enable pins are not described. gpio2 PB1 (speaker) and
-	 * gpio3 PD6 (headphone) are what the EVB drives as simple-audio-amplifier
-	 * aux-devs, and the factory tree names the same two pins -- but only on a
-	 * sound card that never probes, so no capture shows either driven. Adding
-	 * them is the first thing to try if the card plays silence.
+	 * The Wi-Fi module needs 500 ms after reset. A shorter delay loses
+	 * the boot-time probe.
 	 */
-	analog_dummy: analog-codec {
-		compatible = "linux,spdif-dit";
-		#sound-dai-cells = <0>;
+	sdio_pwrseq: sdio-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_enable_h>;
+		post-power-on-delay-ms = <500>;
+		reset-gpios = <&gpio0 RK_PD2 GPIO_ACTIVE_LOW>;
 	};
 
-	analog_sound: analog-sound {
-		compatible = "simple-audio-card";
-		simple-audio-card,name = "H96 Analog";
-		simple-audio-card,format = "i2s";
-		simple-audio-card,mclk-fs = <256>;
-
-		/*
-		 * The `clocks` reference is what ungates MCLK to the pin.
-		 * CLK_SAI1_MCLKOUT_TO_IO is a GRF gate, and nothing enables it
-		 * implicitly: `assigned-clocks` above fixes its rate but never its
-		 * enable state, and the SAI driver only enables the clocks it looks
-		 * up by name ("mclk", "hclk"). simple-audio-card reads `clocks` from
-		 * this sub-node and holds it prepared for the life of the stream,
-		 * which is the role the EVB's ES8388 node plays on a board that has
-		 * an I2C codec to carry the reference.
-		 */
-		simple-audio-card,cpu {
-			sound-dai = <&sai1>;
-			clocks = <&cru CLK_SAI1_MCLKOUT_TO_IO>;
-		};
-
-		simple-audio-card,codec {
-			sound-dai = <&analog_dummy>;
-		};
-	};
-
-	/*
-	 * S/PDIF out. The transmitter has no receiver to describe, so it too takes
-	 * a dummy DIT codec; SPDIF_TX1 drives the board's m1 pin group (see
-	 * &spdif_tx1).
-	 */
 	spdif_dummy: spdif-codec {
 		compatible = "linux,spdif-dit";
 		#sound-dai-cells = <0>;
@@ -290,39 +257,23 @@
 	};
 };
 
-&cpu_l0 {
-	cpu-supply = <&vdd_cpu_lit_s0>;
+/* No PCIe or SATA. This PHY carries the SuperSpeed lane of usb_drd1. */
+&combphy1_psu {
+	status = "okay";
 };
 
 &cpu_b0 {
 	cpu-supply = <&vdd_cpu_big_s0>;
 };
 
-/*
- * Only combphy1_psu runs. The two naneng serdes PHYs each back a PCIe controller,
- * a SATA port, and (for combphy1_psu alone) usb_drd1's SuperSpeed lane. This board
- * brings up no PCIe and no SATA, so combphy0_ps has no consumer at all and stays
- * disabled; combphy1_psu is enabled because usb_drd1_dwc3 names it as its
- * "usb3-phy", which that controller cannot do without — see its node.
- *
- * Keeping it in its USB mux is also what keeps usb_drd1's *high* speed working: the
- * SoC design guide (2.3.4.2) states that with this combo PHY muxed to PCIe or SATA,
- * that controller's USB2 PHY is unusable as well, and the box's four black ports
- * are its.
- */
-&combphy1_psu {
-	status = "okay";
+&cpu_l0 {
+	cpu-supply = <&vdd_cpu_lit_s0>;
 };
 
-/*
- * RGMII TX clock skew is a board trace-length property: 0x1b, not the EVB's
- * 0x21. `rx_delay` stays unset because `rgmii-rxid` has the PHY apply the RX
- * skew itself.
- */
 &gmac0 {
 	clock_in_out = "output";
-	phy-mode = "rgmii-rxid";
 	phy-handle = <&rgmii_phy0>;
+	phy-mode = "rgmii-rxid";
 	pinctrl-names = "default";
 	pinctrl-0 = <&eth0m0_miim
 		     &eth0m0_tx_bus2
@@ -340,34 +291,8 @@
 };
 
 /*
- * Enable vdd_gpu_s0 before the GPU power domain is powered. The RK3576 GPU
- * domain is fed by this rail; if the domain is toggled while the boot-on rail
- * has been disabled as unused (which a late, deferred panfrost probe races),
- * the power controller never acks the transition and panfrost's soft-reset
- * faults the unpowered block with an SError. Pairs with the rk3576-fixes
- * pmdomain patch that gives RK3576_PD_GPU a regulator and the pd_gpu label.
- */
-&pd_gpu {
-	domain-supply = <&vdd_gpu_s0>;
-};
-
-/*
- * gpio2 PB0 biases the HDMI data lines: the board drives it low for HDMI 2.1
- * FRL signalling and high for HDMI 1.4/2.0 TMDS, which is the active-low sense
- * of the encoder's `frl-enable` line.
- *
- * `pinctrl-0` restates the SoC's three default groups and then appends this
- * board's pin, because a board-level property assignment *replaces* the
- * inherited one rather than extending it. Listing `hdmi_frl_en` alone would
- * silently unmux everything rk3576.dtsi muxes for this controller:
- *
- *   hdmi_txm0_pins  gpio4 PC0 = CEC, gpio4 PC1 = hot-plug detect in
- *   hdmi_tx_scl     gpio4 PC2 = DDC clock  (EDID)
- *   hdmi_tx_sda     gpio4 PC3 = DDC data   (EDID)
- *
- * The m0 variant is this board's: the factory device tree muxes the same three
- * groups (bank 4 pins 16-19, function 9), and the m1 alternative on gpio0 goes
- * unused. Nothing else here claims gpio4 PC0-PC3.
+ * gpio2 PB0 is low for HDMI 2.1 FRL and high for TMDS. The pinctrl-0 list
+ * restates the SoC default groups, because it replaces them.
  */
 &hdmi {
 	frl-enable-gpios = <&gpio2 RK_PB0 GPIO_ACTIVE_LOW>;
@@ -457,10 +382,6 @@
 				};
 			};
 
-			/*
-			 * Switched with the NPU power domain, which takes it as
-			 * pd_npu's domain-supply: see the &rknn_core_0 note below.
-			 */
 			vdd_npu_s0: dcdc-reg2 {
 				regulator-boot-on;
 				regulator-min-microvolt = <550000>;
@@ -708,20 +629,7 @@
 	};
 };
 
-/*
- * i2c2 stays disabled: this board populates nothing on it. The EVB design puts a
- * Haoyu HYM8563 RTC at 0x51 there, and the factory device tree carries the node,
- * but the chip is absent -- an i2cdetect sweep of the bus NAKs every address in
- * about 60 ms, which is a healthy bus reporting nothing home rather than a bus
- * fault. Declaring it anyway costs a guaranteed `rtc-hym8563 2-0051: could not
- * init device, -6` on every boot for a device that cannot answer.
- *
- * There is no RTC to substitute. The RK3576 has no on-chip RTC block (the TRM
- * describes none), and mainline exposes no RTC on the RK806 PMIC -- `rtc-rk808`
- * covers RK805/808/809/817/818 only, and the RK806 mfd cell list has no RTC cell.
- * So the board keeps no wall-clock time across power cycles and depends on NTP;
- * `/dev/rtc` does not exist. That is the hardware, not a gap in the config.
- */
+/* i2c2 stays disabled. The EVB's HYM8563 RTC is not fitted on this board. */
 
 &mdio0 {
 	rgmii_phy0: ethernet-phy@1 {
@@ -738,6 +646,11 @@
 	};
 };
 
+/* The GPU domain must enable its rail first, or a late GPU probe faults. */
+&pd_gpu {
+	domain-supply = <&vdd_gpu_s0>;
+};
+
 &pinctrl {
 	hdmi {
 		hdmi_frl_en: hdmi-frl-en {
@@ -746,8 +659,6 @@
 	};
 
 	ir {
-		/* PWM0 IR pin as plain GPIO input; the demodulator drives it
-		 * push-pull, so no bias (matches the vendor pinmux). */
 		ir_receiver_pin: ir-receiver-pin {
 			rockchip,pins = <0 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
@@ -780,105 +691,24 @@
 			rockchip,pins = <1 RK_PC6 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
-
 };
 
-/*
- * Reboot-mode register: the software half of the loader-mode path. `reboot
- * loader` from Linux writes mode-loader (BOOT_LOADER) to PMU0_GRF offset 0x40;
- * mainline u-boot reads it on the next boot and enters the rockusb gadget
- * (loader mode), so the box can be re-flashed with rkdeveloptool from a running
- * system -- no case, no maskrom. The magics match the vendor firmware's. Needs
- * CONFIG_SYSCON_REBOOT_MODE (socs/rk3576) on the kernel side and the
- * rk3576-loader profile's BOOT_LOADER handling on the u-boot side.
- */
 &pmu0_grf {
 	reboot-mode {
 		compatible = "syscon-reboot-mode";
 		offset = <0x40>;
-		mode-normal = <0x5242c300>;
-		mode-loader = <0x5242c301>;
-		mode-bootloader = <0x5242c301>;
-		mode-recovery = <0x5242c303>;
-		mode-fastboot = <0x5242c309>;
-		mode-ums = <0x5242c30c>;
+		mode-normal = <BOOT_NORMAL>;
+		mode-loader = <BOOT_BL_DOWNLOAD>;
+		mode-bootloader = <BOOT_BL_DOWNLOAD>;
+		mode-recovery = <BOOT_RECOVERY>;
+		mode-fastboot = <BOOT_FASTBOOT>;
+		mode-ums = <(REBOOT_FLAG + 0xc)>;
 	};
 };
 
 /*
- * The RKNN NPU, driven by the mainline `rocket` DRM-accel driver. Compute core 0
- * runs. The SoC nodes come in disabled from the rk3576-npu patch series; a board
- * enables the ones it wants and wires the rail.
- *
- * rknn_core_1 and rknn_mmu_1 are deliberately left at that dtsi default. The part
- * has one convolution buffer -- 1 MB in RKNN_TOP, outside either core's register
- * bank, with a single clock pair both core nodes list, where the RK3588 gives each
- * core its own -- and two rocket jobs in flight at once corrupt each other's
- * output: 96-100% of calls wrong, over as much as 94% of the surface, deltas
- * spanning the whole int8 range, across process boundaries. Overlap in time is the
- * entire condition -- the same two cores driven through a mutex, one job in flight,
- * are bit-exact -- so binding one core leaves the kernel nowhere to schedule a
- * concurrent job and puts the failure out of reach by construction rather than
- * making it unlikely. What would make the second core usable is a userspace encoder
- * that stages each core into a disjoint slice of the buffer, the way the vendor
- * driver's cache_sgt_init partitions it; no RK3576 encoder exists yet.
- *
- * Giving it up costs nothing measurable. Two fds on core 0 alone run 1.5-1.7x a
- * single fd, which is submit pipelining filling dispatch gaps at a ~340 us submit
- * floor rather than parallelism; adding core 1 lands inside that range at small
- * shapes and below it at 128x1024x1024.
- *
- * The rail belongs to the power domain. Mainline rocket references no regulator
- * API, so npu-supply is inert, and a rail nothing claims is disabled as unused at
- * t~33 s, long after a clean probe at t~8 s -- a runtime failure, not a boot
- * failure. RK3576_PD_NPU carries need_regulator, so domain-supply on pd_npu makes
- * the domain the rail's consumer: vdd_npu_s0 comes up before the domain powers and
- * goes down after it drops, the way vdd_gpu_s0 follows pd_gpu. The rail keeps
- * regulator-boot-on and does not take regulator-always-on, which would hold it up
- * whatever the domain does. npu-supply stays because the binding requires it.
- *
- * The power domains are not a board's business: rknn_core_0 carries both
- * RK3576_PD_NPU0 and RK3576_PD_NPU1 in the SoC dtsi, because the convolution
- * buffer is read through PD_NPU1 whichever core computes -- so core 0 alone holds
- * the pair up and the buffer stays fully fed with core 1 down. rocket attaches
- * whatever the node lists, so trimming one would run half fed rather than fail;
- * the binding pins it at two. See rk3576/npu/README.md in the patches repo.
- */
-&pd_npu {
-	domain-supply = <&vdd_npu_s0>;
-};
-
-&rknn_core_0 {
-	npu-supply = <&vdd_npu_s0>;
-	status = "okay";
-};
-
-&rknn_mmu_0 {
-	status = "okay";
-};
-
-/*
- * SAI1 drives the analog line-out amplifier. On this board the I2S data pin is
- * sdo2 (the EVB uses sdo0), and the 12.288 MHz master clock leaves on
- * sai1m0_mclk -- with the amplifier modelled as a pinless dummy codec, the SAI
- * owns the MCLK pin and rate rather than an I2C codec.
- *
- * `rockchip,sai-tx-route` is what makes the sdo2 choice real, and its value is not
- * what the binding's prose implies. Measured on this hardware: in SAI_PATH_SEL, TX
- * field *x* selects which TX data stream drives **SDO port x** -- the field index is
- * the port, the value is the stream. The driver writes entry *i* of this property
- * into field *i*, so reaching SDO port 2 takes three entries and the third is the
- * one that matters. `<0 1 0>` is the reset mapping with field 2 changed to stream 0,
- * i.e. sdo2 carries the playback stream.
- *
- * The binding documents `<3>` as "sdo3 is sending to data0", which would make the
- * index the data stream and the value the port -- the opposite assignment. Written
- * that way (`<2>`) the jack is silent: the engine streams, every clock and pin reads
- * correct, and the stream leaves on a port that reaches nothing. Confirmed by poking
- * SAI_PATH_SEL live and listening, one SDO port at a time.
- *
- * The array length also declares the lane count. Three here is an upper bound only:
- * stereo needs one lane, and hw_params clamps to what the channel count requires.
+ * The analog codec is on SDO port 2. Entry N of the route selects the TX
+ * stream for SDO port N, so <0 1 0> sends stream 0 to port 2.
  */
 &sai1 {
 	assigned-clocks = <&cru CLK_SAI1_MCLKOUT_TO_IO>;
@@ -890,13 +720,6 @@
 		     &sai1m0_sdo2
 		     &sai1m0_mclk>;
 	rockchip,sai-tx-route = <0 1 0>;
-	status = "okay";
-};
-
-/* S/PDIF transmitter on the board's m1 pin group. */
-&spdif_tx1 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&spdifm1_tx1>;
 	status = "okay";
 };
 
@@ -921,17 +744,7 @@
 	status = "okay";
 };
 
-/*
- * The AIC8800D80 Wi-Fi/BT module on SDIO. `non-removable` describes a soldered
- * part; the out-of-tree aic8800 driver claims it (the device's `device_kmods`).
- * `keep-power-in-suspend` is load-bearing rather than descriptive: that driver's
- * suspend callback returns early unless the host offers MMC_PM_KEEP_POWER, and
- * the callback is what parks the bus threads before the host loses its clock, so
- * without this the board does not survive a suspend. SDR104 signals at 1.8 V, so
- * the controller needs the bus I/O rail as `vqmmc-supply` to switch signalling --
- * `vccio_sd_s0` (RK806 PLDO5), the same rail the SD slot uses. `vcc_wifi_reg_on`
- * gates the module's own supply and is driven by the power sequence, separately.
- */
+/* The aic8800 driver suspends cleanly only with keep-power-in-suspend. */
 &sdio {
 	bus-width = <4>;
 	cap-sd-highspeed;
@@ -946,26 +759,13 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&sdmmc1m0_bus4 &sdmmc1m0_clk &sdmmc1m0_cmd>;
 	sd-uhs-sdr104;
-	status = "okay";
 	vqmmc-supply = <&vccio_sd_s0>;
+	status = "okay";
 };
 
-/*
- * The microSD slot has no card-detect GPIO and no switchable card supply: the
- * controller's own detect pin reports insertion and the slot is always powered.
- */
-&sdmmc {
-	bus-width = <4>;
-	cap-mmc-highspeed;
-	cap-sd-highspeed;
-	disable-wp;
-	max-frequency = <200000000>;
-	no-sdio;
-	no-mmc;
+&spdif_tx1 {
 	pinctrl-names = "default";
-	pinctrl-0 = <&sdmmc0_clk &sdmmc0_cmd &sdmmc0_det &sdmmc0_bus4>;
-	sd-uhs-sdr104;
-	vqmmc-supply = <&vccio_sd_s0>;
+	pinctrl-0 = <&spdifm1_tx1>;
 	status = "okay";
 };
 
@@ -991,13 +791,9 @@
 };
 
 /*
- * UART4 (m1 pin group) carries the AIC8800D80 Bluetooth HCI. The BT firmware,
- * downloaded over SDIO during Wi-Fi bringup, is configured for 1.5 Mbaud with
- * hardware flow control, so the port needs its CTS/RTS lines. The BT core has no
- * in-tree serdev driver; the aic8800-bluetooth.service attaches the H4 line
- * discipline to the resulting /dev/ttyS4 (hciattach ... any 1500000 flow nosleep)
- * once BT_REG_ON and HST_WAK_BT are asserted -- which that same service does, not
- * the device tree; see the note below on why the lines are left undriven here.
+ * Bluetooth HCI, 1500000 baud with flow control. Userspace drives BT_REG_ON
+ * (gpio1 PC7) and HST_WAK_BT (gpio1 PD4) high after the Wi-Fi firmware
+ * loads. The controller wakes on that rising edge, so a gpio-hog fails.
  */
 &uart4 {
 	pinctrl-names = "default";
@@ -1007,42 +803,8 @@
 };
 
 /*
- * The AIC8800D80's two Bluetooth control lines -- BT_REG_ON (PWR_BT, gpio1 PC7,
- * the BT-core enable) and HST_WAK_BT (host-wake-bluetooth, gpio1 PD4, active-high)
- * -- are named here but deliberately left undriven by the device tree. They are
- * driven high by aic8800-bluetooth.service instead: the controller comes out of
- * the SDIO firmware load in low-power sleep, and it is the low->high transition of
- * these lines *after* that load which wakes it. A static gpio-hog asserted at gpio
- * probe (before the firmware) gives no such edge and the controller never answers
- * HCI_Reset. The pins sit next to WL_REG_ON (PC6).
- */
-
-&ufshc {
-	status = "disabled";
-};
-
-/*
- * The USB 3.0 Type-A port, the only connector on the box a SuperSpeed lane reaches:
- * drd1's SS lane is routed nowhere, and its ports sit behind an internal USB 2.0 hub
- * besides. It runs at SuperSpeed on the usbdp PHY, and needs nothing beyond the SoC
- * dtsi to do it — measured at 5 Gbps, ~154 MB/s sustained over 92 GB of continuous
- * reads with no link error, which is the drive's flash rather than the link.
- *
- * A device landing at 480 Mb/s here is a mechanical fault, not a configuration one:
- * with the board seated back from the enclosure's front panel, a plug bottoms out on
- * the case before the connector's five recessed SuperSpeed contacts mate, while the
- * four USB 2.0 contacts at the leading edge do. That enumerates flawlessly at high
- * speed and leaves the SuperSpeed root hub completely silent — no failed training, no
- * error, nothing — because receiver detection is a DC test for the device's
- * termination and an unmated pair simply reads as absent. Check the seating before
- * touching this node.
- *
- * `dis_u2_susphy_quirk` on both host controllers fixes an xHC resume error
- * (`xHC error in resume, USBSTS 0x401, Reinit`) after s2idle. The SoC dtsi sets
- * `dis_enblslpm_quirk`, which makes dwc3 assert BOTH the ENBLSLPM and SUSPHY bits
- * of GUSB2PHYCFG on host suspend, but the resume path clears SUSPHY only when
- * `dis_u2_susphy_quirk` is set — so without it the U2 PHY stays parked in suspend
- * across resume and the xHC faults. Setting the quirk restores that symmetry.
+ * The blue USB 3.0 port. dis_u2_susphy_quirk lets the USB2 PHY leave
+ * suspend on resume, which avoids an xHC resume error.
  */
 &usb_drd0_dwc3 {
 	dr_mode = "host";
@@ -1051,21 +813,9 @@
 };
 
 /*
- * The black USB 2.0 Type-A ports, which reach this controller through an internal
- * 1a86:8091 four-port USB 2.0 hub that also carries the bundled remote's receiver.
- *
- * It keeps the SoC dtsi's SuperSpeed wiring — the combphy1_psu "usb3-phy" — and has
- * to. Nothing on RK3576 gates this controller's SuperSpeed port: the combo PHY
- * driver carries no `u3otg1_port_en` for this SoC, so xHCI enumerates the port
- * whether or not a PHY is attached, and a PORTSC access with the PIPE interface
- * unpowered takes an external abort that arrives as an SError and panics the kernel
- * during root-hub init. Dropping the SS phy from `phys` is therefore not a way to
- * retire the port; it is a way to make the machine unbootable.
- *
- * The lane the PHY drives reaches no connector — measured by plugging a SuperSpeed
- * device into every port on the box and reading which bus it lands on — so the port
- * never trains and `2b060000.phy: wait phy status ready timeout` on every boot is
- * that. The message is cosmetic.
+ * The black USB 2.0 ports, behind an internal hub. The SuperSpeed lane
+ * reaches no connector, but the controller still needs its USB3 PHY.
+ * Without it, root hub init takes an SError.
  */
 &usb_drd1_dwc3 {
 	dr_mode = "host";
@@ -1073,12 +823,7 @@
 	status = "okay";
 };
 
-/*
- * The USB/DP combo PHY, carrying usb_drd0's SuperSpeed lane. `rockchip,dp-lane-mux`
- * assigns lanes 2 and 3 to DisplayPort and leaves 0 and 1 to USB3, which is the
- * split the four-lane PHY needs to serve USB at all; the board routes no DP
- * connector, so nothing consumes the two DP lanes.
- */
+/* Lanes 2 and 3 go to DisplayPort, which has no connector. USB3 uses 0 and 1. */
 &usbdp_phy {
 	rockchip,dp-lane-mux = <2 3>;
 	status = "okay";
