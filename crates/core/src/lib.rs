@@ -14,6 +14,9 @@
 //! - Device and recipe generation for `new-device` ([`scaffold`]).
 //! - Selftest expectations ([`expect`]), and [`size`] parsing.
 //! - Initramfs module coverage ([`initramfs`]), and image file manifests ([`files`]).
+//! - Which build points a change reaches ([`affected`]).
+//! - The rules a produced `.deb` is held to ([`debcheck`]), and the record of how the
+//!   newest build of a point ended ([`buildrecord`]).
 //! - Source-pin durability form ([`sources`]), and re-pin ref selection ([`repin`]).
 //! - The upgrade survey's comparison ([`outdated`]), over the tag spellings
 //!   [`version`] parses.
@@ -25,12 +28,15 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
+pub mod affected;
 pub mod authkeys;
 pub mod base64;
 pub mod buildpoint;
+pub mod buildrecord;
 pub mod chromeos;
 pub mod datavolume;
 pub mod datetime;
+pub mod debcheck;
 pub mod debdep;
 pub mod diff;
 pub mod error;

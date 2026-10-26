@@ -176,10 +176,12 @@ pub(crate) enum Command {
     /// Read-only, no root: only the head of the artifact is decompressed. The
     /// off-board half of the hardware gate.
     VerifyImage {
-        /// Recipe whose built image to verify (e.g. turing-rk1/forky).
-        recipe: String,
-        /// Directory holding the built artifacts (default: the recipe's own
-        /// `<work>/artifacts`).
+        /// Build points whose built images to verify (e.g. turing-rk1/forky). Each is
+        /// verified in turn, and one exit status covers them all.
+        #[arg(required = true, value_name = "RECIPE")]
+        recipes: Vec<String>,
+        /// Directory holding the built artifacts (default: each point's own
+        /// `<work>/artifacts`). Names one point's directory, so it takes one point.
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
@@ -204,8 +206,16 @@ pub(crate) enum Command {
     /// (`--layout`, `--image-size`) are overridable, while re-pinning a source axis
     /// (kernel/suite/features/boot-method) is `update`'s job.
     Build {
-        /// Recipe to build (e.g. turing-rk1/forky). Its `.lock` must exist.
-        recipe: String,
+        /// Build points to build, in order (e.g. turing-rk1/forky). Each one's `.lock`
+        /// must exist. Several build one after another with the same flags, and then a
+        /// flag that names one point's paths or sources is refused.
+        #[arg(required = true, value_name = "RECIPE")]
+        recipes: Vec<String>,
+        /// With several points, build the rest after one fails rather than stopping
+        /// there. Every point's outcome is recorded beside its artifacts either way, and
+        /// the run exits non-zero if any failed.
+        #[arg(long)]
+        keep_going: bool,
         #[command(flatten)]
         args: BuildArgs,
     },
@@ -317,6 +327,23 @@ pub(crate) enum Command {
         /// Recipes to survey (e.g. turing-rk1/forky). Default: every recipe in the
         /// config tree.
         recipes: Vec<String>,
+    },
+    /// Name the build points a change reaches: those whose build reads a file that
+    /// differs between a git revision and the working tree. A point's inputs are the
+    /// files and directories its build looks up in the config tree, recorded as the
+    /// build's own lookups run. TOML is compared as parsed documents, so a comment or
+    /// a reflowed line changes nothing. A recipe's `[support]` claim is not one of its
+    /// inputs. A change to the builder's own source is reported once, apart from the
+    /// points. Read-only, and offline: it reads git and the config tree.
+    Affected {
+        /// The revision to compare the working tree against: a commit, branch or tag
+        /// (e.g. origin/main).
+        #[arg(required_unless_present = "claims", conflicts_with = "claims")]
+        since: Option<String>,
+        /// Check every `validated` support claim against the commit it names instead,
+        /// and report each one whose inputs have changed since its image was built.
+        #[arg(long)]
+        claims: bool,
     },
     /// Explain, per compile node, what the next `build` will actually redo. It says
     /// whether the cached source tree is reused or rebuilt (naming the pinned input
@@ -478,7 +505,7 @@ pub(crate) enum StageArg {
 
 /// `build`'s flags: the stage selector, per-tree clone-source overrides, the
 /// scratch/output locations, and the lock-independent image + cache knobs.
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub(crate) struct BuildArgs {
     /// Rootfs feature to select, repeatable — the same selection `update --feature`
     /// pinned. It names which lock to build from (`<recipe>+<feature>...`), and does
@@ -804,9 +831,17 @@ pub(crate) struct CleanArgs {
     /// cannot skew.
     #[arg(long, conflicts_with = "sandbox")]
     pub(crate) build_roots: bool,
-    /// Remove the durable Tier-2 artifact store (`<root>/cache/artifacts`).
-    /// Root-scoped. This store is shared across recipes, so it clears cached outputs
-    /// for *every* recipe, not just one.
+    /// Prune the durable Tier-2 artifact store (`<root>/cache/artifacts`) down to the
+    /// entries a build of some lock would restore. Each entry is keyed by its node's
+    /// full input signature, so one no lock's build asks for is never read again and
+    /// is dead. The keys are the ones `why-rebuild` predicts, taken for every lock and
+    /// every selection of optional userspace trees. An entry only a `--patches-path`
+    /// co-dev build wrote is dead by this rule.
+    ///
+    /// Root-scoped. A lock whose keys cannot be computed aborts the sweep, since a
+    /// narrower live set deletes entries that are still read. Pass the same `--overlay`
+    /// flags a build uses, for the reason given under `--verify-trees`. `--all-caches`
+    /// empties the store outright.
     #[arg(long, conflicts_with = "all_caches")]
     pub(crate) artifacts: bool,
     /// Prune the auto-fetched source checkouts (`<root>/cache/verify-trees`, and the

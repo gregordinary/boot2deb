@@ -14,8 +14,9 @@
 //! A hit is sound because the key covers every output-affecting input. The store
 //! lives outside any recipe work dir, so it outlives them and is shared across work
 //! dirs. A rebuilt or freshly-cloned checkout restores rather than recompiles.
-//! `clean --artifacts` empties it, as does the `--all-caches` sweep of the tree it
-//! sits in.
+//! `clean --artifacts` prunes it to the entries some lock still reaches
+//! ([`entries`] is what that sweep reads), and the
+//! `--all-caches` sweep of the tree it sits in empties it.
 //!
 //! The store is self-verifying like [`crate::debstore`]. An entry is a directory
 //! `<node>/<signature>/` holding the artifact files plus a `manifest.toml`. It is
@@ -59,6 +60,30 @@ struct StoreManifest {
     signature: String,
     /// The stored artifacts, in the order the producing node listed them.
     artifacts: Vec<StoredArtifact>,
+}
+
+/// The address of one store entry: the producing node and the output signature it is
+/// keyed by. Two keys name the same entry exactly when both fields match. A liveness
+/// sweep relies on that to compare the keys a build would ask for against the keys
+/// the store holds.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StoreKey {
+    /// The build node (e.g. `kernel`, `userspace:mpp`, `kmod-fw:aic8800`).
+    pub node: String,
+    /// The node's output signature, in hex.
+    pub signature: String,
+}
+
+/// One directory the store holds, as [`entries`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreEntry {
+    /// The entry directory.
+    pub dir: PathBuf,
+    /// The key the entry's manifest records, or `None` when no restore can ever read
+    /// it. That is a manifest that is missing or unparseable, or that records a
+    /// signature other than the directory's name. [`ArtifactStore::restore`] treats
+    /// such an entry as a miss, so it holds bytes nothing will read.
+    pub key: Option<StoreKey>,
 }
 
 /// A content-addressed store of build-node output artifacts, one directory per
@@ -207,9 +232,133 @@ impl ArtifactStore {
     }
 }
 
+/// Every entry directory the store rooted at `root` holds, sorted by path, with the key
+/// each one's manifest records.
+///
+/// A read of the store and nothing else. It neither creates the store nor runs the
+/// stale-temp sweep that [`ArtifactStore::open`] does, so a `--dry-run` that lists it
+/// changes nothing.
+///
+/// The node name is read back from the manifest rather than from the directory. The
+/// directory name is the path-safe form of it (`:` becomes `-`), which does not
+/// invert. An in-flight or abandoned `put` temp is not an entry and is never listed.
+/// The store's own sweep owns those ([`crate::gc`]), and a concurrent build's temp is
+/// not garbage.
+///
+/// # Errors
+///
+/// A store directory that exists and cannot be listed. An absent store has no
+/// entries.
+pub fn entries(root: &Path) -> Result<Vec<StoreEntry>, EngineError> {
+    let mut out = Vec::new();
+    for node_dir in list_dirs(root)? {
+        for dir in list_dirs(&node_dir)? {
+            let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let key = std::fs::read_to_string(dir.join("manifest.toml"))
+                .ok()
+                .and_then(|text| toml::from_str::<StoreManifest>(&text).ok())
+                .filter(|man| man.signature == name)
+                .map(|man| StoreKey {
+                    node: man.node,
+                    signature: man.signature,
+                });
+            out.push(StoreEntry { dir, key });
+        }
+    }
+    out.sort_by(|a, b| a.dir.cmp(&b.dir));
+    Ok(out)
+}
+
+/// The subdirectories of `dir`, unsorted. An absent `dir` has none, and a file in it
+/// is not an entry of the store's layout, so it is skipped rather than reported.
+fn list_dirs(dir: &Path) -> Result<Vec<PathBuf>, EngineError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(EngineError::io(dir, e)),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| EngineError::io(dir, e))?.path();
+        if path.is_dir() {
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entries_lists_every_stored_key_and_names_the_unreadable_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(tmp.path()).unwrap();
+        let src = write(tmp.path(), "a.deb", b"x");
+        store.put("kernel", "sigA", &[("deb", &src)]).unwrap();
+        store
+            .put("userspace:librga", "sigB", &[("deb", &src)])
+            .unwrap();
+        // An entry whose manifest went missing can never restore, so it is listed
+        // without a key rather than hidden.
+        std::fs::create_dir_all(tmp.path().join("ffmpeg/sigC")).unwrap();
+        // A `put` temp belongs to the store's own sweep, never to a liveness decision.
+        std::fs::create_dir_all(tmp.path().join("kernel/.sigD.1234.partial")).unwrap();
+
+        let entries = entries(tmp.path()).unwrap();
+        let keys: Vec<Option<(&str, &str)>> = entries
+            .iter()
+            .map(|e| {
+                e.key
+                    .as_ref()
+                    .map(|k| (k.node.as_str(), k.signature.as_str()))
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                None,
+                Some(("kernel", "sigA")),
+                Some(("userspace:librga", "sigB")),
+            ],
+            "{entries:?}"
+        );
+        // The node name comes back from the manifest, colon and all, which the
+        // directory name alone could not give.
+        assert!(entries[2].dir.ends_with("userspace-librga/sigB"));
+    }
+
+    #[test]
+    fn an_entry_whose_manifest_names_another_signature_has_no_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(tmp.path()).unwrap();
+        let src = write(tmp.path(), "a.deb", b"x");
+        store.put("kernel", "sigA", &[("deb", &src)]).unwrap();
+        std::fs::rename(
+            tmp.path().join("kernel/sigA"),
+            tmp.path().join("kernel/sigZ"),
+        )
+        .unwrap();
+        // `restore` refuses it for the same reason, so it is not a live entry.
+        let entries = entries(tmp.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].key.is_none());
+        assert!(!store.has("kernel", "sigA"));
+    }
+
+    #[test]
+    fn an_absent_store_has_no_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(entries(&tmp.path().join("never-created"))
+            .unwrap()
+            .is_empty());
+    }
 
     /// Write a file with `content` under `dir`, returning its path.
     fn write(dir: &Path, name: &str, content: &[u8]) -> PathBuf {

@@ -6,4 +6,4 @@
 /// workspace root. A change anywhere else in the repo — a device `.toml`, a `.dts`, a
 /// doc page — is build *input*, recorded by the lock and the config stamp, and leaves
 /// the binary's identity intact.
-const SOURCE_PATHS: [&str; 3] = ["crates", "Cargo.toml", "Cargo.lock"];
+pub(crate) const SOURCE_PATHS: [&str; 3] = ["crates", "Cargo.toml", "Cargo.lock"];

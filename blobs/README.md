@@ -17,7 +17,9 @@ reproducible and offline.
 ## Source and redistribution
 
 The blobs come from Rockchip's `rkbin` repository
-(<https://github.com/rockchip-linux/rkbin>, `bin/rk35`). Rockchip's license grants
+(<https://github.com/rockchip-linux/rkbin>, `bin/rk35`). Each SoC layer records that
+upstream as `[rkbin.upstream]`, and `boot2deb outdated` lists it for a newer release
+of each pinned file. Rockchip's license grants
 a non-exclusive right to use, copy, and distribute the binaries and to distribute
 modifications, provided the copyright, patent, and trademark notices are
 preserved; the binaries are provided as-is. Vendoring them here is redistribution

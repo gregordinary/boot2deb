@@ -18,8 +18,8 @@
 //! The **root-scoped** selectors name stores under the config root that every recipe
 //! shares:
 //!
-//! - `--artifacts`, the Tier-2 artifact store.
-//! - `--verify-trees`, the auto-fetched source checkouts.
+//! - `--artifacts`, the Tier-2 artifact store, pruned to what some lock reaches.
+//! - `--verify-trees`, the auto-fetched source checkouts, pruned to what some lock pins.
 //! - `--kconfig`, `verify-config`'s scratch tree.
 //! - `--all-caches`, the whole durable cache tree.
 //!
@@ -47,39 +47,46 @@
 //! whole-tree default it sits outside the stamped directory the ownership guard
 //! checks.
 //!
-//! `--verify-trees` is the only selector that prunes *within* a store rather than
-//! removing it. Both auto-fetch caches are commit-addressed, so liveness is decidable.
-//! A checkout whose commit no lock in the config tree names can only be re-fetched,
-//! never read back from, and is dead.
+//! `--verify-trees` and `--artifacts` prune *within* a store rather than removing it,
+//! because both stores are addressed by something a lock decides:
 //!
-//! That decision is only sound if the pinned set is complete, so an unreadable or
-//! unparseable lock aborts the sweep rather than narrowing it. The one narrowing this
-//! cannot detect is a missing `--overlay`. The locks are read from the search paths,
-//! so a sweep invoked without the overlays a build uses never sees their pins. The run
-//! reports how many locks it read for that reason, and a count short of the tree the
-//! operator knows is the signal.
+//! - The two auto-fetch caches are commit-addressed. A checkout whose commit no lock in
+//!   the config tree names can only be re-fetched, never read back from, and is dead.
+//! - The artifact store is addressed by each node's output signature. An entry whose
+//!   key no lock's build predicts ([`live_artifacts`]) is never restored, and is dead.
+//!
+//! Either decision is only sound if the live set is complete. A lock that cannot be
+//! read, parsed or (for the artifact keys) resolved therefore aborts the sweep rather
+//! than narrowing it. The one narrowing this cannot detect is a missing `--overlay`. The
+//! locks are read from the search paths, so a sweep invoked without the overlays a
+//! build uses never sees them. The run reports how many locks it read for that reason,
+//! and a count short of the tree the operator knows is the signal.
 
+use super::why_rebuild::{predict, PredictOptions};
 use crate::args::CleanArgs;
-use crate::config::{artifact_cache, cache_dir, kconfig_cache, patches_cache, verify_trees_cache};
+use crate::config::{
+    artifact_cache, cache_dir, kconfig_cache, lock_files, patches_cache, verify_trees_cache,
+};
 use crate::fsutil::dir_size;
 use crate::render::human_size;
 use crate::workdir::{check_work_dir_removable, work_dir_for};
-use boot2deb_core::ConfigRoot;
+use boot2deb_core::lock::Lock;
+use boot2deb_core::model::Overrides;
+use boot2deb_core::{resolve_recipe, ConfigRoot};
+use boot2deb_engine::artstore::{self, StoreEntry, StoreKey};
 use boot2deb_engine::sandbox::PublicationLock;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+/// Read and parse one lock file by path.
+fn read_lock(path: &Path) -> Result<Lock, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    Ok(Lock::from_toml_str(&text, &path.display().to_string())?)
+}
+
 /// Every commit any lock in the config tree pins — the liveness set
 /// [`unpinned_checkouts`] sweeps a commit-addressed cache against.
-///
-/// Reads `recipes/*.lock` and `recipes/<device>/*.lock` under every search path. It
-/// does not read the `<recipe>.pkgs.lock` manifests beside them, which share the
-/// extension and are not TOML. An overlay's recipes count exactly as the shipped ones
-/// do.
-///
-/// Locks are read by *path* rather than through the recipe inventory on purpose. A
-/// lock whose `.toml` was deleted still pins its checkouts, and listing recipes would
-/// miss it and call those trees dead.
 ///
 /// Returns the commits and how many locks were read for them. The count is reported to
 /// the operator because the one way this set can be silently narrow is outside the
@@ -94,56 +101,103 @@ use std::path::{Path, PathBuf};
 fn pinned_commits(
     root: &ConfigRoot,
 ) -> Result<(BTreeSet<String>, usize), Box<dyn std::error::Error>> {
+    let locks = lock_files(root)?;
     let mut pinned = BTreeSet::new();
-    let mut locks = 0usize;
-    let mut visit = |path: &Path| -> Result<(), Box<dyn std::error::Error>> {
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            return Ok(());
-        };
-        // A solved package manifest sits beside the lock it belongs to and shares the
-        // `.lock` extension, but it is a line-oriented package list, not TOML — so
-        // selecting by extension alone would abort every sweep on the first one. An
-        // app's NuGet sidecar shares it too, and is not a lock either.
-        if !name.ends_with(".lock")
-            || boot2deb_core::manifest::is_manifest_name(name)
-            || boot2deb_core::nuget::is_sidecar_name(name)
-        {
-            return Ok(());
-        }
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        let lock = boot2deb_core::lock::Lock::from_toml_str(&text, &path.display().to_string())?;
+    for (_, path) in &locks {
+        let lock = read_lock(path)?;
         pinned.extend(lock.pinned_commits().into_iter().map(str::to_owned));
-        locks += 1;
-        Ok(())
-    };
-    for search_root in root.search_paths() {
-        let recipes = search_root.join("recipes");
-        let entries = match std::fs::read_dir(&recipes) {
-            Ok(entries) => entries,
-            // A root with no recipes contributes nothing; anything else is a partial
-            // read, and a partial read must not be mistaken for "nothing pinned".
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("failed to read {}: {e}", recipes.display()).into()),
+    }
+    Ok((pinned, locks.len()))
+}
+
+/// Every artifact-store key a build of some lock would restore from — the liveness set
+/// [`dead_artifacts`] sweeps the store against.
+///
+/// Each lock is resolved and its compile nodes predicted exactly as `why-rebuild`
+/// predicts them ([`predict`]), once for every selection
+/// of the SoC's optional userspace trees, since naming one moves every userspace key.
+/// Pinned mode only: a `--patches-path` co-dev build keys on a live checkout no lock
+/// names, so what it stored is reachable from no lock.
+///
+/// Returns the keys and how many locks were read for them, for the same reason
+/// [`pinned_commits`] reports its count.
+///
+/// # Errors
+///
+/// A lock that does not parse or resolve, and a node whose key cannot be computed. The
+/// key set must be complete, because an entry missing from it is a live entry deleted
+/// and the cost of that is a recompile of up to an hour.
+fn live_artifacts(
+    root: &ConfigRoot,
+) -> Result<(BTreeSet<StoreKey>, usize), Box<dyn std::error::Error>> {
+    let locks = lock_files(root)?;
+    let mut live = BTreeSet::new();
+    for (reference, path) in &locks {
+        let unknown = |why: String| -> Box<dyn std::error::Error> {
+            format!(
+                "cannot compute the artifact keys of {} ({why}); pruning without them \
+                 would delete entries that lock's build still restores",
+                path.display()
+            )
+            .into()
         };
-        for entry in entries {
-            let path = entry
-                .map_err(|e| format!("failed to read {}: {e}", recipes.display()))?
-                .path();
-            if !path.is_dir() {
-                visit(&path)?;
-                continue;
-            }
-            // A device directory: `recipes/<device>/<leaf>.lock`, the shipped layout.
-            for leaf in std::fs::read_dir(&path)
-                .map_err(|e| format!("failed to read {}: {e}", path.display()))?
-            {
-                let leaf = leaf.map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-                visit(&leaf.path())?;
+        let lock = read_lock(path)?;
+        let build = resolve_recipe(root, reference, &Overrides::default())
+            .map_err(|e| unknown(e.to_string()))?;
+        let optional: Vec<String> = build
+            .image
+            .iter()
+            .flat_map(|i| &i.userspace)
+            .filter(|t| t.optional)
+            .map(|t| t.name.clone())
+            .collect();
+        for selection in subsets(&optional) {
+            let nodes = predict(
+                root,
+                &lock,
+                &build,
+                &PredictOptions {
+                    work_dir: work_dir_for(root, reference, None),
+                    userspace: selection,
+                    patches_path: None,
+                    artifact_store: None,
+                },
+            )
+            .map_err(|e| unknown(e.to_string()))?;
+            for node in nodes {
+                let keys = node
+                    .keys
+                    .ok_or_else(|| unknown(format!("node {} has no computable key", node.node)))?;
+                live.extend(keys);
             }
         }
     }
-    Ok((pinned, locks))
+    Ok((live, locks.len()))
+}
+
+/// Every subset of `names`, the empty one first, each in `names`' order.
+fn subsets(names: &[String]) -> Vec<Vec<String>> {
+    (0..1usize << names.len())
+        .map(|mask| {
+            names
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, n)| n.clone())
+                .collect()
+        })
+        .collect()
+}
+
+/// The dead entries of the artifact store: those whose key no lock's build asks for,
+/// and those with no key at all, which no restore can read. Sorted by path, as
+/// [`artstore::entries`] lists them.
+fn dead_artifacts(entries: &[StoreEntry], live: &BTreeSet<StoreKey>) -> Vec<PathBuf> {
+    entries
+        .iter()
+        .filter(|e| e.key.as_ref().is_none_or(|k| !live.contains(k)))
+        .map(|e| e.dir.clone())
+        .collect()
 }
 
 /// The dead entries of one commit-addressed checkout cache: those named for a commit
@@ -250,7 +304,21 @@ pub(crate) fn run(
         targets.push((cache_dir(root), PublicationLock::Keep));
     }
     if args.artifacts {
-        targets.push((artifact_cache(root), PublicationLock::Keep));
+        // Every key is computed before anything is removed: a lock that will not
+        // resolve must abort the whole run, not leave it half-swept.
+        let (live, locks) = live_artifacts(root)?;
+        let entries = artstore::entries(&artifact_cache(root))?;
+        let dead = dead_artifacts(&entries, &live);
+        // Said before any removal, for the reason the `--verify-trees` count is: a sweep
+        // run without the `--overlay` flags a build uses reads fewer locks.
+        println!(
+            "  {} of {} artifact entr{} reached by {locks} lock(s) across {} config root(s)",
+            entries.len() - dead.len(),
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" },
+            root.search_paths().len()
+        );
+        targets.extend(dead.into_iter().map(|dir| (dir, PublicationLock::Keep)));
     }
     if args.kconfig {
         targets.push((kconfig_cache(root), PublicationLock::Keep));
@@ -468,6 +536,85 @@ mod tests {
             std::fs::write(tree.join("Makefile"), "x").unwrap();
         }
         tmp
+    }
+
+    #[test]
+    fn subsets_cover_every_selection_of_the_optional_trees() {
+        let names = ["libmali".to_string(), "extra".to_string()];
+        let all = subsets(&names);
+        assert_eq!(all.len(), 4);
+        assert!(all[0].is_empty(), "a plain build names none");
+        assert!(all.contains(&vec!["libmali".to_string(), "extra".to_string()]));
+        assert_eq!(subsets(&[]), vec![Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn an_entry_is_dead_when_no_lock_reaches_its_key_or_it_has_none() {
+        let key = |node: &str, sig: &str| StoreKey {
+            node: node.into(),
+            signature: sig.into(),
+        };
+        let entry = |dir: &str, k: Option<StoreKey>| StoreEntry {
+            dir: PathBuf::from(dir),
+            key: k,
+        };
+        let entries = [
+            entry("/s/kernel/a", Some(key("kernel", "a"))),
+            entry("/s/kernel/b", Some(key("kernel", "b"))),
+            // The same signature under another node is another entry entirely.
+            entry("/s/ffmpeg/a", Some(key("ffmpeg", "a"))),
+            entry("/s/uboot/c", None),
+        ];
+        let live = BTreeSet::from([key("kernel", "a"), key("uboot", "c")]);
+        assert_eq!(
+            dead_artifacts(&entries, &live),
+            [
+                PathBuf::from("/s/kernel/b"),
+                PathBuf::from("/s/ffmpeg/a"),
+                PathBuf::from("/s/uboot/c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_live_artifact_set_is_what_the_prediction_asks_for() {
+        // Over the shipped tree, offline: every key is derived from the locks and the
+        // resolution, never probed from a store.
+        let root = repo_root();
+        let (live, locks) = live_artifacts(&root).unwrap();
+        assert_eq!(locks, lock_files(&root).unwrap().len());
+        // The RK1 recipe's kernel key is the one `why-rebuild` predicts for it.
+        let recipe = "turing-rk1/forky";
+        let lock = root.lock(recipe).unwrap();
+        let build = resolve_recipe(&root, recipe, &Overrides::default()).unwrap();
+        let nodes = predict(
+            &root,
+            &lock,
+            &build,
+            &PredictOptions {
+                work_dir: PathBuf::from("/nonexistent"),
+                userspace: Vec::new(),
+                patches_path: None,
+                artifact_store: None,
+            },
+        )
+        .unwrap();
+        let kernel = nodes.iter().find(|n| n.node == "kernel").unwrap();
+        for key in kernel.keys.as_ref().unwrap() {
+            assert!(live.contains(key), "{key:?} is reached by {recipe}");
+        }
+    }
+
+    #[test]
+    fn a_lock_whose_keys_cannot_be_computed_aborts_the_artifact_sweep() {
+        // A lock with no recipe behind it resolves to nothing, so its build's keys are
+        // unknown. Pruning anyway would delete what that build restores.
+        let tmp = config_root_with_checkouts(&"a".repeat(40), &"b".repeat(40));
+        let err = live_artifacts(&ConfigRoot::new(tmp.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot compute the artifact keys"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -37,6 +37,13 @@ packages = ["firmware-misc-nonfree", "firmware-realtek", "v4l-utils"]
 atf = "rk3588_bl31_v1.51.elf"
 tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
 
+# Where the vendored blobs above are published. The build never reads it, since the
+# blobs are vendored under blobs/rk3588/ and pinned by sha256; `boot2deb outdated`
+# lists it to find a newer file spelled like each pinned one.
+[rkbin.upstream]
+git = "https://github.com/rockchip-linux/rkbin.git"
+dir = "bin/rk35"
+
 # Media-accel userspace source trees, shared across the RK35xx family.
 # `ref` is the default constraint; the exact commit is pinned in the lock. mpp
 # pins the durable upstream release tag, and the contiguous-CMA allocator fix the

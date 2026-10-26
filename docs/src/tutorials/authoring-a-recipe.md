@@ -103,6 +103,7 @@ result:
 [support]
 status = "validated"     # validated | expected | experimental
 date   = "2026-07-16"
+commit = "7d1c6f5ec599"  # validated only: the commit the booted image was built from
 ```
 
 | Status | What it asserts |
@@ -121,6 +122,10 @@ Three properties make the claim mean something:
   records. Re-pinning under a `validated` claim retires the evidence, and `update` says so
   at the moment both locks exist to compare. A claim cannot be re-dated for pins that moved
   — it has to be re-earned by booting an image.
+- **It is per tree, too.** A `validated` claim names the commit its booted image was built
+  from: the `config_commit` in the image's provenance manifest. An edit to anything the
+  build reads moves the image as a re-pin does. `boot2deb affected --claims` names every
+  claim whose inputs have changed since its commit.
 - **Absent means no claim made**, not a fourth status. That is the honest state for a
   recipe you authored against your own board, and `support-matrix` reports unclaimed
   recipes separately rather than dropping them.

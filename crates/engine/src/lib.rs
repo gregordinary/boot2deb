@@ -64,6 +64,7 @@ pub mod blobs;
 mod bootstrap;
 pub mod build;
 pub mod checks;
+pub mod debfile;
 pub mod debstore;
 pub mod dotnet;
 pub mod error;

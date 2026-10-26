@@ -411,6 +411,7 @@ mod tests {
                 atf: Some("rk3588_bl31_v1.51.elf".into()),
                 tpl: Some("rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin".into()),
                 bl32: None,
+                upstream: None,
             },
             features: vec!["media-accel-rockchip".into()],
             emit_recipe: true,

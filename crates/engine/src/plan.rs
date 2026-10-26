@@ -39,7 +39,7 @@
 //! Out of scope, because it is not a static prediction: the rootfs node's cache keys
 //! on the live package solve, which needs the mirror.
 
-use crate::artstore::ArtifactStore;
+use crate::artstore::{ArtifactStore, StoreKey};
 use crate::signature::{self, RecordChange, SignatureManifest};
 use boot2deb_core::lock::Lock;
 use boot2deb_core::model::ResolvedBuild;
@@ -94,6 +94,15 @@ pub struct NodePlan {
     /// the node's *inputs*. A freshly cloned tree with no stamp at all can still
     /// restore its `.deb`s and compile nothing.
     pub artifact: ArtifactStatus,
+    /// Every artifact-store entry the node's restore reads: its own output key, and for
+    /// a module that ships firmware the firmware deb's key too. `None` exactly when the
+    /// output signature could not be computed offline, the case that also reports
+    /// [`ArtifactStatus::Unknown`].
+    ///
+    /// Present whether or not the predicted build uses the store, because the keys are a
+    /// fact about the node's inputs rather than about the store. A liveness sweep of the
+    /// store is the consumer that needs them with the store's own verdict set aside.
+    pub keys: Option<Vec<StoreKey>>,
 }
 
 impl NodePlan {
@@ -134,6 +143,12 @@ impl NodePlan {
             tree,
             status,
             artifact,
+            keys: output.map(|out| {
+                vec![StoreKey {
+                    node: node.to_string(),
+                    signature: out.signature().as_str().to_string(),
+                }]
+            }),
         }
     }
 }
@@ -440,6 +455,14 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
             mod_man.as_ref(),
             store,
         );
+        // The firmware deb is a second entry the same restore reads, so it is a key of
+        // this node's too.
+        if let (Some(keys), Some(fw)) = (plan.keys.as_mut(), &fw_man) {
+            keys.push(StoreKey {
+                node: crate::build::kmod::firmware_node_name(&k.name),
+                signature: fw.signature().as_str().to_string(),
+            });
+        }
         // Fold the companion firmware deb in: a hit on the modules alone still leaves
         // the driver tree to fetch and the firmware to package.
         if plan.artifact == ArtifactStatus::Hit {
@@ -917,5 +940,17 @@ mod tests {
             .iter()
             .filter(|n| n.node != "kernel")
             .all(|n| n.artifact == ArtifactStatus::Miss));
+
+        // The keys are the ones the store is asked by, and they are the same with the
+        // store off: a liveness sweep reads them with no store verdict at all.
+        assert_eq!(
+            kernel.keys,
+            Some(vec![StoreKey {
+                node: "kernel".into(),
+                signature: sig.as_str().to_string(),
+            }])
+        );
+        let off_kernel = off.iter().find(|n| n.node == "kernel").unwrap();
+        assert_eq!(off_kernel.keys, kernel.keys);
     }
 }

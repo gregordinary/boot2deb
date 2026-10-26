@@ -1,7 +1,15 @@
 //! `verify-image`: hold a finished image artifact to the invariants that are checkable
 //! without a board.
 //!
-//! This is the off-board half of the hardware gate. What it asks:
+//! This is the off-board half of the hardware gate. It takes several points and gives
+//! one exit status for them all, the form a gate pass checks its builds in.
+//!
+//! First it reads the point's build record ([`boot2deb_core::buildrecord`]). The
+//! artifact directory holds whatever the last build to finish a stage left there. Only
+//! the record says whether the newest build of the point was a whole one that
+//! succeeded. When it was not (a failed or unfinished run, or a later `--stage kernel`)
+//! that is the point's whole report, since every other check would be judging files the
+//! newest build did not write. Then it asks:
 //!
 //!  1. The artifact set is there — the image, its provenance manifest, and the plan
 //!     document the rootfs published.
@@ -31,6 +39,10 @@
 //!     byte.** The files are hashed where they sit, so the check holds what would
 //!     ship, whichever run wrote it. A record with no entry for this host passes, saying
 //!     so, since another host's compilers make other bytes.
+//!  9. Where the build compiles anything, **every `.deb` it recorded as
+//!     local-repository input holds to the package rules**
+//!     ([`boot2deb_core::debcheck`]). That is the check that admitted each package,
+//!     run again on the bytes in the artifact directory.
 //!
 //! Every structure is read by the code that writes it.
 //! [`image::inspect`](boot2deb_engine::image::inspect) reads the GPT and the
@@ -41,8 +53,10 @@
 //! It needs no root, and changes nothing it verifies. Checks 1 to 6 decompress only the
 //! head of the artifact. The seventh walks the whole rootfs, and a walk seeks. A
 //! compressed image is therefore decompressed first, into a sparse temporary file in the
-//! artifact directory that is removed when the check ends. The eighth hashes the recorded files.
+//! artifact directory that is removed when the check ends. The eighth hashes the recorded
+//! files, and the ninth reads each recorded package's members.
 
+use boot2deb_core::buildrecord::BuildRecord;
 use boot2deb_core::model::Overrides;
 use boot2deb_core::provenance::ProvenanceManifest;
 use boot2deb_core::{resolve_recipe, ConfigRoot};
@@ -60,16 +74,119 @@ struct Check {
     ok: bool,
 }
 
-/// Run `verify-image <recipe>`.
+/// What verifying one point came to: the image read, and every invariant checked.
+struct PointReport {
+    /// The point's reference.
+    point: String,
+    /// The image artifact read, once one was found.
+    artifact: Option<PathBuf>,
+    /// The invariants, in the order they were checked.
+    checks: Vec<Check>,
+}
+
+impl PointReport {
+    /// How many invariants failed.
+    fn failed(&self) -> usize {
+        self.checks.iter().filter(|c| !c.ok).count()
+    }
+}
+
+/// Run `verify-image <recipe>...`.
 ///
-/// Exits non-zero when any invariant fails, so a CI job or the gate script can branch
-/// on the status rather than on the text.
+/// Verifies every point, then exits non-zero when any invariant of any point failed,
+/// so a CI job or the gate script branches on one status rather than on the text. A
+/// point that cannot be verified at all (no image, no provenance) is a failure of that
+/// point, reported in its place, and the others are still verified.
 pub(crate) fn run(
     root: &ConfigRoot,
-    recipe: &str,
+    points: &[String],
     out_dir: Option<PathBuf>,
     json_out: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if out_dir.is_some() && points.len() > 1 {
+        return Err(format!(
+            "--out-dir names one point's artifact directory, and {} points were given",
+            points.len()
+        )
+        .into());
+    }
+    let mut reports = Vec::with_capacity(points.len());
+    for point in points {
+        reports.push(match verify_point(root, point, out_dir.clone()) {
+            Ok(report) => report,
+            Err(e) => PointReport {
+                point: point.clone(),
+                artifact: None,
+                checks: vec![Check {
+                    what: "artifacts",
+                    detail: e.to_string(),
+                    ok: false,
+                }],
+            },
+        });
+    }
+    let failed_points = reports.iter().filter(|r| r.failed() > 0).count();
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "points": reports.iter().map(|r| json!({
+                    "recipe": r.point,
+                    "artifact": r.artifact.as_ref().map(|a| a.display().to_string()),
+                    "checks": r.checks.iter().map(|c| json!({
+                        "what": c.what, "detail": c.detail, "ok": c.ok,
+                    })).collect::<Vec<_>>(),
+                    "failed": r.failed(),
+                    "result": if r.failed() == 0 { "pass" } else { "fail" },
+                })).collect::<Vec<_>>(),
+                "failed": failed_points,
+                "result": if failed_points == 0 { "pass" } else { "fail" },
+            }))?
+        );
+    } else {
+        for (i, r) in reports.iter().enumerate() {
+            if i > 0 {
+                println!();
+            }
+            match &r.artifact {
+                Some(image) => println!("{}  {}", r.point, image.display()),
+                None => println!("{}", r.point),
+            }
+            for c in &r.checks {
+                println!(
+                    "  {:<15} {}",
+                    if c.ok { c.what } else { "FAIL" },
+                    if c.ok {
+                        c.detail.clone()
+                    } else {
+                        format!("{}: {}", c.what, c.detail)
+                    }
+                );
+            }
+        }
+    }
+    match (failed_points, reports.as_slice()) {
+        (0, _) => Ok(()),
+        (_, [only]) => Err(format!(
+            "{} of {} image invariants failed",
+            only.failed(),
+            only.checks.len()
+        )
+        .into()),
+        (n, all) => Err(format!("{n} of {} points failed verification", all.len()).into()),
+    }
+}
+
+/// Verify one point's artifact directory.
+///
+/// The build record is read first. When the newest build of the point does not vouch
+/// for the directory, that is the whole report: the other checks would be judging
+/// files the newest build did not write.
+fn verify_point(
+    root: &ConfigRoot,
+    recipe: &str,
+    out_dir: Option<PathBuf>,
+) -> Result<PointReport, Box<dyn std::error::Error>> {
     let point = crate::config::build_point(recipe, Vec::new())?;
     let reference = point.reference();
     let stem = point.artifact_stem();
@@ -85,7 +202,17 @@ pub(crate) fn run(
         None => crate::workdir::work_dir_for(root, reference.as_str(), None).join("artifacts"),
     };
 
-    let mut checks = Vec::new();
+    // 0. The newest build of this point wrote this directory, whole.
+    let record_check = build_record_check(&dir, &stem);
+    if !record_check.ok {
+        return Ok(PointReport {
+            point: reference.as_str().to_string(),
+            artifact: None,
+            checks: vec![record_check],
+        });
+    }
+
+    let mut checks = vec![record_check];
     let image = find_image(&dir, &stem)?;
     let prov_path = dir.join(format!("{stem}.provenance.toml"));
     let plan_path = dir.join(format!("{stem}.plan"));
@@ -285,38 +412,79 @@ pub(crate) fn run(
         checks.push(committed_check(&committed, host, &found));
     }
 
-    let failed = checks.iter().filter(|c| !c.ok).count();
-    if json_out {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "recipe": reference.as_str(),
-                "artifact": image.display().to_string(),
-                "checks": checks.iter().map(|c| json!({
-                    "what": c.what, "detail": c.detail, "ok": c.ok,
-                })).collect::<Vec<_>>(),
-                "failed": failed,
-                "result": if failed == 0 { "pass" } else { "fail" },
-            }))?
-        );
-    } else {
-        println!("{}  {}", reference.as_str(), image.display());
-        for c in &checks {
-            println!(
-                "  {:<15} {}",
-                if c.ok { c.what } else { "FAIL" },
-                if c.ok {
-                    c.detail.clone()
-                } else {
-                    format!("{}: {}", c.what, c.detail)
-                }
-            );
-        }
+    // 8. Every package the build recorded as local-repository input holds to the
+    //    package rules — the same check that admitted it, run again on the bytes that
+    //    are there now. A build that compiles nothing records no package, and its
+    //    every package came from the mirror.
+    if build.compiles_from_source() {
+        checks.push(match crate::artifacts::ledger_debs(&dir) {
+            Err(e) => Check {
+                what: "packages",
+                detail: e.to_string(),
+                ok: false,
+            },
+            Ok(debs) => match crate::artifacts::check_packages(&debs, build.arch) {
+                Ok(()) => Check {
+                    what: "packages",
+                    detail: format!(
+                        "{} recorded .deb(s), each within the package rules",
+                        debs.len()
+                    ),
+                    ok: true,
+                },
+                Err(e) => Check {
+                    what: "packages",
+                    detail: e.to_string(),
+                    ok: false,
+                },
+            },
+        });
     }
-    if failed == 0 {
-        Ok(())
-    } else {
-        Err(format!("{failed} of {} image invariants failed", checks.len()).into())
+
+    Ok(PointReport {
+        point: reference.as_str().to_string(),
+        artifact: Some(image),
+        checks,
+    })
+}
+
+/// Check 0: the build record beside the artifacts says the newest build of this point
+/// was a whole build that succeeded ([`BuildRecord::vouches_for_image`]).
+fn build_record_check(dir: &Path, stem: &str) -> Check {
+    let path = dir.join(boot2deb_core::buildrecord::record_name(stem));
+    let parsed = std::fs::read_to_string(&path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "no {} — nothing records which build wrote this directory, so nothing \
+                     here can be vouched for; build the point again",
+                    path.display()
+                )
+            } else {
+                format!("cannot read {} ({e})", path.display())
+            }
+        })
+        .and_then(|text| {
+            BuildRecord::from_toml_str(&text, &path.display().to_string())
+                .map_err(|e| e.to_string())
+        });
+    match parsed.and_then(|r| r.vouches_for_image().map(|()| r)) {
+        Ok(record) => Check {
+            what: "build",
+            detail: format!(
+                "the newest whole build succeeded, finished {}",
+                record
+                    .finished
+                    .as_deref()
+                    .unwrap_or("at an unrecorded time")
+            ),
+            ok: true,
+        },
+        Err(why) => Check {
+            what: "build",
+            detail: why,
+            ok: false,
+        },
     }
 }
 
@@ -445,6 +613,43 @@ mod tests {
 
     /// The check passes on the recorded bytes, fails naming a moved output, and passes a
     /// build from a host the record does not cover, saying why it compared nothing.
+    #[test]
+    fn the_build_record_vouches_only_for_a_whole_build_that_succeeded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |record: BuildRecord| {
+            std::fs::write(tmp.path().join("p.build.toml"), record.to_toml()).unwrap()
+        };
+        // No record: nothing says which build wrote the directory.
+        let none = build_record_check(tmp.path(), "p");
+        assert!(!none.ok && none.detail.contains("no "), "{}", none.detail);
+
+        let started = || BuildRecord::started("d/p", "all", "2026-10-08T12:00:00Z".into());
+        write(started().settled("2026-10-08T13:00:00Z".into(), None));
+        let ok = build_record_check(tmp.path(), "p");
+        assert!(
+            ok.ok && ok.detail.contains("2026-10-08T13:00:00Z"),
+            "{}",
+            ok.detail
+        );
+
+        write(started().settled(
+            "2026-10-08T12:10:00Z".into(),
+            Some("u-boot: make failed".into()),
+        ));
+        let failed = build_record_check(tmp.path(), "p");
+        assert!(
+            !failed.ok && failed.detail.contains("make failed"),
+            "{}",
+            failed.detail
+        );
+
+        write(BuildRecord::started("d/p", "kernel", "t".into()).settled("t".into(), None));
+        assert!(!build_record_check(tmp.path(), "p").ok);
+
+        std::fs::write(tmp.path().join("p.build.toml"), "not = [toml").unwrap();
+        assert!(!build_record_check(tmp.path(), "p").ok);
+    }
+
     #[test]
     fn the_committed_outputs_check_names_what_moved_and_skips_other_hosts() {
         let mut record = CommittedOutputs::default();

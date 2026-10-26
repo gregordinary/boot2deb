@@ -144,7 +144,8 @@ A device also states whatever its boot method requires.
 Under `rockchip-rkbin`, the board states a `uboot_defconfig`, and an `[rkbin]` block only
 if it departs from the SoC's defaults. The bootloader blobs are **inherited from the soc
 layer** and merged per field. A board on the SoC's usual memory omits the block entirely,
-and a board with different DRAM overrides just `tpl`.
+and a board with different DRAM overrides just `tpl`. The SoC's `[rkbin.upstream]`,
+where `outdated` looks for newer blobs, is inherited whole.
 
 Under `depthcharge`, the board states a `[depthcharge]` block naming the board profile and
 the series the unit supports. There is no `uboot_defconfig` and there are no blobs. This

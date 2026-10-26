@@ -220,6 +220,55 @@ pub fn show_file(repo: &Path, commit: &str, path: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The top level of the git work tree `path` is in, or `None` when it is in none.
+pub fn toplevel(path: &Path) -> Option<std::path::PathBuf> {
+    let out = run(
+        Some(path),
+        &["rev-parse", "--show-toplevel"],
+        "rev-parse --show-toplevel",
+    )
+    .ok()?;
+    out.status
+        .success()
+        .then(|| std::path::PathBuf::from(stdout_of(out)))
+}
+
+/// Every path whose content differs between `rev` and the working tree of `repo`,
+/// relative to the repository root, sorted.
+///
+/// Staged and unstaged edits both count, and so does a file git does not track and does
+/// not ignore. A config tree's loader walks directories, so an untracked overlay file
+/// is input the moment it exists. A rename is reported as its two paths, a deletion and
+/// an addition. A build that read the old path and one that reads the new one were
+/// each changed.
+///
+/// # Errors
+///
+/// [`EngineError::GitFailed`] when `rev` names no commit, or `repo` is not a
+/// repository.
+pub fn changed_paths(repo: &Path, rev: &str) -> Result<Vec<String>, EngineError> {
+    let tracked = checked(
+        Some(repo),
+        &["diff", "--name-only", "--no-renames", "-z", rev, "--"],
+        &format!("diff --name-only {rev} in {}", repo.display()),
+    )?;
+    let untracked = checked(
+        Some(repo),
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        &format!("ls-files --others in {}", repo.display()),
+    )?;
+    let mut paths: Vec<String> = tracked
+        .stdout
+        .split(|b| *b == 0)
+        .chain(untracked.stdout.split(|b| *b == 0))
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 /// The object id of `path` at `commit`, or `None` when the commit does not carry it.
 ///
 /// Comparing two blob ids is how two revisions of one file are told apart without
@@ -654,6 +703,57 @@ c9acdc466e9aa96352f658b9276aa8a45b8e817d\trefs/tags/v7.1.1^{}\n";
         assert_eq!(
             resolve_ref("unused://url", upper).unwrap(),
             "c9acdc466e9aa96352f658b9276aa8a45b8e817d"
+        );
+    }
+
+    #[test]
+    fn changed_paths_reports_edits_staged_or_not_and_untracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            eprintln!("skipping changed_paths test: git unavailable");
+            return;
+        }
+        git(&["config", "user.email", "t@boot2deb"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::create_dir_all(repo.join("devices")).unwrap();
+        std::fs::write(repo.join("devices/a.toml"), "a = 1\n").unwrap();
+        std::fs::write(repo.join("devices/b.toml"), "b = 1\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), "/build\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "c"]);
+        let base = rev_parse_head(repo).unwrap();
+
+        std::fs::write(repo.join("devices/a.toml"), "a = 2\n").unwrap();
+        git(&["mv", "devices/b.toml", "devices/c.toml"]);
+        std::fs::write(repo.join("devices/new.toml"), "n = 1\n").unwrap();
+        std::fs::create_dir_all(repo.join("build")).unwrap();
+        std::fs::write(repo.join("build/out.img"), "ignored").unwrap();
+
+        assert_eq!(
+            changed_paths(repo, &base).unwrap(),
+            [
+                "devices/a.toml",
+                "devices/b.toml",
+                "devices/c.toml",
+                "devices/new.toml"
+            ]
+        );
+        assert!(changed_paths(repo, "no-such-rev").is_err());
+        assert_eq!(
+            toplevel(&repo.join("devices"))
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            repo.canonicalize().unwrap()
         );
     }
 }

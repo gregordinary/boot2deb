@@ -15,3 +15,4 @@ image_size = "2G"
 [support]
 status = "validated"
 date   = "2026-07-14"
+commit = "7d1c6f5ec59975b96090c2e2e42ecc8625ff3608"

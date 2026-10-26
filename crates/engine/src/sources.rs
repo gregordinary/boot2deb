@@ -249,6 +249,80 @@ pub fn advertised_refs(url: &str) -> Result<Vec<LsRef>, String> {
     run_ls_remote(url)
 }
 
+/// The files directly under `dir` in the default branch of `url`, and the commit that
+/// branch was listed at.
+///
+/// One bounded, depth-1 fetch that asks for no file contents (`--filter=blob:none`),
+/// then a local `ls-tree`. So the cost is a commit and its trees, whatever the files
+/// weigh. For the Rockchip firmware repository that is well under a megabyte. A server
+/// without partial-clone support sends the blobs of that one commit too, which is
+/// slower but gives the same answer.
+///
+/// # Errors
+///
+/// A human skip reason: a network error, or the fetch's 60-second timeout. A URL that
+/// reads as a git option is refused too, and so is a directory the branch does not
+/// have. Never a typed error: a survey reports the reason in the row and carries on.
+pub fn tree_listing(url: &str, dir: &str) -> Result<(String, Vec<String>), String> {
+    crate::build::reject_optionlike("source", url).map_err(|e| e.to_string())?;
+    let tmp = tempfile::tempdir().map_err(|e| format!("could not create a scratch dir: {e}"))?;
+    let repo = tmp.path();
+    let first_line = |o: &Output| {
+        String::from_utf8_lossy(&o.stderr)
+            .lines()
+            .next()
+            .unwrap_or("unknown error")
+            .trim()
+            .to_string()
+    };
+    match run_bounded(git_init_cmd(repo), FETCH_BY_SHA_TIMEOUT) {
+        Bounded::Ok(o) if o.status.success() => {}
+        _ => return Err("could not init a scratch repo for the listing".into()),
+    }
+    let mut fetch = Command::new("git");
+    crate::build::bound_git_network(&mut fetch);
+    fetch
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "fetch",
+            "--quiet",
+            "--depth",
+            "1",
+            "--filter=blob:none",
+            "--end-of-options",
+        ])
+        .arg(url)
+        .arg("HEAD");
+    match run_bounded(fetch, HISTORY_TIMEOUT) {
+        Bounded::Ok(o) if o.status.success() => {}
+        Bounded::Ok(o) => return Err(format!("fetch failed: {}", first_line(&o))),
+        Bounded::TimedOut => return Err(format!("fetch exceeded {}s", HISTORY_TIMEOUT.as_secs())),
+        Bounded::Spawn(e) => return Err(format!("could not run git: {e}")),
+    }
+    let local = |args: &[&str]| -> Result<String, String> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(repo).args(args);
+        match run_bounded(cmd, FETCH_BY_SHA_TIMEOUT) {
+            Bounded::Ok(o) if o.status.success() => {
+                Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+            }
+            Bounded::Ok(o) => Err(first_line(&o)),
+            _ => Err("git did not answer".into()),
+        }
+    };
+    let commit = local(&["rev-parse", "FETCH_HEAD"])?.trim().to_string();
+    let prefix = format!("{}/", dir.trim_end_matches('/'));
+    let names: Vec<String> = local(&["ls-tree", "--name-only", "FETCH_HEAD", "--", &prefix])?
+        .lines()
+        .filter_map(|path| path.strip_prefix(&prefix).map(str::to_owned))
+        .collect();
+    if names.is_empty() {
+        return Err(format!("the default branch has no files under {dir}/"));
+    }
+    Ok((commit, names))
+}
+
 /// Classify a pin's durability cheaply (ls-remote only) for `update`'s warning.
 pub fn pin_warning(url: &str, reference: &str, commit: &str) -> PinWarning {
     let refs = match run_ls_remote(url) {
@@ -670,5 +744,46 @@ abc1230000000000000000000000000000000000\trefs/heads/master\n";
         // Defence in depth: a URL that looks like a git option is refused, not run.
         let d = probe("--upload-pack=touch /tmp/x", "v1", "0".repeat(40).as_str());
         assert_eq!(d.label(), "skipped");
+    }
+
+    #[test]
+    fn tree_listing_names_the_files_of_one_directory_at_the_listed_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("rkbin");
+        std::fs::create_dir_all(repo.join("bin/rk35/nested")).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            eprintln!("skipping tree_listing test: git unavailable");
+            return;
+        }
+        git(&["config", "user.email", "t@boot2deb"]);
+        git(&["config", "user.name", "t"]);
+        for f in [
+            "bin/rk35/rk3588_bl31_v1.56.elf",
+            "bin/rk35/nested/x",
+            "bin/other.bin",
+        ] {
+            std::fs::write(repo.join(f), "blob").unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "c"]);
+        let head = crate::git::rev_parse_head(&repo).unwrap();
+
+        let url = format!("file://{}", repo.display());
+        let (commit, names) = tree_listing(&url, "bin/rk35").unwrap();
+        assert_eq!(commit, head);
+        // Entries of that directory only: a subdirectory is a name, its files are not.
+        assert_eq!(names, ["nested", "rk3588_bl31_v1.56.elf"]);
+        assert!(tree_listing(&url, "bin/rk99")
+            .unwrap_err()
+            .contains("no files under"));
+        assert!(tree_listing("--upload-pack=touch /tmp/x", "bin").is_err());
     }
 }

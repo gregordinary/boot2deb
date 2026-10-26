@@ -241,6 +241,7 @@ mod tests {
                 atf: "atf".into(),
                 tpl: "tpl".into(),
                 bl32: None,
+                upstream: None,
             },
             offsets: Offsets {
                 idbloader: "32KiB".into(),

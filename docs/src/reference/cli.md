@@ -97,9 +97,11 @@ recovery media) document it on their [board page](../boards/turing-rk1.md).
 | `verify-config` | the merge or parity verdict, with each differing `CONFIG_*` |
 | `verify-sources` | per pin: its durability class and the detail behind it |
 | `verify-packages` | the present / provided / missing split, plus the names this build produces itself |
-| `verify-image` | every checked image invariant with its detail and verdict, plus a `result` |
+| `verify-image` | per point, every checked image invariant with its detail and verdict, plus a `result` per point and for the run |
 | `diff` | every section's comparison as one document, with the per-series patch-file deltas under `patch_files` |
-| `outdated` | per recipe, every pin with its verdict flattened in — `status` plus the newer release or moved tip behind it |
+| `outdated` | per recipe, every pin with its `kind` and verdict flattened in — `status` plus the newer release or moved tip behind it |
+| `affected` | the changed paths, the builder's own changes, and per reached point the inputs that changed. Under `--claims`, per validated claim a `status` of `holds`, `moved` or `unknown` |
+| `why-rebuild` | per node, both verdicts, what moved, and the full artifact-store keys its restore reads |
 | `size` | the whole rollup: every row with its weight and package count, plus the totals. Untruncated, whatever `--top` says |
 | `build` | NDJSON — one object per line, tagged by its `event` field (`step_started`, `progress`, `log`, `artifact`, `step_finished`, `error`), with every produced artifact's path on an `artifact` event and each step's `duration_ms` + `outcome` (`built`/`restored`/`mixed`) on its `step_finished` |
 
@@ -109,8 +111,7 @@ build, and a filtered record would be a wrong one.
 
 A command with no machine form **rejects** `--json` rather than ignoring it, naming the
 structured route to the same information where one exists. Those commands are `update`
-and `clean`, `why-rebuild` and `new-device`, and `support-matrix`, `patch import` and
-`sbom`. A global flag that silently did nothing would be a trap for exactly the scripted
+and `clean`, `new-device` and `support-matrix`, and `patch import` and `sbom`. A global flag that silently did nothing would be a trap for exactly the scripted
 caller it exists for.
 
 The two commands that split reproducibility from upstream are `update` (the only one
@@ -275,7 +276,26 @@ boot2deb build turing-rk1/forky
 
 Builds the recipe from its lock. It compiles the kernel, u-boot, userspace, ffmpeg and
 any application a feature declares. It then bootstraps the rootfs and writes the
-bootable disk image. Notable flags:
+bootable disk image.
+
+Several points build one after another with the same flags:
+
+```sh
+boot2deb build --keep-going asus-c201/forky h96-max-m9/forky turing-rk1/forky
+```
+
+A failure stops the run unless `--keep-going`, and a closing table says what happened to
+every point. A flag that names one point's own paths or sources is refused with several
+points: `--work-dir`, `--out-dir`, `--kernel-src` and the rest. So is `--json`, whose
+stream says nothing about which point an event belongs to.
+
+Every build records how it ended beside its artifacts, in `<point>.build.toml`. The
+record is written as soon as the point's lock has been read, marked `running`. When the
+build ends it settles to `succeeded`, or to `failed` with the error it ended on. A build refused after that, by a
+stale builder say, is recorded as failed too. `verify-image` reads it first, so it never
+vouches for an image the newest build did not write.
+
+Notable flags:
 
 - **`--feature <name>`**, repeatable, selects which lock to build — the one `update
   --feature` pinned. It does not re-resolve one, so a selection that was never pinned
@@ -368,11 +388,36 @@ It lives at `<root>/cache/artifacts`, outside any recipe's work dir. It therefor
 survives `clean`, and is shared across work dirs and recipes. A freshly cloned checkout
 with no build tree at all can still restore every `.deb` and compile nothing.
 
-`clean --artifacts` empties it, for *every* recipe, since the store is shared.
-`--no-artifact-cache` on a build ignores it and stores nothing.
+`clean --artifacts` prunes it to the entries some lock's build would still restore, and
+`--all-caches` empties it. `--no-artifact-cache` on a build ignores it and stores
+nothing.
 
 Because the key covers every input that can change the output, a hit is sound. Two
 builds that would produce different `.deb`s cannot share an entry.
+
+### Every package is checked before the image installs it
+
+The rootfs installs the build's own `.deb`s from a *trusted* local repository, so a
+defect in one ships with nothing to say so. Before a package is recorded as input to
+that repository, it is held to a set of structural rules. That holds for a package
+compiled on this run and for one restored from the artifact cache:
+
+| rule | what it refuses |
+| --- | --- |
+| `control-field` | a control file without `Package`, `Version`, `Architecture`, `Maintainer` or `Description` |
+| `architecture` | an `Architecture` that is neither `all` nor the build's target |
+| `foreign-elf` | an ELF object for another architecture, the shape a host binary in a cross-built package takes |
+| `elf-in-arch-all` | an ELF object in an `Architecture: all` package |
+| `owner` | a member not owned by root, the build user's id leaking into the package |
+| `setuid`, `world-writable` | either mode bit, which no package of boot2deb's needs |
+| `usr-local` | anything under `/usr/local`, which Debian Policy reserves for the administrator |
+| `member-path` | a member path that is not `./`-relative or that steps through `..` |
+| `empty` | a package that installs only directories |
+
+Firmware under `/lib/firmware` or `/usr/lib/firmware` runs on another processor, and is
+exempt from the two ELF rules. A failure names every finding in every package, and none
+of the packages enters the repository. `verify-image` runs the same rules again over the
+packages the artifact directory holds.
 
 ### Rebuilding only the board DTB
 
@@ -833,10 +878,20 @@ fails on any `CONFIG_*` difference from the reference.
 # Hold a finished image to the invariants that are checkable without a board.
 boot2deb verify-image turing-rk1/forky
 boot2deb verify-image turing-rk1/forky --out-dir /path/to/artifacts
+
+# Several points, one exit status: the form a gate pass checks its builds in.
+boot2deb verify-image asus-c201/forky h96-max-m9/forky turing-rk1/forky
 ```
 
 The off-board half of the hardware gate, and the last thing worth running before a flash.
-Per image it checks:
+
+It first reads the point's [build record](#build). The artifact directory holds whatever
+the last build to finish a stage left there. Only the record says whether the newest
+build of the point was a whole one that succeeded. A failed or unfinished build is not,
+and neither is a later `--stage kernel` run. Either is the point's whole report.
+Every other check would be judging files the newest build did not write.
+
+Then, per image, it checks:
 
 - That the artifact set is present.
 - That the plan document parses, and its digest matches what the provenance manifest
@@ -855,6 +910,8 @@ Per image it checks:
 - Where the recipe commits an outputs record (`recipes/<recipe>.outputs`), that the
   artifact directory holds every file it names for this build host, byte for byte. See
   [the release ritual](reproducibility.md#the-release-ritual).
+- Where the build compiles anything, that every `.deb` it recorded holds to the
+  [package rules](#every-package-is-checked-before-the-image-installs-it).
 
 The filesystem and partition check is the one that matters most. Larger and it will not
 mount at all, and smaller and the difference is wasted. It is checked on every image,
@@ -867,8 +924,8 @@ the same bytes differently. It needs no root, and changes nothing it verifies.
 The file check walks the whole rootfs, and a walk seeks, which a compressed stream
 cannot. A `.img.xz` is therefore decompressed into a sparse temporary file in the
 artifact directory first, and a raw `.img` from `--keep-raw` is read in place. Every
-other check reads only the head of the artifact. A failing invariant exits non-zero,
-and `--json` gives the whole run as one document.
+other check reads only the head of the artifact. A failing invariant in any point exits
+non-zero, and `--json` gives the whole run as one document.
 
 ### verify-sources
 
@@ -1121,20 +1178,31 @@ boot2deb outdated turing-rk1/forky h96-max-m9/forky
 ```
 
 `outdated` is the read-only sibling of `update`: it says what a re-pin *would* find,
-without writing a lock. For each git source pin it reports one of
+without writing a lock. It surveys every pin a lock holds, each against the listing its
+upstream gives:
+
+| pin | compared against |
+| --- | --- |
+| a git source | the refs its remote advertises |
+| an rkbin blob | the files of the upstream directory its SoC layer names in `[rkbin.upstream]` |
+| an `extra_debs` entry fetched by URL | the index of the pool directory the URL is in |
+| a compiled app's .NET SDK | the SDK versions its channel has released |
+
+For each it reports one of
 
 | status | meaning |
 | --- | --- |
 | `current` | the pinned tag is the newest comparable release, or the pinned branch is still at the pinned commit |
 | `behind` | newer releases exist — the next one in the pin's own line, and the newest upstream |
 | `tip-moved` | the pin names a branch whose tip has moved, with both commits |
-| `unknown` | nothing could be compared, and why — a bare-commit pin, a ref the remote no longer advertises, or a remote that could not be reached |
+| `unknown` | nothing could be compared, and why — a bare-commit pin, a ref the remote no longer advertises, an upstream that could not be reached, or a `.deb` vendored in the config tree, which has no upstream to ask |
 
 ```
 recipe                        axis     status     detail
 turing-rk1/forky              kernel   behind     v7.1.6 -> v7.1.9 (3 newer in this line); newest upstream v7.3 (7 newer)
 turing-rk1/forky              u-boot   behind     v2026.04 -> v2026.07 (1 newer release, none in this line)
 turing-rk1/forky              patches  tip-moved  branch main: tip moved 659033b7e543 -> ed52b7fa4a3d
+turing-rk1/forky              rkbin:atf  behind   rk3588_bl31_v1.51.elf -> rk3588_bl31_v1.56.elf (1 newer release)
 ```
 
 Two figures because they are different moves. The **in-line** bump is the next stable
@@ -1155,6 +1223,13 @@ release. The rule is that the pin states its own scheme, and only tags spelled t
 way are candidates. That is why no per-axis list of version patterns exists to fall out
 of date.
 
+A file pin follows the same rule. `rk3588_bl31_v1.51.elf` is compared with
+`rk3588_bl31_v1.56.elf`, and never with `rk3588_bl31_primary_v1.60.elf`, a different
+file of the same family. A pool `.deb` is compared with the same package for the same
+architecture, in dpkg's version order. Its line is its upstream version, so a Debian
+rebuild such as `76.1-4+b1` is the in-line move. An SDK's line is its feature band
+(`10.0.4xx`).
+
 Being behind is not a failure. `outdated` always exits zero. It is a survey, and
 whether to move is a decision with hardware evidence behind it.
 
@@ -1163,15 +1238,67 @@ question. Not "is there something newer" but "is what we pinned still fetchable 
 A pin can be a durable tag and nine releases behind, or an ephemeral branch tip and
 current.
 
-Cost is one `git ls-remote` per **distinct remote**, not per pin. The shipped recipes
-share a kernel repo and a patches repo, so surveying the whole tree is a handful of
-round-trips and a few seconds. Nothing is fetched and nothing is written.
+Cost is one probe per **distinct listing**, not per pin. That is a `git ls-remote` per
+remote and a blobless, depth-1 fetch per firmware directory. A pool directory or an SDK
+channel is one HTTP read. The shipped recipes share a kernel repo, a patches repo and a firmware
+directory, so surveying the whole tree is a handful of round-trips. Nothing is written.
 
-What it does **not** cover is the pins that have no upstream ref to move. The rkbin
-blobs and any `extra_debs` are content-pinned by sha256 and read from the config tree.
-The apt archive is pinned by the solved manifest rather than by a ref. Those move
-only when someone changes the config, which [`diff`](#comparing-two-build-points)
-shows.
+A pin with no upstream to ask is a row too, `unknown` with the reason, so the survey
+states everything it does not cover. A `.deb` vendored in the config tree is one. The
+apt archive is pinned by the solved manifest rather than by a ref, and moves only when
+someone changes the config, which [`diff`](#comparing-two-build-points) shows. A blob,
+pool `.deb` or SDK that is behind moves by editing the config that names it, after which
+`update` pins it.
+
+## What a change reaches
+
+```sh
+# The build points a branch changes: compare the working tree against a revision.
+boot2deb affected origin/main
+
+# The validated support claims whose inputs have moved since their image was built.
+boot2deb affected --claims
+```
+
+A build point's inputs are every file and directory its build reads from the config
+tree. They are recorded while the same lookups `build` makes run. A new kind of input
+therefore needs no second list kept in step with it. A change reaches a point when a changed
+path is one of its inputs, or lies under a directory it walks. A path a lookup tried and
+found missing counts too, since a file that appears there later changes what the
+lookup finds.
+
+The comparison is the working tree against the revision, untracked files included. A
+config tree's loader walks directories, so a new overlay file is input the moment it
+exists. TOML is compared as parsed documents, so a comment or a reflowed line changes nothing. A
+recipe's own `[support]` table is not one of its inputs.
+
+```
+point                        changed inputs
+turing-rk1/forky             fragments/soc/rk3588.config (+1 more)
+turing-rk1/media-accel-forky fragments/soc/rk3588.config (+1 more)
+
+the builder changed in 3 file(s) under crates, Cargo.toml, Cargo.lock: every build runs
+different code, and which images that moves is not decidable from the files.
+2 of 26 build point(s) reached; 24 unaffected.
+```
+
+A change to the builder's own source is reported once, apart from the points. It alters
+what every build runs, and the files cannot say which images it moves.
+
+`--claims` asks the question a [`validated` claim](config-model.md#a-recipe-declares-what-it-has-been-taken-through)
+depends on. A validated claim names the commit its booted image was built from, and each
+one is compared against that commit. `update` already warns when a re-pin moves a
+claim's pins. This sees the rest: an edited fragment, overlay file or package list moves
+the image as surely, and no lock records it.
+
+```
+recipe           validated                   status  detail
+asus-c201/forky  2026-07-14 at 7d1c6f5ec599  moved   arches/armv7.toml (+31 more)
+```
+
+Both forms are surveys and exit zero, and a CI job gates on the `--json` document. The claim
+form needs the history back to each claim's commit, so a shallow clone reports such a
+claim `unknown` rather than comparing it.
 
 ## Rebuild planning and cleanup
 
@@ -1188,8 +1315,9 @@ boot2deb clean turing-rk1/forky --dry-run
 boot2deb clean turing-rk1/forky --build-roots
 
 # Sweep the caches every recipe shares — no recipe to name. The routine one drops
-# the auto-fetched checkouts nothing pins any more, and verify-config's scratch.
-boot2deb clean --verify-trees --kconfig --dry-run
+# the auto-fetched checkouts and the stored outputs nothing pins any more, and
+# verify-config's scratch.
+boot2deb clean --verify-trees --artifacts --kconfig --dry-run
 ```
 
 `why-rebuild` answers the question that decides how long a build takes, and it answers
@@ -1216,6 +1344,7 @@ note: the per-node verdict is the *source tree*: whether the clone and patch run
 
 Pass `--no-artifact-cache` to see the prediction for a build that will not use the
 store. Pass `--patches-path` / `--userspace <name>` to match a build that will use those.
+`--json` gives each node's verdicts with the full store keys its restore reads.
 
 `clean` removes only directories `build` created. Every work dir is stamped with a
 `.boot2deb-work` marker, and an unmarked target is refused, so a mistyped
@@ -1250,13 +1379,13 @@ shared, the selectors that name them take **no recipe**:
 | --- | --- | --- |
 | `--verify-trees` | `cache/verify-trees`, `cache/patches` | the checkouts no lock pins |
 | `--kconfig` | `cache/kconfig` | all of it — `verify-config` scratch |
-| `--artifacts` | `cache/artifacts` | all of it — every entry is a compile away |
+| `--artifacts` | `cache/artifacts` | the entries no lock's build would restore |
 | `--all-caches` | `cache/` entire | all of it, pinned checkouts included |
 
-`--verify-trees` is the routine one, and the only selector that prunes *within* a store
-rather than emptying it. Both auto-fetch caches are keyed on the commit they hold, so
-liveness is decidable. A checkout whose commit no `recipes/*/*.lock` names can only ever
-be re-fetched, never read back from, and is dead.
+`--verify-trees` and `--artifacts` are the routine ones, and the two selectors that prune
+*within* a store rather than emptying it. Both auto-fetch caches are keyed on the commit
+they hold, so liveness is decidable. A checkout whose commit no `recipes/*/*.lock` names
+can only ever be re-fetched, never read back from, and is dead.
 
 Re-pinning a kernel therefore strands the old tree the moment `update` writes the new
 commit, and this is what collects it. The still-pinned checkouts stay, and they are what
@@ -1265,6 +1394,14 @@ makes `verify-patches` and `verify-config` start instantly.
 Because a *narrower* pinned set would delete a live tree, a lock that will not parse
 aborts the sweep instead of narrowing it. Nothing is removed until every lock in the
 config tree has been read.
+
+The artifact store is keyed on each node's output signature, and its liveness is decided
+the same way. Every lock is resolved, and its compile nodes predicted exactly as
+`why-rebuild` predicts them, once for every selection of the SoC's optional userspace
+trees. An entry whose key no prediction asks for is never restored, and is dead. So is
+one only a `--patches-path` co-dev build wrote, since no lock names that series. A lock
+that does not resolve aborts this sweep too. A live entry deleted costs a recompile of
+up to an hour.
 
 The one narrowing that rule cannot catch is a missing `--overlay`. The locks are read
 from the search paths. A sweep invoked without the overlays your builds use therefore
@@ -1279,8 +1416,8 @@ run. Each is also a base that ages against the archive exactly as a build root d
 Dropping them costs a re-provision, and buys back the largest of the four stores after
 the artifact cache.
 
-`--artifacts` empties the durable artifact store. Since it is shared, that clears cached
-outputs for every recipe, and the next build of each recompiles.
+A kernel re-pin strands every kernel, module and u-boot entry keyed on the old pins.
+`--artifacts` collects them, and keeps what the current locks restore.
 
 `--all-caches` takes the whole tree: the three above, the pinned checkouts, and the
 pre-built `extra_debs` store. Everything there is reclaimable by construction, but

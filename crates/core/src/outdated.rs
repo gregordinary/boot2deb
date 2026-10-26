@@ -1,10 +1,21 @@
-//! What a remote holds beyond a pin — the pure half of the `outdated` survey.
+//! What upstream holds beyond a pin — the pure half of the `outdated` survey.
 //!
-//! Pure and deterministic: given a lock's `(reference, commit)` and the refs a
-//! remote advertises, decide whether anything newer exists and what it is. The
-//! `git ls-remote` that produces those refs is the engine's job
-//! (`boot2deb_engine::sources`). Everything here is a comparison, so the whole
-//! policy is unit-testable without a network.
+//! Pure and deterministic: given a pin and what its upstream lists, decide whether
+//! anything newer exists and what it is. Fetching the listing is the engine's job
+//! (`boot2deb_engine::sources`, `boot2deb_engine::netfetch`). Everything here is a
+//! comparison, so the whole policy is unit-testable without a network.
+//!
+//! A lock pins four kinds of thing, and each is compared against the listing its
+//! upstream gives:
+//!
+//! - A git source's `(reference, commit)`, against the refs the remote advertises
+//!   ([`compare`]).
+//! - A firmware blob's file name, against the files of the upstream tree directory it
+//!   came from ([`compare_file`]).
+//! - A pool `.deb`'s file name, against the files its pool directory's index lists
+//!   ([`compare_deb`]).
+//! - A .NET SDK version, against the SDK versions its channel has released
+//!   ([`compare_dotnet_sdk`]).
 //!
 //! This is a different question from durability ([`crate::sources`] and
 //! `verify-sources`), which asks whether a pin is still *re-fetchable*. A pin can be
@@ -17,7 +28,8 @@
 //! compares `v7.1.6` against other `vX.Y.Z` tags. The Linux-libre axis compares
 //! `sources/v7.1.6-gnu` only against other deblobbed trees, and u-boot's `vYYYY.MM`
 //! and FFmpeg's `nX.Y.Z` fall out of the same rule. A release pin is never offered a
-//! prerelease.
+//! prerelease. A file pin follows the same rule: its name, read around the version,
+//! is the only scheme a candidate is compared under.
 
 use crate::sources::PinForm;
 use crate::version::{parse_tag, TagShape};
@@ -42,11 +54,16 @@ pub struct RemoteRef<'a> {
 /// A release newer than the pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Newer {
-    /// The tag, spelled as the remote advertises it (`v7.1.9`).
+    /// The release as upstream spells it: a tag (`v7.1.9`), a file name
+    /// (`rk3588_bl31_v1.56.elf`, `libicu76_76.1-4+b1_arm64.deb`), or a version
+    /// (`10.0.402`).
     pub tag: String,
-    /// The commit it resolves to — the peeled target for an annotated tag, so it is
-    /// the value an `update` would write into the lock.
-    pub commit: String,
+    /// The commit it resolves to. For a tag that is the peeled target of an annotated
+    /// one, so it is the value an `update` would write into the lock. For a file read
+    /// out of a git tree it is the commit the tree was listed at. `None` where upstream
+    /// is not a git repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     /// How many comparable releases sit strictly between the pin and this one,
     /// inclusive of it: `1` means this is the very next release.
     pub count: usize,
@@ -174,40 +191,291 @@ fn compare_tag(reference: &str, tags: &BTreeMap<String, String>) -> Upgrade {
     // a different question. A pin that is *itself* a prerelease has already answered
     // that question, so its own line stays comparable.
     let want_pre = !pinned.pre.is_empty();
-    let mut newer: Vec<(Version, &String, &String)> = tags
+    let newer: Vec<Candidate<Version>> = tags
         .iter()
         .filter(|(tag, _)| shape.matches(tag))
         .filter_map(|(tag, commit)| Some((parse_tag(tag).ok()?, tag, commit)))
         .filter(|(v, _, _)| want_pre || v.pre.is_empty())
         .filter(|(v, _, _)| *v > pinned)
+        .map(|(key, tag, commit)| Candidate {
+            key,
+            name: tag.clone(),
+            commit: Some(commit.clone()),
+        })
         .collect();
+    // The pin's own line: same major.minor, which for a kernel is its stable series.
+    verdict(newer, |v| {
+        v.major == pinned.major && v.minor == pinned.minor
+    })
+}
+
+/// One release newer than a pin, ordered by `key`.
+struct Candidate<K> {
+    /// What orders it against the other candidates.
+    key: K,
+    /// How upstream spells it.
+    name: String,
+    /// The commit it resolves to, where upstream is a git repository.
+    commit: Option<String>,
+}
+
+/// The verdict over every release newer than a pin: [`Upgrade::Current`] when there
+/// is none, else the newest overall and the newest that `in_line` keeps.
+///
+/// Counts are positions in ascending order, the name breaking a tie, so the verdict is
+/// deterministic when two spellings order alike. The in-line count is taken within the
+/// line, so "3 newer in 7.1.y" counts 7.1 releases and not everything upstream
+/// published since.
+fn verdict<K: Ord>(mut newer: Vec<Candidate<K>>, in_line: impl Fn(&K) -> bool) -> Upgrade {
     if newer.is_empty() {
         return Upgrade::Current;
     }
-    // Ascending, tag name breaking a tie, so `count` is a position and the whole
-    // verdict is deterministic when two spellings parse to one version.
-    newer.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
-    let at = |i: usize| Newer {
-        tag: newer[i].1.clone(),
-        commit: newer[i].2.clone(),
-        count: i + 1,
+    newer.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| a.name.cmp(&b.name)));
+    let newest = newer.last().expect("checked non-empty");
+    let latest = Newer {
+        tag: newest.name.clone(),
+        commit: newest.commit.clone(),
+        count: newer.len(),
     };
-    let latest = at(newer.len() - 1);
-    // The pin's own line: same major.minor, which for a kernel is its stable series.
-    // Counted within the line, so "3 newer in 7.1.y" is a count of 7.1 releases and
-    // not of everything upstream published since.
     let line = newer
         .iter()
+        .filter(|c| in_line(&c.key))
         .enumerate()
-        .filter(|(_, (v, _, _))| v.major == pinned.major && v.minor == pinned.minor)
-        .enumerate()
-        .map(|(within, (_, (_, tag, commit)))| Newer {
-            tag: (*tag).clone(),
-            commit: (*commit).clone(),
+        .map(|(within, c)| Newer {
+            tag: c.name.clone(),
+            commit: c.commit.clone(),
             count: within + 1,
         })
         .last();
     Upgrade::Behind { line, latest }
+}
+
+/// A versioned file name split around its version: `rk3588_bl31_v1.51.elf` is
+/// `rk3588_bl31_v`, `[1, 51]` and `.elf`.
+///
+/// The version is the last run of dot-separated numbers that follows a `v`, which is
+/// how the Rockchip firmware files spell theirs. A name with no such run has no version.
+fn split_file_version(name: &str) -> Option<(&str, Vec<u64>, &str)> {
+    let bytes = name.as_bytes();
+    let mut found = None;
+    for (i, _) in name.match_indices('v') {
+        let mut end = i + 1;
+        let mut parts = Vec::new();
+        loop {
+            let start = end;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end == start {
+                break;
+            }
+            parts.push(name[start..end].parse::<u64>().ok()?);
+            // A dot continues the version only when a digit follows it, so the `.elf`
+            // after `1.51` stays in the suffix.
+            if end + 1 < bytes.len() && bytes[end] == b'.' && bytes[end + 1].is_ascii_digit() {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        if !parts.is_empty() {
+            found = Some((&name[..=i], parts, &name[end..]));
+        }
+    }
+    found
+}
+
+/// Compare a pinned file against the names an upstream directory lists.
+///
+/// The pinned name states its own scheme, as a pinned tag does: only names with the
+/// same text around the version are candidates. So `rk3588_bl31_v1.51.elf` is
+/// compared with `rk3588_bl31_v1.56.elf` and never with
+/// `rk3588_bl31_primary_v1.60.elf`, a different file that happens to share a family.
+/// A file's line is its major version. `listed_at` is the commit the listing was read
+/// at, carried onto every candidate.
+pub fn compare_file(pinned: &str, listing: &[&str], listed_at: Option<&str>) -> Upgrade {
+    let Some((prefix, version, suffix)) = split_file_version(pinned) else {
+        return Upgrade::Unknown {
+            why: format!(
+                "the pinned file '{pinned}' carries no version, so nothing orders against it"
+            ),
+        };
+    };
+    let newer = listing
+        .iter()
+        .filter_map(|name| {
+            let (p, v, s) = split_file_version(name)?;
+            (p == prefix && s == suffix && v > version).then(|| Candidate {
+                key: v,
+                name: (*name).to_string(),
+                commit: listed_at.map(str::to_owned),
+            })
+        })
+        .collect();
+    verdict(newer, |v| v.first() == version.first())
+}
+
+/// A Debian version, ordered the way dpkg orders them.
+#[derive(PartialEq, Eq)]
+struct DebVersion(String);
+
+impl PartialOrd for DebVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DebVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        crate::debdep::compare_versions(&self.0, &other.0)
+    }
+}
+
+/// The `(package, version, architecture)` a pool file name `<package>_<version>_<arch>.deb`
+/// spells, with any percent-encoding a directory index applied undone.
+fn split_deb_name(name: &str) -> Option<(String, String, String)> {
+    let name = percent_decode(name);
+    let stem = name.strip_suffix(".deb")?;
+    let (package, rest) = stem.split_once('_')?;
+    let (version, arch) = rest.rsplit_once('_')?;
+    Some((package.into(), version.into(), arch.into()))
+}
+
+/// The upstream version of a Debian version: no epoch, no revision.
+fn upstream_version(version: &str) -> &str {
+    let v = version.split_once(':').map_or(version, |(_, v)| v);
+    v.rsplit_once('-').map_or(v, |(u, _)| u)
+}
+
+/// Compare a pinned pool file against the files its pool directory lists.
+///
+/// Only the same package for the same architecture is a candidate, ordered as dpkg
+/// orders versions. The line is the pin's upstream version. A rebuild or a new Debian
+/// revision (`76.1-4` to `76.1-4+b1`) is then the conservative move, and a new
+/// upstream release the wider one.
+pub fn compare_deb(pinned: &str, listing: &[&str]) -> Upgrade {
+    let Some((package, version, arch)) = split_deb_name(pinned) else {
+        return Upgrade::Unknown {
+            why: format!("'{pinned}' is not a <package>_<version>_<arch>.deb file name"),
+        };
+    };
+    let pinned_version = DebVersion(version.clone());
+    let newer = listing
+        .iter()
+        .filter_map(|name| {
+            let (p, v, a) = split_deb_name(name)?;
+            let key = DebVersion(v);
+            (p == package && a == arch && key > pinned_version).then(|| Candidate {
+                key,
+                name: percent_decode(name),
+                commit: None,
+            })
+        })
+        .collect();
+    verdict(newer, |v| {
+        upstream_version(&v.0) == upstream_version(&version)
+    })
+}
+
+/// Compare a pinned .NET SDK version against the SDK versions its channel has
+/// released.
+///
+/// The line is the pin's feature band (`10.0.4xx`), the band the SDK's own servicing
+/// releases stay in. A prerelease is offered only to a prerelease pin.
+pub fn compare_dotnet_sdk(pinned: &str, released: &[&str]) -> Upgrade {
+    let Ok(pin) = Version::parse(pinned) else {
+        return Upgrade::Unknown {
+            why: format!("the pinned SDK '{pinned}' is not a version"),
+        };
+    };
+    let want_pre = !pin.pre.is_empty();
+    let band = |v: &Version| (v.major, v.minor, v.patch / 100);
+    let newer = released
+        .iter()
+        .filter_map(|r| Some((Version::parse(r).ok()?, *r)))
+        .filter(|(v, _)| (want_pre || v.pre.is_empty()) && *v > pin)
+        .map(|(key, name)| Candidate {
+            key,
+            name: name.to_string(),
+            commit: None,
+        })
+        .collect();
+    verdict(newer, |v| band(v) == band(&pin))
+}
+
+/// The channel a .NET SDK version belongs to (`10.0.401` is in `10.0`), which names
+/// the release metadata that lists its siblings.
+pub fn dotnet_channel(version: &str) -> Option<String> {
+    let v = Version::parse(version).ok()?;
+    Some(format!("{}.{}", v.major, v.minor))
+}
+
+/// Every SDK version a channel's `releases.json` lists, in document order.
+///
+/// # Errors
+///
+/// A document that is not JSON, or has no `releases` array.
+pub fn dotnet_sdk_versions(releases_json: &str) -> Result<Vec<String>, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(releases_json).map_err(|e| format!("not JSON: {e}"))?;
+    let releases = doc
+        .get("releases")
+        .and_then(|r| r.as_array())
+        .ok_or("no releases array")?;
+    let mut out = Vec::new();
+    for release in releases {
+        let listed = release
+            .get("sdks")
+            .and_then(|s| s.as_array())
+            .into_iter()
+            .flatten()
+            .chain(release.get("sdk"));
+        for sdk in listed {
+            if let Some(v) = sdk.get("version").and_then(|v| v.as_str()) {
+                if !out.iter().any(|o| o == v) {
+                    out.push(v.to_string());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The file names an HTTP directory index links to: every `href` that names a plain
+/// entry of the directory itself, percent-decoded. A link with a `/`, `?` or `#` is a
+/// subdirectory, a sort control or an anchor, and is not one.
+pub fn index_names(html: &str) -> Vec<String> {
+    html.split("href=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .filter(|href| !href.is_empty() && !href.contains(['/', '?', '#']))
+        .map(percent_decode)
+        .collect()
+}
+
+/// Undo URL percent-encoding. A `%` not followed by two hex digits stays as it is.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (
+            bytes[i],
+            bytes.get(i + 1).copied().and_then(hex),
+            bytes.get(i + 2).copied().and_then(hex),
+        ) {
+            (b'%', Some(hi), Some(lo)) => {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The commit each advertised tag resolves to, keyed by bare tag name.
@@ -285,7 +553,7 @@ mod tests {
         };
         let line = line.as_ref().expect("7.1 has newer point releases");
         assert_eq!(line.tag, "v7.1.9");
-        assert_eq!(line.commit, sha('c'));
+        assert_eq!(line.commit, Some(sha('c')));
         assert_eq!(line.count, 2, "7.1.7 and 7.1.9 are the in-line releases");
         assert_eq!(latest.tag, "v7.2.1");
         assert_eq!(latest.count, 4, "7.1.7, 7.1.9, 7.2 and 7.2.1");
@@ -424,7 +692,7 @@ mod tests {
         assert_eq!(latest.tag, "v1.1");
         assert_eq!(
             latest.commit,
-            sha('c'),
+            Some(sha('c')),
             "the peeled target, not the tag object"
         );
     }
@@ -484,6 +752,128 @@ mod tests {
     }
 
     #[test]
+    fn a_file_is_compared_only_with_files_spelled_like_it() {
+        // The rkbin tree as it lists `bin/rk35`: the pinned version is gone, newer
+        // ones of the same file are there, and so are other files of the same family.
+        let listing = [
+            "rk3588_bl31_v1.56.elf",
+            "rk3588_bl31_v1.53.elf",
+            "rk3588_bl31_primary_v1.60.elf",
+            "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin",
+            "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_eyescan_v1.24.bin",
+            "rk3588_bl31_v2.00.elf",
+        ];
+        let Upgrade::Behind { line, latest } =
+            compare_file("rk3588_bl31_v1.51.elf", &listing, Some(&sha('e')))
+        else {
+            panic!("expected behind");
+        };
+        assert_eq!(latest.tag, "rk3588_bl31_v2.00.elf");
+        assert_eq!(
+            latest.count, 3,
+            "v1.53, v1.56, v2.00 — never the primary_ file"
+        );
+        assert_eq!(
+            latest.commit,
+            Some(sha('e')),
+            "the commit the tree was listed at"
+        );
+        let line = line.unwrap();
+        assert_eq!(
+            line.tag, "rk3588_bl31_v1.56.elf",
+            "the line is the major version"
+        );
+        assert_eq!(line.count, 2);
+
+        // The TPL's long name: the version is the last `v<numbers>` run, and the
+        // `eyescan_` variant is a different file.
+        let Upgrade::Behind { latest, .. } = compare_file(
+            "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin",
+            &listing,
+            None,
+        ) else {
+            panic!("expected behind");
+        };
+        assert_eq!(latest.tag, "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin");
+        assert_eq!(latest.count, 1);
+
+        assert_eq!(
+            compare_file("rk3588_bl31_v2.00.elf", &listing, None),
+            Upgrade::Current
+        );
+        assert_eq!(
+            compare_file("idbloader.img", &listing, None).label(),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn a_pool_deb_is_compared_by_dpkg_order_within_its_package_and_arch() {
+        let listing = [
+            "libicu76_76.1-4_arm64.deb",
+            "libicu76_76.1-4%2Bb1_arm64.deb",
+            "libicu76_76.1-4+b1_amd64.deb",
+            "libicu76_76.2-1_arm64.deb",
+            "libicu78_78.1-1_arm64.deb",
+            "libicu-dev_76.1-4_arm64.deb",
+        ];
+        let Upgrade::Behind { line, latest } = compare_deb("libicu76_76.1-4_arm64.deb", &listing)
+        else {
+            panic!("expected behind");
+        };
+        // A binNMU keeps the upstream version, so it is the conservative move.
+        let line = line.unwrap();
+        assert_eq!(line.tag, "libicu76_76.1-4+b1_arm64.deb", "percent-decoded");
+        assert_eq!(latest.tag, "libicu76_76.2-1_arm64.deb");
+        assert_eq!(latest.count, 2, "not the other arch, package or soname");
+        assert_eq!(latest.commit, None);
+        assert_eq!(
+            compare_deb("libicu76_76.2-1_arm64.deb", &listing),
+            Upgrade::Current
+        );
+    }
+
+    #[test]
+    fn an_sdk_is_offered_its_feature_band_before_a_newer_band() {
+        let released = [
+            "10.0.402",
+            "10.0.500",
+            "10.0.112",
+            "10.0.401",
+            "10.0.600-rc.1",
+        ];
+        let Upgrade::Behind { line, latest } = compare_dotnet_sdk("10.0.401", &released) else {
+            panic!("expected behind");
+        };
+        assert_eq!(line.unwrap().tag, "10.0.402");
+        assert_eq!(
+            latest.tag, "10.0.500",
+            "a release pin is offered no prerelease"
+        );
+        assert_eq!(compare_dotnet_sdk("10.0.500", &released), Upgrade::Current);
+        assert_eq!(dotnet_channel("10.0.401").as_deref(), Some("10.0"));
+    }
+
+    #[test]
+    fn listings_parse_out_of_their_documents() {
+        let html = r#"<a href="?C=N;O=D">Name</a> <a href="/debian/pool/main/i/">Parent</a>
+            <a href="libicu76_76.1-4_arm64.deb">x</a> <a href="libicu76_76.1-4%2Bb1_arm64.deb">y</a>"#;
+        assert_eq!(
+            index_names(html),
+            ["libicu76_76.1-4_arm64.deb", "libicu76_76.1-4+b1_arm64.deb"]
+        );
+        let json = r#"{"releases": [
+            {"sdk": {"version": "10.0.401"}, "sdks": [{"version": "10.0.401"}, {"version": "10.0.112"}]},
+            {"sdk": {"version": "10.0.400"}}
+        ]}"#;
+        assert_eq!(
+            dotnet_sdk_versions(json).unwrap(),
+            ["10.0.401", "10.0.112", "10.0.400"]
+        );
+        assert!(dotnet_sdk_versions("{}").is_err());
+    }
+
+    #[test]
     fn the_json_form_is_one_flat_object_tagged_by_status() {
         // The `--json` row is switched on by `status`, and the token must be the same
         // one the table prints, or a caller and a reader disagree about the verdict.
@@ -491,7 +881,7 @@ mod tests {
             line: None,
             latest: Newer {
                 tag: "v2026.10".into(),
-                commit: sha('c'),
+                commit: Some(sha('c')),
                 count: 2,
             },
         };

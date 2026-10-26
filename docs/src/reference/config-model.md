@@ -142,6 +142,16 @@ The two shipped methods:
   (ATF + DDR TPL) from its SoC. The payloads land *outside* any partition, in the gap
   ahead of the rootfs.
 
+  The blobs are vendored under `blobs/<soc>/` and pinned by sha256, so a build reads
+  nothing upstream. The SoC layer also records where they are published, which only
+  [`outdated`](cli.md#what-has-moved-upstream) reads, to list newer releases:
+
+  ```toml
+  [rkbin.upstream]
+  git = "https://github.com/rockchip-linux/rkbin.git"
+  dir = "bin/rk35"
+  ```
+
 - **`depthcharge`** — boot2deb compiles no bootloader at all. The firmware is the
   board's own (coreboot in an SPI chip), and what it loads is the **kernel itself**,
   vboot-signed and wrapped in a FIT. It comes from a *ChromeOS kernel partition* the
@@ -1212,13 +1222,19 @@ first update, with no lock to inherit from, must supply one.
 ### A recipe declares what it has been taken through
 
 A recipe can carry a `[support]` claim — `validated`, `expected`, or `experimental` —
-plus the `YYYY-MM-DD` the claim was last established:
+plus the `YYYY-MM-DD` the claim was last established. A `validated` claim also names the
+commit its booted image was built from:
 
 ```toml
 [support]
 status = "validated"
 date   = "2026-07-16"
+commit = "7d1c6f5ec59975b96090c2e2e42ecc8625ff3608"
 ```
+
+The commit is the `config_commit` the image's provenance manifest records, and its
+12-character form is accepted as written. Only a `validated` claim carries one, and a
+`validated` claim without one does not load.
 
 The claim is per recipe, not per device, because it varies within a device. A board can
 have one build point booted and another never built, differing in kernel, suite, or
@@ -1231,9 +1247,12 @@ matrix](support-matrix.md) is the generated half. It reads the pins from each re
 lock and sets them beside the claim. The table therefore cannot describe a combination
 the build would not produce.
 
-The two are kept honest at the one moment they can be driven apart. `update` warns when
-it moves the pins out from under a `validated` claim, since moving them retires the
-evidence the claim rested on.
+Two things can drive the pair apart, and each is caught. `update` warns when it moves
+the pins out from under a `validated` claim, since moving them retires the evidence the
+claim rested on. An edit to what the build reads (a fragment, an overlay file, a package
+list) moves the image as surely, and no lock records it.
+[`affected --claims`](cli.md#what-a-change-reaches) compares each `validated` claim's
+inputs against its commit, and names every claim whose inputs have changed since.
 
 ### A status says how far, not how much
 

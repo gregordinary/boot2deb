@@ -203,6 +203,123 @@ pub(crate) fn enabled_userspace(
         .collect())
 }
 
+/// Every lock file in the config tree, each with the build-point reference it pins.
+///
+/// Reads `recipes/*.lock` and `recipes/<device>/*.lock` under every search path, which
+/// is where `update` writes them. It skips the `<recipe>.pkgs.lock` manifests and the
+/// NuGet sidecars beside them, which share the extension and are not locks. An
+/// overlay's locks count exactly as the shipped ones do.
+///
+/// Locks are found by *path* rather than through the recipe inventory on purpose. A
+/// variant's lock has no `.toml` of its own, and a lock whose `.toml` was deleted still
+/// pins what it pins; listing recipes would miss both and call what they keep dead.
+///
+/// # Errors
+///
+/// Any directory that exists and cannot be read. A liveness sweep must not proceed on
+/// a partial listing, because a lock missing from it is a live entry deleted.
+pub(crate) fn lock_files(root: &ConfigRoot) -> Result<Vec<(String, PathBuf)>> {
+    let mut out = Vec::new();
+    let mut visit = |device: Option<&str>, path: PathBuf| {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        // A solved package manifest sits beside the lock it belongs to and shares the
+        // `.lock` extension, but it is a line-oriented package list, not TOML — so
+        // selecting by extension alone would abort every sweep on the first one. An
+        // app's NuGet sidecar shares it too, and is not a lock either.
+        let Some(stem) = name.strip_suffix(".lock") else {
+            return;
+        };
+        if boot2deb_core::manifest::is_manifest_name(name)
+            || boot2deb_core::nuget::is_sidecar_name(name)
+        {
+            return;
+        }
+        let reference = match device {
+            Some(device) => format!("{device}/{stem}"),
+            None => stem.to_string(),
+        };
+        out.push((reference, path));
+    };
+    for search_root in root.search_paths() {
+        let recipes = search_root.join("recipes");
+        let entries = match std::fs::read_dir(&recipes) {
+            Ok(entries) => entries,
+            // A root with no recipes contributes nothing; anything else is a partial
+            // read, and a partial read must not be mistaken for "nothing pinned".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("failed to read {}: {e}", recipes.display()).into()),
+        };
+        for entry in entries {
+            let path = entry
+                .map_err(|e| format!("failed to read {}: {e}", recipes.display()))?
+                .path();
+            if !path.is_dir() {
+                visit(None, path);
+                continue;
+            }
+            // A device directory: `recipes/<device>/<leaf>.lock`, the shipped layout.
+            let Some(device) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            for leaf in std::fs::read_dir(&path)
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))?
+            {
+                let leaf = leaf.map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+                visit(Some(&device), leaf.path());
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Make every config lookup a `build` of `reference` makes, discarding the answers.
+///
+/// Run between [`ConfigRoot::record_probes`] and [`ConfigRoot::take_probes`], this is
+/// what yields the files and directories that build reads from the config tree, and so
+/// what `affected` compares a change against. Each lookup is the very helper `build`
+/// calls, so a path can only be missing here if `build` gains a lookup this does not
+/// make: the lock and the files beside it that it reads, the resolution, every asset
+/// the resolution names, and the archive keyring.
+///
+/// # Errors
+///
+/// A point whose lock or resolution fails, or whose assets are missing. A build of it
+/// would fail the same way, so it has no inputs to report.
+pub(crate) fn build_inputs(root: &ConfigRoot, reference: &str) -> Result<()> {
+    let lock = root.lock(reference)?;
+    let build = resolve_recipe(root, reference, &Overrides::default())?;
+    preflight_config(root, &build)?;
+    // The committed solved manifest is read only where the lock pins its digest: then a
+    // build verifies the file against the pin before anything runs.
+    if let Some(rootfs) = lock.rootfs.as_ref().filter(|r| r.manifest_sha256.is_some()) {
+        root.lock_sibling(reference, &rootfs.manifest)?;
+    }
+    for app in &lock.apps {
+        if let Some(dotnet) = &app.dotnet {
+            root.lock_sibling(reference, &dotnet.nuget.manifest)?;
+        }
+    }
+    root.find_asset(format!("blobs/{}", build.soc.as_str()));
+    kmod_local_patches(root, &build)?;
+    // Every root a build provisions verifies the archive against this keyring, a
+    // bootloader-only build's cross and packaging roots included.
+    root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", false)?;
+    // The rootfs stage's lookups, which a bootloader-only build never reaches.
+    if build.produces_image() {
+        overlay_dirs(root, &build, OverlayStage::PreInstall);
+        overlay_dirs(root, &build, OverlayStage::Customize);
+        for deb in &lock.extra_debs {
+            if let Some(path) = &deb.path {
+                root.find_asset(path);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a build's kernel fragment names to `fragments/<name>.config` paths
 /// along the config search path, erroring if any is missing. An overlay may
 /// ship the fragments for a device/kernel it adds; the highest-precedence copy

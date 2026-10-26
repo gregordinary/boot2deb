@@ -30,7 +30,9 @@
 use crate::error::ConfigError;
 use crate::model::*;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// The paths under a config root that a build reads: every layer directory, the base
 /// layer, and the vendored assets the layers name.
@@ -63,6 +65,10 @@ pub struct ConfigRoot {
     /// Low→high precedence: `roots[0]` is the shipped/primary root; later entries
     /// are overlays that win on merge and on single-file lookup.
     roots: Vec<PathBuf>,
+    /// Every path a lookup has probed since [`record_probes`](Self::record_probes),
+    /// or `None` when nothing is recording. Behind a mutex because lookups take
+    /// `&self`.
+    probes: Mutex<Option<BTreeSet<PathBuf>>>,
 }
 
 impl ConfigRoot {
@@ -71,6 +77,7 @@ impl ConfigRoot {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             roots: vec![root.into()],
+            probes: Mutex::new(None),
         }
     }
 
@@ -106,7 +113,10 @@ impl ConfigRoot {
             }
             roots.push(overlay);
         }
-        Ok(Self { roots })
+        Ok(Self {
+            roots,
+            probes: Mutex::new(None),
+        })
     }
 
     /// The primary (shipped) root — the base of the search path. Non-config assets
@@ -123,11 +133,59 @@ impl ConfigRoot {
         &self.roots
     }
 
+    /// Start recording every path a lookup probes, discarding anything recorded before.
+    ///
+    /// A *probe* is every candidate path a lookup tries, whether or not it exists. Those
+    /// are each root's copy of a merged layer, each root's candidate for an asset, and
+    /// the lock and the files beside it. A missing candidate is recorded as much as a present one,
+    /// because a file that appears there later changes what the lookup finds.
+    ///
+    /// What is recorded is therefore every file and directory whose presence or
+    /// content decided a resolution and the lookups made from it. A directory is
+    /// recorded as itself and stands for everything under it. An inventory listing
+    /// (the names in `devices/`, a "did you mean" hint) decides nothing a build reads,
+    /// and records nothing. This is how `affected` knows which build points a change
+    /// reaches.
+    pub fn record_probes(&self) {
+        *self.probes.lock().expect("probe record poisoned") = Some(BTreeSet::new());
+    }
+
+    /// Stop recording, and return every path probed since
+    /// [`record_probes`](Self::record_probes). Empty when nothing was recording.
+    pub fn take_probes(&self) -> BTreeSet<PathBuf> {
+        self.probes
+            .lock()
+            .expect("probe record poisoned")
+            .take()
+            .unwrap_or_default()
+    }
+
+    /// Run `f` with recording paused, for a lookup that checks the config rather than
+    /// reading something a build of it consumes. Probes made inside `f` are not kept.
+    pub(crate) fn unprobed<T>(&self, f: impl FnOnce() -> T) -> T {
+        let held = self.probes.lock().expect("probe record poisoned").take();
+        let out = f();
+        *self.probes.lock().expect("probe record poisoned") = held;
+        out
+    }
+
+    /// Note that a lookup probed `path`, when recording.
+    fn probe(&self, path: &Path) {
+        if let Some(probes) = self.probes.lock().expect("probe record poisoned").as_mut() {
+            probes.insert(path.to_path_buf());
+        }
+    }
+
     /// The highest-precedence existing path for a repo-relative asset (a fragment,
     /// blob, or overlay tree that is *not* a merged config layer), or `None` if no
     /// root has it. Searched high→low so an overlay's copy shadows the shipped one.
     pub fn find_asset(&self, rel: impl AsRef<Path>) -> Option<PathBuf> {
         let rel = rel.as_ref();
+        // Every root is probed, not only up to the first hit: a copy in a lower root
+        // is shadowed now, and is what the lookup finds the moment the higher one goes.
+        for r in &self.roots {
+            self.probe(&r.join(rel));
+        }
         self.roots
             .iter()
             .rev()
@@ -151,6 +209,9 @@ impl ConfigRoot {
         allow_overlay: bool,
     ) -> Result<Option<PathBuf>, ConfigError> {
         let rel = rel.as_ref();
+        for r in &self.roots {
+            self.probe(&r.join(rel));
+        }
         if allow_overlay {
             // Opted into the overlay explicitly: highest-precedence copy wins.
             return Ok(self.find_asset(rel));
@@ -171,6 +232,9 @@ impl ConfigRoot {
     /// merged shipped-first so the overlay wins the last-writer semantics).
     pub fn find_asset_all(&self, rel: impl AsRef<Path>) -> Vec<PathBuf> {
         let rel = rel.as_ref();
+        for r in &self.roots {
+            self.probe(&r.join(rel));
+        }
         self.roots
             .iter()
             .map(|r| r.join(rel))
@@ -185,6 +249,9 @@ impl ConfigRoot {
     /// tree.
     fn owning_root(&self, subdir: &str, name: &str) -> &Path {
         let rel = format!("{subdir}/{name}.toml");
+        for r in &self.roots {
+            self.probe(&r.join(&rel));
+        }
         self.roots
             .iter()
             .rev()
@@ -252,6 +319,7 @@ impl ConfigRoot {
         let mut last_path = PathBuf::new();
         for root in &self.roots {
             let path = root.join(rel);
+            self.probe(&path);
             last_path = path.clone();
             let Some(text) = Self::read_file(&path)? else {
                 continue;
@@ -467,11 +535,7 @@ impl ConfigRoot {
     /// An overlay that wants different pins overlays the recipe and its lock as a
     /// unit. An overlay retuning a shipped recipe owns both automatically.
     pub fn lock(&self, name: &str) -> Result<crate::lock::Lock, ConfigError> {
-        validate_build_ref(name)?;
-        let path = self
-            .owning_root("recipes", recipe_half(name))
-            .join("recipes")
-            .join(format!("{name}.lock"));
+        let path = self.lock_path(name)?;
         match Self::read_file(&path)? {
             Some(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse {
                 path: path.display().to_string(),
@@ -500,10 +564,12 @@ impl ConfigRoot {
     /// `update` clobber a file outside `recipes/`.
     pub fn lock_path(&self, name: &str) -> Result<PathBuf, ConfigError> {
         validate_build_ref(name)?;
-        Ok(self
+        let path = self
             .owning_root("recipes", recipe_half(name))
             .join("recipes")
-            .join(format!("{name}.lock")))
+            .join(format!("{name}.lock"));
+        self.probe(&path);
+        Ok(path)
     }
 
     /// Filesystem path of `filename` beside the lock of build point `name`, whether or
@@ -531,7 +597,9 @@ impl ConfigRoot {
                 name: filename.to_string(),
             });
         }
-        Ok(self.lock_path(name)?.with_file_name(filename))
+        let path = self.lock_path(name)?.with_file_name(filename);
+        self.probe(&path);
+        Ok(path)
     }
 
     /// Filesystem path of `recipes/<name>.outputs`, whether or not it exists: the
@@ -540,7 +608,9 @@ impl ConfigRoot {
     /// the recipe, and the name is validated for the same reason
     /// [`lock_path`](Self::lock_path)'s is.
     pub fn outputs_path(&self, name: &str) -> Result<PathBuf, ConfigError> {
-        Ok(self.lock_path(name)?.with_extension("outputs"))
+        let path = self.lock_path(name)?.with_extension("outputs");
+        self.probe(&path);
+        Ok(path)
     }
 
     /// Names under `subdir` close enough to `name` to be the one that was meant, for a
@@ -1671,6 +1741,36 @@ packages = [
             matches!(&err, ConfigError::InvalidOverlay { why, .. } if *why == "not a directory"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn recorded_probes_are_every_candidate_tried_present_or_not() {
+        let p = tempfile::tempdir().unwrap();
+        let o = tempfile::tempdir().unwrap();
+        std::fs::write(p.path().join("blob.bin"), "primary").unwrap();
+        let root =
+            ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
+
+        // Nothing is kept until recording starts.
+        root.find_asset("blob.bin");
+        assert!(root.take_probes().is_empty());
+
+        root.record_probes();
+        root.find_asset("blob.bin");
+        // A paused probe — a check of the config rather than a read of it — is not kept.
+        root.unprobed(|| root.find_asset("checked-only.bin"));
+        let _ = root.recipe("absent/leaf");
+        let probes = root.take_probes();
+        // The overlay's candidate is missing today and decides the lookup the day it
+        // appears, so it is recorded beside the primary's.
+        assert!(probes.contains(&p.path().join("blob.bin")));
+        assert!(probes.contains(&o.path().join("blob.bin")));
+        assert!(!probes.iter().any(|x| x.ends_with("checked-only.bin")));
+        // A failed lookup still probed its candidates.
+        assert!(probes.contains(&p.path().join("recipes/absent/leaf.toml")));
+        // Taking the record stops recording.
+        root.find_asset("blob.bin");
+        assert!(root.take_probes().is_empty());
     }
 
     #[test]

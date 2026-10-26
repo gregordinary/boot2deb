@@ -33,12 +33,99 @@ use boot2deb_engine::sandbox::BuildSandbox;
 use boot2deb_engine::{extradebs, pins};
 use std::path::PathBuf;
 
+/// Run `build <recipe>...`: each point in order, through [`run`].
+///
+/// One point is an ordinary build. Several share every flag, so a flag that names one
+/// point's own paths or sources is refused with them, as is `--json`, whose stream
+/// carries no field saying which point an event belongs to. A failure stops the run
+/// unless `keep_going`. Either way each point's outcome is in its build record, and a
+/// closing table says what happened to every point, including those not reached.
+pub(crate) fn run_many(
+    root: &ConfigRoot,
+    points: &[String],
+    args: BuildArgs,
+    keep_going: bool,
+    json: bool,
+    verbosity: Verbosity,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let [point] = points {
+        return run(root, point, args, None, json, verbosity);
+    }
+    let per_point: Vec<&str> = [
+        ("--feature", !args.features.is_empty()),
+        ("--kernel-src", args.kernel_src.is_some()),
+        ("--uboot-src", args.uboot_src.is_some()),
+        ("--userspace-src", !args.userspace_srcs.is_empty()),
+        ("--ffmpeg-base-src", args.ffmpeg_base_src.is_some()),
+        ("--kmod-src", !args.kmod_srcs.is_empty()),
+        ("--blobs-dir", args.blobs_dir.is_some()),
+        ("--work-dir", args.work_dir.is_some()),
+        ("--out-dir", args.out_dir.is_some()),
+        ("--rootfs-tar", args.rootfs_tar.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, given)| given.then_some(flag))
+    .collect();
+    if !per_point.is_empty() {
+        return Err(format!(
+            "{} name(s) one build point's own paths or sources, so {} cannot apply to the \
+             {} points given — build that point on its own, or spell a feature selection \
+             into its reference (`<recipe>+<feature>`)",
+            per_point.join(", "),
+            if per_point.len() == 1 { "it" } else { "they" },
+            points.len()
+        )
+        .into());
+    }
+    if json {
+        return Err(
+            "--json streams one build's events with no field naming the point, so it takes \
+             one build point per invocation"
+                .into(),
+        );
+    }
+    let mut outcomes: Vec<(String, String, String)> = Vec::with_capacity(points.len());
+    let mut failed = 0usize;
+    for (i, point) in points.iter().enumerate() {
+        if failed > 0 && !keep_going {
+            outcomes.push((point.clone(), "not run".into(), String::new()));
+            continue;
+        }
+        println!("==> build {point} ({} of {})", i + 1, points.len());
+        let started = std::time::Instant::now();
+        let result = run(root, point, args.clone(), None, false, verbosity);
+        let took = format!("{}s", started.elapsed().as_secs());
+        match result {
+            Ok(()) => outcomes.push((point.clone(), "succeeded".into(), took)),
+            Err(e) => {
+                eprintln!("error: {point}: {e}");
+                failed += 1;
+                outcomes.push((point.clone(), "failed".into(), took));
+            }
+        }
+    }
+    println!();
+    let mut table = vec![vec!["point".into(), "outcome".into(), "took".into()]];
+    table.extend(outcomes.into_iter().map(|(p, o, t)| vec![p, o, t]));
+    crate::render::print_columns(&table);
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(format!("{failed} of {} build(s) failed", points.len()).into())
+    }
+}
+
 /// Run `build <recipe>`.
 ///
 /// `pinned_plan` is [`reproduce`](super::reproduce)'s one addition: a published plan
 /// document the rootfs replays instead of resolving. Every other input is the same, so
 /// the two commands share one pipeline rather than one of them being a second
 /// implementation of it. `None` is an ordinary build.
+///
+/// Once the point's lock has been read, the build is *admitted*, and its outcome is
+/// recorded beside its artifacts ([`boot2deb_core::buildrecord`]): `running` at
+/// admission, then `succeeded` or `failed` with the error it ended on. An invocation
+/// refused before that, for a point with no lock, touches no artifact directory.
 pub(crate) fn run(
     root: &ConfigRoot,
     recipe: &str,
@@ -46,6 +133,111 @@ pub(crate) fn run(
     pinned_plan: Option<&std::path::Path>,
     json: bool,
     verbosity: Verbosity,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut record: Option<RecordFile> = None;
+    let result = run_point(
+        root,
+        recipe,
+        args,
+        pinned_plan,
+        json,
+        verbosity,
+        &mut record,
+    );
+    let Some(record) = record else {
+        return result;
+    };
+    let settled = record.settle(result.as_ref().err().map(|e| e.to_string()));
+    match (result, settled) {
+        (Ok(()), Err(e)) => Err(format!(
+            "the build succeeded but its outcome could not be recorded, so nothing can \
+             vouch for its artifacts: {e}"
+        )
+        .into()),
+        (Err(e), Err(rec)) => {
+            eprintln!("warning: the failed build's outcome could not be recorded: {rec}");
+            Err(e)
+        }
+        (result, Ok(())) => result,
+    }
+}
+
+/// The build record of one admitted build, and where it is written.
+struct RecordFile {
+    /// `<out_dir>/<stem>.build.toml`.
+    path: PathBuf,
+    /// The record as written at admission.
+    record: boot2deb_core::buildrecord::BuildRecord,
+}
+
+impl RecordFile {
+    /// Record the admission of `point`'s build of `stage` into `out_dir`, creating it.
+    fn start(
+        out_dir: &std::path::Path,
+        stem: &str,
+        point: &str,
+        stage: StageArg,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(out_dir)
+            .map_err(|e| format!("cannot create {} ({e})", out_dir.display()))?;
+        let stage = clap::ValueEnum::to_possible_value(&stage)
+            .map(|v| v.get_name().to_string())
+            .unwrap_or_default();
+        let file = RecordFile {
+            path: out_dir.join(boot2deb_core::buildrecord::record_name(stem)),
+            record: boot2deb_core::buildrecord::BuildRecord::started(point, &stage, now_rfc3339()),
+        };
+        file.write(&file.record)?;
+        Ok(file)
+    }
+
+    /// Settle the record: succeeded when `error` is `None`, failed with it otherwise.
+    fn settle(self, error: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+        let settled = self.record.clone().settled(now_rfc3339(), error);
+        self.write(&settled)
+    }
+
+    /// Write `record` in place of the file, atomically, so a reader never sees half of
+    /// one: staged under a `.partial` name the artifact dir's sweep knows, then renamed.
+    fn write(
+        &self,
+        record: &boot2deb_core::buildrecord::BuildRecord,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let name = self
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("a record path has a file name");
+        let tmp = self
+            .path
+            .with_file_name(format!(".{name}.{}.partial", std::process::id()));
+        std::fs::write(&tmp, record.to_toml())
+            .map_err(|e| format!("cannot write {} ({e})", tmp.display()))?;
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| format!("cannot write {} ({e})", self.path.display()))?;
+        Ok(())
+    }
+}
+
+/// The wall clock as RFC 3339 UTC.
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    boot2deb_core::datetime::format_rfc3339(secs)
+}
+
+/// One build point's pipeline. `record` is set once the build is admitted, which is
+/// what lets [`run`] settle it however this returns.
+fn run_point(
+    root: &ConfigRoot,
+    recipe: &str,
+    args: BuildArgs,
+    pinned_plan: Option<&std::path::Path>,
+    json: bool,
+    verbosity: Verbosity,
+    record: &mut Option<RecordFile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // `build` reads only the lock for pinned sources; the resolved build
     // supplies the axes. Only the lock-independent image knobs (layout, size) are
@@ -57,6 +249,48 @@ pub(crate) fn run(
     // path — lock, work dir, image identity, provenance — keys off the reference, so a
     // variant build cannot land on the recipe's artifacts.
     let point = crate::config::build_point(recipe, args.features.clone())?;
+    let reference = point.reference();
+    let recipe = reference.as_str();
+    // Every artifact this build publishes is named for the point rather than the
+    // board, so several recipes can share one `--out-dir` without folding each
+    // other's rootfs or bootloader into an image.
+    let stem = point.artifact_stem();
+    let lock = root
+        .lock(recipe)
+        .map_err(|err| -> Box<dyn std::error::Error> {
+            // A variant whose lock was never written is the one likely mistake here, and
+            // the generic "lock not found" would leave the operator guessing that `update`
+            // takes the same flags. Name the line to run.
+            if point.is_variant() && root.lock_path(recipe).is_ok_and(|p| !p.exists()) {
+                format!(
+                    "no lock for '{recipe}' — this feature selection has not been pinned yet. \
+                 Run:\n    boot2deb update {} {}",
+                    point.recipe(),
+                    point
+                        .features()
+                        .iter()
+                        .map(|f| format!("--feature {f}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+                .into()
+            } else {
+                err.into()
+            }
+        })?;
+    // Admitted: the point exists and has a lock. From here every way this run ends is
+    // recorded beside the artifacts, a refusal below included, so a check of the
+    // directory never mistakes the previous build's image for this one's.
+    let work_dir = crate::workdir::work_dir_for(root, recipe, args.work_dir.clone());
+    // Stamp the scratch tree as boot2deb-owned before anything writes into it:
+    // `clean` removes only stamped work dirs.
+    mark_work_dir(&work_dir)?;
+    let out_dir = absolutize(
+        args.out_dir
+            .clone()
+            .unwrap_or_else(|| work_dir.join("artifacts")),
+    );
+    *record = Some(RecordFile::start(&out_dir, &stem, recipe, args.stage)?);
     // Resolved before any work: a contradictory `--compress` is an argument error,
     // and discovering it after a multi-hour compile would waste the whole build.
     let compress = crate::args::image_compression(&args.compress)?;
@@ -96,35 +330,6 @@ pub(crate) fn run(
     // admitted rather than as it is tens of minutes later — an edit mid-build must not
     // retroactively change what the image claims it was built from.
     let config_stamp = crate::builder::config_stamp(root);
-    let reference = point.reference();
-    let recipe = reference.as_str();
-    // Every artifact this build publishes is named for the point rather than the
-    // board, so several recipes can share one `--out-dir` without folding each
-    // other's rootfs or bootloader into an image.
-    let stem = point.artifact_stem();
-    let lock = root
-        .lock(recipe)
-        .map_err(|err| -> Box<dyn std::error::Error> {
-            // A variant whose lock was never written is the one likely mistake here, and
-            // the generic "lock not found" would leave the operator guessing that `update`
-            // takes the same flags. Name the line to run.
-            if point.is_variant() && root.lock_path(recipe).is_ok_and(|p| !p.exists()) {
-                format!(
-                    "no lock for '{recipe}' — this feature selection has not been pinned yet. \
-                 Run:\n    boot2deb update {} {}",
-                    point.recipe(),
-                    point
-                        .features()
-                        .iter()
-                        .map(|f| format!("--feature {f}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-                .into()
-            } else {
-                err.into()
-            }
-        })?;
     let overrides = Overrides {
         layout: args.layout,
         image_size: args.image_size.clone(),
@@ -181,15 +386,6 @@ pub(crate) fn run(
         }
     }
 
-    let work_dir = crate::workdir::work_dir_for(root, recipe, args.work_dir.clone());
-    // Stamp the scratch tree as boot2deb-owned before anything writes into it:
-    // `clean` removes only stamped work dirs.
-    mark_work_dir(&work_dir)?;
-    let out_dir = absolutize(
-        args.out_dir
-            .clone()
-            .unwrap_or_else(|| work_dir.join("artifacts")),
-    );
     // The content-addressed caches — provisioner downloads and finished rootfs trees —
     // live under the work dir, so they persist across `--stage` invocations and are
     // shared by every build using this work dir.
@@ -629,6 +825,7 @@ pub(crate) fn run(
                 record_artifacts(
                     &out_dir,
                     &[artifacts.image_deb.clone(), artifacts.headers_deb.clone()],
+                    resolved.arch,
                 )?;
                 state.kernel_image_deb = Some(artifacts.image_deb);
                 Ok(())
@@ -667,7 +864,7 @@ pub(crate) fn run(
                 for deb in &artifacts.debs {
                     emit_artifact(&sink, "kmod", "deb", deb);
                 }
-                record_artifacts(&out_dir, &artifacts.debs)?;
+                record_artifacts(&out_dir, &artifacts.debs, resolved.arch)?;
                 state.kmod_debs = artifacts.debs;
                 Ok(())
             }),
@@ -706,7 +903,11 @@ pub(crate) fn run(
                     emit_artifact(&sink, "uboot", "usb472", &m.usb472);
                     emit_artifact(&sink, "uboot", "maskrom_loader", &m.loader);
                 }
-                record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
+                record_artifacts(
+                    &out_dir,
+                    std::slice::from_ref(&artifacts.deb),
+                    resolved.arch,
+                )?;
                 // A uboot-only build also emits a standalone, directly-flashable
                 // bootloader image (`<stem>-boot.img`) — the eMMC/SPI medium for a split
                 // install whose OS lives on another disk. Emitted for an explicit
@@ -756,7 +957,7 @@ pub(crate) fn run(
                 for deb in &artifacts.debs {
                     emit_artifact(&sink, "userspace", "deb", deb);
                 }
-                record_artifacts(&out_dir, &artifacts.debs)?;
+                record_artifacts(&out_dir, &artifacts.debs, resolved.arch)?;
                 Ok(())
             }),
         },
@@ -813,7 +1014,11 @@ pub(crate) fn run(
                     &sink,
                 )?;
                 emit_artifact(&sink, "ffmpeg", "deb", &artifacts.deb);
-                record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
+                record_artifacts(
+                    &out_dir,
+                    std::slice::from_ref(&artifacts.deb),
+                    resolved.arch,
+                )?;
                 Ok(())
             }),
         },
@@ -873,7 +1078,11 @@ pub(crate) fn run(
                         &sink,
                     )?;
                     emit_artifact(&sink, "app", "deb", &artifacts.deb);
-                    record_artifacts(&out_dir, std::slice::from_ref(&artifacts.deb))?;
+                    record_artifacts(
+                        &out_dir,
+                        std::slice::from_ref(&artifacts.deb),
+                        resolved.arch,
+                    )?;
                 }
                 Ok(())
             }),
@@ -1977,4 +2186,90 @@ fn materialize_extra_debs(
     let paths = extradebs::materialize(root, &wanted, &store, &step)?;
     step.finish();
     Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::{Cli, Command};
+    use clap::Parser;
+
+    /// Parse a `build` command line into its points and flags.
+    fn build_args(argv: &[&str]) -> (Vec<String>, BuildArgs, bool) {
+        let cli =
+            Cli::try_parse_from(std::iter::once("boot2deb").chain(argv.iter().copied())).unwrap();
+        match cli.command {
+            Command::Build {
+                recipes,
+                keep_going,
+                args,
+            } => (recipes, args, keep_going),
+            _ => unreachable!("a build command line parses as build"),
+        }
+    }
+
+    #[test]
+    fn a_flag_naming_one_points_paths_is_refused_with_several_points() {
+        // Refused before any point is admitted, so nothing is built and no record is
+        // written: the root here is the shipped tree and must stay untouched.
+        let (points, args, keep_going) = build_args(&[
+            "build",
+            "turing-rk1/forky",
+            "h96-max-m9/forky",
+            "--work-dir",
+            "/nonexistent/w",
+            "--kernel-src",
+            "../linux",
+        ]);
+        let err = run_many(
+            &crate::testsupport::repo_root(),
+            &points,
+            args,
+            keep_going,
+            false,
+            Verbosity::Normal,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("--kernel-src, --work-dir") && err.contains("2 points"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn json_takes_one_point_per_invocation() {
+        let (points, args, keep_going) =
+            build_args(&["build", "turing-rk1/forky", "h96-max-m9/forky"]);
+        let err = run_many(
+            &crate::testsupport::repo_root(),
+            &points,
+            args,
+            keep_going,
+            true,
+            Verbosity::Normal,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("one build point per invocation"), "{err}");
+    }
+
+    #[test]
+    fn a_point_with_no_lock_is_refused_before_admission() {
+        // No lock, no build: the artifact directory a record would name is never
+        // created, so a typo cannot leave a `build/<typo>/` tree behind.
+        let tmp = tempfile::tempdir().unwrap();
+        let (points, mut args, keep_going) = build_args(&["build", "turing-rk1/no-such-leaf"]);
+        args.work_dir = Some(tmp.path().join("w"));
+        assert!(run_many(
+            &crate::testsupport::repo_root(),
+            &points,
+            args,
+            keep_going,
+            false,
+            Verbosity::Normal,
+        )
+        .is_err());
+        assert!(!tmp.path().join("w").exists());
+    }
 }

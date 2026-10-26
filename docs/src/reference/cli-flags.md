@@ -245,11 +245,11 @@ Hold a finished image artifact to the invariants that are checkable without a bo
 
 | argument | required | what it is |
 | --- | --- | --- |
-| `recipe` | yes | Recipe whose built image to verify (e.g. turing-rk1/forky) |
+| `recipes` | yes | Build points whose built images to verify (e.g. turing-rk1/forky). Each is verified in turn, and one exit status covers them all |
 
 | flag | value | what it does |
 | --- | --- | --- |
-| `--out-dir` | `<OUT_DIR>` | Directory holding the built artifacts (default: the recipe's own `<work>/artifacts`) |
+| `--out-dir` | `<OUT_DIR>` | Directory holding the built artifacts (default: each point's own `<work>/artifacts`). Names one point's directory, so it takes one point |
 
 
 ## verify-sources
@@ -296,10 +296,11 @@ Drive the build stages from the recipe's lock, streaming the structured build ev
 
 | argument | required | what it is |
 | --- | --- | --- |
-| `recipe` | yes | Recipe to build (e.g. turing-rk1/forky). Its `.lock` must exist |
+| `recipes` | yes | Build points to build, in order (e.g. turing-rk1/forky). Each one's `.lock` must exist. Several build one after another with the same flags, and then a flag that names one point's paths or sources is refused |
 
 | flag | value | what it does |
 | --- | --- | --- |
+| `--keep-going` |  | With several points, build the rest after one fails rather than stopping there. Every point's outcome is recorded beside its artifacts either way, and the run exits non-zero if any failed |
 | `--feature` | `<FEATURES>`, repeatable | Rootfs feature to select, repeatable — the same selection `update --feature` pinned. It names which lock to build from (`<recipe>+<feature>...`), and does not re-resolve one. `update` must have written that variant's lock first, and a selection with no lock is an error naming the `update` line to run. Passing the reference directly (`build turing-rk1/forky+jellyfin`) is equivalent |
 | `--stage` | `all` \| `kernel` \| `dtb` \| `kmod` \| `uboot` \| `userspace` \| `ffmpeg` \| `app` \| `rootfs` \| `image` (default `all`) | Which stage(s) to run |
 | `--kernel-src` | `<KERNEL_SRC>` | Kernel clone source (git URL or local path). Default: the kernel definition's source URL. A local clone (e.g. ../linux) is far faster |
@@ -433,6 +434,19 @@ Survey what has moved upstream since the locks were pinned. For each recipe's gi
 
 This command takes no flags of its own.
 
+## affected
+
+Name the build points a change reaches: those whose build reads a file that differs between a git revision and the working tree. A point's inputs are the files and directories its build looks up in the config tree, recorded as the build's own lookups run. TOML is compared as parsed documents, so a comment or a reflowed line changes nothing. A recipe's `[support]` claim is not one of its inputs. A change to the builder's own source is reported once, apart from the points. Read-only, and offline: it reads git and the config tree
+
+| argument | required | what it is |
+| --- | --- | --- |
+| `since` | no | The revision to compare the working tree against: a commit, branch or tag (e.g. origin/main) |
+
+| flag | value | what it does |
+| --- | --- | --- |
+| `--claims` |  | Check every `validated` support claim against the commit it names instead, and report each one whose inputs have changed since its image was built |
+
+
 ## why-rebuild
 
 Explain, per compile node, what the next `build` will actually redo. It says whether the cached source tree is reused or rebuilt (naming the pinned input that moved), and whether the durable artifact cache lets it skip the compile entirely. Offline: it reads the lock, the build stamps and the artifact store, and runs no build
@@ -483,7 +497,7 @@ Remove a recipe's build scratch (clones, sandbox, rootfs cache) under its work d
 | `--cache` |  | Remove only the rootfs early-cutoff cache (WORK_DIR/cache), keeping the compiled source trees and artifacts |
 | `--sandbox` |  | Remove only the provisioned roots (WORK_DIR/sandbox: the target-arch build sandbox and the host-arch packaging root). This is the largest reclaimable tree |
 | `--build-roots` |  | Remove the provisioned *build* roots and the layers staged over them, sparing the packaging root. The next build then provisions them against the archive as it stands now. This is the answer to `the <stage> build root does not satisfy its own dependencies`, where a cached base has aged past the archive its layer resolved from. `--sandbox` clears the same skew but takes the packaging root with it. That is a second bootstrap for a root that is never layered and cannot skew |
-| `--artifacts` |  | Remove the durable Tier-2 artifact store (`<root>/cache/artifacts`). Root-scoped. This store is shared across recipes, so it clears cached outputs for *every* recipe, not just one |
+| `--artifacts` |  | Prune the durable Tier-2 artifact store (`<root>/cache/artifacts`) down to the entries a build of some lock would restore. Each entry is keyed by its node's full input signature, so one no lock's build asks for is never read again and is dead. The keys are the ones `why-rebuild` predicts, taken for every lock and every selection of optional userspace trees. An entry only a `--patches-path` co-dev build wrote is dead by this rule. — Root-scoped. A lock whose keys cannot be computed aborts the sweep, since a narrower live set deletes entries that are still read. Pass the same `--overlay` flags a build uses, for the reason given under `--verify-trees`. `--all-caches` empties the store outright. |
 | `--verify-trees` |  | Prune the auto-fetched source checkouts (`<root>/cache/verify-trees`, and the `patches` checkouts beside them) down to what is still pinned. A checkout is commit-addressed, so one whose commit no `recipes/*/*.lock` names can only be re-fetched, never reconstructed from, and is dead. Root-scoped. Pinned checkouts stay, and `--all-caches` is what takes those too. Pass the same `--overlay` flags a build of these recipes uses. The pinned set is read from the search paths, so a sweep that omits an overlay calls its checkouts dead. The run reports how many locks it read, which is what makes a narrow set visible |
 | `--kconfig` |  | Remove `verify-config`'s scratch tree (`<root>/cache/kconfig`), one work dir per recipe holding a provisioned cross root and a kbuild output dir. Pure scratch, since the next `verify-config` re-provisions. Root-scoped |
 | `--all-caches` |  | Remove the whole durable cache tree (`<root>/cache`) — artifacts, every auto-fetched checkout *including the pinned ones*, the kconfig scratch, and the pre-built extra-deb store. Root-scoped, and the nuclear option. Everything here is reclaimable by construction, but re-earning it costs a full re-fetch and a cache-cold rebuild |

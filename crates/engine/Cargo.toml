@@ -47,6 +47,12 @@ lzma-rust2 = { version = "0.20", default-features = false, features = ["std", "x
 # the bootloader has to be in that container. `rust_backend` is miniz_oxide — pure
 # Rust, no zlib, and already in the tree transitively.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Reads the `.deb`s a build produces so the package rules can hold them (debfile.rs):
+# the tar members stream through their decompressor, and a `zstd`-compressed member
+# reads through ruzstd. Both are already in the tree, tar under ferrosys with the same
+# features off and ruzstd under ferroday-cage, so neither adds a crate to the build.
+tar = { version = "0.4", default-features = false }
+ruzstd = "0.9"
 # Pure-Rust ext2/3/4 formatter (see the engine's image::ext4): builds the resize-safe
 # rootfs filesystem directly from the rootfs tar, replacing host mke2fs/e2fsprogs and
 # the userns staging they required. The `tar` feature carries the archive source that

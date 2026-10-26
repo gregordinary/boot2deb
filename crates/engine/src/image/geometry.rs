@@ -636,6 +636,7 @@ mod tests {
                 atf: "atf.elf".into(),
                 tpl: "tpl.bin".into(),
                 bl32: None,
+                upstream: None,
             },
             offsets: Offsets {
                 idbloader: idbloader.into(),

@@ -300,6 +300,15 @@ pub enum ConfigError {
         what: String,
     },
 
+    /// The `[rkbin.upstream]` a layer declares cannot name a place to list blobs from.
+    #[error("device '{device}' declares an unusable [rkbin.upstream]: {why}")]
+    BadRkbinUpstream {
+        /// The device being resolved.
+        device: String,
+        /// What is wrong with it.
+        why: String,
+    },
+
     /// The device omits a field the *resolved boot method* requires. The
     /// requirement is method-scoped, not universal. A board that boots depthcharge
     /// has no `uboot_defconfig`, because it compiles no u-boot, and one that boots

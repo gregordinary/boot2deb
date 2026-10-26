@@ -6,6 +6,7 @@
 //! build recorded. It is never an extension-only scan of the output dir, so a stray
 //! or half-written `.deb` cannot become trusted apt input.
 
+use boot2deb_core::model::Arch;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -23,10 +24,17 @@ const ARTIFACT_LEDGER: &str = ".boot2deb-artifacts";
 /// `out_dir`, rewritten sorted so the file is deterministic. Paths not directly
 /// under `out_dir` are ignored — the ledger names local-repo inputs, which every
 /// stage stages into `out_dir`.
+///
+/// Every deb is first held to the package rules ([`check_packages`]) for a build
+/// targeting `arch`, and nothing is recorded unless all of them pass. The ledger is
+/// what the trusted local repository is made from, so this is the one point every
+/// produced package is admitted at, compiled on this run or restored from the cache.
 pub(crate) fn record_artifacts(
     out_dir: &Path,
     debs: &[PathBuf],
+    arch: Arch,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    check_packages(debs, arch)?;
     let ledger = out_dir.join(ARTIFACT_LEDGER);
     let mut names: BTreeSet<String> = read_ledger_names(&ledger)?;
     for deb in debs {
@@ -44,6 +52,54 @@ pub(crate) fn record_artifacts(
         )
     })?;
     Ok(())
+}
+
+/// Hold every package in `debs` to the package rules
+/// ([`boot2deb_core::debcheck`]) for a build targeting `arch`.
+///
+/// Reads them all before deciding, so one failure names every finding in every
+/// package rather than the first.
+///
+/// # Errors
+///
+/// A package that breaks any rule, or one that cannot be read as a `.deb`. The message
+/// lists each package with its findings, one per line under it.
+pub(crate) fn check_packages(
+    debs: &[PathBuf],
+    arch: Arch,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut report = String::new();
+    let mut failing = 0usize;
+    for deb in debs {
+        let name = deb
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| deb.display().to_string());
+        match boot2deb_engine::debfile::check(deb, arch) {
+            Ok(findings) if findings.is_empty() => continue,
+            Ok(findings) => {
+                failing += 1;
+                report.push_str(&format!("\n  {name}"));
+                for f in findings {
+                    let at = f.path.map(|p| format!("{p}: ")).unwrap_or_default();
+                    report.push_str(&format!("\n    {:<16} {at}{}", f.rule.id(), f.detail));
+                }
+            }
+            Err(e) => {
+                failing += 1;
+                report.push_str(&format!("\n  {name}\n    unreadable: {e}"));
+            }
+        }
+    }
+    if failing == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "the package rules reject {failing} of the {} .deb(s) this build produced, so \
+         none enters the local repository:{report}",
+        debs.len()
+    )
+    .into())
 }
 
 /// The ledger's recorded file names, or an empty set if the ledger does not exist.
@@ -514,11 +570,11 @@ mod tests {
         // extension-only scan — a stray .deb dropped into out_dir is not ingested.
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path();
-        let recorded = out.join("librockchip-mpp1_1.5.0-1_arm64.deb");
-        std::fs::write(&recorded, b"deb").unwrap();
-        record_artifacts(out, std::slice::from_ref(&recorded)).unwrap();
+        let recorded = out.join("libuavs3d1_1.2.89_arm64.deb");
+        std::fs::copy(vendored_deb(), &recorded).unwrap();
+        record_artifacts(out, std::slice::from_ref(&recorded), Arch::Arm64).unwrap();
         // Recording is idempotent (re-recording the same deb keeps one entry).
-        record_artifacts(out, std::slice::from_ref(&recorded)).unwrap();
+        record_artifacts(out, std::slice::from_ref(&recorded), Arch::Arm64).unwrap();
         // A stray unsigned deb the build never recorded.
         std::fs::write(out.join("evil_1.0_arm64.deb"), b"deb").unwrap();
 
@@ -532,6 +588,34 @@ mod tests {
         // A recorded deb whose file was removed is silently skipped.
         std::fs::remove_file(&recorded).unwrap();
         assert!(ledger_debs(out).is_err(), "empty existing set is an error");
+    }
+
+    /// A real arm64 package from the shipped tree, so the rules have a `.deb` to read.
+    fn vendored_deb() -> PathBuf {
+        crate::testsupport::repo_root()
+            .path()
+            .join("debs/libuavs3d1_1.2.89+deb14.20260831.0e20d2c.c411a33.70accd8_arm64.deb")
+    }
+
+    #[test]
+    fn a_package_the_rules_refuse_is_never_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path();
+        let good = out.join("libuavs3d1_1.2.89_arm64.deb");
+        std::fs::copy(vendored_deb(), &good).unwrap();
+        let junk = out.join("junk_1.0_arm64.deb");
+        std::fs::write(&junk, b"not an archive").unwrap();
+        let err = record_artifacts(out, &[good.clone(), junk], Arch::Arm64)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("junk_1.0_arm64.deb"), "{err}");
+        // All or nothing: the readable package beside it is not admitted either.
+        assert!(ledger_debs(out).is_err());
+        // An arm64 package in an armhf build is refused for its architecture.
+        let err = record_artifacts(out, std::slice::from_ref(&good), Arch::Armv7)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("architecture"), "{err}");
     }
 
     #[test]

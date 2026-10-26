@@ -2,6 +2,7 @@
 //! [`crate::main`] parses and dispatches. The shared machinery lives in
 //! [`crate::config`], [`crate::render`], and their siblings.
 
+pub(crate) mod affected;
 pub(crate) mod build;
 pub(crate) mod clean;
 pub(crate) mod cli_reference;

@@ -1432,6 +1432,28 @@ pub struct RkbinLayer {
     /// Omitted on BL31-only boots (RK3588/RK1).
     #[serde(default)]
     pub bl32: Option<String>,
+    /// Where these blobs are published upstream (`[rkbin.upstream]`). It is normally
+    /// set once at the SoC layer, since a SoC family's blobs share one directory. A
+    /// device that takes its blobs from elsewhere replaces it whole.
+    #[serde(default)]
+    pub upstream: Option<RkbinUpstream>,
+}
+
+/// The upstream a set of vendored rkbin blobs comes from: a git repository and the
+/// directory in it that holds the files.
+///
+/// The build never reads it, since the blobs are vendored and pinned by sha256.
+/// `outdated` lists it to find a newer file spelled like each pinned one. A firmware
+/// release upstream is then as visible as a kernel tag.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RkbinUpstream {
+    /// The repository's clone URL.
+    pub git: String,
+    /// The directory in the repository's default branch that holds the blobs, relative
+    /// to its root (`bin/rk35`). Resolution guarantees it is relative and never steps
+    /// through `..`.
+    pub dir: String,
 }
 
 /// The resolved rkbin blob set a Rockchip u-boot build consumes: ATF/BL31 and the
@@ -1449,6 +1471,10 @@ pub struct Rkbin {
     /// form.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bl32: Option<String>,
+    /// Where the blobs are published upstream, when a layer declares it. Only the
+    /// upgrade survey reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<RkbinUpstream>,
 }
 
 /// A device's depthcharge board-profile selection (`[depthcharge]` on the device
@@ -2264,10 +2290,20 @@ kebab_enum!(SupportStatus {
 /// from under a [`Validated`](SupportStatus::Validated) claim, which is the only moment
 /// the pair can be driven apart.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "SupportDoc")]
 pub struct Support {
     /// How far this build point has been taken.
     pub status: SupportStatus,
+    /// The boot2deb commit the image this claim rests on was built from: the
+    /// `config_commit` its provenance manifest records. Present exactly when the status
+    /// is [`Validated`](SupportStatus::Validated), since only a boot is evidence tied
+    /// to one tree. Lowercase hex, 12 to 40 characters, so the provenance's short form
+    /// is accepted as written.
+    ///
+    /// It is what lets `boot2deb affected --claims` find a validated claim whose build
+    /// inputs have changed since. An edited fragment, layer or package list moves the
+    /// image as surely as a re-pin does, and no lock records it.
+    pub commit: Option<String>,
     /// `YYYY-MM-DD` the claim was last established: for
     /// [`Validated`](SupportStatus::Validated) the day the image booted, otherwise
     /// the day the claim was last assessed. Validated as a real calendar date at
@@ -2276,7 +2312,6 @@ pub struct Support {
     /// A date is unavoidably an assertion, since nothing mechanical knows when a board
     /// was booted. So it lives here, with the rest of the assertion, rather than in the
     /// lock, which records only what a build resolved.
-    #[serde(deserialize_with = "de_iso_date")]
     pub date: String,
     /// What this build point does **not** do, in sentences: limitations an operator
     /// meets on the running system and no amount of rebuilding lifts.
@@ -2299,8 +2334,62 @@ pub struct Support {
     /// non-empty and carries no leading or trailing whitespace. It is published into the
     /// support matrix and printed after a build. A blank entry or a ragged one is a defect
     /// a reader sees.
-    #[serde(default, deserialize_with = "de_caveats")]
     pub caveats: Vec<String>,
+}
+
+/// A `[support]` table as written, before the cross-field rule [`Support`] holds is
+/// checked.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupportDoc {
+    status: SupportStatus,
+    #[serde(deserialize_with = "de_iso_date")]
+    date: String,
+    #[serde(default)]
+    commit: Option<String>,
+    #[serde(default, deserialize_with = "de_caveats")]
+    caveats: Vec<String>,
+}
+
+impl TryFrom<SupportDoc> for Support {
+    type Error = String;
+
+    /// A validated claim names its commit and no other claim does, and the commit is
+    /// held to the shape a provenance record writes.
+    fn try_from(doc: SupportDoc) -> Result<Self, Self::Error> {
+        match (doc.status, &doc.commit) {
+            (SupportStatus::Validated, None) => {
+                return Err(
+                    "a validated claim names the commit its image was built from \
+                     (`commit`, the provenance manifest's config_commit)"
+                        .into(),
+                )
+            }
+            (SupportStatus::Validated, Some(c)) => {
+                let hex = c
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                if !hex || !(12..=40).contains(&c.len()) {
+                    return Err(format!(
+                        "claim commit '{c}' is not 12 to 40 lowercase hex characters"
+                    ));
+                }
+            }
+            (status, Some(_)) => {
+                return Err(format!(
+                    "only a validated claim names a commit, and this one is {status}: the \
+                     commit is the tree a booted image was built from"
+                ))
+            }
+            (_, None) => {}
+        }
+        Ok(Support {
+            status: doc.status,
+            commit: doc.commit,
+            date: doc.date,
+            caveats: doc.caveats,
+        })
+    }
 }
 
 /// Deserialize a caveat list, holding each entry to the shape a published sentence
@@ -3494,10 +3583,37 @@ mod tests {
 
     #[test]
     fn a_support_claim_parses_and_rejects_impossible_dates() {
-        let claim: Support =
-            toml::from_str("status = \"validated\"\ndate = \"2026-07-14\"\n").unwrap();
+        let claim: Support = toml::from_str(
+            "status = \"validated\"\ndate = \"2026-07-14\"\ncommit = \"7d1c6f5ec599\"\n",
+        )
+        .unwrap();
         assert_eq!(claim.status, SupportStatus::Validated);
         assert_eq!(claim.date, "2026-07-14");
+        assert_eq!(claim.commit.as_deref(), Some("7d1c6f5ec599"));
+
+        // A validated claim without its commit is evidence nothing can check, a commit
+        // on any other claim is evidence of nothing, and a commit is a commit.
+        for (bad, why) in [
+            (
+                "status = \"validated\"\ndate = \"2026-07-14\"\n",
+                "names the commit",
+            ),
+            (
+                "status = \"expected\"\ndate = \"2026-07-14\"\ncommit = \"7d1c6f5ec599\"\n",
+                "only a validated claim",
+            ),
+            (
+                "status = \"validated\"\ndate = \"2026-07-14\"\ncommit = \"7d1c6f5\"\n",
+                "12 to 40",
+            ),
+            (
+                "status = \"validated\"\ndate = \"2026-07-14\"\ncommit = \"7D1C6F5EC599\"\n",
+                "lowercase hex",
+            ),
+        ] {
+            let err = toml::from_str::<Support>(bad).unwrap_err().to_string();
+            assert!(err.contains(why), "{bad:?}: {err}");
+        }
 
         // A recipe may omit the claim entirely (`None` = no claim made), but an
         // unknown status is a typo, not a fourth state.
@@ -3556,8 +3672,10 @@ mod tests {
         assert_eq!(claim.caveats.len(), 2);
 
         // A claim without the key at all is the ordinary case, and states nothing.
-        let bare: Support =
-            toml::from_str("status = \"validated\"\ndate = \"2026-07-14\"\n").unwrap();
+        let bare: Support = toml::from_str(
+            "status = \"validated\"\ndate = \"2026-07-14\"\ncommit = \"7d1c6f5ec599\"\n",
+        )
+        .unwrap();
         assert!(bare.caveats.is_empty());
 
         for bad in ["\"\"", "\" leading\"", "\"trailing \"", "\"\\n\""] {

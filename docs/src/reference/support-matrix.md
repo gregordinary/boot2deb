@@ -14,9 +14,12 @@ resolves — so this table cannot claim a combination that was never built.
 | `experimental` | Under active bring-up. It may not build. |
 
 The date is when the claim was last established: for `validated`, the day the image
-booted; otherwise the day the claim was last assessed. Re-pinning a lock under a
-`validated` claim is flagged by `boot2deb update`, because moving the pins retires
-the evidence the claim rested on.
+booted, beside the commit that image was built from; otherwise the day the claim was
+last assessed. Re-pinning a lock under a `validated` claim is flagged by
+`boot2deb update`, because moving the pins retires the evidence the claim rested on.
+An edit to the configuration a build reads retires it as surely, and
+`boot2deb affected --claims` names each `validated` claim whose inputs have changed
+since its commit.
 
 A status says how far a build point has been taken, not that everything on the board
 works. What each one does *not* do is under [Caveats](#caveats) below, and is printed
@@ -29,7 +32,7 @@ at the end of a build of that recipe.
 | `asus-c201-libreboot/forky` | asus-c201-libreboot | forky | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-31 |
 | `asus-c201-libreboot/libre-forky` | asus-c201-libreboot | forky | `rk3288-libre-7.2` `sources/v7.2.8-gnu` | `rk3288-fixes` `main` (`14e7a6de48ff`) | none | none | `expected` | 2026-08-21 |
 | `asus-c201-libreboot/mainline-forky` | asus-c201-libreboot | forky | `rk3288-mainline-7.2` `v7.2.9` | `rk3288-fixes` `main` (`2fd63c3c0259`) | none | none | `expected` | 2026-08-21 |
-| `asus-c201/forky` | asus-c201 | forky | `debian-armmp` (from the suite) | none | none | none | `validated` | 2026-07-14 |
+| `asus-c201/forky` | asus-c201 | forky | `debian-armmp` (from the suite) | none | none | none | `validated` | 2026-07-14 (`7d1c6f5ec599`) |
 | `asus-c201/libre-forky` | asus-c201 | forky | `rk3288-libre-7.2` `sources/v7.2.8-gnu` | `rk3288-fixes` `main` (`14e7a6de48ff`) | none | none | `expected` | 2026-08-21 |
 | `asus-c201/mainline-forky` | asus-c201 | forky | `rk3288-mainline-7.2` `v7.2.9` | `rk3288-fixes` `main` (`2fd63c3c0259`) | none | none | `expected` | 2026-08-21 |
 | `asus-c201/trixie` | asus-c201 | trixie | `debian-armmp` (from the suite) | none | none | none | `expected` | 2026-07-20 |

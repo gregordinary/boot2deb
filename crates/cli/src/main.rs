@@ -9,6 +9,8 @@
 //! - `new-device`: scaffold a new device and recipe from the typed model.
 //! - `update`: resolve upstream refs into the lock.
 //! - `outdated`: survey, read-only, what has moved upstream since.
+//! - `affected`: name the build points a change to the tree reaches, and the validated
+//!   support claims whose inputs have changed since their image was built.
 //! - `verify-patches`, `verify-config`, and `verify-sources`: the patch,
 //!   kernel-config, and source-durability gates.
 //! - `patch import`: fetch, normalize, and slot a patch into a series.
@@ -101,7 +103,8 @@ fn run(
     if json && !supports_json(&command) {
         return Err(format!(
             "--json is not supported by `{}`: it has no machine-readable form. \
-             The commands that do are list-*, resolve, doctor, verify-*, and build.{}",
+             The commands that do are list-*, resolve, doctor, verify-*, build, \
+             reproduce, diff, size, outdated, affected and why-rebuild.{}",
             command_name(&command),
             json_alternative(&command),
         )
@@ -151,16 +154,18 @@ fn run(
             commands::verify_config::run(root, &recipe, args, json, verbosity)
         }
         Command::VerifyPackages { recipe } => commands::verify_packages::run(root, &recipe, json),
-        Command::VerifyImage { recipe, out_dir } => {
-            commands::verify_image::run(root, &recipe, out_dir, json)
+        Command::VerifyImage { recipes, out_dir } => {
+            commands::verify_image::run(root, &recipes, out_dir, json)
         }
         Command::VerifySources { recipe } => commands::verify_sources::run(root, &recipe, json),
         Command::Patch { action } => match action {
             PatchAction::Import { source, args } => commands::patch::import(root, &source, args),
         },
-        Command::Build { recipe, args } => {
-            commands::build::run(root, &recipe, args, None, json, verbosity)
-        }
+        Command::Build {
+            recipes,
+            keep_going,
+            args,
+        } => commands::build::run_many(root, &recipes, args, keep_going, json, verbosity),
         Command::Reproduce {
             recipe,
             from,
@@ -202,7 +207,12 @@ fn run(
             json,
         ),
         Command::Outdated { recipes } => commands::outdated::run(root, &recipes, json),
-        Command::WhyRebuild { recipe, args } => commands::why_rebuild::run(root, &recipe, args),
+        Command::Affected { since, claims } => {
+            commands::affected::run(root, since.as_deref(), claims, json)
+        }
+        Command::WhyRebuild { recipe, args } => {
+            commands::why_rebuild::run(root, &recipe, args, json)
+        }
         Command::Shell { recipe, args } => commands::shell::run(root, &recipe, args, verbosity),
         Command::Clean { recipe, args } => commands::clean::run(root, recipe.as_deref(), args),
         Command::Press {
@@ -244,7 +254,9 @@ fn supports_json(command: &Command) -> bool {
         | Command::Reproduce { .. }
         | Command::Diff { .. }
         | Command::Size { .. }
-        | Command::Outdated { .. } => true,
+        | Command::Outdated { .. }
+        | Command::Affected { .. }
+        | Command::WhyRebuild { .. } => true,
         Command::SupportMatrix { .. }
         | Command::CliReference { .. }
         | Command::Completions { .. }
@@ -253,7 +265,6 @@ fn supports_json(command: &Command) -> bool {
         | Command::Update { .. }
         | Command::Patch { .. }
         | Command::Sbom { .. }
-        | Command::WhyRebuild { .. }
         | Command::Shell { .. }
         | Command::Clean { .. }
         | Command::Press { .. }
@@ -290,6 +301,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Sbom { .. } => "sbom",
         Command::Size { .. } => "size",
         Command::Outdated { .. } => "outdated",
+        Command::Affected { .. } => "affected",
         Command::WhyRebuild { .. } => "why-rebuild",
         Command::Shell { .. } => "shell",
         Command::Clean { .. } => "clean",

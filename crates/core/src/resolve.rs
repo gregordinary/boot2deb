@@ -173,17 +173,23 @@ pub fn resolve_device(
         .iter()
         .any(|(_, f)| !f.requires_capability.is_empty())
     {
-        let mut known_providers = Vec::new();
-        for name in root.list("features")? {
-            // A manifest that does not parse is not this check's business to report:
-            // selecting it fails with its own error, and an unselected broken feature
-            // must not break an unrelated build.
-            if let Ok(f) = root.feature(&name) {
-                if !f.provides.is_empty() {
-                    known_providers.push((name, f.provides));
+        // The scan checks the composition and reads nothing the build consumes, so it
+        // is not recorded as an input: a capability another feature provides cannot
+        // change this build, only whether it resolves.
+        let known_providers = root.unprobed(|| -> Result<_, ConfigError> {
+            let mut known_providers = Vec::new();
+            for name in root.list("features")? {
+                // A manifest that does not parse is not this check's business to report:
+                // selecting it fails with its own error, and an unselected broken feature
+                // must not break an unrelated build.
+                if let Ok(f) = root.feature(&name) {
+                    if !f.provides.is_empty() {
+                        known_providers.push((name, f.provides));
+                    }
                 }
             }
-        }
+            Ok(known_providers)
+        })?;
         crate::feature::ensure_capabilities_satisfied(&loaded_features, &known_providers)?;
     }
 
@@ -1186,7 +1192,8 @@ fn validate_kmod(k: &KmodLayer, name: &str) -> Result<(), ConfigError> {
 
 /// Merge the SoC-layer rkbin defaults with the device overrides (device wins per
 /// field) and validate the result: `atf` and `tpl` are required (a missing or
-/// blank one is a [`ConfigError::MissingBlob`]), `bl32` stays optional.
+/// blank one is a [`ConfigError::MissingBlob`]), `bl32` stays optional, and a declared
+/// `upstream` names a relative directory ([`ConfigError::BadRkbinUpstream`]).
 fn resolve_rkbin(
     soc: &RkbinLayer,
     device: &RkbinLayer,
@@ -1202,10 +1209,29 @@ fn resolve_rkbin(
             what: what.into(),
         })
     };
+    let upstream = device.upstream.clone().or_else(|| soc.upstream.clone());
+    if let Some(up) = &upstream {
+        let why = if up.git.trim().is_empty() {
+            Some("its git URL is empty")
+        } else if up.dir.is_empty() || up.dir.starts_with('/') {
+            Some("its dir must be a path relative to the repository root")
+        } else if up.dir.split('/').any(|step| step == ".." || step == ".") {
+            Some("its dir must not step through . or ..")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            return Err(ConfigError::BadRkbinUpstream {
+                device: device_name.to_string(),
+                why: why.into(),
+            });
+        }
+    }
     Ok(Rkbin {
         atf: require(pick(&device.atf, &soc.atf), "rkbin.atf")?,
         tpl: require(pick(&device.tpl, &soc.tpl), "rkbin.tpl")?,
         bl32: pick(&device.bl32, &soc.bl32),
+        upstream,
     })
 }
 
@@ -2427,6 +2453,50 @@ mod tests {
             atf: atf.map(Into::into),
             tpl: tpl.map(Into::into),
             bl32: bl32.map(Into::into),
+            upstream: None,
+        }
+    }
+
+    fn upstream(dir: &str) -> Option<RkbinUpstream> {
+        Some(RkbinUpstream {
+            git: "https://example.invalid/rkbin.git".into(),
+            dir: dir.into(),
+        })
+    }
+
+    #[test]
+    fn rkbin_upstream_is_inherited_whole_and_must_name_a_relative_dir() {
+        let soc = RkbinLayer {
+            upstream: upstream("bin/rk35"),
+            ..layer(Some("atf.elf"), Some("ddr.bin"), None)
+        };
+        let r = resolve_rkbin(&soc, &RkbinLayer::default(), "dev").unwrap();
+        assert_eq!(r.upstream.unwrap().dir, "bin/rk35");
+        // A device that takes its blobs from elsewhere replaces the table, not a field.
+        let dev = RkbinLayer {
+            upstream: upstream("vendor/blobs"),
+            ..RkbinLayer::default()
+        };
+        assert_eq!(
+            resolve_rkbin(&soc, &dev, "dev")
+                .unwrap()
+                .upstream
+                .unwrap()
+                .dir,
+            "vendor/blobs"
+        );
+        for bad in ["", "/bin/rk35", "bin/../rk35", "./bin"] {
+            let dev = RkbinLayer {
+                upstream: upstream(bad),
+                ..RkbinLayer::default()
+            };
+            assert!(
+                matches!(
+                    resolve_rkbin(&soc, &dev, "dev"),
+                    Err(ConfigError::BadRkbinUpstream { .. })
+                ),
+                "{bad:?}"
+            );
         }
     }
 
