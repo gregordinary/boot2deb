@@ -8,9 +8,18 @@ reproducible and offline.
 
 ## `rk3588/`
 
-- `rk3588_bl31_v1.51.elf` — ARM Trusted Firmware BL31 (passed as `BL31=`).
-- `rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin` — DDR init TPL (passed as
+- `rk3588_bl31_v1.56.elf` — ARM Trusted Firmware BL31 (passed as `BL31=`).
+- `rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin` — DDR init TPL (passed as
   `ROCKCHIP_TPL=`). Board-memory-specific, matching the RK1's LPDDR4/5 setup.
+
+The two move together: the v1.24 DDR blob needs BL31 v1.53 or later.
+
+## `rk3576/`
+
+- `rk3576_bl31_v1.25.elf` — ARM Trusted Firmware BL31 (passed as `BL31=`).
+- `rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.13.bin` — DDR init TPL (passed as
+  `ROCKCHIP_TPL=`). rkbin's one DDR loader for this SoC, covering LPDDR4/4X and
+  LPDDR5, so it is the SoC default rather than a board's choice.
 
 `boot2deb update` hashes these to fill the lock's `[blobs]` pins.
 

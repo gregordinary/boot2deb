@@ -8,15 +8,15 @@ soc                     = "rk3576"                 # -> arch, dt_dir, modules, r
 boot_method             = "rockchip-rkbin"
 supported_boot_methods  = ["rockchip-rkbin"]
 
-# Validated against u-boot v2026.07: builds idbloader.img + u-boot.itb.
+# Validated against u-boot v2026.10: builds idbloader.img + u-boot.itb.
 uboot_defconfig         = "generic-rk3576_defconfig"
 
 # In mainline arch/arm64/boot/dts/rockchip/ — a plain mainline build produces it.
 kernel_dtb              = "rockchip/rk3576-evb1-v10.dtb"
 
 device_config_fragments = []
-supported_kernels       = ["rk3576-mainline-7.2"]
-default_kernel          = "rk3576-mainline-7.2"
+supported_kernels       = ["rk3576-mainline-7.3"]
+default_kernel          = "rk3576-mainline-7.3"
 # The EVB defaults to the minimal rockusb loader u-boot — the dev-board bring-up
 # posture (flash over USB); the display/util variants are available too.
 supported_uboot_series = ["rk3576-loader", "rk3576-display", "rk3576-util"]

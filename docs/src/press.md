@@ -262,7 +262,7 @@ identifiers stamped into its GPT and superblock:
 | `{{image.boot_method}}` | boot method (`rockchip-rkbin`) |
 | `{{image.suite}}` | Debian suite (`forky`) |
 | `{{image.layout}}` | `combined` or `split` |
-| `{{image.kernel}}` | kernel definition id (`rk3588-mainline-7.2`) |
+| `{{image.kernel}}` | kernel definition id (`rk3588-mainline-7.3`) |
 | `{{image.recipe}}` | the build point pressed (`turing-rk1/forky`) |
 | `{{image.rootfs_partuuid}}` | the rootfs partition's PARTUUID, hyphenated — the form `root=PARTUUID=` and `/etc/fstab` take |
 | `{{image.rootfs_uuid}}` | the rootfs ext4 superblock UUID, hyphenated — the form `UUID=` takes |

@@ -335,23 +335,23 @@ supported_boot_methods  = ["rockchip-rkbin"]
 uboot_defconfig         = "my-board-rk3588_defconfig"    # research: must exist in u-boot
 kernel_dtb              = "rockchip/rk3588-my-board.dtb" # research: must exist in the kernel
 device_config_fragments = []                             # no board-specific kconfig deltas
-supported_kernels       = ["rk3588-mainline-7.2"]
-default_kernel          = "rk3588-mainline-7.2"
+supported_kernels       = ["rk3588-mainline-7.3"]
+default_kernel          = "rk3588-mainline-7.3"
 default_suite           = "forky"
 default_layout          = "combined"
 hostname                = "my-board"                     # defaults to the slug, which is already one
 image_size              = "2G"
 
 [rkbin]                                                  # board-memory-specific DDR init
-atf = "rk3588_bl31_v1.51.elf"
-tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
+atf = "rk3588_bl31_v1.56.elf"
+tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin"
 ```
 
 `recipes/my-board/forky.toml`:
 
 ```toml
 device   = "my-board"
-kernel   = "rk3588-mainline-7.2"
+kernel   = "rk3588-mainline-7.3"
 suite    = "forky"
 features = ["media-accel-rockchip"]   # or [] for a plain image
 layout   = "combined"

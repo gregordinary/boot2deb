@@ -2,8 +2,8 @@
 
 The [Turing RK1](https://turingpi.com/product/turing-rk1/) is an RK3588 compute
 module that seats in a Turing Pi 2 cluster board. boot2deb ships it as a small family
-of recipes over one hardware base. That base is kernel `v7.2` (linux-stable), u-boot
-`v2026.07`, and the RGA / VEPU / VDPU (and NPU) drivers carried in-kernel via the
+of recipes over one hardware base. That base is kernel `v7.3` (linux-stable), u-boot
+`v2026.10`, and the RGA / VEPU / VDPU (and NPU) drivers carried in-kernel via the
 `rk3588-accel` patch series. It is a supported configuration in its own right, and a good
 starting point for any RK3588 board.
 

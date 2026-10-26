@@ -72,8 +72,8 @@ caveats = [
 # blobs but is still functional". Supplying OP-TEE means building it from
 # `optee_os` and passing the resulting `tee.elf`.
 [rkbin]
-atf  = "rk3576_bl31_v1.24.elf"
-tpl  = "rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.12.bin"
+atf  = "rk3576_bl31_v1.25.elf"
+tpl  = "rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.13.bin"
 
 # Where the vendored blobs above are published. The build never reads it, since the
 # blobs are vendored under blobs/rk3576/ and pinned by sha256; `boot2deb outdated`

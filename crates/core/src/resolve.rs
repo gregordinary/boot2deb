@@ -3734,7 +3734,7 @@ mod tests {
             .rootfs_packages
             .contains(&"ffmpeg-rk".to_string()));
         assert_eq!(image_of(&b).rootfs_exclude, vec!["isc-dhcp-client"]);
-        assert_eq!(image_of(&b).kernel.id(), "rk3588-mainline-7.2");
+        assert_eq!(image_of(&b).kernel.id(), "rk3588-mainline-7.3");
         assert_eq!(b.kernel_dtb, "rockchip/rk3588-turing-rk1.dtb");
         assert!(b.modules.contains(&"rga3".to_string()));
         assert!(b.modules.contains(&"rkvenc".to_string()));
@@ -3756,12 +3756,12 @@ mod tests {
         // The boot half resolves as the rkbin variant, carrying the u-boot source,
         // the raw-gap offsets, and the SoC-inherited blob set.
         let boot = b.rkbin_boot().expect("the RK1 boots via rockchip-rkbin");
-        assert_eq!(boot.uboot_ref, "v2026.07");
+        assert_eq!(boot.uboot_ref, "v2026.10");
         assert_eq!(boot.uboot_defconfig, "turing-rk1-rk3588_defconfig");
         assert_eq!(boot.offsets.idbloader, "32KiB");
         assert_eq!(boot.offsets.uboot_itb, "8MiB");
         assert_eq!(boot.offsets.rootfs, "16MiB");
-        assert_eq!(boot.rkbin.atf, "rk3588_bl31_v1.51.elf");
+        assert_eq!(boot.rkbin.atf, "rk3588_bl31_v1.56.elf");
         assert!(b.depthcharge_boot().is_none());
     }
 
@@ -3803,7 +3803,7 @@ mod tests {
             .compiled()
             .expect("the RK1 compiles its kernel");
         assert!(kernel.config_fragments.contains(&"accel/full".to_string()));
-        assert_eq!(image_of(&b).kernel.id(), "rk3588-mainline-7.2");
+        assert_eq!(image_of(&b).kernel.id(), "rk3588-mainline-7.3");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 # recipe of its own that composes this feature plus the app.
 # Constraints only; the exact resolution is written to the sibling .lock.
 device     = "turing-rk1"
-kernel     = "rk3588-mainline-7.2"       # omit -> device default_kernel
+kernel     = "rk3588-mainline-7.3"       # omit -> device default_kernel
 suite      = "forky"                     # omit -> device default_suite
 # HW transcode userspace (MPP + RGA + ffmpeg-rk), and the GPU driver its filter
 # path needs. `vulkan` is here rather than left a la carte because this recipe's
@@ -23,17 +23,18 @@ layout     = "combined"                  # omit -> device default_layout
 # included, so half the volume is still free before the first-boot grow.
 image_size = "2G"
 
-# Derived from turing-rk1/forky along the userspace axis, and re-assessed over the v7.2
-# generation: see that recipe for what the bump moves. Two of its items land on this
-# recipe's own path rather than the base's. The RGA the `/dev/rga` consumers here talk
-# to is still the multicore vendor driver — 7.2's in-tree V4L2 RGA3 driver is left
-# unbuilt, because it exposes one core per video node, does scale and colour conversion
-# only, and has no 10-bit YUV, so NV15 out of a 10-bit HEVC decode has no path through
-# it and `librga`, `scale_rkrga` and `vpp_rkrga` cannot speak to it at all. And the
-# IOMMU fetch-DTE change upstream ties to RGA3 hangs is on exactly this image's filter
-# path. `rkvdec`'s move to a shared bitwriter writes the same register payloads. The
-# `vulkan` feature is unaffected: it is a userspace package set over panthor, which
-# takes fixes this recipe cannot distinguish.
+# Derived from turing-rk1/forky along the userspace axis, and re-assessed over the 7.3
+# generation: see that recipe for what the bump moves. One of its items lands on this
+# recipe's own path rather than the base's: the IOMMU's stale-fault acknowledgement
+# before a stall reaches the decoders and the RGA cores this image's filter path drives.
+# The RGA the `/dev/rga` consumers here talk to is still the multicore vendor driver --
+# the kernel's in-tree V4L2 RGA3 driver is left unbuilt, because it exposes one core per
+# video node, does scale and colour conversion only, and has no 10-bit YUV, so NV15 out
+# of a 10-bit HEVC decode has no path through it and `librga`, `scale_rkrga` and
+# `vpp_rkrga` cannot speak to it at all. `rkvdec`'s `DIV_ROUND_UP()` CTB counts are the
+# same values. The `vulkan` feature is a userspace package set over panthor, whose 7.3
+# changes are bounds checks, a job-cleanup fix and a model check for Immortalis parts,
+# none of them specific to this board's G610.
 #
 # An image from this recipe was booted and measured on the board on 2026-08-30, on the
 # v7.2 kernel with the `076-080` media series: VP9 decodes bit-exact against libvpx at
@@ -49,11 +50,13 @@ image_size = "2G"
 # demuxer, decoder and swscale fixes as what differs from the booted build, plus 0022
 # on the RGA rotation path.
 #
-# `expected` until an image from this pin boots. The last image on the board is the
-# feature variant `forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode`
-# at v7.2.2 and patches 6e886797a212, booted 2026-09-02; it exercised the kernel,
-# u-boot, device layers and the media stack end to end. The kernel, its patch series
-# and the FFmpeg base are what have moved since.
+# `expected` until an image from this pin boots. The last image to run the media stack on
+# the board is the feature variant
+# `forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode` at v7.2.2 and
+# patches 6e886797a212, booted 2026-09-02; it exercised the kernel, u-boot, device layers
+# and the media stack end to end. turing-rk1/forky has booted since, at v7.2.9 on
+# 2026-10-08, without the media stack. The kernel, its patch series and the FFmpeg base
+# are what have moved since.
 [support]
 status = "expected"
-date   = "2026-09-05"
+date   = "2026-10-19"

@@ -213,7 +213,7 @@ description = "Turing RK1 with a different DDR fitting"
 hostname    = "rk1-variant"
 
 [rkbin]
-tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
+tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin"
 ```
 
 `extends` inherits the parent device's keys *and* its `overlay/` file tree. The parent's

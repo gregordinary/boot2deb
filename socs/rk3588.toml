@@ -34,8 +34,8 @@ packages = ["firmware-misc-nonfree", "firmware-realtek", "v4l-utils"]
 # common-memory default a board with different DRAM overrides on its device layer.
 # RK3588 boots BL31-only, so there is no BL32/OP-TEE.
 [rkbin]
-atf = "rk3588_bl31_v1.51.elf"
-tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin"
+atf = "rk3588_bl31_v1.56.elf"
+tpl = "rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin"
 
 # Where the vendored blobs above are published. The build never reads it, since the
 # blobs are vendored under blobs/rk3588/ and pinned by sha256; `boot2deb outdated`

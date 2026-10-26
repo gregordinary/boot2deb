@@ -746,9 +746,9 @@ ordering is the point. The cheap check tells you a series makes no claim about y
 kernel, and the expensive one tells you whether it would have worked anyway.
 
 ```
-note: kernel v7.2-rc5 is outside series 'rk3588-accel' (declared >=7.0, <7.2) — a build
+note: kernel v7.4-rc5 is outside series 'rk3588-accel' (declared >=7.3, <7.4) — a build
       will refuse it. Measure it first, which needs no re-pin:
-  boot2deb verify-patches turing-rk1/forky --kernel v7.2-rc5 --kernel-path <checkout> --keep-going
+  boot2deb verify-patches turing-rk1/forky --kernel v7.4-rc5 --kernel-path <checkout> --keep-going
 then widen applies_to_kernel in the series if it comes back clean, or retire the
 patches it names.
 ```
@@ -781,17 +781,17 @@ boot2deb verify-patches turing-rk1/forky
 boot2deb verify-patches rk3576-generic/loader
 
 # ...and a recipe carrying both reports each at its own version:
-#   kernel series applies (4 patches) against rk3576-mainline-7.2 @ v7.2
+#   kernel series applies (4 patches) against rk3576-mainline-7.3 @ v7.3
 #   uboot  series applies (6 patches) against u-boot @ v2026.04
 boot2deb verify-patches rk3576-evb1-v10/forky
 
 # Fast path when you already have a local kernel checkout:
 boot2deb verify-patches turing-rk1/forky --kernel-src ../linux
 
-# "Would this series survive 7.2?" -- asked against a kernel you have not adopted,
+# "Would this series survive 7.4?" -- asked against a kernel you have not adopted,
 # reporting every boundary at once rather than stopping at the first.
 boot2deb verify-patches turing-rk1/forky \
-    --kernel v7.2 --kernel-path ../linux --keep-going
+    --kernel v7.4 --kernel-path ../linux --keep-going
 ```
 
 #### Asking about a kernel you have not adopted
@@ -806,8 +806,8 @@ Because the lock pins no commit for a kernel it does not name, a candidate needs
 `--kernel-path` pointing at a checkout already at that version. Three rules shift on this
 path:
 
-- **The declared envelope does not gate the run.** A series is asked about 7.2 exactly
-  while its `applies_to_kernel` still says `<7.2`. Refusing an out-of-envelope
+- **The declared envelope does not gate the run.** A series is asked about 7.4 exactly
+  while its `applies_to_kernel` still says `<7.4`. Refusing an out-of-envelope
   candidate would answer the question by assuming it. The only way past would be to
   widen the claim first, which is the very thing being tested.
 
@@ -819,8 +819,8 @@ path:
   really would be applied to a kernel it makes no claim about. Per-entry
   `kernels` ranges still narrow the series, so a patch already marked obsolete at the
   candidate drops out rather than counting as a failure.
-- **A release candidate is answerable.** By semver's rule `7.2.0-rc3` satisfies neither
-  `<7.2` nor `>=7.2`, so a release-only range rejects every RC.
+- **A release candidate is answerable.** By semver's rule `7.4.0-rc3` satisfies neither
+  `<7.4` nor `>=7.4`, so a release-only range rejects every RC.
 
   That strictness is right for a build, since a series' envelope is a claim about
   *released* kernels. It is wrong here, where an RC is exactly the tree you want to

@@ -5,7 +5,7 @@ soc                     = "rk3576"                 # -> arch, dt_dir, modules, r
 boot_method             = "rockchip-rkbin"         # default within supported_boot_methods
 supported_boot_methods  = ["rockchip-rkbin"]
 
-# Validated against u-boot v2026.07: builds idbloader.img + u-boot.itb.
+# Validated against u-boot v2026.10: builds idbloader.img + u-boot.itb.
 uboot_defconfig         = "generic-rk3576_defconfig"
 
 # The board DTS is not upstream, so the kernel builds these DTBs from the
@@ -82,8 +82,8 @@ packages                = [
     "libgbm1",
 ]
 
-supported_kernels       = ["rk3576-mainline-7.2"]
-default_kernel          = "rk3576-mainline-7.2"
+supported_kernels       = ["rk3576-mainline-7.3"]
+default_kernel          = "rk3576-mainline-7.3"
 # The u-boot variant is its own axis. This board uses the SoC-generic display
 # u-boot for its shipped image (rk3576-display), and a board-specific util tool
 # that adds this board's ethernet (h96-max-m9-util, a u-boot-only recipe). The

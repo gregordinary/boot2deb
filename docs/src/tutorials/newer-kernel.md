@@ -3,9 +3,9 @@
 A board that compiles its own kernel is pinned to an exact tag, and that tag goes stale.
 This tutorial moves the Turing RK1 forward, in the two shapes that job takes:
 
-- **Within the track** — `v7.2` to a later `7.2.y` point release. The patch series
+- **Within the track** — `v7.3` to a later `7.3.y` point release. The patch series
   already claims the version, so this is a re-pin and a rebuild.
-- **Across a version boundary** — 7.2 to 7.3. The series makes no claim about 7.3 yet, so
+- **Across a version boundary** — 7.3 to 7.4. The series makes no claim about 7.4 yet, so
   the first move is *measuring* whether it would survive, without changing a pin.
 
 The second shape is the interesting one, and the order it runs in is the point: find out,
@@ -31,13 +31,13 @@ new definition is also one line there.
 
 ## Shape 1: within the track
 
-`kernels/rk3588-mainline-7.2.toml` tracks `7.2.y`, and `series/rk3588-accel.toml` declares
-`applies_to_kernel = ">=7.1.5, <7.3"`. A later 7.2 point release is inside both, so if the
+`kernels/rk3588-mainline-7.3.toml` tracks `7.3.y`, and `series/rk3588-accel.toml` declares
+`applies_to_kernel = ">=7.3, <7.4"`. A later 7.3 point release is inside both, so if the
 series holds, nothing in the config or the series changes — only the pin.
 
 ```sh
 # 1. Re-pin. This is the only command that consults upstream.
-boot2deb update turing-rk1/forky --kernel-ref v7.2.1
+boot2deb update turing-rk1/forky --kernel-ref v7.3.1
 
 # 2. Does the series still apply to the new tree? (--kernel-src makes the fetch
 #    near-instant if you have a checkout; omit it and the tree is auto-fetched.)
@@ -60,7 +60,7 @@ so:
 ```
   warning: recipe 'turing-rk1/forky' claims support = "validated" as of 2026-07-16, but
   this update moved its pins:
-    kernel v7.2 (8d3ae59288f1) -> v7.2.1 (155b42bec9cb)
+    kernel v7.3 (c03c1a14507d) -> v7.3.1 (…)
   that claim now describes a combination nothing has booted — re-validate on hardware and
   update the date, or set status = "expected" until you do
   note: this re-pin changes the generated support matrix — regenerate it:
@@ -86,7 +86,7 @@ the evidence the claim is re-earned or retired on. See
 [Comparing two build points](../reference/cli.md#comparing-two-build-points).
 
 If you would rather not touch the lock until you know the answer, step 2 can come first.
-`verify-patches turing-rk1/forky --kernel v7.2.1 --kernel-path ../linux` measures a
+`verify-patches turing-rk1/forky --kernel v7.3.1 --kernel-path ../linux` measures a
 version the lock does not name and leaves the lock alone. That is the [candidate
 path](#step-2-measure-and-change-nothing) below, and it works inside the envelope as well
 as outside it.
@@ -104,30 +104,30 @@ checkout you point at:
 
 ```sh
 git -C ../linux fetch --tags origin
-git -C ../linux checkout v7.3
+git -C ../linux checkout v7.4
 ```
 
-A release candidate is a legitimate answer here — measuring `v7.3-rc5` before 7.3 exists is
+A release candidate is a legitimate answer here — measuring `v7.4-rc5` before 7.4 exists is
 exactly what this path is for.
 
 ### Step 2: measure, and change nothing
 
 ```sh
 boot2deb verify-patches turing-rk1/forky \
-    --kernel v7.3 --kernel-path ../linux --keep-going
+    --kernel v7.4 --kernel-path ../linux --keep-going
 ```
 
 `--kernel` verifies against a kernel the lock does not pin and **leaves the lock alone**.
 Three rules differ from the locked path, and each of them exists so the question can be
 asked at all:
 
-- **The declared envelope does not gate the run.** The series still says `<7.3` — refusing
+- **The declared envelope does not gate the run.** The series still says `<7.4` — refusing
   the candidate on that basis would answer the question by assuming it. The run reports
   that the kernel is outside the envelope and measures it anyway, and what `git am` does is
   the answer. A clean result is the *evidence for* widening the envelope, not a claim that
-  it already covers 7.3.
-- **A release candidate is matched as its base release**, because by semver `7.3.0-rc3`
-  satisfies neither `<7.3` nor `>=7.3` and a release-only range would reject every RC. The
+  it already covers 7.4.
+- **A release candidate is matched as its base release**, because by semver `7.4.0-rc3`
+  satisfies neither `<7.4` nor `>=7.4` and a release-only range would reject every RC. The
   build path stays release-strict, and this path does not.
 - **`--keep-going` reports every failure in one pass.** One boundary usually spawns
   adjacent ones, because a reworked patch shifts the context every later patch applies
@@ -170,6 +170,13 @@ drivers. Both still applied strictly and still built, so every gate passed with 
 bound checked twice. Only reading the incremental patch finds that one. Retiring the pair
 then moved the context `083` applies against, so it was rebased in the same round.
 
+*An absorption that applies in neither direction.* 7.3 took `rk3576/npu/0004`, the
+Rockchip IOMMU's all-clocks change, word for word, comment included. In the same release
+the driver moved its ops struct onto the domain, so the patch's context no longer matched.
+It failed forward like a patch that needs rebasing. It would not reverse-apply either,
+which is the usual quick test for "upstream has this". Reading the probe function in the
+new tree settled it.
+
 **Reworked.** The patch is still needed but no longer applies. Rebase it, keep both
 versions, and give them complementary ranges. One list then builds both generations
 correctly from a single checkout, which a list mutated in place cannot do.
@@ -206,7 +213,7 @@ Re-run step 2 after each round. When it comes back clean, and only then, widen t
 envelope:
 
 ```toml
-applies_to_kernel = ">=7.1.5, <7.4"
+applies_to_kernel = ">=7.3, <7.5"
 ```
 
 That edit is what turns a measurement into a claim, which is why it comes last. Commit it in
@@ -214,19 +221,19 @@ the `patches` repo — and push it, because a pin naming an unpushed commit reso
 your checkout and nowhere else:
 
 ```sh
-git -C ../patches add -A && git -C ../patches commit -m "rk3588-accel: extend to 7.3"
+git -C ../patches add -A && git -C ../patches commit -m "rk3588-accel: extend to 7.4"
 git -C ../patches push
 ```
 
 ### Step 4: write the kernel definition
 
-A kernel definition owns everything version-coupled, so 7.3 is a new file rather than an
-edit — `kernels/rk3588-mainline-7.3.toml`:
+A kernel definition owns everything version-coupled, so 7.4 is a new file rather than an
+edit — `kernels/rk3588-mainline-7.4.toml`:
 
 ```toml
 flavor           = "mainline"
 source           = "linux-stable"
-track            = "7.3.y"
+track            = "7.4.y"
 base_defconfig   = "defconfig"
 config_fragments = ["base/debian-arm64", "soc/rk3588", "accel/full"]
 patch_series     = ["rk3588-accel"]
@@ -239,47 +246,47 @@ kernel definitions referencing them stay stable. Then let the board resolve it, 
 `devices/turing-rk1.toml`:
 
 ```toml
-supported_kernels = ["rk3588-mainline-7.2", "rk3588-mainline-7.3"]
-default_kernel    = "rk3588-mainline-7.2"        # still the one with board evidence
+supported_kernels = ["rk3588-mainline-7.3", "rk3588-mainline-7.4"]
+default_kernel    = "rk3588-mainline-7.3"        # still the one with board evidence
 ```
 
 Check the point resolves before pinning anything — `--kernel` selects the definition for a
 resolve without touching a file:
 
 ```sh
-boot2deb resolve turing-rk1/forky --kernel rk3588-mainline-7.3
+boot2deb resolve turing-rk1/forky --kernel rk3588-mainline-7.4
 ```
 
 ### Step 5: adopt it in a recipe
 
 `update` has no `--kernel` flag. Which definition a recipe pins is the recipe's own
-`kernel` field, not a per-run choice, so adopting 7.3 is a recipe edit. Do it in a **new
+`kernel` field, not a per-run choice, so adopting 7.4 is a recipe edit. Do it in a **new
 leaf** rather than in `forky.toml`, and the board keeps a validated recipe while the new
-one is unproven. That leaf is `recipes/turing-rk1/forky-7.3.toml`:
+one is unproven. That leaf is `recipes/turing-rk1/forky-7.4.toml`:
 
 ```toml
 device   = "turing-rk1"
-kernel   = "rk3588-mainline-7.3"
+kernel   = "rk3588-mainline-7.4"
 suite    = "forky"
 features = []
 layout   = "combined"
 
 [support]
 status = "experimental"     # nothing has booted this yet
-date   = "2026-08-21"       # the day the claim was last assessed
+date   = "2026-10-19"       # the day the claim was last assessed
 ```
 
 Then run the same sequence as shape 1 against the new leaf, on the locked path this time.
-There is no `--kernel`, because the lock now names 7.3 itself:
+There is no `--kernel`, because the lock now names 7.4 itself:
 
 ```sh
-boot2deb update         turing-rk1/forky-7.3 --kernel-ref v7.3
-boot2deb verify-patches turing-rk1/forky-7.3 --kernel-src ../linux
-boot2deb verify-config  turing-rk1/forky-7.3
-boot2deb build          turing-rk1/forky-7.3
+boot2deb update         turing-rk1/forky-7.4 --kernel-ref v7.4
+boot2deb verify-patches turing-rk1/forky-7.4 --kernel-src ../linux
+boot2deb verify-config  turing-rk1/forky-7.4
+boot2deb build          turing-rk1/forky-7.4
 ```
 
-If you skipped ahead and pinned 7.3 before widening the envelope, nothing is broken. The
+If you skipped ahead and pinned 7.4 before widening the envelope, nothing is broken. The
 envelope check is pure metadata, so `update` reports the mismatch and keeps going, since
 pinning is the first step of adopting. `build` refuses before cloning anything, and names
 the `verify-patches --kernel` line to run instead. That is the cheap check telling you
@@ -293,7 +300,7 @@ naming one that no longer exists silently stops setting anything. `verify-config
 the merge, and with a reference config it asserts byte-identical `CONFIG_*` parity:
 
 ```sh
-boot2deb verify-config turing-rk1/forky-7.3 \
+boot2deb verify-config turing-rk1/forky-7.4 \
     --reference-config build/turing-rk1/forky/linux/.config
 ```
 
@@ -310,8 +317,9 @@ hardware the kernel is there for — for the RK1, see [Turing RK1](../boards/tur
 
 A kernel bump is not finished when the image builds:
 
-1. **Re-earn the claim.** Set `status = "validated"` and the date on which an image from
-   these pins booted. A claim is per-pin: it cannot be re-dated for pins that moved, only
+1. **Re-earn the claim.** Set `status = "validated"`, the date on which an image from
+   these pins booted, and the `commit` that image's provenance manifest records as its
+   `config_commit`. A claim is per-pin: it cannot be re-dated for pins that moved, only
    re-earned. Until then, `expected` is the honest status.
 2. **Regenerate the matrix**, which is generated from the locks and therefore stale the
    moment a pin moves:
@@ -321,7 +329,7 @@ A kernel bump is not finished when the image builds:
 3. **Check the pins are durable.** `verify-sources` grades every pin in the lock — a tag is
    durable, a branch tip is ephemeral, a force-pushed branch is orphaned:
    ```sh
-   boot2deb verify-sources turing-rk1/forky-7.3
+   boot2deb verify-sources turing-rk1/forky-7.4
    ```
 4. **Retire the old definition** once the new one is validated: delete the superseded
    recipe leaf and kernel file, and drop the id from `supported_kernels`. Old locks name old

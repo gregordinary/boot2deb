@@ -47,10 +47,10 @@ boot_method = "rockchip-rkbin"
 ...
 
 [kernel]
-id = "rk3588-mainline-7.2"
+id = "rk3588-mainline-7.3"
 flavor = "mainline"
-reference = "v7.2"
-commit = "8d3ae59288f1e7d58d76558a6ee96d533bc5019f"
+reference = "v7.3"
+commit = "c03c1a14507dfaf8b856c2608f9ac216021fc222"
 patch_series = ["rk3588-accel"]
 ```
 

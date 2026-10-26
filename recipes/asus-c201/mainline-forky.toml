@@ -1,29 +1,29 @@
 # recipes/asus-c201/mainline-forky.toml — the C201 on a boot2deb-compiled kernel.
 #
 # Same board and suite as asus-c201/forky, but the kernel is compiled from
-# mainline 7.2.y instead of installed from Debian: kconfig comes from the
+# mainline 7.3.y instead of installed from Debian: kconfig comes from the
 # fragments (Debian-parity baseline + rk3288 slice) and the `rk3288-fixes`
 # patch series rides on top. This is the customization seam — pick this recipe
 # to change the kernel; pick asus-c201/forky to track Debian's.
 device     = "asus-c201"
-kernel     = "rk3288-mainline-7.2"
+kernel     = "rk3288-mainline-7.3"
 suite      = "forky"
 features   = []                # a base image, same surface as asus-c201/forky
 layout     = "combined"
 image_size = "2G"
 
 # The last pin that booted was v7.1.3, so this one has not been on the board. The pin is
-# v7.2.9, the current stable point release. No 7.2.y point release touches an RK3288
-# device tree or a defconfig. The drivers they do reach here, brcmfmac, the crypto hash
-# engine and the eDP glue among them, take fixes only. Three things move from v7.1.7
-# that this board reaches, and the `rk3288-fixes` series applies to all of it
-# unchanged.
+# v7.3, two generations on, and the `rk3288-fixes` series applies to all of it
+# unchanged. What those generations move on the paths this board reaches:
 #
-# `analogix_dp` — the eDP the panel hangs off — fixes a shift mismatch between the
-# pre-emphasis and voltage-swing values it programs during link training. That is a
-# fix on the one path between this board and a picture.
+# `analogix_dp` — the eDP the panel hangs off — changes in both. 7.2 fixes a shift
+# mismatch between the pre-emphasis and voltage-swing values it programs during link
+# training, and 7.3 takes the training waits from the panel's own DPCD instead of fixed
+# 100 us and 400 us delays, reading the DPCD capabilities before training starts. That
+# is the one path between this board and a picture, so the panel lighting up is the
+# first thing to check on a new image.
 #
-# The in-tree V4L2 RGA driver, which this recipe builds and the RK3588 recipes
+# In 7.2 the in-tree V4L2 RGA driver, which this recipe builds and the RK3588 recipes
 # deliberately do not, takes the rework that carried RGA3 support into mainline. The
 # RGA2 half is where this board sits, and it gains real behaviour: colorimetry is
 # announced and synchronised rather than ignored, offsets are computed from the stride
@@ -31,13 +31,20 @@ image_size = "2G"
 # for YUV formats, and the scaling factor is range-checked. The hardware-specific parts
 # move behind a struct and the command buffer is reused between jobs.
 #
-# `max98090` moves to the standard ASoC `set_jack` callback, and
+# Also in 7.2, `max98090` moves to the standard ASoC `set_jack` callback, and
 # `rk3288-veyron-analog-audio.dtsi` drops `rockchip,hp-det-gpios` and
 # `rockchip,mic-det-gpios`, neither of which the `rockchip,rockchip-audio-max98090`
 # binding defines and neither of which any driver read.
+#
+# 7.3 adds driver fixes elsewhere on the board: brcmfmac fixes a leak in its SDIO
+# control read and two P2P faults, and `dw_mmc` stops and completes DMA when a transfer
+# is aborted while the card is still busy. The Rockchip IOMMU keeps its ops per device
+# and takes every clock its nodes list, which on this SoC is the same `aclk` and `iface`
+# pair as before. The rk3288 crypto engine that `rk3288-fixes` patches, and the RGA
+# driver, are unchanged from 7.2.
 #
 # So the delta reads as favorable, but the claim is `expected` until an image from this
 # pin boots.
 [support]
 status = "expected"
-date   = "2026-08-21"
+date   = "2026-10-19"

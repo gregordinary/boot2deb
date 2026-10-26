@@ -21,13 +21,13 @@ sudo boot2deb-selftest
 ```
 
 ```
-turing-rk1 / forky / rk3588-mainline-7.2
+turing-rk1 / forky / rk3588-mainline-7.3
 
 identity
-  ok      kernel-release    7.2.0
+  ok      kernel-release    7.3.0
   ok      kernel-flavor     arm64
   ok      dtb               rockchip/rk3588-turing-rk1.dtb
-  ok      single-kernel     7.2.0-1-arm64
+  ok      single-kernel     7.3.0-1-arm64
 soc-rk3588
   ok      firmware          arm/mali/arch10.8/mali_csffw.bin
   FAILED  driver-bound      fb000000.gpu panthor  (no /sys/bus/*/drivers/panthor/fb000000.gpu)
@@ -53,7 +53,7 @@ identity.checks                 derived from the build itself (see below)
 soc-rk3588.checks               socs/rk3588.toml [[expect]]
 boot-method-rockchip-rkbin.checks
 device-turing-rk1.checks
-kernel-rk3588-mainline-7.2.checks
+kernel-rk3588-mainline-7.3.checks
 feature-media-accel-rockchip.checks
 kmod-aic8800.checks
 ```
@@ -95,7 +95,7 @@ any.
 | `devnode` | the node exists under `/dev` (globs allowed) | `devnode /dev/dri/renderD128` |
 | `sound-card` | the name appears in `/proc/asound/cards` | `sound-card H96 Analog` |
 | `no-dmesg-match` | the POSIX ERE does **not** match the kernel log | `no-dmesg-match SError\|Synchronous External Abort` |
-| `kernel-release` | `uname -r` starts with the release the pinned ref names, normalized as the kernel spells it (`v7.2` names `7.2.0`) (generated only) | `kernel-release 7.2.0` |
+| `kernel-release` | `uname -r` starts with the release the pinned ref names, normalized as the kernel spells it (`v7.3` names `7.3.0`) (generated only) | `kernel-release 7.3.0` |
 | `kernel-flavor` | `uname -r` ends in the flavor and is not its `-rt-` variant (generated only) | `kernel-flavor arm64` |
 | `single-kernel` | `/boot` holds exactly one kernel and its module tree is that kernel's (generated only, and takes no argument) | `single-kernel` |
 
@@ -105,7 +105,7 @@ kind must not fail for it. Skips are loud in the output for the same reason a
 silent skip is banned everywhere else. A check that quietly stops running looks
 exactly like a check that passes.
 
-`kernel-flavor` earns its two lines of logic: `7.2.0-1-rt-arm64` also ends in
+`kernel-flavor` earns its two lines of logic: `7.3.0-1-rt-arm64` also ends in
 `-arm64`, so the runner refuses the `-rt-` spelling first. That is the check
 that catches an accidentally-RT kernel, which boots fine and quietly changes
 scheduling behavior.

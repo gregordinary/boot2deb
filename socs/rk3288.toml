@@ -38,7 +38,7 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 #
 # None of it reaches a libre build: `nonfree_firmware_packages` and the
 # `overlay-nonfree/` tree are exactly what a GNU Linux-libre kernel drops, which on
-# this SoC costs the internal radio outright — see `kernels/rk3288-libre-7.2.toml`.
+# this SoC costs the internal radio outright — see `kernels/rk3288-libre-7.3.toml`.
 # What is left works: an AR9271 USB adapter, whose firmware is Free and packaged
 # below, is the supported way onto a network there.
 #

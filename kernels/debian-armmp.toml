@@ -23,7 +23,7 @@ supported_socs = ["rk3288"]
 
 # The BCM4354 radio firmware, checked here rather than on the SoC layer because
 # the kernel axis is what decides whether the blobs exist at all: a libre kernel
-# (rk3288-libre-7.2) drops `nonfree_firmware_packages` and the overlay-nonfree
+# (rk3288-libre-7.3) drops `nonfree_firmware_packages` and the overlay-nonfree
 # blobs by design, so a SoC-wide check would fail a correctly-built libre image.
 # Every kernel definition that loads blobs states the radio's three files; the
 # libre definition states none.

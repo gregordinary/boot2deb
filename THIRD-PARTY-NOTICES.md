@@ -6,11 +6,15 @@ sources are under the project license stated in the repository root; the
 components below retain the license of their upstream and keep their original
 copyright notices.
 
-## Bootloader firmware blobs — `blobs/rk3588/`
+## Bootloader firmware blobs — `blobs/rk3588/`, `blobs/rk3576/`
 
-- `rk3588_bl31_v1.51.elf` — ARM Trusted Firmware BL31 for RK3588 (passed to the
+- `rk3588_bl31_v1.56.elf` — ARM Trusted Firmware BL31 for RK3588 (passed to the
   u-boot build as `BL31=`).
-- `rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.19.bin` — DDR init TPL for RK3588
+- `rk3588_ddr_lp4_2112MHz_lp5_2400MHz_v1.24.bin` — DDR init TPL for RK3588
+  (passed as `ROCKCHIP_TPL=`).
+- `rk3576_bl31_v1.25.elf` — ARM Trusted Firmware BL31 for RK3576 (passed to the
+  u-boot build as `BL31=`).
+- `rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.13.bin` — DDR init TPL for RK3576
   (passed as `ROCKCHIP_TPL=`).
 
 Source: Rockchip's `rkbin` repository, <https://github.com/rockchip-linux/rkbin>

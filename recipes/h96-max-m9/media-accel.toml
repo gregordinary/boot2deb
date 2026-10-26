@@ -1,5 +1,5 @@
 # recipes/h96-max-m9/media-accel.toml -- the H96 MAX M9 with hardware video
-# decode and the RGA 2D accelerator, on mainline 7.2 / Debian forky. Constraints
+# decode and the RGA 2D accelerator, on mainline 7.3 / Debian forky. Constraints
 # only; the exact resolution is written to the sibling .lock by
 # `boot2deb update h96-max-m9/media-accel`.
 #
@@ -12,7 +12,7 @@
 # because the rkrga ffmpeg filters require MPP and this GPU has no Vulkan driver. See
 # features/media-accel-v4l2.toml for the full capability statement.
 device     = "h96-max-m9"
-kernel     = "rk3576-mainline-7.2"
+kernel     = "rk3576-mainline-7.3"
 uboot_series = "rk3576-display"
 suite      = "forky"
 features   = ["media-accel-v4l2"]
@@ -22,45 +22,20 @@ image_size = "3G"
 # The kernel's GPU fix and the u-boot chain are hardware-validated on this board,
 # and Panfrost + Mesa render first-party at 4K.
 #
-# What the move from v7.1.7 to the v7.2 generation changes on this SoC's paths. The pin
-# is v7.2.9, the current stable point release. No 7.2.y point release touches an RK3576
-# device tree or a defconfig, but 7.2.4, 7.2.5 and 7.2.7 do reach the drivers this recipe
-# builds: `drivers/accel/rocket` gains the job-push, task-array, domain-reference and
-# run-path error handling this board's NPU series used to carry, so four of those
-# patches retire and four more are rebased onto the kernel's own error paths; and the
-# V4L2 core bounds the HEVC tile counts the VDPU383 reads, so the SoC's fix series
-# carries no patch for it.
+# What the move from the 7.2 generation changes on this SoC's paths. The pin is v7.3.
+# `h96-max-m9/forky` describes the board-wide part: the IOMMU fixes the NPU series no
+# longer carries, the regenerated power-domain patches, the aic8800 7.3 guard, and the
+# HDMI PHY and `dw_hdmi_qp` changes that make the display the first thing to check on a
+# new image.
 #
-# The aic8800 module follows radxa's `main`, whose tip splits the firmware path into a
-# compiled-in root and a per-chip subdirectory; `kmods/aic8800.toml` takes both halves,
-# so the driver still requests its firmware from `aic8800_fw/SDIO/aic8800D80`.
-#
-# Nothing in the `rk3576-fixes` series is specific to the generation: rk3576/100-104
-# read the same on 7.1.7 and 7.2, and the other five are written against 7.2. Two of
-# them answer a point release. media-accel/083 makes the `delta_idx_minus1` guard 7.2.5
-# adds return `-EINVAL`, a bound its own validation already enforces. rk3576/109 applies
-# over 7.2.5's `platform_get_irq()` check in the probe.
-#
-# `rockchip-iommu` clears the AUTO_GATING
-# fetch-DTE time limit, which upstream reports as the cause of RGA3 hangs and of the
-# vendor kernel's VOP black screens; every accelerator here maps through that IOMMU.
-# `rkvdec` moves its H.264 and HEVC backends off local bitfield structs onto a shared
-# bitwriter -- a codegen fix aimed at clang on armhf and hexagon, writing the same
-# register payloads -- and this board's own read-cache patch (rk3576/104) sits beside
-# it unchanged, since it maps the "cache" bank by name. `rockchip_sai` takes a
-# `guard()` conversion for its spin locks, partly reverted in the same release; the
-# board's SAI routing patch (rk3576/103) applies over the result untouched. The
-# `rk3576.dtsi` changes are additions for other boards -- Khadas Edge 2L peripherals,
-# `pinctrl-names`, HDMI FRL enable GPIOs -- and none of them names this one.
-#
-# Mainline still has no Rockchip video *encoder*, so nothing changes there.
-#
-# Two of those land on this recipe's own paths. The RGA it builds is the multicore
-# vendor driver, and 7.2's in-tree V4L2 RGA3 support is RK3588 silicon only, so this
-# board's RGA2 cores and the `rk3576-rga` series that wires them are untouched by it --
-# but the IOMMU fetch-DTE change upstream ties to RGA3 hangs is on the same shared
-# driver these cores map through. And `rkvdec`'s bitwriter move is on the decode path
-# this recipe exists to exercise.
+# On this recipe's own paths: the RGA it builds is the multicore vendor driver, and the
+# kernel's in-tree V4L2 RGA3 support is RK3588 silicon only, so this board's RGA2 cores
+# and the `rk3576-rga` series that wires them are untouched by it; all three of that
+# series' patches apply unchanged. `rkvdec` computes its CTB counts with
+# `DIV_ROUND_UP()`, which gives the same values, on the decode path this recipe exists
+# to exercise, and hantro releases its media entities on its error and remove paths.
+# The IOMMU's stale-fault acknowledgement before a stall was already in the images this
+# recipe built, through the NPU series. Mainline still has no Rockchip video *encoder*.
 #
 # What the claim rests on. An image built from this recipe boots on the board and every
 # path the recipe exists to provide is exercised there: `boot2deb-selftest` passes all
@@ -75,9 +50,12 @@ image_size = "3G"
 # software `lvp` device, and none of the paths above used it.
 #
 # The claim is `expected` rather than `validated` because the lock has moved since that
-# image: it booted kernel v7.2.3 with patches `daa40ed`, and the pins here are v7.2.9
-# with patches `2fd63c3`. The kernel bump retires four of the NPU patches that image
-# carried, which 7.2.4 now supplies itself, and rebases four more onto its error paths.
+# image: it booted kernel v7.2.3 with patches `daa40ed` on u-boot v2026.07, BL31 v1.24
+# and DDR init v1.12, and the pins here are v7.3 with patches `339beaf` on u-boot
+# v2026.10, BL31 v1.25 and DDR init v1.13, the bootloader `h96-max-m9/forky`
+# describes. Of the NPU patches that image carried, the kernel now supplies six itself
+# -- four rocket fixes from 7.2.4 and the two Rockchip IOMMU fixes from 7.3 -- and four
+# more are rebased onto its error paths.
 # The NPU series at this pin follows its upstream v14 posting, which pulses the NPU
 # domain's bus reset before the power-on settle rather than after it, and the board's
 # device tree hands the NPU rail to that domain as its supply. In the media path one
@@ -87,4 +65,4 @@ image_size = "3G"
 # image at these pins boots the board.
 [support]
 status = "expected"
-date   = "2026-09-14"
+date   = "2026-10-19"

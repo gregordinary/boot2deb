@@ -1,8 +1,8 @@
 # recipes/h96-max-m9/forky.toml — the buildable point for the H96 MAX M9 on
-# mainline 7.2 / Debian forky. Constraints only; the exact resolution is written
+# mainline 7.3 / Debian forky. Constraints only; the exact resolution is written
 # to the sibling .lock by `boot2deb update h96-max-m9/forky`.
 device     = "h96-max-m9"
-kernel     = "rk3576-mainline-7.2"
+kernel     = "rk3576-mainline-7.3"
 uboot_series = "rk3576-display"
 suite      = "forky"
 features   = []                # base image; add media-accel-v4l2 for the decode/RGA stack
@@ -30,36 +30,52 @@ image_size = "2G"
 # board description: 5 Gbps, ~154 MB/s over 92 GB of continuous reads, no link error.
 # A device that lands at 480 Mb/s there is a seating problem — see the board page.
 #
-# What the move from v7.1.7 to the v7.2 generation changes on this SoC's paths. The pin
-# is v7.2.9, the current stable point release. No 7.2.y point release touches an RK3576
-# device tree or a defconfig. 7.2.4, 7.2.5 and 7.2.7 do reach the NPU and decoder drivers
-# this recipe's patch series modifies, as `h96-max-m9/media-accel` describes.
+# What the move from the 7.2 generation changes on this SoC's paths. The pin is v7.3.
 #
-# The aic8800 module follows radxa's `main`, whose tip splits the firmware path into a
-# compiled-in root and a per-chip subdirectory; `kmods/aic8800.toml` takes both halves,
-# so the driver still requests its firmware from `aic8800_fw/SDIO/aic8800D80`.
+# The patch series gets shorter. 7.3 carries the Rockchip IOMMU's all-clocks and
+# stale-fault fixes, which the NPU series carried as 0004 and 0005, so it no longer
+# does; images from this recipe already ran both. rk3576/100 and npu/0002 are
+# regenerated because `pm-domains.c` gains a regulator-carrying `DOMAIN_M_R` macro for
+# the RK3568 NPU beside the one they extend. The RK3576 GPU domain is still unflagged
+# upstream, so 100 still does its work.
 #
-# Nothing in the `rk3576-fixes` series is specific to the generation: rk3576/100-104
-# read the same on 7.1.7 and 7.2, and the other five are written against 7.2. Two of
-# them answer a point release. media-accel/083 makes the `delta_idx_minus1` guard 7.2.5
-# adds return `-EINVAL`, a bound its own validation already enforces. rk3576/109 applies
-# over 7.2.5's `platform_get_irq()` check in the probe.
+# The aic8800 module follows radxa's `main`, whose 7.3 guard handles cfg80211 assigning
+# the remain-on-channel and probe cookies itself and `cfg80211_probe_status()`'s new
+# `link_id`; `kmods/aic8800.toml` takes it. The firmware path stays split into a
+# compiled-in root and a per-chip subdirectory, so the driver still requests its
+# firmware from `aic8800_fw/SDIO/aic8800D80`.
 #
-# `rockchip-iommu` clears the AUTO_GATING
-# fetch-DTE time limit, which upstream reports as the cause of RGA3 hangs and of the
-# vendor kernel's VOP black screens; every accelerator here maps through that IOMMU.
-# `rkvdec` moves its H.264 and HEVC backends off local bitfield structs onto a shared
-# bitwriter -- a codegen fix aimed at clang on armhf and hexagon, writing the same
-# register payloads -- and this board's own read-cache patch (rk3576/104) sits beside
-# it unchanged, since it maps the "cache" bank by name. `rockchip_sai` takes a
-# `guard()` conversion for its spin locks, partly reverted in the same release; the
-# board's SAI routing patch (rk3576/103) applies over the result untouched. The
-# `rk3576.dtsi` changes are additions for other boards -- Khadas Edge 2L peripherals,
-# `pinctrl-names`, HDMI FRL enable GPIOs -- and none of them names this one.
+# The display path is where 7.3 moves most on this board. The Samsung HDMI PHY drops the
+# TMDS-rate workarounds it kept for the old clock interface and programs a link rate or
+# colour depth that changed while its clock stayed prepared, and the `dw_hdmi_qp` glue
+# hands the bridge the output formats it supports, so the common HDMI code now picks
+# among them. The mode list, the colour format and 4K output are the first things to
+# check on a new image. The power-domain driver no longer treats a clock that is not
+# ready yet as the end of a domain's clock list: a deferred clock now defers the device
+# instead of leaving it without clock management. `rkvdec` computes its CTB counts with
+# `DIV_ROUND_UP()`, `rockchip_sai` propagates a deferred interrupt lookup, and
+# `rk3576.dtsi` gains an eDP node, which this board does not enable. The board's
+# read-cache (rk3576/104), SAI routing (rk3576/103) and warm-up (rk3576/108, 109)
+# patches apply unchanged.
 #
-# Mainline still has no Rockchip video *encoder*, so nothing changes there.
+# Mainline still has no Rockchip video *encoder*, so nothing changes there. The kernel
+# configuration differs from 7.2.9's in 47 symbols, none of them on a Rockchip, media,
+# NPU or GPU path.
+#
+# The bootloader is u-boot v2026.10 with rkbin's BL31 v1.25 and DDR init v1.13. BL31
+# v1.25 loads at the same addresses as v1.24 and enters at the same point; Rockchip
+# lists support for SIP_ACCESS_CPU_REG and new system-sleep debug output as its
+# changes, none of them to CPU idle or the reboot modes, so `cpuidle.off=1` stays. The
+# DDR blob keeps v1.12's parameters (UART0 at 1500000, LPDDR4X at 2112 MHz) and fixes
+# how the high-temperature refresh derate reads MR4; its other fixes are for LPDDR5.
+# u-boot v2026.10 sizes the DRAM banks earlier in start-up, and the kernel's memory node
+# is built from that result, so `bdinfo` and `/proc/iomem` are the first thing to
+# compare on a new image. The `rk3576-display` series no longer carries the build
+# host's pylibfdt fix, which v2026.10 has itself. rk3576/0008, the PMU power-domain
+# driver, places its Kconfig and Makefile entries in upstream's sorted order, and its
+# driver source is the same.
 #
 # `expected` until an image from this pin boots.
 [support]
 status = "expected"
-date   = "2026-08-21"
+date   = "2026-10-19"

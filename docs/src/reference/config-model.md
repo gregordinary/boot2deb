@@ -99,7 +99,7 @@ that compiles nothing would read as configured and boot as broken.
 A compiled kernel can declare `libre = true`, which says its source is
 [GNU Linux-libre](https://www.fsfla.org/ikiwiki/selibre/linux-libre/). Every
 nonfree-firmware loader has been removed from the tree, so no driver it builds can read
-a blob. `kernels/rk3288-libre-7.2.toml` is the shipped one.
+a blob. `kernels/rk3288-libre-7.3.toml` is the shipped one.
 
 That is a property of the *source*, but it decides things well outside the kernel.
 Resolution therefore propagates it to the whole build, rather than leaving each layer
@@ -1195,7 +1195,7 @@ See the [CLI reference](cli.md) for the commands that operate on these.
 
 ### Re-pinning: constraints move, hand-pins stay
 
-The config layers declare a **constraint**, such as `uboot_ref = "v2026.07"` on the boot
+The config layers declare a **constraint**, such as `uboot_ref = "v2026.10"` on the boot
 method or a `[[userspace]]` entry's `ref` on the SoC. The lock records the **exact pin**
 resolved from it. An `update` given no per-tree ref flag re-reads the constraint, so
 editing one and re-pinning carries every recipe that resolves through that layer with it:
@@ -1203,7 +1203,7 @@ editing one and re-pinning carries every recipe that resolves through that layer
 ```sh
 # after bumping uboot_ref in boot-methods/rockchip-rkbin.toml
 boot2deb update turing-rk1/forky
-#   bumped   u-boot v2026.04 -> v2026.07 (config constraint)
+#   bumped   u-boot v2026.07 -> v2026.10 (config constraint)
 ```
 
 Every pin moved this way is named in the output. A propagated bump is therefore visible

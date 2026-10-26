@@ -5,7 +5,7 @@
 # forky pocket either way, so both variants install Jellyfin's trixie build.
 # Constraints only; the exact resolution is written to the sibling .lock.
 device     = "turing-rk1"
-kernel     = "rk3588-mainline-7.2"       # omit -> device default_kernel
+kernel     = "rk3588-mainline-7.3"       # omit -> device default_kernel
 suite      = "trixie"
 features   = ["jellyfin", "media-accel-rockchip", "jellyfin-rockchip"]
 layout     = "combined"                  # omit -> device default_layout
@@ -15,10 +15,10 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 
 # The suite sibling of turing-rk1/jellyfin-forky and under the same bring-up gate:
 # the transcode path this recipe exists to serve has not been exercised through
-# Jellyfin on either suite. Re-assessed over the v7.2 generation with its forky sibling.
+# Jellyfin on either suite. Re-assessed over the 7.3 generation with its forky sibling.
 [support]
 status = "experimental"
-date   = "2026-08-21"
+date   = "2026-10-19"
 
 # The same two, for the same reasons: the acceleration shape is a property of the
 # ffmpeg-rk build and the seeded configuration, neither of which is suite-dependent.

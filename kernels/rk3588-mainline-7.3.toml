@@ -1,8 +1,8 @@
-# kernels/rk3588-mainline-7.2.toml — a kernel is its own versioned entity that
+# kernels/rk3588-mainline-7.3.toml — a kernel is its own versioned entity that
 # owns everything version-coupled: source ref, config fragments, patch series.
 flavor           = "mainline"
-source           = "linux-stable"        # 7.2.x releases live in linux-stable
-track            = "7.2.y"               # resolved to an exact tag/SHA in the lock
+source           = "linux-stable"        # 7.3.x releases live in linux-stable
+track            = "7.3.y"               # resolved to an exact tag/SHA in the lock
 base_defconfig   = "defconfig"           # in-tree arm64 base; fragments merge onto it
 # Merge order (base first, device appended by the device layer): the generated
 # Debian-generic baseline, then the curated rockchip SoC + accel slices.

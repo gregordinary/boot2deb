@@ -8,7 +8,7 @@ the first 32-bit Arm board and first ChromeOS-firmware board boot2deb supports.
 | --- | --- | --- |
 | `asus-c201/forky` | Debian's `armmp`, installed from the archive | validated |
 | `asus-c201/trixie` | the same, on the stable suite | expected |
-| `asus-c201/mainline-forky` | compiled here from mainline 7.2.y | expected |
+| `asus-c201/mainline-forky` | compiled here from mainline 7.3.y | expected |
 | `asus-c201/libre-forky` | the same, from GNU Linux-libre — no blobs | expected |
 
 The first two are the board as Debian ships it. The third is the seam for changing the
@@ -64,7 +64,7 @@ new kernel fails to boot, the firmware falls back to the old one by itself. See
 ## A kernel of your own
 
 `asus-c201/mainline-forky` is the same board and the same suite, with the kernel compiled
-here from **mainline 7.2.y** instead of installed from the archive. Its kconfig comes from
+here from **mainline 7.3.y** instead of installed from the archive. Its kconfig comes from
 the fragments, a Debian-parity baseline plus the RK3288 slice, on top of the in-tree
 `multi_v7_defconfig`. The slice turns off every other SoC family that base builds in,
 which keeps the kernel small enough for the signed payload. The `rk3288-fixes` patch
@@ -82,10 +82,11 @@ so any user of the shash export/import path gets a truncated state. The fix is f
 and nothing about it is board-specific. It is simply not in a released kernel yet. A
 compiled recipe is where a fix like that lives until it is.
 
-Being ahead of the archive is the other half of it, and 7.2 is a good example on this
-board specifically. `analogix_dp`, the eDP bridge the panel hangs off, fixed a shift
-mismatch between the pre-emphasis and voltage-swing values it programs during link
-training. That is on the one path between this machine and a picture.
+Being ahead of the archive is the other half of it, and 7.2 and 7.3 are good examples on
+this board specifically. In 7.2, `analogix_dp`, the eDP bridge the panel hangs off, fixed
+a shift mismatch between the pre-emphasis and voltage-swing values it programs during
+link training. In 7.3 it takes the training waits from the panel's own DPCD instead of
+fixed delays. That is on the one path between this machine and a picture.
 
 The in-tree V4L2 RGA driver, which the RK3288 does use, took the rework that carried RGA3
 support into mainline. On the RGA2 side that means five things:
@@ -101,7 +102,7 @@ it when you rebuild.
 
 The trade is what you would expect. This recipe compiles a kernel, so a cold build
 provisions a cross root and takes real time. `asus-c201/forky` is a rootfs bootstrap and
-an image assembly. It also takes on the maintenance Debian was doing for you: a `7.2.y`
+an image assembly. It also takes on the maintenance Debian was doing for you: a `7.3.y`
 point release is an `update --kernel-ref` and a rebuild, not an `apt upgrade`. Take it
 when you need a kernel change, and stay on `asus-c201/forky` when you do not.
 
@@ -109,7 +110,7 @@ when you need a kernel change, and stay on `asus-c201/forky` when you do not.
 
 `asus-c201/libre-forky` is `asus-c201/mainline-forky` with one thing changed. The kernel
 comes from the [GNU Linux-libre](https://www.fsfla.org/ikiwiki/selibre/linux-libre/)
-tree instead of `linux-stable`. Same 7.2 release, same `multi_v7_defconfig` base, same
+tree instead of `linux-stable`. Same 7.3 release, same `multi_v7_defconfig` base, same
 fragments, same `rk3288-fixes` series. The source is deblobbed, and nothing else
 differs. The two locks are worth a diff. Apart from the manifest's file name, which each
 recipe names after itself, only the kernel table's four lines differ.
@@ -131,10 +132,10 @@ kernel definition carries `libre = true`, and resolution reads it:
 
 Moving it to a newer release works like any compiled recipe, with one difference worth
 knowing. The linux-libre project publishes its trees under a tag namespace, and appends
-`-gnu` to the version. The ref is therefore `sources/v7.2-gnu` rather than `v7.2`.
+`-gnu` to the version. The ref is therefore `sources/v7.3-gnu` rather than `v7.3`.
 
 ```sh
-boot2deb update asus-c201/libre-forky --kernel-ref sources/v7.2-gnu
+boot2deb update asus-c201/libre-forky --kernel-ref sources/v7.3-gnu
 ```
 
 ### What stops working
@@ -417,7 +418,7 @@ kernel and the `rk3288-fixes` patch are therefore both proven on silicon. A late
 of it also booted from USB and **installed cleanly to internal eMMC**. That exercises the
 whole image path rather than just the boot.
 
-That was `v7.1.3`. The recipe now pins `v7.2.9`, which is why its claim reads `expected`
+That was `v7.1.3`. The recipe now pins `v7.3`, which is why its claim reads `expected`
 rather than `validated`. That kernel has not been on the board.
 
 ### What the first minutes look like

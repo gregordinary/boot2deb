@@ -3,7 +3,7 @@
 The H96 MAX M9 (and the M9S, the same board) is an Android TV box built on the
 Rockchip **RK3576**. It carries an octa-core CPU (4x Cortex-A72 + 4x Cortex-A53) with a
 Mali-G52 MC3, LPDDR4X memory, eMMC 5.1 storage, Gigabit ethernet and HDMI. boot2deb turns
-it into a mainline Debian box: kernel `v7.2`, u-boot `v2026.07`, no vendor BSP.
+it into a mainline Debian box: kernel `v7.3`, u-boot `v2026.10`, no vendor BSP.
 
 It is a cheap and widely available RK3576 board, which makes it a practical target, and
 an awkward one. There is no SD slot (the pads are depopulated), no reset button, and no

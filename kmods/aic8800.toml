@@ -22,12 +22,13 @@ subdir = "src/SDIO/driver_fw/driver/aic8800"
 # PCIE/USB/Allwinner/BT entries radxa also ships are irrelevant to an SDIO arm64 build
 # and are omitted.
 #
-# The 7.1 and 7.2 guards are what carry this driver onto a current kernel. 7.1 moved
-# the cfg80211 key and station ops from `net_device *` to `wireless_dev *`; 7.2 removed
-# `strncpy()` from the kernel and gave `remain_on_channel` a trailing receive-address
-# filter. Both patches reach the SDIO tree, so this build needs no local equivalent.
-# radxa's series also carries `fix-linux-7.3-build.patch`. It guards a 7.3 kernel, which
-# no kernel definition here builds, so the list leaves it out until one does.
+# The 7.1, 7.2 and 7.3 guards are what carry this driver onto a current kernel. 7.1
+# moved the cfg80211 key and station ops from `net_device *` to `wireless_dev *`; 7.2
+# removed `strncpy()` from the kernel and gave `remain_on_channel` a trailing
+# receive-address filter; 7.3 has cfg80211 assign the remain-on-channel and probe
+# cookies, and adds a `link_id` to `cfg80211_probe_status()`. All three patches reach
+# the SDIO tree, so this build needs no local equivalent. radxa's series orders the 7.3
+# guard after the per-chip firmware fix, and so does this list.
 #
 # The firmware path is two patches that only work as a pair. `fix-sdio-firmware-path`
 # compiles `/lib/firmware/aic8800_fw/SDIO` into the BSP loader as the root, and
@@ -50,6 +51,7 @@ repo_patches = [
     "fix-linux-7.1-build.patch",
     "fix-linux-7.2-build.patch",
     "fix-sdio-per-chip-firmware-path.patch",
+    "fix-linux-7.3-build.patch",
 ]
 
 # Ours, from kmods/aic8800/patches/, applied after radxa's. All three are behaviour

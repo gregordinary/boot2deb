@@ -2,18 +2,18 @@
 # Exact resolved pins for the recipe. `boot2deb build` reads only this;
 # re-run `boot2deb update` to re-resolve within the recipe's constraints.
 [kernel]
-id = "rk3288-libre-7.2"
+id = "rk3288-libre-7.3"
 source = "git://linux-libre.fsfla.org/releases.git"
-ref = "sources/v7.2.8-gnu"
-commit = "ea31b59e482803c5d0a57ee6af3ba1e31790c8bb"
+ref = "sources/v7.3-gnu"
+commit = "e2aac1c6a442f8bedc5d94c9ed73f11504b35980"
 
 [patches]
 series = ["rk3288-fixes"]
 source = "https://github.com/gregordinary/patches.git"
 ref = "main"
-commit = "14e7a6de48ff89830c0974b2c89682d0e17d636e"
+commit = "339beaf35d5a81f861e4a2229365fb8f07ade50c"
 
 [rootfs]
 suite = "forky"
 manifest = "libre-forky.pkgs.lock"
-source_date_epoch = 1790520613
+source_date_epoch = 1792427930

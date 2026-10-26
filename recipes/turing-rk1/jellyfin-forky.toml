@@ -10,7 +10,7 @@
 # at blobs/keyrings/jellyfin.gpg); see features/jellyfin/README.md. The sibling
 # .lock holds the exact resolved pins; re-pin with `boot2deb update`.
 device     = "turing-rk1"
-kernel     = "rk3588-mainline-7.2"       # omit -> device default_kernel
+kernel     = "rk3588-mainline-7.3"       # omit -> device default_kernel
 suite      = "forky"                     # omit -> device default_suite
 features   = ["jellyfin", "media-accel-rockchip", "jellyfin-rockchip"]
 layout     = "combined"                  # omit -> device default_layout
@@ -30,19 +30,21 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 # on `hevc_rkmpp` or `h264_rkmpp`. A server carrying the `patches/jellyfin` series was
 # driven through Jellyfin on the board: it adds `-hwaccel v4l2request` decode in front
 # of the same encoders, declines 10-bit by design, and never fell back to libx264.
-# Re-assessed over the v7.2 generation: the encode path it uses is the
-# VEPU580 out-of-tree driver, which 7.2 does not touch — mainline still has no Rockchip
+# Re-assessed over the 7.3 generation: the encode path it uses is the
+# VEPU580 out-of-tree driver, which 7.3 does not touch — mainline still has no Rockchip
 # video encoder. See turing-rk1/forky for the full delta.
 #
-# `expected` until an image from this pin boots. The last image on the board is the
-# feature variant `forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode`
-# at v7.2.2 and patches 6e886797a212, booted 2026-09-02; it exercised the kernel,
-# u-boot, device layers and the media stack end to end. The kernel, its patch series,
+# `expected` until an image from this pin boots. The last image to run the media stack on
+# the board is the feature variant
+# `forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode` at v7.2.2 and
+# patches 6e886797a212, booted 2026-09-02; it exercised the kernel, u-boot, device layers
+# and the media stack end to end. turing-rk1/forky has booted since, at v7.2.9 on
+# 2026-10-08, without the media stack. The kernel, its patch series,
 # the FFmpeg base and the Jellyfin server have moved since: the image installs
 # Jellyfin 12 from its repository, where the booted one ran 10.11.
 [support]
 status = "expected"
-date   = "2026-09-05"
+date   = "2026-10-19"
 
 # What an operator gets, stated up front, because the shape of the acceleration is
 # not the shape the Jellyfin dashboard implies. The two limits underneath these ride

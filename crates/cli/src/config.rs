@@ -1432,7 +1432,7 @@ mod tests {
             kernel: Some(kernel.to_string()),
             ..Default::default()
         };
-        let blobbed = resolve_device(&root, "asus-c201", &ov("rk3288-mainline-7.2")).unwrap();
+        let blobbed = resolve_device(&root, "asus-c201", &ov("rk3288-mainline-7.3")).unwrap();
         let dirs = overlay_dirs(&root, &blobbed, OverlayStage::Customize);
         assert!(dirs.contains(&blobs), "blobs missing from {dirs:?}");
         let soc = root.find_asset("socs/rk3288/overlay").unwrap();
@@ -1444,7 +1444,7 @@ mod tests {
 
         // The libre kernel gets neither the tree nor the package — and still gets the
         // layer's ordinary overlay, so this is a gate and not a lost SoC layer.
-        let libre = resolve_device(&root, "asus-c201", &ov("rk3288-libre-7.2")).unwrap();
+        let libre = resolve_device(&root, "asus-c201", &ov("rk3288-libre-7.3")).unwrap();
         assert!(image_of(&libre).libre);
         let dirs = overlay_dirs(&root, &libre, OverlayStage::Customize);
         assert!(!dirs.contains(&blobs), "a libre image carries {blobs:?}");

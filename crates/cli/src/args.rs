@@ -1045,7 +1045,7 @@ pub(crate) struct NewDeviceArgs {
     /// Boot method (e.g. rockchip-rkbin). Prompted/defaulted if omitted.
     #[arg(long)]
     pub(crate) boot_method: Option<String>,
-    /// Kernel definition id (e.g. rk3588-mainline-7.2). Must support the chosen
+    /// Kernel definition id (e.g. rk3588-mainline-7.3). Must support the chosen
     /// SoC. Prompted/defaulted if omitted.
     #[arg(long)]
     pub(crate) kernel: Option<String>,
@@ -1090,7 +1090,7 @@ pub(crate) struct UpdateArgs {
     /// carries no `[support]` claim, since the claim belongs to the recipe.
     #[arg(long = "feature")]
     pub(crate) features: Vec<String>,
-    /// Kernel ref to pin, resolved to a commit (e.g. v7.2). Optional once a lock
+    /// Kernel ref to pin, resolved to a commit (e.g. v7.3). Optional once a lock
     /// exists. Omitting it re-pins the *previous lock's* kernel ref, so a routine
     /// re-pin (e.g. after importing a patch) needs no kernel tag the user did not
     /// touch. Required only for the first update, which has no prior ref to inherit.
@@ -1188,8 +1188,8 @@ pub(crate) struct VerifyArgs {
     #[arg(long)]
     pub(crate) patches_url: Option<String>,
     /// Verify against this kernel version instead of the one the lock pins, leaving
-    /// the lock untouched. It answers "would this series survive 7.2?" before
-    /// adopting 7.2. Takes a kernel tag (`v7.2`, `v7.2-rc3`). Pair it with
+    /// the lock untouched. It answers "would this series survive 7.4?" before
+    /// adopting 7.4. Takes a kernel tag (`v7.4`, `v7.4-rc3`). Pair it with
     /// `--kernel-path` or `--kernel-src` pointing at a tree that holds it.
     ///
     /// A version outside the series' declared `applies_to_kernel` is measured rather
