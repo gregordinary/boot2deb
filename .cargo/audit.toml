@@ -27,13 +27,34 @@ ignore = [
     #   inputs or timing it.
     #
     # Nor is there a version to move to. The advisory carries no patched release, and
-    # the 0.10 pre-releases do not change that — `rsa` 0.10.0-rc.18 still states in its
+    # the 0.10 pre-releases do not change that — `rsa` 0.10.0-rc.19 still states in its
     # own README that the crate is vulnerable to the Marvin Attack. `pgp` 0.20, the
-    # latest release and the one `ferroday-cage` 0.1.4 requires, depends on `rsa`
-    # "0.9.10", which a pre-release of 0.10 does not satisfy — so the pin could not be
-    # forced past `pgp` even if the newer line fixed it.
+    # line `ferroday-cage` 0.4.5 requires, and 0.21, the latest release, both depend on
+    # `rsa` "0.9.10", which a pre-release of 0.10 does not satisfy — so the pin could
+    # not be forced past `pgp` even if the newer line fixed it.
     #
     # Drop this entry when `rsa` ships a constant-time release, `pgp` picks it up, and
     # the engine's own requirement moves to it.
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0387 — "Multiple timing variability issues in operations intended to
+    # be constant-time" in `crypto-bigint` 0.5.5, reached only as `crypto-bigint <-
+    # {elliptic-curve, cx448} <- pgp <- ferroday-cage <- boot2deb-engine`.
+    #
+    # Not reachable as a vulnerability here. The advisory concerns arithmetic on
+    # *secret* integers: a party that can time the operations learns about a private
+    # key or intermediate secret. `ferroday-cage` uses `pgp` to parse the vendored
+    # archive keyrings and verify the clearsigned `Release` file, which is ECDSA/EdDSA
+    # or RSA verification over a public key and a public signature. Its secret-key and
+    # X448 code paths are confined to its own tests. Nothing in boot2deb signs, decrypts
+    # or agrees a key through `pgp`, so no secret value reaches `crypto-bigint`.
+    #
+    # Nor is there a version to move to. The fix is `crypto-bigint` 0.7.6, a semver
+    # break the 0.5 line has no backport of. `elliptic-curve` 0.13 and `cx448` 0.1 both
+    # require 0.5, and `pgp` 0.20 and 0.21 both require `elliptic-curve` 0.13 and
+    # `cx448` 0.1.
+    #
+    # Drop this entry when a `pgp` release moves to the `elliptic-curve` 0.14 line and
+    # `ferroday-cage` takes it.
+    "RUSTSEC-2026-0387",
 ]
