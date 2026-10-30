@@ -270,11 +270,16 @@ fn artifact_stem(path: &Path) -> Result<String> {
 /// the wall clock is used, because both formats require the field and there is no
 /// honest constant to substitute.
 fn created() -> Result<String> {
-    let secs = match std::env::var("SOURCE_DATE_EPOCH") {
-        Ok(value) => value.trim().parse::<u64>().map_err(|_| {
+    created_from(std::env::var("SOURCE_DATE_EPOCH").ok().as_deref())
+}
+
+/// [`created`] over an explicit `SOURCE_DATE_EPOCH` value, `None` where it is unset.
+fn created_from(source_date_epoch: Option<&str>) -> Result<String> {
+    let secs = match source_date_epoch {
+        Some(value) => value.trim().parse::<u64>().map_err(|_| {
             format!("SOURCE_DATE_EPOCH is '{value}', which is not a whole number of seconds")
         })?,
-        Err(_) => std::time::SystemTime::now()
+        None => std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .map_err(|_| "the host clock is before the Unix epoch")?,
@@ -309,18 +314,15 @@ mod tests {
     fn source_date_epoch_pins_the_only_field_the_image_does_not_determine() {
         // Every other field is derived from the image's content, so this is the one
         // input that decides whether two runs produce the same bytes.
-        //
-        // Safety: the environment is process-global and this test sets and clears one
-        // variable no other test in this binary reads.
-        unsafe { std::env::set_var("SOURCE_DATE_EPOCH", "1767225600") };
-        assert_eq!(created().unwrap(), "2026-01-01T00:00:00Z");
-        unsafe { std::env::set_var("SOURCE_DATE_EPOCH", "not-a-number") };
-        let err = created().unwrap_err().to_string();
+        assert_eq!(
+            created_from(Some("1767225600")).unwrap(),
+            "2026-01-01T00:00:00Z"
+        );
+        let err = created_from(Some("not-a-number")).unwrap_err().to_string();
         assert!(err.contains("SOURCE_DATE_EPOCH"), "{err}");
-        unsafe { std::env::remove_var("SOURCE_DATE_EPOCH") };
         // With none set the wall clock answers, and it still parses as the shape both
         // formats require.
-        let now = created().unwrap();
+        let now = created_from(None).unwrap();
         assert!(now.ends_with('Z') && now.len() == 20, "{now}");
     }
 }

@@ -511,7 +511,7 @@ fn run_bounded(mut command: Command, timeout: Duration) -> Bounded {
         Ok(c) => c,
         Err(e) => return Bounded::Spawn(e),
     };
-    let pgid = child.id() as i32;
+    let pgid = rustix::process::Pid::from_child(&child);
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut stderr = child.stderr.take().expect("stderr piped");
     let deadline = Instant::now() + timeout;
@@ -562,14 +562,13 @@ fn run_bounded(mut command: Command, timeout: Duration) -> Bounded {
     })
 }
 
-/// `SIGKILL` an entire process group by its leader pid (a negative target selects
-/// the group). Best-effort — an already-exited group yields `ESRCH`, harmless.
-fn kill_group(pgid: i32) {
-    // Safety: `kill` is async-signal-safe and takes only integers; a negative pid
-    // addresses the process group. No memory is touched.
-    unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
-    }
+/// `SIGKILL` an entire process group by its leader pid. Best-effort — an already-exited
+/// group yields `ESRCH`, harmless.
+///
+/// The group is addressed by a [`Pid`](rustix::process::Pid), which cannot be zero, so
+/// this cannot reach `kill(0)` and signal boot2deb's own group.
+fn kill_group(pgid: rustix::process::Pid) {
+    let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
 }
 
 /// A placeholder failing exit status for the unreachable-in-practice case where

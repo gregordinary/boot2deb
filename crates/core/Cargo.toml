@@ -18,3 +18,6 @@ semver.workspace = true
 [dev-dependencies]
 # Fixture config roots for resolution tests, decoupled from the shipped layers.
 tempfile.workspace = true
+
+[lints]
+workspace = true

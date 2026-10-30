@@ -29,3 +29,9 @@ clap_mangen = "0.3"
 tempfile = "3"
 boot2deb-core = { path = "crates/core" }
 boot2deb-engine = { path = "crates/engine" }
+
+# Every crate opts in with `[lints] workspace = true`. The tree reaches the host through
+# safe interfaces (rustix, nix, std), so an `unsafe` block is an error rather than an
+# exception to review. `forbid` also refuses a module-level `allow`.
+[workspace.lints.rust]
+unsafe_code = "forbid"

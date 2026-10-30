@@ -1088,9 +1088,14 @@ mod tests {
         let fifo_tree = tmp.path().join("fifo");
         std::fs::create_dir_all(fifo_tree.join("run")).unwrap();
         let fifo = fifo_tree.join("run/pipe");
-        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes().to_vec()).unwrap();
-        // SAFETY: `c` is a valid NUL-terminated path in a fresh temp directory.
-        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o644),
+            0,
+        )
+        .unwrap();
         let err = additions("s").copy_tree(&fifo_tree).unwrap_err();
         assert!(err.to_string().contains("FIFO"), "{err}");
 

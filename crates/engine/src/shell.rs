@@ -73,8 +73,12 @@ use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, PackagingSandbox, S
 use boot2deb_core::lock::Lock;
 use boot2deb_core::ResolvedBuild;
 use ferroday_cage::{Pty, Stdio, Terminal};
-use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use nix::sys::signal::{SigSet, Signal};
+use nix::sys::signalfd::{SfdFlags, SignalFd};
+use rustix::io::Errno;
+use rustix::termios::{OptionalActions, Termios};
+use std::io::{IsTerminal, Read, Write};
+use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -524,9 +528,7 @@ fn userspace_pins(lock: &Lock) -> Result<&[boot2deb_core::lock::UserspacePin], E
 
 /// Refuse a session with no terminal on the caller's end.
 fn require_terminal() -> Result<(), EngineError> {
-    // SAFETY: `isatty` reads a descriptor's kind and has no preconditions beyond the
-    // descriptor number being an integer; a closed or invalid one answers 0.
-    if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+    if std::io::stdin().is_terminal() {
         Ok(())
     } else {
         Err(EngineError::ShellNeedsTerminal)
@@ -547,7 +549,7 @@ fn require_terminal() -> Result<(), EngineError> {
 /// line disciplines in series would do all of it twice. It is restored on every path out,
 /// including a panic, by [`RawMode`]'s drop.
 fn relay(cage: &ferroday_cage::Cage, context: &str) -> Result<u8, EngineError> {
-    let tty = libc::STDIN_FILENO;
+    let tty = rustix::stdio::stdin();
     // Armed before the terminal is allocated: it blocks `SIGWINCH` process-wide, and a
     // resize between the size below and the block would otherwise be a signal delivered
     // to a process whose default action for it is to ignore it, and so lost.
@@ -581,9 +583,11 @@ fn relay(cage: &ferroday_cage::Cage, context: &str) -> Result<u8, EngineError> {
         if read == 0 {
             break;
         }
-        write_all(libc::STDOUT_FILENO, &buf[..read]).map_err(|source| EngineError::Terminal {
-            context: "write to the terminal",
-            source,
+        write_all(rustix::stdio::stdout(), &buf[..read]).map_err(|source| {
+            EngineError::Terminal {
+                context: "write to the terminal",
+                source,
+            }
         })?;
     }
 
@@ -606,7 +610,7 @@ fn relay(cage: &ferroday_cage::Cage, context: &str) -> Result<u8, EngineError> {
 /// redirected input that ran out) or on the first write the terminal refuses, and in
 /// both cases the session continues, since a command that is no longer being typed at
 /// is still running.
-fn relay_input(pty: Arc<Pty>, tty: RawFd) {
+fn relay_input(pty: Arc<Pty>, tty: BorrowedFd<'static>) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -633,37 +637,21 @@ fn relay_input(pty: Arc<Pty>, tty: RawFd) {
 /// spawned afterwards inherits that mask.
 struct WinchWatch {
     /// The `signalfd`, readable once per queued `SIGWINCH`.
-    fd: OwnedFd,
+    fd: SignalFd,
 }
 
 impl WinchWatch {
     /// Block `SIGWINCH` and open the descriptor it will be read off.
     fn arm() -> Result<WinchWatch, EngineError> {
-        let fail = |source| EngineError::Terminal {
+        let fail = |errno: nix::Error| EngineError::Terminal {
             context: "watch for terminal resizes",
-            source,
+            source: errno.into(),
         };
-        // SAFETY: every call takes an initialized `sigset_t` this frame owns, and the
-        // signalfd call takes it by shared reference for the duration of the call only.
-        unsafe {
-            let mut mask: libc::sigset_t = std::mem::zeroed();
-            if libc::sigemptyset(&mut mask) != 0 || libc::sigaddset(&mut mask, libc::SIGWINCH) != 0
-            {
-                return Err(fail(std::io::Error::last_os_error()));
-            }
-            // `pthread_sigmask` reports through its return value, not `errno`.
-            let masked = libc::pthread_sigmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
-            if masked != 0 {
-                return Err(fail(std::io::Error::from_raw_os_error(masked)));
-            }
-            let fd = libc::signalfd(-1, &mask, libc::SFD_CLOEXEC);
-            if fd < 0 {
-                return Err(fail(std::io::Error::last_os_error()));
-            }
-            Ok(WinchWatch {
-                fd: OwnedFd::from_raw_fd(fd),
-            })
-        }
+        let mut mask = SigSet::empty();
+        mask.add(Signal::SIGWINCH);
+        mask.thread_block().map_err(fail)?;
+        let fd = SignalFd::with_flags(&mask, SfdFlags::SFD_CLOEXEC).map_err(fail)?;
+        Ok(WinchWatch { fd })
     }
 
     /// Resize the sandbox's terminal to match `tty` for as long as the process lives.
@@ -671,18 +659,18 @@ impl WinchWatch {
     /// Detached, like the input relay and for the same reason. A resize that fails is
     /// dropped: the session is worth more than the ioctl, and the next resize retries it
     /// from the size the terminal reports then.
-    fn follow(self, pty: Arc<Pty>, tty: RawFd) {
-        std::thread::spawn(move || {
-            let mut buf = [0u8; std::mem::size_of::<libc::signalfd_siginfo>()];
-            loop {
-                match read_interruptibly(self.fd.as_raw_fd(), &mut buf) {
-                    Ok(0) | Err(_) => return,
-                    Ok(_) => {
-                        if let Some((rows, cols)) = window_size(tty) {
-                            let _ = pty.resize(rows, cols);
-                        }
+    fn follow(self, pty: Arc<Pty>, tty: BorrowedFd<'static>) {
+        std::thread::spawn(move || loop {
+            // The descriptor blocks, so a read answers with a signal or an error, and
+            // `Ok(None)` (the non-blocking "nothing queued") does not arise.
+            match self.fd.read_signal() {
+                Ok(Some(_)) => {
+                    if let Some((rows, cols)) = window_size(tty) {
+                        let _ = pty.resize(rows, cols);
                     }
                 }
+                Err(nix::Error::EINTR) => continue,
+                Ok(None) | Err(_) => return,
             }
         });
     }
@@ -694,95 +682,71 @@ impl WinchWatch {
 /// terminal left in raw mode is one the operator's shell no longer echoes into.
 struct RawMode {
     /// The terminal's descriptor.
-    fd: RawFd,
+    fd: BorrowedFd<'static>,
     /// The modes to put back.
-    saved: libc::termios,
+    saved: Termios,
 }
 
 impl RawMode {
     /// Read `fd`'s modes and put it in raw mode.
-    fn enter(fd: RawFd) -> Result<RawMode, EngineError> {
-        let fail = |source| EngineError::Terminal {
+    fn enter(fd: BorrowedFd<'static>) -> Result<RawMode, EngineError> {
+        let fail = |errno: Errno| EngineError::Terminal {
             context: "put the terminal in raw mode",
-            source,
+            source: errno.into(),
         };
-        // SAFETY: both calls take a `termios` this frame owns, initialized by `tcgetattr`
-        // before it is read.
-        unsafe {
-            let mut saved: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(fd, &mut saved) != 0 {
-                return Err(fail(std::io::Error::last_os_error()));
-            }
-            let mut raw = saved;
-            libc::cfmakeraw(&mut raw);
-            // `TCSADRAIN`, not `TCSAFLUSH`: input already queued when the session starts
-            // is relayed, not discarded. It is input the operator typed *at this
-            // session*, and discarding it loses type-ahead — and loses everything, for a
-            // session driven from a here-document or a pipe, where all of the input can
-            // be queued before the first read.
-            if libc::tcsetattr(fd, libc::TCSADRAIN, &raw) != 0 {
-                return Err(fail(std::io::Error::last_os_error()));
-            }
-            Ok(RawMode { fd, saved })
-        }
+        let saved = rustix::termios::tcgetattr(fd).map_err(fail)?;
+        let mut raw = saved.clone();
+        raw.make_raw();
+        // `TCSADRAIN`, not `TCSAFLUSH`: input already queued when the session starts
+        // is relayed, not discarded. It is input the operator typed *at this
+        // session*, and discarding it loses type-ahead — and loses everything, for a
+        // session driven from a here-document or a pipe, where all of the input can
+        // be queued before the first read.
+        rustix::termios::tcsetattr(fd, OptionalActions::Drain, &raw).map_err(fail)?;
+        Ok(RawMode { fd, saved })
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        // SAFETY: the descriptor was a terminal when its modes were read, and `saved` is
-        // what it reported. A failure here has no recovery and no reader.
-        unsafe {
-            libc::tcsetattr(self.fd, libc::TCSADRAIN, &self.saved);
-        }
+        // A failure here has no recovery and no reader.
+        let _ = rustix::termios::tcsetattr(self.fd, OptionalActions::Drain, &self.saved);
     }
 }
 
 /// The window size `fd` reports, as (rows, columns), or `None` when it reports none —
 /// which is what a terminal opened by something that was itself started without a size
 /// answers.
-fn window_size(fd: RawFd) -> Option<(u16, u16)> {
-    // SAFETY: `TIOCGWINSZ` writes a `winsize` this frame owns; a descriptor that is not
-    // a terminal fails rather than writing.
-    unsafe {
-        let mut size: libc::winsize = std::mem::zeroed();
-        (libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) == 0).then_some((size.ws_row, size.ws_col))
-    }
+fn window_size(fd: BorrowedFd<'_>) -> Option<(u16, u16)> {
+    rustix::termios::tcgetwinsize(fd)
+        .ok()
+        .map(|size| (size.ws_row, size.ws_col))
 }
 
-/// Read from a raw descriptor, retrying the interruption a signal causes.
+/// Read from a descriptor, retrying the interruption a signal causes.
 ///
 /// The relay's threads sit blocked in `read` for the whole session, which is exactly
 /// where an unhandled `EINTR` would end one early.
-fn read_interruptibly(fd: RawFd, buf: &mut [u8]) -> std::io::Result<usize> {
+fn read_interruptibly(fd: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<usize> {
     loop {
-        // SAFETY: the pointer and length describe `buf`, which this call borrows
-        // mutably for its duration.
-        let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if read >= 0 {
-            return Ok(read as usize);
-        }
-        let err = std::io::Error::last_os_error();
-        if err.kind() != std::io::ErrorKind::Interrupted {
-            return Err(err);
+        match rustix::io::read(fd, &mut *buf) {
+            Err(Errno::INTR) => continue,
+            done => return done.map_err(Into::into),
         }
     }
 }
 
-/// Write every byte to a raw descriptor, retrying a short write and an interruption.
-fn write_all(fd: RawFd, mut buf: &[u8]) -> std::io::Result<()> {
+/// Write every byte to a descriptor, retrying a short write and an interruption.
+///
+/// Straight to the descriptor rather than through `std::io::stdout()`, whose line
+/// buffering would hold back a prompt that does not end in a newline.
+fn write_all(fd: BorrowedFd<'_>, mut buf: &[u8]) -> std::io::Result<()> {
     while !buf.is_empty() {
-        // SAFETY: the pointer and length describe `buf`, which this call reads for its
-        // duration.
-        let written = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-        if written < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
+        match rustix::io::write(fd, buf) {
+            Ok(written) => buf = &buf[written..],
+            Err(Errno::INTR) => continue,
+            Err(errno) => return Err(errno.into()),
         }
-        buf = &buf[written as usize..];
     }
     Ok(())
 }

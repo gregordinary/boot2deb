@@ -386,36 +386,21 @@ fn stamp_times(path: &Path, secs: i64) -> Result<(), EngineError> {
 }
 
 /// Set one path's access and modification times to `secs`, without following a symlink.
+///
+/// `utimensat` with `AT_SYMLINK_NOFOLLOW` stamps a symlink itself. Anything that opens
+/// the path first stamps the link's target, which can lie outside the tree.
 fn set_times(path: &Path, secs: i64) -> Result<(), EngineError> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        EngineError::io(path, std::io::Error::from(std::io::ErrorKind::InvalidInput))
-    })?;
-    let times = [
-        libc::timespec {
-            tv_sec: secs,
-            tv_nsec: 0,
-        },
-        libc::timespec {
-            tv_sec: secs,
-            tv_nsec: 0,
-        },
-    ];
-    // SAFETY: `c_path` is a NUL-terminated path owned for the duration of the call, and
-    // `times` is a two-element array as `utimensat` requires.
-    let rc = unsafe {
-        libc::utimensat(
-            libc::AT_FDCWD,
-            c_path.as_ptr(),
-            times.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
+    use rustix::fs::{AtFlags, Timespec, Timestamps, CWD};
+    let at = Timespec {
+        tv_sec: secs,
+        tv_nsec: 0,
     };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(EngineError::io(path, std::io::Error::last_os_error()))
-    }
+    let times = Timestamps {
+        last_access: at,
+        last_modification: at,
+    };
+    rustix::fs::utimensat(CWD, path, &times, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|errno| EngineError::io(path, errno.into()))
 }
 
 /// Merge the layer `overlay-pre/` trees into `staging` and write the boot method's

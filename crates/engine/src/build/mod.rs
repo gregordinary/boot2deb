@@ -1611,9 +1611,7 @@ pub(crate) fn archive_deb(
 /// belongs at the top of a program. A library call is the wrong place, since a caller
 /// with its own threads did not ask to be reconfigured.
 pub fn declare_umask() {
-    // Safety: `umask` is always successful, returns the previous mask, and touches no
-    // memory. Called before any build thread exists.
-    unsafe { libc::umask(0o022) };
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
 }
 
 /// Normalize every mode in a staged package tree so the host umask does not leak into

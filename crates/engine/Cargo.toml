@@ -91,12 +91,15 @@ gix = { version = "0.85", default-features = false, features = [
     "blocking-http-transport-reqwest-rust-tls",
     "worktree-mutation",
 ] }
-# Process-group kill for the wall-clock-bounded `verify-sources` durability probe:
-# on timeout, SIGKILL git's whole process group so its network-helper
-# children die too and release the captured pipes, rather than hanging on a
-# huge-history repo. Already in the tree transitively; the engine is Linux-only,
-# so the Unix `killpg` is idiomatic here.
-libc = "0.2"
+# Safe syscall wrappers for the engine's direct host calls: the `verify-sources` probe's
+# process-group kill, the build's umask, the overlay's symlink-preserving timestamps,
+# and the `shell` session's terminal (raw mode, window size, unbuffered relay I/O).
+# Already in the tree under ferroday-cage and ferrosys with these features on.
+rustix = { version = "1.1", features = ["fs", "process", "termios", "stdio"] }
+# The `shell` session's `SIGWINCH` follow: blocking the signal and reading it off a
+# `signalfd`, which rustix does not wrap. Only `signal`, whose dependencies are all
+# already in the tree.
+nix = { version = "0.31", default-features = false, features = ["signal"] }
 # Pure-Rust `sha512crypt` for the image's first-boot `/etc/shadow` entry (see the
 # engine's secret module), replacing a shell-out to the host `openssl passwd -6`.
 # Same RustCrypto family as sha2/sha1, and portable: LibreSSL's `openssl passwd`
@@ -107,3 +110,6 @@ sha-crypt = "0.6"
 [dev-dependencies]
 # NDJSON wire-shape tests for the --json event stream (event.rs).
 serde_json.workspace = true
+
+[lints]
+workspace = true
