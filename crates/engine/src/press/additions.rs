@@ -10,7 +10,8 @@
 //!
 //! Everything here is pure list manipulation over [`SourceEntry`] values. A plain
 //! copy's bytes stay on the host as [`FileRange`]s until the formatter places
-//! them, so an embedded multi-gigabyte artifact costs no memory. A [template]
+//! them, a mebibyte at a time. An embedded multi-gigabyte artifact costs one
+//! window. A [template]
 //! is the one exception, because it has to be read to be expanded — and is
 //! size-capped for it.
 //!
@@ -18,8 +19,11 @@
 //! which mirrors the target rootfs: `DIR/etc/site.conf` lands at
 //! `/etc/site.conf`. The walk is
 //! [`ferrosys::DirectorySource`], the same machinery the image node's own sources
-//! use. Symlinks are recorded as symlinks rather than followed. The entry list a
-//! tree walks to does not depend on the order the host read its directories in.
+//! use. Symlinks are recorded as symlinks rather than followed. Every file's bytes,
+//! a template's included, are read beneath the tree's root following no link. A
+//! directory swapped for a link after the walk therefore redirects nothing. The
+//! entry list a tree walks to does not depend on the order the host read its
+//! directories in.
 //!
 //! The merge is deliberately conservative. An addition replaces an existing
 //! *file* (copying a config over the shipped one is the use case) but never a
@@ -295,7 +299,7 @@ impl TreeAdditions {
                     Some(dest) => {
                         let dest = dest.to_string();
                         let normalized = normalize_tree_dest(&dest, &tree_err)?;
-                        let (template, _) = host_template(&host_path, &normalized)?;
+                        let template = parse_template(&content, &host_path, &normalized)?;
                         (normalized, AddedContent::Template(template), "template")
                     }
                     None => (
@@ -465,12 +469,11 @@ impl TreeAdditions {
                             detail: "the image holds a directory at this path".into(),
                         });
                     }
-                    entries[i] = SourceEntry {
-                        path: file.dest.clone(),
-                        kind: file.kind(&facts),
-                        meta: Metadata::new(file.mode, time),
-                        xattrs: Vec::new(),
-                    };
+                    entries[i] = SourceEntry::new(
+                        file.dest.clone(),
+                        file.kind(&facts),
+                        Metadata::new(file.mode, time),
+                    );
                 }
                 None => {
                     for parent in ancestors(&file.dest) {
@@ -489,22 +492,20 @@ impl TreeAdditions {
                             None => {
                                 if !planned_dirs.iter().any(|p| p == parent) {
                                     planned_dirs.push(parent.to_vec());
-                                    appended.push(SourceEntry {
-                                        path: parent.to_vec(),
-                                        kind: EntryKind::Directory,
-                                        meta: Metadata::new(0o755, time),
-                                        xattrs: Vec::new(),
-                                    });
+                                    appended.push(SourceEntry::new(
+                                        parent.to_vec(),
+                                        EntryKind::Directory,
+                                        Metadata::new(0o755, time),
+                                    ));
                                 }
                             }
                         }
                     }
-                    appended.push(SourceEntry {
-                        path: file.dest.clone(),
-                        kind: file.kind(&facts),
-                        meta: Metadata::new(file.mode, time),
-                        xattrs: Vec::new(),
-                    });
+                    appended.push(SourceEntry::new(
+                        file.dest.clone(),
+                        file.kind(&facts),
+                        Metadata::new(file.mode, time),
+                    ));
                 }
             }
         }
@@ -640,26 +641,37 @@ fn host_file(src: &Path, dest: &str) -> Result<(FileContent, bool), EngineError>
 /// be checked, and checking it here is what makes a mistyped reference fail on
 /// the command line rather than in the middle of a re-assembly.
 fn host_template(src: &Path, dest: &str) -> Result<(Template, bool), EngineError> {
+    let (content, executable) = host_file(src, dest)?;
+    Ok((parse_template(&content, src, dest)?, executable))
+}
+
+/// A template's bytes, held to [`MAX_TEMPLATE_BYTES`] and parsed. `src` names the
+/// file in errors.
+///
+/// The bytes come from `content` rather than from `src`, so a template a
+/// [`copy_tree`](TreeAdditions::copy_tree) walk found is read the way every other
+/// file of that walk is: beneath the tree's root, following no link.
+fn parse_template(content: &FileContent, src: &Path, dest: &str) -> Result<Template, EngineError> {
     let bad = |detail: String| EngineError::PressAddition {
         dest: dest.to_string(),
         detail,
     };
-    let (meta, executable) = host_meta(src, dest)?;
-    if meta.len() > MAX_TEMPLATE_BYTES {
+    if content.len() > MAX_TEMPLATE_BYTES {
         return Err(bad(format!(
             "{} is {} bytes; a template is a config file and is read whole, so \
              {MAX_TEMPLATE_BYTES} is the ceiling (drop the {} suffix to copy it \
              verbatim instead)",
             src.display(),
-            meta.len(),
+            content.len(),
             template::TEMPLATE_SUFFIX,
         )));
     }
-    let bytes =
-        std::fs::read(src).map_err(|e| bad(format!("cannot read {}: {e}", src.display())))?;
-    let text = String::from_utf8(bytes)
+    let bytes = content
+        .read()
+        .map_err(|e| bad(format!("cannot read {}: {e}", src.display())))?;
+    let text = std::str::from_utf8(&bytes)
         .map_err(|_| bad(format!("{} is a template but is not UTF-8", src.display())))?;
-    Ok((Template::parse(&text, dest)?, executable))
+    Template::parse(text, dest)
 }
 
 /// A host source file's metadata, refusing anything but a regular file, plus
@@ -747,17 +759,13 @@ mod tests {
     /// one shipped config, and the identity document the marker rewrites.
     fn tree() -> Vec<SourceEntry> {
         let t = Timestamp::from_secs(1_700_000_000);
-        let dir = |p: &str| SourceEntry {
-            path: p.as_bytes().to_vec(),
-            kind: EntryKind::Directory,
-            meta: Metadata::new(0o755, t),
-            xattrs: Vec::new(),
-        };
-        let file = |p: &str, body: &str| SourceEntry {
-            path: p.as_bytes().to_vec(),
-            kind: EntryKind::File(FileContent::Owned(body.as_bytes().to_vec())),
-            meta: Metadata::new(0o644, t),
-            xattrs: Vec::new(),
+        let dir = |p: &str| SourceEntry::new(p, EntryKind::Directory, Metadata::new(0o755, t));
+        let file = |p: &str, body: &str| {
+            SourceEntry::new(
+                p,
+                EntryKind::File(FileContent::Owned(body.as_bytes().to_vec())),
+                Metadata::new(0o644, t),
+            )
         };
         vec![
             dir("/etc"),

@@ -319,23 +319,13 @@ fn verify_point(
         ok: prov.image.image_bytes > 0,
     });
 
-    // 5. A fitted size additionally has to have left the slack it asked for. The
-    //    formatter measures that as free blocks once the source is written and computes
-    //    the requirement by integer division, so the comparison truncates the same way —
-    //    a filesystem sitting exactly on the floor is a pass, and comparing the
-    //    untruncated ratio instead would report it as a failure by less than one block.
+    // 5. A fitted size additionally has to have left the slack it asked for, measured
+    //    as the formatter measures it: free blocks once the source is written.
     if let boot2deb_core::size::ImageSize::Fit(slack) =
         boot2deb_core::size::parse_image_size(&prov.image.image_size)?
     {
         let free = boot2deb_engine::image::inspect::rootfs_free_blocks(&image);
-        let required = match slack {
-            boot2deb_core::size::Slack::Share(hundredths) => {
-                geom.total_blocks * hundredths as u64 / 10_000
-            }
-            // A byte floor rounds *up* to whole blocks: the formatter cannot leave a
-            // fraction of one free, so anything less than a full block short is short.
-            boot2deb_core::size::Slack::Bytes(bytes) => bytes.div_ceil(geom.block_size as u64),
-        };
+        let required = required_free_blocks(slack, geom.total_blocks, geom.block_size as u64);
         checks.push(Check {
             what: "slack",
             detail: match &free {
@@ -450,6 +440,26 @@ fn verify_point(
 
 /// Check 0: the build record beside the artifacts says the newest build of this point
 /// was a whole build that succeeded ([`BuildRecord::vouches_for_image`]).
+/// The fewest free blocks a fitted filesystem of `total_blocks` must keep to honour
+/// `slack`.
+///
+/// Both floors round up to whole blocks, because the formatter cannot leave a fraction
+/// of one free. A share is the fewest blocks that are at least that share of the
+/// filesystem, which is what the formatter searches for, so a filesystem sitting exactly
+/// on the floor passes and one a fraction of a block short of the share does not.
+fn required_free_blocks(
+    slack: boot2deb_core::size::Slack,
+    total_blocks: u64,
+    block_size: u64,
+) -> u64 {
+    match slack {
+        boot2deb_core::size::Slack::Share(hundredths) => {
+            (total_blocks * hundredths as u64).div_ceil(10_000)
+        }
+        boot2deb_core::size::Slack::Bytes(bytes) => bytes.div_ceil(block_size),
+    }
+}
+
 fn build_record_check(dir: &Path, stem: &str) -> Check {
     let path = dir.join(boot2deb_core::buildrecord::record_name(stem));
     let parsed = std::fs::read_to_string(&path)
@@ -682,5 +692,19 @@ mod tests {
             "{}",
             other.detail
         );
+    }
+
+    /// A share asks for whole blocks rounded up, as the formatter's fit search does: a
+    /// fifth of 1001 blocks is 200.2, so 200 free is short and 201 is the floor.
+    #[test]
+    fn a_slack_floor_rounds_up_to_whole_blocks() {
+        use boot2deb_core::size::Slack;
+        assert_eq!(required_free_blocks(Slack::Share(2000), 1001, 4096), 201);
+        // A share that divides exactly asks for exactly that many.
+        assert_eq!(required_free_blocks(Slack::Share(2000), 1000, 4096), 200);
+        assert_eq!(required_free_blocks(Slack::Share(150), 10_000, 4096), 150);
+        // A byte floor is whole blocks too: one byte past a block needs a second.
+        assert_eq!(required_free_blocks(Slack::Bytes(4097), 1000, 4096), 2);
+        assert_eq!(required_free_blocks(Slack::Bytes(8192), 1000, 4096), 2);
     }
 }

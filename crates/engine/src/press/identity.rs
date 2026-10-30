@@ -361,12 +361,11 @@ mod tests {
     }
 
     fn file(path: &str, body: &str) -> SourceEntry {
-        SourceEntry {
-            path: path.as_bytes().to_vec(),
-            kind: EntryKind::File(FileContent::Owned(body.as_bytes().to_vec())),
-            meta: Metadata::new(0o644, Timestamp::from_secs(1_700_000_000)),
-            xattrs: Vec::new(),
-        }
+        SourceEntry::new(
+            path,
+            EntryKind::File(FileContent::Owned(body.as_bytes().to_vec())),
+            Metadata::new(0o644, Timestamp::from_secs(1_700_000_000)),
+        )
     }
 
     fn body(entries: &[SourceEntry], path: &str) -> String {

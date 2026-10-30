@@ -60,12 +60,16 @@ ruzstd = "0.9"
 # member's bytes out of the archive as that file is placed rather than buffering the
 # whole rootfs.
 # `fat` additionally formats the 1 MiB FAT12 seed partition every image carries
-# (see the engine's flash::seed) — a text file an operator can edit from any OS.
+# (see the engine's press::seed) — a text file an operator can edit from any OS.
 # `dir` adds the host-directory walk `press --copy-tree` places a site tree
 # with: it yields the same `SourceEntry` values the tar source does, recording
 # symlinks rather than following them and leaving file bytes on the host until
 # the formatter places them.
-ferrosys = { version = "0.5", features = ["tar", "fat", "dir"] }
+# The families are named rather than taken from the crate's default, which carries
+# every family it has, APFS and its decoders among them. With this set ferrosys
+# compiles only its own MIT OR Apache-2.0 code, and only the families boot2deb writes
+# and reads.
+ferrosys = { version = "0.7", default-features = false, features = ["ext", "tar", "fat", "dir"] }
 # Pure-Rust build sandbox (see the engine's sandbox module): enters the
 # target-arch rootfs and runs each package-build command in fresh namespaces
 # with the caller mapped to root, replacing the external `bwrap` binary. The

@@ -38,6 +38,10 @@ pub fn manifest_of(ext4: &Path) -> Result<FileManifest, EngineError> {
 /// Read the rootfs file manifest back out of a finished image artifact: the partition its
 /// GPT labels `rootfs`, walked where it sits.
 ///
+/// The reader is held to the partition's extent as well as its start, so it reads what a
+/// kernel mounting the partition reads. A read past the partition's end fails as one past
+/// the end of the image does, rather than taking bytes from whatever follows it.
+///
 /// The walk seeks, and a compressed stream cannot. A `.img.xz` or `.img.gz` is therefore
 /// decompressed first, into a sparse temporary file in `scratch`, which is removed when
 /// this returns. A raw `.img` is read in place.
@@ -48,7 +52,9 @@ pub fn manifest_of(ext4: &Path) -> Result<FileManifest, EngineError> {
 /// partition, or holds a tree the manifest format cannot carry.
 pub fn manifest_of_image(artifact: &Path, scratch: &Path) -> Result<FileManifest, EngineError> {
     let partition = crate::image::inspect::rootfs_partition(artifact)?;
-    let options = ferrosys::ext::OpenOptions::new().base(partition.start);
+    let options = ferrosys::ext::OpenOptions::new()
+        .base(partition.start)
+        .len(partition.bytes);
     if crate::press::write::Container::of(artifact)? == crate::press::write::Container::Raw {
         let file = std::fs::File::open(artifact).map_err(|s| EngineError::io(artifact, s))?;
         let reader = Reader::open_with(std::io::BufReader::new(file), &options)

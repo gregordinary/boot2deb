@@ -12,8 +12,9 @@
 //! runs as the plain build user.
 //!
 //! Only the headers are read up front. Each file's bytes stay in the archive until that
-//! file is placed. A multi-gigabyte rootfs therefore costs the largest single file in
-//! it rather than the sum.
+//! file is placed, and are then placed a mebibyte at a time. A multi-gigabyte rootfs
+//! therefore costs its entry records and one window, whatever the size of its largest
+//! file.
 //!
 //! The image is resize-safe by construction. [`GrowReservation::Max`] sizes the
 //! reserved group-descriptor-table blocks to the most the format can address (~8 TiB
@@ -72,9 +73,9 @@ use crate::hosttool;
 use crate::image::geometry::EXT4_BLOCK;
 use boot2deb_core::provenance::{FilesystemGeometry, FilesystemProvenance};
 use ferrosys::ext::{
-    EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions, FormatPlan, GrowReservation,
-    InodeCount, Layout, Location, Reader, ReservedRatio, ScanReport, Source, SourceEntry,
-    TreeBuilder,
+    Anomaly, EntryKind, ErrorBehavior, FeatureSet, FileContent, FormatOptions, FormatPlan,
+    GrowReservation, InodeCount, Layout, Location, Reader, ReservedRatio, ScanReport, Source,
+    SourceEntry, TreeBuilder,
 };
 use ferrosys::{ArchiveSource, Slack, Timestamp};
 use sha2::{Digest, Sha256};
@@ -169,12 +170,12 @@ pub(crate) fn build_rootfs_ext4(
     //    ownership, mode, times, xattrs, ACLs, and device nodes straight from the
     //    (PAX) headers — no privileged extraction, so no user namespace.
     //
-    //    `from_path` leaves each member's bytes in the archive and reads them as that
-    //    file is placed, so peak memory is the largest single file in the rootfs rather
-    //    than the sum of them all — for a media-accel rootfs, megabytes instead of
-    //    gigabytes. It holds the archive open for the whole format, so `tarball` must
-    //    not be rewritten in place until this returns — the rootfs node finishes writing
-    //    it before the image node runs, so nothing holds it open for writing here.
+    //    `from_path` leaves each member's bytes in the archive and reads them a window
+    //    at a time as that file is placed, so the bytes in memory are one mebibyte
+    //    however large the rootfs or its largest file. It holds the archive open for
+    //    the whole format, so `tarball` must not be rewritten in place until this
+    //    returns — the rootfs node finishes writing it before the image node runs, so
+    //    nothing holds it open for writing here.
     let mut entries = ArchiveSource::from_path(tarball)
         .map_err(|e| EngineError::Ext4Format {
             detail: format!("parsing rootfs tar {}: {e}", tarball.display()),
@@ -206,8 +207,8 @@ pub(crate) fn build_rootfs_ext4(
     //    formats. The model it built is kept, so the write walks the source once.
     let options = format_options(uuid, label, &entries);
     let plan = match size {
-        RootfsSize::Exact(bytes) => FormatPlan::new(Entries(entries), bytes, options),
-        RootfsSize::Fit(slack) => FormatPlan::fit(Entries(entries), options, slack),
+        RootfsSize::Exact(bytes) => FormatPlan::new(entries, bytes, options),
+        RootfsSize::Fit(slack) => FormatPlan::fit(entries, options, slack),
     }
     .map_err(|e| EngineError::Ext4Format {
         detail: e.to_string(),
@@ -525,15 +526,6 @@ impl PressTree<'_> {
     }
 }
 
-/// A parsed, post-processed entry list handed to the formatter as a [`Source`].
-struct Entries(Vec<SourceEntry>);
-
-impl Source for Entries {
-    fn into_entries(self) -> Vec<SourceEntry> {
-        self.0
-    }
-}
-
 /// Minimum e2fsprogs version the `e2fsck` cross-check is trusted at, as
 /// `(major, minor)`.
 ///
@@ -617,22 +609,47 @@ const REPORTED_ANOMALIES: usize = 8;
 
 /// Render a failing scan as the error text the build stops with.
 ///
-/// Pure, so the rendering is unit-testable against a constructed report rather than
-/// against a deliberately corrupted image.
+/// A scan fails for one of two reasons, and the text keeps them apart. An anomaly is the
+/// formatter and its own reader disagreeing about the image. A source failure is a read
+/// of the image file that failed: it says nothing about what the formatter wrote, but the
+/// scan did not see what the read held, so it fails the build as well and is named as the
+/// host's fault rather than the formatter's.
+///
+/// Pure, so the rendering is unit-testable against the report a scan returns.
 fn scan_failure(report: &ScanReport) -> String {
     let found = report.anomalies().len();
-    let at_least = if report.is_truncated() {
-        "at least "
-    } else {
-        ""
-    };
-    let mut detail = format!(
-        "the formatter wrote an image its own reader disagrees with: {at_least}{found} \
-         anomal{} found scanning it back",
-        if found == 1 { "y" } else { "ies" },
-    );
-    for anomaly in report.anomalies().iter().take(REPORTED_ANOMALIES) {
-        detail.push_str(&format!(
+    let failed = report.source_failures().len();
+    let mut parts = Vec::new();
+    if found > 0 || failed == 0 {
+        let at_least = if report.is_truncated() {
+            "at least "
+        } else {
+            ""
+        };
+        parts.push(format!(
+            "the formatter wrote an image its own reader disagrees with: {at_least}{found} \
+             anomal{} found scanning it back{}",
+            if found == 1 { "y" } else { "ies" },
+            listed(report.anomalies()),
+        ));
+    }
+    if failed > 0 {
+        parts.push(format!(
+            "{failed} read{} of the image failed while scanning it back, so the scan did \
+             not see all of it{}",
+            if failed == 1 { "" } else { "s" },
+            listed(report.source_failures()),
+        ));
+    }
+    parts.join("\n")
+}
+
+/// The first [`REPORTED_ANOMALIES`] of `met`, one indented line each, and a count of the
+/// rest.
+fn listed(met: &[Anomaly]) -> String {
+    let mut lines = String::new();
+    for anomaly in met.iter().take(REPORTED_ANOMALIES) {
+        lines.push_str(&format!(
             "\n  [{}/{}] {}{}",
             anomaly.severity.as_str(),
             anomaly.category.as_str(),
@@ -640,10 +657,13 @@ fn scan_failure(report: &ScanReport) -> String {
             at(&anomaly.location),
         ));
     }
-    if found > REPORTED_ANOMALIES {
-        detail.push_str(&format!("\n  ... and {} more", found - REPORTED_ANOMALIES));
+    if met.len() > REPORTED_ANOMALIES {
+        lines.push_str(&format!(
+            "\n  ... and {} more",
+            met.len() - REPORTED_ANOMALIES
+        ));
     }
-    detail
+    lines
 }
 
 /// One anomaly's location as a trailing ` (inode N, group N, block N)`, empty when the
@@ -751,12 +771,11 @@ mod tests {
 
     /// A shadow entry as `ArchiveSource` would parse it: a `0640` regular file.
     fn shadow_entry(content: &[u8], mtime: Timestamp) -> SourceEntry {
-        SourceEntry {
-            path: b"/etc/shadow".to_vec(),
-            kind: EntryKind::File(FileContent::Owned(content.to_vec())),
-            meta: Metadata::new(0o640, mtime),
-            xattrs: Vec::new(),
-        }
+        SourceEntry::new(
+            "/etc/shadow",
+            EntryKind::File(FileContent::Owned(content.to_vec())),
+            Metadata::new(0o640, mtime),
+        )
     }
 
     /// The size every fixture image below is formatted at.
@@ -809,15 +828,6 @@ mod tests {
         Ok((img, fs))
     }
 
-    /// The formatted image must carry the supplied UUID, the resize-critical layout
-    /// (`sparse_super` + `resize_inode` with reserved GDT blocks reaching the format
-    /// ceiling), the pinned `remount-ro` error policy, and exactly the requested size —
-    /// and pass the scan `build_rootfs_ext4` runs over it.
-    ///
-    /// Read back through the formatter's own reader rather than by indexing superblock
-    /// offsets by hand. Each field is then named by the format rather than located by
-    /// this test's arithmetic, so an assertion cannot quietly pass by reading the wrong
-    /// two bytes — and the feature words are checked as a feature set rather than as bit
     /// A fitted size is decided by the format rather than stated to it, so the two
     /// things worth asserting are that the size comes back reported — the geometry is
     /// laid out around it, and a wrong number there is a filesystem that does not
@@ -862,6 +872,15 @@ mod tests {
         );
     }
 
+    /// The formatted image must carry the supplied UUID, the resize-critical layout
+    /// (`sparse_super` + `resize_inode` with reserved GDT blocks reaching the format
+    /// ceiling), the pinned `remount-ro` error policy, and exactly the requested size —
+    /// and pass the scan `build_rootfs_ext4` runs over it.
+    ///
+    /// Read back through the formatter's own reader rather than by indexing superblock
+    /// offsets by hand. Each field is then named by the format rather than located by
+    /// this test's arithmetic, so an assertion cannot quietly pass by reading the wrong
+    /// two bytes — and the feature words are checked as a feature set rather than as bit
     /// masks this file would have to keep in step with the format's own.
     #[test]
     fn formats_resizable_filesystem_with_the_supplied_uuid() {
@@ -977,6 +996,78 @@ mod tests {
         );
     }
 
+    /// A read of the image that fails is the host's fault rather than the formatter's,
+    /// and the gate still fails on it: a scan that did not see part of the image has no
+    /// verdict on that part. The source answers until the scan starts and fails every read
+    /// after, which is a disk returning errors under a finished image.
+    #[test]
+    fn the_scan_gate_fails_a_scan_whose_reads_failed_and_blames_the_host() {
+        use std::cell::Cell;
+        use std::io::{Read, Seek};
+        use std::rc::Rc;
+
+        /// The image file, failing every read once `failing` is set.
+        struct Failing {
+            file: std::fs::File,
+            failing: Rc<Cell<bool>>,
+        }
+        impl Read for Failing {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.failing.get() {
+                    return Err(std::io::Error::other("the disk returned an error"));
+                }
+                self.file.read(buf)
+            }
+        }
+        impl Seek for Failing {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.file.seek(pos)
+            }
+        }
+
+        if !tar_ready() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (img, _) = format_fixture(
+            tmp.path(),
+            RootfsSize::Exact(FIXTURE_SIZE),
+            Uuid::from_bytes([0x5a; 16]),
+        )
+        .expect("the fixture formats clean");
+
+        let failing = Rc::new(Cell::new(false));
+        let mut reader = Reader::open(Failing {
+            file: std::fs::File::open(&img).unwrap(),
+            failing: Rc::clone(&failing),
+        })
+        .unwrap();
+        failing.set(true);
+        let report = reader.scan();
+
+        assert!(
+            !report.source_failures().is_empty(),
+            "the failed reads are recorded"
+        );
+        assert!(
+            !report.is_clean(),
+            "a scan that could not read the image is not a clean one"
+        );
+        let detail = scan_failure(&report);
+        assert!(
+            detail.contains("of the image failed while scanning it back"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("the disk returned an error"),
+            "the host's own error is carried: {detail}"
+        );
+        assert!(
+            !detail.contains("disagrees with"),
+            "a read failure is not blamed on the formatter: {detail}"
+        );
+    }
+
     #[test]
     fn splice_first_boot_password_rewrites_the_shadow_entry() {
         let mtime = Timestamp::from_secs(1_600_000_000);
@@ -985,12 +1076,11 @@ mod tests {
                 b"root:*:19000:0:99999:7:::\ndebian:!:19000:0:99999:7:::\n",
                 mtime,
             ),
-            SourceEntry {
-                path: b"/etc/hostname".to_vec(),
-                kind: EntryKind::File(FileContent::Owned(b"turing-rk1\n".to_vec())),
-                meta: Metadata::new(0o644, mtime),
-                xattrs: Vec::new(),
-            },
+            SourceEntry::new(
+                "/etc/hostname",
+                EntryKind::File(FileContent::Owned(b"turing-rk1\n".to_vec())),
+                Metadata::new(0o644, mtime),
+            ),
         ];
         let first_boot = FirstBoot {
             user: "debian",
@@ -1036,12 +1126,11 @@ mod tests {
 
     #[test]
     fn splice_first_boot_password_errors_when_shadow_is_absent() {
-        let mut entries = vec![SourceEntry {
-            path: b"/etc/hostname".to_vec(),
-            kind: EntryKind::File(FileContent::Owned(b"turing-rk1\n".to_vec())),
-            meta: Metadata::new(0o644, Timestamp::from_secs(1)),
-            xattrs: Vec::new(),
-        }];
+        let mut entries = vec![SourceEntry::new(
+            "/etc/hostname",
+            EntryKind::File(FileContent::Owned(b"turing-rk1\n".to_vec())),
+            Metadata::new(0o644, Timestamp::from_secs(1)),
+        )];
         let first_boot = FirstBoot {
             user: "debian",
             password_hash: "$6$x$y",

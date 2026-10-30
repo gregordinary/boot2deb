@@ -1633,13 +1633,15 @@ mod tests {
         let bytes = std::fs::read(&pressed_path).unwrap();
         assert_eq!(&bytes[32 * 1024..32 * 1024 + 17], b"IDBLOADER-PAYLOAD");
 
-        // Walk both filesystems (they sit at the same 16 MiB offset) into
-        // path -> (mode, uid, content) maps.
+        // Walk both filesystems into path -> (mode, uid, content) maps, each read
+        // from its own GPT entry and held to that partition's extent.
         type Snapshot = BTreeMap<Vec<u8>, (u16, u32, Option<Vec<u8>>)>;
         let walk = |path: &Path| -> Snapshot {
+            let part = inspect::rootfs_partition(path).unwrap();
             let file = std::fs::File::open(path).unwrap();
             let mut reader =
-                ExtReader::open_with(file, &ExtOpen::new().base(16 * 1024 * 1024)).unwrap();
+                ExtReader::open_with(file, &ExtOpen::new().base(part.start).len(part.bytes))
+                    .unwrap();
             let entries = reader.walk().unwrap();
             entries
                 .into_iter()
@@ -1760,12 +1762,14 @@ mod tests {
         let table = crate::press::verify::read_back_table(path).unwrap();
         let rootfs = table.iter().find(|e| e.name == "rootfs").unwrap();
         let base = rootfs.first_lba * geometry::SECTOR;
+        // The GPT's last LBA is inclusive.
+        let len = (rootfs.last_lba - rootfs.first_lba + 1) * geometry::SECTOR;
         let bytes = std::fs::read(path).unwrap();
         let at = usize::try_from(base).unwrap() + 1024 + 0x68;
         let uuid = Uuid::from_slice(&bytes[at..at + 16]).unwrap();
         let mut reader = ExtReader::open_with(
             std::fs::File::open(path).unwrap(),
-            &ExtOpen::new().base(base),
+            &ExtOpen::new().base(base).len(len),
         )
         .unwrap();
         let entry = reader
