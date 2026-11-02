@@ -13,15 +13,16 @@ serde.workspace = true
 # diffs. Pure Rust, already in the tree via core.
 toml.workspace = true
 # Format-preserving TOML editing for `patch import`: slot a patch into a
-# series' scope list without disturbing the file's comments/layout. Already in
-# the tree as toml's own parser backend.
-toml_edit = "0.22"
+# series' scope list without disturbing the file's comments/layout. It reads and
+# writes through the same `toml_parser` and `toml_writer` that `toml` does, so it
+# adds no crate to the build beyond itself.
+toml_edit = "0.25"
 thiserror.workspace = true
-# `oid` lets `rsa` build the PKCS#1 v1.5 DigestInfo for SHA-256 from the hash type
-# itself (image::vboot). Already enabled in the tree by `rsa`.
-sha2 = { workspace = true, features = ["oid"] }
+sha2.workspace = true
 # RSASSA-PKCS1-v1_5 signing and verification for the vboot kernel partition a press
-# re-signs under a fresh identity (image::vboot). Pure Rust, RustCrypto.
+# re-signs under a fresh identity (image::vboot). Pure Rust, RustCrypto. Its 0.9 line
+# takes hashes of the older `digest` generation, so vboot states the SHA-256
+# `DigestInfo` header itself rather than deriving it from `sha2`.
 rsa = "0.9.10"
 # Reads the vendored apt keyrings the trust-anchor audit holds to their fingerprint
 # manifests (keyring.rs): their certificates, each primary key's fingerprint, and
@@ -80,16 +81,18 @@ ferroday-cage = { version = "0.5.0", features = ["debian", "subid"] }
 # Randomly-named, fail-if-exists staging dirs for the build's intermediate trees,
 # so a local user cannot pre-create and own one.
 tempfile.workspace = true
-# HTTP(S) fetch of pre-built `extra_debs` from a vendor URL. Pure-Rust
-# TLS via rustls with bundled roots (no system OpenSSL / cert store), aligning with
-# the pure-Rust orchestrator goal and the rustls direction; blocking, no async
-# runtime pulled in.
-ureq = { version = "2", default-features = false, features = ["tls"] }
-# Pure-Rust clone of the `patches` repo at the lock-pinned commit, so a
-# build with no local checkout auto-fetches the series. Blocking HTTP/S transport
-# over reqwest + rustls (no libcurl / OpenSSL), plus `worktree-mutation` for the
-# detached checkout of the exact pinned commit into the cache.
-gix = { version = "0.85", default-features = false, features = [
+# Every HTTP(S) fetch boot2deb makes itself: pre-built `extra_debs` and the .NET pins
+# (netfetch.rs), the `https://` half of the archive transport (archfetch.rs), and the
+# listings `patch import` and `outdated` read. TLS through rustls against the bundled
+# webpki roots, never the host's certificate store; blocking, no async runtime.
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+# In-process clone of the `patches` repo at the lock-pinned commit, so a build with
+# no local checkout auto-fetches the series. Blocking HTTP/S transport over reqwest +
+# rustls (no libcurl, no OpenSSL), plus `worktree-mutation` for the detached checkout
+# of the exact pinned commit into the cache. reqwest's rustls takes its cryptography
+# from aws-lc-rs, which builds C with `cc`, and verifies against the host's
+# certificate store.
+gix = { version = "0.90", default-features = false, features = [
     "sha1",
     "blocking-network-client",
     "blocking-http-transport-reqwest-rust-tls",

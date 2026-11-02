@@ -14,6 +14,8 @@
 //! - **No TLS downgrade.** Redirects are followed manually (auto-redirect off), and a
 //!   hop from `https` to `http` is refused — a MITM cannot strip TLS by redirecting.
 //! - **Bounded redirects.** At most `MAX_REDIRECTS` hops before giving up.
+//! - **Direct connections.** Proxy variables in the environment are not read. The
+//!   fetch connects to the host its URL names.
 //!
 //! Integrity of a fetched `extra_deb` still comes from its pinned sha256. This
 //! is the transport-hardening layer beneath that pin.
@@ -23,6 +25,25 @@ use std::time::Duration;
 
 /// Maximum redirect hops followed before the fetch is abandoned.
 pub(crate) const MAX_REDIRECTS: u32 = 5;
+
+/// How long one connection attempt may take, TLS handshake included, before the fetch
+/// fails. It is the bound the sandbox library's own client sets for the same step, so
+/// an unreachable host fails every fetch on one clock rather than on the kernel's
+/// SYN-retry span.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The configuration every `ureq` agent in this crate starts from: a bounded connect
+/// and no proxy. ureq reads `ALL_PROXY`, `HTTPS_PROXY` and `HTTP_PROXY` from the
+/// environment unless a proxy is set explicitly, so `None` is what keeps these agents
+/// connecting directly, as the sandbox library's own client beside them in
+/// [`ArchiveFetch`](crate::archfetch::ArchiveFetch) does. TLS is ureq's default for the
+/// `rustls` feature: rustls, verifying against the bundled webpki roots and never the
+/// host's certificate store.
+pub(crate) fn agent_config() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .proxy(None)
+}
 
 /// A bounded-fetch failure. Callers map the message into their own typed error
 /// ([`ExtraDebFetch`](crate::error::EngineError::ExtraDebFetch) /
@@ -40,34 +61,42 @@ pub struct FetchError(pub String);
 pub fn fetch_bounded(url: &str, max_bytes: u64, timeout: Duration) -> Result<Vec<u8>, FetchError> {
     require_http(url)?;
     // Auto-redirect off: we follow manually so each hop passes the scheme/downgrade
-    // policy before it is requested.
-    let agent = ureq::AgentBuilder::new()
-        .timeout(timeout)
-        .redirects(0)
-        .build();
+    // policy before it is requested. `timeout` bounds each hop end to end, the body
+    // read included.
+    let agent: ureq::Agent = agent_config()
+        .timeout_global(Some(timeout))
+        .max_redirects(0)
+        .build()
+        .into();
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
+        // The hop is named in the error because a redirect may have moved the fetch
+        // away from the URL the caller reports.
         let resp = agent
             .get(&current)
             .call()
-            .map_err(|e| FetchError(e.to_string()))?;
+            .map_err(|e| FetchError(format!("{current}: {e}")))?;
         // ureq returns Err for >=400, so an Ok response is 2xx or (redirects off) 3xx.
-        if (300..400).contains(&resp.status()) {
-            let loc = resp.header("Location").ok_or_else(|| {
-                FetchError(format!(
-                    "redirect {} without a Location header",
-                    resp.status()
-                ))
-            })?;
+        let status = resp.status().as_u16();
+        if (300..400).contains(&status) {
+            let loc = resp
+                .headers()
+                .get(ureq::http::header::LOCATION)
+                .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
+                .ok_or_else(|| {
+                    FetchError(format!("redirect {status} without a Location header"))
+                })?;
             let next = resolve_redirect(&current, loc)?;
             require_http(&next)?;
             reject_downgrade(&current, &next)?;
             current = next;
             continue;
         }
-        // 2xx: read the body under the size cap.
+        // 2xx: read the body under the size cap. The body reader is unbounded, so the
+        // cap is this `take`, not a limit of the client's.
         let mut bytes = Vec::new();
-        resp.into_reader()
+        resp.into_body()
+            .into_reader()
             .take(max_bytes.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|e| FetchError(format!("reading response body: {e}")))?;

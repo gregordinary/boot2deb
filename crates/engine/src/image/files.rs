@@ -13,7 +13,6 @@ use crate::event::Step;
 use boot2deb_core::files::{FileEntry, FileManifest, FileType, WalkedEntry};
 use ferrosys::ext::ondisk::Inode;
 use ferrosys::ext::Reader;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 use std::path::Path;
@@ -202,12 +201,12 @@ fn describe<R: Read + Seek>(
     match file_type {
         FileType::Reg => {
             // The content streams through the hash rather than being held whole.
-            let mut hasher = Sha256::new();
+            let mut hasher = crate::blobs::Sha256Writer::default();
             let size = reader
                 .read_data_to(inode, &mut hasher)
                 .map_err(|e| read_failed(source, e))?;
             entry.size = size;
-            entry.sha256 = (size > 0).then(|| crate::blobs::hex(&hasher.finalize()));
+            entry.sha256 = (size > 0).then(|| hasher.hex());
         }
         FileType::Lnk => {
             let target = reader

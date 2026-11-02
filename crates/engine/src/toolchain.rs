@@ -46,7 +46,6 @@
 //! not in the pure lock-only `why-rebuild` plan.
 
 use ferroday_cage::provision::debian::foreign_interpreter;
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -110,7 +109,7 @@ impl Interpreter {
 /// sha256 of the file at `path`, lowercase hex; `None` when it cannot be read.
 fn digest_of(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
-    Some(format!("{:x}", Sha256::digest(&bytes)))
+    Some(crate::blobs::sha256_hex(&bytes))
 }
 
 /// First line of `path --version`; `None` when it cannot be run or reports nothing.

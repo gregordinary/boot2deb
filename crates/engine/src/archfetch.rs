@@ -28,7 +28,7 @@
 //!
 //! The two halves run at once.
 
-use crate::netfetch::MAX_REDIRECTS;
+use crate::netfetch::{agent_config, MAX_REDIRECTS};
 use ferroday_cage::provision::{Fetch, FetchError, FetchJob, FetchRequest, HttpFetch};
 use std::io::Write;
 use std::sync::Mutex;
@@ -60,7 +60,7 @@ impl ArchiveFetch {
             // Redirects are followed by the agent rather than by hand, and bounded for
             // the reason `netfetch` bounds them: a mirror that redirects in a loop must
             // fail rather than hang a build.
-            tls: ureq::AgentBuilder::new().redirects(MAX_REDIRECTS).build(),
+            tls: agent_config().max_redirects(MAX_REDIRECTS).build().into(),
         }
     }
 }
@@ -95,7 +95,9 @@ fn fetch_tls(
     let url = request.url();
     match agent.get(url).call() {
         Ok(response) => {
-            let mut body = response.into_reader();
+            // Streamed, so no body limit of the client's applies: a package weighs
+            // whatever it weighs, and the provisioner bounds the sink it is written to.
+            let mut body = response.into_body().into_reader();
             std::io::copy(&mut body, sink).map_err(FetchError::at("reading the body", url))?;
             Ok(())
         }
@@ -103,13 +105,9 @@ fn fetch_tls(
         // status: the provisioner treats it as a recoverable absence and falls back
         // to another index compression or a non-by-hash path, and a plain status
         // would turn a normal probe into a hard failure.
-        Err(ureq::Error::Status(404, _)) => Err(FetchError::not_found(url)),
-        Err(ureq::Error::Status(code, _)) => Err(FetchError::status(url, code)),
-        Err(err @ ureq::Error::Transport(_)) => Err(FetchError::io(
-            "fetching over https",
-            url,
-            std::io::Error::other(err.to_string()),
-        )),
+        Err(ureq::Error::StatusCode(404)) => Err(FetchError::not_found(url)),
+        Err(ureq::Error::StatusCode(code)) => Err(FetchError::status(url, code)),
+        Err(err) => Err(FetchError::io("fetching over https", url, err.into_io())),
     }
 }
 

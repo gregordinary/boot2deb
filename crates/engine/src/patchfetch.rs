@@ -173,9 +173,16 @@ fn clone_at_commit_inner(
         .workdir()
         .ok_or_else(|| "clone has no work dir".to_string())?
         .to_owned();
+    // No filter drivers and Git's default line-ending settings. The pipeline takes the
+    // repository's hash kind, which it expands `$Id$` with.
+    let filters = gix::filter::plumbing::Pipeline::new(
+        Default::default(),
+        repo.object_hash(),
+        Default::default(),
+    );
     let opts = gix::worktree::state::checkout::Options {
         destination_is_initially_empty: true,
-        ..Default::default()
+        ..gix::worktree::state::checkout::Options::new(filters)
     };
     // The checkout parallelizes, so it needs a thread-safe (`Arc`-backed) object
     // store; the default handle is `Rc`-backed and not `Send`.

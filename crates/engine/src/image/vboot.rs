@@ -51,6 +51,27 @@ const PUBLIC_EXPONENT: u32 = 65_537;
 /// The largest modulus a vboot algorithm uses, in bits.
 const MAX_MODULUS_BITS: usize = 8192;
 
+/// The DER `DigestInfo` header a PKCS#1 v1.5 signature over a SHA-256 digest carries
+/// before the digest (RFC 8017 §9.2, note 1): the SHA-256 algorithm identifier, then an
+/// octet string of 32 bytes.
+const SHA256_DIGEST_INFO: [u8; 19] = [
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+    0x00, 0x04, 0x20,
+];
+
+/// RSASSA-PKCS1-v1_5 padding for a SHA-256 digest, every vboot signature's.
+///
+/// Stated with its `DigestInfo` header rather than derived from the hash type, because
+/// `rsa`'s derivation takes a hash of an older `digest` generation than the `sha2`
+/// this crate hashes with. The partitions `futility` packed, which the tests hold this
+/// module to byte for byte, are what pin the header.
+fn pkcs1v15_sha256() -> Pkcs1v15Sign {
+    Pkcs1v15Sign {
+        hash_len: Some(32),
+        prefix: Box::new(SHA256_DIGEST_INFO),
+    }
+}
+
 /// The vboot structure version this module reads, for both the keyblock and the
 /// preamble. Every depthcharge firmware boots version 2.
 const STRUCT_VERSION_MAJOR: u32 = 2;
@@ -335,7 +356,7 @@ impl KernelPartition {
         let check = |data: &Range<usize>, signature: &Range<usize>, what: &str| {
             self.data_key
                 .verify(
-                    Pkcs1v15Sign::new::<Sha256>(),
+                    pkcs1v15_sha256(),
                     &Sha256::digest(&self.bytes[data.clone()]),
                     &self.bytes[signature.clone()],
                 )
@@ -379,7 +400,7 @@ impl SigningKey {
     /// Sign `data`: RSASSA-PKCS1-v1_5 over its SHA-256 digest, as long as the modulus.
     fn sign(&self, data: &[u8]) -> Result<Vec<u8>, EngineError> {
         self.key
-            .sign(Pkcs1v15Sign::new::<Sha256>(), &Sha256::digest(data))
+            .sign(pkcs1v15_sha256(), &Sha256::digest(data))
             .map_err(|e| resign_err(format!("signing failed: {e}")))
     }
 }

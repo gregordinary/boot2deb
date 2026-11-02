@@ -26,9 +26,33 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// [`EngineError::Io`] when the file cannot be read.
 pub fn sha256_file(path: &Path) -> Result<(u64, String), EngineError> {
     let mut file = std::fs::File::open(path).map_err(|s| EngineError::io(path, s))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Writer::default();
     let len = std::io::copy(&mut file, &mut hasher).map_err(|s| EngineError::io(path, s))?;
-    Ok((len, hex(&hasher.finalize())))
+    Ok((len, hasher.hex()))
+}
+
+/// A SHA-256 hash a stream is written into, for the reads that hash as they go
+/// (`std::io::copy`, a filesystem reader's `read_data_to`) rather than holding the bytes
+/// whole. The hash type itself takes no `io::Write`.
+#[derive(Default)]
+pub(crate) struct Sha256Writer(Sha256);
+
+impl Sha256Writer {
+    /// Lowercase hex of the digest of everything written.
+    pub(crate) fn hex(self) -> String {
+        hex(&self.0.finalize())
+    }
+}
+
+impl std::io::Write for Sha256Writer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Lowercase hex of a digest's bytes.
