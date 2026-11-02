@@ -63,7 +63,18 @@ pub(crate) fn run(
     // which is exactly what someone types `doctor` after a clone to find out.
     let Some(target) = target else {
         let checks = boot2deb_engine::checks::host_checks();
-        let anchors = trust_anchors(root, &[])?;
+        // Every distro layer's archive keyring, since no target says which one a build
+        // would use. A layer that does not parse is reported by the build that resolves
+        // it, not here.
+        let mut keyrings = Vec::new();
+        for name in root.list("distros")? {
+            if let Ok(layer) = root.distro(&name) {
+                if !keyrings.contains(&layer.keyring) {
+                    keyrings.push(layer.keyring);
+                }
+            }
+        }
+        let anchors = trust_anchors(root, &keyrings, &[])?;
         let blocking = report(&checks, &anchors, json, &mut doc)?;
         if !json {
             println!();
@@ -151,6 +162,7 @@ pub(crate) fn run(
     let checks = boot2deb_engine::checks::tool_checks(&needs);
     let anchors = trust_anchors(
         root,
+        std::slice::from_ref(&build.distro.keyring),
         build
             .image
             .as_ref()
@@ -170,8 +182,8 @@ pub(crate) fn run(
 /// One verified trust anchor: the keyring file's name and the vetted keys it carries.
 type Anchor = (String, Vec<boot2deb_engine::keyring::Key>);
 
-/// Verify every apt keyring this run bootstraps against — the Debian archive keyring
-/// plus one per third-party source — and return each with its vetted keys.
+/// Verify every apt keyring this run bootstraps against — each named distro's archive
+/// keyring plus one per third-party source — and return each with its vetted keys.
 ///
 /// A keyring that fails its fingerprint manifest, or that resolves outside the
 /// vendored keyring directory, is an error, not a printed warning: `doctor` doubles
@@ -181,13 +193,14 @@ type Anchor = (String, Vec<boot2deb_engine::keyring::Key>);
 /// source that wanted it.
 fn trust_anchors(
     root: &ConfigRoot,
+    distro_keyrings: &[String],
     apt_sources: &[boot2deb_core::model::AptSource],
 ) -> Result<Vec<Anchor>, Box<dyn std::error::Error>> {
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(archive) =
-        root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", false)?
-    {
-        paths.push(archive);
+    for keyring in distro_keyrings {
+        if let Some(archive) = root.find_trust_anchor(format!("blobs/keyrings/{keyring}"), false)? {
+            paths.push(archive);
+        }
     }
     for source in apt_sources {
         if let Some(path) = crate::config::apt_source_keyring(root, &source.signed_by)? {

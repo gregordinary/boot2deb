@@ -53,6 +53,7 @@ ref = "f66f2f804627e4464c2d1b10181772b5437bb991"
 commit = "f66f2f804627e4464c2d1b10181772b5437bb991"
 
 [rootfs]
+distro = "debian"
 suite = "forky"
 manifest = "media-accel-forky.pkgs.lock"
 source_date_epoch = 1792427891

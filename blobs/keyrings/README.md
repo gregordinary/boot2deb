@@ -3,8 +3,10 @@
 Each `.gpg` file here is a binary (dearmored) OpenPGP keyring that verifies the
 `Release`/`InRelease` signatures of one apt repository the build consumes:
 
-- `debian-archive-keyring.gpg` — the Debian mirror (the rootless build sandbox
-  and the image rootfs bootstrap).
+- `debian-archive-keyring.gpg` — the Debian archive, for every recipe whose suite
+  the `debian` distro layer serves (the build roots and the image rootfs bootstrap).
+- `ubuntu-archive-keyring.gpg` — the Ubuntu archive, for every recipe whose suite the
+  `ubuntu` distro layer serves.
 - `jellyfin.gpg` — the Jellyfin upstream repository the `jellyfin` feature adds.
 
 Keyrings are vendored because the build host is frequently not Debian — an
@@ -23,10 +25,10 @@ against the key during the package solve (an unsigned source is never accepted).
 anywhere else, and the resolved file is checked to still be *inside* a keyring
 directory after symlinks are followed, so a link planted here cannot make an
 arbitrary host file the anchor a repository is verified against. An overlay may
-vendor its own keyring in its own `blobs/keyrings/` for a repository it adds; the
-Debian archive keyring is the exception, resolved from the shipped tree only, and
-an overlay shipping a copy of *that* is refused as a swap rather than preferred
-(`--unsafe-overlay-keyring` is the explicit opt-in).
+vendor its own keyring in its own `blobs/keyrings/` for a repository it adds. A
+distro layer's archive keyring is the exception, resolved from the shipped tree
+only, and an overlay shipping a copy of one is refused as a swap rather than
+preferred (`--unsafe-overlay-keyring` is the explicit opt-in).
 
 ## Fingerprint manifests
 

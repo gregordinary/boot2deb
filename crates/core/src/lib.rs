@@ -20,8 +20,8 @@
 //! - Source-pin durability form ([`sources`]), and re-pin ref selection ([`repin`]).
 //! - The upgrade survey's comparison ([`outdated`]), over the tag spellings
 //!   [`version`] parses.
-//! - Debian suite facts ([`suite`]), `authorized_keys` entry shape ([`authkeys`]),
-//!   and [`host`] detection.
+//! - Which archive serves a suite ([`distro`]), `authorized_keys` entry shape
+//!   ([`authkeys`]), and [`host`] detection.
 //!
 //! `missing_docs` is a warning here to keep the config surface documented as it
 //! grows.
@@ -39,6 +39,7 @@ pub mod datetime;
 pub mod debcheck;
 pub mod debdep;
 pub mod diff;
+pub mod distro;
 pub mod error;
 pub mod expect;
 pub mod feature;
@@ -65,7 +66,6 @@ pub mod series;
 pub mod size;
 pub mod sources;
 pub mod staticip;
-pub mod suite;
 pub mod support;
 pub mod version;
 pub mod weight;

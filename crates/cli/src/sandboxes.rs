@@ -11,6 +11,7 @@
 //!
 //! One definition of the three, here, is what makes that impossible.
 
+use boot2deb_core::distro::ResolvedDistro;
 use boot2deb_core::model::ResolvedBuild;
 use boot2deb_core::ConfigRoot;
 use boot2deb_engine::sandbox::{
@@ -50,7 +51,7 @@ pub(crate) struct Roots {
 /// the caches they share.
 ///
 /// Passed as one value because they are read together and must be the same values at
-/// every site: the mirror list above all, which is in each tree's key precisely because
+/// every site: the archive above all, which is in each tree's key precisely because
 /// `--snapshot pin` must move the *compiler* and not only the image's userland.
 pub(crate) struct RootInputs<'a> {
     /// The build's scratch tree; every root lives under `<work_dir>/sandbox`.
@@ -58,33 +59,33 @@ pub(crate) struct RootInputs<'a> {
     /// The **host's** Debian architecture, which the cross and packaging roots are
     /// provisioned at so their commands run natively.
     pub(crate) host_deb_arch: &'a str,
-    /// The build's own resolved mirror list, in order.
-    pub(crate) mirrors: &'a [String],
-    /// The Debian archive keyring verifying each bootstrap's `Release` signature, from
-    /// [`keyring`]. `None` falls back to the host apt trust store.
-    pub(crate) keyring: Option<PathBuf>,
+    /// The build's own archive: every pocket of its suite, at its resolved mirrors.
+    pub(crate) archive: &'a boot2deb_engine::Archive,
+    /// The distribution's archive keyring verifying each bootstrap's `Release`
+    /// signature, from [`keyring`].
+    pub(crate) keyring: PathBuf,
     /// Where downloaded `.deb`s are cached, shared with the rootfs node's provisioner.
     pub(crate) deb_cache: PathBuf,
 }
 
 /// Construct the three roots for `build`.
 pub(crate) fn roots(build: &ResolvedBuild, inputs: &RootInputs) -> Roots {
-    let target = build.image.as_ref().map(|image| {
-        let suite = &image.suite;
+    // The image's suite and the packaging suite are one suite on every build that has
+    // an image, so the one archive serves all three roots.
+    let target = build.image.as_ref().map(|_| {
         let rootfs = build_sandbox_dir(
             inputs.work_dir,
             SandboxRole::Target,
             build.arch.debian_arch(),
-            suite,
-            inputs.mirrors,
+            inputs.archive,
         );
         Box::new(RootlessSandbox::new(
             SandboxRole::Target,
             SandboxSpec {
                 rootfs,
-                suite: suite.clone(),
                 arch: build.arch.debian_arch().to_string(),
-                mirrors: inputs.mirrors.to_vec(),
+                archive: inputs.archive.clone(),
+                components: build.distro.components.clone(),
                 keyring: inputs.keyring.clone(),
                 cache_dir: Some(inputs.deb_cache.clone()),
             },
@@ -104,12 +105,11 @@ pub(crate) fn roots(build: &ResolvedBuild, inputs: &RootInputs) -> Roots {
                 inputs.work_dir,
                 cross_role,
                 inputs.host_deb_arch,
-                &build.packaging_suite,
-                inputs.mirrors,
+                inputs.archive,
             ),
-            suite: build.packaging_suite.clone(),
             arch: inputs.host_deb_arch.to_string(),
-            mirrors: inputs.mirrors.to_vec(),
+            archive: inputs.archive.clone(),
+            components: build.distro.components.clone(),
             keyring: inputs.keyring.clone(),
             cache_dir: Some(inputs.deb_cache.clone()),
         },
@@ -117,15 +117,10 @@ pub(crate) fn roots(build: &ResolvedBuild, inputs: &RootInputs) -> Roots {
     );
 
     let packaging = PackagingSandbox::new(SandboxSpec {
-        rootfs: packaging_root_dir(
-            inputs.work_dir,
-            inputs.host_deb_arch,
-            &build.packaging_suite,
-            inputs.mirrors,
-        ),
-        suite: build.packaging_suite.clone(),
+        rootfs: packaging_root_dir(inputs.work_dir, inputs.host_deb_arch, inputs.archive),
         arch: inputs.host_deb_arch.to_string(),
-        mirrors: inputs.mirrors.to_vec(),
+        archive: inputs.archive.clone(),
+        components: build.distro.components.clone(),
         keyring: inputs.keyring.clone(),
         cache_dir: Some(inputs.deb_cache.clone()),
     });
@@ -137,30 +132,39 @@ pub(crate) fn roots(build: &ResolvedBuild, inputs: &RootInputs) -> Roots {
     }
 }
 
-/// The Debian archive keyring every bootstrap verifies its `Release` signature against:
-/// the explicit `--keyring`, else the vendored anchor, else `None` (the host apt trust
-/// store, which only exists on a Debian host).
+/// The archive keyring every bootstrap verifies its `Release` signatures against: the
+/// explicit `--keyring`, else the one `distro`'s layer names under `blobs/keyrings/`.
 ///
 /// A vendored keyring is additionally held to its fingerprint manifest. It decides whose
 /// signatures a bootstrap accepts, and as a binary blob it is the one vendored file a
 /// reviewer cannot read. An explicit `--keyring` is the operator's own anchor, chosen
 /// deliberately, and is used as given.
 ///
+/// A distro layer naming a keyring the tree does not carry is an error rather than a
+/// fallback. No other anchor would verify that distribution's archive.
+///
 /// `unsafe_overlay` allows an overlay to supply it; without that the anchor is resolved
 /// from the primary root only, since an overlay copy would be a fail-closed swap.
 pub(crate) fn keyring(
     root: &ConfigRoot,
+    distro: &ResolvedDistro,
     explicit: Option<PathBuf>,
     unsafe_overlay: bool,
-) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(explicit) = explicit {
-        return Ok(Some(explicit));
+        return Ok(explicit);
     }
-    let vendored =
-        root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", unsafe_overlay)?;
-    if let Some(path) = &vendored {
-        boot2deb_engine::keyring::verify(path)?;
-    }
+    let rel = format!("blobs/keyrings/{}", distro.keyring);
+    let vendored = root
+        .find_trust_anchor(&rel, unsafe_overlay)?
+        .ok_or_else(|| {
+            format!(
+                "distro '{}' names the archive keyring {rel}, which the config tree does not \
+             carry",
+                distro.name
+            )
+        })?;
+    boot2deb_engine::keyring::verify(&vendored)?;
     Ok(vendored)
 }
 

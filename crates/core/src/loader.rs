@@ -1,6 +1,6 @@
 //! Reads typed config layers from a boot2deb config root (the repo directory
-//! holding `devices/`, `socs/`, `arches/`, `boot-methods/`, `kernels/`, `kmods/`,
-//! `features/`, `recipes/`).
+//! holding `devices/`, `socs/`, `arches/`, `boot-methods/`, `distros/`, `kernels/`,
+//! `kmods/`, `features/`, `recipes/`).
 //!
 //! **Layer search path & overlays.** A [`ConfigRoot`] holds an *ordered*
 //! search path: the shipped root first, then zero or more out-of-tree overlay
@@ -49,6 +49,7 @@ pub const BUILD_INPUT_PATHS: &[&str] = &[
     "boot-methods",
     "debs",
     "devices",
+    "distros",
     "features",
     "fragments",
     "kernels",
@@ -523,6 +524,61 @@ impl ConfigRoot {
     /// It deep-merges across the search path like the rest.
     pub fn base(&self) -> Result<BaseLayer, ConfigError> {
         self.load_merged("base", "base", "base.toml")
+    }
+
+    /// Load `distros/<name>.toml` and [validate](crate::distro::DistroLayer::validate)
+    /// it, so a caller never holds a layer whose URLs or components a bootstrap could
+    /// not use.
+    pub fn distro(&self, name: &str) -> Result<crate::distro::DistroLayer, ConfigError> {
+        let layer: crate::distro::DistroLayer = self.load("distro", "distros", name)?;
+        layer.validate(name)?;
+        Ok(layer)
+    }
+
+    /// The one distro layer serving `suite`, with its stem.
+    ///
+    /// Every layer under `distros/` is read, because the answer is only sound if no
+    /// second layer also claims the suite. Only the layer returned is recorded as a
+    /// [probed](Self::record_probes) input. The others can decide whether this build
+    /// resolves, never what it builds, which is the rule the feature-capability scan
+    /// in resolution follows too.
+    ///
+    /// The suite's shape is checked first, so a malformed string is named as
+    /// malformed. A suite no layer lists is [`ConfigError::UnknownSuite`], naming what
+    /// each layer does serve. One that two layers list is
+    /// [`ConfigError::AmbiguousSuite`]. Only the layer returned is validated in full.
+    pub fn distro_for_suite(
+        &self,
+        suite: &str,
+    ) -> Result<(String, crate::distro::DistroLayer), ConfigError> {
+        crate::distro::check_suite(suite)?;
+        let (found, served) = self.unprobed(|| -> Result<_, ConfigError> {
+            let mut found = Vec::new();
+            let mut served = Vec::new();
+            for name in self.list("distros")? {
+                let layer: crate::distro::DistroLayer = self.load("distro", "distros", &name)?;
+                served.push(format!("{name}: {}", layer.suites.join(", ")));
+                if layer.serves(suite) {
+                    found.push(name);
+                }
+            }
+            Ok((found, served))
+        })?;
+        match found.as_slice() {
+            [] => Err(ConfigError::UnknownSuite {
+                suite: suite.to_string(),
+                served: if served.is_empty() {
+                    "no distros/ layers exist".to_string()
+                } else {
+                    served.join("; ")
+                },
+            }),
+            [name] => Ok((name.clone(), self.distro(name)?)),
+            _ => Err(ConfigError::AmbiguousSuite {
+                suite: suite.to_string(),
+                distros: found.join(", "),
+            }),
+        }
     }
 
     /// Load `recipes/<name>.lock` — the resolved exact pins for a recipe.
@@ -1655,7 +1711,7 @@ packages = [
         format!(
             "[kernel]\nid = \"k\"\nsource = \"s\"\nref = \"v\"\ncommit = \"{c}\"\n\
              [uboot]\nsource = \"s\"\nref = \"v\"\ncommit = \"{c}\"\n\
-             [rootfs]\nsuite = \"forky\"\nmanifest = \"m.pkgs.lock\"\nsource_date_epoch = 1790347034\n\
+             [rootfs]\ndistro = \"debian\"\nsuite = \"forky\"\nmanifest = \"m.pkgs.lock\"\nsource_date_epoch = 1790347034\n\
              [blobs]\natf = \"a.elf@sha256:{h}\"\ntpl = \"t.bin@sha256:{h}\"\n"
         )
     }

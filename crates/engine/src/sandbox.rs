@@ -110,7 +110,7 @@
 //! malicious build script is that every compiled source is pinned to an exact commit by
 //! the lock. It is not the namespace around the compiler.
 
-use crate::bootstrap::{COMPONENTS, DEFAULT_MIRROR};
+use crate::bootstrap::Archive;
 use crate::build;
 use crate::error::{cage_message, EngineError};
 use crate::event::{Step, Stream};
@@ -504,25 +504,24 @@ struct SandboxBase {
     /// Rootfs directory — bootstrapped once, reused across builds (the seed of the
     /// base-rootfs cache).
     rootfs: PathBuf,
-    /// Debian suite to bootstrap (e.g. `forky`).
-    suite: String,
-    /// Debian architecture to bootstrap (e.g. `arm64`). The *target's* for a build
-    /// sandbox, the *host's* for a packaging root.
+    /// Architecture to bootstrap (e.g. `arm64`). The *target's* for a build sandbox,
+    /// the *host's* for a packaging root.
     arch: String,
-    /// Ordered mirror list the rootfs is bootstrapped from — the same list the rootfs
-    /// node fetches the *image's* userland from
-    /// ([`snapshot::resolve_mirrors`](crate::snapshot::resolve_mirrors)). Non-empty.
+    /// The archive the rootfs is bootstrapped from — the same one the rootfs node
+    /// fetches the *image's* userland from ([`Archive::resolve`]).
     ///
     /// Shared, not defaulted, because the tools that produce the build's `.deb`s live
     /// in these rootfs trees. Consider a `--snapshot pin` that fixed the image's
     /// userland to a point in time while a sandbox kept bootstrapping from the live
     /// mirror. It would pin the *output* packages and leave the *compiler and archiver*
     /// that produced them free to move, which is not what "pinned" reads as.
-    mirrors: Vec<String>,
-    /// Debian archive keyring verifying the suite's `Release` signature. `None`
-    /// falls back to the host apt trust store, which only works on a Debian host. A
-    /// vendored keyring makes the bootstrap portable to non-Debian hosts.
-    keyring: Option<PathBuf>,
+    archive: Archive,
+    /// The archive components the base resolves against: the distribution's full set,
+    /// whatever the image narrows its own to.
+    components: Vec<String>,
+    /// The archive keyring verifying every pocket's `Release` signature. Vendored, so
+    /// the bootstrap does not depend on which distribution the build host runs.
+    keyring: PathBuf,
     /// Content-addressed directory downloaded `.deb`s are cached in, reused across
     /// bootstraps. `None` downloads to a temporary directory the provisioner discards.
     ///
@@ -543,8 +542,8 @@ struct SandboxBase {
     used: AtomicBool,
 }
 
-/// What a sandbox is provisioned from. It says where its tree lives, which suite and
-/// architecture it is, which mirrors and keyring it resolves against, and where its
+/// What a sandbox is provisioned from. It says where its tree lives, which
+/// architecture it is, which archive and keyring it resolves against, and where its
 /// downloads are cached.
 ///
 /// A struct rather than six positional arguments, because four of them are
@@ -557,43 +556,33 @@ pub struct SandboxSpec {
     /// with [`build_sandbox_dir`] or [`packaging_root_dir`], which is what makes two
     /// differently-configured sandboxes different directories.
     pub rootfs: PathBuf,
-    /// Debian suite to bootstrap (e.g. `forky`).
-    pub suite: String,
-    /// Debian architecture to bootstrap: the *target's* for a build sandbox, the
-    /// *host's* for a cross or packaging root.
+    /// Architecture to bootstrap: the *target's* for a build sandbox, the *host's* for
+    /// a cross or packaging root.
     pub arch: String,
-    /// The build's own resolved mirror list, in order. Under `--snapshot pin` the
+    /// The build's own archive, every pocket of its suite. Under `--snapshot pin` the
     /// compiler and archiver have to come from the same point-in-time archive the
-    /// packages they produce do. This is therefore the build's list rather than a fixed
-    /// default. Empty falls back to [`crate::DEFAULT_MIRROR`], since a caller that
-    /// resolved no mirror expressed no preference.
-    pub mirrors: Vec<String>,
-    /// Debian archive keyring verifying the suite's `Release` signature. `None` falls
-    /// back to the host apt trust store. A vendored keyring makes the bootstrap portable
-    /// to a non-Debian host.
-    pub keyring: Option<PathBuf>,
+    /// packages they produce do. This is therefore the build's archive rather than a
+    /// fixed default.
+    pub archive: Archive,
+    /// The archive components to resolve against: the distribution's full set
+    /// ([`ResolvedDistro::components`](boot2deb_core::distro::ResolvedDistro::components)).
+    pub components: Vec<String>,
+    /// The archive keyring verifying every pocket's `Release` signature.
+    pub keyring: PathBuf,
     /// Content-addressed directory downloaded `.deb`s are cached in. `None` discards
     /// them with the bootstrap.
     pub cache_dir: Option<PathBuf>,
 }
 
 impl SandboxBase {
-    /// A base rooted at `rootfs` for `suite`/`arch`, resolved from `mirrors` in order
-    /// and verified with `keyring`.
-    ///
-    /// An empty `mirrors` falls back to [`crate::DEFAULT_MIRROR`] rather than failing,
-    /// since a caller that resolved no mirror expressed no preference. Every other
-    /// argument is taken as given.
+    /// A base rooted at `rootfs` for `arch`, resolved from `archive` and verified with
+    /// `keyring`, each taken as given.
     fn new(spec: SandboxSpec) -> Self {
         SandboxBase {
             rootfs: spec.rootfs,
-            suite: spec.suite,
             arch: spec.arch,
-            mirrors: if spec.mirrors.is_empty() {
-                vec![DEFAULT_MIRROR.to_string()]
-            } else {
-                spec.mirrors
-            },
+            archive: spec.archive,
+            components: spec.components,
             keyring: spec.keyring,
             cache_dir: spec.cache_dir,
             used: AtomicBool::new(false),
@@ -630,7 +619,7 @@ impl SandboxBase {
     }
 
     /// The provisioner configuration the base bootstrap and every build root over it
-    /// resolve against: mirror and fallbacks, components, keyring, stale-release
+    /// resolve against: the archive's pockets, components, keyring, stale-release
     /// posture, download cache, and identity map.
     ///
     /// One definition because a base and a layer over it must agree on all of it. They
@@ -644,42 +633,24 @@ impl SandboxBase {
     /// The caller adds what is its own: [`ensure`](Self::ensure) the base package set,
     /// [`build_root`](BuildSandbox::build_root) the base layer, the component's
     /// packages, and any feed-forward pool.
-    fn debian_builder(&self) -> DebianBuilder {
-        let (primary, fallbacks) = self
-            .mirrors
-            .split_first()
-            .expect("the constructor guarantees a non-empty mirror list");
-        let mut builder = Debian::builder(&self.suite)
+    fn debian_builder(&self) -> Result<DebianBuilder, EngineError> {
+        let builder = Debian::builder(self.archive.suite())
             .architecture(&self.arch)
-            .mirror(primary)
-            .components(COMPONENTS.split(','))
             // Declared, not defaulted. It is the library's default, but `stage_layer`
             // rejects a layer whose map differs from its base's, so stating it here is
             // what makes the two agree by construction rather than by both happening to
             // take the same default. `dpkg` needs the caller mapped to root inside.
             .identity_map(IdentityMap::Single);
-        for fallback in fallbacks {
-            builder = builder.mirror_fallback(fallback);
-        }
-        // A point-in-time archive's release is expired by design; accepting a
-        // signed-but-stale release is a repository-wide posture, taken only when one
-        // is in the list (as the rootfs node does).
-        if crate::snapshot::has_snapshot(&self.mirrors) {
-            builder = builder.allow_stale_release(true);
-        }
-        // A vendored keyring makes the bootstrap portable to a non-Debian host;
-        // without one the provisioner falls back to its embedded Debian archive
-        // keyring.
-        if let Some(keyring) = &self.keyring {
-            builder = builder.keyring(keyring);
-        }
+        let mut builder = self
+            .archive
+            .configure(builder, &self.components, &self.keyring)?;
         // Cached downloads survive the bootstrap, so re-provisioning a discarded base
         // — or staging a layer whose packages an earlier build already fetched —
         // refetches only what the cache does not already hold.
         if let Some(cache) = &self.cache_dir {
             builder = builder.cache_dir(cache);
         }
-        builder
+        Ok(builder)
     }
 
     /// Bootstrap this base with `packages` if it is not already published, and record
@@ -699,7 +670,7 @@ impl SandboxBase {
         step.log(format!(
             "ensuring {} {} rootfs at {} (in-process Debian provisioner)",
             self.arch,
-            self.suite,
+            self.archive.suite(),
             self.rootfs.display()
         ));
         let manifest = self.manifest_path();
@@ -721,11 +692,15 @@ impl SandboxBase {
         // base's dpkg status — but the sources make the published base a usable Debian
         // userland rather than one that only works for this build.
         let mut debian = self
-            .debian_builder()
+            .debian_builder()?
             .include(packages.iter().map(AsRef::as_ref))
             .build()
             .map_err(|source| EngineError::Bootstrap {
-                context: format!("configure the {} {} bootstrap", self.arch, self.suite),
+                context: format!(
+                    "configure the {} {} bootstrap",
+                    self.arch,
+                    self.archive.suite()
+                ),
                 message: cage_message(&source),
             })?;
         // A base already standing is checked against the archive before it is reused,
@@ -746,15 +721,18 @@ impl SandboxBase {
             // A fresh builder because a plan names every package, so the `include`
             // selectors that would shape a resolution contradict it and are refused at
             // `build()`. This is the two-mode shape [`crate::rootfs`] already uses.
-            debian = self.debian_builder().plan(plan).build().map_err(|source| {
-                EngineError::Bootstrap {
+            debian = self
+                .debian_builder()?
+                .plan(plan)
+                .build()
+                .map_err(|source| EngineError::Bootstrap {
                     context: format!(
                         "configure the {} {} re-bootstrap from the checked resolution",
-                        self.arch, self.suite
+                        self.arch,
+                        self.archive.suite()
                     ),
                     message: cage_message(&source),
-                }
-            })?;
+                })?;
         }
         // The sink is bound for this one run rather than for the provisioner's life,
         // so its borrow of `step` and of `installed` ends when `ensure` returns.
@@ -773,7 +751,11 @@ impl SandboxBase {
         let outcome =
             provision::ensure(&self.rootfs, &mut debian.observe(&mut sink)).map_err(|source| {
                 EngineError::Bootstrap {
-                    context: format!("bootstrap the {} {} rootfs", self.arch, self.suite),
+                    context: format!(
+                        "bootstrap the {} {} rootfs",
+                        self.arch,
+                        self.archive.suite()
+                    ),
                     message: cage_message(&source),
                 }
             })?;
@@ -857,7 +839,8 @@ impl SandboxBase {
         let plan = debian.resolve().map_err(|source| EngineError::Bootstrap {
             context: format!(
                 "resolve the {} {} base to check it against the archive",
-                self.arch, self.suite
+                self.arch,
+                self.archive.suite()
             ),
             message: cage_message(&source),
         })?;
@@ -925,24 +908,20 @@ pub struct RootlessSandbox {
 }
 
 impl RootlessSandbox {
-    /// A build sandbox in `role`, rooted at `rootfs`, bootstrapping `suite`/`arch` from
-    /// `mirrors` in order. The archive is verified with `keyring`, which is recommended.
-    /// `None` uses the host apt trust store.
+    /// A build sandbox in `role`, rooted at `rootfs`, bootstrapping `arch` from the
+    /// spec's archive and verifying it with the spec's keyring.
     ///
     /// `arch` is the architecture the root itself is provisioned at, and it must be the
     /// one `role` implies. That is the target's for [`SandboxRole::Target`], and the
     /// host's for [`SandboxRole::Cross`]. `rootfs` has to be [`build_sandbox_dir`] of
-    /// the same role and arch, for the tree and its contents to agree.
+    /// the same role, arch and archive, for the tree and its contents to agree.
     ///
-    /// `mirrors` is the build's own resolved list
-    /// ([`snapshot::resolve_mirrors`](crate::snapshot::resolve_mirrors)) rather than a
-    /// fixed default, because the toolchain that compiles this build's `.deb`s lives in
-    /// this rootfs. Consider a `--snapshot pin` that fixed the image's userland to a
-    /// point in time while this sandbox kept bootstrapping from the live mirror. It
-    /// would pin the *output* packages and leave the *compiler* that produced them free
-    /// to move, which is not what "pinned" reads as. An empty list falls back to
-    /// [`crate::DEFAULT_MIRROR`] rather than failing, since a caller that resolved no
-    /// mirror expressed no preference.
+    /// The archive is the build's own ([`Archive::resolve`]) rather than a fixed
+    /// default, because the toolchain that compiles this build's `.deb`s lives in this
+    /// rootfs. Consider a `--snapshot pin` that fixed the image's userland to a point in
+    /// time while this sandbox kept bootstrapping from the live mirror. It would pin the
+    /// *output* packages and leave the *compiler* that produced them free to move, which
+    /// is not what "pinned" reads as.
     ///
     /// `cache_dir` is where downloaded `.deb`s are cached, and `None` discards them
     /// with the bootstrap. `uppers_dir` is where each stage's overlay upper is created,
@@ -1000,7 +979,7 @@ impl BuildSandbox for RootlessSandbox {
 
         let mut builder = self
             .base
-            .debian_builder()
+            .debian_builder()?
             // The base is the overlay's lower and the resolver's already-installed set,
             // read from its own dpkg status — so the increment closes over only what the
             // base lacks, and the ids the resolver assumes match the files on disk.
@@ -1010,7 +989,7 @@ impl BuildSandbox for RootlessSandbox {
         // repository rather than a push into the tree, so the resolver pulls each
         // package *and its transitive dependencies* in one resolution.
         if let Some(pool) = spec.pool {
-            let repo = Repository::builder(&self.base.suite)
+            let repo = Repository::builder(self.base.archive.suite())
                 .mirror(pool)
                 // The component the pool publishes under; stated rather than left to the
                 // builder's default so the two sides of the `dists/` layout are written
@@ -1111,23 +1090,22 @@ pub struct PackagingSandbox {
 }
 
 impl PackagingSandbox {
-    /// A packaging root at `rootfs` for `suite`/`arch`, resolved from `mirrors` in
-    /// order and verified with `keyring`, which is recommended. `None` uses the host
-    /// apt trust store.
+    /// A packaging root at `rootfs` for `arch`, resolved from the spec's archive and
+    /// verified with the spec's keyring.
     ///
-    /// `arch` is the **host's** Debian architecture, so the root runs natively.
-    /// `rootfs` must be [`packaging_root_dir`] of the build's work dir, whose key
-    /// covers everything below.
+    /// `arch` is the **host's** architecture, so the root runs natively. `rootfs` must
+    /// be [`packaging_root_dir`] of the build's work dir, whose key covers everything
+    /// below.
     ///
-    /// `suite` is the build's
+    /// The archive serves the build's
     /// [`packaging_suite`](boot2deb_core::model::ResolvedBuild::packaging_suite), which
     /// is its image suite where it has one and the device's default otherwise. A
     /// bootloader-only build and that board's image builds therefore share one
     /// provisioned tree.
     ///
-    /// `mirrors` is the build's own resolved list, for the reason
-    /// [`RootlessSandbox::new`] takes one. Under `--snapshot pin` the tool that archives
-    /// the `.deb`s has to come from the same point-in-time archive their contents do.
+    /// It is the build's own archive, for the reason [`RootlessSandbox::new`] takes
+    /// one. Under `--snapshot pin` the tool that archives the `.deb`s has to come from
+    /// the same point-in-time archive their contents do.
     /// `cache_dir` is where downloaded `.deb`s are cached, and `None` discards them
     /// with the bootstrap.
     pub fn new(spec: SandboxSpec) -> Self {
@@ -1138,7 +1116,7 @@ impl PackagingSandbox {
 
     /// Short label for logs, e.g. `packaging amd64 forky`.
     pub fn describe(&self) -> String {
-        format!("packaging {} {}", self.base.arch, self.base.suite)
+        format!("packaging {} {}", self.base.arch, self.base.archive.suite())
     }
 
     /// Ensure the root exists with `dpkg` and `xz-utils` present. Idempotent — the
@@ -1533,8 +1511,8 @@ const PACKAGING_ROLE: &str = "package";
 /// the *target's* for [`SandboxRole::Target`], the *host's* for [`SandboxRole::Cross`].
 ///
 /// Keyed by role + arch + suite, plus a digest of three more things. Those are **the
-/// mirror list it was bootstrapped from, the package set it was bootstrapped with, and
-/// a base recipe version**. One host can therefore serve several targets from one work
+/// archive it was bootstrapped from, the package set it was bootstrapped with, and a
+/// base recipe version**. One host can therefore serve several targets from one work
 /// dir. A tree is only ever reused for a base it actually is.
 ///
 /// The digest is what makes the path honest rather than merely unique.
@@ -1543,8 +1521,9 @@ const PACKAGING_ROLE: &str = "package";
 /// archive, never the ingredients below. So each ingredient stops a specific wrong
 /// answer:
 ///
-/// - **The mirrors.** Turning on `--snapshot pin` would otherwise reuse the sandbox a
-///   previous live-mirror build left behind, while the output signature
+/// - **The archive.** Each pocket and its mirrors. Turning on `--snapshot pin` would
+///   otherwise reuse the sandbox a previous live-mirror build left behind, while the
+///   output signature
 ///   ([`BuildEnv::sandbox_id`](crate::build::BuildEnv::sandbox_id)) asserted the
 ///   snapshot's toolchain. The tree and the claim would disagree, with the claim being
 ///   the one that keys the artifact cache.
@@ -1562,14 +1541,13 @@ pub fn build_sandbox_dir(
     work_dir: &Path,
     role: SandboxRole,
     arch: &str,
-    suite: &str,
-    mirrors: &[String],
+    archive: &Archive,
 ) -> PathBuf {
     work_dir.join("sandbox").join(base_tree_name(
         role.token(),
         arch,
-        suite,
-        mirrors,
+        archive.suite(),
+        &archive.identity(),
         &role.base_packages(arch),
         role.stage_version(),
     ))
@@ -1584,12 +1562,12 @@ pub fn build_sandbox_dir(
 ///
 /// It sits beside the build sandboxes rather than under a directory of its own. `clean
 /// --sandbox` therefore reclaims every provisioned tree a build made in one sweep.
-pub fn packaging_root_dir(work_dir: &Path, arch: &str, suite: &str, mirrors: &[String]) -> PathBuf {
+pub fn packaging_root_dir(work_dir: &Path, arch: &str, archive: &Archive) -> PathBuf {
     work_dir.join("sandbox").join(base_tree_name(
         PACKAGING_ROLE,
         arch,
-        suite,
-        mirrors,
+        archive.suite(),
+        &archive.identity(),
         PACKAGING_DEPS,
         PACKAGING_STAGE_VERSION,
     ))
@@ -1603,11 +1581,11 @@ fn base_tree_name<S: AsRef<str>>(
     role: &str,
     arch: &str,
     suite: &str,
-    mirrors: &[String],
+    archive: &[String],
     base_deps: &[S],
     version: u32,
 ) -> String {
-    // Short digest, not the ingredients: a mirror list is long and contains characters no
+    // Short digest, not the ingredients: an archive's identity is long and contains characters no
     // directory name should carry. 12 hex characters is 48 bits — far past collision
     // range for the handful of bases one work dir ever sees. The `\0` separators keep two
     // different recipes from spelling one digest input. The role is in the *name* and not
@@ -1615,7 +1593,7 @@ fn base_tree_name<S: AsRef<str>>(
     // labels is already covered — so two roles that somehow declared the same set would
     // share a tree, which is the correct answer rather than a collision.
     let deps: Vec<&str> = base_deps.iter().map(AsRef::as_ref).collect();
-    let recipe = format!("{version}\0{}\0{}", mirrors.join("\n"), deps.join("\n"));
+    let recipe = format!("{version}\0{}\0{}", archive.join("\n"), deps.join("\n"));
     let digest = crate::blobs::sha256_hex(recipe.as_bytes());
     format!("{role}-{arch}-{suite}-{}", &digest[..12])
 }
@@ -2190,16 +2168,14 @@ pub(crate) fn packaging_root_for_tests(step: &Step) -> Option<PackagingSandbox> 
     let work = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-roots");
     // The suite the shipped boards package under, so the tests exercise the real
     // configuration rather than a stand-in.
-    let (suite, mirrors) = ("forky", vec![DEFAULT_MIRROR.to_string()]);
+    let (archive, components) = crate::bootstrap::test_archive("forky");
     let arch = boot2deb_core::HostInfo::detect().debian_arch()?;
     let root = PackagingSandbox::new(SandboxSpec {
-        rootfs: packaging_root_dir(&work, arch, suite, &mirrors),
-        suite: suite.to_string(),
+        rootfs: packaging_root_dir(&work, arch, &archive),
         arch: arch.to_string(),
-        mirrors,
-        // No keyring: the provisioner falls back to its own embedded Debian archive
-        // keyring, so the tests need no vendored blob resolved from the config root.
-        keyring: None,
+        archive,
+        components,
+        keyring: crate::bootstrap::test_keyring(),
         cache_dir: Some(work.join("cache")),
     });
     // A poisoned lock means another test panicked mid-bootstrap; the tree it left is
@@ -2212,8 +2188,23 @@ pub(crate) fn packaging_root_for_tests(step: &Step) -> Option<PackagingSandbox> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boot2deb_core::lock::SnapshotMode;
     use ferroday_cage::RawMount;
     use std::collections::BTreeSet;
+
+    /// A spec for a root at `rootfs`, provisioned at `arch` from the shipped tree's live
+    /// archive for `suite`. Nothing a test here builds from it bootstraps.
+    fn spec(rootfs: PathBuf, arch: &str, suite: &str) -> SandboxSpec {
+        let (archive, components) = crate::bootstrap::test_archive(suite);
+        SandboxSpec {
+            rootfs,
+            arch: arch.into(),
+            archive,
+            components,
+            keyring: crate::bootstrap::test_keyring(),
+            cache_dir: None,
+        }
+    }
 
     /// **The live proof that a base the archive moved past is not reused.**
     ///
@@ -2247,8 +2238,8 @@ mod tests {
         let arch = boot2deb_core::host::HostInfo::detect()
             .debian_arch()
             .expect("a host this test can provision a native root for");
-        let (suite, mirrors) = ("forky", vec![DEFAULT_MIRROR.to_string()]);
-        let rootfs = packaging_root_dir(tmp.path(), arch, suite, &mirrors);
+        let (archive, components) = crate::bootstrap::test_archive("forky");
+        let rootfs = packaging_root_dir(tmp.path(), arch, &archive);
 
         let logs = RefCell::new(Vec::new());
         let sink = |e: crate::event::Event| {
@@ -2259,10 +2250,10 @@ mod tests {
         let sandbox = || {
             PackagingSandbox::new(SandboxSpec {
                 rootfs: rootfs.clone(),
-                suite: suite.to_string(),
                 arch: arch.to_string(),
-                mirrors: mirrors.clone(),
-                keyring: None,
+                archive: archive.clone(),
+                components: components.clone(),
+                keyring: crate::bootstrap::test_keyring(),
                 cache_dir: Some(tmp.path().join("debs")),
             })
         };
@@ -2569,7 +2560,7 @@ mod tests {
     /// used it and holds an unrecorded superset of its own manifest.
     #[test]
     fn the_base_recipe_reaches_the_tree_name() {
-        let mirrors = vec![DEFAULT_MIRROR.to_string()];
+        let mirrors = crate::bootstrap::test_archive("forky").0.identity();
         let deps: Vec<&str> = BASE_DEPS.to_vec();
         let name = |d: &[&str], v: u32| {
             base_tree_name(
@@ -2605,7 +2596,7 @@ mod tests {
         assert_ne!(base, name(&deps, BASE_STAGE_VERSION - 1));
 
         // And the separators are load-bearing: a package set cannot be spelled as part
-        // of the mirror list.
+        // of the archive's identity.
         assert_ne!(
             name(&["a", "b"], 1),
             base_tree_name(
@@ -2644,8 +2635,8 @@ mod tests {
         );
 
         let work = Path::new("/w");
-        let mirrors = vec![DEFAULT_MIRROR.to_string()];
-        let dir = |role| build_sandbox_dir(work, role, "amd64", "forky", &mirrors);
+        let (archive, _) = crate::bootstrap::test_archive("forky");
+        let dir = |role| build_sandbox_dir(work, role, "amd64", &archive);
         let cross_arm64 = dir(SandboxRole::Cross { target: "arm64" });
         assert_ne!(cross_arm64, dir(SandboxRole::Cross { target: "armhf" }));
         assert_ne!(cross_arm64, dir(SandboxRole::Cross { target: "amd64" }));
@@ -2722,14 +2713,7 @@ mod tests {
         let sandbox = |role, arch: &str| {
             RootlessSandbox::new(
                 role,
-                SandboxSpec {
-                    rootfs: PathBuf::from("/w/rootfs"),
-                    suite: "forky".into(),
-                    arch: arch.into(),
-                    mirrors: vec![DEFAULT_MIRROR.to_string()],
-                    keyring: None,
-                    cache_dir: None,
-                },
+                spec(PathBuf::from("/w/rootfs"), arch, "forky"),
                 PathBuf::from("/w/sandbox/layers"),
             )
         };
@@ -2754,20 +2738,16 @@ mod tests {
         let sb = |arch: &str, suite: &str| {
             RootlessSandbox::new(
                 SandboxRole::Target,
-                SandboxSpec {
-                    rootfs: build_sandbox_dir(
+                spec(
+                    build_sandbox_dir(
                         work,
                         SandboxRole::Target,
                         arch,
-                        suite,
-                        &[DEFAULT_MIRROR.to_string()],
+                        &crate::bootstrap::test_archive(suite).0,
                     ),
-                    suite: suite.into(),
-                    arch: arch.into(),
-                    mirrors: vec![DEFAULT_MIRROR.to_string()],
-                    keyring: None,
-                    cache_dir: None,
-                },
+                    arch,
+                    suite,
+                ),
                 PathBuf::from("/w/sandbox/layers"),
             )
         };
@@ -2799,14 +2779,7 @@ mod tests {
         std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
         let sb = RootlessSandbox::new(
             SandboxRole::Target,
-            SandboxSpec {
-                rootfs: rootfs.clone(),
-                suite: "forky".into(),
-                arch: "arm64".into(),
-                mirrors: vec![DEFAULT_MIRROR.to_string()],
-                keyring: None,
-                cache_dir: None,
-            },
+            spec(rootfs.clone(), "arm64", "forky"),
             PathBuf::from("/w/sandbox/layers"),
         );
         let manifest = sb.base.manifest_path();
@@ -2844,14 +2817,7 @@ mod tests {
         std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
         let sb = RootlessSandbox::new(
             SandboxRole::Target,
-            SandboxSpec {
-                rootfs,
-                suite: "forky".into(),
-                arch: "arm64".into(),
-                mirrors: vec![DEFAULT_MIRROR.to_string()],
-                keyring: None,
-                cache_dir: None,
-            },
+            spec(rootfs, "arm64", "forky"),
             PathBuf::from("/w/sandbox/layers"),
         );
         let manifest = sb.base.manifest_path();
@@ -2995,74 +2961,65 @@ mod tests {
         );
     }
 
-    /// The sandbox bootstraps from the build's mirror list, not a fixed default.
+    /// The sandbox bootstraps from the build's own archive, not a fixed default.
     ///
     /// Under `--snapshot pin` the rootfs node fetches the image's userland from a
     /// point-in-time archive; the compiler that produces the target `.deb`s lives in
     /// *this* rootfs, so it has to come from the same place or "pinned" only covers
-    /// half the image. An empty list is the one case that falls back, since a caller
-    /// that resolved no mirror expressed no preference.
+    /// half the image.
     #[test]
-    fn the_sandbox_bootstraps_from_the_builds_own_mirrors() {
-        let snapshot = "https://snapshot.debian.org/archive/debian/20260628T083000Z/";
-        let sb = |mirrors: Vec<String>| {
+    fn the_sandbox_bootstraps_from_the_builds_own_archive() {
+        let pinned =
+            crate::bootstrap::test_snapshot_archive("forky", "20260628T083000Z", SnapshotMode::Pin);
+        let sb = |archive: Archive| {
+            let mut spec = spec(PathBuf::from("/w/rootfs"), "arm64", "forky");
+            spec.archive = archive;
             RootlessSandbox::new(
                 SandboxRole::Target,
-                SandboxSpec {
-                    rootfs: PathBuf::from("/w/rootfs"),
-                    suite: "forky".into(),
-                    arch: "arm64".into(),
-                    mirrors,
-                    keyring: None,
-                    cache_dir: None,
-                },
+                spec,
                 PathBuf::from("/w/sandbox/layers"),
             )
         };
-        assert_eq!(sb(vec![snapshot.to_string()]).base.mirrors, vec![snapshot]);
-        // A fallback snapshot keeps its order: live first, snapshot backfills.
-        assert_eq!(
-            sb(vec![DEFAULT_MIRROR.to_string(), snapshot.to_string()])
-                .base
-                .mirrors,
-            vec![DEFAULT_MIRROR, snapshot]
-        );
-        assert_eq!(sb(vec![]).base.mirrors, vec![DEFAULT_MIRROR]);
+        assert_eq!(sb(pinned.clone()).base.archive, pinned);
+        assert!(sb(pinned).base.archive.point_in_time);
+        let (live, _) = crate::bootstrap::test_archive("forky");
+        assert_eq!(sb(live.clone()).base.archive, live);
     }
 
-    /// A sandbox bootstrapped from one mirror set must never be reused for another.
+    /// A sandbox bootstrapped from one archive must never be reused for another.
     ///
     /// `ensure_ready` fast-paths on an existing directory and never asks where its
-    /// contents came from, so the mirror list has to reach the *path* — otherwise
+    /// contents came from, so the archive has to reach the *path* — otherwise
     /// turning on `--snapshot pin` would silently keep compiling in the tree a
     /// live-mirror build left behind, while the output signature claimed the
     /// snapshot's toolchain.
     #[test]
-    fn a_different_mirror_set_gets_a_different_sandbox_tree() {
+    fn a_different_archive_gets_a_different_sandbox_tree() {
         let work = Path::new("/w");
-        let live = vec![DEFAULT_MIRROR.to_string()];
-        let snapshot = vec!["https://snapshot.debian.org/archive/debian/20260628T083000Z/".into()];
-        let dir = |m: &[String]| build_sandbox_dir(work, SandboxRole::Target, "arm64", "forky", m);
+        let (live, _) = crate::bootstrap::test_archive("forky");
+        let snapshot =
+            |mode| crate::bootstrap::test_snapshot_archive("forky", "20260628T083000Z", mode);
+        let pin = snapshot(SnapshotMode::Pin);
+        let fallback = snapshot(SnapshotMode::Fallback);
+        let dir = |a: &Archive| build_sandbox_dir(work, SandboxRole::Target, "arm64", a);
 
-        assert_eq!(dir(&live), dir(&live), "stable for one mirror set");
-        assert_ne!(dir(&live), dir(&snapshot));
-        // A fallback list is a third tree: it can resolve packages neither of the
+        assert_eq!(dir(&live), dir(&live), "stable for one archive");
+        assert_ne!(dir(&live), dir(&pin));
+        // A fallback archive is a third tree: it can resolve packages neither of the
         // single-mirror sandboxes can.
-        let fallback = [live.clone(), snapshot.clone()].concat();
         assert_ne!(dir(&fallback), dir(&live));
-        assert_ne!(dir(&fallback), dir(&snapshot));
-        // Order matters — `fallback` and `pin` are different postures, not a set.
-        let reversed = [snapshot.clone(), live.clone()].concat();
-        assert_ne!(dir(&fallback), dir(&reversed));
+        assert_ne!(dir(&fallback), dir(&pin));
+        // A pocket more or less is a different archive too.
+        let mut release_only = live.clone();
+        release_only.pockets.truncate(1);
+        assert_ne!(dir(&live), dir(&release_only));
         // Arch and suite still separate, and the name stays a readable path segment.
         assert_ne!(
             dir(&live),
-            build_sandbox_dir(work, SandboxRole::Target, "armhf", "forky", &live)
+            build_sandbox_dir(work, SandboxRole::Target, "armhf", &live)
         );
-        assert_ne!(
-            dir(&live),
-            build_sandbox_dir(work, SandboxRole::Target, "arm64", "sid", &live)
-        );
+        let (sid, _) = crate::bootstrap::test_archive("sid");
+        assert_ne!(dir(&live), dir(&sid));
         let leaf = dir(&live);
         let leaf = leaf.file_name().unwrap().to_str().unwrap();
         assert!(leaf.starts_with("build-arm64-forky-"), "{leaf}");
@@ -3076,19 +3033,16 @@ mod tests {
         // and `xz-utils` is not one a compile may run in, and vice versa. Their package
         // sets are what the digest separates them by; the role prefix is what tells a
         // reader which is which.
-        let pkg = |m: &[String]| packaging_root_dir(work, "arm64", "forky", m);
+        let pkg = |a: &Archive| packaging_root_dir(work, "arm64", a);
         assert_eq!(pkg(&live).parent(), dir(&live).parent());
         assert_ne!(pkg(&live), dir(&live));
         let pkg_leaf = pkg(&live);
         let pkg_leaf = pkg_leaf.file_name().unwrap().to_str().unwrap();
         assert!(pkg_leaf.starts_with("package-arm64-forky-"), "{pkg_leaf}");
         // And it keys on its own inputs, not the build sandbox's.
-        assert_ne!(pkg(&live), pkg(&snapshot));
-        assert_ne!(
-            pkg(&live),
-            packaging_root_dir(work, "amd64", "forky", &live)
-        );
-        assert_ne!(pkg(&live), packaging_root_dir(work, "arm64", "sid", &live));
+        assert_ne!(pkg(&live), pkg(&pin));
+        assert_ne!(pkg(&live), packaging_root_dir(work, "amd64", &live));
+        assert_ne!(pkg(&live), pkg(&sid));
     }
 
     /// The signature input and the directory are the same string, because they are the
@@ -3099,11 +3053,11 @@ mod tests {
     /// another, which is exactly what the tree name's digest exists to prevent.
     #[test]
     fn the_packaging_identity_is_the_tree_it_names() {
-        let mirrors = vec![DEFAULT_MIRROR.to_string()];
-        let id = crate::build::packaging_identity("amd64", "forky", &mirrors);
+        let (live, _) = crate::bootstrap::test_archive("forky");
+        let id = crate::build::packaging_identity("amd64", &live);
         assert_eq!(
             id,
-            packaging_root_dir(Path::new("/w"), "amd64", "forky", &mirrors)
+            packaging_root_dir(Path::new("/w"), "amd64", &live)
                 .file_name()
                 .unwrap()
                 .to_str()
@@ -3111,27 +3065,14 @@ mod tests {
             "the identity and the tree name disagree"
         );
         // Independent of the work dir: the same root on two machines is the same root.
-        assert_eq!(
-            id,
-            crate::build::packaging_identity("amd64", "forky", &mirrors)
-        );
+        assert_eq!(id, crate::build::packaging_identity("amd64", &live));
         // And it moves with every ingredient that changes what the root holds.
-        assert_ne!(
-            id,
-            crate::build::packaging_identity("arm64", "forky", &mirrors)
-        );
-        assert_ne!(
-            id,
-            crate::build::packaging_identity("amd64", "sid", &mirrors)
-        );
-        assert_ne!(
-            id,
-            crate::build::packaging_identity(
-                "amd64",
-                "forky",
-                &["https://snapshot.debian.org/archive/debian/20260628T083000Z/".to_string()]
-            )
-        );
+        assert_ne!(id, crate::build::packaging_identity("arm64", &live));
+        let (sid, _) = crate::bootstrap::test_archive("sid");
+        assert_ne!(id, crate::build::packaging_identity("amd64", &sid));
+        let pin =
+            crate::bootstrap::test_snapshot_archive("forky", "20260628T083000Z", SnapshotMode::Pin);
+        assert_ne!(id, crate::build::packaging_identity("amd64", &pin));
     }
 
     /// The recorded profile is what the manifest claims it is: the declared environment

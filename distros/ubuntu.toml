@@ -1,0 +1,62 @@
+# distros/ubuntu.toml — the Ubuntu archive: where its suites are served from, how a
+# release is verified, and what an Ubuntu image adds to the shared base set.
+#
+# A recipe never names this file. It names a suite, and resolution finds the one
+# distro layer whose `suites` list carries it.
+
+description = "Ubuntu"
+
+# The releases this layer's archive facts hold for. Since 26.04, arm64 is served from
+# archive.ubuntu.com beside amd64. An earlier release keeps arm64 on a separate ports
+# archive, which this layer does not describe.
+suites = ["resolute"]
+
+# Every Ubuntu release publishes its -updates, -backports and -security pockets.
+rolling = []
+
+# The archive serving each suite's release pocket. apt verifies every Release
+# signature against the archive keyring, so plain http carries no integrity burden.
+mirror = "http://archive.ubuntu.com/ubuntu"
+# The point-in-time copy of that archive. A captured snapshot timestamp is appended to
+# it, as `<snapshot>/<timestamp>/`. It carries the security pocket too.
+snapshot = "https://snapshot.ubuntu.com/ubuntu"
+
+# The four components a stock Ubuntu install enables. Ubuntu's main carries the
+# firmware packages, so this layer offers no free-only set, and resolution refuses a
+# Linux-libre kernel on it.
+components = ["main", "restricted", "universe", "multiverse"]
+
+# Verifies each Release signature during the build. A file name under
+# `blobs/keyrings/`, held to its fingerprint manifest there.
+keyring = "ubuntu-archive-keyring.gpg"
+# The keyring the image's apt sources name in `Signed-By`. The ubuntu-keyring package
+# installs it.
+image_keyring = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+
+# The account every Ubuntu image is created with.
+default_user = "ubuntu"
+
+# Ubuntu's generic kernels recommend dracut, and its documentation assumes it. A
+# recipe may pick initramfs-tools instead.
+initramfs_generator = "dracut"
+
+# The important set already carries ubuntu-minimal and systemd-resolved, and
+# ubuntu-minimal depends on netplan and chrony. Nothing beyond the base set is named
+# here.
+packages = []
+exclude = []
+
+# The pockets beside the release one, in the order the image's apt sources list them,
+# which is the order a stock install writes. A build resolves against every one of
+# them, so an image ships the fixes published since its release.
+[[pockets]]
+suffix = "-updates"
+
+# Marked NotAutomatic and ButAutomaticUpgrades by the archive, so a package installs
+# from here only when no other pocket carries it, as apt would choose.
+[[pockets]]
+suffix = "-backports"
+
+[[pockets]]
+suffix = "-security"
+mirror = "http://security.ubuntu.com/ubuntu"

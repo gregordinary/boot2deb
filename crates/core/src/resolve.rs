@@ -105,11 +105,12 @@ pub fn resolve_device(
         // This deliverable resolves no image suite, but it still produces a `.deb`, and
         // the root that archives it has to be provisioned for some suite. The board's
         // own declared default is that suite: it is the one this board's image builds
-        // resolve, so they share a packaging root rather than provisioning two. Shape-
-        // validated like any suite that reaches the archive — `supported_suites` is not
-        // consulted, since that list constrains which suites this board is *imaged*
+        // resolve, so they share a packaging root rather than provisioning two. Resolved
+        // to its distro like any suite that reaches the archive — `supported_suites` is
+        // not consulted, since that list constrains which suites this board is *imaged*
         // for, and nothing here is imaged.
-        validate_suite(&device.default_suite)?;
+        let (distro_name, distro) = root.distro_for_suite(&device.default_suite)?;
+        let distro = distro.resolve(&distro_name, &device.default_suite);
         return Ok(ResolvedBuild {
             device: device_name.to_string(),
             device_lineage,
@@ -118,6 +119,7 @@ pub fn resolve_device(
             soc: device.soc,
             boot_method,
             packaging_suite: device.default_suite,
+            distro,
             layout,
             boot,
             kernel_dtb: device.kernel_dtb,
@@ -229,11 +231,13 @@ pub fn resolve_device(
         .suite
         .clone()
         .unwrap_or_else(|| device.default_suite.clone());
-    // A bad suite otherwise fails deep in the bootstrap; reject it here, and
-    // the shape guard also keeps a leading-`-` suite from ever reaching the archive as
-    // a positional. Shape first, membership second, so a malformed string is named as
-    // malformed rather than reported as absent from a list it could never join.
-    validate_suite(&suite)?;
+    // A bad suite otherwise fails deep in the bootstrap; reject it here. The distro
+    // lookup checks the shape first, which also keeps a leading-`-` suite from ever
+    // reaching the archive as a positional, and then finds the one layer serving it.
+    // Shape and service first, the device's list second, so a malformed string is
+    // named as malformed rather than reported as absent from a list it could never
+    // join.
+    let (distro_name, distro_layer) = root.distro_for_suite(&suite)?;
     check_suite_supported(device_name, &device.supported_suites, &suite)?;
     // A feature that builds the media-accel stack (`requires_media_accel`) needs the
     // SoC to supply the `[userspace]`/`[ffmpeg]` source trees its `.deb`s compile
@@ -282,6 +286,32 @@ pub fn resolve_device(
     // because the package is not unwanted: it is unreachable, and naming it in an
     // exclude set would also forbid it as any other package's dependency.
     let libre = kernel.libre();
+    // The components the image resolves against and offers on the board. A libre
+    // kernel narrows them to the distro's free subset, and a distro with none cannot
+    // host one: its archive would offer exactly the firmware the image promises not to
+    // carry.
+    let components = distro_layer
+        .image_components(libre)
+        .ok_or_else(|| ConfigError::LibreWithoutFreeComponents {
+            kernel: kernel_id.clone(),
+            distro: distro_name.clone(),
+        })?
+        .to_vec();
+    // The initramfs generator: the recipe's pick, else the distro's default. A
+    // depthcharge board's initramfs settings are written for initramfs-tools alone, so
+    // any other generator would build an initrd without them.
+    let initramfs_generator = overrides
+        .initramfs_generator
+        .unwrap_or(distro_layer.initramfs_generator);
+    if boot_method == BootMethod::Depthcharge
+        && initramfs_generator != crate::distro::InitramfsGenerator::InitramfsTools
+    {
+        return Err(ConfigError::InitramfsGeneratorUnsupported {
+            device: device_name.to_string(),
+            boot_method: boot_method.to_string(),
+            generator: initramfs_generator.to_string(),
+        });
+    }
     let (soc_firmware, device_firmware) = match libre {
         true => (&[][..], &[][..]),
         false => (
@@ -302,12 +332,27 @@ pub fn resolve_device(
         .cloned()
         .map(PackageEntry::Plain)
         .collect();
+    // The generator's package comes from the axis and from no layer, so an image can
+    // never be asked for both of two packages that conflict.
+    let generator_entry = [PackageEntry::from(initramfs_generator.package())];
+    // A `distros` condition naming a layer the tree does not have would never apply.
+    // The scan reads only the directory listing, which decides whether this build
+    // resolves and never what it builds, so it is not recorded as an input.
+    let known_distros = root.unprobed(|| root.list("distros"))?;
+    let filter = PackageFilter {
+        distro: &distro_name,
+        suite: &suite,
+        known_distros: &known_distros,
+    };
+    let distro_label = format!("distro '{distro_name}'");
     let soc_layer = format!("soc '{}'", device.soc);
     let device_layer = format!("device '{device_name}'");
     let mut rootfs_packages = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for (layer, src) in [
         ("the base layer", base.packages.as_slice()),
+        (&distro_label, distro_layer.packages.as_slice()),
+        ("the initramfs generator", generator_entry.as_slice()),
         (&soc_layer, soc.packages.as_slice()),
         (&soc_layer, soc_firmware),
         ("the boot method", bm.packages()),
@@ -315,14 +360,14 @@ pub fn resolve_device(
         (&device_layer, device_firmware),
         ("the kernel", kernel_entries.as_slice()),
     ] {
-        extend_unique(&mut rootfs_packages, &mut seen, src, &suite, layer)?;
+        extend_unique(&mut rootfs_packages, &mut seen, src, &filter, layer)?;
     }
     for (name, feat) in &loaded_features {
         extend_unique(
             &mut rootfs_packages,
             &mut seen,
             &feat.packages,
-            &suite,
+            &filter,
             &format!("feature '{name}'"),
         )?;
     }
@@ -337,7 +382,7 @@ pub fn resolve_device(
         &mut rootfs_packages,
         &mut seen,
         &app_debs,
-        &suite,
+        &filter,
         "the selected apps",
     )?;
 
@@ -348,6 +393,7 @@ pub fn resolve_device(
     let mut seen_exclude = std::collections::HashSet::new();
     for src in [
         base.exclude.as_slice(),
+        distro_layer.exclude.as_slice(),
         soc.exclude.as_slice(),
         bm.exclude(),
         device.exclude.as_slice(),
@@ -442,6 +488,7 @@ pub fn resolve_device(
         // whole build, so a `--suite sid` image does not carry a u-boot deb that
         // forky's `dpkg` produced.
         packaging_suite: suite.clone(),
+        distro: distro_layer.resolve(&distro_name, &suite),
         layout,
         boot,
         kernel_dtb: device.kernel_dtb,
@@ -463,6 +510,9 @@ pub fn resolve_device(
             suite,
             features,
             libre,
+            components,
+            user: distro_layer.default_user.clone(),
+            initramfs_generator,
             image_size,
             hostname: device.hostname,
             // Filled in by `resolve_recipe`: a direct device build names no recipe and
@@ -1610,6 +1660,7 @@ pub fn resolve_recipe(
         kernel: cli.kernel.clone().or(recipe.kernel),
         uboot_series: cli.uboot_series.clone().or(recipe.uboot_series),
         suite: cli.suite.clone().or(recipe.suite),
+        initramfs_generator: cli.initramfs_generator.or(recipe.initramfs_generator),
         layout: cli.layout.or(recipe.layout),
         boot_method: cli.boot_method,
         board: cli.board.clone().or(recipe.board),
@@ -1801,7 +1852,17 @@ fn extend_names(
     }
 }
 
-/// Appends the entries of `src` that apply to `suite`, skipping names already taken.
+/// The build a package entry's condition is decided against: the distro layer and
+/// suite it resolved to, and the distro layers the tree defines, which a `distros`
+/// condition must name.
+struct PackageFilter<'a> {
+    distro: &'a str,
+    suite: &'a str,
+    known_distros: &'a [String],
+}
+
+/// Appends the entries of `src` that apply to the build `filter` describes, skipping
+/// names already taken.
 ///
 /// De-duplication is by name across every layer, so a package two layers both name is
 /// installed once and keeps the earlier layer's position. A conditional entry that does
@@ -1814,12 +1875,22 @@ fn extend_unique(
     acc: &mut Vec<String>,
     seen: &mut std::collections::HashSet<String>,
     src: &[PackageEntry],
-    suite: &str,
+    filter: &PackageFilter,
     layer: &str,
 ) -> Result<(), ConfigError> {
     for entry in src {
         entry.validate(layer)?;
-        if !entry.applies_to(suite) {
+        for distro in entry.distros().unwrap_or_default() {
+            if !filter.known_distros.contains(distro) {
+                return Err(ConfigError::UnknownPackageDistro {
+                    package: entry.name().to_string(),
+                    layer: layer.to_string(),
+                    distro: distro.clone(),
+                    known: filter.known_distros.join(", "),
+                });
+            }
+        }
+        if !entry.applies_to(filter.distro, filter.suite) {
             continue;
         }
         if seen.insert(entry.name().to_string()) {
@@ -1854,9 +1925,14 @@ fn join<T: std::fmt::Display>(items: &[T]) -> String {
 ///
 /// Checked in flag order so the first-reported error is stable.
 fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(), ConfigError> {
-    let inapplicable: [(&'static str, bool); 13] = [
+    let inapplicable: [(&'static str, bool); 14] = [
         ("--kernel", overrides.kernel.is_some()),
         ("--suite", overrides.suite.is_some()),
+        // Recipe-only, so named as the key that sets it.
+        (
+            "initramfs_generator",
+            overrides.initramfs_generator.is_some(),
+        ),
         ("--feature", overrides.features.is_some()),
         ("--image-size", overrides.image_size.is_some()),
         ("--locale", overrides.locale.is_some()),
@@ -1883,31 +1959,6 @@ fn reject_rootfs_overrides(device_name: &str, overrides: &Overrides) -> Result<(
             flag,
         }),
         None => Ok(()),
-    }
-}
-
-/// Reject a suite that is not a well-formed Debian codename. The suite becomes an apt
-/// `sources.list` entry and the archive path the bootstrap fetches under, so it must
-/// be a bare token starting with an alphanumeric and drawn from `[A-Za-z0-9._-]`.
-///
-/// Shape only. *Which* pockets a suite publishes is a separate question, answered by
-/// [`suite::pockets`](crate::suite::pockets) where the sources file is generated —
-/// `sid` is a valid, documented value that simply has no `-security` or `-updates`.
-///
-/// Pure, so it is unit-testable.
-fn validate_suite(suite: &str) -> Result<(), ConfigError> {
-    let mut chars = suite.chars();
-    let ok = matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    if ok {
-        Ok(())
-    } else {
-        Err(ConfigError::InvalidField {
-            what: "suite",
-            value: suite.to_string(),
-            why: "expected a Debian codename: a bare token in [A-Za-z0-9._-] starting with \
-                  an alphanumeric",
-        })
     }
 }
 
@@ -2583,6 +2634,29 @@ mod tests {
         assert!(uk.compiled().is_none());
     }
 
+    /// A depthcharge board's initramfs settings are written for initramfs-tools, so
+    /// another generator would build an initrd without them. Refused at resolution
+    /// rather than discovered as a board that does not boot.
+    #[test]
+    fn a_depthcharge_board_refuses_dracut() {
+        let root = repo_root();
+        let dracut = Overrides {
+            initramfs_generator: Some(crate::distro::InitramfsGenerator::Dracut),
+            ..Default::default()
+        };
+        match resolve_device(&root, "asus-c201", &dracut) {
+            Err(ConfigError::InitramfsGeneratorUnsupported { generator, .. }) => {
+                assert_eq!(generator, "dracut")
+            }
+            other => panic!("expected InitramfsGeneratorUnsupported, got {other:?}"),
+        }
+        // The same board on its distro's own default resolves.
+        assert!(resolve_device(&root, "asus-c201", &Overrides::default()).is_ok());
+        // And an rkbin board takes dracut.
+        let b = resolve_device(&root, "turing-rk1", &dracut).unwrap();
+        assert!(image_of(&b).rootfs_packages.contains(&"dracut".to_string()));
+    }
+
     #[test]
     fn a_uboot_only_recipe_resolves_no_suite_or_kernel() {
         // The loader recipe is a pure bootloader deliverable: it resolves no suite and
@@ -2603,6 +2677,10 @@ mod tests {
             b.packaging_suite,
             root.device("rk3576-generic").unwrap().default_suite
         );
+        // And the distro serving that suite, whose archive its roots are provisioned
+        // from.
+        assert_eq!(b.distro.name, "debian");
+        assert_eq!(b.distro.release().suite, b.packaging_suite);
         let boot = b.rkbin_boot().expect("a rockchip-rkbin boot");
         // The u-boot series lives on its own axis, paired with its patches source.
         assert_eq!(boot.uboot_series.as_deref(), Some("rk3576-loader"));
@@ -2857,16 +2935,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_suite_accepts_codenames_and_rejects_bad_shapes() {
-        for s in [
-            "forky",
-            "trixie",
-            "sid",
-            "bookworm",
-            "stable-proposed-updates",
-        ] {
-            assert!(validate_suite(s).is_ok(), "{s} should be a valid suite");
-        }
+    fn a_malformed_suite_is_refused_before_any_distro_layer_is_consulted() {
+        let root = repo_root();
         for s in [
             "",               // empty
             "-updates",       // leading dash (option-like)
@@ -2877,10 +2947,10 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    validate_suite(s),
+                    root.distro_for_suite(s),
                     Err(ConfigError::InvalidField { what: "suite", .. })
                 ),
-                "{s} should be rejected"
+                "{s} should be rejected as malformed"
             );
         }
     }
@@ -3947,6 +4017,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(p.join("base.toml"), "packages = []\nexclude = []\n").unwrap();
+        crate::distro::write_test_distro(p);
         std::fs::write(
             p.join("socs/rk3288.toml"),
             "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
@@ -4566,6 +4637,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(p.join("base.toml"), "packages = []\nexclude = []\n").unwrap();
+        crate::distro::write_test_distro(p);
         std::fs::write(
             p.join("socs/rk3288.toml"),
             "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
@@ -4628,6 +4700,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(p.join("base.toml"), "packages = []\nexclude = []\n").unwrap();
+        crate::distro::write_test_distro(p);
         std::fs::write(
             p.join("socs/rk3288.toml"),
             "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
@@ -4882,6 +4955,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(p.join("base.toml"), "packages = []\nexclude = []\n").unwrap();
+        crate::distro::write_test_distro(p);
         std::fs::write(
             p.join("socs/rk3288.toml"),
             "description = \"soc\"\narch = \"armv7\"\ndt_dir = \"rockchip\"\nmodules = []\n",
@@ -5349,6 +5423,7 @@ mod fixture_tests {
                 ),
             )
             .unwrap();
+            crate::distro::write_test_distro(p);
 
             let src = "[[userspace]]\nname = \"mpp\"\ngit = \"x\"\nref = \"y\"\n\
                        debs = [\"libmpp\"]\n\
@@ -5560,6 +5635,7 @@ mod fixture_tests {
             image_of(&b).rootfs_packages,
             vec![
                 "base-pkg",
+                "initramfs-tools",
                 "soc-pkg",
                 "firmware-soc",
                 "device-pkg",
@@ -5576,7 +5652,7 @@ mod fixture_tests {
         assert!(image_of(&b).libre);
         assert_eq!(
             image_of(&b).rootfs_packages,
-            vec!["base-pkg", "soc-pkg", "device-pkg"]
+            vec!["base-pkg", "initramfs-tools", "soc-pkg", "device-pkg"]
         );
         // Dropped from the include set, not pushed onto the exclude set: the blob is
         // unreachable, not unwanted, and excluding it would also forbid apt from
@@ -5612,7 +5688,11 @@ mod fixture_tests {
         let b = resolve_device(&root, "dev", &ov).unwrap();
 
         assert_eq!(image_of(&b).rootfs_exclude, vec!["b", "c", "a"]);
-        assert_eq!(image_of(&b).rootfs_packages, vec!["shared", "d", "e", "g"]);
+        // The generator's package follows the base and distro layers' own.
+        assert_eq!(
+            image_of(&b).rootfs_packages,
+            vec!["shared", "initramfs-tools", "d", "e", "g"]
+        );
         // No name is both included and excluded — what the reconciliation guarantees.
         for x in &image_of(&b).rootfs_exclude {
             assert!(
@@ -6346,7 +6426,7 @@ mod fixture_tests {
             .expect("the forky recipe resolves");
         assert_eq!(
             image_of(&b).rootfs_packages,
-            vec!["network-manager", "network-manager-tui"],
+            vec!["initramfs-tools", "network-manager", "network-manager-tui"],
             "forky carries the split-out package",
         );
 
@@ -6355,7 +6435,7 @@ mod fixture_tests {
             .expect("the trixie recipe resolves");
         assert_eq!(
             image_of(&b).rootfs_packages,
-            vec!["network-manager"],
+            vec!["initramfs-tools", "network-manager"],
             "trixie does not, and the entry contributes nothing there",
         );
     }
@@ -6380,12 +6460,18 @@ mod fixture_tests {
         let dir = tree("bookworm").write();
         let b = resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default())
             .expect("the bookworm recipe resolves");
-        assert_eq!(image_of(&b).rootfs_packages, vec!["libv4l-0"]);
+        assert_eq!(
+            image_of(&b).rootfs_packages,
+            vec!["initramfs-tools", "libv4l-0"]
+        );
 
         let dir = tree("forky").write();
         let b = resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default())
             .expect("the forky recipe resolves");
-        assert_eq!(image_of(&b).rootfs_packages, vec!["libv4l-0t64"]);
+        assert_eq!(
+            image_of(&b).rootfs_packages,
+            vec!["initramfs-tools", "libv4l-0t64"]
+        );
     }
 
     /// An entry that applies to no suite at all is refused rather than silently
@@ -6400,8 +6486,215 @@ mod fixture_tests {
         let err = resolve_device(&ConfigRoot::new(dir.path()), "dev", &Overrides::default())
             .expect_err("an entry applying to nothing is refused");
         assert!(
-            matches!(err, ConfigError::PackageSuitesEmpty { ref package, .. } if package == "nmtui"),
+            matches!(err, ConfigError::PackageCondition { ref package, .. } if package == "nmtui"),
             "{err:?}",
         );
+    }
+
+    /// Add the test Ubuntu layer beside the tree's Debian one.
+    fn with_ubuntu(dir: &TempDir) {
+        fs::write(
+            dir.path().join("distros/ubuntu.toml"),
+            crate::distro::TEST_UBUNTU,
+        )
+        .unwrap();
+    }
+
+    /// A recipe naming `suite`, over a tree that otherwise takes its defaults.
+    fn recipe_on(suite: &'static str) -> Tree {
+        Tree {
+            recipe: Some(RecipeSpec {
+                suite: Some(suite),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The suite picks the distro layer, and the layer fills in everything about the
+    /// image that differs between distributions: its archive, its account, its
+    /// initramfs generator and its own packages.
+    #[test]
+    fn a_suite_resolves_to_the_distro_layer_that_serves_it() {
+        let dir = Tree {
+            base_packages: &["shared"],
+            ..recipe_on("resolute")
+        }
+        .write();
+        with_ubuntu(&dir);
+        let b = resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default())
+            .expect("the resolute recipe resolves");
+        assert_eq!(b.distro.name, "ubuntu");
+        assert_eq!(
+            b.distro
+                .pockets
+                .iter()
+                .map(|p| p.suite.as_str())
+                .collect::<Vec<_>>(),
+            ["resolute", "resolute-updates", "resolute-security"]
+        );
+        assert_eq!(
+            b.distro.pockets[2].mirror,
+            "http://security.ubuntu.com/ubuntu"
+        );
+        let image = image_of(&b);
+        assert_eq!(image.user, "ubuntu");
+        assert_eq!(
+            image.initramfs_generator,
+            crate::distro::InitramfsGenerator::Dracut
+        );
+        assert_eq!(image.components.len(), 4);
+        // The base layer's, then the distro's, then the generator's package.
+        assert_eq!(image.rootfs_packages, ["shared", "ubuntu-only", "dracut"]);
+        assert_eq!(image.rootfs_exclude, ["ubuntu-excluded"]);
+
+        // The same tree's Debian suite takes the Debian layer, which names none of it.
+        let dir = Tree {
+            base_packages: &["shared"],
+            ..recipe_on("forky")
+        }
+        .write();
+        with_ubuntu(&dir);
+        let b = resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default())
+            .expect("the forky recipe resolves");
+        assert_eq!(b.distro.name, "debian");
+        assert_eq!(image_of(&b).user, "debian");
+        assert_eq!(image_of(&b).rootfs_packages, ["shared", "initramfs-tools"]);
+        assert!(image_of(&b).rootfs_exclude.is_empty());
+    }
+
+    /// A suite no layer lists has no archive to resolve against, and the refusal says
+    /// what each layer does serve.
+    #[test]
+    fn a_suite_no_distro_layer_serves_is_refused() {
+        let dir = recipe_on("noble").write();
+        with_ubuntu(&dir);
+        match resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default()) {
+            Err(ConfigError::UnknownSuite { suite, served }) => {
+                assert_eq!(suite, "noble");
+                assert!(served.contains("ubuntu: resolute"), "{served}");
+                assert!(served.contains("debian: "), "{served}");
+            }
+            other => panic!("expected UnknownSuite, got {other:?}"),
+        }
+    }
+
+    /// Two layers claiming one suite would make the archive depend on which file was
+    /// read first, so the claim is refused rather than settled by order.
+    #[test]
+    fn a_suite_two_distro_layers_claim_is_refused() {
+        let dir = recipe_on("forky").write();
+        fs::write(
+            dir.path().join("distros/ubuntu.toml"),
+            crate::distro::TEST_UBUNTU.replace("[\"resolute\"]", "[\"resolute\", \"forky\"]"),
+        )
+        .unwrap();
+        match resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default()) {
+            Err(ConfigError::AmbiguousSuite { suite, distros }) => {
+                assert_eq!(suite, "forky");
+                assert_eq!(distros, "debian, ubuntu");
+            }
+            other => panic!("expected AmbiguousSuite, got {other:?}"),
+        }
+    }
+
+    /// A Linux-libre kernel needs a free-only archive to provision from, and a
+    /// distribution that offers none cannot host it.
+    #[test]
+    fn a_libre_kernel_needs_a_distro_with_a_free_component_set() {
+        let dir = Tree {
+            libre: true,
+            ..recipe_on("resolute")
+        }
+        .write();
+        with_ubuntu(&dir);
+        match resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default()) {
+            Err(ConfigError::LibreWithoutFreeComponents { distro, .. }) => {
+                assert_eq!(distro, "ubuntu")
+            }
+            other => panic!("expected LibreWithoutFreeComponents, got {other:?}"),
+        }
+        // Debian's free subset is what a libre image resolves against and offers.
+        let dir = Tree {
+            libre: true,
+            ..recipe_on("forky")
+        }
+        .write();
+        let b = resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default())
+            .expect("a libre Debian image resolves");
+        assert_eq!(image_of(&b).components, ["main"]);
+    }
+
+    /// A recipe may pick the other generator. The axis swaps the package rather than
+    /// adding a second one, since the two conflict.
+    #[test]
+    fn a_recipe_picks_the_initramfs_generator() {
+        let dir = Tree {
+            recipe: Some(RecipeSpec {
+                suite: Some("forky"),
+                extra_toml: "initramfs_generator = \"dracut\"\n",
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .write();
+        let b = resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default())
+            .expect("the recipe resolves");
+        let image = image_of(&b);
+        assert_eq!(
+            image.initramfs_generator,
+            crate::distro::InitramfsGenerator::Dracut
+        );
+        assert!(image.rootfs_packages.contains(&"dracut".to_string()));
+        assert!(!image
+            .rootfs_packages
+            .contains(&"initramfs-tools".to_string()));
+    }
+
+    /// A distro condition holds for every suite of its distribution, and one naming a
+    /// layer the tree does not have is a typo that would otherwise drop the package
+    /// from every image without a word.
+    #[test]
+    fn a_distro_condition_applies_per_distribution_and_must_name_a_layer() {
+        let tree = |suite| Tree {
+            soc_packages: &[
+                r#"{ name = "fw-debian", distros = ["debian"] }"#,
+                r#"{ name = "fw-ubuntu", distros = ["ubuntu"] }"#,
+            ],
+            ..recipe_on(suite)
+        };
+        for (suite, wanted, absent) in [
+            ("forky", "fw-debian", "fw-ubuntu"),
+            ("trixie", "fw-debian", "fw-ubuntu"),
+            ("resolute", "fw-ubuntu", "fw-debian"),
+        ] {
+            let dir = tree(suite).write();
+            with_ubuntu(&dir);
+            let b = resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default())
+                .expect("the recipe resolves");
+            let packages = &image_of(&b).rootfs_packages;
+            assert!(
+                packages.contains(&wanted.to_string()),
+                "{suite}: {packages:?}"
+            );
+            assert!(
+                !packages.contains(&absent.to_string()),
+                "{suite}: {packages:?}"
+            );
+        }
+
+        let dir = Tree {
+            soc_packages: &[r#"{ name = "fw", distros = ["ubuntoo"] }"#],
+            ..recipe_on("forky")
+        }
+        .write();
+        with_ubuntu(&dir);
+        match resolve_recipe(&ConfigRoot::new(dir.path()), "rec", &Overrides::default()) {
+            Err(ConfigError::UnknownPackageDistro { distro, known, .. }) => {
+                assert_eq!(distro, "ubuntoo");
+                assert_eq!(known, "debian, ubuntu");
+            }
+            other => panic!("expected UnknownPackageDistro, got {other:?}"),
+        }
     }
 }

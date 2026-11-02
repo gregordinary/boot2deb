@@ -786,6 +786,7 @@ mod tests {
          arch = \"arm64\"\n\
          soc = \"rk3588\"\n\
          boot_method = \"rockchip-rkbin\"\n\
+         distro = \"debian\"\n\
          suite = \"forky\"\n\
          features = []\n\
          layout = \"combined\"\n\

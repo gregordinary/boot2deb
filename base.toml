@@ -1,8 +1,9 @@
-# base.toml — the distro-generic rootfs substrate: the base Debian package
-# set every boot2deb image installs, plus packages excluded from the base system,
-# and the system-wide locale/timezone policy.
-# Layer-specific packages (soc/boot-method/device) and feature packages stack on
-# top at resolution; overlay files live in each layer's overlay/ tree.
+# base.toml — the distro-generic rootfs substrate: the package set every boot2deb
+# image installs whatever its distribution, and the system-wide locale, time and
+# account policy.
+# The distro layer under distros/ adds what differs between distributions. The
+# hardware layers and the features stack on top at resolution, and overlay files
+# live in each layer's overlay/ tree.
 
 # --- Localization -------------------------------------------------------------
 # The `LANG` an image boots with. C.UTF-8 is a complete UTF-8 locale built into
@@ -73,13 +74,14 @@ timezone = "UTC"
 ntp_servers = []
 
 # --- Account and access -------------------------------------------------------
-# Who can log in to a built image as the default `debian` account, and what reaching
-# root costs them. Every key here is overridable per recipe.
+# Who can log in to a built image as its default account, and what reaching root
+# costs them. The account's name comes from the distro layer: `debian` on Debian,
+# `ubuntu` on Ubuntu. Every key here is overridable per recipe.
 #
 # Each image gets its own randomly generated first-boot password, expired so it must be
 # changed at first login. Three facts about the shipped base decide how much that
 # password is protecting, and they are worth knowing before changing anything below:
-# openssh-server is installed and Debian enables it, a DHCP client brings the board onto
+# openssh-server is installed and enabled, a DHCP client brings the board onto
 # the network before anyone has logged in, and the account can reach root through
 # `sudo`, whose prompt asks for that same password. So the generated password is root on
 # whatever network the board is plugged into, from the moment it powers on.
@@ -97,7 +99,7 @@ ntp_servers = []
 # root on its own. `nopasswd` suits a single-operator board that runs nothing reachable
 # from outside a trusted network, or a first-boot script that has to reach root
 # unattended. It is also one line to change afterwards on a running board, by rewriting
-# /etc/sudoers.d/debian — so this is a default, not a commitment.
+# the account's file under /etc/sudoers.d/ — so this is a default, not a commitment.
 sudo = "password"
 
 # Length of the generated per-image first-boot password, in characters drawn from a
@@ -160,21 +162,21 @@ ssh_authorized_keys = []
 groups = ["video", "render", "adm"]
 
 # --- Packages -----------------------------------------------------------------
-# The base system is Debian's `required` + `important` priority set; everything below
-# stacks onto it. Two properties of the install decide what has to be named here:
+# The base system is the archive's `required` + `important` priority set; everything
+# below stacks onto it. Each name here is the same package on every distribution the
+# distros/ layers serve, and a package that differs belongs in the distro layer.
+# Two properties of the install decide what has to be named here:
 # dependency resolution follows `Depends` only — **`Recommends` are never installed** —
 # and priority `standard` is not part of the base set. So a package that an ordinary
-# Debian install would have arrived at by either route is absent unless it is listed.
+# install would have arrived at by either route is absent unless it is listed.
 # `ca-certificates` is the case to keep in mind: it is priority `standard` and merely
 # *Recommended* by libcurl, so it reaches the image only by being named here — and
 # without it, curl and wget cannot fetch an https URL at all.
 packages = [
-    # Boot and system services.
-    "initramfs-tools",
+    # System services. The initramfs generator, the DHCP client and the time daemon
+    # differ between distributions and come from the distro layer.
     "dbus",
-    "dhcpcd",
     "libpam-systemd",
-    "systemd-timesyncd",
     "sudo",
 
     # Remote access, both directions. The server's `Depends` already pull
@@ -230,4 +232,3 @@ packages = [
     "keyboard-configuration",
     "console-setup",
 ]
-exclude = ["isc-dhcp-client"]

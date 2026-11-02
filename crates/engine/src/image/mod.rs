@@ -345,8 +345,8 @@ pub struct ImageArtifacts {
     /// Whether the raw image files were deleted after compression, so a
     /// consumer knows only the compressed forms remain.
     pub raw_removed: bool,
-    /// The per-image first-boot password spliced into [`crate::rootfs::DEFAULT_USER`]'s
-    /// account. It is unique per build, and expired so it must be changed at first
+    /// The per-image first-boot password spliced into the image's account
+    /// ([`ResolvedImage::user`](boot2deb_core::ResolvedImage::user)). It is unique per build, and expired so it must be changed at first
     /// login. The caller surfaces it and records it in the provenance manifest. It
     /// is written to no committed file.
     pub password: String,
@@ -506,7 +506,7 @@ pub fn build_image(
         opts.rootfs_label,
         opts.identity.ext4_uuid,
         ext4::FirstBoot {
-            user: crate::rootfs::DEFAULT_USER,
+            user: &image.user,
             password_hash: &password_hash,
         },
         None,
@@ -863,7 +863,7 @@ pub fn press_image(
         opts.rootfs_label,
         identity.ext4_uuid,
         ext4::FirstBoot {
-            user: crate::rootfs::DEFAULT_USER,
+            user: &image.user,
             password_hash: &password_hash,
         },
         Some(ext4::PressTree {
@@ -1317,6 +1317,7 @@ mod tests {
              arch = \"arm64\"\n\
              soc = \"rk3588\"\n\
              boot_method = \"rockchip-rkbin\"\n\
+             distro = \"debian\"\n\
              suite = \"forky\"\n\
              features = []\n\
              layout = \"combined\"\n\

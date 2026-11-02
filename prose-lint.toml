@@ -55,6 +55,7 @@ include = [
   "arches/*.toml",
   "socs/*.toml",
   "boot-methods/*.toml",
+  "distros/*.toml",
   "devices/*.toml",
   "kernels/*.toml",
   "kmods/*.toml",

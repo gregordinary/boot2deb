@@ -65,18 +65,15 @@ pub(crate) fn run(
     let stage = ShellStage::from(args.stage);
     ensure_build_has(&resolved, stage, recipe)?;
 
-    // The mirror list keys every provisioned root, so it is resolved the way `build`
+    // The archive keys every provisioned root, so it is resolved the way `build`
     // resolves it — the flag, else the lock's captured mode. A session opened under a
     // different mode would enter a different tree.
     let snapshot_mode = args
         .snapshot
         .or(lock.snapshot.as_ref().map(|s| s.mode))
         .unwrap_or(SnapshotMode::Off);
-    let mirrors = boot2deb_engine::snapshot::resolve_mirrors(
-        boot2deb_engine::DEFAULT_MIRROR,
-        lock.snapshot.as_ref(),
-        snapshot_mode,
-    )?;
+    let archive =
+        boot2deb_engine::Archive::resolve(&resolved.distro, lock.snapshot.as_ref(), snapshot_mode)?;
 
     let work_dir = crate::workdir::work_dir_for(root, recipe, args.work_dir);
     // The session's working directory and its bind, so it exists and is stamped before
@@ -91,8 +88,8 @@ pub(crate) fn run(
     let inputs = RootInputs {
         work_dir: &work_dir,
         host_deb_arch,
-        mirrors: &mirrors,
-        keyring: keyring(root, args.keyring, false)?,
+        archive: &archive,
+        keyring: keyring(root, &resolved.distro, args.keyring, false)?,
         deb_cache: work_dir.join("cache").join("provisioner-debs"),
     };
     let provisioned = roots(&resolved, &inputs);

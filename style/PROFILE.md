@@ -44,7 +44,8 @@ would search for before adding a second answer to it.
 | Does a solved package set satisfy its own dependencies? | `core::debdep::unsatisfied` |
 | How do two Debian package versions compare? | `crates/core/src/debdep.rs`, whose `compare_versions` is dpkg's own ordering |
 | What does a size written `32KiB` or `2G` mean in bytes? | `core::size::parse_size` |
-| Which archive pockets does a Debian suite publish? | `core::suite::pockets` |
+| Which archive pockets does a suite publish, and from where? | `core::distro::DistroLayer::pockets_for` |
+| Which distribution serves a suite? | `core::loader::ConfigRoot::distro_for_suite` |
 | Which git ref does `update` pin for one source axis? | `core::repin::pick_ref` |
 | Is a source pin durable without a network? | `core::sources::PinForm::classify` |
 | How does a fetched patch become a `git am`-ready mbox? | `core::mbox::normalize` |

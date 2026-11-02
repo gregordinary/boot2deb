@@ -81,6 +81,7 @@ manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-
 manifest_sha256 = "2173903fe44f80b0c95d070be77e205f97ca385bf712105969d7bc0f3a968279"
 
 [rootfs]
+distro = "debian"
 suite = "forky"
 manifest = "forky+media-accel-rockchip+jellyfin+jellyfin-v4l2request+vulkan+avs-decode.pkgs.lock"
 source_date_epoch = 1792427952

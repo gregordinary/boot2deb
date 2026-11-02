@@ -73,8 +73,12 @@ pub(crate) fn run(
     // architecture, resolved against the same archive and cached in the same download
     // cache the build's provisioner runs use — but it is a root of `try`'s own, for
     // the reason [`tryboot::FixtureSpec`] gives.
-    let keyring = crate::sandboxes::keyring(root, args.keyring.clone(), false)?;
-    let mirrors = vec![boot2deb_engine::DEFAULT_MIRROR.to_string()];
+    let keyring = crate::sandboxes::keyring(root, &resolved.distro, args.keyring.clone(), false)?;
+    let archive = boot2deb_engine::Archive::resolve(
+        &resolved.distro,
+        None,
+        boot2deb_core::lock::SnapshotMode::Off,
+    )?;
     let deb_cache = work_dir.join("cache").join("provisioner-debs");
 
     let sink = move |e: Event| print_event_at(verbosity, &e);
@@ -84,9 +88,9 @@ pub(crate) fn run(
         let fixture = tryboot::fixture_kernel(
             &tryboot::FixtureSpec {
                 arch: resolved.arch,
-                suite: &resolved_image.suite,
-                mirrors: &mirrors,
-                keyring: keyring.as_deref(),
+                archive: &archive,
+                components: &resolved.distro.components,
+                keyring: &keyring,
                 deb_cache: &deb_cache,
                 scratch_dir: &work_dir,
             },

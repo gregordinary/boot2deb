@@ -125,12 +125,12 @@ pub struct BuildEnv {
     pub packaging_id: String,
 }
 
-/// Compose a [`BuildEnv::sandbox_id`] from the build sandbox's architecture, suite and
-/// ordered mirror list, plus the interpreter that executes what it compiles.
+/// Compose a [`BuildEnv::sandbox_id`] from the build sandbox's architecture and the
+/// build's archive, plus the interpreter that executes what it compiles.
 ///
 /// The first segment is the tree name the sandbox is provisioned under
 /// ([`build_sandbox_dir`](crate::sandbox::build_sandbox_dir)), which is the identity of
-/// the base. Its digest covers the mirror list, the base package set and the base recipe
+/// the base. Its digest covers the archive, the base package set and the base recipe
 /// version, and its prefix carries the arch and suite. Deriving the signature input from
 /// the function that *names the directory* is what keeps the two from disagreeing. A
 /// build keyed on one claim while compiling in a differently-provisioned tree is exactly
@@ -149,16 +149,14 @@ pub struct BuildEnv {
 /// the signature, not of the CLI.
 pub fn sandbox_identity(
     arch: &str,
-    suite: &str,
-    mirrors: &[String],
+    archive: &crate::bootstrap::Archive,
     toolchain: &crate::toolchain::HostToolchain,
 ) -> String {
     let base = root_identity(crate::sandbox::build_sandbox_dir(
         Path::new(""),
         SandboxRole::Target,
         arch,
-        suite,
-        mirrors,
+        archive,
     ));
     match toolchain.qemu_identity() {
         Some(qemu) => format!("{base} | {qemu}"),
@@ -167,7 +165,7 @@ pub fn sandbox_identity(
 }
 
 /// Compose a [`BuildEnv::toolchain_id`] from the cross sandbox's own architecture, the
-/// `target` its toolchain emits for, the suite and the ordered mirror list.
+/// `target` its toolchain emits for, and the build's archive.
 ///
 /// The tree name the cross root is provisioned under
 /// ([`build_sandbox_dir`](crate::sandbox::build_sandbox_dir) at
@@ -186,13 +184,16 @@ pub fn sandbox_identity(
 /// than probed is what lets `why-rebuild` ask the artifact store this question offline.
 /// No root is provisioned and none has to be. It is also what backs it with a
 /// sha256-pinned package manifest instead of a `--version` line.
-pub fn cross_identity(arch: &str, target: &'static str, suite: &str, mirrors: &[String]) -> String {
+pub fn cross_identity(
+    arch: &str,
+    target: &'static str,
+    archive: &crate::bootstrap::Archive,
+) -> String {
     root_identity(crate::sandbox::build_sandbox_dir(
         Path::new(""),
         SandboxRole::Cross { target },
         arch,
-        suite,
-        mirrors,
+        archive,
     ))
 }
 
@@ -208,12 +209,12 @@ fn root_identity(dir: PathBuf) -> String {
         .into_owned()
 }
 
-/// Compose a [`BuildEnv::packaging_id`] from the packaging root's architecture, suite
-/// and ordered mirror list.
+/// Compose a [`BuildEnv::packaging_id`] from the packaging root's architecture and
+/// the build's archive.
 ///
 /// The tree name the root is provisioned under
 /// ([`packaging_root_dir`](crate::sandbox::packaging_root_dir)), which is the identity
-/// of the base. Its digest already covers the mirrors, the package set and the recipe
+/// of the base. Its digest already covers the archive, the package set and the recipe
 /// version, and its prefix carries the arch and suite. Deriving the signature input from
 /// the same function that names the directory is what keeps the two from disagreeing.
 /// A claim keyed on one while the tree is provisioned under the other is exactly the
@@ -224,12 +225,11 @@ fn root_identity(dir: PathBuf) -> String {
 ///
 /// Takes the pieces rather than a [`PackagingSandbox`], because `why-rebuild` asks the
 /// artifact store this question offline, with no root provisioned and none to provision.
-pub fn packaging_identity(arch: &str, suite: &str, mirrors: &[String]) -> String {
+pub fn packaging_identity(arch: &str, archive: &crate::bootstrap::Archive) -> String {
     root_identity(crate::sandbox::packaging_root_dir(
         Path::new(""),
         arch,
-        suite,
-        mirrors,
+        archive,
     ))
 }
 
@@ -2586,33 +2586,34 @@ mod tests {
     #[test]
     fn the_sandbox_identity_separates_userland_and_interpreter() {
         use crate::toolchain::HostToolchain;
-        let live = vec!["http://deb.debian.org/debian".to_string()];
-        let snapshot = vec!["https://snapshot.debian.org/archive/debian/20260628T083000Z/".into()];
+        use boot2deb_core::lock::SnapshotMode;
+        let (live, _) = crate::bootstrap::test_archive("forky");
+        let snapshot =
+            |mode| crate::bootstrap::test_snapshot_archive("forky", "20260628T083000Z", mode);
         // A cross build whose interpreter cannot be run still folds a fallback naming
         // it; a native build folds nothing, so the two are never equal.
         let cross = HostToolchain::probe(Some("boot2deb-no-such-arch"));
         let native = HostToolchain::probe(None);
-        let id = |mirrors: &[String], tc: &HostToolchain| {
-            sandbox_identity("arm64", "forky", mirrors, tc)
+        let id = |archive: &crate::bootstrap::Archive, tc: &HostToolchain| {
+            sandbox_identity("arm64", archive, tc)
         };
         assert_ne!(id(&live, &cross), id(&live, &native));
         // A snapshot-pinned userland is a different compiler than the live mirror's.
-        assert_ne!(id(&live, &cross), id(&snapshot, &cross));
-        // A fallback list is neither of the two single-mirror identities.
-        let fallback = [live.clone(), snapshot.clone()].concat();
-        for one in [&live, &snapshot] {
+        let pin = snapshot(SnapshotMode::Pin);
+        assert_ne!(id(&live, &cross), id(&pin, &cross));
+        // A fallback archive is neither of the two single-mirror identities.
+        let fallback = snapshot(SnapshotMode::Fallback);
+        for one in [&live, &pin] {
             assert_ne!(id(&fallback, &cross), id(one, &cross));
         }
-        // And the arch and suite separate too: the same mirrors bootstrap a different
+        // And the arch and suite separate too: the same archive bootstraps a different
         // compiler for each, and only the tree name carries that.
         assert_ne!(
             id(&live, &native),
-            sandbox_identity("armhf", "forky", &live, &native)
+            sandbox_identity("armhf", &live, &native)
         );
-        assert_ne!(
-            id(&live, &native),
-            sandbox_identity("arm64", "trixie", &live, &native)
-        );
+        let (trixie, _) = crate::bootstrap::test_archive("trixie");
+        assert_ne!(id(&live, &native), id(&trixie, &native));
     }
 
     /// Both identities are the name of the tree they describe, so a claim can never be
@@ -2626,50 +2627,47 @@ mod tests {
     #[test]
     fn each_identity_is_the_name_of_the_tree_it_describes() {
         use crate::toolchain::HostToolchain;
-        let mirrors = vec![crate::DEFAULT_MIRROR.to_string()];
+        let (archive, _) = crate::bootstrap::test_archive("forky");
         let native = HostToolchain::probe(None);
         let leaf = |p: std::path::PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
 
         assert_eq!(
-            sandbox_identity("arm64", "forky", &mirrors, &native),
+            sandbox_identity("arm64", &archive, &native),
             leaf(crate::sandbox::build_sandbox_dir(
                 Path::new("/some/work/dir"),
                 SandboxRole::Target,
                 "arm64",
-                "forky",
-                &mirrors
+                &archive
             )),
             "the build sandbox's identity is its tree's name, whatever work dir holds it"
         );
         assert_eq!(
-            packaging_identity("amd64", "forky", &mirrors),
+            packaging_identity("amd64", &archive),
             leaf(crate::sandbox::packaging_root_dir(
                 Path::new("/some/work/dir"),
                 "amd64",
-                "forky",
-                &mirrors
+                &archive
             )),
             "and so is the packaging root's"
         );
         assert_eq!(
-            cross_identity("amd64", "arm64", "forky", &mirrors),
+            cross_identity("amd64", "arm64", &archive),
             leaf(crate::sandbox::build_sandbox_dir(
                 Path::new("/some/work/dir"),
                 SandboxRole::Cross { target: "arm64" },
                 "amd64",
-                "forky",
-                &mirrors
+                &archive
             )),
             "and so is the cross root's"
         );
-        // No two roles key alike even at one arch, suite and mirror list: they are
-        // different trees holding different packages. Asserted as a set, because the
-        // defect this guards against is two identities computed independently and
-        // agreeing by accident.
+        // No two roles key alike even at one arch and archive: they are different
+        // trees holding different packages. Asserted as a set, because the defect this
+        // guards against is two identities computed independently and agreeing by
+        // accident.
         let at_amd64 = [
-            sandbox_identity("amd64", "forky", &mirrors, &native),
-            packaging_identity("amd64", "forky", &mirrors),
-            cross_identity("amd64", "arm64", "forky", &mirrors),
+            sandbox_identity("amd64", &archive, &native),
+            packaging_identity("amd64", &archive),
+            cross_identity("amd64", "arm64", &archive),
         ];
         let distinct: std::collections::BTreeSet<&String> = at_amd64.iter().collect();
         assert_eq!(distinct.len(), at_amd64.len(), "{at_amd64:?}");

@@ -757,6 +757,7 @@ ref = \"main\"
 commit = \"527d03d54ea68a375b814ccb3314901530cb8b32\"
 
 [rootfs]
+distro = \"debian\"
 suite = \"forky\"
 manifest = \"r.pkgs.lock\"
 source_date_epoch = 1790347034

@@ -122,14 +122,13 @@ pub struct FixtureKernel {
 pub struct FixtureSpec<'a> {
     /// The guest architecture, which names both the kernel package and the emulator.
     pub arch: Arch,
-    /// The Debian suite the fixture kernel comes from — the image's, so the guest
-    /// boots the generic kernel of the release it runs.
-    pub suite: &'a str,
-    /// Ordered mirror list, primary first. Non-empty.
-    pub mirrors: &'a [String],
-    /// Debian archive keyring verifying the suite's `Release` signature. `None` falls
-    /// back to the host apt trust store, as everywhere else.
-    pub keyring: Option<&'a Path>,
+    /// The archive the fixture kernel comes from — the image's, so the guest boots the
+    /// generic kernel of the release it runs.
+    pub archive: &'a crate::Archive,
+    /// The archive components to resolve against: the distribution's full set.
+    pub components: &'a [String],
+    /// The archive keyring verifying every pocket's `Release` signature.
+    pub keyring: &'a Path,
     /// Where downloaded `.deb`s are cached, shared with the build's own provisioner
     /// runs so a `try` after a `build` refetches nothing it already holds.
     pub deb_cache: &'a Path,
@@ -172,7 +171,7 @@ pub fn fixture_kernel(
     let arch = spec.arch.debian_arch();
     step.log(format!(
         "harvesting the fixture kernel: {package} + initramfs-tools in a {arch} {} root",
-        spec.suite
+        spec.archive.suite()
     ));
 
     std::fs::create_dir_all(spec.scratch_dir).map_err(|s| EngineError::io(spec.scratch_dir, s))?;
@@ -182,7 +181,7 @@ pub fn fixture_kernel(
     let mut sink = |event: DebianEvent<'_>| forward_bootstrap_event(step, event);
     provision::ensure(&root, &mut debian.observe(&mut sink)).map_err(|source| {
         EngineError::Bootstrap {
-            context: format!("provision the {arch} {} fixture root", spec.suite),
+            context: format!("provision the {arch} {} fixture root", spec.archive.suite()),
             message: cage_message(&source),
         }
     })?;
@@ -223,35 +222,17 @@ pub fn fixture_kernel(
 /// The base stays at the library's `required` floor: this root exists to run one
 /// postinst, not to be a userland anyone works in.
 fn fixture_provisioner(spec: &FixtureSpec, package: &str) -> Result<Debian, EngineError> {
-    let (primary, fallbacks) = spec
-        .mirrors
-        .split_first()
-        .ok_or_else(|| EngineError::TryBoot {
-            context: "provision the fixture root".into(),
-            message: "no mirror to resolve the fixture kernel from".into(),
-        })?;
-    let mut b = Debian::builder(spec.suite)
+    let b = Debian::builder(spec.archive.suite())
         .architecture(spec.arch.debian_arch())
-        .components(crate::bootstrap::COMPONENTS.split(','))
         .identity_map(IdentityMap::Subordinate)
         .cache_dir(spec.deb_cache)
-        .mirror(primary)
         .include([package, "initramfs-tools", "busybox"]);
-    for fallback in fallbacks {
-        b = b.mirror_fallback(fallback);
-    }
-    // A point-in-time archive's release is expired by design, as everywhere else.
-    if crate::snapshot::has_snapshot(spec.mirrors) {
-        b = b.allow_stale_release(true);
-    }
-    if let Some(keyring) = spec.keyring {
-        b = b.keyring(keyring);
-    }
+    let b = spec.archive.configure(b, spec.components, spec.keyring)?;
     b.build().map_err(|source| EngineError::Bootstrap {
         context: format!(
             "configure the {} {} fixture bootstrap",
             spec.arch.debian_arch(),
-            spec.suite
+            spec.archive.suite()
         ),
         message: cage_message(&source),
     })
@@ -1146,12 +1127,17 @@ mod tests {
     }
 
     /// A spec standing in for a `try` run's, carrying only what the provisioner reads.
-    fn fixture_spec<'a>(mirrors: &'a [String], dirs: &'a Path) -> FixtureSpec<'a> {
+    fn fixture_spec<'a>(
+        archive: &'a crate::Archive,
+        components: &'a [String],
+        keyring: &'a Path,
+        dirs: &'a Path,
+    ) -> FixtureSpec<'a> {
         FixtureSpec {
             arch: Arch::Arm64,
-            suite: "forky",
-            mirrors,
-            keyring: None,
+            archive,
+            components,
+            keyring,
             deb_cache: dirs,
             scratch_dir: dirs,
         }
@@ -1163,9 +1149,10 @@ mod tests {
     /// whose postinst builds the initramfs.
     #[test]
     fn the_fixture_root_is_provisioned_under_the_subordinate_map() {
-        let mirrors = vec!["http://deb.debian.org/debian".to_string()];
+        let (archive, components) = crate::bootstrap::test_archive("forky");
+        let keyring = crate::bootstrap::test_keyring();
         let tmp = tempfile::tempdir().unwrap();
-        let spec = fixture_spec(&mirrors, tmp.path());
+        let spec = fixture_spec(&archive, &components, &keyring, tmp.path());
         let rendered = format!(
             "{:?}",
             fixture_provisioner(&spec, fixture_package(Arch::Arm64).unwrap()).unwrap()
@@ -1181,16 +1168,6 @@ mod tests {
         }
         // Nothing layers this root, so it carries no base to increment.
         assert!(rendered.contains("base_layer: None"), "{rendered}");
-    }
-
-    /// An empty mirror list is refused where it is read, rather than reaching the
-    /// provisioner as a bootstrap with nowhere to resolve from.
-    #[test]
-    fn a_fixture_root_with_no_mirror_is_refused() {
-        let tmp = tempfile::tempdir().unwrap();
-        let err = fixture_provisioner(&fixture_spec(&[], tmp.path()), "linux-image-arm64")
-            .expect_err("a fixture root resolved from nothing");
-        assert!(err.to_string().contains("no mirror"), "{err}");
     }
 
     #[test]

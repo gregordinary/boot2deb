@@ -363,6 +363,7 @@ mod tests {
                 soc: "rk3588".into(),
                 boot_method: "rockchip-rkbin".into(),
                 board: None,
+                distro: "debian".into(),
                 suite: "forky".into(),
                 features: Vec::new(),
                 layout: "combined".into(),

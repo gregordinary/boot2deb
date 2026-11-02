@@ -1407,6 +1407,9 @@ impl From<OverrideArgs> for Overrides {
             kernel: a.kernel,
             uboot_series: a.uboot_series,
             suite: a.suite,
+            // Recipe-only: the generator decides what the image's own kernel upgrades
+            // run, which is a property of the build point rather than of one invocation.
+            initramfs_generator: None,
             layout: a.layout,
             boot_method: a.boot_method,
             board: a.board,

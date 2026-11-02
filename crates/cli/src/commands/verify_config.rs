@@ -74,8 +74,8 @@ pub(crate) fn run(
     // snapshot mode where it has one, else the live mirror. A gate that generated its
     // config with a different toolchain than the build would use is not a gate.
     let gate_lock = root.lock(recipe).ok();
-    let mirrors = boot2deb_engine::snapshot::resolve_mirrors(
-        boot2deb_engine::DEFAULT_MIRROR,
+    let archive = boot2deb_engine::Archive::resolve(
+        &build.distro,
         gate_lock.as_ref().and_then(|l| l.snapshot.as_ref()),
         gate_lock
             .as_ref()
@@ -83,16 +83,9 @@ pub(crate) fn run(
             .map(|s| s.mode)
             .unwrap_or(boot2deb_core::lock::SnapshotMode::Off),
     )?;
-    // The vendored archive keyring, held to its fingerprint manifest, as a build uses
-    // it; `None` falls back to the host apt trust store.
-    let keyring = {
-        let vendored =
-            root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", false)?;
-        if let Some(path) = &vendored {
-            boot2deb_engine::keyring::verify(path)?;
-        }
-        vendored
-    };
+    // The distribution's vendored archive keyring, held to its fingerprint manifest, as
+    // a build uses it.
+    let keyring = crate::sandboxes::keyring(root, &build.distro, None, false)?;
     let sink = move |e: Event| print_event_at(verbosity, &e);
 
     // Resolve the kernel tree to configure. An explicit `--kernel-path` is used as-is
@@ -199,7 +192,7 @@ pub(crate) fn run(
         .map_err(|e| format!("failed to create {}: {e}", work_dir.display()))?;
 
     // The root kbuild runs in, provisioned exactly as a build would provision it —
-    // same role, same host arch, same suite, same mirrors — so the gate answers
+    // same role, same host arch, same archive — so the gate answers
     // `cc-option` probes with the compiler the build will use. Bootstrapped here rather
     // than lazily because every path below this point runs `make`.
     let cross_role = SandboxRole::Cross {
@@ -212,12 +205,11 @@ pub(crate) fn run(
                 &work_dir,
                 cross_role,
                 host_deb_arch,
-                &build.packaging_suite,
-                &mirrors,
+                &archive,
             ),
-            suite: build.packaging_suite.clone(),
             arch: host_deb_arch.to_string(),
-            mirrors,
+            archive: archive.clone(),
+            components: build.distro.components.clone(),
             keyring,
             cache_dir: Some(work_dir.join("cache").join("provisioner-debs")),
         },

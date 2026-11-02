@@ -14,6 +14,7 @@ ref = "main"
 commit = "339beaf35d5a81f861e4a2229365fb8f07ade50c"
 
 [rootfs]
+distro = "debian"
 suite = "forky"
 manifest = "libre-forky.pkgs.lock"
 source_date_epoch = 1792427930

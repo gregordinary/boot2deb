@@ -71,7 +71,7 @@ use std::path::{Path, PathBuf};
 /// bootstrapped tree's dpkg state, apt configuration, and configure ordering, so a
 /// dependency bump that changes the emitted tree for unchanged inputs is a bump here
 /// too.
-const ROOTFS_STAGE_VERSION: u32 = 13;
+const ROOTFS_STAGE_VERSION: u32 = 14;
 
 /// Everything that determines the produced rootfs tree *except* the per-image
 /// password (applied on restore) — the inputs [`cache_key`] hashes.
@@ -101,8 +101,8 @@ pub struct CacheKeyInputs<'a> {
     pub arch: &'a str,
     /// Target Debian suite.
     pub suite: &'a str,
-    /// The archive components the tree was provisioned from — `main` alone on a libre
-    /// build, the full `main,contrib,non-free,non-free-firmware` otherwise.
+    /// The archive components the tree was provisioned from, comma-separated: the
+    /// distro layer's free subset on a libre build, its full set otherwise.
     ///
     /// Folded in even though it is *usually* implied by the solved set, because
     /// "usually" is not a cache guarantee. Two builds differing only in whether they
@@ -110,6 +110,10 @@ pub struct CacheKeyInputs<'a> {
     /// none. They would then share a key, serving one a tree the other's apt
     /// configuration produced.
     pub components: &'a str,
+    /// The image account's login, from the distro layer. The customize step creates
+    /// the account and names its home and its sudoers drop-in after it. The same
+    /// package set therefore builds a different tree under a different name.
+    pub user: &'a str,
     /// Identity of the interpreter that executes the target's maintainer scripts
     /// ([`RootfsOptions::interpreter_id`](crate::rootfs::RootfsOptions::interpreter_id)).
     /// It is `None` on a native host, where nothing is interpreted and no such input
@@ -148,6 +152,7 @@ pub fn cache_key(inputs: &CacheKeyInputs) -> Signature {
     b.fold_scalar("arch", inputs.arch);
     b.fold_scalar("suite", inputs.suite);
     b.fold_scalar("components", inputs.components);
+    b.fold_scalar("user", inputs.user);
     b.fold_set("solved", inputs.solved);
     b.fold_set("overlay", inputs.overlay);
     b.fold_set("repo_debs", inputs.repo_debs);
@@ -420,7 +425,8 @@ mod tests {
             apt_sources: &[],
             arch: "arm64",
             suite: "forky",
-            components: crate::bootstrap::COMPONENTS,
+            components: "main,contrib,non-free,non-free-firmware",
+            user: "debian",
             interpreter: None,
             sudo: "nopasswd",
             authorized_keys: &[],
@@ -508,7 +514,16 @@ mod tests {
         assert_ne!(
             key,
             cache_key(&CacheKeyInputs {
-                components: crate::bootstrap::FREE_COMPONENTS,
+                components: "main",
+                ..base
+            })
+        );
+        // The account's name decides its home, its sudoers drop-in and its /etc/passwd
+        // line, none of which the solved set sees.
+        assert_ne!(
+            key,
+            cache_key(&CacheKeyInputs {
+                user: "ubuntu",
                 ..base
             })
         );
@@ -653,7 +668,7 @@ mod tests {
         let debs = vec!["def".to_string()];
         assert_eq!(
             cache_key(&inputs(&solved, &overlay, &debs)).as_str(),
-            "857ca17102aefac7fcd89dc97eeb0e53dc72a058f6228f13f7e316e269acddfa"
+            "187bfb020019976e732285bfbd15e6ac1af3defba7a68c6d9889abf83014887c"
         );
     }
 

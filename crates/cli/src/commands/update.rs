@@ -67,10 +67,11 @@ impl AppNuget<'_> {
         let host_deb_arch = crate::sandboxes::host_deb_arch(&pf)?;
         let work_dir = crate::workdir::work_dir_for(root, recipe, None);
         crate::workdir::mark_work_dir(&work_dir)?;
-        // The live mirror, as a build without a snapshot uses: the root only has to run
-        // the SDK, and the package set the restore resolves comes from NuGet, not Debian.
-        let mirrors = boot2deb_engine::snapshot::resolve_mirrors(
-            boot2deb_engine::DEFAULT_MIRROR,
+        // The live archive, as a build without a snapshot uses: the root only has to run
+        // the SDK, and the package set the restore resolves comes from NuGet, not the
+        // distribution's archive.
+        let archive = boot2deb_engine::Archive::resolve(
+            &build.distro,
             None,
             boot2deb_core::lock::SnapshotMode::Off,
         )?;
@@ -79,8 +80,8 @@ impl AppNuget<'_> {
             &crate::sandboxes::RootInputs {
                 work_dir: &work_dir,
                 host_deb_arch,
-                mirrors: &mirrors,
-                keyring: crate::sandboxes::keyring(root, None, false)?,
+                archive: &archive,
+                keyring: crate::sandboxes::keyring(root, &build.distro, None, false)?,
                 deb_cache: work_dir.join("cache").join("provisioner-debs"),
             },
         );

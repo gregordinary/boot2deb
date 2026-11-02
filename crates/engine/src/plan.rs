@@ -621,6 +621,7 @@ mod tests {
                 rockchip: Some(git("rk1")),
             }),
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "m".into(),
                 manifest_sha256: None,

@@ -729,7 +729,11 @@ pub struct IdentityImage {
     /// `depthchargectl --board` needs. Absent under a boot method with no board profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<String>,
-    /// Debian suite.
+    /// The [distro layer](crate::distro::DistroLayer) the image was built from, such
+    /// as `debian`. `/etc/os-release` says the same thing on the disk itself. This is
+    /// the build's account of it, and a disagreement is worth reporting.
+    pub distro: String,
+    /// The suite, as the distribution's archive names it.
     pub suite: String,
     /// Selected rootfs features (empty for a plain base image).
     pub features: Vec<String>,
@@ -787,7 +791,10 @@ pub struct ImageProvenance {
     /// different profiles. Absent under a boot method with no board profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<String>,
-    /// Debian suite.
+    /// The [distro layer](crate::distro::DistroLayer) the image was built from, such
+    /// as `debian`.
+    pub distro: String,
+    /// The suite, as the distribution's archive names it.
     pub suite: String,
     /// Selected rootfs features (empty for a plain base image).
     pub features: Vec<String>,
@@ -951,7 +958,7 @@ pub struct AppSourceProvenance {
 /// The rootfs suite plus the content-pinned solved-manifest reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootfsProvenance {
-    /// Debian suite.
+    /// The suite, as the distribution's archive names it.
     pub suite: String,
     /// Solved-manifest filename (committed beside the lock).
     pub manifest: String,
@@ -1432,6 +1439,7 @@ pub fn system_identity(ib: ImageBuild, lock: &Lock) -> SystemIdentity {
             soc: ib.build.soc.to_string(),
             boot_method: ib.build.boot_method.to_string(),
             board: ib.build.depthcharge_boot().map(|b| b.board.clone()),
+            distro: ib.build.distro.name.clone(),
             suite: ib.image.suite.clone(),
             features: ib.image.features.clone(),
             layout: ib.build.layout.to_string(),
@@ -1560,6 +1568,7 @@ pub fn assemble(ib: ImageBuild, lock: &Lock, facts: &BuildFacts) -> ProvenanceMa
             soc: ib.build.soc.to_string(),
             boot_method: ib.build.boot_method.to_string(),
             board: ib.build.depthcharge_boot().map(|b| b.board.clone()),
+            distro: ib.build.distro.name.clone(),
             suite: ib.image.suite.clone(),
             features: ib.image.features.clone(),
             layout: ib.build.layout.to_string(),
@@ -1910,6 +1919,7 @@ pub(crate) mod tests {
                 rockchip: Some(git("8.1", "frc")),
             }),
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "turing-rk1-media-accel-forky.pkgs.lock".into(),
                 manifest_sha256: Some("mh".into()),
@@ -2560,6 +2570,7 @@ pub(crate) mod tests {
             userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "asus-c201-forky.pkgs.lock".into(),
                 manifest_sha256: None,

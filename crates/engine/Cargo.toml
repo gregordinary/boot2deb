@@ -77,7 +77,7 @@ ferrosys = { version = "0.7", default-features = false, features = ["ext", "tar"
 # `debian` feature adds the in-process archive provisioner that bootstraps the
 # target suite/arch rootfs (pure Rust: tar extraction + OpenPGP release
 # verification, no external binary, no C dep).
-ferroday-cage = { version = "0.5.0", features = ["debian", "subid"] }
+ferroday-cage = { version = "0.5.1", features = ["debian", "subid"] }
 # Randomly-named, fail-if-exists staging dirs for the build's intermediate trees,
 # so a local user cannot pre-create and own one.
 tempfile.workspace = true
@@ -118,7 +118,7 @@ serde_json.workspace = true
 # The same ferroday-cage with its `serde` feature, for tests only: the sandbox record's
 # completeness test reads every key the library's resolved inputs carry through the
 # library's own serialization of them.
-ferroday-cage = { version = "0.5.0", features = ["serde"] }
+ferroday-cage = { version = "0.5.1", features = ["serde"] }
 
 [lints]
 workspace = true

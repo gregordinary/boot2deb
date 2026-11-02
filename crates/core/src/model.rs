@@ -971,7 +971,7 @@ pub struct AptSource {
 }
 
 /// One entry of a layer's or feature's `packages` list: a name, and optionally the
-/// suites it applies to.
+/// suites or the distributions it applies to.
 ///
 /// Most packages are the same in every suite and are written as a bare string. A few
 /// are not. Debian splits, renames and drops binary packages between releases. A layer
@@ -993,22 +993,40 @@ pub struct AptSource {
 /// It also means this type needs no ordering over suite names. There is no release
 /// sequence to maintain here, and no special case for `sid`.
 ///
+/// A package that differs between distributions rather than between releases names
+/// the [distro layers](crate::distro::DistroLayer) instead. The Debian firmware
+/// packages and Ubuntu's are the case. Each name holds for every release of its own
+/// distribution, and listing suites would restate every codename for no information.
+///
 /// A conditional entry that matches no suite in the config tree is almost certainly a
-/// typo. `boot2deb verify-config` reports one.
+/// typo. `boot2deb verify-packages` reports one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PackageEntry {
     /// Installed on every suite. The common case, and the only one most layers use.
     Plain(String),
-    /// Installed only on the suites it names.
-    Conditional {
-        /// The package name, as the archive spells it.
-        name: String,
-        /// The suites that carry this package. Never empty — an entry applying to no
-        /// suite is refused at resolution as [`ConfigError::PackageSuitesEmpty`],
-        /// since config that can never take effect is a mistake and not a no-op.
-        suites: Vec<String>,
-    },
+    /// Installed only where its condition holds.
+    Conditional(ConditionalPackage),
+}
+
+/// A package entry with a condition: `{ name, suites = [...] }` or
+/// `{ name, distros = [...] }`.
+///
+/// Exactly one of the two lists is set, and it is non-empty. Resolution refuses any
+/// other shape as [`ConfigError::PackageCondition`]. An empty list can never take
+/// effect. An entry with both would leave a reader to guess whether they combine as
+/// "and" or "or".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionalPackage {
+    /// The package name, as the archive spells it.
+    pub name: String,
+    /// The suites that carry this package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suites: Option<Vec<String>>,
+    /// The distro layers whose archives carry this package, by layer stem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distros: Option<Vec<String>>,
 }
 
 impl PackageEntry {
@@ -1016,42 +1034,68 @@ impl PackageEntry {
     pub fn name(&self) -> &str {
         match self {
             PackageEntry::Plain(name) => name,
-            PackageEntry::Conditional { name, .. } => name,
+            PackageEntry::Conditional(c) => &c.name,
         }
     }
 
-    /// The suites this entry is restricted to, or `None` where it applies to all of
-    /// them.
+    /// The suites this entry is restricted to, or `None` where it names none.
     pub fn suites(&self) -> Option<&[String]> {
         match self {
             PackageEntry::Plain(_) => None,
-            PackageEntry::Conditional { suites, .. } => Some(suites),
+            PackageEntry::Conditional(c) => c.suites.as_deref(),
         }
     }
 
-    /// Whether this entry contributes its package to a build of `suite`.
+    /// The distro layers this entry is restricted to, or `None` where it names none.
+    pub fn distros(&self) -> Option<&[String]> {
+        match self {
+            PackageEntry::Plain(_) => None,
+            PackageEntry::Conditional(c) => c.distros.as_deref(),
+        }
+    }
+
+    /// Whether this entry contributes its package to a build of `suite`, served by the
+    /// distro layer `distro`.
     ///
-    /// An unconditional entry applies everywhere. A conditional one applies where it
-    /// says so, compared verbatim: a suite is an archive's own name for itself, and
-    /// two spellings are two suites.
-    pub fn applies_to(&self, suite: &str) -> bool {
+    /// An unconditional entry applies everywhere. A conditional one applies where its
+    /// list says so, compared verbatim. A suite is an archive's own name for itself, and
+    /// a distro is a layer's stem.
+    pub fn applies_to(&self, distro: &str, suite: &str) -> bool {
         match self {
             PackageEntry::Plain(_) => true,
-            PackageEntry::Conditional { suites, .. } => suites.iter().any(|s| s == suite),
+            PackageEntry::Conditional(c) => match (&c.suites, &c.distros) {
+                (Some(suites), _) => suites.iter().any(|s| s == suite),
+                (None, Some(distros)) => distros.iter().any(|d| d == distro),
+                (None, None) => false,
+            },
         }
     }
 
-    /// Refuses an entry that names no suite. `layer` names the file the entry came
-    /// from, so the failure points at what to edit.
+    /// Refuses an entry whose condition is malformed: neither list, both, or an empty
+    /// one. `layer` names the file the entry came from, so the failure points at what to
+    /// edit.
+    ///
+    /// Whether a `distros` entry names a layer that exists is checked at resolution,
+    /// which knows the tree's layers. This check is the shape alone.
     pub fn validate(&self, layer: &str) -> Result<(), ConfigError> {
-        match self {
-            PackageEntry::Conditional { name, suites } if suites.is_empty() => {
-                Err(ConfigError::PackageSuitesEmpty {
-                    package: name.clone(),
-                    layer: layer.to_string(),
-                })
+        let PackageEntry::Conditional(c) = self else {
+            return Ok(());
+        };
+        let problem = match (&c.suites, &c.distros) {
+            (Some(_), Some(_)) => Some("sets both `suites` and `distros`"),
+            (None, None) => Some("is a table with neither `suites` nor `distros`"),
+            (Some(list), None) | (None, Some(list)) if list.is_empty() => {
+                Some("names an empty list, so it is installed nowhere")
             }
-            _ => Ok(()),
+            _ => None,
+        };
+        match problem {
+            Some(problem) => Err(ConfigError::PackageCondition {
+                package: c.name.clone(),
+                layer: layer.to_string(),
+                problem,
+            }),
+            None => Ok(()),
         }
     }
 }
@@ -1765,9 +1809,10 @@ pub struct DeviceLayer {
     pub expect: Vec<crate::expect::Expectation>,
 }
 
-/// The distro-generic rootfs substrate (`base.toml`): the base Debian
-/// package set every image installs, plus packages excluded from the base
-/// system. Layer- and feature-specific packages stack on top at resolution.
+/// The distro-generic rootfs substrate (`base.toml`): the package set every image
+/// installs whatever its distribution, plus packages excluded from the base system.
+/// The [distro layer](crate::distro::DistroLayer) adds what differs between
+/// distributions, and the hardware layers and features stack on top at resolution.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BaseLayer {
@@ -1811,8 +1856,8 @@ pub struct BaseLayer {
     /// reachable time source does instead.
     #[serde(default)]
     pub ntp_servers: Vec<String>,
-    /// Base Debian packages installed into every rootfs (the bootstrap
-    /// `--include` set) — device- and feature-independent distro policy.
+    /// Packages installed into every rootfs whatever its distribution, by the same
+    /// name on each. Device- and feature-independent policy.
     #[serde(default)]
     pub packages: Vec<PackageEntry>,
     /// Packages excluded from the base system, e.g. `isc-dhcp-client` where a
@@ -2531,6 +2576,12 @@ pub struct Recipe {
     /// [`Deliverable::Uboot`] recipe, which resolves no suite.
     #[serde(default)]
     pub suite: Option<String>,
+    /// Initramfs-generator override. `None` → the
+    /// [`initramfs_generator`](crate::distro::DistroLayer::initramfs_generator) of the
+    /// distro layer serving the suite. Refused on a [`Deliverable::Uboot`] recipe, which
+    /// has no initramfs.
+    #[serde(default)]
+    pub initramfs_generator: Option<crate::distro::InitramfsGenerator>,
     /// Composable rootfs features — add-in module names. Empty (or
     /// omitted) means a plain base image, merged onto the layered substrate at
     /// resolution.
@@ -2630,8 +2681,12 @@ pub struct Overrides {
     /// Override the u-boot patch series (must be in the device's
     /// `supported_uboot_series`).
     pub uboot_series: Option<String>,
-    /// Override the Debian suite.
+    /// Override the suite. The distribution follows it, from the distro layer that
+    /// lists it.
     pub suite: Option<String>,
+    /// Override the initramfs generator. Set from a recipe rather than a flag, since
+    /// the generator decides what the image's own kernel upgrades will run.
+    pub initramfs_generator: Option<crate::distro::InitramfsGenerator>,
     /// Override the image layout.
     pub layout: Option<Layout>,
     /// Override the boot method (must be in the device's supported set).
@@ -3017,6 +3072,14 @@ pub struct ResolvedBuild {
     /// so this names an input to them and is folded into the u-boot and kmod output
     /// signatures.
     pub packaging_suite: String,
+    /// The distribution serving [`packaging_suite`](Self::packaging_suite): its
+    /// pockets, components and archive keyring.
+    ///
+    /// Resolved from the one [distro layer](crate::distro::DistroLayer) that lists the
+    /// suite. Every root the build provisions draws from it, the cross and packaging
+    /// roots included. The compiler and the archiver behind an image's `.deb`s therefore
+    /// come from the same archive as the image's userland.
+    pub distro: crate::distro::ResolvedDistro,
     /// Image layout.
     pub layout: Layout,
     /// The boot-method-specific configuration, tagged by method: what the
@@ -3100,8 +3163,9 @@ pub struct ResolvedImage {
     /// distro-package one installed from the mirror. Unconditional, because a build
     /// that resolves no kernel resolves no image either.
     pub kernel: ResolvedKernel,
-    /// The Debian suite this image is built from: the mirror its rootfs is
-    /// bootstrapped against and the archive its packages are solved in.
+    /// The suite this image is built from: the archive its rootfs is bootstrapped
+    /// against and its packages are solved in. Its distribution is
+    /// [`ResolvedBuild::distro`].
     ///
     /// Distinct from [`ResolvedBuild::packaging_suite`], which every deliverable has.
     /// This one is the suite the *image* is. On an image build the two are equal by
@@ -3119,8 +3183,26 @@ pub struct ResolvedImage {
     /// Three things read it, and each is a subtraction rather than an addition. The
     /// hardware layers' `nonfree_firmware_packages` are left out of
     /// [`rootfs_packages`](Self::rootfs_packages). Their `overlay-nonfree/` trees are not
-    /// laid into the rootfs, and the image's apt components narrow to `main`.
+    /// laid into the rootfs, and the image's [`components`](Self::components) narrow
+    /// to the distro layer's free subset.
     pub libre: bool,
+    /// The archive components this image resolves against and its apt sources offer:
+    /// the distro layer's full set, or its free subset on a [`libre`](Self::libre)
+    /// build.
+    ///
+    /// One answer for two questions that must not diverge. A package `apt` could not
+    /// have installed at build time is then also one the board will not offer later.
+    /// Never empty. Resolution refuses a libre build on a distribution with no free
+    /// subset.
+    pub components: Vec<String>,
+    /// The login the image's account is created under, from the distro layer's
+    /// [`default_user`](crate::distro::DistroLayer::default_user).
+    pub user: String,
+    /// The program that builds this image's initramfs. The distro layer's default
+    /// unless the recipe picked the other one. Its package is in
+    /// [`rootfs_packages`](Self::rootfs_packages), placed there by resolution and named
+    /// by no layer.
+    pub initramfs_generator: crate::distro::InitramfsGenerator,
     /// Image size.
     pub image_size: String,
     /// Image hostname.
@@ -3733,7 +3815,7 @@ mod tests {
     }
 
     /// A bare string and a table are both entries. TOML tells them apart by shape and
-    /// the untagged enum follows, so a layer can mix the two in one list.
+    /// the untagged enum follows, so a layer can mix the forms in one list.
     #[test]
     fn a_package_list_mixes_bare_names_and_conditional_entries() {
         #[derive(serde::Deserialize)]
@@ -3745,77 +3827,125 @@ mod tests {
             packages = [
                 "network-manager",
                 { name = "network-manager-tui", suites = ["forky", "sid"] },
+                { name = "firmware-realtek", distros = ["debian"] },
             ]
             "#,
         )
-        .expect("both forms parse");
+        .expect("every form parses");
         assert_eq!(
             layer.packages,
             vec![
                 PackageEntry::Plain("network-manager".into()),
-                PackageEntry::Conditional {
-                    name: "network-manager-tui".into(),
-                    suites: vec!["forky".into(), "sid".into()],
-                },
+                suites_entry("network-manager-tui", &["forky", "sid"]),
+                distros_entry("firmware-realtek", &["debian"]),
             ]
         );
+    }
+
+    /// A misspelled key in a conditional table is refused at the parse rather than read
+    /// as an entry with no condition.
+    #[test]
+    fn a_conditional_entry_refuses_an_unknown_key() {
+        #[derive(Debug, serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Layer {
+            packages: Vec<PackageEntry>,
+        }
+        let parsed = toml::from_str::<Layer>(r#"packages = [{ name = "x", distro = ["debian"] }]"#);
+        assert!(parsed.is_err(), "{parsed:?}");
+    }
+
+    fn suites_entry(name: &str, suites: &[&str]) -> PackageEntry {
+        PackageEntry::Conditional(ConditionalPackage {
+            name: name.into(),
+            suites: Some(suites.iter().map(|s| s.to_string()).collect()),
+            distros: None,
+        })
+    }
+
+    fn distros_entry(name: &str, distros: &[&str]) -> PackageEntry {
+        PackageEntry::Conditional(ConditionalPackage {
+            name: name.into(),
+            suites: None,
+            distros: Some(distros.iter().map(|s| s.to_string()).collect()),
+        })
     }
 
     /// The condition decides membership per build, which is the whole point: one layer
     /// file serves every suite.
     #[test]
     fn a_conditional_entry_applies_only_to_the_suites_it_names() {
-        let entry = PackageEntry::Conditional {
-            name: "network-manager-tui".into(),
-            suites: vec!["forky".into(), "sid".into()],
-        };
-        assert!(entry.applies_to("forky"));
-        assert!(entry.applies_to("sid"));
-        assert!(!entry.applies_to("trixie"));
+        let entry = suites_entry("network-manager-tui", &["forky", "sid"]);
+        assert!(entry.applies_to("debian", "forky"));
+        assert!(entry.applies_to("debian", "sid"));
+        assert!(!entry.applies_to("debian", "trixie"));
         // Verbatim: a suite is an archive's own name for itself, so a near-miss is a
         // different suite and not a match.
-        assert!(!entry.applies_to("Forky"));
-        assert!(!entry.applies_to("forky-backports"));
+        assert!(!entry.applies_to("debian", "Forky"));
+        assert!(!entry.applies_to("debian", "forky-backports"));
+    }
+
+    /// A distro condition holds for every release of that distribution and for none
+    /// of another's.
+    #[test]
+    fn a_distro_entry_applies_to_every_suite_of_its_distro() {
+        let entry = distros_entry("linux-firmware-misc", &["ubuntu"]);
+        assert!(entry.applies_to("ubuntu", "resolute"));
+        assert!(!entry.applies_to("debian", "forky"));
+        assert_eq!(entry.distros(), Some(&["ubuntu".to_string()][..]));
+        assert_eq!(entry.suites(), None);
     }
 
     /// An unconditional entry is the common case and is never filtered out.
     #[test]
     fn a_bare_name_applies_to_every_suite() {
         let entry = PackageEntry::from("network-manager");
-        assert!(entry.applies_to("trixie"));
-        assert!(entry.applies_to("forky"));
+        assert!(entry.applies_to("debian", "trixie"));
+        assert!(entry.applies_to("ubuntu", "resolute"));
         assert_eq!(entry.suites(), None);
+        assert_eq!(entry.distros(), None);
     }
 
-    /// Config that can never take effect is a mistake, not a no-op — most likely a list
-    /// someone emptied instead of deleting the entry.
+    /// Config that can never take effect is a mistake, not a no-op, and so is a
+    /// condition a reader would have to guess how to combine.
     #[test]
-    fn an_entry_naming_no_suite_is_refused() {
-        let entry = PackageEntry::Conditional {
+    fn a_malformed_condition_is_refused() {
+        let both = PackageEntry::Conditional(ConditionalPackage {
             name: "nmtui".into(),
-            suites: vec![],
-        };
-        let err = entry
-            .validate("soc 'rk3288'")
-            .expect_err("an entry applying to nothing is refused");
-        assert!(matches!(err, ConfigError::PackageSuitesEmpty { .. }));
-        // The failure names both the package and where to edit it.
-        let message = err.to_string();
-        assert!(message.contains("nmtui"), "{message}");
-        assert!(message.contains("rk3288"), "{message}");
+            suites: Some(vec!["forky".into()]),
+            distros: Some(vec!["debian".into()]),
+        });
+        let neither = PackageEntry::Conditional(ConditionalPackage {
+            name: "nmtui".into(),
+            suites: None,
+            distros: None,
+        });
+        for entry in [
+            suites_entry("nmtui", &[]),
+            distros_entry("nmtui", &[]),
+            both,
+            neither,
+        ] {
+            let err = entry
+                .validate("soc 'rk3288'")
+                .expect_err("a malformed condition is refused");
+            assert!(matches!(err, ConfigError::PackageCondition { .. }));
+            // The failure names both the package and where to edit it.
+            let message = err.to_string();
+            assert!(message.contains("nmtui"), "{message}");
+            assert!(message.contains("rk3288"), "{message}");
+        }
     }
 
     /// A well-formed entry passes validation whichever form it takes.
     #[test]
     fn a_well_formed_entry_validates() {
-        assert!(PackageEntry::from("bash")
-            .validate("the base layer")
-            .is_ok());
-        assert!(PackageEntry::Conditional {
-            name: "nmtui".into(),
-            suites: vec!["forky".into()],
+        for entry in [
+            PackageEntry::from("bash"),
+            suites_entry("nmtui", &["forky"]),
+            distros_entry("firmware-realtek", &["debian"]),
+        ] {
+            assert!(entry.validate("the base layer").is_ok(), "{entry:?}");
         }
-        .validate("the base layer")
-        .is_ok());
     }
 }

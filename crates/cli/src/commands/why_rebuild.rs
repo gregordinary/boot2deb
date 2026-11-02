@@ -120,10 +120,10 @@ fn build_env(lock: &Lock, build: &ResolvedBuild) -> Result<BuildEnv> {
     let toolchain = boot2deb_engine::toolchain::HostToolchain::probe(
         pf.interpreter.then(|| build.arch.debian_arch()),
     );
-    // The mirror list keys the sandbox identity; it is the lock's captured snapshot
-    // mode, exactly as a build with no `--snapshot` would resolve it.
-    let mirrors = boot2deb_engine::snapshot::resolve_mirrors(
-        boot2deb_engine::DEFAULT_MIRROR,
+    // The archive keys the sandbox identity; it is the lock's captured snapshot mode,
+    // exactly as a build with no `--snapshot` would resolve it.
+    let archive = boot2deb_engine::Archive::resolve(
+        &build.distro,
         lock.snapshot.as_ref(),
         lock.snapshot
             .as_ref()
@@ -134,29 +134,17 @@ fn build_env(lock: &Lock, build: &ResolvedBuild) -> Result<BuildEnv> {
         // The cross root's identity — what compiles the kernel, u-boot and modules.
         toolchain_id: host_deb_arch
             .map(|arch| {
-                boot2deb_engine::build::cross_identity(
-                    arch,
-                    build.arch.debian_arch(),
-                    &build.packaging_suite,
-                    &mirrors,
-                )
+                boot2deb_engine::build::cross_identity(arch, build.arch.debian_arch(), &archive)
             })
             .unwrap_or_default(),
         // The target-arch sandbox's identity. Empty where the build resolves no suite
         // and so stands up none, matching what the build itself would compose.
-        sandbox_id: build.image.as_ref().map_or_else(String::new, |image| {
-            boot2deb_engine::build::sandbox_identity(
-                build.arch.debian_arch(),
-                &image.suite,
-                &mirrors,
-                &toolchain,
-            )
+        sandbox_id: build.image.as_ref().map_or_else(String::new, |_| {
+            boot2deb_engine::build::sandbox_identity(build.arch.debian_arch(), &archive, &toolchain)
         }),
         // The packaging root's identity.
         packaging_id: host_deb_arch
-            .map(|arch| {
-                boot2deb_engine::build::packaging_identity(arch, &build.packaging_suite, &mirrors)
-            })
+            .map(|arch| boot2deb_engine::build::packaging_identity(arch, &archive))
             .unwrap_or_default(),
         cross_compile,
         // Not folded into any signature (a build whose output depends on its job

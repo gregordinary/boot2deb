@@ -42,8 +42,9 @@
 //! Resolving the plan up front lets [`rootcache`] skip that bootstrap on an unchanged
 //! *solved* package set (early cutoff), without ever reusing a stale solve.
 //!
-//! The rootfs bootstrap fetches from the mirror list [`snapshot`] resolves: the live
-//! mirror, plus a `snapshot.debian.org` mirror when a captured snapshot is activated.
+//! Every bootstrap fetches from one [`Archive`]: each pocket of the build's suite, at
+//! the mirrors [`snapshot`] resolves for it. That is the live mirror, plus the
+//! distribution's point-in-time copy when a captured snapshot is activated.
 //! Its solved package manifest is verified against the committed reproducibility pin
 //! by [`manifest`].
 //!
@@ -61,7 +62,7 @@ pub mod archfetch;
 pub mod archive;
 pub mod artstore;
 pub mod blobs;
-mod bootstrap;
+pub mod bootstrap;
 pub mod build;
 pub mod checks;
 pub mod debfile;
@@ -99,7 +100,7 @@ pub mod srcfetch;
 pub mod toolchain;
 pub mod tryboot;
 
-pub use bootstrap::DEFAULT_MIRROR;
+pub use bootstrap::Archive;
 pub use error::EngineError;
 pub use event::{Event, EventSink, Step, Stream};
 

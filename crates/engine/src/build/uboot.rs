@@ -1049,12 +1049,13 @@ mod tests {
     /// Pointed at a path that does not exist, deliberately: a test that reached
     /// `ensure_ready` through this would fail rather than quietly bootstrap a tree.
     fn unused_packaging() -> PackagingSandbox {
+        let (archive, components) = crate::bootstrap::test_archive("forky");
         PackagingSandbox::new(SandboxSpec {
             rootfs: PathBuf::from("/nonexistent/packaging-root"),
-            suite: "forky".into(),
             arch: "amd64".into(),
-            mirrors: Vec::new(),
-            keyring: None,
+            archive,
+            components,
+            keyring: crate::bootstrap::test_keyring(),
             cache_dir: None,
         })
     }
@@ -1102,6 +1103,7 @@ mod tests {
                 rockchip: Some(git("rk")),
             }),
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "m".into(),
                 manifest_sha256: None,

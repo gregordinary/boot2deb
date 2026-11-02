@@ -700,6 +700,17 @@ pub enum EngineError {
         mode: &'static str,
     },
 
+    /// A snapshot mode was requested for a pocket whose distro layer names no
+    /// point-in-time archive, so there is nowhere to take the captured moment from.
+    #[error(
+        "a snapshot was requested, but the distro layer serving '{suite}' names no \
+         snapshot archive for it"
+    )]
+    NoSnapshotArchive {
+        /// The pocket's suite.
+        suite: String,
+    },
+
     /// The resolved raw-gap offsets or image size are inconsistent. The cause is a
     /// bad ordering (idbloader < u-boot.itb < rootfs), or a non-sector-aligned offset.
     /// It can also be an image too small to hold the GPT plus a rootfs partition. Or a

@@ -23,7 +23,7 @@
 //! Both are read-only and network-only, and both run before anything is built.
 
 use crate::archfetch::ArchiveFetch;
-use crate::bootstrap::components;
+use crate::bootstrap::Archive;
 use crate::error::{cage_message, EngineError};
 use crate::rootfs::{feature_repositories, AptRepo};
 use boot2deb_core::model::ImageBuild;
@@ -80,47 +80,30 @@ fn bootstrap_failure() -> impl Fn(&str) -> Box<dyn Fn(DebianError) -> EngineErro
 ///
 /// Shared by both questions deliberately: verifying against a different archive than the
 /// one the other question asks — or than the build itself resolves from — would not be a
-/// verification. `purpose` names the caller in the one failure raised before a builder
-/// exists.
+/// verification.
 ///
 /// The build's **local** `.deb` pool is not among them. It holds what a build produces,
 /// and nothing has been produced yet.
 fn archives<'a>(
     ib: ImageBuild<'a>,
-    mirrors: &[String],
-    keyring: Option<&Path>,
+    archive: &Archive,
+    keyring: &Path,
     apt_sources: &[AptRepo],
-    purpose: &str,
 ) -> Result<DebianBuilder, EngineError> {
     let ImageBuild { build, image } = ib;
-    let (primary, fallbacks) = mirrors
-        .split_first()
-        .ok_or_else(|| EngineError::Bootstrap {
-            context: format!("configure the archive {purpose}"),
-            message: "no Debian mirror was resolved".into(),
-        })?;
-
     // No `include`, no `exclude`, no base priority here: what the archives offer is
     // shaped by none of them, and the caller that does resolve a closure adds its own
     // `include`. Nor an identity map or a cache dir — nothing is unpacked, and nothing
     // is downloaded past the indexes.
-    let mut b = Debian::builder(&image.suite)
+    let b = Debian::builder(archive.suite())
         .architecture(build.arch.debian_arch())
-        .components(components(image).split(','))
         // The same transport a build uses, so a feature repository this can reach is
         // one the build can reach and vice versa — see [`ArchiveFetch`].
-        .fetcher(ArchiveFetch::new())
-        .mirror(primary);
-    for fallback in fallbacks {
-        b = b.mirror_fallback(fallback);
-    }
-    // A point-in-time archive's release is expired by design, exactly as in a build.
-    if crate::snapshot::has_snapshot(mirrors) {
-        b = b.allow_stale_release(true);
-    }
-    if let Some(keyring) = keyring {
-        b = b.keyring(keyring);
-    }
+        .fetcher(ArchiveFetch::new());
+    // Every pocket a build resolves against, at the image's own components and with
+    // the same stale-release posture, so a package an update pocket carries is found
+    // where the build will find it.
+    let mut b = archive.configure(b, &image.components, keyring)?;
     for repo in feature_repositories(apt_sources)? {
         b = b.repository(repo);
     }
@@ -129,15 +112,14 @@ fn archives<'a>(
 
 /// Ask the archives a build would resolve against which of `names` they offer.
 ///
-/// The archives are the build's own: the primary mirror with any snapshot backstop,
-/// plus every repository the selected features contribute. A package that exists only
+/// The archives are the build's own: every pocket of its suite with any snapshot
+/// backstop, plus every repository the selected features contribute. A package that exists only
 /// in a feature's own repository (Jellyfin's, say) is therefore found where the recipe
 /// expects it. The build's **local** `.deb` pool is deliberately not among them: it
 /// holds what a build produces, and nothing has been produced yet.
 ///
-/// `mirrors` is the resolved mirror list (primary first) and must be non-empty.
-/// `keyring` is the vendored archive keyring, or `None` to fall back to the host apt
-/// trust store.
+/// `archive` is the build's resolved [`Archive`], and `keyring` the distribution's
+/// vendored archive keyring.
 ///
 /// # Errors
 ///
@@ -146,14 +128,14 @@ fn archives<'a>(
 /// resolve's read half has, surfaced before a build rather than during one.
 pub fn available(
     ib: ImageBuild,
-    mirrors: &[String],
-    keyring: Option<&Path>,
+    archive: &Archive,
+    keyring: &Path,
     apt_sources: &[AptRepo],
     names: &[String],
 ) -> Result<AvailabilityReport, EngineError> {
     let ImageBuild { build, image } = ib;
     let fail = bootstrap_failure();
-    let mut debian = archives(ib, mirrors, keyring, apt_sources, "availability query")?
+    let mut debian = archives(ib, archive, keyring, apt_sources)?
         .build()
         .map_err(fail(&format!(
             "configure the {} {} archives",
@@ -258,8 +240,8 @@ impl ClosureReport {
 /// release or an index cannot be fetched or verified.
 pub fn closure(
     ib: ImageBuild,
-    mirrors: &[String],
-    keyring: Option<&Path>,
+    archive: &Archive,
+    keyring: &Path,
     apt_sources: &[AptRepo],
     names: &[String],
 ) -> Result<ClosureReport, EngineError> {
@@ -299,7 +281,7 @@ pub fn closure(
     // satisfier the recipe excluded is refused in a build, and a check that did not
     // exclude it would pass and let the build fail later. `extra_packages` is not here —
     // it is a flag on one invocation rather than anything the recipe declares.
-    let mut debian = archives(ib, mirrors, keyring, apt_sources, "closure query")?
+    let mut debian = archives(ib, archive, keyring, apt_sources)?
         .base_priority(Priority::Important)
         .include(names.iter().cloned())
         .exclude(image.rootfs_exclude.iter().cloned())

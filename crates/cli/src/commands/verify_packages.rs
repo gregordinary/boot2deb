@@ -58,22 +58,15 @@ pub(crate) fn run(
     // has one, else the live mirror. Verifying against a different archive than the
     // build resolves from would not be a verification.
     let lock = root.lock(recipe).ok();
-    let mirrors = boot2deb_engine::snapshot::resolve_mirrors(
-        boot2deb_engine::DEFAULT_MIRROR,
+    let archive = boot2deb_engine::Archive::resolve(
+        &build.distro,
         lock.as_ref().and_then(|l| l.snapshot.as_ref()),
         lock.as_ref()
             .and_then(|l| l.snapshot.as_ref())
             .map(|s| s.mode)
             .unwrap_or(boot2deb_core::lock::SnapshotMode::Off),
     )?;
-    let keyring = {
-        let vendored =
-            root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", false)?;
-        if let Some(path) = &vendored {
-            boot2deb_engine::keyring::verify(path)?;
-        }
-        vendored
-    };
+    let keyring = crate::sandboxes::keyring(root, &build.distro, None, false)?;
     let apt_repos = apt_source_keyrings(root, &image.apt_sources)?;
 
     if !json_out {
@@ -84,8 +77,7 @@ pub(crate) fn run(
             query.len(),
         );
     }
-    let report =
-        boot2deb_engine::archive::available(ib, &mirrors, keyring.as_deref(), &apt_repos, &query)?;
+    let report = boot2deb_engine::archive::available(ib, &archive, &keyring, &apt_repos, &query)?;
 
     // A conditional package entry naming a suite this tree never builds. Reported here
     // because this is the command about whether a recipe's package set is right, and it
@@ -102,11 +94,7 @@ pub(crate) fn run(
     // the set unbuildable.
     let closure = if report.is_complete() {
         Some(boot2deb_engine::archive::closure(
-            ib,
-            &mirrors,
-            keyring.as_deref(),
-            &apt_repos,
-            &query,
+            ib, &archive, &keyring, &apt_repos, &query,
         )?)
     } else {
         None
@@ -127,9 +115,12 @@ pub(crate) fn run(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "recipe": recipe,
+                "distro": &build.distro.name,
                 "suite": &image.suite,
                 "architecture": build.arch.debian_arch(),
-                "mirrors": mirrors,
+                "pockets": archive.pockets.iter().map(|p| json!({
+                    "suite": p.suite, "mirrors": p.mirrors,
+                })).collect::<Vec<_>>(),
                 "present": report.present,
                 "provided": report.provided.iter().map(|(name, providers)| json!({
                     "name": name, "providers": providers,
@@ -294,6 +285,7 @@ fn locally_built(
         .as_ref()
         .map(|i| i.suite.as_str())
         .unwrap_or_default();
+    let distro = build.distro.name.as_str();
     for name in build.image.iter().flat_map(|i| &i.features) {
         let feature = root.feature(name)?;
         if feature.requires_media_accel {
@@ -301,7 +293,7 @@ fn locally_built(
                 feature
                     .packages
                     .iter()
-                    .filter(|entry| entry.applies_to(suite))
+                    .filter(|entry| entry.applies_to(distro, suite))
                     .map(|entry| entry.name().to_string()),
             );
         }

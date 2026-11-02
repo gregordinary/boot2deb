@@ -14,6 +14,7 @@
 # Environment, all set by the caller:
 #
 #   B2D_USER                    the default account's name
+#   B2D_APT_REPLACED            the bootstrap's own apt sources files, one path per line
 #   B2D_SUDOERS                 its sudoers spec, e.g. `NOPASSWD: ALL`
 #   B2D_AUTHORIZED_KEYS         its authorized_keys, one per line; empty for none
 #   B2D_GROUPS                  its supplementary groups, comma-separated; empty for none
@@ -75,12 +76,15 @@ if [ -d /var/lib/dbus ]; then
     ln -sf /etc/machine-id /var/lib/dbus/machine-id
 fi
 
-# The bootstrap's copy of the archive keyring it verified against. The provisioner
-# writes the keyring boot2deb supplied to this path, which no package ships, for the
-# sources.list it writes; the image's own sources.list replaces that one and trusts
-# the keys the debian-archive-keyring package installs, whose upgrades follow the
-# archive's key rotation. Left in place, the copy is a second Debian keyring that no
-# rotation ever reaches.
+# The bootstrap's own apt configuration for the distribution's archive: the release
+# pocket's sources.list, each further pocket's sources.list.d entry, and the keyring
+# copies they name. The image's deb822 sources under sources.list.d replace all of it
+# and trust the keyring the distribution's keyring package installs, whose upgrades
+# follow the archive's key rotation. Left in place, the copies are a second keyring no
+# rotation ever reaches and a second set of sources apt reads twice.
+printf '%s\n' "$B2D_APT_REPLACED" | while IFS= read -r replaced; do
+    [ -z "$replaced" ] || rm -f -- "$replaced"
+done
 rm -f /usr/share/keyrings/fcage-archive-keyring.gpg
 
 # --- Boot artifacts ----------------------------------------------------------

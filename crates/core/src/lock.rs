@@ -525,7 +525,14 @@ pub struct FfmpegPins {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootfsPin {
-    /// Debian suite.
+    /// The [distro layer](crate::distro::DistroLayer) the suite resolved to, by stem.
+    ///
+    /// Recorded although the suite determines it, because the solved manifest beside
+    /// the lock was resolved against that distribution's archive. A config change could
+    /// move the suite to another layer. Every pin here would then describe the wrong
+    /// archive, and the drift check names that rather than building from them.
+    pub distro: String,
+    /// The suite, as the distribution's archive names it.
     pub suite: String,
     /// Filename of the content-pinned solved package manifest, committed beside
     /// the lock (`recipes/<manifest>`). Deserialization enforces a bare filename.
@@ -682,6 +689,7 @@ mod tests {
                 }),
             }),
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "turing-rk1-forky.pkgs.lock".into(),
                 manifest_sha256: Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into()),
@@ -776,6 +784,7 @@ mod tests {
                 }),
             }),
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "rec.pkgs.lock".into(),
                 manifest_sha256: None,
@@ -946,6 +955,7 @@ mod tests {
             userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "asus-c201-forky.pkgs.lock".into(),
                 manifest_sha256: None,
@@ -979,6 +989,7 @@ mod tests {
             userspace: Vec::new(),
             ffmpeg: None,
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "asus-c201-forky.pkgs.lock".into(),
                 manifest_sha256: None,

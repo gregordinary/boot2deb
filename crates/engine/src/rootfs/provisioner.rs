@@ -46,10 +46,9 @@
 
 use super::{
     config, stage_overlay, stage_preinstall_overlay, AptRepo, BootConfig, RootfsArtifacts,
-    RootfsOptions, DEFAULT_USER,
+    RootfsOptions,
 };
 use crate::archfetch::ArchiveFetch;
-use crate::bootstrap::components;
 use crate::error::{cage_message, EngineError};
 use crate::event::{EventSink, Step};
 use crate::repo::LocalDistsRepo;
@@ -108,12 +107,6 @@ pub fn build_rootfs(
     let ImageBuild { build, image } = ib;
     let step = Step::start(sink, "rootfs");
     std::fs::create_dir_all(opts.out_dir).map_err(|s| EngineError::io(opts.out_dir, s))?;
-    if opts.mirrors.is_empty() {
-        return Err(EngineError::Bootstrap {
-            context: "configure the rootfs bootstrap".into(),
-            message: "no Debian mirror was resolved".into(),
-        });
-    }
     let arch = build.arch.debian_arch();
 
     // Caller-owned staging (overlays + local repo). A private temp under the
@@ -215,9 +208,9 @@ pub fn build_rootfs(
                 })?;
                 drop(resolver);
                 step.log(format!(
-                    "resolved {} packages ({} mirror(s), {} local .deb(s))",
+                    "resolved {} packages ({} pocket(s), {} local .deb(s))",
                     plan.packages.len(),
-                    opts.mirrors.len(),
+                    opts.archive.pockets.len(),
                     opts.repo_debs.len()
                 ));
                 let document =
@@ -315,7 +308,7 @@ pub fn build_rootfs(
             &overlay,
             image,
             opts.boot_config,
-            DEFAULT_USER,
+            &apt_replaced(opts.archive),
             opts.source_date_epoch,
             &step,
         )?;
@@ -584,10 +577,10 @@ impl Drop for PoolDir {
 /// Assemble the [`Debian`] provisioner from the resolved build and options, either to
 /// **resolve** a plan (`plan` is `None`) or to **install** one it was already given.
 ///
-/// The resolved mirror list is configured on the builder, primary first; a
-/// `snapshot.debian.org` mirror anywhere in it relaxes the release freshness check
-/// ([`snapshot::has_snapshot`](crate::snapshot::has_snapshot)); the local trusted `dists/` pool and the
-/// feature repositories are merged in as additional [`Repository`] sources. The
+/// The build's [`Archive`](crate::Archive) is configured on the builder: the release
+/// pocket as the primary, each further pocket as a [`Repository`] of its own, and a
+/// relaxed release freshness check where a snapshot is active. The local trusted
+/// `dists/` pool and the feature repositories are merged in after them. The
 /// subordinate map gives the tree real ownership, the pre-install overlay is handed to
 /// the provisioner's pre-configure hook, and the download cache is content-addressed
 /// for reuse. All of that describes *how* a bootstrap runs and applies to both modes.
@@ -623,14 +616,9 @@ fn build_debian(
 ) -> Result<Debian, EngineError> {
     let ImageBuild { build, image } = ib;
     let arch = build.arch.debian_arch();
-    let (primary, fallbacks) = opts
-        .mirrors
-        .split_first()
-        .expect("mirrors are non-empty (checked by the caller)");
 
-    let mut b = Debian::builder(&image.suite)
+    let b = Debian::builder(&image.suite)
         .architecture(arch)
-        .components(components(image).split(','))
         .identity_map(IdentityMap::Subordinate)
         // Every maintainer script runs under the lock's epoch, so the system accounts
         // the install creates record its day in `/etc/shadow` rather than the day the
@@ -643,8 +631,10 @@ fn build_debian(
         // A feature repository can be published at any URL its vendor chose, and the
         // library's own client speaks no TLS — so the transport is boot2deb's to
         // supply. See [`ArchiveFetch`].
-        .fetcher(ArchiveFetch::new())
-        .mirror(primary);
+        .fetcher(ArchiveFetch::new());
+    // Every pocket of the suite, at the image's own components: what the solve may
+    // install is what the booted board's apt offers.
+    let mut b = opts.archive.configure(b, &image.components, opts.keyring)?;
     b = match plan {
         Some(plan) => b.plan(plan),
         None => b
@@ -653,17 +643,6 @@ fn build_debian(
             .include(opts.extra_packages.iter().cloned())
             .exclude(image.rootfs_exclude.iter().cloned()),
     };
-    for fallback in fallbacks {
-        b = b.mirror_fallback(fallback);
-    }
-    // A point-in-time archive's release is expired by design; accepting a
-    // signed-but-stale release is a repository-wide posture.
-    if crate::snapshot::has_snapshot(opts.mirrors) {
-        b = b.allow_stale_release(true);
-    }
-    if let Some(keyring) = opts.keyring {
-        b = b.keyring(keyring);
-    }
 
     // The build's own `.deb`s: a trusted `file://` pool, apt's `[trusted=yes]`.
     let local = Repository::builder(&image.suite)
@@ -757,7 +736,8 @@ fn rootfs_key(
         apt_sources: &apt_fp,
         arch: &arch,
         suite: &image.suite,
-        components: components(image),
+        components: &image.components.join(","),
+        user: &image.user,
         interpreter: opts.interpreter_id,
         sudo: image.sudo.as_str(),
         authorized_keys: &image.ssh_authorized_keys,
@@ -816,6 +796,18 @@ fn write_plan_manifest(plan: &Plan, out: &Path, step: &Step) -> Result<(), Engin
     Ok(())
 }
 
+/// The apt sources files and keyring copies the bootstrap wrote for the distribution's
+/// own archive, which the image's deb822 sources replace: the release pocket's
+/// `sources.list`, and each further pocket's entry and keyring.
+///
+/// A feature repository's entry is not among them. It is the image's only record of
+/// that repository, and the board updates from it.
+fn apt_replaced(archive: &crate::Archive) -> Vec<String> {
+    std::iter::once("/etc/apt/sources.list".to_string())
+        .chain(archive.pocket_entries())
+        .collect()
+}
+
 /// Customize the provisioned tree: lay the post-install overlay in with
 /// [`provision::CopyIn`], then run the account, kernel-`postinst.d`, l10n, and
 /// depthcharge steps as commands in a subordinate cage over the finished tree.
@@ -833,7 +825,7 @@ fn customize(
     overlay: &Path,
     image: &ResolvedImage,
     boot: Option<BootConfig>,
-    user: &str,
+    apt_replaced: &[String],
     source_date_epoch: u64,
     step: &Step,
 ) -> Result<(), EngineError> {
@@ -882,7 +874,7 @@ fn customize(
     step.log("running the target-chroot customize steps in a cage");
     run_customize_cage(
         rootfs,
-        &customize_env(user, image, boot, source_date_epoch),
+        &customize_env(image, boot, apt_replaced, source_date_epoch),
         step,
     )?;
     check_initramfs_modules(rootfs, &image.initramfs_modules, step)
@@ -997,9 +989,9 @@ const CUSTOMIZE: &str = include_str!("customize/customize.sh");
 /// The program itself never reads `SOURCE_DATE_EPOCH`. `mkinitramfs`, `useradd` and
 /// `mkimage` do, which is why it is set for the whole run rather than passed as a value.
 fn customize_env(
-    user: &str,
     image: &ResolvedImage,
     boot: Option<BootConfig>,
+    apt_replaced: &[String],
     source_date_epoch: u64,
 ) -> Vec<(String, String)> {
     let depthcharge_board = match boot {
@@ -1007,7 +999,10 @@ fn customize_env(
         _ => "",
     };
     vec![
-        ("B2D_USER".into(), user.to_string()),
+        ("B2D_USER".into(), image.user.clone()),
+        // One absolute path per line. Each is built from a validated suite name, so
+        // none carries a newline and the split on the other side is unambiguous.
+        ("B2D_APT_REPLACED".into(), apt_replaced.join("\n")),
         ("B2D_SUDOERS".into(), image.sudo.sudoers_spec().to_string()),
         // One key per line, exactly as authored. Resolution guarantees each entry is a
         // single well-formed `authorized_keys` line, which is what makes the join
@@ -1225,10 +1220,11 @@ mod tests {
     }
 
     /// Options standing in for a build's, carrying only what [`build_debian`] reads:
-    /// the mirror list, the excludes/includes, and the paths. The rest is the struct's
-    /// own shape.
+    /// the archive and its keyring, the excludes/includes, and the paths. The rest is
+    /// the struct's own shape.
     fn sample_options<'a>(
-        mirrors: &'a [String],
+        archive: &'a crate::Archive,
+        keyring: &'a Path,
         dir: &'a Path,
         identity: &'a boot2deb_core::provenance::SystemIdentity,
     ) -> RootfsOptions<'a> {
@@ -1242,11 +1238,11 @@ mod tests {
             out_dir: dir,
             stem: "sample",
             scratch_dir: dir,
-            keyring: None,
+            keyring,
             interpreter_id: None,
             manifest_out: dir,
             pinned_plan: None,
-            mirrors,
+            archive,
             extra_packages: &[],
             cache_dir: None,
             refresh: false,
@@ -1268,6 +1264,7 @@ mod tests {
                 soc: "sample".into(),
                 boot_method: "rockchip-rkbin".into(),
                 board: None,
+                distro: "debian".into(),
                 suite: "forky".into(),
                 features: Vec::new(),
                 layout: "combined".into(),
@@ -1300,9 +1297,10 @@ mod tests {
     fn the_installing_provisioner_drops_the_selectors_its_pinned_plan_replaces() {
         let build = rk1();
         let tmp = tempfile::tempdir().unwrap();
-        let mirrors = vec!["https://deb.debian.org/debian".to_string()];
+        let (archive, _) = crate::bootstrap::test_archive("forky");
+        let keyring = crate::bootstrap::test_keyring();
         let identity = sample_identity();
-        let opts = sample_options(&mirrors, tmp.path(), &identity);
+        let opts = sample_options(&archive, &keyring, tmp.path(), &identity);
         let deb_cache = tmp.path().join("debs");
         let preinstall = tmp.path().join("overlay-pre");
         let local_url = "file:///nonexistent/localrepo";
@@ -1647,7 +1645,7 @@ mod tests {
     /// program does not read is a value that silently reaches nothing.
     #[test]
     fn every_value_the_program_reads_comes_from_the_environment() {
-        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
+        let env = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
         let supplied: std::collections::BTreeSet<&str> = env
             .iter()
             .map(|(k, _)| k.as_str())
@@ -1677,7 +1675,7 @@ mod tests {
     /// account's last password change.
     #[test]
     fn the_customize_run_carries_the_lock_epoch() {
-        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
+        let env = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
         assert_eq!(env_of(&env, "SOURCE_DATE_EPOCH"), "1790347034");
     }
 
@@ -1737,7 +1735,7 @@ mod tests {
             .find(r#"run-parts --exit-on-error --arg="$kver" /etc/kernel/postinst.d"#)
             .expect("the hooks run");
         assert!(removed < hooks, "removal precedes the hooks");
-        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
+        let env = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
         assert_eq!(
             env_of(&env, "B2D_INITRAMFS_STUB"),
             crate::rootfs::INITRAMFS_STUB
@@ -1786,7 +1784,7 @@ mod tests {
         // takes the *last* matching rule, so a stray NOPASSWD beside it would not be
         // inert — and there is nowhere for one to be, since the program writes exactly
         // this value once.
-        let plain = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
+        let plain = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
         assert_eq!(env_of(&plain, "B2D_SUDOERS"), "ALL");
         assert_eq!(env_of(&plain, "B2D_AUTHORIZED_KEYS"), "");
 
@@ -1800,7 +1798,7 @@ mod tests {
             },
         )
         .unwrap();
-        let env = customize_env(DEFAULT_USER, image_of(&build), None, 1_790_347_034);
+        let env = customize_env(image_of(&build), None, &[], 1_790_347_034);
         // `nopasswd` writes the no-prompt spec.
         assert_eq!(env_of(&env, "B2D_SUDOERS"), "NOPASSWD: ALL");
         // Both keys, one per line, in the order the config named them.
@@ -1894,13 +1892,13 @@ mod tests {
         }
 
         let env = customize_env(
-            DEFAULT_USER,
             image_of(&c201()),
             Some(BootConfig::Depthcharge {
                 board: "speedy",
                 cmdline: "console=tty1 ro",
                 initramfs_compress: InitramfsCompress::Xz,
             }),
+            &[],
             1_790_347_034,
         );
         assert_eq!(env_of(&env, "B2D_DEPTHCHARGE_BOARD"), "speedy");
@@ -1909,7 +1907,7 @@ mod tests {
         assert!(env_of(&env, "B2D_DEPTHCHARGE_CONFIG").contains("enable-system-hooks = True"));
 
         // A raw-gap board takes the early exit instead: no board, so no tail.
-        let raw = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
+        let raw = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
         assert_eq!(env_of(&raw, "B2D_DEPTHCHARGE_BOARD"), "");
         assert_eq!(env_of(&raw, "B2D_DEPTHCHARGE_CONFIG"), "");
         assert!(
@@ -1928,7 +1926,7 @@ mod tests {
         assert!(CUSTOMIZE.contains("is not in this suite's tzdata"));
         assert!(CUSTOMIZE.contains("[ -s /usr/lib/locale/locale-archive ]"));
 
-        let env = customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034);
+        let env = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
         assert_eq!(env_of(&env, "B2D_TIMEZONE"), "UTC");
         // The flag is set because the RK1 image generates locales; the check is
         // meaningless on an image that generates none, where the archive is absent by

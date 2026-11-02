@@ -346,17 +346,14 @@ fn run_point(
     preflight_config(root, &resolved)?;
 
     // Snapshot activation: the effective mode is `--snapshot`, else the
-    // lock's captured mode, else off. Resolve the mirror list here so a
-    // fallback/pin request with no captured snapshot fails before any stage runs.
+    // lock's captured mode, else off. Resolve the archive here so a fallback/pin
+    // request with no captured snapshot fails before any stage runs.
     let snapshot_mode = args
         .snapshot
         .or(lock.snapshot.as_ref().map(|s| s.mode))
         .unwrap_or(SnapshotMode::Off);
-    let mirrors = boot2deb_engine::snapshot::resolve_mirrors(
-        boot2deb_engine::DEFAULT_MIRROR,
-        lock.snapshot.as_ref(),
-        snapshot_mode,
-    )?;
+    let archive =
+        boot2deb_engine::Archive::resolve(&resolved.distro, lock.snapshot.as_ref(), snapshot_mode)?;
 
     // Manifest-as-input: if the lock pins a solved-manifest sha256, the
     // committed manifest beside the lock must exist and hash to it, so the pin and
@@ -508,29 +505,23 @@ fn run_point(
         toolchain_id: boot2deb_engine::build::cross_identity(
             host_deb_arch,
             resolved.arch.debian_arch(),
-            &resolved.packaging_suite,
-            &mirrors,
+            &archive,
         ),
         // What the sandbox's own compiler is: the base it is provisioned as, named by
         // the same function that names its tree, plus the interpreter that runs it.
         // Empty where the build resolves no suite and so stands up no sandbox — the
         // nodes that read this never run on such a build.
-        sandbox_id: image.map_or_else(String::new, |ib| {
+        sandbox_id: image.map_or_else(String::new, |_| {
             boot2deb_engine::build::sandbox_identity(
                 resolved.arch.debian_arch(),
-                &ib.image.suite,
-                &mirrors,
+                &archive,
                 &toolchain,
             )
         }),
         // What archives the u-boot and kmod `.deb`s: the packaging root's own identity,
         // derived from the same function that names its tree so the key and the tree
         // cannot disagree.
-        packaging_id: boot2deb_engine::build::packaging_identity(
-            host_deb_arch,
-            &resolved.packaging_suite,
-            &mirrors,
-        ),
+        packaging_id: boot2deb_engine::build::packaging_identity(host_deb_arch, &archive),
         cross_compile,
         jobs: args.jobs,
     };
@@ -573,8 +564,12 @@ fn run_point(
     );
 
     // Debian archive keyring for both bootstraps — the cross sandbox and the rootfs.
-    let keyring =
-        crate::sandboxes::keyring(root, args.keyring.clone(), args.unsafe_overlay_keyring)?;
+    let keyring = crate::sandboxes::keyring(
+        root,
+        &resolved.distro,
+        args.keyring.clone(),
+        args.unsafe_overlay_keyring,
+    )?;
 
     // The three roots this build compiles, cross-compiles and archives in. Which of them
     // a run actually provisions is decided by the stages it reaches: each is bootstrapped
@@ -598,7 +593,7 @@ fn run_point(
             // The build's own mirror list, not the default: under `--snapshot pin` the
             // compiler that produces the target `.deb`s, and the `dpkg` that archives
             // them, must come from the same point-in-time archive their runtime does.
-            mirrors: &mirrors,
+            archive: &archive,
             keyring: keyring.clone(),
             deb_cache: deb_cache.clone(),
         },
@@ -1105,8 +1100,8 @@ fn run_point(
                     out_dir: &out_dir,
                     work_dir: &work_dir,
                     cache_dir: &cache_dir,
-                    mirrors: &mirrors,
-                    keyring: keyring.as_deref(),
+                    archive: &archive,
+                    keyring: &keyring,
                     toolchain: &toolchain,
                     pinned_plan,
                     produces_debs: compiles_kernel
@@ -1568,7 +1563,7 @@ fn write_provenance(
             plan: &plan_name,
             plan_sha256: &plan_record.sha256,
             archives: &plan_record.archives,
-            user: rootfs::DEFAULT_USER,
+            user: &r.ib.image.user,
             password,
             // Stamped by build.rs from the boot2deb checkout; the commit is empty when
             // built outside a git tree (e.g. a source tarball), leaving only the version.
@@ -1764,10 +1759,10 @@ struct RootfsStage<'a> {
     work_dir: &'a std::path::Path,
     /// The durable download cache.
     cache_dir: &'a std::path::Path,
-    /// The resolved mirror list.
-    mirrors: &'a [String],
-    /// The vendored archive keyring, if one was resolved.
-    keyring: Option<&'a std::path::Path>,
+    /// The build's archive: every pocket of its suite at its resolved mirrors.
+    archive: &'a boot2deb_engine::Archive,
+    /// The distribution's archive keyring.
+    keyring: &'a std::path::Path,
     /// The probed host toolchain, for the interpreter identity.
     toolchain: &'a boot2deb_engine::toolchain::HostToolchain,
     /// `reproduce`'s published plan, replayed instead of resolved.
@@ -1932,7 +1927,7 @@ fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
         interpreter_id: interpreter_id.as_deref(),
         manifest_out: &manifest_out,
         pinned_plan: s.pinned_plan,
-        mirrors: s.mirrors,
+        archive: s.archive,
         extra_packages: &extra_packages,
         cache_dir: Some(s.cache_dir),
         refresh: s.args.refresh_rootfs,
@@ -2087,7 +2082,7 @@ fn image_stage(s: ImageStage) -> Result<(), Box<dyn std::error::Error>> {
             "{:<width$}: {}  (user {}, expired — change at first login)",
             "first-boot pw",
             artifacts.password,
-            rootfs::DEFAULT_USER,
+            s.ib.image.user,
             width = LABEL_WIDTH
         ),
     );

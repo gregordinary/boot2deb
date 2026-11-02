@@ -947,19 +947,104 @@ pub enum ConfigError {
         device: String,
     },
 
-    /// A conditional package entry names an empty `suites` list, so it applies to no
-    /// build at all. Config that can never take effect is a mistake rather than a
-    /// no-op — most likely a list someone emptied instead of deleting the entry.
+    /// A conditional package entry states no usable condition: it sets neither `suites`
+    /// nor `distros`, sets both, or sets one to an empty list. Config that can never
+    /// take effect is a mistake rather than a no-op. Two conditions on one entry leave a
+    /// reader to guess how they combine.
     #[error(
-        "package '{package}' in {layer} names an empty `suites` list, so it is installed \
-         on no suite; delete the entry, or list the suites that carry the package"
+        "package '{package}' in {layer} {problem}; give the entry exactly one non-empty \
+         `suites` or `distros` list, or write the bare name to install it everywhere"
     )]
-    PackageSuitesEmpty {
+    PackageCondition {
         /// The package the entry names.
         package: String,
         /// The layer or feature the entry was read from, for a message that points at
         /// the file to edit.
         layer: String,
+        /// What is wrong with the condition, as a phrase completing the message.
+        problem: &'static str,
+    },
+
+    /// A conditional package entry's `distros` list names no distro layer in the config
+    /// tree. The entry would never apply, and the package would go missing from every
+    /// image with nothing said.
+    #[error(
+        "package '{package}' in {layer} names distro '{distro}', which no distros/ layer \
+         defines (defined: {known})"
+    )]
+    UnknownPackageDistro {
+        /// The package the entry names.
+        package: String,
+        /// The layer or feature the entry was read from.
+        layer: String,
+        /// The distro name that matched no layer.
+        distro: String,
+        /// Comma-separated distro layers the tree does define.
+        known: String,
+    },
+
+    /// A distro layer carries a value a bootstrap or an apt sources file could not
+    /// hold. Caught when the layer is resolved, before any archive is contacted.
+    #[error("distro '{distro}': {field} '{value}' {why}")]
+    DistroField {
+        /// The distro layer's stem.
+        distro: String,
+        /// The key carrying the bad value.
+        field: &'static str,
+        /// The value as written.
+        value: String,
+        /// Why it is refused, as a phrase completing the message.
+        why: &'static str,
+    },
+
+    /// No distro layer lists the suite, so nothing says which archive serves it. The
+    /// fix is a line in the right `distros/<name>.toml`, written by someone who checked
+    /// that archive.
+    #[error("suite '{suite}' is served by no distro layer ({served})")]
+    UnknownSuite {
+        /// The requested suite.
+        suite: String,
+        /// Each distro layer and the suites it serves, for the message.
+        served: String,
+    },
+
+    /// More than one distro layer lists the suite, so the archive it resolves against
+    /// would depend on which file was read first.
+    #[error("suite '{suite}' is listed by more than one distro layer: {distros}")]
+    AmbiguousSuite {
+        /// The requested suite.
+        suite: String,
+        /// Comma-separated layers that list it.
+        distros: String,
+    },
+
+    /// A Linux-libre kernel on a distribution whose layer names no free component set.
+    /// The image's archive would offer the nonfree firmware that kernel has no loader
+    /// for. Carrying none of it is the one thing a libre image promises.
+    #[error(
+        "kernel '{kernel}' is Linux-libre, and distro '{distro}' names no \
+         free_components to provision a libre image from"
+    )]
+    LibreWithoutFreeComponents {
+        /// The libre kernel definition.
+        kernel: String,
+        /// The distro layer the suite resolved to.
+        distro: String,
+    },
+
+    /// An initramfs generator the board's boot method has no configuration for. The
+    /// image would boot an initrd built without the boot method's own settings.
+    #[error(
+        "device '{device}' boots by {boot_method}, which carries initramfs \
+         configuration for initramfs-tools only, not {generator}"
+    )]
+    InitramfsGeneratorUnsupported {
+        /// The device being resolved.
+        device: String,
+        /// Its boot method.
+        boot_method: String,
+        /// The generator the build resolved.
+        generator: String,
     },
 
     /// An `extra_debs` entry does not set exactly one locator: it must carry either

@@ -333,8 +333,7 @@ fn reassemble(
     // surfaced exactly as a build's is.
     step.log(format!(
         "first-boot pw: {}  (user {}, expired — change at first login)",
-        pressed.password,
-        boot2deb_engine::rootfs::DEFAULT_USER
+        pressed.password, image.image.user
     ));
     step.finish();
     Ok(())

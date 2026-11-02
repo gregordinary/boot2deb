@@ -10,15 +10,16 @@ modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket
 
 # What every RK3588 image carries, regardless of board or feature selection.
 #
-# Non-free firmware the RK3588 loads at runtime, from Debian's non-free-firmware
-# component (already enabled in the rootfs sources.list) and snapshot-pinned like
-# every other package -- so no linux-firmware tarball is fetched or extracted.
-#   firmware-misc-nonfree -- the panthor Mali CSF blob the G610 GPU needs
-#     (/usr/lib/firmware/arm/mali/arch10.8/mali_csffw.bin) plus the rockchip/
-#     display firmware (e.g. rockchip/dptx.bin for USB-C DisplayPort alt-mode).
-#   firmware-realtek -- rtl_nic/ blobs for Realtek USB/PCIe NICs. Defensive: the
-#     RK3588's own GMAC + RTL8211F PHY needs no firmware, but a board or USB dongle
-#     with a Realtek NIC does.
+# Non-free firmware the RK3588 loads at runtime, from the distribution's archive and
+# pinned in the solved manifest like every other package -- so no linux-firmware
+# tarball is fetched or extracted.
+#   firmware-misc-nonfree (Debian), linux-firmware-misc (Ubuntu) -- the panthor
+#     Mali CSF blob the G610 GPU needs (arm/mali/arch10.8/mali_csffw.bin) plus the
+#     rockchip/ display firmware (e.g. rockchip/dptx.bin for USB-C DisplayPort
+#     alt-mode).
+#   firmware-realtek (Debian), linux-firmware-realtek (Ubuntu) -- rtl_nic/ blobs for
+#     Realtek USB/PCIe NICs. Defensive: the RK3588's own GMAC + RTL8211F PHY needs no
+#     firmware, but a board or USB dongle with a Realtek NIC does.
 # The RK3588 has no integrated wifi/BT radio, so no wireless firmware is staged
 # here; a board that adds a wifi module pulls its firmware on its device layer.
 #
@@ -28,7 +29,18 @@ modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket
 #     feature, so the tool that inspects them is homed beside the modules rather
 #     than with the userspace that drives them. ~5.6 MiB installed with its
 #     closure (libv4l-0t64, libv4lconvert0t64, libv4l2rds0t64, libjpeg62-turbo).
-packages = ["firmware-misc-nonfree", "firmware-realtek", "v4l-utils"]
+#
+# The firmware packages are named per distribution. Debian splits them by licence
+# and ships the blobs uncompressed. Ubuntu splits linux-firmware by vendor and ships
+# every blob zstd-compressed (mali_csffw.bin.zst), which the kernel's loader reads
+# under FW_LOADER_COMPRESS_ZSTD.
+packages = [
+    { name = "firmware-misc-nonfree", distros = ["debian"] },
+    { name = "firmware-realtek", distros = ["debian"] },
+    { name = "linux-firmware-misc", distros = ["ubuntu"] },
+    { name = "linux-firmware-realtek", distros = ["ubuntu"] },
+    "v4l-utils",
+]
 
 # rkbin defaults for RK3588 boards. ATF (BL31) is SoC-generic; the DDR TPL is a
 # common-memory default a board with different DRAM overrides on its device layer.

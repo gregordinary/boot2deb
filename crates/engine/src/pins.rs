@@ -413,6 +413,7 @@ fn assemble_lock(
         // The rootfs pin exists only for an image build; a u-boot-only build resolves
         // no suite, so the lock omits `[rootfs]`.
         rootfs: build.image.as_ref().map(|image| RootfsPin {
+            distro: build.distro.name.clone(),
             suite: image.suite.clone(),
             manifest: opts.rootfs_manifest.to_string(),
             // Set once the solved manifest is committed beside the lock; a bare
@@ -443,7 +444,7 @@ fn assemble_lock(
 ///   out-of-tree modules)
 /// - The rkbin blob file names
 /// - The patch series
-/// - The suite
+/// - The distro and the suite
 /// - The resolved extra-deb set
 /// - The out-of-tree module set
 /// - Media-accel presence
@@ -649,6 +650,7 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         build.produces_image(),
     );
     if let (Some(pin), Some(image)) = (&lock.rootfs, image) {
+        diff(&mut axes, "distro", &pin.distro, &build.distro.name);
         diff(&mut axes, "suite", &pin.suite, &image.suite);
     }
     let resolved_debs = image.map(|i| i.extra_debs.as_slice()).unwrap_or(&[]);
@@ -1194,6 +1196,7 @@ mod tests {
                 rockchip: Some(git('5')),
             }),
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "m.lock".into(),
                 manifest_sha256: None,
@@ -1399,6 +1402,8 @@ mod tests {
         assert_eq!(ff.base.commit, "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935");
         assert_eq!(ff.rockchip.as_ref().unwrap().reference, "8.1");
         assert_eq!(lock.rootfs.as_ref().unwrap().suite, "forky");
+        // The distro the suite resolved to rides with it, from the resolved build.
+        assert_eq!(lock.rootfs.as_ref().unwrap().distro, "debian");
         assert_eq!(
             lock.rootfs.as_ref().unwrap().manifest,
             "turing-rk1-forky.pkgs.lock"
@@ -1430,6 +1435,17 @@ mod tests {
                     "message names the axis: {}",
                     axes[0]
                 );
+            }
+            other => panic!("expected LockConfigDrift, got {other:?}"),
+        }
+        // So is a suite that now resolves to another distribution: the solved manifest
+        // beside the lock was resolved against the other archive.
+        let mut drifted = base_lock();
+        drifted.rootfs.as_mut().unwrap().distro = "ubuntu".into();
+        match check_lock_consistency(&drifted, &build).unwrap_err() {
+            EngineError::LockConfigDrift { axes } => {
+                assert_eq!(axes.len(), 1);
+                assert!(axes[0].contains("distro"), "{}", axes[0]);
             }
             other => panic!("expected LockConfigDrift, got {other:?}"),
         }
@@ -1605,6 +1621,7 @@ mod tests {
                 rockchip: ff.rockchip.as_ref().map(|s| git(&s.git, "rk")),
             }),
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: image_of(build).suite.clone(),
                 manifest: "m".into(),
                 manifest_sha256: None,

@@ -304,9 +304,9 @@ pub(crate) fn build_inputs(root: &ConfigRoot, reference: &str) -> Result<()> {
     }
     root.find_asset(format!("blobs/{}", build.soc.as_str()));
     kmod_local_patches(root, &build)?;
-    // Every root a build provisions verifies the archive against this keyring, a
-    // bootloader-only build's cross and packaging roots included.
-    root.find_trust_anchor("blobs/keyrings/debian-archive-keyring.gpg", false)?;
+    // Every root a build provisions verifies the archive against the distro's keyring,
+    // a bootloader-only build's cross and packaging roots included.
+    root.find_trust_anchor(format!("blobs/keyrings/{}", build.distro.keyring), false)?;
     // The rootfs stage's lookups, which a bootloader-only build never reaches.
     if build.produces_image() {
         overlay_dirs(root, &build, OverlayStage::PreInstall);

@@ -374,12 +374,16 @@ mod tests {
             "socs/rk3588.toml",
             "boot-methods/rockchip-rkbin.toml",
             "base.toml",
+            "distros/debian.toml",
             "blobs/rk3588",
             "blobs/keyrings/debian-archive-keyring.gpg",
             "base/overlay",
         ] {
             assert!(p.inputs.contains(&rel(wanted)), "{wanted} is an input");
         }
+        // Another distro layer is read to prove the suite is not claimed twice, which
+        // decides whether the point resolves and never what it builds.
+        assert!(!p.inputs.contains(&rel("distros/ubuntu.toml")));
         // A kernel fragment the kernel definition names is read, and another board's
         // device layer is not.
         assert!(

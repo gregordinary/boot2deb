@@ -1,0 +1,19 @@
+# Primary keys `ubuntu-archive-keyring.gpg` is allowed to contain.
+#
+# The build fails closed unless the keyring holds exactly this set, so a swapped or
+# injected archive key is a review-visible line here rather than an invisible change
+# to a binary. Every fingerprint below is published by Ubuntu and can be checked
+# without trusting this repo:
+#
+#   /usr/share/keyrings/ubuntu-archive-keyring.gpg on any Ubuntu host
+#   gpgv --keyring ./ubuntu-archive-keyring.gpg InRelease, for any release fetched
+#   from archive.ubuntu.com
+#
+# Primary keys only. A subkey cannot enter a certificate without a binding signature
+# from its primary key, so pinning the primaries pins the whole keyring.
+#
+# <40-hex v4 fingerprint>  <uid>
+
+790BC7277767219C42C86F933B4FE6ACC0B21F32  Ubuntu Archive Automatic Signing Key (2012) <ftpmaster@ubuntu.com>
+843938DF228D22F7B3742BC0D94AA3F0EFE21092  Ubuntu CD Image Automatic Signing Key (2012) <cdimage@ubuntu.com>
+F6ECB3762474EDA9D21B7022871920D1991BC93C  Ubuntu Archive Automatic Signing Key (2018) <ftpmaster@ubuntu.com>

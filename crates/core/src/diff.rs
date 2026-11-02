@@ -1162,6 +1162,7 @@ mod tests {
                 rockchip: None,
             }),
             rootfs: Some(RootfsPin {
+                distro: "debian".into(),
                 suite: "forky".into(),
                 manifest: "m.pkgs.lock".into(),
                 manifest_sha256: None,
