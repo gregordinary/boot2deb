@@ -24,8 +24,8 @@
 //! any package version, so all three are folded.
 //!
 //! The **interpreter**: on a cross host every maintainer script runs under the host's
-//! `qemu-user`, and so does everything they invoke. That covers `update-initramfs`
-//! writing the initrd the image boots, `ldconfig`, `locale-gen`, and a depthcharge
+//! `qemu-user`, and so does everything they invoke. That covers the initramfs
+//! generator writing the initrd the image boots, `ldconfig`, `locale-gen`, and a depthcharge
 //! board's kernel signing. Those bytes are the interpreter's as much as the package's.
 //!
 //! The **feature apt repositories**: the provisioner writes each one's

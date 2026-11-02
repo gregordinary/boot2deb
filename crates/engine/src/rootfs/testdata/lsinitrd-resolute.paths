@@ -1,0 +1,8 @@
+bin
+etc/conf.d/systemd.conf
+usr/lib/modules/7.3.0-1-arm64/kernel/drivers/mmc/host
+usr/lib/modules/7.3.0-1-arm64/kernel/drivers/mmc/host/dw_mmc-bluefield.ko
+usr/lib/modules/7.3.0-1-arm64/kernel/drivers/mmc/host/sdhci-of-at91.ko
+usr/lib/modules/7.3.0-1-arm64/kernel/arch/arm64/crypto/sm4-ce-cipher.ko
+var/lock
+var/tmp

@@ -627,8 +627,8 @@ pub enum EngineError {
     /// The built initramfs does not cover the image's initramfs module list: a listed
     /// module is neither in the initrd nor built into the kernel.
     ///
-    /// `initramfs-tools` drops such a name without a word, so the build is where it
-    /// surfaces. A listed module is one a board needs before its root mounts. On a
+    /// `initramfs-tools` drops such a name without a word, and dracut logs it and still
+    /// exits 0, so the build is where it surfaces. A listed module is one a board needs before its root mounts. On a
     /// board without a display stack, a missing one looks like a boot that never
     /// reaches its root and says nothing. The decision is
     /// [`coverage`](boot2deb_core::initramfs::coverage).

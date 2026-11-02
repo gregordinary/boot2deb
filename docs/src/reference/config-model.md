@@ -770,13 +770,17 @@ modules = [
 ```
 
 The SoC's list comes first and the device's follows. A variant device accumulates its
-parent's list, and `boot2deb resolve` prints the result. The build writes the list into a
-`modules.d` drop-in before any package installs, so the first initramfs the kernel package
-builds already has it. The drop-in ships in the image, and an on-device kernel upgrade
-regenerates the initramfs from the same list.
+parent's list, and `boot2deb resolve` prints the result.
+
+Before any package installs, the build writes the list in the form the image's initramfs
+generator reads. An initramfs-tools image gets a `modules.d` drop-in. A dracut image gets
+a `dracut.conf.d` drop-in with one `force_drivers+=` line per name. Either way each listed
+module is installed and loaded early in the initramfs. The drop-in ships in the image, and
+an on-device kernel upgrade regenerates the initramfs from the same list.
 
 **Every name must land.** `initramfs-tools` skips a listed module it cannot find without
-a word. The rootfs stage therefore checks the initramfs it built. A name that is neither
+a word. Under dracut the miss is logged as an error, and the initramfs is still finished
+without it. The rootfs stage therefore checks the initramfs it built. A name that is neither
 in it nor built into the kernel (`modules.builtin`) fails the build:
 
 ```console
@@ -794,9 +798,10 @@ Each name is also an `initramfs-module` check in the
 [on-image self-test](self-test.md). That catches an on-device regeneration that loses one,
 where no build is watching.
 
-A board that names no module leaves the choice to `initramfs-tools`, which on a
-`rockchip-rkbin` board is `MODULES=most`. A depthcharge board builds with `MODULES=list`,
-where its list is the whole of what reaches the root device.
+A board that names no module leaves the choice to its generator. On a `rockchip-rkbin`
+board initramfs-tools uses `MODULES=most`, and dracut builds a generic initramfs, not one
+sized to the build host. A depthcharge board builds with initramfs-tools and
+`MODULES=list`, where its list is the whole of what reaches the root device.
 
 ### A variant board extends another
 

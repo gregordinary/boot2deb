@@ -5,11 +5,13 @@
 //! rootfs stage runs a target-side report program over the finished rootfs and hands
 //! its output to [`InitrdReport::parse`]. [`coverage`] then decides.
 //!
-//! The check exists because `initramfs-tools` does not make one. It hands each listed
-//! name to `dracut-install` with `-o` (`--optional`). A name it cannot find is logged
-//! below the default warning threshold and skipped with exit 0. A board whose list
-//! names a module its kernel does not build therefore gets an initrd without it. The
-//! first sign is a boot that never reaches its root.
+//! The check exists because neither generator makes one. `initramfs-tools` hands each
+//! listed name to `dracut-install` with `-o` (`--optional`). A name it cannot find is
+//! logged below the default warning threshold and skipped with exit 0. Under dracut the
+//! same miss is logged as an error, and dracut still exits 0, having written the initrd
+//! without it.
+//! Either way a board whose list names a module its kernel does not build gets an
+//! initrd without it. The first sign is a boot that never reaches its root.
 //!
 //! A listed name is **covered** when the built initrd carries its `.ko`, under any
 //! compression suffix, or when the kernel builds it in (`modules.builtin`). Names match

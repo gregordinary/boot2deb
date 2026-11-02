@@ -41,6 +41,7 @@ pub(crate) use provisioner::{feature_repositories, provisioned_dir, ProvisionedR
 
 use crate::error::EngineError;
 use crate::event::Step;
+use boot2deb_core::distro::InitramfsGenerator;
 use boot2deb_core::model::{AptSource, ImageBuild, InitramfsCompress, ResolvedImage};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -126,7 +127,7 @@ pub struct RootfsOptions<'a> {
     ///
     /// It is an input to the *tree*, not merely a fact about the host. On a cross host
     /// every maintainer script runs under it, and so does everything they invoke. That
-    /// covers `update-initramfs` writing the initrd this image boots, `ldconfig`,
+    /// covers the initramfs generator writing the initrd this image boots, `ldconfig`,
     /// `locale-gen`, and on a depthcharge board the kernel signing. So it is folded
     /// into the rootfs cache key ([`crate::rootcache::CacheKeyInputs`]), and a tree
     /// configured under one interpreter is never restored for a build using another.
@@ -484,24 +485,27 @@ fn stage_preinstall_overlay(
         )?;
     }
 
-    // Only a build that names modules writes the list. With none, initramfs-tools
+    // Only a build that names modules writes the list. With none, the generator
     // selects modules on its own and the build holds it to nothing.
+    let generator = image.initramfs_generator;
     if !image.initramfs_modules.is_empty() {
         write_staged(
             staging,
-            INITRAMFS_MODULES_DROP_IN,
-            &config::initramfs_modules(&image.initramfs_modules),
+            initramfs_modules_drop_in(generator),
+            &config::initramfs_modules(generator, &image.initramfs_modules),
         )?;
     }
 
-    // The placeholder that keeps the install from building an initrd it cannot
-    // build correctly — see INITRAMFS_STUB. Executable, and the only staged file
-    // that is.
-    write_staged_exec(
-        staging,
-        INITRAMFS_STUB.trim_start_matches('/'),
-        &config::initramfs_stub(),
-    )?;
+    // The placeholders that keep the install from building an initrd it cannot
+    // build correctly — see `initramfs_stubs`. Executable, and the only staged files
+    // that are.
+    for stub in initramfs_stubs(generator) {
+        write_staged_exec(
+            staging,
+            stub.trim_start_matches('/'),
+            &config::initramfs_stub(generator, stub),
+        )?;
+    }
 
     normalize_overlay_modes(staging)?;
     normalize_overlay_times(staging, source_date_epoch)?;
@@ -549,16 +553,16 @@ fn stage_overlay(
     )?;
     write_staged(staging, "etc/kernel-img.conf", &config::kernel_img_conf())?;
     // Two files that exist because the build host is not the board. `dhcpcd` cannot
-    // start without a `/etc/resolv.conf` to bind, and `update-initramfs` — running here,
-    // against a disk that does not exist yet — otherwise resolves its resume device and
-    // its fsck helper by probing this host. See each generator for what goes wrong.
+    // start without a `/etc/resolv.conf` to bind, and the initramfs generator — running
+    // here, against a disk that does not exist yet — otherwise sizes the initrd to this
+    // host by probing it. See each generator for what goes wrong.
     write_staged(staging, "etc/resolv.conf", &config::resolv_conf())?;
     write_staged(
         staging,
-        "etc/initramfs-tools/conf.d/boot2deb.conf",
+        initramfs_conf_path(image.initramfs_generator),
         // From the image node's own declaration of what it formats, so the helper the
         // initramfs carries is the one the filesystem the image node writes needs.
-        &config::initramfs_conf(crate::image::ROOTFS_FS_KIND),
+        &config::initramfs_conf(image.initramfs_generator, crate::image::ROOTFS_FS_KIND),
     )?;
     // Board boot params the kernel postinst.d/postrm.d hooks + mk_extlinux source,
     // so the boot-method overlay scripts stay board-agnostic (driven by the
@@ -642,7 +646,7 @@ fn write_staged(staging: &Path, rel: &str, content: &str) -> Result<(), EngineEr
 }
 
 /// [`write_staged`] for a file that must be executable — a hook or, in the
-/// pre-install overlay, the [`INITRAMFS_STUB`] placeholder. Mode `0755` rather
+/// pre-install overlay, an [`initramfs_stubs`] placeholder. Mode `0755` rather
 /// than `0644`, which `normalize_overlay_modes` then preserves.
 fn write_staged_exec(staging: &Path, rel: &str, content: &str) -> Result<(), EngineError> {
     write_staged(staging, rel, content)?;
@@ -671,41 +675,81 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), EngineError> {
         .map_err(|s| EngineError::io(path, s))
 }
 
-/// Where the pre-install overlay lays the `update-initramfs` placeholder that
-/// shadows the real one for the length of the package install.
+/// Where the pre-install overlay lays the placeholders that shadow `generator`'s
+/// initramfs builders for the length of the package install.
 ///
 /// `/usr/local/sbin` is first on the `PATH` every maintainer script runs with,
-/// so this is the `update-initramfs` the kernel package's `postinst.d` hook and
-/// the `initramfs-tools` trigger reach — and neither of them can build a usable
-/// initrd at the point they run. The overlay this build ships is laid in *after*
-/// the packages, so an initrd built during the install has neither the board's
-/// `initramfs-tools` configuration nor the `modules.dep` the `depmod` hook
-/// writes; the rootfs stage discards it and builds the real one afterwards, in
-/// [`customize_script`](crate::rootfs::provisioner). Suppressing the two costs
-/// nothing and saves two full initramfs builds, which on a cross host run under
-/// `qemu-user` like everything else a maintainer script invokes.
+/// so these are what the kernel package's `postinst.d` hook and the generator's
+/// trigger reach — and neither of them can build a usable initrd at the point they
+/// run. The overlay this build ships is laid in *after* the packages, so an initrd
+/// built during the install has neither the image's initramfs configuration nor the
+/// `modules.dep` the `depmod` hook writes; the rootfs stage discards it and builds
+/// the real one afterwards, in
+/// [`customize_script`](crate::rootfs::provisioner). Suppressing them costs
+/// nothing and saves every install-time initramfs build, which on a cross host runs
+/// under `qemu-user` like everything else a maintainer script invokes.
 ///
-/// Removed by the same customize step that builds the real initrd, so it never
-/// reaches the image — and it is a file in the staging tree only, not a
-/// `dpkg-divert`, so a build that dies before that leaves nothing to undo: the
-/// staging tree is discarded, and no cached artifact ever holds it.
-pub(crate) const INITRAMFS_STUB: &str = "/usr/local/sbin/update-initramfs";
+/// Which programs that takes:
+///
+///  - `initramfs-tools`: `update-initramfs`, which its kernel hook and its trigger
+///    both call.
+///  - `dracut`: `dracut`, which its kernel hook calls by name, and `update-initramfs`,
+///    the shim the package ships for its own trigger and for other packages' calls.
+///    The shim reaches `dracut` by `PATH` as well, but it is shadowed in its own
+///    right: once `dracut` succeeds it `sync`s the initrd `dracut` was to write, and
+///    a placeholder writes none.
+///
+/// Removed by the same customize step that builds the real initrd, so none reaches
+/// the image — and each is a file in the staging tree only, not a `dpkg-divert`, so a
+/// build that dies before that leaves nothing to undo: the staging tree is discarded,
+/// and no cached artifact ever holds one.
+pub(crate) fn initramfs_stubs(generator: InitramfsGenerator) -> &'static [&'static str] {
+    match generator {
+        InitramfsGenerator::InitramfsTools => &["/usr/local/sbin/update-initramfs"],
+        InitramfsGenerator::Dracut => {
+            &["/usr/local/sbin/dracut", "/usr/local/sbin/update-initramfs"]
+        }
+    }
+}
 
-/// Where the placeholder records the calls it absorbed, so the build can report
+/// Where the placeholders record the calls they absorbed, so the build can report
 /// how many initramfs builds it suppressed rather than claiming a saving it did
-/// not make. Deleted with the placeholder.
+/// not make. Deleted with the placeholders.
 pub(crate) const INITRAMFS_STUB_LOG: &str = "/var/lib/boot2deb/initramfs-stub.log";
 
 /// Where the pre-install overlay writes the image's initramfs module list
-/// ([`ResolvedImage::initramfs_modules`]), one name per line.
+/// ([`ResolvedImage::initramfs_modules`]) for `generator`, in the form
+/// [`config::initramfs_modules`] renders.
 ///
-/// A `modules.d` drop-in under `/usr/share` rather than `/etc/initramfs-tools/modules`,
-/// which is an `initramfs-tools` conffile: writing it before the package installs makes
-/// dpkg treat it as locally modified and prompt. `mkinitramfs` reads every file in
-/// this directory whatever `MODULES=` says, so the drop-in has the same effect with no
-/// packaging conflict. It ships in the image, so an on-device kernel upgrade
-/// regenerates the initrd from the same list.
-pub(crate) const INITRAMFS_MODULES_DROP_IN: &str = "usr/share/initramfs-tools/modules.d/boot2deb";
+/// Both are files no package owns, so dpkg has no conffile to prompt about, and both
+/// ship in the image, so an on-device kernel upgrade regenerates the initrd from the
+/// same list:
+///
+///  - `initramfs-tools`: a `modules.d` drop-in under `/usr/share` rather than
+///    `/etc/initramfs-tools/modules`, which is a conffile of the package. `mkinitramfs`
+///    reads every file in this directory whatever `MODULES=` says.
+///  - `dracut`: a drop-in in the distribution's `dracut.conf.d`, beside the one
+///    [`initramfs_conf_path`] names. An administrator's file of the same name under
+///    `/etc/dracut.conf.d` replaces it.
+pub(crate) fn initramfs_modules_drop_in(generator: InitramfsGenerator) -> &'static str {
+    match generator {
+        InitramfsGenerator::InitramfsTools => "usr/share/initramfs-tools/modules.d/boot2deb",
+        InitramfsGenerator::Dracut => "usr/lib/dracut/dracut.conf.d/90-boot2deb-modules.conf",
+    }
+}
+
+/// Where the overlay writes `generator`'s build settings, [`config::initramfs_conf`].
+///
+/// A drop-in either way. `initramfs-tools` reads `conf.d/*` unconditionally, and
+/// `/etc/initramfs-tools/initramfs.conf` is a conffile. For dracut, its distribution
+/// directory and `/etc/dracut.conf.d` are read together, ordered by file name, and a
+/// file of the same name under `/etc` replaces this one.
+pub(crate) fn initramfs_conf_path(generator: InitramfsGenerator) -> &'static str {
+    match generator {
+        InitramfsGenerator::InitramfsTools => "etc/initramfs-tools/conf.d/boot2deb.conf",
+        InitramfsGenerator::Dracut => "usr/lib/dracut/dracut.conf.d/90-boot2deb.conf",
+    }
+}
 
 /// Members every finished rootfs tarball must contain, checked by [`validate_tar`].
 /// `etc/shadow` is written late (the account is created there), so its presence
@@ -763,7 +807,7 @@ pub fn validate_tar(tarball: &Path) -> Result<(), EngineError> {
 /// Generated rootfs config files, rendered from resolved values. Pure —
 /// each returns the exact file content — so the config is unit-testable.
 mod config {
-    use boot2deb_core::distro::ResolvedDistro;
+    use boot2deb_core::distro::{InitramfsGenerator, ResolvedDistro};
     use boot2deb_core::model::{
         ImageBuild, InitramfsCompress, Keymap, ResolvedBoot, CONSOLE_LOGLEVEL_ARG,
     };
@@ -826,30 +870,30 @@ mod config {
         )
     }
 
-    /// The `update-initramfs` placeholder the pre-install overlay lays at
-    /// [`INITRAMFS_STUB`](super::INITRAMFS_STUB).
+    /// The placeholder the pre-install overlay lays at `path`, one of
+    /// [`initramfs_stubs`](super::initramfs_stubs) for `generator`.
     ///
-    /// It answers `--version` as `initramfs-tools` on purpose: the kernel
-    /// package's `postinst.d` hook checks that before calling, and a placeholder
-    /// that failed the check would be skipped silently instead of taking the
-    /// call and recording it. Every other invocation is a no-op that appends its
-    /// arguments to [`INITRAMFS_STUB_LOG`](super::INITRAMFS_STUB_LOG), which is
-    /// what lets the customize step report the suppression as a number rather
-    /// than an assumption.
-    pub fn initramfs_stub() -> String {
+    /// It answers `--version` with the generator's name on purpose: initramfs-tools'
+    /// `postinst.d` hook checks that `update-initramfs` names `initramfs-tools` before
+    /// calling it, and a placeholder that failed the check would be skipped silently
+    /// instead of taking the call and recording it. Every other invocation is a no-op
+    /// that appends the program's name and its arguments to
+    /// [`INITRAMFS_STUB_LOG`](super::INITRAMFS_STUB_LOG), which is what lets the
+    /// customize step report the suppression as a number rather than an assumption.
+    pub fn initramfs_stub(generator: InitramfsGenerator, path: &str) -> String {
+        let program = path.rsplit('/').next().unwrap_or(path);
         format!(
             "#!/bin/sh\n\
-             # Placeholder for initramfs-tools' update-initramfs, in place only\n\
-             # while boot2deb's package install runs. An initrd built here would\n\
-             # predate this image's initramfs-tools configuration and the\n\
-             # modules.dep the depmod hook writes, so the build discards these\n\
-             # calls and builds the real initrd afterwards. Removed by the\n\
-             # customize step that does.\n\
+             # Placeholder for {generator}'s {program}, in place only while\n\
+             # boot2deb's package install runs. An initrd built here would predate\n\
+             # this image's initramfs configuration and the modules.dep the depmod\n\
+             # hook writes, so the build discards these calls and builds the real\n\
+             # initrd afterwards. Removed by the customize step that does.\n\
              case \"$1\" in\n\
-             \x20 --version) echo 'initramfs-tools boot2deb-placeholder'; exit 0 ;;\n\
+             \x20 --version) echo '{generator} boot2deb-placeholder'; exit 0 ;;\n\
              esac\n\
              mkdir -p \"$(dirname '{log}')\"\n\
-             echo \"update-initramfs $*\" >> '{log}'\n\
+             echo \"{program} $*\" >> '{log}'\n\
              exit 0\n",
             log = super::INITRAMFS_STUB_LOG,
         )
@@ -935,19 +979,29 @@ mod config {
         out
     }
 
-    /// The [`INITRAMFS_MODULES_DROP_IN`](super::INITRAMFS_MODULES_DROP_IN) content: a
-    /// header, then one module name per line, in resolved order.
+    /// The [`initramfs_modules_drop_in`](super::initramfs_modules_drop_in) content for
+    /// `generator`: a header, then one module per line, in resolved order.
+    ///
+    /// For initramfs-tools that is the bare name. For dracut it is a `force_drivers+=`
+    /// line per name, its form of the same instruction: install the module and load it in the
+    /// initramfs, as initramfs-tools loads every module its list names. The spaces
+    /// around each name are dracut's own convention for appending to a list, and
+    /// resolution holds a name to letters, digits, `-` and `_`, so none can end the
+    /// quoted string.
     ///
     /// The reason each module is listed lives beside it in the layer's TOML, which is
     /// where the next editor looks. This file names its source instead.
-    pub fn initramfs_modules(modules: &[String]) -> String {
+    pub fn initramfs_modules(generator: InitramfsGenerator, modules: &[String]) -> String {
         let mut out = String::from(
             "# Generated by boot2deb from the `[initramfs] modules` lists of this image's\n\
              # SoC and device layers. Every name here must reach the initramfs: the build\n\
              # fails when one is neither in the built initrd nor built into the kernel.\n",
         );
         for module in modules {
-            let _ = writeln!(out, "{module}");
+            let _ = match generator {
+                InitramfsGenerator::InitramfsTools => writeln!(out, "{module}"),
+                InitramfsGenerator::Dracut => writeln!(out, "force_drivers+=\" {module} \""),
+            };
         }
         out
     }
@@ -1033,10 +1087,11 @@ mod config {
     ///    drivers the board needs. It is only meaningful when built on the target; an
     ///    explicit list is deterministic and works in both places.
     ///
-    /// The list itself is the generated
-    /// [`INITRAMFS_MODULES_DROP_IN`](super::INITRAMFS_MODULES_DROP_IN), from the
-    /// `[initramfs] modules` of the board's SoC and device layers, so which modules a
-    /// board carries stays with the board.
+    /// The list itself is initramfs-tools'
+    /// [`initramfs_modules_drop_in`](super::initramfs_modules_drop_in), generated from
+    /// the `[initramfs] modules` of the board's SoC and device layers, so which modules
+    /// a board carries stays with the board. Resolution refuses any other generator on
+    /// a depthcharge board.
     pub fn depthcharge_initramfs_conf(compress: InitramfsCompress) -> String {
         format!(
             "# Generated by boot2deb.\n\
@@ -1216,10 +1271,27 @@ mod config {
             .to_string()
     }
 
-    /// `/etc/initramfs-tools/conf.d/boot2deb.conf` — the two initramfs settings an image
-    /// has to state outright, because `update-initramfs` runs on the build host while
-    /// the hardware it is building for is absent, and both defaults resolve by probing
-    /// whatever is in front of them.
+    /// The [`initramfs_conf_path`](super::initramfs_conf_path) content: the initramfs
+    /// settings an image has to state outright, because the generator runs on the build
+    /// host while the hardware it is building for is absent, and its defaults resolve by
+    /// probing whatever is in front of them.
+    ///
+    /// For `dracut` that is one setting and one for the lock's sake:
+    ///
+    ///  - `hostonly="no"`. Unless told otherwise, dracut builds host-only, sizing the
+    ///    initrd to the drivers, filesystems and swap of the machine it runs on, which
+    ///    here is the build host. A generic initrd also leaves `fsck` helpers and
+    ///    `resume=` unprobed: every helper the image has is installed, and no host swap
+    ///    device is written into the initrd's command line. `fstype` is not needed and
+    ///    not written. The `filesystems` setting is an exclusive list, and setting it would
+    ///    drop every other filesystem module from the initrd.
+    ///  - `reproducible="yes"`, so dracut dates and orders the archive from the
+    ///    `SOURCE_DATE_EPOCH` the customize step runs under, as `mkinitramfs` does
+    ///    unasked. The modes it records follow the umask of the process that runs it,
+    ///    and the customize step reaches it through `run-parts`, which runs every
+    ///    hook under `022`, so the build host's umask never reaches the archive.
+    ///
+    /// For `initramfs-tools`, two:
     ///
     /// `RESUME=none`: the image is one ext4 root partition with no swap, so there is
     /// nothing to resume from. Left unset, the resume hook auto-detects a swap device and
@@ -1233,8 +1305,11 @@ mod config {
     /// unchecked on every boot. Naming the type skips the probe. It selects which helper
     /// is installed and nothing more: at boot the root filesystem's type is read from the
     /// device itself.
-    pub fn initramfs_conf(fstype: &str) -> String {
-        format!("RESUME=none\nFSTYPE={fstype}\n")
+    pub fn initramfs_conf(generator: InitramfsGenerator, fstype: &str) -> String {
+        match generator {
+            InitramfsGenerator::InitramfsTools => format!("RESUME=none\nFSTYPE={fstype}\n"),
+            InitramfsGenerator::Dracut => "hostonly=\"no\"\nreproducible=\"yes\"\n".to_string(),
+        }
     }
 
     /// `/etc/boot2deb/board.conf` — board boot parameters the boot-method overlay
@@ -2126,7 +2201,8 @@ mod tests {
             &step,
         )
         .unwrap();
-        let dropin = std::fs::read_to_string(laptop.path().join(INITRAMFS_MODULES_DROP_IN))
+        let tools = InitramfsGenerator::InitramfsTools;
+        let dropin = std::fs::read_to_string(laptop.path().join(initramfs_modules_drop_in(tools)))
             .expect("the drop-in is staged");
         let names: Vec<&str> = dropin
             .lines()
@@ -2134,6 +2210,44 @@ mod tests {
             .collect();
         assert_eq!(names, image_of(&c2).initramfs_modules);
         assert!(dropin.starts_with("# Generated by boot2deb"), "{dropin}");
+
+        // The same list under dracut: one `force_drivers+=` line per name, in its own
+        // drop-in, and nothing where initramfs-tools would read. The board is a
+        // depthcharge one, which resolution keeps on initramfs-tools, so the generator
+        // is set on the resolved image directly: what is under test is the staging.
+        let mut dracut = c201();
+        dracut.image.as_mut().unwrap().initramfs_generator = InitramfsGenerator::Dracut;
+        let staged = tempfile::tempdir().unwrap();
+        stage_preinstall_overlay(
+            staged.path(),
+            &[],
+            image_of(&dracut),
+            None,
+            1_790_347_034,
+            &step,
+        )
+        .unwrap();
+        let dropin = std::fs::read_to_string(
+            staged
+                .path()
+                .join(initramfs_modules_drop_in(InitramfsGenerator::Dracut)),
+        )
+        .expect("the dracut drop-in is staged");
+        let lines: Vec<String> = dropin
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        let expected: Vec<String> = image_of(&c2)
+            .initramfs_modules
+            .iter()
+            .map(|m| format!("force_drivers+=\" {m} \""))
+            .collect();
+        assert_eq!(lines, expected);
+        assert!(!staged
+            .path()
+            .join(initramfs_modules_drop_in(tools))
+            .exists());
 
         let headless = tempfile::tempdir().unwrap();
         stage_preinstall_overlay(
@@ -2145,7 +2259,10 @@ mod tests {
             &step,
         )
         .unwrap();
-        assert!(!headless.path().join(INITRAMFS_MODULES_DROP_IN).exists());
+        assert!(!headless
+            .path()
+            .join(initramfs_modules_drop_in(tools))
+            .exists());
     }
 
     /// The boot-time selftest service is enabled by the recipe flag and only by
@@ -2257,6 +2374,42 @@ mod tests {
             conf.contains(&format!("FSTYPE={}", crate::image::ROOTFS_FS_KIND)),
             "{conf}"
         );
+        assert!(!tmp
+            .path()
+            .join(initramfs_conf_path(InitramfsGenerator::Dracut))
+            .exists());
+    }
+
+    /// The dracut counterpart of the settings above: a generic initrd, which is what
+    /// keeps dracut from sizing it to the build host, dated from the lock's epoch. Its
+    /// `filesystems` list is exclusive, so the root's type must not be written there.
+    #[test]
+    fn a_dracut_image_states_a_generic_reproducible_initrd() {
+        let mut build = rk1();
+        build.image.as_mut().unwrap().initramfs_generator = InitramfsGenerator::Dracut;
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = |_e: crate::event::Event| {};
+        let step = Step::start(&sink, "test");
+        stage_overlay(
+            tmp.path(),
+            &[],
+            pair_of(&build),
+            uuid::Uuid::nil(),
+            &ident(&build),
+            1_790_347_034,
+            &step,
+        )
+        .unwrap();
+        let conf = std::fs::read_to_string(
+            tmp.path()
+                .join(initramfs_conf_path(InitramfsGenerator::Dracut)),
+        )
+        .expect("the dracut drop-in is staged");
+        assert_eq!(conf, "hostonly=\"no\"\nreproducible=\"yes\"\n");
+        assert!(!tmp
+            .path()
+            .join(initramfs_conf_path(InitramfsGenerator::InitramfsTools))
+            .exists());
     }
 
     #[test]
@@ -2413,38 +2566,58 @@ mod tests {
         assert!(!headless.path().join("etc/default/keyboard").exists());
     }
 
-    /// The pre-install overlay carries an executable `update-initramfs`
-    /// placeholder, and it is a real shell script that answers `--version` the
-    /// way the kernel package's hook checks for.
+    /// The pre-install overlay carries an executable placeholder for every program
+    /// the generator's kernel hook and trigger reach, each a real shell script that
+    /// logs its own name and answers `--version` with the generator's.
     #[test]
-    fn the_preinstall_overlay_shadows_update_initramfs() {
+    fn the_preinstall_overlay_shadows_the_generator_s_programs() {
         use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: crate::event::Event| {};
         let step = Step::start(&sink, "test");
-        stage_preinstall_overlay(
-            tmp.path(),
-            &[],
-            image_of(&rk1()),
-            None,
-            1_700_000_000,
-            &step,
-        )
-        .unwrap();
-        let stub = tmp.path().join(INITRAMFS_STUB.trim_start_matches('/'));
-        let text = std::fs::read_to_string(&stub).unwrap();
-        assert!(text.starts_with("#!/bin/sh\n"), "{text}");
-        assert!(
-            text.contains("echo 'initramfs-tools boot2deb-placeholder'"),
-            "the kernel hook skips a tool whose --version does not name \
-             initramfs-tools, which would suppress the call without recording it:\n{text}"
-        );
-        assert!(text.contains(INITRAMFS_STUB_LOG), "{text}");
-        assert_eq!(
-            std::fs::metadata(&stub).unwrap().permissions().mode() & 0o777,
-            0o755,
-            "a placeholder that is not executable is not on the PATH at all"
-        );
+        let mut build = rk1();
+        for (generator, programs) in [
+            (
+                InitramfsGenerator::InitramfsTools,
+                &["update-initramfs"][..],
+            ),
+            (
+                InitramfsGenerator::Dracut,
+                &["dracut", "update-initramfs"][..],
+            ),
+        ] {
+            build.image.as_mut().unwrap().initramfs_generator = generator;
+            let tmp = tempfile::tempdir().unwrap();
+            stage_preinstall_overlay(
+                tmp.path(),
+                &[],
+                image_of(&build),
+                None,
+                1_700_000_000,
+                &step,
+            )
+            .unwrap();
+            let stubs = initramfs_stubs(generator);
+            assert_eq!(stubs.len(), programs.len(), "{generator}");
+            for (stub, program) in stubs.iter().zip(programs) {
+                assert_eq!(*stub, format!("/usr/local/sbin/{program}"));
+                let path = tmp.path().join(stub.trim_start_matches('/'));
+                let text = std::fs::read_to_string(&path).unwrap();
+                assert!(text.starts_with("#!/bin/sh\n"), "{text}");
+                assert!(
+                    text.contains(&format!("echo '{generator} boot2deb-placeholder'")),
+                    "initramfs-tools' kernel hook skips an update-initramfs whose --version \
+                     does not name initramfs-tools, which would suppress the call without \
+                     recording it:\n{text}"
+                );
+                assert!(text.contains(&format!("echo \"{program} $*\"")), "{text}");
+                assert!(text.contains(INITRAMFS_STUB_LOG), "{text}");
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o755,
+                    "a placeholder that is not executable is not on the PATH at all"
+                );
+            }
+        }
     }
 
     #[test]

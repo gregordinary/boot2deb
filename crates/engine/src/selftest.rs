@@ -303,6 +303,68 @@ mod tests {
         assert!(out.contains("4 not applicable"), "{out}");
     }
 
+    /// A dracut image has `lsinitrd` and no `lsinitramfs`, and the module check
+    /// reads its initrd through that: an `ls -l` listing rather than bare paths.
+    /// The `PATH` is a directory holding the tools the runner calls and a
+    /// stand-in `lsinitrd`, so a build host's own `lsinitramfs` cannot answer.
+    #[test]
+    fn the_module_check_reads_a_dracut_initrd_with_lsinitrd() {
+        const TOOLS: [&str; 10] = [
+            "sh", "uname", "cat", "ls", "dmesg", "tr", "sed", "head", "grep", "tail",
+        ];
+        if !crate::hosttool::require(&TOOLS) {
+            return;
+        }
+        let tmp = fixture();
+        let bin = tmp.path().join("test-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let host_path = std::env::var_os("PATH").unwrap_or_default();
+        for tool in TOOLS {
+            let found = std::env::split_paths(&host_path)
+                .map(|dir| dir.join(tool))
+                .find(|path| path.is_file())
+                .unwrap_or_else(|| panic!("{tool} was found by the gate above"));
+            std::os::unix::fs::symlink(found, bin.join(tool)).unwrap();
+        }
+        // The head and one module line of a real lsinitrd listing, resolute's dracut
+        // over a 7.3 kernel, with the release changed to the fixture's.
+        let lsinitrd = bin.join("lsinitrd");
+        std::fs::write(
+            &lsinitrd,
+            "#!/bin/sh\ncat <<'EOF'\n\
+             Image: /boot/initrd.img-7.1.6-1-arm64: 35M\n\
+             ========================================================================\n\
+             -rw-r--r--   1 root     root        22192 Nov  1  2025 usr/lib/modules/7.1.6-1-arm64/kernel/drivers/mmc/host/sdhci-of-at91.ko\n\
+             ========================================================================\n\
+             EOF\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lsinitrd, std::fs::Permissions::from_mode(0o755)).unwrap();
+        checks(
+            tmp.path(),
+            "device",
+            "initramfs-module  sdhci_of_at91\ninitramfs-module  rk808-regulator\n",
+        );
+        let out = Command::new(bin.join("sh"))
+            .arg(runner())
+            .arg("--root")
+            .arg(tmp.path())
+            .args(UNAME)
+            .env("PATH", &bin)
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.contains("  ok      initramfs-module  sdhci_of_at91\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  FAILED  initramfs-module  rk808-regulator  (not built in"),
+            "{out}"
+        );
+    }
+
     /// An unknown check kind — a config tree newer than the boot2deb that
     /// built the image — is reported skipped, never failed.
     #[test]

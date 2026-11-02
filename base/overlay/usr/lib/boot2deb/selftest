@@ -187,12 +187,23 @@ check_initramfs_module() {
             return
         fi
     done
+    # The lister is the one the image's generator ships: lsinitramfs with
+    # initramfs-tools, lsinitrd with dracut, and the dracut package conflicts with
+    # initramfs-tools. lsinitrd prints an ls -l listing rather than bare paths,
+    # which the path match below reads the same way.
     _initrd="$root/boot/initrd.img-$_kver"
+    _lister=
+    for _l in lsinitramfs lsinitrd; do
+        if command -v "$_l" >/dev/null 2>&1; then
+            _lister=$_l
+            break
+        fi
+    done
     if [ ! -e "$_initrd" ]; then
         report fail initramfs-module "$1" "no initrd.img-$_kver"
-    elif ! command -v lsinitramfs >/dev/null 2>&1; then
-        report skip initramfs-module "$1" "lsinitramfs unavailable"
-    elif lsinitramfs "$_initrd" 2>/dev/null | tr - _ | grep -q "/$_mod\.ko"; then
+    elif [ -z "$_lister" ]; then
+        report skip initramfs-module "$1" "neither lsinitramfs nor lsinitrd is installed"
+    elif "$_lister" "$_initrd" 2>/dev/null | tr - _ | grep -q "/$_mod\.ko"; then
         report ok initramfs-module "$1"
     else
         report fail initramfs-module "$1" "not built in and not in initrd.img-$_kver"

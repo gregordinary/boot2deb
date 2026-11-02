@@ -1,0 +1,24 @@
+Image: /boot/initrd.img-7.3.0-1-arm64: 35M
+========================================================================
+Version: 
+
+Arguments: 
+
+dracut modules:
+console-setup
+dash
+systemd
+shell-interpreter
+shutdown
+========================================================================
+lrwxrwxrwx   1 root     root            7 Nov  1  2025 bin -> usr/bin
+-rw-r--r--   1 root     root          130 Nov  1  2025 etc/conf.d/systemd.conf
+drwxr-xr-x   2 root     root            0 Nov  1  2025 usr/lib/modules/7.3.0-1-arm64/kernel/drivers/mmc/host
+-rw-r--r--   1 root     root         9088 Nov  1  2025 usr/lib/modules/7.3.0-1-arm64/kernel/drivers/mmc/host/dw_mmc-bluefield.ko
+-rw-r--r--   1 root     root        22192 Nov  1  2025 usr/lib/modules/7.3.0-1-arm64/kernel/drivers/mmc/host/sdhci-of-at91.ko
+-rw-r--r--   1 root     root         9464 Nov  1  2025 usr/lib/modules/7.3.0-1-arm64/kernel/arch/arm64/crypto/sm4-ce-cipher.ko
+lrwxrwxrwx   1 root     root           11 Nov  1  2025 var/lock -> ../run/lock
+drwxr-xr-x   2 root     root            0 Nov  1  2025 var/tmp
+========================================================================
+
+dracut cmdline:

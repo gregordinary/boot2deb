@@ -54,6 +54,7 @@ use crate::event::{EventSink, Step};
 use crate::repo::LocalDistsRepo;
 use crate::rootcache::{self, RootfsStore};
 use crate::sandbox::{forward_bootstrap_event, StepObserver};
+use boot2deb_core::distro::InitramfsGenerator;
 use boot2deb_core::model::{ImageBuild, ResolvedImage};
 use boot2deb_core::weight::PlannedWeight;
 use ferroday_cage::provision::debian::{Debian, DebianEvent, Plan, Priority, Repository};
@@ -877,7 +878,12 @@ fn customize(
         &customize_env(image, boot, apt_replaced, source_date_epoch),
         step,
     )?;
-    check_initramfs_modules(rootfs, &image.initramfs_modules, step)
+    check_initramfs_modules(
+        rootfs,
+        image.initramfs_generator,
+        &image.initramfs_modules,
+        step,
+    )
 }
 
 /// The target-side initrd report program: one committed POSIX `sh` file, like
@@ -889,24 +895,26 @@ const INITRD_REPORT: &str = include_str!("customize/initrd-report.sh");
 /// Fail the build unless the initrd the customize step built covers the image's
 /// [`initramfs_modules`](ResolvedImage::initramfs_modules).
 ///
-/// `initramfs-tools` drops a listed name it cannot find without a word, so this is the
-/// check it does not make. It runs after [`CUSTOMIZE`], which built the initrd and, on a
+/// `initramfs-tools` drops a listed name it cannot find without a word, and dracut logs
+/// it as an error and still exits 0, so this is the check neither generator makes. It runs after [`CUSTOMIZE`], which built the initrd and, on a
 /// depthcharge board, signed it into the kernel partition. A failure here means neither
 /// ships. A module in the initrd that declares firmware the initrd does not hold is
 /// reported as a warning, since a driver's declarations name alternatives.
 ///
-/// Skipped where the list is empty: `initramfs-tools` then selects modules on its own,
+/// Skipped where the list is empty: the generator then selects modules on its own,
 /// and the build declared nothing to hold it to.
 fn check_initramfs_modules(
     rootfs: &Path,
+    generator: InitramfsGenerator,
     modules: &[String],
     step: &Step,
 ) -> Result<(), EngineError> {
     if modules.is_empty() {
         return Ok(());
     }
-    let report = boot2deb_core::initramfs::InitrdReport::parse(&run_initrd_report(rootfs)?)
-        .map_err(|message| EngineError::InitrdReport { message })?;
+    let report =
+        boot2deb_core::initramfs::InitrdReport::parse(&run_initrd_report(rootfs, generator)?)
+            .map_err(|message| EngineError::InitrdReport { message })?;
     let verdict = boot2deb_core::initramfs::coverage(modules, &report);
     for missing in &verdict.missing_firmware {
         step.log(format!(
@@ -934,13 +942,15 @@ fn check_initramfs_modules(
 
 /// Run [`INITRD_REPORT`] in a cage rooted at the customized `rootfs` and return what it
 /// printed. The same profile and subordinate map as [`run_customize_cage`], because it
-/// reads the tree that cage wrote.
-fn run_initrd_report(rootfs: &Path) -> Result<String, EngineError> {
+/// reads the tree that cage wrote. `generator` is the one that built the initrd, and
+/// picks the program that lists it.
+fn run_initrd_report(rootfs: &Path, generator: InitramfsGenerator) -> Result<String, EngineError> {
     let context = || "report on the built initrd".to_string();
     let cage = crate::sandbox::baseline(rootfs)
         .identity_map(IdentityMap::Subordinate)
         .command("sh")
         .args(["-c", INITRD_REPORT])
+        .env("B2D_INITRAMFS_GENERATOR", generator.package())
         .current_dir("/")
         .build()
         .map_err(|source| EngineError::Sandbox {
@@ -1015,9 +1025,10 @@ fn customize_env(
         // guarantees no entry holds a comma, so the join is unambiguous; empty when
         // the account is to get its login group and nothing else.
         ("B2D_GROUPS".into(), image.groups.join(",")),
+        // One absolute path per line, each a constant of this crate's.
         (
-            "B2D_INITRAMFS_STUB".into(),
-            crate::rootfs::INITRAMFS_STUB.to_string(),
+            "B2D_INITRAMFS_STUBS".into(),
+            crate::rootfs::initramfs_stubs(image.initramfs_generator).join("\n"),
         ),
         (
             "B2D_INITRAMFS_STUB_LOG".into(),
@@ -1723,27 +1734,86 @@ mod tests {
         );
     }
 
-    /// The update-initramfs placeholder is removed *before* the hooks run, so the one
-    /// initrd the image ships is the one built here — after the overlay and after the
-    /// depmod hook, which is the first point it can be built right.
+    /// The dracut branch of [`INITRD_REPORT`] reads `lsinitrd`'s `ls -l` listing down to
+    /// the paths `3cpio --list` prints for the same initrd. The fixture is a cut of a
+    /// real listing, resolute's dracut over the RK1's 7.3 kernel, keeping its header,
+    /// its rules, directories, modules and links verbatim; the expected paths are that
+    /// initrd's own `3cpio --list` lines for the same members. Over the whole listing
+    /// the two agreed on all 1800 members.
     #[test]
-    fn the_placeholder_is_dropped_before_the_kernel_hooks_run() {
+    fn the_dracut_lister_reduces_a_real_lsinitrd_listing_to_its_paths() {
+        use std::io::Write;
+        const FILTER: &str = r"/^[-dl][-rwxsStT]{9} /{s/^([^ ]+ +){8}//; s/ -> .*$//; p;}";
+        assert!(
+            INITRD_REPORT.contains(&format!("sed -n -E '{FILTER}'")),
+            "the report's dracut branch carries the filter under test"
+        );
+        if !crate::hosttool::require(&["sed"]) {
+            return;
+        }
+        let filter = |listing: &str| {
+            let mut sed = Command::new("sed")
+                .args(["-n", "-E", FILTER])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            sed.stdin
+                .take()
+                .unwrap()
+                .write_all(listing.as_bytes())
+                .unwrap();
+            let out = sed.wait_with_output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(
+            filter(include_str!("testdata/lsinitrd-resolute.txt")),
+            include_str!("testdata/lsinitrd-resolute.paths")
+        );
+        // A device node's size column is a `major, minor` pair. That initrd holds none,
+        // so this line is written for the purpose, in the listing's own columns.
+        assert_eq!(
+            filter("crw-r--r--   1 root     root       5,   1 Nov  1  2025 dev/console\n"),
+            ""
+        );
+    }
+
+    /// The initramfs placeholders are removed *before* the hooks run, so the one
+    /// initrd the image ships is the one built here — after the overlay and after the
+    /// depmod hook, which is the first point it can be built right. The script names
+    /// none of them: the list is the generator's, one path per line.
+    #[test]
+    fn the_placeholders_are_dropped_before_the_kernel_hooks_run() {
         let removed = CUSTOMIZE
-            .find(r#"rm -f "$B2D_INITRAMFS_STUB""#)
-            .expect("the placeholder is removed");
+            .find(r#"printf '%s\n' "$B2D_INITRAMFS_STUBS" | while IFS= read -r stub; do"#)
+            .expect("the placeholders are removed");
         let hooks = CUSTOMIZE
             .find(r#"run-parts --exit-on-error --arg="$kver" /etc/kernel/postinst.d"#)
             .expect("the hooks run");
         assert!(removed < hooks, "removal precedes the hooks");
-        let env = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
-        assert_eq!(
-            env_of(&env, "B2D_INITRAMFS_STUB"),
-            crate::rootfs::INITRAMFS_STUB
+        assert!(
+            !CUSTOMIZE.contains("/usr/local/sbin/"),
+            "the paths are the caller's"
         );
-        assert_eq!(
-            env_of(&env, "B2D_INITRAMFS_STUB_LOG"),
-            crate::rootfs::INITRAMFS_STUB_LOG
-        );
+        let mut build = rk1();
+        for generator in [
+            boot2deb_core::distro::InitramfsGenerator::InitramfsTools,
+            boot2deb_core::distro::InitramfsGenerator::Dracut,
+        ] {
+            build.image.as_mut().unwrap().initramfs_generator = generator;
+            let env = customize_env(image_of(&build), None, &[], 1_790_347_034);
+            assert_eq!(
+                env_of(&env, "B2D_INITRAMFS_STUBS")
+                    .lines()
+                    .collect::<Vec<_>>(),
+                crate::rootfs::initramfs_stubs(generator)
+            );
+            assert_eq!(
+                env_of(&env, "B2D_INITRAMFS_STUB_LOG"),
+                crate::rootfs::INITRAMFS_STUB_LOG
+            );
+        }
     }
 
     /// Every image enables `systemd-time-wait-sync`, so `time-sync.target` means what

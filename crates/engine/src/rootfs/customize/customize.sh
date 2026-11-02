@@ -18,8 +18,8 @@
 #   B2D_SUDOERS                 its sudoers spec, e.g. `NOPASSWD: ALL`
 #   B2D_AUTHORIZED_KEYS         its authorized_keys, one per line; empty for none
 #   B2D_GROUPS                  its supplementary groups, comma-separated; empty for none
-#   B2D_INITRAMFS_STUB          the update-initramfs placeholder to remove
-#   B2D_INITRAMFS_STUB_LOG      where the placeholder recorded its calls
+#   B2D_INITRAMFS_STUBS         the initramfs placeholders to remove, one path per line
+#   B2D_INITRAMFS_STUB_LOG      where the placeholders recorded their calls
 #   B2D_TIMEZONE                the resolved tzdata zone name
 #   B2D_LOCALES_GENERATED       non-empty when locale-gen was asked for anything
 #   B2D_DEPTHCHARGE_BOARD       the board profile, or empty on a raw-gap board
@@ -89,21 +89,24 @@ rm -f /usr/share/keyrings/fcage-archive-keyring.gpg
 
 # --- Boot artifacts ----------------------------------------------------------
 #
-# Remove the update-initramfs placeholder and say what it absorbed, then re-run the
-# kernel postinst.d hooks. This is the first moment an initramfs can be built
-# correctly: the overlay is in place and the depmod hook — which run-parts reaches
-# first — has written the modules.dep that resolves this board's out-of-tree modules.
+# Remove the initramfs generator's placeholders and say what they absorbed, then
+# re-run the kernel postinst.d hooks. This is the first moment an initramfs can be
+# built correctly: the overlay is in place and the depmod hook — which run-parts
+# reaches first — has written the modules.dep that resolves this board's out-of-tree
+# modules.
 #
-# The count comes from the placeholder's own log rather than from an assumption about
-# what dpkg would have done, and its absence is reported rather than passed over: the
+# The count comes from the placeholders' own log rather than from an assumption about
+# what dpkg would have done, and its absence is reported rather than passed over: a
 # placeholder works by shadowing the real tool on PATH, so "never called" is a real
 # outcome and the build should say so instead of implying a saving it did not make.
-rm -f "$B2D_INITRAMFS_STUB"
+printf '%s\n' "$B2D_INITRAMFS_STUBS" | while IFS= read -r stub; do
+    [ -z "$stub" ] || rm -f -- "$stub"
+done
 if [ -f "$B2D_INITRAMFS_STUB_LOG" ]; then
     echo "suppressed $(wc -l < "$B2D_INITRAMFS_STUB_LOG") initramfs build(s) during the package install; building the real one now"
     rm -f "$B2D_INITRAMFS_STUB_LOG"
 else
-    echo 'note: the update-initramfs placeholder was never called, so the package install built its own initrd' >&2
+    echo 'note: no initramfs placeholder was called, so the package install built its own initrd' >&2
 fi
 
 # --exit-on-error fails the build rather than shipping a kernel with nothing to boot
