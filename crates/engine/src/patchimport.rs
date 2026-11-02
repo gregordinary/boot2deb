@@ -205,7 +205,7 @@ uboot = []
     fn insert_preserves_an_existing_inline_element_comment() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("series.toml");
-        // An existing element carries a trailing inline comment.
+        // An existing element has a trailing inline comment.
         std::fs::write(
             &path,
             "applies_to_kernel = \">=7.0\"\nkernel = [\n    \"k/040-a.patch\",  # keep me\n]\n",

@@ -18,7 +18,7 @@ use std::process::{Command, Output};
 ///
 /// **Every** `git` the engine runs comes from here, because host config is build
 /// input. The one that decides it is `url.<base>.insteadOf`: it silently rewrites a
-/// remote URL, so a host carrying one would fetch the pinned commit from a *different
+/// remote URL, so a host with one would fetch the pinned commit from a *different
 /// remote than the lock names* — the precise input the lock exists to fix, redirected
 /// with nothing in the build to report it. `core.hooksPath` (arbitrary code on
 /// `clone`/`checkout`), `am.threeWay` and `apply.whitespace` (which decide whether a
@@ -31,7 +31,7 @@ use std::process::{Command, Output};
 /// **The files are not the whole of it.** `GIT_CONFIG_COUNT` with its
 /// `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` pairs, and `GIT_CONFIG_PARAMETERS`, are
 /// honored regardless of `GIT_CONFIG_NOSYSTEM` and `GIT_CONFIG_GLOBAL` — so a host or a
-/// CI wrapper carrying either can inject the very `insteadOf` the paragraph above says
+/// CI wrapper setting either can inject the very `insteadOf` the paragraph above says
 /// cannot reach a fetch. Both are removed. Dropping the count is sufficient for the
 /// numbered form: git reads the pairs only up to it.
 ///
@@ -40,7 +40,7 @@ use std::process::{Command, Output};
 /// stderr, and on a localized host every transient network failure would otherwise
 /// become a hard one. Nothing that parses git output wants a translated string.
 ///
-/// Transport settings are the deliberate cost. A host whose `~/.gitconfig` carries
+/// Transport settings are the deliberate cost. A host whose `~/.gitconfig` contains
 /// `http.proxy` must express it as `http_proxy`/`https_proxy` in the environment,
 /// which git still reads; credentials for a private source likewise. Config that
 /// changes *what is fetched* cannot be honored without giving up the guarantee.
@@ -188,7 +188,7 @@ pub fn has_untracked(repo: &Path, paths: &[&str]) -> bool {
 /// Whether `repo` holds `commit` as a commit object.
 ///
 /// The question a read-only query over a *historical* pin has to ask first. A checkout
-/// at one commit need not carry another. Asking for a blob under a commit that is not
+/// at one commit need not contain another. Asking for a blob under a commit that is not
 /// there fails deep inside the read rather than at its premise.
 ///
 /// Best-effort: a path that is not a repository at all answers `false`, since from the
@@ -202,7 +202,7 @@ pub fn has_commit(repo: &Path, commit: &str) -> bool {
     .is_ok_and(|out| out.status.success())
 }
 
-/// The contents of `path` at `commit`, or `None` when the commit does not carry it.
+/// The contents of `path` at `commit`, or `None` when the commit does not contain it.
 ///
 /// Reads out of the object store rather than the worktree. A query about a historical
 /// pin therefore does not need a checkout at that commit, and cannot disturb one.
@@ -269,7 +269,7 @@ pub fn changed_paths(repo: &Path, rev: &str) -> Result<Vec<String>, EngineError>
     Ok(paths)
 }
 
-/// The object id of `path` at `commit`, or `None` when the commit does not carry it.
+/// The object id of `path` at `commit`, or `None` when the commit does not contain it.
 ///
 /// Comparing two blob ids is how two revisions of one file are told apart without
 /// reading either, since git already content-addresses them. Equal ids are equal bytes.
@@ -376,7 +376,7 @@ pub(crate) fn am_3way(repo: &Path, patch: &Path) -> Result<Output, EngineError> 
 
 /// Abort an in-progress `git am`, returning whether the abort succeeded.
 ///
-/// Best-effort by design — callers invoke it while already carrying the error that
+/// Best-effort by design — callers invoke it while already holding the error that
 /// matters, and a failed abort must not displace it. The return value lets a caller
 /// that *owns* the checkout (a commit-addressed cache tree) escalate to a harder
 /// cleanup instead of leaving the tree wedged.
@@ -581,7 +581,7 @@ c9acdc466e9aa96352f658b9276aa8a45b8e817d\trefs/tags/v7.1.1^{}\n";
     /// The build's `git` must not read the host's git configuration.
     ///
     /// Asserted against `url.<base>.insteadOf`, the setting that decides this: it
-    /// rewrites a remote URL, so a host carrying one would fetch a pinned commit from a
+    /// rewrites a remote URL, so a host with one would fetch a pinned commit from a
     /// remote the lock does not name. A bare `git` is probed first as the positive
     /// control — without it the assertion below could pass because the fixture never
     /// took effect, not because [`command`] excluded it.

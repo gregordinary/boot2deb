@@ -24,7 +24,7 @@ image_size = "2G"
 # first thing to check on a new image.
 #
 # In 7.2 the in-tree V4L2 RGA driver, which this recipe builds and the RK3588 recipes
-# deliberately do not, takes the rework that carried RGA3 support into mainline. The
+# deliberately do not, takes the rework that added RGA3 support to mainline. The
 # RGA2 half is where this board sits, and it gains real behaviour: colorimetry is
 # announced and synchronised rather than ignored, offsets are computed from the stride
 # instead of the width, strides are aligned to four bytes, odd frame sizes are refused

@@ -20,13 +20,13 @@ modules = []
 # speaker-test) drives and validates the board's analog + S/PDIF cards.
 #
 # No `bluez` here: it is board-specific. The AIC8800D80's Bluetooth is UART HCI, not
-# the `depends on BROKEN` SDIO-BT path, and only the H96 carries the chip -- so `bluez`
+# the `depends on BROKEN` SDIO-BT path, and only the H96 has the chip -- so `bluez`
 # lives on devices/h96-max-m9.toml, not the SoC layer, and the rk3576-evb1-v10
 # validator (no BT transport) stays free of it. These Wi-Fi/audio packages are SoC-wide;
 # the evb1 inherits them benignly -- NetworkManager simply manages its Ethernet.
 packages = [
     "network-manager",
-    # Split out of `network-manager` at 1.56.0-4; trixie predates that and carries
+    # Split out of `network-manager` at 1.56.0-4; trixie predates that and has
     # `nmtui` inside `network-manager`, where naming this would fail the resolve.
     { name = "network-manager-tui", suites = ["forky", "sid"] },
     "wpasupplicant",
@@ -99,7 +99,7 @@ dir = "bin/rk35"
 # panfrost, so its userspace is Mesa from the Debian mirror -- see the GL packages
 # on devices/h96-max-m9.toml. libmali is for a CSF GPU with no mainline driver.
 # librga alone: `ffmpeg_requires = ["mpp"]` is unsatisfied on this part, so the produced
-# ffmpeg carries no librga `NEEDED` entry — `librga2` still ships, for programs that
+# ffmpeg contains no librga `NEEDED` entry — `librga2` still ships, for programs that
 # speak the API directly. That is the rule stated as data rather than as a special case
 # in the ffmpeg stage.
 [[userspace]]

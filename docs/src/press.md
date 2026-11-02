@@ -19,11 +19,11 @@ A plain press streams the build's compressed artifact into the output, so
 pressing a card never costs a rebuild. It then verifies the file it wrote. The
 bytes are re-read against the digest computed while streaming. The partition
 table is read back and compared entry-for-entry against the one the artifact
-carries. What you hand the flasher is what the build made.
+contains. What you hand the flasher is what the build made.
 `--dry-run` prints what would be pressed, including the medium size the image
 needs, without writing anything.
 
-Beside each output that carries a rootfs, `press` writes its
+Beside each output that contains a rootfs, `press` writes its
 [file manifest](reference/reproducibility.md#the-rootfs-file-manifest), named
 for the output: `card.img` gets `card.rootfs.uapi16`. A plain press copies the
 build's, since the rootfs is the build's to the byte. A press with additions
@@ -63,7 +63,7 @@ boot2deb press turing-rk1/forky rk1-03.img \
     --hostname rk1-03 --ssh-key "$(cat ~/.ssh/id_ed25519.pub)"
 ```
 
-Every image carries a 1 MiB FAT partition labeled `b2d-seed` holding a
+Every image contains a 1 MiB FAT partition labeled `b2d-seed` holding a
 `seed.txt` of `key=value` lines. `press` regenerates the whole partition with
 what you name — never edits it in place — and the device applies it once at
 first boot:
@@ -77,17 +77,17 @@ first boot:
 | `static_ip=` | `--static-ip` | pins a static IPv4 (`address/prefix[,gateway[,dns...]]`) on the connection the seed sets up |
 
 The Wi-Fi keys are the canonical per-site values that must never sit in a
-committed recipe. They apply on images that carry NetworkManager, which every
+committed recipe. They apply on images that contain NetworkManager, which every
 Wi-Fi-capable board's image does, and degrade to a logged skip elsewhere. Like
 every seed key, they are plain text in the seed partition, which personalizes
-a unit rather than keeping secrets. An image pressed with no keys carries the
+a unit rather than keeping secrets. An image pressed with no keys contains the
 empty template and behaves exactly as an unpersonalized image always has.
 
 `static_ip=` follows the connection the other keys define. Seeded together
 with `wifi_ssid` it makes that Wi-Fi profile static, and seeded alone it pins
 the first wired interface. It works through NetworkManager where the image
-carries it, through `dhcpcd.conf` where it carries dhcpcd, and with a logged
-skip where it carries neither.
+contains it, through `dhcpcd.conf` where it contains dhcpcd, and with a logged
+skip where it contains neither.
 
 Fields beyond the address are optional. No gateway field means no default route
 is written, and no DNS fields mean no resolvers are. The key personalizes
@@ -129,7 +129,7 @@ stick and the eMMC install written from the same recipe. The initramfs roots on
 the first partition it finds with that PARTUUID, which can be the other disk's.
 The stick's kernel then runs the eMMC's system.
 
-`--fresh-identity` gives the pressed image identifiers no other image carries:
+`--fresh-identity` gives the pressed image identifiers no other image has:
 
 ```sh
 boot2deb press asus-c201/mainline-forky stick.img --fresh-identity
@@ -144,7 +144,7 @@ wrote the root PARTUUID into the rootfs, and the press rewrites each place:
 | `/boot/extlinux/extlinux.conf` | `rockchip-rkbin` | the `root=` of every boot entry |
 | `/boot/depthcharge/*.img` | `depthcharge` | the signed kernel, re-signed for the new root and placed in the kernel slot too |
 
-A depthcharge kernel is re-signed with the key the image carries for its own
+A depthcharge kernel is re-signed with the key the image contains for its own
 kernel upgrades, the vboot developer key. The press refuses a kernel that any
 other key signed. It then reads every file under `/etc` and `/boot` for the
 build's identifiers. When one still names them, the press refuses the image.
@@ -249,7 +249,7 @@ in a config file would mean pressing the image, reading its GPT back, editing,
 and pressing again. Everything else in the set is a convenience.
 
 The vocabulary is **the image's identity**, and it is closed. Every name is a
-field of the `/etc/boot2deb/image.toml` the image carries, or one of the
+field of the `/etc/boot2deb/image.toml` the image contains, or one of the
 identifiers stamped into its GPT and superblock:
 
 | reference | what it expands to |
@@ -274,7 +274,7 @@ vocabulary. It is never an empty string in a shipped config that only fails on
 the board. Names are checked when the flags are parsed, so a typo fails before
 any artifact is read.
 
-`{{` is claimed **only** when `image.` follows it. A file that carries braces
+`{{` is claimed **only** when `image.` follows it. A file that contains braces
 of its own, such as a Go, Helm, or Jinja template shipped as data, passes
 through untouched. The flip side is that a mistyped namespace
 (`{{iamge.suite}}`) is literal text rather than an error. That is why `press`
@@ -324,7 +324,7 @@ later without touching the filesystem.
 ## Installing to internal storage
 
 Some boards boot from removable media but live on internal storage — boot a
-Chromebook from SD, install to its eMMC. `--embed-image` carries the recipe's
+Chromebook from SD, install to its eMMC. `--embed-image` places the recipe's
 own compressed artifact inside the pressed image, at
 `/var/lib/boot2deb/install/`:
 
@@ -342,7 +342,7 @@ confirmation requires typing the device's name.
 sudo boot2deb-install-to /dev/mmcblk0
 ```
 
-The pressed card is a derived copy that *carries* the artifact. The embedded
+The pressed card is a derived copy that *contains* the artifact. The embedded
 image is the artifact itself, byte for byte. The card gets a
 [fresh identity](#giving-a-medium-its-own-identifiers), so the installed disk
 and the card that installed it never share a root PARTUUID. `--embed-image`

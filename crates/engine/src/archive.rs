@@ -101,7 +101,7 @@ fn archives<'a>(
         // one the build can reach and vice versa — see [`ArchiveFetch`].
         .fetcher(ArchiveFetch::new());
     // Every pocket a build resolves against, at the image's own components and with
-    // the same stale-release posture, so a package an update pocket carries is found
+    // the same stale-release posture, so a package an update pocket contains is found
     // where the build will find it.
     let mut b = archive.configure(b, &image.components, keyring)?;
     for repo in feature_repositories(apt_sources)? {
@@ -190,7 +190,7 @@ pub struct Refusal {
     /// Who asked for it — a selected package whose dependency it was, or the install
     /// list, which is the recipe's own `rootfs_packages`.
     pub required_by: String,
-    /// Why it could not be: the name is absent, it is excluded, or the archive carries
+    /// Why it could not be: the name is absent, it is excluded, or the archive contains
     /// it only at a version the constraint rules out.
     pub reason: String,
 }
@@ -247,7 +247,7 @@ pub fn closure(
 ) -> Result<ClosureReport, EngineError> {
     /// Collects the refusals a resolution reports on its way to failing.
     ///
-    /// The events and the error carry the same set, and neither is a summary of the
+    /// The events and the error contain the same set, and neither is a summary of the
     /// other — but only the events keep the three fields apart, so they are what this
     /// reads.
     #[derive(Default)]

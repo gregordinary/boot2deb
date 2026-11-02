@@ -9,11 +9,11 @@
 //!   build's suite and **target** arch.
 //! - The **cross build sandbox** ([`SandboxRole::Cross`]) is where the kernel, u-boot
 //!   and kmod stages compile. It is bootstrapped for the build's suite and the **host**
-//!   arch, and carries a cross toolchain that emits the target's objects.
+//!   arch, and contains a cross toolchain that emits the target's objects.
 //! - The **packaging root** ([`PackagingSandbox`]) is where an already-staged tree
 //!   becomes a `.deb`. It is bootstrapped for the build's
 //!   [`packaging_suite`](boot2deb_core::model::ResolvedBuild::packaging_suite) and the
-//!   **host** arch. It carries `dpkg` and `xz-utils` and nothing else, and is never
+//!   **host** arch. It contains `dpkg` and `xz-utils` and nothing else, and is never
 //!   layered, so it has no `build_root` operation at all.
 //!
 //! Both build sandboxes are layered. A stage declares its build-dependencies and gets a
@@ -101,8 +101,8 @@
 //! root.
 //!
 //! A tree the build user staged on the host stats as `root:root` inside, and `dpkg-deb`
-//! archives it with the ownership a `.deb` must carry. `dpkg-buildpackage` selects no
-//! gain-root command at all. No base set carries the package, because nothing on any
+//! archives it with the ownership a `.deb` must record. `dpkg-buildpackage` selects no
+//! gain-root command at all. No base set includes the package, because nothing on any
 //! path would execute it.
 //!
 //! No root is a hard security boundary against malicious build code. Each runs as the
@@ -179,12 +179,12 @@ const CROSS_DEPS: &[&str] = &[
 /// [`DEB_COMPRESSOR`](crate::build::DEB_COMPRESSOR) names. Deliberately neither compile
 /// set: archiving a staged tree compiles nothing, so a toolchain, `debhelper` and
 /// `pkg-config` in here would be a few hundred megabytes of tree that no packaging step
-/// can reach for. No set carries `fakeroot`, for the reason the [module docs](self)
+/// can reach for. No set includes `fakeroot`, for the reason the [module docs](self)
 /// give.
 const PACKAGING_DEPS: &[&str] = &["dpkg", "xz-utils"];
 
 /// What a [`RootlessSandbox`] is *for*: which architecture it is provisioned at, which
-/// packages its base carries, and which token names its tree.
+/// packages its base contains, and which token names its tree.
 ///
 /// One type serves both because a compile root is a compile root — same bootstrap, same
 /// layering, same cage. What differs is which side of the compile the root stands on.
@@ -200,7 +200,7 @@ pub enum SandboxRole {
     /// correct at the target's architecture. On a host that cannot execute the target's
     /// binaries every command in here runs under `qemu-user`.
     Target,
-    /// The **host-arch** root the kernel, u-boot and kmod stages compile in, carrying a
+    /// The **host-arch** root the kernel, u-boot and kmod stages compile in, containing a
     /// cross toolchain that emits `target`'s objects.
     ///
     /// These stages emit target objects but link nothing against the target's
@@ -214,7 +214,7 @@ pub enum SandboxRole {
         /// It picks the toolchain package, and it reaches the tree name through that, so
         /// two targets never share a cross root. Where it equals the root's own
         /// architecture there is no cross toolchain to add: the base's own
-        /// `build-essential` — carried for the *host* programs kbuild and u-boot build
+        /// `build-essential` — included for the *host* programs kbuild and u-boot build
         /// during any cross build — is then the whole compiler.
         target: &'static str,
     },
@@ -328,7 +328,7 @@ pub struct SandboxRun<'a> {
 }
 
 /// A build root and the host paths a command in it must see — the pair every compile
-/// invocation carries.
+/// invocation passes.
 ///
 /// One value, because neither half means anything alone. A root with no binds sees no
 /// source tree, and a bind list with no root has nowhere to be exposed.
@@ -354,7 +354,7 @@ pub struct BuildRootSpec<'a> {
     /// Debian packages to layer over the base — this stage's build-dependencies.
     ///
     /// Resolved as a delta against the base's own configured set, so only what the
-    /// base lacks is downloaded and configured. A package the base already carries
+    /// base lacks is downloaded and configured. A package the base already contains
     /// contributes nothing, and an empty delta stages no increment at all.
     pub packages: &'a [&'a str],
     /// A trusted `file://` repository the increment resolves against **in addition**
@@ -468,7 +468,7 @@ pub trait BuildSandbox {
     /// first call and reuses it thereafter.
     fn ensure_ready(&self, step: &Step) -> Result<(), EngineError>;
 
-    /// The manifest of the packages the base carries: one
+    /// The manifest of the packages the base contains: one
     /// `name version arch sha256` line per package, sha256-pinned from the plan the
     /// bootstrap resolved ([`crate::manifest`]).
     ///
@@ -737,7 +737,7 @@ impl SandboxBase {
         // The sink is bound for this one run rather than for the provisioner's life,
         // so its borrow of `step` and of `installed` ends when `ensure` returns.
         //
-        // `Resolved` carries the closure the bootstrap itself resolved and is about to
+        // `Resolved` contains the closure the bootstrap itself resolved and is about to
         // install, and it is the only report of it — a resolution taken separately
         // would be a claim about a set that was never installed. It fires only when
         // this call bootstraps; a reused base already has its manifest on disk.
@@ -801,7 +801,7 @@ impl SandboxBase {
     /// **Why the tree's name cannot answer this.** A base is keyed by
     /// [`build_sandbox_dir`] on the inputs that *request* it — mirrors, package set,
     /// recipe version — and those are the same before and after an archive moves. Two
-    /// bootstraps months apart therefore land on one directory carrying different
+    /// bootstraps months apart therefore land on one directory containing different
     /// libraries, and a reuse cannot tell them apart by inspection. Keying on what the
     /// bootstrap resolved is not available at the point the path is chosen: the
     /// resolution is the bootstrap's own output. So the check is made where the answer
@@ -890,7 +890,7 @@ impl SandboxBase {
 /// than on the host. [`PackagingSandbox`] is the root that archives a staged tree.
 pub struct RootlessSandbox {
     /// What this sandbox is for, and so which architecture it is provisioned at and
-    /// which packages its base carries.
+    /// which packages its base contains.
     role: SandboxRole,
     /// The provisioned userland every [`BuildRoot`] overlays.
     base: SandboxBase,
@@ -1037,7 +1037,7 @@ impl BuildSandbox for RootlessSandbox {
         check_layer_coherent(spec.stage, &upper)?;
         // Every path into `stage_layer` resolves before it stages, so a staged layer
         // always reported its plan — including the empty-delta case, whose plan is
-        // legitimately empty because the base already carried everything asked for.
+        // legitimately empty because the base already contained everything asked for.
         let plan = resolved.ok_or_else(|| EngineError::Bootstrap {
             context: format!("stage the {} build root", spec.stage),
             message: "the layer resolution reported no plan".into(),
@@ -1055,7 +1055,7 @@ impl BuildSandbox for RootlessSandbox {
     }
 }
 
-/// The packaging root: a host-arch Debian userland carrying `dpkg` and `xz-utils`, in
+/// The packaging root: a host-arch Debian userland containing `dpkg` and `xz-utils`, in
 /// which a staged tree becomes a `.deb`.
 ///
 /// The u-boot and kmod stages assemble their package trees on the host. The layout,
@@ -1129,7 +1129,7 @@ impl PackagingSandbox {
             .ensure(PACKAGING_DEPS, PACKAGING_MANIFEST_HEADER, step)
     }
 
-    /// The manifest of the packages this root carries: one `name version arch sha256`
+    /// The manifest of the packages this root contains: one `name version arch sha256`
     /// line per package, sha256-pinned from the plan the bootstrap resolved.
     ///
     /// The record of what archived the build's `.deb`s, and the counterpart of
@@ -1193,7 +1193,7 @@ pub(crate) fn build_cage(
     }
     // The instrumented form, if this run asked for one. It is applied here and not at
     // the call site so `spec.argv` — what the failure message and the event stream name
-    // — stays the command the build asked for rather than the wrapper carrying it.
+    // — stays the command the build asked for rather than the wrapper containing it.
     let launched = match spec.probe {
         Some(report) => Cow::Owned(crate::build::probe::wrap(spec.argv, report)),
         None => Cow::Borrowed(spec.argv),
@@ -1231,7 +1231,7 @@ pub(crate) fn run_in(
 }
 
 /// Run a built [`Cage`], relaying its output to `step` and mapping a non-zero exit to
-/// [`CommandFailed`](EngineError::CommandFailed) carrying the stderr tail.
+/// [`CommandFailed`](EngineError::CommandFailed) containing the stderr tail.
 fn run_cage(cage: Cage, spec: &SandboxRun, step: &Step) -> Result<(), EngineError> {
     let mut observer = StepObserver::new(step);
     let status = cage
@@ -1253,7 +1253,7 @@ fn run_cage(cage: Cage, spec: &SandboxRun, step: &Step) -> Result<(), EngineErro
     }
 }
 
-/// Whether a reclaim also takes the `<path>.lock` a provisioned rootfs carries beside
+/// Whether a reclaim also takes the `<path>.lock` a provisioned rootfs has beside
 /// it.
 ///
 /// Only the caller knows which of the two kinds of directory it named. The provisioner
@@ -1349,7 +1349,7 @@ fn discard_unrecordable_base(rootfs: &Path, manifest: &Path) -> Result<bool, Eng
 /// Fail if the staged root does not satisfy its own declared dependencies.
 ///
 /// `dpkg` rewrites the whole status database when it installs into the overlay, so the
-/// upper carries the *merged* view — the base's packages and the layer's together —
+/// upper contains the *merged* view — the base's packages and the layer's together —
 /// and one read of it describes the tree a compile will actually see.
 ///
 /// The unmet set is reported in full rather than truncated to the first: a skew
@@ -1447,7 +1447,7 @@ fn profile() -> ferroday_cage::CageBuilder {
         // Declared for the reason the environment is: left unset, the sandbox's UTS
         // namespace starts with the build host's own name, which is then what `uname -n`
         // and `hostname` answer to anything a build runs, and what the record would
-        // carry.
+        // contain.
         .hostname(SANDBOX_HOSTNAME)
         // A build is non-interactive by construction, which is already what the host
         // commands in `crate::build` state; this is the same statement for the
@@ -1586,7 +1586,7 @@ fn base_tree_name<S: AsRef<str>>(
     version: u32,
 ) -> String {
     // Short digest, not the ingredients: an archive's identity is long and contains characters no
-    // directory name should carry. 12 hex characters is 48 bits — far past collision
+    // directory name should contain. 12 hex characters is 48 bits — far past collision
     // range for the handful of bases one work dir ever sees. The `\0` separators keep two
     // different recipes from spelling one digest input. The role is in the *name* and not
     // in the digest on purpose: it is a label for the reader, and the package set it
@@ -1604,7 +1604,7 @@ fn base_tree_name<S: AsRef<str>>(
 /// Beside the sandbox base it overlays, and deliberately **not** under `TMPDIR`. An
 /// unprivileged overlay records its whiteouts and opaque markers in `user.*` extended
 /// attributes, which a tmpfs older than Linux 6.6 cannot hold. An upper placed in a
-/// tmpfs `TMPDIR` therefore fails on a host whose work dir would have carried it.
+/// tmpfs `TMPDIR` therefore fails on a host whose work dir would have supported it.
 ///
 /// Which filesystem this lands on is a host requirement, and
 /// [`overlay_check`](crate::checks::overlay_check) probes this directory rather than
@@ -1646,7 +1646,7 @@ fn is_packaging_root(name: &str) -> bool {
 /// Selection is by leaf name rather than by resolving a recipe. The trees that have to
 /// go include the ones whose digest no longer matches any base this config would
 /// provision. An aged tree is exactly the one a resolve would not name. The `.lock`
-/// and `.pkgs` siblings carry the tree's own leaf name and so come along with it.
+/// and `.pkgs` siblings share the tree's own leaf name and so come along with it.
 ///
 /// A name this cannot read as text is left out. Every tree here is named
 /// `<role>-<arch>-<suite>-<digest>` and so is ASCII, which makes an unreadable name
@@ -1725,7 +1725,7 @@ fn project(inputs: ferroday_cage::ResolvedInputs) -> SandboxProvenance {
     SandboxProvenance {
         posture: project_posture(&inputs),
         // Every variable is declared by SANDBOX_ENV from `&str` constants, so the lossy
-        // conversion is exact for the environment this profile carries.
+        // conversion is exact for the environment this profile contains.
         env: inputs
             .env
             .iter()
@@ -1853,7 +1853,7 @@ fn project_posture(inputs: &ferroday_cage::ResolvedInputs) -> SandboxPosture {
 ///
 /// A kind per stream and nothing more: [`ResolvedStdio::Fd`] names a descriptor the
 /// launch supplied, which is a live resource of this run's and not something a record
-/// can carry forward — the same rule the root and the identity map are recorded under.
+/// can keep — the same rule the root and the identity map are recorded under.
 fn project_streams(streams: &ResolvedStreams) -> SandboxStreams {
     SandboxStreams {
         stdin: stdio_kind(streams.stdin),
@@ -1890,7 +1890,7 @@ fn hex_access(bits: u64) -> String {
 /// rest with `..`. Unlike [`forward_bootstrap_event`], where a progress stream may drop a
 /// milestone it has no line for, a record whose value is being complete may not drop an
 /// input: `the_projection_decides_every_resolved_key` pins every key a mount in the
-/// recorded profile carries, so a field the library adds fails that test rather than
+/// recorded profile contains, so a field the library adds fails that test rather than
 /// going silently missing from every later manifest.
 fn project_mount(mount: &ResolvedMount) -> SandboxMount {
     let base = |kind: &str| SandboxMount {
@@ -1951,7 +1951,7 @@ fn hex_flags(flags: u64) -> String {
     format!("{flags:#010x}")
 }
 
-/// A mount's filesystem data string, or `None` where it carries none: the library
+/// A mount's filesystem data string, or `None` where it contains none: the library
 /// freezes an unset one as the empty string, and `options = ""` would read as a value
 /// rather than an absence.
 fn data_string(data: &str) -> Option<String> {
@@ -2003,8 +2003,8 @@ pub(crate) fn forward_bootstrap_event(step: &Step, event: DebianEvent<'_>) {
         } => step.log(format!("downloading {package} ({index}/{total})")),
         DebianEvent::Extracting { package, .. } => step.log(format!("extracting {package}")),
         // One line per dependency the resolution could not satisfy. A resolve reports
-        // every refusal before it fails, so the log carries the whole list a user has to
-        // correct rather than the first item of it — and it carries it on the way past,
+        // every refusal before it fails, so the log contains the whole list a user has to
+        // correct rather than the first item of it — and it shows it on the way past,
         // where a reader is already looking, instead of only inside the error.
         DebianEvent::Unsatisfiable {
             requirement,
@@ -2041,7 +2041,7 @@ pub(crate) fn forward_bootstrap_event(step: &Step, event: DebianEvent<'_>) {
 /// stderr lines are retained for a [`CommandFailed`](EngineError::CommandFailed)
 /// message.
 ///
-/// The cage delivers raw byte chunks whose boundaries carry no meaning, so this
+/// The cage delivers raw byte chunks whose boundaries have no meaning, so this
 /// buffers each stream and splits on newlines; [`flush`](Self::flush) emits any
 /// trailing partial line after the command exits.
 ///
@@ -2215,7 +2215,7 @@ mod tests {
     ///
     /// What is simulated is only the *cause*. Waiting for Debian to move a package
     /// would make the test unrunnable on demand, so the divergence is created by
-    /// rewriting the manifest the published tree carries. That substitution is exact:
+    /// rewriting the manifest the published tree contains. That substitution is exact:
     /// the manifest is the **only** record of what a tree holds, so a tree whose
     /// manifest disagrees with the archive is indistinguishable — to this code and to
     /// an operator — from one the archive genuinely moved past. That indistinguishability
@@ -2269,7 +2269,7 @@ mod tests {
         let truth = std::fs::read_to_string(&manifest).unwrap();
         assert!(
             truth.contains("dpkg "),
-            "the base carries dpkg:
+            "the base contains dpkg:
 {truth}"
         );
 
@@ -2295,7 +2295,7 @@ mod tests {
         );
 
         // 3. Make the published tree claim a package set the archive would not give —
-        //    the 2026-08-07-vs-2026-08-22 case, where one directory name carried two
+        //    the 2026-08-07-vs-2026-08-22 case, where one directory name contained two
         //    different libc6 and nothing could tell them apart.
         let staled = truth
             .lines()
@@ -2343,7 +2343,7 @@ mod tests {
     ///
     /// This is what lets the provenance record one profile for a build whose stages run
     /// in overlay roots: [`resolved_inputs`] resolves [`baseline`], so if
-    /// [`baseline_overlay`] carried so much as one different variable, mount, limit or
+    /// [`baseline_overlay`] contained so much as one different variable, mount, limit or
     /// identity, the record would describe an environment no compile ran in.
     ///
     /// The rooting *kind* is the one field that must differ, and the test asserts that
@@ -2456,7 +2456,7 @@ mod tests {
         assert!(!recorded.posture.no_new_privileges);
     }
 
-    /// Every key the sandbox library's resolved record carries for the profile boot2deb
+    /// Every key the sandbox library's resolved record contains for the profile boot2deb
     /// records is one [`project_posture`] and [`project_mount`] have decided about.
     ///
     /// The library's resolved types are `#[non_exhaustive]`, so a field it adds compiles
@@ -2484,7 +2484,7 @@ mod tests {
             "mounts[].data",
             "mounts[].flags",
             "mounts[].kind",
-            // A symlink's own path, which the record carries as its `target`.
+            // A symlink's own path, which the record contains as its `target`.
             "mounts[].path",
             "mounts[].read-only",
             "mounts[].source",
@@ -2495,7 +2495,7 @@ mod tests {
             "rlimits",
             "root",
             "root.kind",
-            // Left out: a path on the build host. The record carries the kind.
+            // Left out: a path on the build host. The record contains the kind.
             "root.path",
             "run-as",
             "streams",
@@ -2704,7 +2704,7 @@ mod tests {
         assert!(events.contains(&(Stream::Stdout, "two".to_string())));
         assert!(events.contains(&(Stream::Stderr, "warn: bad".to_string())));
         assert!(events.contains(&(Stream::Stderr, "trailing-no-newline".to_string())));
-        // The failure tail carries the stderr lines, in order, and no stdout.
+        // The failure tail contains the stderr lines, in order, and no stdout.
         assert_eq!(obs.stderr_tail(), "warn: bad\ntrailing-no-newline");
     }
 
@@ -2933,7 +2933,7 @@ mod tests {
     #[test]
     fn an_archive_skew_is_named_with_both_versions() {
         // The real failure this exists for: the layer's glib wants a libc the cached
-        // base does not carry, and the compile that follows blames something else.
+        // base does not contain, and the compile that follows blames something else.
         let body = [
             "Package: libglib2.0-0t64",
             "Status: install ok installed",
@@ -3128,11 +3128,11 @@ mod tests {
         }
     }
 
-    /// The flat shape carries every kind's parameters: `raw` is the widest, and the one
+    /// The flat shape contains every kind's parameters: `raw` is the widest, and the one
     /// kind whose source, filesystem type, and data string are each optional.
     ///
     /// The library's resolved mounts cannot be constructed outside it, so each case is a
-    /// real cage carrying the raw mount, resolved, and its mount read back by target.
+    /// real cage containing the raw mount, resolved, and its mount read back by target.
     #[test]
     fn a_raw_mount_projects_its_whole_parameter_set() {
         let scratch = tempfile::tempdir().unwrap();

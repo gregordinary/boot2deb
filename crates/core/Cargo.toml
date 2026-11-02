@@ -9,7 +9,7 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 # The strict reader for the file manifests boot2deb writes (`files`). A UAPI.16 manifest
-# carries nanosecond timestamps past 2^53, which this parser keeps exact as `u64`.
+# contains nanosecond timestamps past 2^53, which this parser keeps exact as `u64`.
 serde_json.workspace = true
 toml.workspace = true
 thiserror.workspace = true

@@ -47,13 +47,13 @@ image_size              = "2G"
 keymap                  = "us"
 
 # The board's one sound card: no analog codec (the DT skips the chromebook
-# include), so the card is the HDMI one and carries mickey's own DT name.
+# include), so the card is the HDMI one and has mickey's own DT name.
 [[expect]]
 check = "sound-card"
 name  = "VEYRON-HDMI"
 
 # --- The board profile ---------------------------------------------------------
-# One profile: depthcharge-tools carries `mickey` as a first-class board, and there is
+# One profile: depthcharge-tools includes `mickey` as a first-class board, and there is
 # no libreboot port for the Chromebit — the family's only libreboot profile is the
 # C201's. The payload shape is the family's: a 16 MiB ceiling and firmware that
 # ignores a FIT ramdisk, so depthchargectl patches the initrd address into the DTB.

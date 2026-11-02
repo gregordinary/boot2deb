@@ -1,7 +1,9 @@
 # The prose gate. `style/README.md` says how to run it, and `style/STYLE.md` is the guide
-# it enforces Part 5 of.
+# it enforces Part 6 of. The voice mode lists candidates for rules in Parts 1 to 5, and
+# fails on the families `[voice.modes]` raises.
 #
 #   python3 style/prose-lint.py --config prose-lint.toml
+#   python3 style/prose-lint.py --config prose-lint.toml --voice
 #
 # Every path below resolves relative to this file, which is why it sits at the repository
 # root rather than beside the script.
@@ -11,7 +13,7 @@ root = "."
 # The pages a stranger reads: the README, then the book. A glob rather than the contents
 # order, so a chapter added to `docs/src/` and not to `SUMMARY.md` is still held.
 include = ["README.md", "docs/src/**/*.md"]
-# `SUMMARY.md` is the contents page and carries no prose. The other two are generated, and
+# `SUMMARY.md` is the contents page and contains no prose. The other two are generated, and
 # a generated page is not the surface: its sentences were authored once and are repeated
 # once per row, so a ratchet over it measures how much the world grew rather than how the
 # prose reads. Each is held at its source instead, where a fix lands once.
@@ -44,7 +46,7 @@ exclude = ["crates/**/tests/**", "crates/cli/src/args.rs"]
 dialect = "rust"
 include = ["crates/cli/src/args.rs"]
 
-# Config data. `caveats` and `description` are the two keys in the config tree that carry
+# Config data. `caveats` and `description` are the two keys in the config tree that contain
 # prose a user reads, through `list-features`, `resolve`, and the generated support matrix.
 # The dialect refuses to run without `keys`, because a `data` surface with none would report
 # every file clean while holding nothing in it.
@@ -67,13 +69,17 @@ include = [
 [profile]
 path = "style/PROFILE.md"
 vocabulary_heading = "## Domain vocabulary"
+# The two sections the voice mode reads. The profile has no document skeletons yet, so
+# the third heading the kit knows is left at its default and finds nothing.
+house_words_heading = "## House words"
+record_zones_heading = "## Record zones"
 
 [terms]
 # The fixed-terms table is enforced. The third column is matched literally, per paragraph
 # and case-insensitively, with code spans stripped first. A variant there is therefore a
 # phrase specific enough that only the wrong usage matches it: the table rules out "build
-# config", not "config", because this project's own config tree is named by that word.
-# `style/PROFILE.md`'s guards carry the distinctions too fine for that match to make.
+# config", not "config", because boot2deb's own config tree is named by that word.
+# `style/PROFILE.md`'s guards contain the distinctions too fine for that match to make.
 heading = "## Fixed terms"
 
 [answers]
@@ -89,23 +95,26 @@ exclude = ["crates/**/tests/**"]
 # Where each surface stood when the gate went in. A listed surface may not get worse, and
 # comes off the list once it reaches zero. Rewrite it with `--baseline`.
 path = "prose-pending.txt"
+# The voice ratchet, one count per surface and family. Only the families `[voice.modes]`
+# runs as `ratchet` are held to it. Rewrite it with `--voice --baseline`.
+voice_path = "voice-pending.txt"
 
 [limits]
 sentence_words = 25
 paragraph_sentences = 6
-# Rule 18, a sentence carrying a run of parallel items. Held at the tightest setting the
-# script offers, because no surface above carries a run of three.
+# Rule 24, a sentence containing a run of parallel items. Held at the tightest setting the
+# script offers, because no surface above contains a run of three.
 enumeration_items = 3
-# Rule 12, a repeated bold lead-in whose block runs long. Off, and it stays off: the guide
+# Rule 18, a repeated bold lead-in whose block runs long. Off, and it stays off: the guide
 # exempts a list whose bold terms are definition labels, and the script cannot see that
-# exemption. Of the 138 blocks it reports at 40 words, 106 are list items, and a tight list
-# gives every item the whole list as its block. The sections where a bold lead-in really is
-# a heading are held by a reviewer instead, and `style/PROFILE.md` names that guard.
+# exemption. Most of the blocks `--census` reports are list items, and a tight list gives
+# every item the whole list as its block. The sections where a bold lead-in really is a
+# heading are held by a reviewer instead, and `style/PROFILE.md` names that guard.
 label_block_words = 0
 labels_per_section = 3
 
 [counting]
-# A quantity and its unit count as one word, so "512 MiB" does not spend two of Rule 20's
+# A quantity and its unit count as one word, so "512 MiB" does not use two of Rule 26's
 # budget on one fact.
 units = [
   "TiB", "GiB", "MiB", "KiB", "TB", "GB", "MB", "KB", "B",
@@ -113,3 +122,34 @@ units = [
 ]
 # Technical names come from the profile's vocabulary run instead, so nothing is listed twice.
 names = []
+
+[voice]
+# References a stranger cannot use, as regular expressions matched anywhere on a held
+# surface. This file ships, so the list names shapes rather than names: a working note
+# named in capitals with a lowercase subject, and an address on a private network.
+internal_patterns = [
+  '\b[A-Z]{3,}(?:-[A-Z]{2,})*-[a-z0-9][A-Za-z0-9.-]*\.md\b',
+  '\b(?:10(?:\.[0-9]{1,3}){3}|192\.168(?:\.[0-9]{1,3}){2}|172\.(?:1[6-9]|2[0-9]|3[01])(?:\.[0-9]{1,3}){2})\b',
+]
+# The glossary `style/PROFILE.md` names. The `glossary` family holds its entries to
+# Rule 2's form.
+glossary = "docs/src/reference/glossary.md"
+
+[voice.modes]
+# Every family reports unless it is listed here. `hard` fails on any finding, and each of
+# these three admits no legitimate use: a reference a stranger cannot follow, the project
+# as the actor in a sentence, and residue in a page's opening paragraph.
+internal = "hard"
+agent = "hard"
+first_paragraph = "hard"
+# `ratchet` fails when a surface's count in the family grows past `voice-pending.txt`.
+# Each of these has high precision and a legitimate use, so the count is held rather than
+# zeroed. `house_word` is here so that a word the profile retires stays retired.
+residue = "ratchet"
+history = "ratchet"
+self_assessment = "ratchet"
+bold_hazard = "ratchet"
+characters = "ratchet"
+erratum = "ratchet"
+glossary = "ratchet"
+house_word = "ratchet"

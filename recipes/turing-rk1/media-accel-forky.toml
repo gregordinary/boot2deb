@@ -1,7 +1,7 @@
 # recipes/turing-rk1/media-accel-forky.toml — the Turing RK1 with the Rockchip
 # hardware video-transcode userspace on Debian forky. The turing-rk1/forky base
 # plus the media-accel-rockchip capability feature, which builds and installs
-# ffmpeg-rk + MPP + RGA against the accel kernel the base already carries.
+# ffmpeg-rk + MPP + RGA against the accel kernel the base already includes.
 #
 # This is the "bare-ffmpeg box": a ready HW-transcode host with no media
 # application layered on top. A media server (Jellyfin/Plex/Emby) belongs on a
@@ -40,7 +40,7 @@ image_size = "2G"
 # v7.2 kernel with the `076-080` media series: VP9 decodes bit-exact against libvpx at
 # both profiles and scores 224/305 on Fluster, the 10-bit NV15 filter path works at
 # width 1920, and the tone-map and burn-in tables were re-earned. The media stack this
-# recipe carries is measured on hardware at the patches pin: kernel 082 (8K 10-bit
+# recipe includes is measured on hardware at the patches pin: kernel 082 (8K 10-bit
 # bit-exact, no IOVA collision at 6x concurrent), 083 (HEVC conformance holds at
 # 141/147 against a same-box software control), 084 (AV1 bit-exact to 8192x4352) and
 # 085 (the JPEG cap is honest at 8176), with ffmpeg 0016-0021 exercised alongside them.

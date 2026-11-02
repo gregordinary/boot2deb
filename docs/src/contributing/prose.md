@@ -12,44 +12,71 @@ can check:
 
 The guide is
 [`style/STYLE.md`](https://github.com/gregordinary/boot2deb/blob/main/style/STYLE.md), and
-it is portable. What it cannot know about this project sits beside it in
-`style/PROFILE.md`. That document carries the readers, the fixed terms, and the
-lowercase technical names the gate has to recognize.
+it is portable. What it cannot know about boot2deb sits beside it in `style/PROFILE.md`.
+That document names the readers, the fixed terms, the house words, and the lowercase
+technical names the gate has to recognize. The terms boot2deb coins are defined in the
+[glossary](../reference/glossary.md).
 
 ## Running it
 
 ```sh
 python3 style/prose-lint.py --config prose-lint.toml
+python3 style/prose-lint.py --config prose-lint.toml --voice
 ```
 
-Python 3.11 or newer is the only requirement, and the run takes seconds. `prose-lint.toml`
-at the repository root names every surface the gate walks. Three further modes are worth
-knowing:
+Python 3.11 or newer is the only requirement, and each run takes seconds. `prose-lint.toml`
+at the repository root names every surface the gate walks. The first command holds the
+rules a script can count, such as sentence length and the fixed terms. The second holds
+the voice checks.
 
-- `--all` prints every finding with its context lines, which is how one file gets worked
-  through.
-- `--soft` prints the three rules the gate reports and never fails. Each needs a reader to
-  judge, which is why none of them is in the build.
+Three further modes are for working through a file rather than for a build:
+
+- `--all` prints every finding with its context lines.
+- `--soft` prints the rules the gate reports and never fails. Each needs a reader to judge,
+  which is why none of them is in the build.
 - `--census` measures the corpus: findings per rule, density per surface, and what each
   optional rule costs.
 
-## The ratchet
+## The voice checks
 
-`prose-pending.txt` is the ratchet, and it is empty: every surface the gate walks is held
-to the rules in full.
+`--voice` finds candidates for the rules a reader applies. A house word where the field
+has a standard term is one, and so is a heading written as a sentence. Each check is a
+family, and `prose-lint.toml` runs every family in one of three modes:
 
-It stays as the mechanism a corpus that does not yet comply is brought in through. A
-surface listed there carries the weight it stands at. The rule over that file is one line:
-**a listed surface never gets worse.** A surface comes off the list once it reaches zero,
-and the gate then holds it fully. Write the file with `--baseline`.
+| Mode | The build fails when | Families |
+|---|---|---|
+| `hard` | The family finds anything | `internal`, `agent`, `first_paragraph` |
+| `ratchet` | A page's count in the family grows | `house_word`, `residue`, `history`, `self_assessment`, `bold_hazard`, `characters`, `erratum`, `glossary` |
+| `report` | Never | Every other family |
 
-Nothing a ratchet lists is exempt. It records a starting point rather than a set of pages
-the rules do not reach.
+A `report` family is a worklist rather than a verdict. Run it over one file before editing
+that file:
 
-The number beside a surface is a weight rather than a count. A length finding weighs how
-far it runs over its limit, so splitting one long sentence into two shorter ones lowers it.
-That is deliberate, because splitting is the move the guide asks for. Never compress a
-sentence to get it under a limit.
+```sh
+python3 style/prose-lint.py --config prose-lint.toml --voice --detail all docs/src/press.md
+```
+
+`style/REVIEWING.md` is the review that works such a list. A candidate that fires on a
+correct sentence is a defect in the check, so report it and leave the sentence as it is.
+
+## The ratchets
+
+Two files record where a surface stood when a rule reached it. The rule over both is one
+line: a listed surface never gets worse. A surface comes off the list once it reaches
+zero, and the gate then holds it fully.
+
+`prose-pending.txt` is the ratchet for the countable rules, and it is empty: every surface
+the gate walks is held to them in full. The number beside a surface is a weight rather than
+a count. A length finding weighs how far it runs over its limit, so splitting one long
+sentence into two shorter ones lowers it. That is deliberate, because splitting is the move
+the guide asks for. Never compress a sentence to get it under a limit.
+
+`voice-pending.txt` is the ratchet for the voice families, with one count per surface and
+family. Lower a count when the prose moves, and delete the line at zero.
+
+Write each file with `--baseline`, and `--voice --baseline` for the second. Nothing a
+ratchet lists is exempt. It records a starting point rather than a set of pages the rules
+do not reach.
 
 ## When the gate goes red
 
@@ -74,7 +101,7 @@ Neither is a page to go and edit.
 Two pages are generated, and a generated page is not the surface. Its sentences were
 authored once somewhere else and are repeated once per row. A finding on the page is
 therefore a fact about how many rows there are. The gate holds each at its source instead,
-where a fix lands once:
+where a fix is made once:
 
 - `reference/support-matrix.md` comes from `boot2deb support-matrix --markdown`, over the
   `caveats` in the config tree.

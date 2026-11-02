@@ -9,7 +9,7 @@
 //! for that type GUID, and picks among the candidates by the entry's attribute
 //! bits.
 //! Both are ordinary GPT entries, so the type GUID (`partition_types::CHROME_KERNEL`)
-//! and the raw 64-bit `flags` field carry it, and no ChromeOS host tooling is needed.
+//! and the raw 64-bit `flags` field contain it, and no ChromeOS host tooling is needed.
 //!
 //! The `gpt` crate writes only the GPT structures (primary header + entry array
 //! at the front, backup at the end), so the protective MBR at LBA 0 is written
@@ -42,8 +42,8 @@ const KPART_NAMES: [&str; MAX_KPART_SLOTS as usize] = ["KERN-A", "KERN-B", "KERN
 /// reads to decide which partitions are boot candidates.
 ///
 /// Load-bearing under `rockchip-rkbin`. U-Boot's `bootflow scan`, which is
-/// `bootcmd` on every board this builds, considers **only** partitions carrying
-/// this bit, and when no partition on the medium carries it falls back to
+/// `bootcmd` on every board this builds, considers **only** partitions having
+/// this bit, and when no partition on the medium has it falls back to
 /// scanning partition 1 alone. The rootfs is what holds
 /// `/boot/extlinux/extlinux.conf`, and it is not partition 1 — the seed is — so
 /// an unmarked table is a board that reaches its prompt and finds no bootflow.
@@ -78,9 +78,9 @@ struct PartitionSpec<'a> {
 ///
 /// The rootfs partition spans `[rootfs_first_lba, rootfs_first_lba +
 /// rootfs_length_lba)` — the exact range the ext4 filesystem is spliced into —
-/// typed `LINUX_FS`, carrying `rootfs_guid` as its PARTUUID and the
+/// typed `LINUX_FS`, having `rootfs_guid` as its PARTUUID and the
 /// [`LEGACY_BIOS_BOOTABLE`] attribute that points a scanning bootloader at it.
-/// Under `depthcharge` a ChromeOS kernel partition precedes it, carrying the
+/// Under `depthcharge` a ChromeOS kernel partition precedes it, having the
 /// attribute bits the firmware selects on; under `rockchip-rkbin` the bootloader
 /// payloads live in the raw gap ahead of the table and are not GPT entries at all.
 ///
@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(
             disk.guid(),
             &DISK_GUID,
-            "header carries the derived disk GUID"
+            "header contains the derived disk GUID"
         );
         let parts = disk.partitions();
         assert_eq!(
@@ -346,11 +346,11 @@ mod tests {
         assert_eq!(
             parts.get(&2).unwrap().part_guid,
             ROOTFS_GUID,
-            "partition carries the derived GUID"
+            "partition has the derived GUID"
         );
     }
 
-    /// The rootfs entry carries the legacy-BIOS-bootable attribute and the seed does
+    /// The rootfs entry has the legacy-BIOS-bootable attribute and the seed does
     /// not — the difference between a board that boots and one that stops at its
     /// prompt.
     ///
@@ -410,7 +410,7 @@ mod tests {
         }
     }
 
-    /// A fitted image sizes the disk to the *exact* minimum that carries its rootfs plus
+    /// A fitted image sizes the disk to the *exact* minimum that contains its rootfs plus
     /// the backup table, so its last partition LBA is the last usable LBA and there is no
     /// spare sector anywhere to absorb an off-by-one.
     ///
@@ -483,7 +483,7 @@ mod tests {
     /// at all, and priority 0 is what stops the firmware booting a partition that so
     /// far contains nothing but zeroes.
     #[test]
-    fn a_depthcharge_table_carries_a_bootable_kernel_slot_and_an_unbootable_spare() {
+    fn a_depthcharge_table_contains_a_bootable_kernel_slot_and_an_unbootable_spare() {
         let tmp = tempfile::tempdir().unwrap();
         let size = 512 * 1024 * 1024;
         let geom = Geometry::resolve(&depthcharge_boot(), 512 << 20).unwrap();
@@ -538,7 +538,7 @@ mod tests {
         let kern_b = parts.get(&3).unwrap();
         assert_eq!(
             kern_b.part_type_guid.guid, cros_kernel,
-            "the spare carries the kernel type GUID too — that is how depthchargectl \
+            "the spare has the kernel type GUID too — that is how depthchargectl \
              discovers it as an upgrade target, since it selects by type, not attributes"
         );
         assert_eq!(kern_b.name, "KERN-B");
@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(root.first_lba, 90_112, "the rootfs sits behind both slots");
         assert_eq!(
             root.flags, LEGACY_BIOS_BOOTABLE,
-            "the rootfs is marked bootable and carries nothing else — none of the \
+            "the rootfs is marked bootable and has nothing else — none of the \
              selection bits, which live on the kernel slots the firmware picks among"
         );
         assert_eq!(

@@ -31,7 +31,7 @@ pub fn snapshot_mirror(base: &str, timestamp: &str) -> String {
 ///
 /// The parameters:
 ///
-/// - `pocket` carries the live mirror and the base of its point-in-time archive.
+/// - `pocket` contains the live mirror and the base of its point-in-time archive.
 /// - `snapshot` is the lock's captured pin, if any.
 /// - `mode` is the effective mode: a `--snapshot` override, else the lock's captured
 ///   mode.

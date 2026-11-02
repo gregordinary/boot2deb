@@ -2,7 +2,7 @@
 # on GNU Linux-libre, with no nonfree firmware in the image.
 #
 # The build point this whole axis exists for: free firmware in the SPI chip, a
-# deblobbed kernel, and an image carrying no blob. From asus-c201-libreboot it takes
+# deblobbed kernel, and an image containing no blob. From asus-c201-libreboot it takes
 # the `speedy-libreboot` board profile and the 32 MiB kernel slot that firmware's
 # buffer allows, which puts the rootfs at 76 MiB and leaves room for the display
 # stack in the initramfs — so a failed boot is something you can read rather than a

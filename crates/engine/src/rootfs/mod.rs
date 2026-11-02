@@ -25,7 +25,7 @@
 //!
 //! The manifest is fully content-pinned, `name + version + arch + sha256` per
 //! package, from the archive-recorded digests in the resolved plan. Each row
-//! therefore names the exact `.deb` the image carries.
+//! therefore names the exact `.deb` the image contains.
 //!
 //! Board firmware (rockchip display, panthor Mali, Realtek NIC) is staged as Debian
 //! `non-free-firmware` packages declared on the SoC layer. For RK3588 that is
@@ -91,14 +91,14 @@ pub struct RootfsOptions<'a> {
     /// partition table. `depthchargectl` derives the signed kernel's `root=` from the
     /// image's own `/etc/fstab`, so the fstab has to name the partition before the
     /// filesystem containing it exists. The value is folded into the rootfs cache key
-    /// with the rest of the staged overlay. A cached tree can therefore never carry an
+    /// with the rest of the staged overlay. A cached tree can therefore never contain an
     /// fstab pointing somewhere the table does not.
     pub rootfs_partuuid: uuid::Uuid,
     /// Directory the rootfs tarball is written to.
     pub out_dir: &'a Path,
     /// The build point's
     /// [artifact stem](boot2deb_core::buildpoint::BuildPoint::artifact_stem) — the
-    /// tarball is published as `<stem>-rootfs.tar`. A board carries several recipes
+    /// tarball is published as `<stem>-rootfs.tar`. A board has several recipes
     /// with different package sets. A tarball named for the board alone would let
     /// one recipe's userland be formatted into another's image.
     pub stem: &'a str,
@@ -107,7 +107,7 @@ pub struct RootfsOptions<'a> {
     ///
     /// Deliberately **not** `TMPDIR`, for the same reason as
     /// [`build_root_uppers`](crate::sandbox::build_root_uppers). The provisioned tree
-    /// is the whole target userland (multiple GB) carrying `security.capability`
+    /// is the whole target userland (multiple GB) containing `security.capability`
     /// xattrs and subordinate-mapped ownership. On most desktop distros `/tmp` is a
     /// RAM-backed `tmpfs` sized to a fraction of physical memory. `TMPDIR` would
     /// therefore make the build's success a property of the host's mount table. A
@@ -150,7 +150,7 @@ pub struct RootfsOptions<'a> {
     ///
     /// **That moves the trust anchor.** An ordinary build's package digests chain to
     /// the archive signature that vouched for the index they came from. A replay's
-    /// chain to this document, because the index that would have carried the signature
+    /// chain to this document, because the index that would have contained the signature
     /// is never read. Each `.deb` is still verified against the digest here, so a
     /// mirror serving different bytes is caught. What is no longer checked is that the
     /// document itself describes a set the archive ever offered.
@@ -190,7 +190,7 @@ pub struct RootfsOptions<'a> {
     /// It is the ceiling the tar export clamps every member's mtime to, and the time
     /// the staged overlays are stamped with. The bootstrap's maintainer scripts and the
     /// target-side customize step both run under it. What the account tools,
-    /// `mkinitramfs` and `useradd` write therefore carries it rather than the wall clock.
+    /// `mkinitramfs` and `useradd` write therefore contains it rather than the wall clock.
     /// It dates the local `.deb` pool's `Release` too, and it is folded into the rootfs
     /// cache key.
     pub source_date_epoch: u64,
@@ -256,7 +256,7 @@ pub struct RootfsArtifacts {
     /// parsed — see [`RootfsProvenance::plan_sha256`](boot2deb_core::provenance::RootfsProvenance::plan_sha256).
     ///
     /// What it contributes to the provenance manifest is read back off this file by
-    /// [`read_plan_record`], not carried alongside it. The manifest describes the
+    /// [`read_plan_record`], not passed alongside it. The manifest describes the
     /// published document, so the digest it records must be the digest of what was
     /// published.
     pub plan: PathBuf,
@@ -561,7 +561,7 @@ fn stage_overlay(
         staging,
         initramfs_conf_path(image.initramfs_generator),
         // From the image node's own declaration of what it formats, so the helper the
-        // initramfs carries is the one the filesystem the image node writes needs.
+        // initramfs contains is the one the filesystem the image node writes needs.
         &config::initramfs_conf(image.initramfs_generator, crate::image::ROOTFS_FS_KIND),
     )?;
     // Board boot params the kernel postinst.d/postrm.d hooks + mk_extlinux source,
@@ -819,10 +819,10 @@ mod config {
     /// derived up front and threaded through both nodes so this entry always names the
     /// partition the image will actually write. The value is the device's boot
     /// identity for its whole life: nothing on the device rewrites it (first-boot
-    /// grows the partition but keeps its PARTUUID), so the references that carry it —
+    /// grows the partition but keeps its PARTUUID), so the references that contain it —
     /// this file, the extlinux cmdline, the signed depthcharge kernel — never go
     /// stale. A press that draws a fresh identity rewrites all three in the image file,
-    /// before any medium carries it ([`press::identity`](crate::press::identity)). The
+    /// before any medium contains it ([`press::identity`](crate::press::identity)). The
     /// ext4 label and filesystem UUID still exist (the label is handy for rescue mounts)
     /// but nothing boots by them.
     ///
@@ -840,7 +840,7 @@ mod config {
     pub fn fstab(ib: ImageBuild, rootfs_partuuid: Uuid) -> String {
         // One root entry for both methods, because both root by PARTUUID. Only the
         // note differs: it tells an editor what else has to be regenerated, and the
-        // two methods carry that value in different places.
+        // two methods keep that value in different places.
         let source = format!("PARTUUID={}", rootfs_partuuid.hyphenated());
         let note = match &ib.build.boot {
             ResolvedBoot::RockchipRkbin(_) => {
@@ -1016,7 +1016,7 @@ mod config {
     /// Makefile's `SUBLEVEL` is 0 there, so the kernel reports `7.2.0`. A ref
     /// read literally would be compared against a release it can never equal.
     /// The same call handles the Linux-libre namespace (`sources/v7.1.6-gnu` →
-    /// `7.1.6`, its `-gnu` carried in `uname -r`'s suffix) and preserves a
+    /// `7.1.6`, its `-gnu` kept in `uname -r`'s suffix) and preserves a
     /// prerelease (`v7.2-rc3` → `7.2.0-rc3`).
     ///
     /// A branch name or a bare commit parses as no version and yields no
@@ -1090,7 +1090,7 @@ mod config {
     /// The list itself is initramfs-tools'
     /// [`initramfs_modules_drop_in`](super::initramfs_modules_drop_in), generated from
     /// the `[initramfs] modules` of the board's SoC and device layers, so which modules
-    /// a board carries stays with the board. Resolution refuses any other generator on
+    /// a board includes stays with the board. Resolution refuses any other generator on
     /// a depthcharge board.
     pub fn depthcharge_initramfs_conf(compress: InitramfsCompress) -> String {
         format!(
@@ -1251,7 +1251,7 @@ mod config {
 
     /// `/etc/resolv.conf` — the file `dhcpcd` rewrites once it holds a lease.
     ///
-    /// It carries no nameserver, because the network the board will join is not a thing
+    /// It contains no nameserver, because the network the board will join is not a thing
     /// the build host knows. What the image needs is that the **path exists**: Debian's
     /// `dhcpcd.service` runs under `ProtectSystem=strict` and names `/etc/resolv.conf`
     /// among its `ReadWritePaths=`, and systemd refuses to set up a mount namespace for
@@ -1319,12 +1319,12 @@ mod config {
     /// DT output dir) locates the dtb inside the installed `linux-image` package,
     /// and `DTB_NAME` (its basename) names the copy placed in `/boot`.
     ///
-    /// `EXTL_CMD_LINE` carries the arguments `mk_extlinux` writes into the boot
+    /// `EXTL_CMD_LINE` contains the arguments `mk_extlinux` writes into the boot
     /// entry: `rootwait`, then the base console gate
     /// ([`CONSOLE_LOGLEVEL_ARG`]), then any extra arguments the board asked for
     /// ([`ResolvedImage::kernel_cmdline`]). It overrides `mk_extlinux`'s own
     /// `rootwait` default — board.conf is sourced after that default, so the
-    /// assignment must carry `rootwait` itself. The board's arguments come last so a
+    /// assignment must contain `rootwait` itself. The board's arguments come last so a
     /// board can override the gate. Resolution guarantees the value is safe to embed
     /// in this double-quoted, shell-sourced assignment.
     pub fn board_conf(kernel_dtb: &str, kernel_cmdline: &str) -> String {
@@ -1374,7 +1374,7 @@ mod tests {
 
     fn rk1() -> ResolvedBuild {
         // The media-accel build: these rootfs tests assert the bootstrap includes the
-        // feature packages (ffmpeg-rk et al.), so they need the userspace-carrying recipe.
+        // feature packages (ffmpeg-rk et al.), so they need the recipe that includes userspace.
         resolve_recipe(
             &repo_root(),
             "turing-rk1/media-accel-forky",
@@ -1559,7 +1559,7 @@ mod tests {
             .unwrap()
             .to_path_buf();
         let mut checked: Vec<std::path::PathBuf> = Vec::new();
-        // Every layer kind that can carry an overlay tree, which is every kind the
+        // Every layer kind that can contain an overlay tree, which is every kind the
         // rootfs stage merges: base, then soc, boot method, device, feature. This list
         // must stay in step with the CLI's `overlay_dirs` — a kind missing here is not a
         // failing test but a *vacuous* one, silently exempting whatever it holds.
@@ -1940,7 +1940,7 @@ mod tests {
     #[test]
     fn locale_gen_pairs_each_locale_with_its_codeset() {
         // locale-gen reads `<name> <codeset>` pairs, and the codeset is not separate
-        // config — it is carried inside the name.
+        // config — it is contained inside the name.
         let g = config::locale_gen(&[
             "C.UTF-8".to_string(),
             "en_US.UTF-8".to_string(),
@@ -1988,11 +1988,11 @@ mod tests {
     /// is the value that is **not** recoverable from the disk — `depthchargectl` gets it
     /// from the *running* board's HWID, so a tool re-signing this image's kernel from
     /// other media, or from a machine that is not this board, can only be told. And the
-    /// document ships *inside* the image, so it must never carry the per-image first-boot
+    /// document ships *inside* the image, so it must never contain the per-image first-boot
     /// password that its sibling — the provenance manifest, which stays with the build —
     /// exists to record.
     #[test]
-    fn the_staged_overlay_carries_the_image_identity() {
+    fn the_staged_overlay_contains_the_image_identity() {
         let build = c201();
         let identity = ident(&build);
         let tmp = tempfile::tempdir().unwrap();
@@ -2115,7 +2115,7 @@ mod tests {
     /// exactly the distro case, and the compiled case is covered by
     /// [`a_pinned_ref_becomes_the_release_the_kernel_reports`].
     #[test]
-    fn the_staged_overlay_carries_the_selftest_checks() {
+    fn the_staged_overlay_contains_the_selftest_checks() {
         let rk = rk1();
         let tmp = tempfile::tempdir().unwrap();
         let sink = |_e: crate::event::Event| {};
@@ -2367,7 +2367,7 @@ mod tests {
                 .expect("the initramfs drop-in is staged");
         // Unset, the resume hook bakes the build host's swap device into every image.
         assert!(conf.contains("RESUME=none"), "{conf}");
-        // Unset, the fsck hook probes a PARTUUID that no disk carries yet, finds nothing,
+        // Unset, the fsck hook probes a PARTUUID that no disk has yet, finds nothing,
         // and ships an initramfs with no fsck — so root goes unchecked at every boot.
         // The type is the formatter's, not a literal, so the helper matches the image.
         assert!(
@@ -2495,7 +2495,7 @@ mod tests {
                 .path()
                 .join("etc/systemd/timesyncd.conf.d/10-boot2deb.conf")
                 .exists(),
-            "an unconfigured image carries no timesyncd drop-in"
+            "an unconfigured image contains no timesyncd drop-in"
         );
 
         // Configured, the drop-in lands where timesyncd reads drop-ins — not as an
@@ -2525,7 +2525,7 @@ mod tests {
             lan.path()
                 .join("etc/systemd/timesyncd.conf.d/10-boot2deb.conf"),
         )
-        .expect("a configured image carries the drop-in");
+        .expect("a configured image contains the drop-in");
         assert!(conf.contains("NTP=ntp.lan\n"), "{conf}");
     }
 
@@ -2566,7 +2566,7 @@ mod tests {
         assert!(!headless.path().join("etc/default/keyboard").exists());
     }
 
-    /// The pre-install overlay carries an executable placeholder for every program
+    /// The pre-install overlay contains an executable placeholder for every program
     /// the generator's kernel hook and trigger reach, each a real shell script that
     /// logs its own name and answers `--version` with the generator's.
     #[test]

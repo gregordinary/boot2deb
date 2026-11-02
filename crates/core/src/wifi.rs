@@ -28,7 +28,7 @@ pub const MAX_PSK_LEN: usize = 63;
 ///
 /// 802.11 itself allows arbitrary octets, but this SSID rides two line-based text
 /// files (`seed.txt`, the NetworkManager keyfile). A value a line-based parser
-/// cannot carry, such as a newline or any other control character, is refused here
+/// cannot read, such as a newline or any other control character, is refused here
 /// rather than mangled there. Spaces and non-ASCII UTF-8 are fine.
 ///
 /// # Errors
@@ -40,10 +40,10 @@ pub fn check_ssid(ssid: &str) -> Result<(), &'static str> {
         return Err("empty");
     }
     if ssid.len() > MAX_SSID_LEN {
-        return Err("longer than 32 bytes, which 802.11 cannot carry");
+        return Err("longer than 32 bytes, which 802.11 does not allow");
     }
     if ssid.chars().any(char::is_control) {
-        return Err("contains a control character, which a seed line cannot carry");
+        return Err("contains a control character, which a seed line does not allow");
     }
     if ssid != ssid.trim() {
         return Err("starts or ends with whitespace, which the seed parser trims away");
@@ -78,7 +78,7 @@ pub fn check_psk(psk: &str) -> Result<(), &'static str> {
     if !psk.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
         return Err("contains a character outside printable ASCII, which WPA refuses");
     }
-    // Interior spaces are legal WPA; edge whitespace is not carried by the seed
+    // Interior spaces are legal WPA; edge whitespace is not preserved by the seed
     // file's line parser, so a value that depends on it would silently change.
     if psk != psk.trim() {
         return Err("starts or ends with whitespace, which the seed parser trims away");

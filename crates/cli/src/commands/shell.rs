@@ -6,7 +6,7 @@
 //! - Which build point's roots these are.
 //! - Which of them the requested stage has.
 //! - What outside the work dir the session sees.
-//! - The one host value the sandbox environment deliberately does not carry, `TERM`.
+//! - The one host value the sandbox environment deliberately does not contain, `TERM`.
 //!
 //! The roots come from [`crate::sandboxes`], the same construction `build` uses. A
 //! session therefore enters the tree a build made, rather than a second one keyed
@@ -25,10 +25,10 @@ use boot2deb_engine::event::Event;
 use boot2deb_engine::shell::{ShellOptions, ShellRoots, ShellStage};
 use std::path::PathBuf;
 
-/// A session that ended non-zero, carried out of `main` as the process's own status.
+/// A session that ended non-zero, passed out of `main` as the process's own status.
 ///
 /// `shell` is the one command whose result is a *command's* exit status rather than a
-/// verdict of its own, and a script that wraps it reads that status. Carried as an
+/// verdict of its own, and a script that wraps it reads that status. Passed as an
 /// error so it travels the ordinary `Result` path, and recognized in
 /// [`main`](crate::main) so it does not print as one: a shell exiting non-zero is what
 /// the last command in it did, not a boot2deb failure.
@@ -105,7 +105,7 @@ pub(crate) fn run(
         .map(|path| std::path::absolute(&path).unwrap_or(path))
         .collect();
 
-    // The one host value the declared sandbox environment has no reason to carry: a
+    // The one host value the declared sandbox environment has no reason to contain: a
     // build has no terminal to describe, and a session does. Passed here rather than in
     // the shared profile, so the environment a compile runs in — and that the image's
     // provenance records — does not move.

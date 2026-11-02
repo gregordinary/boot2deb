@@ -57,7 +57,7 @@ the depthcharge signing are exercised on hardware only. `try` replaces a
 flash-plus-serial-console cycle for userland faults, and replaces nothing else.
 
 The shipped kernel is not booted either. It is configured from the board's
-fragments and has no reason to carry virtio drivers. Adding them would change
+fragments and has no reason to include virtio drivers. Adding them would change
 the shipped kernel to serve the test, which is backwards.
 
 The guest boots the **suite's own generic kernel** (`linux-image-arm64` /

@@ -94,7 +94,7 @@ enum Source {
 }
 
 impl Source {
-    /// The kind token the `--json` form carries.
+    /// The kind token the `--json` form contains.
     fn kind(&self) -> &'static str {
         match self {
             Source::Git { .. } => "git",
@@ -604,7 +604,7 @@ mod tests {
     use super::*;
     use boot2deb_core::outdated::Newer;
 
-    /// A row carrying `upgrade`, for the rendering tests.
+    /// A row containing `upgrade`, for the rendering tests.
     fn row(reference: &str, upgrade: Upgrade) -> Row {
         Row {
             pin: Pin {
@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn the_json_pin_object_carries_the_status_at_its_top_level() {
+    fn the_json_pin_object_contains_the_status_at_its_top_level() {
         // A consumer switches on one key, so the verdict is flattened into the pin
         // rather than nested under it — and the identity fields must not collide with
         // the verdict's own.

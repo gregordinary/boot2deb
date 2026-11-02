@@ -9,7 +9,7 @@ boot2deb build asus-c100p/forky
 ```
 
 That produces `build/asus-c100p/forky/artifacts/asus-c100p-forky.img.xz` — a whole-disk image
-carrying two ChromeOS kernel slots and the ext4 rootfs, so one write lays down everything
+containing two ChromeOS kernel slots and the ext4 rootfs, so one write lays down everything
 the firmware needs. The kernel is in the first slot. The second ships empty, and is what
 lets a later kernel upgrade roll itself back if the new kernel does not boot. See
 [Upgrading the kernel](../kernel-upgrades.md).
@@ -34,7 +34,7 @@ Its own hardware deltas are four, and only the last two matter to you:
 
 ## Board profiles
 
-One: `minnie`, which `depthcharge-tools` carries as a first-class board. There is no
+One: `minnie`, which `depthcharge-tools` supports as a first-class board. There is no
 libreboot port for it, since the family's only libreboot profile is the C201's. This
 board therefore runs stock ChromeOS firmware, and the `crossystem` step below is
 required.

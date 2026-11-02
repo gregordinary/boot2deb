@@ -2,7 +2,7 @@
 # release is verified, and what a Debian image adds to the shared base set.
 #
 # A recipe never names this file. It names a suite, and resolution finds the one
-# distro layer whose `suites` list carries it.
+# distro layer whose `suites` list contains it.
 
 description = "Debian"
 
@@ -26,13 +26,13 @@ rolling = ["sid", "unstable"]
 
 # The archive serving each suite's release pocket. Plain http is standard Debian
 # practice: apt verifies every Release signature against the archive keyring, so the
-# transport carries no integrity burden.
+# transport has no integrity burden.
 mirror = "http://deb.debian.org/debian"
 # The point-in-time copy of that archive. A captured snapshot timestamp is appended to
 # it, as `<snapshot>/<timestamp>/`.
 snapshot = "https://snapshot.debian.org/archive/debian"
 
-# non-free and non-free-firmware carry the codecs and the NIC and GPU firmware the
+# non-free and non-free-firmware contain the codecs and the NIC and GPU firmware the
 # boards need. contrib rounds out the standard set.
 components = ["main", "contrib", "non-free", "non-free-firmware"]
 # The components a Linux-libre image resolves against and offers on the board.

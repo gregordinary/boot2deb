@@ -4,7 +4,7 @@
 //!
 //! The rootfs feature axis is a *list* of these, stacked onto the layered
 //! substrate — `base ⊕ soc ⊕ boot-method ⊕ device ⊕ Σ features`. A feature
-//! declares the Debian packages it adds. Its overlay tree carries the config it
+//! declares the Debian packages it adds. Its overlay tree contains the config it
 //! lays into the rootfs, in the same manifest-plus-ordered-files spirit as a
 //! patch series.
 //!
@@ -42,7 +42,7 @@ use serde::Deserialize;
 ///   SoC-integrated accel, [`requires_arch`](Feature::requires_arch) for a
 ///   discrete-GPU stack.
 /// - **Application features** install an app/service (e.g. `jellyfin`). Named for
-///   the app, portable (no HW gate), and often carrying an
+///   the app, portable (no HW gate), and often containing an
 ///   [`apt_sources`](Feature::apt_sources) entry because the app ships from its
 ///   own repo rather than the Debian mirror.
 ///
@@ -94,7 +94,7 @@ pub struct Feature {
     /// layers + features and de-duplicated by sha256 at resolution.
     #[serde(default)]
     pub extra_debs: Vec<crate::model::ExtraDeb>,
-    /// Libraries the ffmpeg build links that Debian does not carry, supplied by this
+    /// Libraries the ffmpeg build links that Debian does not package, supplied by this
     /// feature's [`extra_debs`](Feature::extra_debs) targeting the ffmpeg stage.
     ///
     /// Declared beside those pins rather than derived from them. A `.deb` file name
@@ -151,7 +151,7 @@ pub struct Feature {
     /// A `true` here is a resolve-time requirement on the *SoC*: the resolved SoC
     /// must provide those sources, else resolution fails with
     /// [`ConfigError::FeatureRequiresMediaAccel`]. It is also the build-plan signal —
-    /// a build with no such feature carries no sources and skips the userspace/ffmpeg
+    /// a build with no such feature includes no sources and skips the userspace/ffmpeg
     /// nodes entirely. Default `false`: most features (an app like `jellyfin`, a
     /// mirror-only add-in) need no source build.
     #[serde(default)]
@@ -176,7 +176,7 @@ pub struct Feature {
     ///
     /// Reaches the build as [`ResolvedImage::ffmpeg_nonfree`](crate::model::ResolvedImage::ffmpeg_nonfree),
     /// which decides both the `./configure` flags and the build root's package set.
-    /// The free build therefore does not carry the nonfree encoder's headers either.
+    /// The free build therefore does not include the nonfree encoder's headers either.
     #[serde(default)]
     pub ffmpeg_nonfree: bool,
     /// Kconfig fragments this feature merges into the kernel build, by fragment
@@ -186,7 +186,7 @@ pub struct Feature {
     ///
     /// For a capability whose driver is not in the base kernel, the fragment
     /// compiles it. It lives here rather than on the kernel layer, so a build that
-    /// did not select the capability does not carry the driver.
+    /// did not select the capability does not include the driver.
     ///
     /// Requires a *compiled* kernel. A distro-package kernel merges no kconfig, so
     /// selecting such a feature against one is a
@@ -199,7 +199,7 @@ pub struct Feature {
     /// They resolve from the same `patches` checkout at the same pin.
     ///
     /// The patch-series half of [`config_fragments`](Feature::config_fragments). A
-    /// fragment can only turn on code the tree contains. A feature carrying an
+    /// fragment can only turn on code the tree contains. A feature including an
     /// out-of-tree driver therefore supplies both: the series that adds the source
     /// and the fragment that compiles it.
     ///
@@ -380,7 +380,7 @@ pub fn ensure_no_conflicts(selected: &[(String, Feature)]) -> Result<(), ConfigE
 /// `selected` pairs each chosen feature's name with its loaded manifest. Returns
 /// [`ConfigError::MissingCapability`] for the first requirement no selected feature
 /// [`provides`](Feature::provides). It names the providers the shipped tree does
-/// carry, so the message says what to add rather than only what is missing.
+/// contain, so the message says what to add rather than only what is missing.
 ///
 /// A feature can satisfy its own requirement. That is a provider that also consumes
 /// what it supplies, and it needs no special case.
@@ -545,7 +545,7 @@ mod tests {
         );
 
         // Alone it fails, and the message has to name the fix — a user who has not
-        // read the feature tree cannot know which features carry the capability.
+        // read the feature tree cannot know which features provide the capability.
         let err = ensure_capabilities_satisfied(&[jellyfin], &known).unwrap_err();
         let ConfigError::MissingCapability {
             ref feature,

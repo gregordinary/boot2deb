@@ -29,7 +29,7 @@ impl HostInfo {
         }
     }
 
-    /// The host arch expressed as one of our target [`Arch`]es, if it maps.
+    /// The host arch expressed as one of the target [`Arch`]es, if it maps.
     ///
     /// 32-bit ARM Linux reports `"arm"`. `std::env::consts::ARCH` has no `"armv7"`
     /// value, so matching one would claim support for a string that cannot arrive.
@@ -48,7 +48,7 @@ impl HostInfo {
     ///
     /// About the *compile* rather than about the host's own tooling. No build invokes a
     /// compiler from the host at all. This decides which package a provisioned root
-    /// carries, rather than which package the operator installs.
+    /// contains, rather than which package the operator installs.
     ///
     /// Strict arch equality: an aarch64 compiler cannot emit armhf even though the same
     /// CPU executes armhf fine.

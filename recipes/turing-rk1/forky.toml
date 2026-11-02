@@ -7,7 +7,7 @@
 # later from the media-accel debs, or build it in from the start with
 # turing-rk1/media-accel-forky.
 #
-# The u-boot it ships carries the turing-rk1-recovery series, whose one patch adds
+# The u-boot it ships includes the turing-rk1-recovery series, whose one patch adds
 # `ums`. That is what lets a disk on the M.2 slot be written from the carrier at
 # all: the management controller writes the module's eMMC and nothing else, so
 # without it an NVMe u-boot enumerates perfectly well has no path to a host.
@@ -22,8 +22,8 @@ image_size = "2G"
 # The pin is v7.3. What the move from the 7.2 generation changes, on the paths this
 # image runs:
 #
-# The patch series gets shorter. 7.3 carries the rocket driver's slot search on core
-# removal and on scheduler lookup, so the series no longer carries either; 095, which
+# The patch series gets shorter. 7.3 includes the rocket driver's slot search on core
+# removal and on scheduler lookup, so the series no longer includes either; 095, which
 # numbers each core by its devicetree position, still applies on top. 101, the crypto
 # offloader, is regenerated only because 7.3 moved `qcom-rng` out of `drivers/crypto`,
 # a line its Makefile context named.
@@ -64,7 +64,7 @@ image_size = "2G"
 # recipe at v7.2.9 and patches a74f07a5df1f on u-boot v2026.10, booted 2026-10-08: the
 # selftest passed 15 of 15, a 30-minute memory stress over 85% of RAM verified clean,
 # and five warm reboots each came back with the same four DRAM banks. It was built from
-# a tree with uncommitted changes, so it carries no claim of its own. The kernel and its
+# a tree with uncommitted changes, so it has no claim of its own. The kernel and its
 # patch series are what have moved since.
 [support]
 status = "expected"

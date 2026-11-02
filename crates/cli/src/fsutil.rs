@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 /// unreadable.
 ///
 /// [Normalized](normalize) on the way out. `--root` defaults to the literal `.`, so
-/// every path joined onto it carries a `/./` into the middle of an otherwise absolute
+/// every path joined onto it contains a `/./` in the middle of an otherwise absolute
 /// path — and these are exactly the paths a build, `why-rebuild`, and `clean` print.
 /// The value is the same directory either way; the difference is whether it reads
 /// like one.

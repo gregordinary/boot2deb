@@ -1,4 +1,4 @@
-//! `verify-packages`: does the archive carry what the recipe asks for?
+//! `verify-packages`: does the archive contain what the recipe asks for?
 //!
 //! A recipe's package list is config like any other. It is the one part of it the
 //! config tree cannot check on its own. Whether `forky` ships
@@ -83,12 +83,12 @@ pub(crate) fn run(
     // because this is the command about whether a recipe's package set is right, and it
     // is the one failure enumerating suites can hide: the entry simply never applies, so
     // the package goes missing with nothing said. Advice rather than a verdict — a tree
-    // may legitimately carry a layer ahead of the recipe that will use it — so it does
+    // may legitimately contain a layer ahead of the recipe that will use it — so it does
     // not change the exit code.
     let unreachable = root.unreachable_suites().unwrap_or_default();
 
     // The second question, asked only when the first passed. A name the archives do not
-    // carry at all refuses its own dependency group too, so running the closure over a
+    // contain at all refuses its own dependency group too, so running the closure over a
     // set with a known-missing name would report the same fact twice and bury whatever
     // else it found. When every name is there, this is the only thing left that can make
     // the set unbuildable.
@@ -230,7 +230,7 @@ pub(crate) fn run(
                     "note: this recipe also pulls {} pre-built .deb(s) from outside the mirror. \
                      A name one of those supplies reaches the rootfs through the build's local \
                      pool and is listed above as missing, because the archives genuinely do not \
-                     carry it.",
+                     contain it.",
                     image.extra_debs.len()
                 );
             }
@@ -298,7 +298,7 @@ fn locally_built(
             );
         }
     }
-    // Each app's deb is compiled by this build, whatever the archive also carries under
+    // Each app's deb is compiled by this build, whatever the archive also contains under
     // that name: the image installs the build's own.
     built.extend(
         build
@@ -315,7 +315,7 @@ fn locally_built(
 /// A pre-built `.deb` is pinned by URL or path and a sha256, and nothing in the config
 /// states what package is inside it — the name is in the file, and reading it would mean
 /// downloading and unpacking every pin, which is exactly what this command promises not
-/// to do. The archive's own filename convention carries it instead:
+/// to do. The archive's own filename convention records it instead:
 /// `<package>_<version>_<arch>.deb`, so the text before the first `_` is the name.
 ///
 /// Used only to explain a refusal, never to claim a package is present. A filename that
@@ -339,7 +339,7 @@ fn extra_deb_names(image: &boot2deb_core::model::ResolvedImage) -> BTreeSet<Stri
 
 /// Whether any name in `supplied` satisfies the dependency group `requirement`.
 ///
-/// The requirement is the archive's own text for the group, so it carries Policy 7.1
+/// The requirement is the archive's own text for the group, so it uses Policy 7.1
 /// syntax: alternatives separated by `|`, each optionally followed by a version
 /// constraint in parentheses and an architecture qualifier after `:`. Only the name is
 /// compared — a local `.deb` is pinned by digest and this cannot know its version, so

@@ -35,7 +35,7 @@ supported_boards = ["speedy-libreboot"]
 # 12 MiB + 2 x 32 MiB = 76 MiB, where the stock geometry puts it at 44 MiB.
 kpart_size       = "32MiB"
 
-# The display stack, carried in the initramfs so the panel comes up during it rather
+# The display stack, included in the initramfs so the panel comes up during it rather
 # than after it. The build unions this list after the SoC layer's (socs/rk3288.toml),
 # so a board adds to the family's list rather than restating it.
 #

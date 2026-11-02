@@ -35,7 +35,7 @@ pub const KEY_TYPES: &[&str] = &[
 /// it in the typed error that suits where the value was authored, the same convention
 /// as [`crate::hostname::check`].
 ///
-/// Four rejections carry more weight than the rest:
+/// Four rejections matter more than the rest:
 ///
 ///  - **Private key material.** A `-----BEGIN … PRIVATE KEY-----` block here means the
 ///    author reached for `id_ed25519` instead of `id_ed25519.pub`. The consequence is a
@@ -48,7 +48,7 @@ pub const KEY_TYPES: &[&str] = &[
 ///  - **A blob disagreeing with its type name.** The wire encoding of every accepted
 ///    key repeats the type as its first field. A truncated or line-wrapped paste is
 ///    therefore caught here rather than at first login.
-///  - **Embedded newlines.** One entry is one line. A value carrying a newline would
+///  - **Embedded newlines.** One entry is one line. A value containing a newline would
 ///    become two lines in the file, the second of them unvalidated.
 pub fn check_authorized_key(entry: &str) -> Result<(), &'static str> {
     // Before field-splitting: a pasted private key is the one error whose real cause is
@@ -112,7 +112,7 @@ pub fn check_authorized_key(entry: &str) -> Result<(), &'static str> {
     }
 }
 
-/// The type name an SSH key blob carries as its own first field, or `None` if the
+/// The type name an SSH key blob contains as its own first field, or `None` if the
 /// bytes are not a plausible SSH wire encoding.
 ///
 /// Every accepted key's blob begins with a 32-bit big-endian length followed by that
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(
             embedded_type(&crate::base64::decode("AAAAB3NzaC1yc2EA").unwrap()),
             Some(&b"ssh-rsa"[..]),
-            "the fixture must really carry the other type"
+            "the fixture must really contain the other type"
         );
         let why = check_authorized_key(mismatched).expect_err("mismatch is refused");
         assert!(why.contains("does not match its type name"), "got: {why}");

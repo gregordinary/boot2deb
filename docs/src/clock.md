@@ -79,8 +79,8 @@ is why this never writes `FallbackNTP=`.
 Two reasons to set it:
 
 - **An isolated network**, where the public pool cannot be reached at all. Without a
-  server it can reach, a board never syncs — it boots, waits its 45 seconds, and carries
-  on with a stale clock.
+  server it can reach, a board never syncs — it boots, waits its 45 seconds, and continues
+  with a stale clock.
 - **A LAN time source on any network.** It answers in about a millisecond instead of an
   internet round trip, which shortens the window this page opens with.
 

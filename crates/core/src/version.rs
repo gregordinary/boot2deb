@@ -23,13 +23,13 @@ use semver::Version;
 /// `EXTRAVERSION`, and the tail of every tag it publishes (`sources/v7.1.6-gnu`).
 const LIBRE_SUFFIX: &str = "-gnu";
 
-/// The letters a release tag may carry in front of its version: `v` on the kernel,
+/// The letters a release tag may have in front of its version: `v` on the kernel,
 /// u-boot and most projects (`v7.1.6`, `v2026.04`), `n` on FFmpeg (`n8.1.3`).
 const RELEASE_PREFIXES: [char; 2] = ['v', 'n'];
 
 /// Split a release prefix off a tag leaf, when one of [`RELEASE_PREFIXES`] is
 /// directly followed by a digit. Requiring the digit keeps branch names whole:
-/// `next` and `master` carry no prefix.
+/// `next` and `master` have no prefix.
 fn split_prefix(leaf: &str) -> (Option<char>, &str) {
     let mut chars = leaf.chars();
     match (chars.next(), chars.next()) {
@@ -40,7 +40,7 @@ fn split_prefix(leaf: &str) -> (Option<char>, &str) {
     }
 }
 
-/// Parse a version tag into a [`Version`]. The tag can carry any of:
+/// Parse a version tag into a [`Version`]. The tag can contain any of:
 ///
 /// - A namespace (`sources/v7.1.6-gnu` → `7.1.6`).
 /// - A leading `v`, or FFmpeg's leading `n` (`n8.1.3` → `8.1.3`).
@@ -100,8 +100,8 @@ pub fn parse_tag(s: &str) -> Result<Version, ConfigError> {
 /// How a tag is spelled, apart from its numbers: the namespace it sits under, the
 /// release prefix (`v`, or FFmpeg's `n`), and the Linux-libre `-gnu` marker.
 ///
-/// A repo advertises tags from more than one scheme at once. `linux-stable` carries
-/// `v7.1.6` beside `v2.6.11`, and the Linux-libre mirror carries `sources/v7.1.6-gnu`
+/// A repo advertises tags from more than one scheme at once. `linux-stable` contains
+/// `v7.1.6` beside `v2.6.11`, and the Linux-libre mirror contains `sources/v7.1.6-gnu`
 /// beside upstream's own. An upgrade survey that compared every parseable tag would
 /// offer a deblobbed tree to a build that pinned an ordinary one, or the reverse.
 ///
@@ -121,7 +121,7 @@ pub struct TagShape {
     /// The release prefix in front of the version, if any. FFmpeg's `n8.1.3` and a
     /// bare `8.1.3` are different schemes from `v8.1.3`.
     prefix: Option<char>,
-    /// Whether the tag carries the Linux-libre `-gnu` marker.
+    /// Whether the tag contains the Linux-libre `-gnu` marker.
     libre: bool,
 }
 
@@ -190,7 +190,7 @@ fn normalize_core(core: &str) -> String {
 
 /// Apply [`normalize_core`] to every comparator in a comma-separated semver
 /// requirement, leaving each comparator's operator prefix intact — so a range may
-/// bound u-boot tags in the spelling they actually carry (`">=2026.04, <2027.01"`).
+/// bound u-boot tags in the spelling they actually use (`">=2026.04, <2027.01"`).
 ///
 /// Used by [`crate::series`] when it parses a declared envelope; the version side of
 /// the same normalization is [`parse_tag`].
@@ -235,7 +235,7 @@ mod tests {
         let rc = parse_tag("v7.2-rc1").unwrap();
         assert!(!rc.pre.is_empty());
         assert!(rc < Version::new(7, 2, 0));
-        // FFmpeg spells its releases with an `n`, and its development tags carry a
+        // FFmpeg spells its releases with an `n`, and its development tags have a
         // `-dev` suffix that stays a prerelease.
         assert_eq!(parse_tag("n8.1.3").unwrap(), Version::new(8, 1, 3));
         assert_eq!(parse_tag("n8.1").unwrap(), Version::new(8, 1, 0));
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn requirement_normalization_leaves_operators_alone() {
-        // A range may be authored in the spelling its tags carry; only the numeric
+        // A range may be authored in the spelling its tags use; only the numeric
         // core is rewritten, so the comparator survives intact.
         assert_eq!(normalize_req(">=2026.04, <2027.01"), ">=2026.4, <2027.1");
         assert_eq!(normalize_req(">=7.0, <7.2"), ">=7.0, <7.2");

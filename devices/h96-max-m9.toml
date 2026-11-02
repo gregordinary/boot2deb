@@ -13,7 +13,7 @@ uboot_defconfig         = "generic-rk3576_defconfig"
 # that kernel_dtb names one of them.
 #  - rk3576-h96-max-m9.dts describes the board without the NPU. Beyond the
 #    `pd_gpu` label rk3576-fixes adds, it names no out-of-tree node, so it is
-#    the file other distributions can carry.
+#    the file other distributions can include.
 #  - rk3576-h96-max-m9-npu.dts includes it and enables NPU core 0 and its rail,
 #    on the nodes the rk3576-npu series adds. The image boots this one.
 # Both DTBs ship in the linux-image package.
@@ -44,18 +44,18 @@ device_config_fragments = ["device/h96-max-m9", "accel/rk3576-npu"]
 
 # The RK3576 NPU (rocket) kernel series, composed after the kernel's SoC-wide
 # rk3576-fixes series. On the device rather than the kernel so an RK3576 board
-# without an NPU enable in its device tree carries neither the series nor the driver.
+# without an NPU enable in its device tree includes neither the series nor the driver.
 # It delivers a device (/dev/accel) that computes bit-exact; no released userspace
 # encodes for this SoC yet, so nothing in the image opens it.
 device_patch_series   = ["rk3576-npu"]
 
 # The board's AIC8800D80 SDIO Wi-Fi driver, built out-of-tree from kmods/aic8800.toml
-# rather than carried as an in-tree patch series. Board opt-in, so the shared RK3576
+# rather than maintained as an in-tree patch series. Board opt-in, so the shared RK3576
 # kernel stays lean for boards without the chip.
 device_kmods            = ["aic8800"]
 
 # Board userspace, kept on the device layer so the rk3576-evb1-v10 validator (no
-# combo Wi-Fi/BT, no IR handset) does not carry any of it:
+# combo Wi-Fi/BT, no IR handset) does not include any of it:
 #  - bluez + gpiod: the AIC8800D80's BT is UART HCI on ttyS4 (see the DTS &uart4 node
 #    and aic8800-bluetooth.service); bluez provides the hciattach/bluetoothctl and
 #    gpiod's gpioset drives the BT_REG_ON / HST_WAK_BT wake lines.
@@ -66,7 +66,7 @@ device_kmods            = ["aic8800"]
 #    the TV remote drives the box). The units ship disabled -- opt-in via systemctl.
 #  - libgl1-mesa-dri / libegl-mesa0 / libgbm1: the GPU's userspace. The Mali-G52 is
 #    driven by mainline panfrost, whose userspace is Mesa -- no vendor blob, unlike
-#    the RK3588's G610, which is CSF and takes libmali. libgl1-mesa-dri carries
+#    the RK3588's G610, which is CSF and takes libmali. libgl1-mesa-dri contains
 #    panfrost_dri.so (the driver proper), libegl-mesa0 the EGL vendor library
 #    including the GBM platform, and libgbm1 the buffer manager a KMS client
 #    allocates from. Without these the render node exists with nothing able to open
@@ -101,13 +101,13 @@ hostname                = "h96-max-m9"
 image_size              = "2G"
 
 # rkbin (ATF + DDR TPL; no BL32) is inherited from socs/rk3576.toml. The H96
-# carries LPDDR4X at 2112 MHz, which is the SoC default loader's native target, so
+# has LPDDR4X at 2112 MHz, which is the SoC default loader's native target, so
 # this board overrides no blobs.
 
 # What no build lifts on this board, beyond what socs/rk3576.toml already states of
 # the silicon. Rendered in the support matrix and printed at the end of a build.
 caveats = [
-  "Only the blue port beside HDMI carries USB 3.0. It reaches 5 Gbps and holds ~154 MB/s over sustained reads. The black ports never will -- they sit behind an internal USB 2.0 hub, and their SuperSpeed lane reaches no connector.",
+  "Only the blue port beside HDMI provides USB 3.0. It reaches 5 Gbps and holds ~154 MB/s over sustained reads. The black ports never will -- they sit behind an internal USB 2.0 hub, and their SuperSpeed lane reaches no connector.",
   "A drive in the blue port that enumerates at 480 Mb/s is usually not seated. With the board sitting back from the enclosure's front panel, a plug bottoms out on the case before the connector's recessed SuperSpeed contacts mate. USB 2.0 then works perfectly and SuperSpeed is silent. Push the plug fully home, or reseat the board against the panel.",
   "There is no SD-card slot: it is depopulated on this box. eMMC and USB are the only storage.",
 ]

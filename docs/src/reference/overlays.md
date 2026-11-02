@@ -57,10 +57,10 @@ last).
 
 ## The three rootfs trees
 
-A layer can carry up to three trees, which differ in *when* they are laid in and
+A layer can contain up to three trees, which differ in *when* they are laid in and
 *whether* they are:
 
-| Tree | Laid in | Carried by |
+| Tree | Laid in | Contained in |
 |---|---|---|
 | `overlay-pre/` | before any package installs, so a maintainer script sees the config while it runs | any layer |
 | `overlay/` | after every package, so it wins over whatever a package shipped | any layer |
@@ -87,7 +87,7 @@ and it stays executable in the image. Everything else about the mode is not your
 choose here.
 
 If a file needs a mode outside those two, an overlay tree is the wrong place for it. A
-git checkout cannot carry that mode to begin with. A `0440` sudoers drop-in and a `0700`
+git checkout cannot preserve that mode to begin with. A `0440` sudoers drop-in and a `0700`
 home are the usual cases. Ship it from a first-boot hook, which runs as root on the
 board.
 

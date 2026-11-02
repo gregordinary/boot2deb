@@ -42,12 +42,12 @@ pub(crate) fn run(
             .unwrap_or_else(|| work_dir.join("artifacts")),
     );
 
-    // The artifact that carries the rootfs — on a split build the boot image is
+    // The artifact that contains the rootfs — on a split build the boot image is
     // not bootable under `-M virt` and is not what `try` tests.
     let role = boot2deb_core::press::roles(&resolved)
         .into_iter()
-        .find(|r| r.carries_rootfs())
-        .expect("an image build has a rootfs-carrying artifact");
+        .find(|r| r.contains_rootfs())
+        .expect("an image build has a rootfs-containing artifact");
     let image = super::press::find_artifact(&out_dir, &stem, role)?;
 
     // The generated password rides the provenance manifest, which stays with

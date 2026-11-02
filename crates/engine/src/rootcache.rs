@@ -90,7 +90,7 @@ pub struct CacheKeyInputs<'a> {
     /// including the config the node generates into them.
     pub overlay: &'a [String],
     /// Content hashes of the build's local-repo `.deb`s ([`file_fingerprints`]) — the
-    /// non-archive packages whose version carries no immutability guarantee.
+    /// non-archive packages whose version has no immutability guarantee.
     pub repo_debs: &'a [String],
     /// One opaque record per feature apt repository: its identity and the content of
     /// the keyring it is verified against. The provisioner writes both into the tree.
@@ -139,7 +139,7 @@ pub struct CacheKeyInputs<'a> {
     /// The rootfs `SOURCE_DATE_EPOCH`
     /// ([`RootfsOptions::source_date_epoch`](crate::rootfs::RootfsOptions::source_date_epoch)).
     ///
-    /// It decides every time the tree carries: the export's mtime ceiling, and what the
+    /// It decides every time the tree contains: the export's mtime ceiling, and what the
     /// customize step stamps into the initrd and the account databases. It moves only
     /// when a lock pin moves, so folding it costs no hit a moved pin would not already
     /// have cost.
@@ -215,7 +215,7 @@ fn walk_fingerprints(dir: &Path, base: &Path, out: &mut Vec<String>) -> Result<(
 
 /// sha256 of each file in `files`, sorted + de-duplicated — the content identity of
 /// the build's local-repo `.deb`s folded into [`cache_key`]. Non-archive packages
-/// carry no immutable-version guarantee, so their bytes are the key.
+/// have no immutable-version guarantee, so their bytes are the key.
 pub fn file_fingerprints(files: &[PathBuf]) -> Result<Vec<String>, EngineError> {
     let mut out = Vec::with_capacity(files.len());
     for f in files {
@@ -498,7 +498,7 @@ mod tests {
                 ..base
             })
         );
-        // The epoch decides the times the tree carries, so a re-pin that moved it is a
+        // The epoch decides the times the tree contains, so a re-pin that moved it is a
         // different tree even over the same package set.
         assert_ne!(
             key,
@@ -721,7 +721,7 @@ mod tests {
         let shadow =
             "root:*:20000:0:99999:7:::\ndebian:!:20000:0:99999:7:::\ndaemon:*:20000::::::\n";
         let out = splice_shadow(shadow, "debian", "$6$salt$hash").unwrap();
-        // The debian line carries the hash and last-change 0 (force change at login).
+        // The debian line contains the hash and last-change 0 (force change at login).
         assert!(out.contains("debian:$6$salt$hash:0:0:99999:7:::\n"));
         // root and daemon are untouched.
         assert!(out.contains("root:*:20000:0:99999:7:::\n"));

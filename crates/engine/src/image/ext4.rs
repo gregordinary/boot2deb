@@ -26,7 +26,7 @@
 //! The feature set is chosen here rather than left to the formatter's default. It is
 //! expressed relative to that default, which is itself a fixed set, so the on-disk
 //! contract is stable across formatter releases. It is recorded rather than assumed
-//! either way. The provenance manifest's `[filesystem]` carries three pins (see
+//! either way. The provenance manifest's `[filesystem]` contains three pins (see
 //! [`filesystem_provenance`]):
 //!
 //! - The formatter's own policy pin, every format option by name
@@ -59,7 +59,7 @@
 //! "New enough" is [`E2FSCK_MIN`], and the floor is not a formality. The pinned feature
 //! set includes `metadata_csum_seed`, which e2fsprogs only learned in 1.43. An older
 //! `e2fsck` rejects the image over a feature it does not know. Without the floor, a
-//! host carrying an ancient `e2fsck` fails a build that a host with **no** `e2fsck`
+//! host with an ancient `e2fsck` fails a build that a host with **no** `e2fsck`
 //! completes. An optional cross-check must never be worse than absent, so below the
 //! floor it is skipped with a log line.
 //!
@@ -108,11 +108,11 @@ const RESERVED_HUNDREDTHS: u16 = 100;
 /// knee the ceilings bind, which is where every real rootfs sits.
 const REFERENCE_PIN_BYTES: u64 = 4 << 30;
 
-/// The filesystem the rootfs partition carries.
+/// The filesystem the rootfs partition contains.
 ///
 /// A constant rather than a value read back off a formatted image, because two consumers
 /// need it *before* the image node runs. The rootfs node writes it into the initramfs
-/// configuration (`FSTYPE=`, which decides the fsck helper the initramfs carries), and
+/// configuration (`FSTYPE=`, which decides the fsck helper the initramfs contains), and
 /// its own test asserts that. `feature_set` selects it — the ext4 baseline plus this
 /// module's choices — so the two cannot be changed independently without the pin moving.
 pub const ROOTFS_FS_KIND: &str = "ext4";
@@ -128,7 +128,7 @@ pub const ROOTFS_FS_KIND: &str = "ext4";
 /// `press` is what a press re-assembly changes in the tree, applied to the parsed entry
 /// list before the credential splice, so the per-image password wins over anything a
 /// press could copy. See [`PressTree`] for the order. It is `None` for a build, whose
-/// image carries exactly the tar.
+/// image contains exactly the tar.
 ///
 /// The superblock's format times are deterministic: they take the newest source mtime,
 /// which the rootfs export has already clamped to the lock's `SOURCE_DATE_EPOCH`. The
@@ -372,12 +372,12 @@ fn feature_set() -> FeatureSet {
 ///
 /// All three are *resolved* values, not declared ones. The pins come from the same
 /// [`FormatOptions`] the formatter was handed, so the manifest reports what an image
-/// actually carries — including a feature that arrived from the formatter's baseline
+/// actually contains — including a feature that arrived from the formatter's baseline
 /// rather than from anything in this file. The geometry comes from the format itself.
 ///
 /// The pins are taken whole rather than re-spelled field by field, and that is the point.
 /// The formatter builds each by destructuring its own options exhaustively, so a field it
-/// gains is carried here with no change to this function. A record assembled here would
+/// gains is included here with no change to this function. A record assembled here would
 /// keep compiling and silently stop covering it — which is exactly what a feature set
 /// gaining a size (bigalloc's cluster size is both a feature bit *and* a size) would do
 /// to a hand-written projection of three words and two sizes.
@@ -531,7 +531,7 @@ impl PressTree<'_> {
 ///
 /// `metadata_csum_seed` is in the pinned feature set, and e2fsprogs only learned it in
 /// 1.43 (2016). An older `e2fsck` reports the seed as an unknown feature and exits
-/// non-zero on a perfectly good image — so without this floor, a host carrying an
+/// non-zero on a perfectly good image — so without this floor, a host with an
 /// ancient or non-GNU `e2fsck` on `PATH` fails a build that a host with **no** `e2fsck`
 /// completes. An optional cross-check must never be worse than absent.
 const E2FSCK_MIN: (u32, u32) = (1, 43);
@@ -557,7 +557,7 @@ const E2FSCK_MIN: (u32, u32) = (1, 43);
 /// happens to be harmless *this* time.
 ///
 /// The scan is compiled in and always runs; the `e2fsck` cross-check runs only where the
-/// host carries an `e2fsprogs` of at least [`E2FSCK_MIN`], which makes verification
+/// host has an `e2fsprogs` of at least [`E2FSCK_MIN`], which makes verification
 /// *depth* host-dependent. Its value is not that it is deeper — the scan is deeper — but
 /// that it is *independent*: the scan is one implementation checking its own output, so
 /// an assumption the writer and the reader share passes it unchallenged, and `e2fsck` is
@@ -600,7 +600,7 @@ fn verify_clean(dest: &Path, step: &Step) -> Result<Vec<String>, EngineError> {
     Ok(ran)
 }
 
-/// How many of a failing scan's findings the error message carries.
+/// How many of a failing scan's findings the error message contains.
 ///
 /// A scan reports everything it finds, which for a systematically wrong write is one
 /// finding per inode. The first few identify the defect; the rest restate it. The count
@@ -691,14 +691,14 @@ fn at(location: &Location) -> String {
 enum E2fsck {
     /// Run `e2fsck -fn` and fail the build on any correction.
     Run,
-    /// Skip it, carrying the reason to log.
+    /// Skip it, containing the reason to log.
     Skip(String),
 }
 
 /// Decide from `e2fsck -V`'s banner (`None` when the binary could not be spawned).
 ///
 /// Pure, so the floor is unit-testable against real banner text rather than against
-/// whatever e2fsprogs the test host happens to carry. An unparseable banner runs the
+/// whatever e2fsprogs the test host happens to have. An unparseable banner runs the
 /// check: a version this cannot read is far more likely to be a newer format than a
 /// pre-2016 one, and refusing to check on a spelling change would quietly weaken every
 /// build.
@@ -872,7 +872,7 @@ mod tests {
         );
     }
 
-    /// The formatted image must carry the supplied UUID, the resize-critical layout
+    /// The formatted image must have the supplied UUID, the resize-critical layout
     /// (`sparse_super` + `resize_inode` with reserved GDT blocks reaching the format
     /// ceiling), the pinned `remount-ro` error policy, and exactly the requested size —
     /// and pass the scan `build_rootfs_ext4` runs over it.
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(
             geom.reserved_gdt_blocks,
             u32::from(sb.reserved_gdt_blocks),
-            "the recorded headroom is the headroom the image carries"
+            "the recorded headroom is the headroom the image has"
         );
         // The one number no superblock field states: what those reserved blocks buy.
         // The floor is a 2 TiB disk — a size a board this image ships to can plausibly
@@ -1060,7 +1060,7 @@ mod tests {
         );
         assert!(
             detail.contains("the disk returned an error"),
-            "the host's own error is carried: {detail}"
+            "the host's own error is included: {detail}"
         );
         assert!(
             !detail.contains("disagrees with"),
@@ -1093,7 +1093,7 @@ mod tests {
         };
         let bytes = content.read().unwrap();
         let out = std::str::from_utf8(&bytes).unwrap();
-        // The debian line carries the hash and is expired (field 3 = 0); root is untouched.
+        // The debian line contains the hash and is expired (field 3 = 0); root is untouched.
         assert!(
             out.contains("debian:$6$saltsalt$hashhashhash:0:0:99999:7:::"),
             "spliced line missing, got: {out}"
@@ -1170,7 +1170,7 @@ mod tests {
     }
 
     /// The format options as the image stage really assembles them. The identity inputs
-    /// are stand-ins because neither pin under test carries any of them: the policy pin
+    /// are stand-ins because neither pin under test contains any of them: the policy pin
     /// is documented as holding nothing image-specific, and the geometry a size implies
     /// is a function of the policy options and the size alone.
     fn pinned_options() -> FormatOptions {

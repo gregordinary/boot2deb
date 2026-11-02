@@ -97,7 +97,7 @@ pub fn read(path: &Path) -> Result<DebContents, EngineError> {
     }
     if !saw_control || !saw_data {
         return Err(malformed(
-            "a .deb carries a control.tar and a data.tar member, and this does not".into(),
+            "a .deb contains a control.tar and a data.tar member, and this does not".into(),
         ));
     }
     Ok(contents)

@@ -45,7 +45,7 @@ pub fn patch_series(authored: &str) -> Option<&str> {
 /// How a kernel version is matched against a declared range.
 ///
 /// The distinction exists only for prereleases. By semver's rule a prerelease never
-/// satisfies a range whose bounds carry none, so `7.2.0-rc3` does not match
+/// satisfies a range whose bounds contain none, so `7.2.0-rc3` does not match
 /// `">=7.0, <7.2"`. It separately does not match `">=7.2"` either, which leaves an RC
 /// matched by nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub enum RangeMatch {
 /// One entry in a series' ordered scope list.
 ///
 /// Bare string or table. The version-insensitive majority therefore stay one-liners,
-/// and only the volatile few carry a range:
+/// and only the volatile few contain a range:
 ///
 /// ```toml
 /// kernel = [
@@ -117,7 +117,7 @@ impl<'de> Deserialize<'de> for PatchEntry {
     }
 }
 
-/// A [`PatchEntry`] carrying its own kernel range.
+/// A [`PatchEntry`] containing its own kernel range.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RangedPatch {
@@ -282,7 +282,7 @@ impl PatchSeries {
     ///
     /// The scope-generic form of [`applies_to_under`](Self::applies_to_under). A
     /// caller reporting on both axes, such as `update`'s pin-time advisory, therefore
-    /// asks the same question of each rather than carrying two near-copies. `version`
+    /// asks the same question of each rather than maintaining two near-copies. `version`
     /// is a kernel tag for the kernel-family scopes and a u-boot tag for `uboot`.
     pub fn applies_to_scope(
         &self,
@@ -676,7 +676,7 @@ impl Interval {
     /// in the narrow direction would report a live entry as dead, which is the one
     /// answer the lint must never give.
     ///
-    /// A comparator carrying a prerelease (`>=7.2.0-rc1`) is declined: its bounds
+    /// A comparator containing a prerelease (`>=7.2.0-rc1`) is declined: its bounds
     /// order below the release core this models, so treating it as the core would
     /// again narrow the span.
     fn of(req: &VersionReq) -> Option<Self> {
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn parses_bare_and_ranged_entries_in_one_list() {
-        // The volatile few carry a range; the rest stay one-liners.
+        // The volatile few contain a range; the rest stay one-liners.
         let text = r#"
             applies_to_kernel = ">=7.0, <7.4"
             kernel = [
@@ -1139,7 +1139,7 @@ mod tests {
         // u-boot releases as `vYYYY.MM` with a zero-padded month, which semver rejects
         // outright ("invalid leading zero in minor version number"). Without
         // normalization on both sides, a series could be range-matched against u-boot
-        // only by writing versions in a spelling no tag carries — so the envelope gate
+        // only by writing versions in a spelling no tag uses — so the envelope gate
         // would hard-error on the first series that used it rather than gate.
         let mut p = series();
         p.applies_to_uboot = Some(">=2026.01, <2027.01".into());

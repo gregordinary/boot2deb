@@ -16,7 +16,7 @@ use crate::error::ConfigError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-/// The filename suffix every solved manifest carries: `<stem>.pkgs.lock`, written
+/// The filename suffix every solved manifest has: `<stem>.pkgs.lock`, written
 /// beside the `<recipe>.lock` that names it.
 ///
 /// Part of the format this module defines, so a writer and a reader cannot disagree
@@ -208,7 +208,7 @@ mod tests {
         }
     }
 
-    /// The rendered text is sorted and carries each package's archive-recorded
+    /// The rendered text is sorted and contains each package's archive-recorded
     /// sha256, so one package set has one byte sequence.
     #[test]
     fn render_is_sorted_and_pinned() {
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn a_version_change_names_both_sides() {
-        // The §5 case: one base carries libc6 2.42-17, a later archive resolves 2.43-3,
+        // The §5 case: one base contains libc6 2.42-17, a later archive resolves 2.43-3,
         // and nothing but the version distinguishes the two trees.
         let before = [pkg("libc6", "2.42-17", "arm64", "aaaa")];
         let after = [pkg("libc6", "2.43-3", "arm64", "cccc")];

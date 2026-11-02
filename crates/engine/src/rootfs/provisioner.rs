@@ -5,14 +5,14 @@
 //! [`ferroday_cage`]'s pure-Rust Debian provisioner, talking to the archive
 //! directly. That is the same library the build sandbox uses ([`crate::sandbox`]).
 //!
-//! The image is a **deployed product**, so its files carry real system ownership
+//! The image is a **deployed product**, so its files have real system ownership
 //! (`root:shadow` on `/etc/shadow`, `_apt`, `systemd-journald`, the setgid `dbus`
 //! and `ssh` helpers). The provisioner therefore runs under ferroday-cage's
 //! **subordinate** identity map (real ids, via the `subid` feature's
 //! `newuidmap`/`newgidmap`). The finished tree is emitted with [`Export`], which
 //! re-enters that map so the on-host offset ids (`100000 + n`) round-trip to the
 //! ids the rootfs intends. A plain host-side `tar` would record the offset ids and
-//! miss the `security.*` xattrs a setcap'd binary carries. Device nodes are
+//! miss the `security.*` xattrs a setcap'd binary has. Device nodes are
 //! excluded, as the runtime provides its own.
 //!
 //! The pipeline, keyed by the resolved [`Plan`](ferroday_cage::provision::debian::Plan):
@@ -22,7 +22,7 @@
 //!    **once**. This one call keys the early-cutoff cache, is handed back to the
 //!    bootstrap as the set to install, and becomes the content-pinned manifest. All
 //!    three therefore describe the same packages by construction. The plan is
-//!    published beside the tar as a deb822 document carrying the archive state it
+//!    published beside the tar as a deb822 document containing the archive state it
 //!    resolved against. A later run replays that document instead of resolving
 //!    ([`RootfsOptions::pinned_plan`]), which is what `reproduce` does.
 //! 2. On a cache miss, **provision** that plan into a staging tree
@@ -66,7 +66,7 @@ use std::path::{Path, PathBuf};
 ///
 /// This repo is a **build-time-only** trusted `file://` mirror living under a temp dir
 /// that is gone by the time the image runs. The provisioner writes no apt source for a
-/// repository whose mirror is a `file://` URL, so the image carries none for it, unlike
+/// repository whose mirror is a `file://` URL, so the image contains none for it, unlike
 /// the feature repositories, whose entries are meant to persist for on-device updates.
 ///
 /// The pool's own `Release` publishes this as its `Label`, because it *is* that
@@ -81,7 +81,7 @@ const LOCAL_REPO_NAME: &str = crate::repo::POOL_LABEL;
 /// deletes before the build ends. It therefore names nothing a reader of the artifact
 /// can open, on that machine or any other, while naming the build user, the checkout
 /// and the process that ran — the same reason the provenance manifest drops it from
-/// `[[archives]]` and the sandbox record carries no working or artifact path.
+/// `[[archives]]` and the sandbox record contains no working or artifact path.
 ///
 /// The scheme stays `file://`, because that is what says the row is a local pool and
 /// is what [`archive_records`] reads to mark it one. `/nonexistent` is Debian's own
@@ -270,7 +270,7 @@ pub fn build_rootfs(
             "bootstrapping {} {} rootfs into a staging tree (subordinate id-map, real ownership)",
             build.arch, image.suite,
         ));
-        // A transient provisioned tree carrying subordinate-mapped ownership
+        // A transient provisioned tree having subordinate-mapped ownership
         // the caller cannot unlink; the guard removes it through the map. Kept
         // out of `work` so its TempDir drop is not asked to remove ids it
         // cannot, and out of `TMPDIR` because it is the whole target userland —
@@ -341,8 +341,8 @@ pub fn build_rootfs(
 /// Both halves are returned because they are not interchangeable. The plan drives the
 /// install; the *document* is what gets republished, verbatim, so the artifact this run
 /// leaves behind is the one it was given rather than this build's re-rendering of it. A
-/// document may carry fields written by a newer library than this one links — those are
-/// carried through a round trip, but re-emitted after the fields this version knows
+/// document may contain fields written by a newer library than this one links — those are
+/// preserved through a round trip, but re-emitted after the fields this version knows
 /// rather than where they were, so a re-render is a different file with the same
 /// meaning. Publishing the original keeps the digest a reader compares against stable.
 ///
@@ -368,7 +368,7 @@ fn read_pinned_plan(path: &Path, step: &Step) -> Result<(Plan, String), EngineEr
 ///
 /// The digest is of the file's bytes, and the archive rows are parsed from the same
 /// read. The manifest therefore describes the document that was published rather than
-/// a value carried alongside it. An `--stage image` re-run over an existing rootfs tar
+/// a value passed alongside it. An `--stage image` re-run over an existing rootfs tar
 /// therefore records the plan the earlier rootfs stage left in the output directory.
 /// It does so the same way it records that stage's solved manifest.
 pub fn read_plan_record(path: &Path) -> Result<PlanRecord, EngineError> {
@@ -402,7 +402,7 @@ pub struct PlanRecord {
 /// one. That manifest is a **content pin**. Its sha256 is committed in the lock's
 /// `RootfsPin.manifest_sha256`, and a mismatch is a hard `ManifestDrift`. Adding
 /// columns to it would invalidate every committed pin for a reason that has nothing to
-/// do with the package set. The plan carries the same rows plus the archive's own
+/// do with the package set. The plan contains the same rows plus the archive's own
 /// `Installed-Size` and `Source`, and nothing pins its shape.
 ///
 /// A document written before those fields existed parses fine and reports every size as
@@ -439,7 +439,7 @@ pub struct PlanWeights {
     /// One row per package the plan installs, in document order.
     pub packages: Vec<PlannedWeight>,
     /// One row per repository, in configuration order. This is the same projection
-    /// the provenance manifest's `[[archives]]` carries. A `file://` pool is marked
+    /// the provenance manifest's `[[archives]]` contains. A `file://` pool is marked
     /// local, and its build-host path is dropped here too.
     pub archives: Vec<boot2deb_core::provenance::ArchiveProvenance>,
 }
@@ -465,9 +465,9 @@ fn published_plan(plan: &Plan) -> Plan {
 ///
 /// A repository served over `file://` is marked local and its URL dropped: that URL is a
 /// path on the build host — for the build's own `.deb` pool, a per-run path under a
-/// per-run directory — and a record whose value is being portable may not carry one, the
+/// per-run directory — and a record whose value is being portable may not contain one, the
 /// same reason the sandbox record drops a run's own working and artifact binds. Every
-/// other field is carried across as the resolve reported it.
+/// other field is kept as the resolve reported it.
 fn archive_records(plan: &Plan) -> Vec<boot2deb_core::provenance::ArchiveProvenance> {
     plan.archives
         .iter()
@@ -668,7 +668,7 @@ fn build_debian(
 }
 
 /// Build a signed [`Repository`] per resolved feature apt source (e.g. Jellyfin),
-/// each verified against its own keyring and carrying its own suite/components, so
+/// each verified against its own keyring and containing its own suite/components, so
 /// an out-of-mirror app resolves in the provisioner's closure. Each writes its own
 /// `/etc/apt/sources.list.d/<name>.list` into the finished rootfs.
 ///
@@ -751,7 +751,7 @@ fn rootfs_key(
 ///
 /// Both halves reach the image directly — [`feature_repositories`] hands each to the
 /// provisioner, which writes its `sources.list.d` entry and its keyring into the
-/// finished tree — so a re-pointed URI or a rotated key changes what the image carries
+/// finished tree — so a re-pointed URI or a rotated key changes what the image contains
 /// without moving a single package version. Fields are NUL-separated for the same
 /// reason [`rootcache::dir_fingerprints`] does it: no value can forge a field boundary.
 ///
@@ -849,7 +849,7 @@ fn customize(
     // A device node or socket the copy could not create is not something these trees
     // hold — they are git-tracked config, and the runtime supplies its own `/dev` — so
     // a non-empty list means the staged tree gained something unexpected, and a rootfs
-    // quietly missing a file it was told to carry is exactly the failure the report
+    // quietly missing a file it was told to include is exactly the failure the report
     // exists to prevent. Fail rather than log it past.
     if !report.skipped.is_empty() {
         let listed = report
@@ -978,7 +978,7 @@ fn run_initrd_report(rootfs: &Path, generator: InitramfsGenerator) -> Result<Str
 /// every build.
 ///
 /// **Nothing this build resolved is interpolated into it.** Every value arrives through
-/// the environment ([`customize_env`]), so a hostname carrying a newline or a board
+/// the environment ([`customize_env`]), so a hostname containing a newline or a board
 /// profile spelling a heredoc delimiter cannot change what runs — it can only be a wrong
 /// value in a right program. That is the same split
 /// [`core::expect`](boot2deb_core::expect) and the on-image selftest runner use, and it
@@ -1011,7 +1011,7 @@ fn customize_env(
     vec![
         ("B2D_USER".into(), image.user.clone()),
         // One absolute path per line. Each is built from a validated suite name, so
-        // none carries a newline and the split on the other side is unambiguous.
+        // none contains a newline and the split on the other side is unambiguous.
         ("B2D_APT_REPLACED".into(), apt_replaced.join("\n")),
         ("B2D_SUDOERS".into(), image.sudo.sudoers_spec().to_string()),
         // One key per line, exactly as authored. Resolution guarantees each entry is a
@@ -1116,7 +1116,7 @@ fn run_customize_cage(
 /// formats. [`Export`] re-enters the subordinate map, so the on-host offset ids
 /// round-trip to the ids the rootfs intends, and the setcap `security.*` xattrs and
 /// setgid ownerships come through. Everything under `/dev` is left out — see the
-/// filter below — as are device nodes anywhere, which the export never carries.
+/// filter below — as are device nodes anywhere, which the export never includes.
 ///
 /// `source_date_epoch` is the `SOURCE_DATE_EPOCH` ceiling: each member's mtime is
 /// recorded as `min(mtime, epoch)`, pulling the bootstrap's wall-clock stamps down
@@ -1186,7 +1186,7 @@ mod tests {
         )
     }
 
-    /// The media-accel build (carries ffmpeg-rk et al. + depthcharge is absent).
+    /// The media-accel build (includes ffmpeg-rk et al. + depthcharge is absent).
     fn rk1() -> ResolvedBuild {
         resolve_recipe(
             &repo_root(),
@@ -1204,7 +1204,7 @@ mod tests {
     /// A minimal plan document standing in for one [`Debian::resolve`] would return, so
     /// the pinned-install configuration is exercisable with no archive to resolve
     /// against. One archive and one package is enough: what is under test is which
-    /// *settings* the installing provisioner carries, not what it would install.
+    /// *settings* the installing provisioner contains, not what it would install.
     fn sample_plan(suite: &str, architecture: &str) -> Plan {
         Plan::parse_document(&format!(
             "Format: ferroday-cage-plan 2\n\
@@ -1230,7 +1230,7 @@ mod tests {
         .expect("the document is well-formed")
     }
 
-    /// Options standing in for a build's, carrying only what [`build_debian`] reads:
+    /// Options standing in for a build's, containing only what [`build_debian`] reads:
     /// the archive and its keyring, the excludes/includes, and the paths. The rest is
     /// the struct's own shape.
     fn sample_options<'a>(
@@ -1316,7 +1316,7 @@ mod tests {
         let preinstall = tmp.path().join("overlay-pre");
         let local_url = "file:///nonexistent/localrepo";
 
-        // The build resolves excludes, so the resolving mode really does carry a
+        // The build resolves excludes, so the resolving mode really does include a
         // selector the pinned mode must drop — without that this test would pass
         // vacuously.
         assert!(
@@ -1332,7 +1332,7 @@ mod tests {
             &preinstall,
             None,
         )
-        .expect("the resolving provisioner carries the selectors");
+        .expect("the resolving provisioner contains the selectors");
 
         let plan = sample_plan(&image_of(&build).suite, build.arch.debian_arch());
         build_debian(
@@ -1363,7 +1363,7 @@ mod tests {
         assert_eq!(
             document,
             std::fs::read_to_string(&path).unwrap(),
-            "the document is carried verbatim, not re-rendered"
+            "the document is preserved verbatim, not re-rendered"
         );
     }
 
@@ -1433,7 +1433,7 @@ mod tests {
     /// from. Three properties decide whether that account is portable: a `file://`
     /// repository is the build host's own, so its path must not reach the record; an
     /// unsigned repository must read as unsigned rather than as unrecorded; and the
-    /// certificate and the key that signed under it are carried as the two separate
+    /// certificate and the key that signed under it are recorded as the two separate
     /// answers they are.
     #[test]
     fn the_archive_rows_drop_a_build_host_path_and_keep_an_empty_signer() {
@@ -1472,7 +1472,7 @@ mod tests {
         );
         assert_eq!(rows[0].components, ["main", "non-free-firmware"]);
         // The certificate primary, which is what `blobs/keyrings/*.fingerprints` pins,
-        // and the subkey that made the signature — carried side by side, because a
+        // and the subkey that made the signature — recorded side by side, because a
         // certificate rotating its signing subkey moves the second and not the first.
         assert_eq!(
             rows[0].signed_by,
@@ -1500,7 +1500,7 @@ mod tests {
 
     /// The digest recorded is of the file, not of a re-rendering of the plan it holds —
     /// which is what keeps it comparable against a document written by a library version
-    /// that carried fields this one would re-emit elsewhere.
+    /// that had fields this one would re-emit elsewhere.
     #[test]
     fn the_plan_record_digests_the_published_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1513,7 +1513,7 @@ mod tests {
         assert_eq!(record.archives.len(), 1);
     }
 
-    /// A source name is carried to the `sources.list.d` stem as authored, and one
+    /// A source name is passed to the `sources.list.d` stem as authored, and one
     /// that is not a portable stem fails the build of the repository rather than
     /// being folded into a legal-looking neighbour. Resolution rejects such a name
     /// first; this is the backstop at the boundary that writes the file.
@@ -1614,7 +1614,7 @@ mod tests {
 
     /// The customize script is built by string formatting and handed to `sh` ~10
     /// minutes into a build, so parse it here with `sh -n` — a syntax error caught
-    /// A value the customize environment carries, by name.
+    /// A value the customize environment contains, by name.
     fn env_of(pairs: &[(String, String)], key: &str) -> String {
         pairs
             .iter()
@@ -1648,7 +1648,7 @@ mod tests {
 
     /// **No build value is ever syntax.** Every variable the program reads is a `B2D_*`
     /// one the environment supplies, and the environment supplies exactly those — so a
-    /// hostname carrying a newline, or a board profile spelling a heredoc delimiter,
+    /// hostname containing a newline, or a board profile spelling a heredoc delimiter,
     /// cannot change what runs.
     ///
     /// Both directions matter: a `B2D_*` the program reads and the environment does not
@@ -1685,7 +1685,7 @@ mod tests {
     /// `mkinitramfs` stamps the initrd with it and `useradd` records it as the new
     /// account's last password change.
     #[test]
-    fn the_customize_run_carries_the_lock_epoch() {
+    fn the_customize_run_receives_the_lock_epoch() {
         let env = customize_env(image_of(&rk1()), None, &[], 1_790_347_034);
         assert_eq!(env_of(&env, "SOURCE_DATE_EPOCH"), "1790347034");
     }
@@ -1746,7 +1746,7 @@ mod tests {
         const FILTER: &str = r"/^[-dl][-rwxsStT]{9} /{s/^([^ ]+ +){8}//; s/ -> .*$//; p;}";
         assert!(
             INITRD_REPORT.contains(&format!("sed -n -E '{FILTER}'")),
-            "the report's dracut branch carries the filter under test"
+            "the report's dracut branch contains the filter under test"
         );
         if !crate::hosttool::require(&["sed"]) {
             return;
@@ -1846,7 +1846,7 @@ mod tests {
     /// The account policy reaches the image as resolved: the sudoers spec the build
     /// chose, and the keys the config authorized, in order.
     #[test]
-    fn the_customize_env_carries_the_resolved_account_policy() {
+    fn the_customize_env_contains_the_resolved_account_policy() {
         const ED25519: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9dY/aLK4WVQ5c4tYlYCkkC1J3Ry+d0nc3TgtDe operator@workstation";
         const RSA: &str = "ssh-rsa AAAAB3NzaC1yc2EA laptop";
 
@@ -1902,7 +1902,7 @@ mod tests {
     }
 
     /// The keys, written by the program's own line. What has to hold is that the file
-    /// `sshd` reads carries the authored bytes **verbatim** — no expansion, no
+    /// `sshd` reads contains the authored bytes **verbatim** — no expansion, no
     /// word-splitting, nothing executed — whatever a key's comment holds.
     ///
     /// The line is lifted out of the committed program rather than restated here, so

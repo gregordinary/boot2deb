@@ -1,7 +1,7 @@
 # features/vulkan.toml — the GPU userspace: a Vulkan loader and Mesa's drivers.
 #
 # `ffmpeg-rk` is always linked against Vulkan, libplacebo and shaderc, so every image
-# carrying it already *has* `hwmap=derive_device=vulkan`, `vf_libplacebo`,
+# containing it already *has* `hwmap=derive_device=vulkan`, `vf_libplacebo`,
 # `scale_vulkan`/`overlay_vulkan` and swscale's Vulkan compute backend compiled in.
 # None of them can run without a driver, and the driver is an ICD loaded at runtime
 # rather than a library anything links — so no `Depends` pulls it in and it has to be
@@ -24,7 +24,7 @@
 # composite route the hardware has — `scale_vulkan` measures 53.8 dB against swscale
 # at 18x the efficiency and 2.8x the speed, and libplacebo is the only compositor in
 # this build that runs anywhere but the CPU. Shipping the filters without a driver
-# would leave an image that quietly does the slow thing, so those recipes carry it.
+# would leave an image that quietly does the slow thing, so those recipes include it.
 #
 # It stays opt-in everywhere else, and the Jellyfin recipes are the case that matters:
 # Jellyfin's `HardwareAccelerationType` is a closed enum with no Vulkan member, and
@@ -61,7 +61,7 @@ requires_arch = ["arm64"]
 
 caveats = [
   "This feature adds 25 packages and roughly 305 MiB to the installed system, measured against the RK3588 media-accel package set on forky. Two thirds of it is not the driver. `mesa-vulkan-drivers` is 144 MiB, and it depends on `libllvm21` (127 MiB) and through it `libz3-4` (25 MiB). Those two are there for the `lvp` software rasterizer Debian ships in the same package, rather than for PanVk.",
-  "Debian offers no per-driver package. `mesa-vulkan-drivers` carries the AMD, Intel, NVIDIA, virtio and software back ends as well as the Mali one this hardware uses. An image that wants PanVk therefore takes all of them and the LLVM they imply.",
+  "Debian offers no per-driver package. `mesa-vulkan-drivers` contains the AMD, Intel, NVIDIA, virtio and software back ends as well as the Mali one this hardware uses. An image that wants PanVk therefore takes all of them and the LLVM they imply.",
   "Vulkan support is a per-GPU fact, not a per-feature one. PanVk is conformant on the RK3588's Mali-G610. On the RK3576's Mali-G52 it declines the device unless `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER` is set. With it set, Mesa 26.1 and 26.2 compute wrong chroma in ffmpeg's Vulkan filters. The same package installs on both, and on the RK3576 its only working device is `lvp`.",
   "A software Vulkan device (`lvp`, llvmpipe) enumerates alongside the hardware one. Anything that leaves device selection to the default can bind it and run GPU work on the CPU. That is slower than not using this feature at all, and it does not announce itself.",
 ]

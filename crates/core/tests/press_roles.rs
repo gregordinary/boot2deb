@@ -42,7 +42,7 @@ fn every_shipped_recipe_has_a_well_formed_artifact_set() {
                 "{recipe}: a u-boot deliverable is one boot image"
             );
             assert!(
-                !r[0].carries_rootfs(),
+                !r[0].contains_rootfs(),
                 "{recipe}: a boot image takes no seed keys and no additions"
             );
             continue;
@@ -54,7 +54,7 @@ fn every_shipped_recipe_has_a_well_formed_artifact_set() {
                     vec![ArtifactRole::Combined],
                     "{recipe}: combined is one image"
                 );
-                assert!(r[0].carries_rootfs(), "{recipe}");
+                assert!(r[0].contains_rootfs(), "{recipe}");
             }
             Layout::Split => {
                 assert_eq!(
@@ -93,11 +93,11 @@ fn split_layout_maps_to_two_artifacts_wherever_it_resolves() {
         split_seen += 1;
         let r = roles(&build);
         assert_eq!(r.len(), 2, "{recipe}");
-        // Exactly one of the two carries the rootfs, and it is the second: seed
+        // Exactly one of the two contains the rootfs, and it is the second: seed
         // keys and additions land on the disk the OS reads, never the bootloader
         // medium.
-        assert!(!r[0].carries_rootfs(), "{recipe}");
-        assert!(r[1].carries_rootfs(), "{recipe}");
+        assert!(!r[0].contains_rootfs(), "{recipe}");
+        assert!(r[1].contains_rootfs(), "{recipe}");
     }
     assert!(
         split_seen > 0,

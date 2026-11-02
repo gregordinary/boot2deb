@@ -5,7 +5,7 @@
 # of these parts — so this is CPU decode, and the reason it is a feature rather
 # than part of the base build is that the libraries are not in Debian: they arrive
 # as pinned `.deb`s from `debs/`, and an image that has no use for the codecs
-# should not carry them.
+# should not include them.
 #
 # What that costs is measured. AVS2 decodes 1080p at 49.2 fps on demanding
 # content, taking 2.9 of the RK1's eight cores at realtime; AVS3 reaches 113.3 fps
@@ -34,7 +34,7 @@ caveats = [
 
 # The libraries the ffmpeg build links, and the flags that compile it against
 # them. `links` is the runtime library then its `-dev`, in that order, the same
-# contract a compiled userspace tree carries: the `-dev` alone would give
+# contract a compiled userspace tree has: the `-dev` alone would give
 # `./configure` headers and a `.pc` file with no `libdavs2.so` to link and no
 # `shlibs` for `dpkg-shlibdeps` to read, and the produced deb would then declare
 # no dependency on the library it links.

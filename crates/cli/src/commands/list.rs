@@ -183,7 +183,7 @@ fn kernel_fields(k: &boot2deb_core::model::KernelDef) -> (String, Option<String>
 /// The relations cell folds `conflicts=`, `provides=` and `needs=` into one column so
 /// the table keeps its shape. `provides` is the discovery path a rejected composition
 /// sends a user down — the error names the providers, and this is where they see what
-/// else each one carries.
+/// else each one includes.
 pub(crate) fn features(root: &ConfigRoot, json: bool) -> Result {
     let mut broken = Vec::new();
     let mut rows = Vec::new();
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn a_feature_that_installs_nothing_states_what_it_configures() {
         // A feature contributing no packages, no repository, no vendored `.deb`, no
-        // kconfig and no patch series installs nothing: everything it carries is
+        // kconfig and no patch series installs nothing: everything it contains is
         // configuration for software some *other* feature brings. Selected alone it
         // seeds config files into an image with nothing to read them, which is the
         // composition error `requires_capability` exists to reject — so a glue feature

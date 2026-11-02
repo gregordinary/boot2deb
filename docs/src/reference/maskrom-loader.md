@@ -4,7 +4,7 @@ Some boards' u-boot builds emit a **maskrom loader**. It is a single file you st
 a Rockchip SoC over USB to run that u-boot from RAM, writing nothing to storage.
 
 It exists for the case where the board's own bootloader cannot help you. A Rockchip SoC
-whose eMMC carries no bootloader, or a broken one, still enters the BootROM's download
+whose eMMC contains no bootloader, or a broken one, still enters the BootROM's download
 mode. The BootROM will accept a bootloader over USB and jump to it. That is the floor
 beneath every other recovery path: it does not need the board to boot, and it does not need
 the case open.
@@ -59,7 +59,7 @@ producing a loader needs no vendor tooling and the output is deterministic. The 
 inputs give the same bytes, which is what lets the artifact cache treat it like any other
 build output.
 
-The container holds only the two download sections. A full vendor loader also carries a
+The container holds only the two download sections. A full vendor loader also contains a
 `LOADER` section, the blobs a host writes *to storage*. `db` never downloads it, and it
 is the only part bearing a signed or encrypted header. Omitting it is what keeps the
 writer pure: there is nothing to sign, so there is nothing that needs a vendor key.

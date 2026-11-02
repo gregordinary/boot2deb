@@ -27,7 +27,7 @@ trees a run from inside `boot2deb/` builds into. An explicit `--work-dir` or
 
 ## How much a build prints
 
-A build's event stream carries two very different volumes: what each stage *decided*
+A build's event stream contains two very different volumes: what each stage *decided*
 (tens of lines) and what its subprocesses *printed* (tens of thousands). The default
 shows the first, so a tens-of-minutes kernel compile stays readable:
 
@@ -423,7 +423,7 @@ packages the artifact directory holds.
 
 `build <recipe> --stage dtb` compiles just the board's device tree in the
 already-cloned, already-patched kernel tree and stages the `.dtb` — seconds rather than
-a full kernel build. It is the bring-up loop for a board carrying its own `device_dts`
+a full kernel build. It is the bring-up loop for a board with its own `device_dts`
 source: edit the `.dts`, rebuild the DTB, reflash. The result is byte-identical to the
 DTB a full `--stage kernel` ships inside the `linux-image` deb.
 
@@ -595,7 +595,7 @@ never over the build it is judged against. Both caches are off, since a restored
 proves nothing about this run. `--with-caches` turns them back on.
 
 When the build ends, every output the original's provenance manifest recorded gets a
-verdict: `identical`, `differs`, `missing` or `not comparable`. An image carries a fresh
+verdict: `identical`, `differs`, `missing` or `not comparable`. An image contains a fresh
 first-boot password, so it is compared through its disk and its
 [file manifest](reproducibility.md#the-rootfs-file-manifest). The partition tables must
 agree, and the files must agree everywhere but in the content of `/etc/shadow`. A
@@ -648,7 +648,7 @@ cache. All four therefore work on a fresh clone with no hand-cloned trees.
 | Imported or edited a patch — does the series still apply to the pinned kernel and u-boot (and ffmpeg/userspace)? | `verify-patches` |
 | Edited a `.config` fragment or the base defconfig — does the kernel `.config` still generate cleanly (and match a reference)? | `verify-config` |
 | A lock is old — are its pinned commits still fetchable upstream, or has a branch moved out from under them? | `verify-sources` |
-| Added a package to a layer, a feature, or a recipe — does the suite you build against actually carry it? | `verify-packages` |
+| Added a package to a layer, a feature, or a recipe — does the suite you build against actually contain it? | `verify-packages` |
 | A build finished — is the image it produced internally consistent, before you flash it? | `verify-image` |
 
 The first `verify-patches` or `verify-config` on a cold cache clones the kernel, and
@@ -666,7 +666,7 @@ contribute. One pass answers every name at once, which is why it is cheap enough
 per board over every recipe.
 
 It is worth having as its own command because the resolver cannot answer it. A recipe
-naming a package the suite does not carry fails at resolve time, deep in a build, after
+naming a package the suite does not contain fails at resolve time, deep in a build, after
 every compile node has already run.
 
 It fails badly, too. A top-level include naming nothing makes the *whole* set
@@ -697,7 +697,7 @@ UNSATISFIED: jellyfin-server requires libicu76, and no configured archive offers
 
 Every refusal is reported, not just the first, because the list is what a user has to
 correct. The closure runs only when the name check passed. A name the archive does not
-carry refuses its own dependency group as well, and reporting that twice would bury
+contain refuses its own dependency group as well, and reporting that twice would bury
 whatever else was found.
 
 The same blind spot applies here as above, and the check accounts for it rather than
@@ -723,7 +723,7 @@ build's problem.
 
 A resolution stopped that way has no closure size, and the output says that instead of
 printing zero. Under `--json`, `closure.installed` is `null` in that case, `refusals`
-carries what the recipe must correct, and `supplied_locally` carries what the check could
+contains what the recipe must correct, and `supplied_locally` contains what the check could
 not see.
 
 #### The free prerequisite: does the series even claim this version?
@@ -782,7 +782,7 @@ boot2deb verify-patches turing-rk1/forky
 # A u-boot-only recipe verifies its u-boot series...
 boot2deb verify-patches rk3576-generic/loader
 
-# ...and a recipe carrying both reports each at its own version:
+# ...and a recipe with both reports each at its own version:
 #   kernel series applies (4 patches) against rk3576-mainline-7.3 @ v7.3
 #   uboot  series applies (6 patches) against u-boot @ v2026.04
 boot2deb verify-patches rk3576-evb1-v10/forky
@@ -839,11 +839,11 @@ path:
 
 `--kernel-path` / `--uboot-path` / `--ffmpeg-path` / `--userspace-path` are all
 **optional**. An omitted tree is auto-fetched at its locked commit (ffmpeg and userspace
-only when the series carries patches for that scope).
+only when the series includes patches for that scope).
 
 The `--kernel-src` / `--uboot-src` / `--ffmpeg-base-src` / `--userspace-src` flags
 override the fetch *source*. That is a git URL or local path used in place of the
-configured upstream. The first three carry the same names and meaning as `build`'s, and
+configured upstream. The first three have the same names and meaning as `build`'s, and
 the last names the patched tree's source.
 
 The tree still lands at exactly the locked commit. Those flags are consulted only on the
@@ -899,11 +899,11 @@ Then, per image, it checks:
 - That the plan document parses, and its digest matches what the provenance manifest
   records.
 - That `[[archives]]` is well formed. That is the mirror plus the build's own pool. The
-  pool is marked `local` and carries no mirror URL, since a per-run path is not
+  pool is marked `local` and contains no mirror URL, since a per-run path is not
   portable provenance.
 - That **the ext4 filesystem is exactly its GPT partition**.
 - That the rootfs GPT entry is marked bootable, since U-Boot's `bootflow scan` looks
-  only at marked partitions once any partition carries the mark.
+  only at marked partitions once any partition has the mark.
 - For a fitted `--image-size`, that the slack the recipe asked for actually survived
   into the shipped filesystem.
 - That **the rootfs holds exactly the files its
@@ -1045,7 +1045,7 @@ patches:
 `+` added, `-` removed, `~` rewritten under an unchanged name. The last is the
 case a membership comparison calls identical.
 
-It needs a `patches` checkout carrying both commits, from `--patches-path` or else the
+It needs a `patches` checkout containing both commits, from `--patches-path` or else the
 config root's sibling `../patches`. Without one it reports "the commit moved, and here is
 why the files could not be listed", rather than failing the rest of the comparison.
 
@@ -1071,7 +1071,7 @@ documents state the same facts. What is in them:
 
 | component | how it is identified |
 | --- | --- |
-| every installed package | name, exact version, sha256, and a `pkg:deb/debian/...` purl — carrying `&upstream=<source>` where the source package is named separately |
+| every installed package | name, exact version, sha256, and a `pkg:deb/debian/...` purl — containing `&upstream=<source>` where the source package is named separately |
 | every pinned source tree | the ref and the exact commit — kernel, u-boot, the patch series, the media-accel trees, and each compiled app's tree, packaging tree and series |
 | every rkbin blob | its sha256, which is the only identity it has |
 | every externally-fetched `.deb` | its URL and sha256 |
@@ -1083,15 +1083,15 @@ source package, and nothing else in the document says so.
 
 It comes from the published plan beside the image. It is emitted only where the source
 name *differs* from the binary package's own. That absence is how the ecosystem spells
-"the source carries this name".
+"the source has this name".
 
-An image handed over without its plan simply carries no attribution. The SBOM is
+An image handed over without its plan simply has no attribution. The SBOM is
 complete without it, and a warning says what is missing rather than the command failing.
 
 The one distinction worth reading is between what the image **contains** and what it was
 **generated from**. A kernel source tree is compiled into the image, not installed in
 it. SPDX says so with `CONTAINS` and `GENERATED_FROM`. CycloneDX has one relationship
-kind, so it carries the distinction in the component type and description instead.
+kind, so it records the distinction in the component type and description instead.
 
 **Licenses are `NOASSERTION`, deliberately.** boot2deb records no per-package license,
 and synthesizing one by reading `/usr/share/doc/*/copyright` out of the rootfs would
@@ -1109,7 +1109,7 @@ byte-stable.
 It reads a *published build*, not a recipe's lock. A lock says what an image would be
 made of, and only a build says what one is. `sbom <recipe>` therefore reads the
 `.provenance.toml` and `.pkgs.lock` beside that recipe's image, and says so if no build
-has produced them yet. An image with a compiled .NET app also carries the app's
+has produced them yet. An image with a compiled .NET app also has the app's
 `.nuget.lock` beside them, and the SBOM refuses to leave it out.
 
 ## Where the size went
@@ -1129,7 +1129,7 @@ boot2deb size ./turing-rk1-forky.plan --json
 ```
 
 Answers "why is this image 2.1 GiB" from the plan document a build published — the one
-file that carries each package's `Installed-Size` and `Source`.
+file that contains each package's `Installed-Size` and `Source`.
 
 ```
 size build/turing-rk1/forky/artifacts/turing-rk1-forky.plan — by source package
@@ -1236,7 +1236,7 @@ Being behind is not a failure. `outdated` always exits zero. It is a survey, and
 whether to move is a decision with hardware evidence behind it.
 
 Its neighbour [`verify-sources`](#verify-sources) is the gate, and it asks the opposite
-question. Not "is there something newer" but "is what we pinned still fetchable at all".
+question. Not "is there something newer" but "is what the lock pins still fetchable at all".
 A pin can be a durable tag and nine releases behind, or an ephemeral branch tip and
 current.
 

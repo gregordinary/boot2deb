@@ -120,7 +120,7 @@ pub struct BuildEnv {
     /// cannot.
     ///
     /// Distinct from `sandbox_id` rather than folded into it, because the two roots move
-    /// independently. They carry different package sets, at different architectures,
+    /// independently. They contain different package sets, at different architectures,
     /// and the packaging root's suite is not always the image's.
     pub packaging_id: String,
 }
@@ -131,7 +131,7 @@ pub struct BuildEnv {
 /// The first segment is the tree name the sandbox is provisioned under
 /// ([`build_sandbox_dir`](crate::sandbox::build_sandbox_dir)), which is the identity of
 /// the base. Its digest covers the archive, the base package set and the base recipe
-/// version, and its prefix carries the arch and suite. Deriving the signature input from
+/// version, and its prefix contains the arch and suite. Deriving the signature input from
 /// the function that *names the directory* is what keeps the two from disagreeing. A
 /// build keyed on one claim while compiling in a differently-provisioned tree is exactly
 /// the failure that digest exists to prevent. A package added to or removed from the base
@@ -215,7 +215,7 @@ fn root_identity(dir: PathBuf) -> String {
 /// The tree name the root is provisioned under
 /// ([`packaging_root_dir`](crate::sandbox::packaging_root_dir)), which is the identity
 /// of the base. Its digest already covers the archive, the package set and the recipe
-/// version, and its prefix carries the arch and suite. Deriving the signature input from
+/// version, and its prefix contains the arch and suite. Deriving the signature input from
 /// the same function that names the directory is what keeps the two from disagreeing.
 /// A claim keyed on one while the tree is provisioned under the other is exactly the
 /// failure the tree name's own digest exists to prevent.
@@ -715,7 +715,7 @@ pub(crate) enum ObjectProbe {
     /// non-zero with no error output — its designed "absent" signal).
     Absent,
     /// The probe itself failed — git could not be run, or errored for a reason other
-    /// than a missing object (bad repo, malformed rev). Carries the stderr/spawn detail
+    /// than a missing object (bad repo, malformed rev). Contains the stderr/spawn detail
     /// so the caller can report it faithfully instead of as an absence.
     Errored(String),
 }
@@ -843,7 +843,7 @@ pub(crate) enum PatchScope {
     /// The ffmpeg-tree series.
     Ffmpeg,
     /// The userspace-tree series (the MPP CMA fix). Applies to the MPP
-    /// tree; librga/libmali carry no userspace patch and never use this scope.
+    /// tree; librga/libmali have no userspace patch and never use this scope.
     Userspace,
     /// An application's own tree.
     App,
@@ -931,7 +931,7 @@ pub(crate) struct ClonePinned<'a> {
 
 /// A resolved `patches` checkout together with the pin and series it supplies.
 ///
-/// Bundled rather than carried as four loose fields, so that "this build applies no
+/// Bundled rather than kept as four loose fields, so that "this build applies no
 /// patches" is one `Option::None` the compiler enforces. There is no way to name a
 /// series without a checkout to read it from. Nor is there a way to resolve a checkout
 /// for a build that has no series.
@@ -1170,7 +1170,7 @@ pub(crate) fn sanitize_deb_version(raw: &str) -> String {
 }
 
 /// The restored path for `role` in an [`artstore`](crate::artstore) restore result,
-/// or `None` if the entry did not carry that role (a foreign/older layout — the
+/// or `None` if the entry did not contain that role (a foreign/older layout — the
 /// caller then falls through to a rebuild rather than trusting a partial restore).
 pub(crate) fn role_path(restored: &[(String, PathBuf)], role: &str) -> Option<PathBuf> {
     restored
@@ -1530,10 +1530,10 @@ const DEB_COMPRESS_LEVEL: &str = "6";
 ///   sha256-pinned package resolved from the build's own mirror list — so the archiver
 ///   is an input the lock describes rather than whatever the build host installed.
 /// - **Ownership.** The root maps the caller to uid 0, so the host-staged tree stats as
-///   `root:root` inside and is archived with the ownership a `.deb` must carry. No
+///   `root:root` inside and is archived with the ownership a `.deb` must have. No
 ///   `fakeroot`: there is nothing left to fake.
 /// - **Time.** `source_date_epoch` (a locked commit's committer date) makes `dpkg-deb`
-///   clamp every member's mtime to it, so the `.deb` carries the lock's timestamp rather
+///   clamp every member's mtime to it, so the `.deb` contains the lock's timestamp rather
 ///   than the build clock. Passed as an environment variable because that is the only
 ///   interface `dpkg-deb` has for it.
 /// - **The compression.** [`DEB_COMPRESSOR`] and [`DEB_COMPRESS_LEVEL`], stated rather
@@ -2516,7 +2516,7 @@ mod tests {
         // this is what drives CommitUnreachable/Orphaned.
         let absent = "0123456789abcdef0123456789abcdef01234567";
         assert!(matches!(probe_object(&repo, absent), ObjectProbe::Absent));
-        // A dir that is not a git repo is an errored probe, carrying git's message —
+        // A dir that is not a git repo is an errored probe, containing git's message —
         // never misreported as an absence.
         let notrepo = tmp.path().join("notrepo");
         std::fs::create_dir(&notrepo).unwrap();
@@ -2607,7 +2607,7 @@ mod tests {
             assert_ne!(id(&fallback, &cross), id(one, &cross));
         }
         // And the arch and suite separate too: the same archive bootstraps a different
-        // compiler for each, and only the tree name carries that.
+        // compiler for each, and only the tree name contains that.
         assert_ne!(
             id(&live, &native),
             sandbox_identity("armhf", &live, &native)

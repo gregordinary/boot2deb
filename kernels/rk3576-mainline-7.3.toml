@@ -1,7 +1,7 @@
 # kernels/rk3576-mainline-7.3.toml — mainline 7.3.x for RK3576 boards.
 # The SoC is fully upstream, so the kernel tree is nearly pristine: HW decode
 # (VDPU383) is native mainline, and encode is absent from mainline (a
-# vendor-kernel dependency, out of scope). The SoC-wide series it carries is
+# vendor-kernel dependency, out of scope). The SoC-wide series it applies is
 # `rk3576-fixes` (the GPU power-domain regulator fix; see patches/rk3576/kernel);
 # a board that needs its own series (an out-of-tree driver, say) adds it via the
 # device's `device_patch_series`, so one kernel entry serves every RK3576 board.

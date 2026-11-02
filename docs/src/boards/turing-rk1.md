@@ -3,7 +3,7 @@
 The [Turing RK1](https://turingpi.com/product/turing-rk1/) is an RK3588 compute
 module that seats in a Turing Pi 2 cluster board. boot2deb ships it as a small family
 of recipes over one hardware base. That base is kernel `v7.3` (linux-stable), u-boot
-`v2026.10`, and the RGA / VEPU / VDPU (and NPU) drivers carried in-kernel via the
+`v2026.10`, and the RGA / VEPU / VDPU (and NPU) drivers included in-kernel via the
 `rk3588-accel` patch series. It is a supported configuration in its own right, and a good
 starting point for any RK3588 board.
 
@@ -25,12 +25,12 @@ server, pre-pointed at `ffmpeg-rk`. See
 these axes at all but a u-boot-only recovery tool — see
 [Writing the NVMe from u-boot](#writing-the-nvme-from-u-boot).
 
-Every variant carries the **same accel kernel**. The VEPU / VDPU / RGA and NPU drivers
+Every variant includes the **same accel kernel**. The VEPU / VDPU / RGA and NPU drivers
 are present in all of them, because the patches and kconfig live on the kernel axis. A
 **base** image simply omits the Rockchip media userspace — the hardware blocks are
 there but dark. A **media-accel** image adds the `media-accel-rockchip` feature, which
 builds and installs `ffmpeg-rk`, `librockchip-mpp1`, and `librga2` on top. The split is
-deliberate: because the kernel already carries the capability, those debs can equally be
+deliberate: because the kernel already has the capability, those debs can equally be
 installed onto a running base image later. `forky` is the RK1's validated suite.
 
 ### Two RGA drivers exist; this image builds the out-of-tree one
@@ -59,7 +59,7 @@ with no out-of-tree code and can live without the FFmpeg filter path. Unset
 Then drop `media-accel/kernel/072` from the series, so the device-tree nodes keep their
 mainline compatibles.
 
-The `media-accel-*` pair also carries the **`vulkan`** feature, which is Mesa's Vulkan
+The `media-accel-*` pair also includes the **`vulkan`** feature, which is Mesa's Vulkan
 drivers and the loader. That is what makes the Vulkan filters `ffmpeg-rk` is already
 built with actually open. On a box driven from the command line those are the fastest
 scale, tone-map and composite route the hardware has. `scale_vulkan` measures 53.8 dB
@@ -67,12 +67,12 @@ against swscale at 18x the efficiency and 2.8x the speed. It costs about 305 MiB
 installed, two thirds of which is the LLVM that Mesa's software rasterizer pulls in
 rather than the Mali driver itself.
 
-The `jellyfin-*` pair deliberately does **not** carry it. Jellyfin's
+The `jellyfin-*` pair deliberately does **not** include it. Jellyfin's
 `HardwareAccelerationType` is a closed enum with no Vulkan member, so the server can
 never emit a Vulkan filter. The packages would be reachable only from a shell. Add
 it there with a feature selection if you want the command line too.
 
-Two feature selections carry Jellyfin together with `vulkan` and `avs-decode` (see
+Two feature selections include Jellyfin together with `vulkan` and `avs-decode` (see
 [Decode](#decode)), and they differ only in the server:
 
 - `turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-rockchip+vulkan+avs-decode`
@@ -84,7 +84,7 @@ Two feature selections carry Jellyfin together with `vulkan` and `avs-decode` (s
 
 Their locks pin the same kernel, patches, userspace and FFmpeg. Pass
 `--image-size 3G` with either, since a feature selection takes the device's 2G and
-cannot carry the `jellyfin-*` recipes' own larger volume.
+does not inherit the `jellyfin-*` recipes' own larger volume.
 
 Every image here ships a **redistributable** FFmpeg. See
 [The FFmpeg a build ships is redistributable](../reference/config-model.md#the-ffmpeg-a-build-ships-is-redistributable)
@@ -239,7 +239,7 @@ by another route. The bootloader itself is the shortest one — see below.
 ## Installing to the NVMe from the booted node
 
 The shortest way onto the M.2 disk uses no serial console and no bootloader
-prompt at all. Flash the **eMMC** with the BMC, carrying the image inside itself.
+prompt at all. Flash the **eMMC** with the BMC, using an image that contains its own compressed copy.
 The BMC does that in one step. Then boot it, and let the node write its own NVMe.
 
 ```sh
@@ -248,7 +248,7 @@ boot2deb press turing-rk1/forky rk1-03.img --embed-image \
 tpi flash -n 2 -l -i rk1-03.img
 ```
 
-`--embed-image` carries the recipe's own compressed artifact inside the pressed
+`--embed-image` places the recipe's own compressed artifact inside the pressed
 image at `/var/lib/boot2deb/install/`. Power the node on, let first boot finish,
 then from an ssh session:
 
@@ -274,7 +274,7 @@ disk you are about to replace.
 The BMC writes eMMC and nothing else. The loader it streams into the module speaks
 eMMC, so the M.2 disk is invisible to `tpi flash`, to the web UI, and to gadget
 mode. The RK1's own u-boot has no such limit, since it enumerates the disk over
-`pcie3x4`. The shipped bootloader therefore carries the two commands that let a host
+`pcie3x4`. The shipped bootloader therefore includes the two commands that let a host
 reach it.
 
 This route needs a UART session and interrupting the boot countdown. Reach for it
@@ -325,7 +325,7 @@ its own. Images at or above 4 GiB uncompressed need `gzwrite`'s explicit
 `outsize` argument, and the shipped recipes are well under it.
 
 Either way the eMMC still needs a bootloader afterwards. `boot2deb build
-turing-rk1/forky --stage uboot` emits the shipping one, which also carries `ums`.
+turing-rk1/forky --stage uboot` emits the shipping one, which also includes `ums`.
 A node that boots from NVMe therefore keeps a route back to its disks without
 reflashing the tool.
 
@@ -358,7 +358,7 @@ is 115200. See Turing Pi's [UART docs](https://docs.turingpi.com/docs/tpi-uart).
 
 ### Forcing one boot from a chosen medium
 
-A node carrying a system on both its eMMC and its M.2 disk boots whichever its
+A node with a system on both its eMMC and its M.2 disk boots whichever its
 `boot_targets` list reaches first. To boot the other one **once**, override the list
 at the prompt instead of writing it. Checking that a freshly written eMMC copy comes
 up, without disturbing a node that normally runs from NVMe, is the case for it:
@@ -454,7 +454,7 @@ support-matrix`](../reference/support-matrix.md).
 | VP9 | `rkvdec` VDPU381, `/dev/video0` | `NV12` (profile 0) | `NV15` (profile 2) | profiles 1 and 3 are 4:2:2/4:4:4, which the hardware cannot do |
 | AV1 | Hantro VPU981, `/dev/video3` | `NV12` | `NV15`, `P010` | to 8192x4352. Decodes to a 4x4-tiled buffer and post-processes out |
 | VP8 | Hantro VDPU2, `/dev/video1` | `NV12` | — | to 3840x2160 |
-| MPEG-2 | Hantro VDPU2, `/dev/video1` | `NV12` | — | 1080p ceiling. Within ±2 of software decode and almost never bit-exact. Bottom-field-first field pictures carry one reference-parity defect |
+| MPEG-2 | Hantro VDPU2, `/dev/video1` | `NV12` | — | 1080p ceiling. Within ±2 of software decode and almost never bit-exact. Bottom-field-first field pictures have one reference-parity defect |
 
 FFmpeg's `v4l2request` decides where a stream goes. Of the decoders that take the
 stream's codec, it tries the one reporting the widest frame-size range first
@@ -469,7 +469,7 @@ as control:
 
 - **HEVC** (JCT-VC-HEVC_V1): **146/147**. The one failure is unequal luma/chroma bit
   depth, which software fails too. A stream that keeps its reference picture sets in the
-  SPS needs the `EXT_SPS_ST_RPS`/`EXT_SPS_LT_RPS` controls filled. `ffmpeg-rk` carries
+  SPS needs the `EXT_SPS_ST_RPS`/`EXT_SPS_LT_RPS` controls filled. `ffmpeg-rk` includes
   the patch that does (`media-accel/ffmpeg/0016`), and with it the ffmpeg harness
   reaches its own software ceiling (141/147). Without it such streams (HM-encoded
   material, not x265 output) decode against wrong references.
@@ -508,7 +508,7 @@ much cheaper: 113.3 fps at 1080p for 1.3 cores, about what software HEVC costs.
 
 Both are bit-exact against their encoders' own reconstruction. Neither direction
 encodes. FFmpeg has no AVS2 encoder wrapper at all, and its AVS3 one is for a library
-this image does not carry.
+this image does not contain.
 
 ```sh
 boot2deb build turing-rk1/forky+media-accel-rockchip+avs-decode
@@ -639,7 +639,7 @@ and exactly two things can:
   here, since deriving a Vulkan frames context from the mapped frame fails with
   `Unsupported pixel format: nv15`.
 
-  **There is no `hwupload`, and that is deliberate.** A filtergraph carries one
+  **There is no `hwupload`, and that is deliberate.** A filtergraph has one
   `-filter_hw_device`. `scale_rkrga` needs the RKMPP one, and an explicit `hwupload`
   into Vulkan would need the Vulkan one. They cannot both be satisfied.
   `hwupload=derive_device=vulkan` from an RKMPP device is `ENOSYS`, and naming Vulkan
@@ -681,7 +681,7 @@ NV15 for the same samples.
 
 ### What the silicon has that this image does not drive
 
-The tables above are what runs. The RK3588 carries more, and knowing which gaps are
+The tables above are what runs. The RK3588 has more, and knowing which gaps are
 whose saves chasing them:
 
 - **AVS2 decode** is in the datasheet's decoder line, and **MPEG-4 ASP / H.263
@@ -690,8 +690,8 @@ whose saves chasing them:
   them in hardware. AVS2 and AVS3 are reachable in software with the `avs-decode`
   feature, at the cost measured above. MPEG-1 is nominally a subset of the MPEG-2
   silicon, but MPEG-1-syntax streams never engage the stateless path in any
-  userspace. Software carries them, cheaply.
-- **A dedicated JPEG decoder block** exists, and the devicetree carries its clock and
+  userspace. Software decodes them, cheaply.
+- **A dedicated JPEG decoder block** exists, and the devicetree contains its clock and
   QoS plumbing. A mainline driver is in flight upstream. It is a stateful V4L2
   M2M device, so once it lands ffmpeg reaches it the same way the encoder above is
   reached. Nothing new is needed beyond a decoder counterpart to that wrapper.

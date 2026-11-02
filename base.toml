@@ -8,7 +8,7 @@
 # --- Localization -------------------------------------------------------------
 # The `LANG` an image boots with. C.UTF-8 is a complete UTF-8 locale built into
 # glibc, so it needs no locale data on disk and no package — it works on the
-# smallest possible image. It is also neutral: this project targets no one country,
+# smallest possible image. It is also neutral: boot2deb targets no one country,
 # and a US locale is not a better default than any other.
 locale = "C.UTF-8"
 
@@ -122,7 +122,7 @@ first_boot_password_length = 12
 
 # SSH public keys authorized for the default account, one authorized_keys line each —
 # the key material itself, not a path to it (a path would resolve differently on another
-# machine, and the point of writing a key down is that every build carries it). Public
+# machine, and the point of writing a key down is that every build includes it). Public
 # keys are not secret, so they belong in config.
 #
 # This is the friendly answer to a long password: with a key here you never type the
@@ -216,7 +216,7 @@ packages = [
     "file",
 
     # Shell usability. man-db brings groff-base, bsdextrautils and libpipeline1 for
-    # ~9.2 MiB total, which buys the ~3.9 MiB of manual pages the image already carries
+    # ~9.2 MiB total, which buys the ~3.9 MiB of manual pages the image already contains
     # from every other package and otherwise has no reader for.
     "bash-completion",
     "man-db",

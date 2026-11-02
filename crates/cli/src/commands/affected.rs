@@ -233,7 +233,7 @@ fn run_claims(root: &ConfigRoot, repo: &Path, json_out: bool) -> Result<()> {
         return Ok(());
     }
     if rows.is_empty() {
-        println!("no recipe carries a validated claim, so there is nothing to check.");
+        println!("no recipe contains a validated claim, so there is nothing to check.");
         return Ok(());
     }
     let mut table = vec![vec![

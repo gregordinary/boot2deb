@@ -182,7 +182,7 @@ pub(crate) mod test_support {
         resolve_recipe(&repo_root(), RK1_MEDIA_ACCEL, &Overrides::default()).unwrap()
     }
 
-    /// That recipe's **committed** lock, for tests that need a lock carrying every pin
+    /// That recipe's **committed** lock, for tests that need a lock containing every pin
     /// table a media-accel build has — the kernel and patches pins, the userspace
     /// sources, ffmpeg's base, and the rootfs suite.
     ///
@@ -204,7 +204,7 @@ use boot2deb_core::model::Arch;
 /// image path's `tar`/`cp`, with remediation) are [`checks::tool_checks`].
 ///
 /// Only one of the two booleans is a host *requirement*. `cross_toolchain` decides what a
-/// provisioned root is given, not what the host must carry — the compiler is a package
+/// provisioned root is given, not what the host must have — the compiler is a package
 /// either way. They are kept apart because they come apart: see
 /// [`HostInfo::needs_cross_toolchain`] and [`HostInfo::needs_interpreter`].
 #[derive(Debug, Clone)]
@@ -218,7 +218,7 @@ pub struct Preflight {
     /// Running target binaries needs a `qemu-user` interpreter and a registered binfmt
     /// handler → the target-arch sandbox's compiles and the rootfs's maintainer scripts
     /// are emulated. This one *is* a host requirement, since the interpreter runs on the
-    /// host kernel's binfmt handler and no root can carry it.
+    /// host kernel's binfmt handler and no root can provide it.
     pub interpreter: bool,
 }
 

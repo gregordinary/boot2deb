@@ -14,14 +14,14 @@ ignore = [
     # from the timing of operations performed by the key's holder, as measured by a
     # party that can choose inputs and observe the response time. boot2deb's one use of
     # `rsa` is `press --fresh-identity`, which re-signs a depthcharge kernel (engine
-    # `image::vboot`) with the private key the image itself carries for its on-device
+    # `image::vboot`) with the private key the image itself contains for its on-device
     # kernel upgrades. On every boot2deb image that is the vboot developer key, published
     # test material that Debian ships in `vboot-kernel-utils`, so there is no secret to
     # recover. The signing runs locally, twice per press, with no party choosing inputs
     # or timing it. Archive signatures are verified by `irongall`, which shares no code
     # with `rsa`.
     #
-    # Nor is there a version to move to. The advisory carries no patched release, and
+    # Nor is there a version to move to. The advisory lists no patched release, and
     # the 0.10 line is still a release candidate whose own README states that the crate
     # is vulnerable to the Marvin Attack.
     #

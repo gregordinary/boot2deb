@@ -1,12 +1,12 @@
 //! `verify-patches`: the patch gate — dry-run the locked series with `git am --3way`.
 //!
 //! Every patch axis is covered. The kernel axis verifies the `kernel` scope, plus
-//! `ffmpeg` and `userspace` when the series carries patches for them. The u-boot
+//! `ffmpeg` and `userspace` when the series includes patches for them. The u-boot
 //! axis verifies the `uboot` scope. Each app that applies a series verifies its `app`
 //! scope against the app's tree and its `app_packaging` scope against the packaging
 //! tree.
 //!
-//! A recipe verifies every axis it carries, each against its own version. A u-boot
+//! A recipe verifies every axis it has, each against its own version. A u-boot
 //! series makes no claim about a kernel, nor an app series about either. Reporting
 //! them at one target would misdescribe all but one of them.
 //!
@@ -57,7 +57,7 @@ struct ResolvedTree {
 /// Under `--json` the *verdict* is one document on stdout — per axis, how many
 /// patches applied and every one that did not. The `git am` runs still stream to the
 /// terminal like a build stage, because what `git` said is the evidence a failing CI
-/// log has to carry.
+/// log has to contain.
 pub(crate) fn run(
     root: &ConfigRoot,
     recipe: &str,
@@ -239,7 +239,7 @@ pub(crate) fn run(
 }
 
 /// The kernel-family trees (`kernel`, plus `ffmpeg`/`userspace` where the series
-/// carries patches for them), or an empty list when the lock pins no kernel series.
+/// includes patches for them), or an empty list when the lock pins no kernel series.
 ///
 /// This is where `--kernel` applies: the candidate question is about a kernel tree,
 /// and it relaxes both the envelope verdict and the range match.
@@ -348,7 +348,7 @@ fn kernel_axis(
     }];
 
     // The ffmpeg/userspace series verify only for a media-accel build, which is the
-    // only one carrying those source trees; without them there is nothing to fetch or
+    // only one containing those source trees; without them there is nothing to fetch or
     // apply against (the series' ffmpeg/userspace scopes, if any, are moot here).
     if let (Some(ff), Some(ff_pins)) = (
         build.image.as_ref().and_then(|i| i.ffmpeg.as_ref()),
@@ -376,7 +376,7 @@ fn kernel_axis(
     }
     // The `userspace` scope's patches apply to whichever tree declares `patched`, so
     // verification needs that tree specifically — a SoC with no patched tree has none to
-    // verify against, and carries no userspace patches either.
+    // verify against, and has no userspace patches either.
     let patched = build
         .image
         .iter()
@@ -629,9 +629,9 @@ fn tree_for_scope(
 /// What a kernel falling outside a series' declared `applies_to_kernel` means for
 /// this run.
 enum Envelope {
-    /// Say so and measure it anyway, carrying the note to print.
+    /// Say so and measure it anyway, containing the note to print.
     Measure(String),
-    /// Refuse, carrying the error.
+    /// Refuse, containing the error.
     Refuse(String),
 }
 

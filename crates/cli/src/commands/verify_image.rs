@@ -15,7 +15,7 @@
 //!     document the rootfs published.
 //!  2. The plan parses, and its digest is the one the provenance records. A mismatch
 //!     means the manifest describes a document other than the one that shipped.
-//!  3. `[[archives]]` is well formed. It carries at least the mirror and the build's
+//!  3. `[[archives]]` is well formed. It contains at least the mirror and the build's
 //!     own pool. The pool is marked `local` with no mirror URL, since a per-run path
 //!     is not portable provenance. `signed_by` is written on every row, because an
 //!     empty `signed_by` is a *fact* (trusted unsigned) and must be present rather
@@ -25,8 +25,8 @@
 //!     fit ordering exists to preserve, so it is checked on every image and not only on
 //!     the fitted one.
 //!  5. **The rootfs GPT entry is marked bootable.** U-Boot's `bootflow scan` narrows
-//!     to the partitions carrying the legacy-BIOS-bootable attribute, as soon as any
-//!     partition on the medium carries it. It scans partition 1 alone when none
+//!     to the partitions with the legacy-BIOS-bootable attribute, as soon as any
+//!     partition on the medium has it. It scans partition 1 alone when none
 //!     does, and partition 1 is the seed. Nothing about the filesystem's contents
 //!     says whether the bootloader will ever open it.
 //!  6. A fitted `image_size` left the slack it asked for.
@@ -260,7 +260,7 @@ fn verify_point(
         detail: match pool {
             None => "no `local = true` row".into(),
             Some(p) if p.mirror.is_some() => {
-                "the pool carries a mirror URL — a build-host path is not portable \
+                "the pool contains a mirror URL — a build-host path is not portable \
                  provenance"
                     .into()
             }
@@ -300,7 +300,7 @@ fn verify_point(
         what: "rootfs bootable",
         detail: match &part {
             Err(e) => format!("could not read the rootfs partition: {e}"),
-            Ok(p) if p.bootable => "the GPT entry carries the bootable attribute".into(),
+            Ok(p) if p.bootable => "the GPT entry has the bootable attribute".into(),
             Ok(_) => "the rootfs GPT entry is not marked bootable — a scanning \
                       bootloader will never open it"
                 .into(),

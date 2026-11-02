@@ -9,14 +9,14 @@
 //! reading its GPT back, editing, and pressing again.
 //!
 //! The vocabulary is exactly **the image's identity**. Every name here is a
-//! field of the `/etc/boot2deb/image.toml` the tree already carries
+//! field of the `/etc/boot2deb/image.toml` the tree already contains
 //! ([`SystemIdentity`]), or of the identifiers stamped into its GPT and
 //! superblock ([`ImageIdentity`]). That is what the `image.` namespace states,
 //! and it is why the set is closed. A template draws on what the image knows
 //! about itself, not on the press's environment.
 //!
 //! The namespace is also what keeps the substitution safe to run over a file
-//! that carries braces of its own. `{{` is claimed **only** when `image.`
+//! that contains braces of its own. `{{` is claimed **only** when `image.`
 //! follows it, so a Go, Helm, or Jinja template shipped as data passes through
 //! untouched. Inside the namespace the rules are strict. An unknown name is an
 //! error at press time, rather than an empty string in the shipped image.
@@ -176,8 +176,8 @@ impl ImageFacts {
     /// `identity` is the tree's own `/etc/boot2deb/image.toml`, read back out of
     /// the entry list being merged. A template therefore sees what the image says
     /// about itself, rather than a second copy of the build's opinion. `image`
-    /// carries the identifiers that exist only in the GPT and the superblock.
-    /// `recipe` carries the build point, which the identity document does not
+    /// contains the identifiers that exist only in the GPT and the superblock.
+    /// `recipe` names the build point, which the identity document does not
     /// record (it states the axes the reference resolves to instead).
     ///
     /// `seed_hostname` is the press's `--hostname`, and supersedes the identity
@@ -234,7 +234,7 @@ impl ImageFacts {
 /// One piece of a parsed template.
 #[derive(Debug, PartialEq, Eq)]
 enum Segment {
-    /// Text carried through unchanged — including any `{{` the namespace did
+    /// Text passed through unchanged — including any `{{` the namespace did
     /// not claim.
     Literal(String),
     /// A reference, replaced by its value when the template is rendered.
@@ -251,7 +251,7 @@ enum Segment {
 #[derive(Debug)]
 pub struct Template {
     segments: Vec<Segment>,
-    /// How many references the text carries, for the press's own report — an
+    /// How many references the text contains, for the press's own report — an
     /// operator who expected four and is told three has found their typo.
     references: usize,
 }
@@ -340,7 +340,7 @@ impl Template {
 }
 
 /// The destination a template source lands at: its path with
-/// [`TEMPLATE_SUFFIX`] removed, or `None` when the name does not carry one.
+/// [`TEMPLATE_SUFFIX`] removed, or `None` when the name does not have one.
 #[must_use]
 pub fn strip_suffix(name: &str) -> Option<&str> {
     name.strip_suffix(TEMPLATE_SUFFIX)
@@ -351,7 +351,7 @@ mod tests {
     use super::*;
     use boot2deb_core::provenance::{IdentityImage, IdentityKernel};
 
-    /// The identity document a boot2deb rootfs carries, as the merge reads it
+    /// The identity document a boot2deb rootfs contains, as the merge reads it
     /// back out of the tree.
     fn identity_doc() -> SystemIdentity {
         SystemIdentity {
@@ -381,7 +381,7 @@ mod tests {
         }
     }
 
-    /// The identifiers this build point's image carries.
+    /// The identifiers this build point's image contains.
     fn image_identity() -> ImageIdentity {
         ImageIdentity::derive("turing-rk1/forky", "turing-rk1")
     }
@@ -467,7 +467,7 @@ mod tests {
         );
     }
 
-    /// The namespace is what makes the pass safe over a file that carries
+    /// The namespace is what makes the pass safe over a file that contains
     /// braces of its own: only `image.` is claimed, everything else is text.
     #[test]
     fn foreign_braces_pass_through_untouched() {

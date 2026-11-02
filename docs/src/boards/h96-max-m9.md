@@ -1,7 +1,7 @@
 # H96 MAX M9
 
 The H96 MAX M9 (and the M9S, the same board) is an Android TV box built on the
-Rockchip **RK3576**. It carries an octa-core CPU (4x Cortex-A72 + 4x Cortex-A53) with a
+Rockchip **RK3576**. It has an octa-core CPU (4x Cortex-A72 + 4x Cortex-A53) with a
 Mali-G52 MC3, LPDDR4X memory, eMMC 5.1 storage, Gigabit ethernet and HDMI. boot2deb turns
 it into a mainline Debian box: kernel `v7.3`, u-boot `v2026.10`, no vendor BSP.
 
@@ -19,7 +19,7 @@ having a bootloader that can recover the board without a cable. That is what the
 | `h96-max-m9/media-accel` | The same image plus HW video decode and the RGA 2D accelerator | expected — every path is exercised on the board, but not at this pin |
 | `h96-max-m9/util` | u-boot only — the recovery tool, with this board's ethernet | builds, and its ethernet is validated |
 
-The base image carries the NPU — see [The NPU](#the-npu) below.
+The base image supports the NPU — see [The NPU](#the-npu) below.
 
 Build the shipped image as in [Getting started](../getting-started.md):
 
@@ -86,7 +86,7 @@ nothing already working on the board. There are two ways in:
   clock data out of the flash and falls through to USB device mode. The status LED
   glowing *dim* rather than bright confirms it.
 - **Once the board runs boot2deb's u-boot:** press the recessed button in the AV jack
-  before connecting power. Our u-boot carries the download-key patches, so the button
+  before connecting power. boot2deb's u-boot includes the download-key patches, so the button
   drops straight into maskrom.
 
 The AV-jack button behaves differently on factory firmware depending on the build. Some
@@ -147,17 +147,17 @@ Things the board needs that are worth knowing about:
 - **Wi-Fi is an out-of-tree module.** The AIC8800D80 has no mainline driver, so
   boot2deb builds one from a pinned upstream repo as a `.deb` through the
   [kmods layer](../reference/config-model.md#out-of-tree-modules-are-their-own-layer).
-  The device declares it as `device_kmods = ["aic8800"]` rather than carrying it as a
+  The device declares it as `device_kmods = ["aic8800"]` rather than maintaining it as a
   kernel patch series. An RK3576 board without the chip therefore gets a lean kernel.
 - **Bluetooth audio needs `libspa-0.2-bluetooth` installed alongside a desktop.** The image ships
   `bluez`, so `hci0` comes up on its own and a headset pairs. Sound only reaches it through
   PipeWire's Bluetooth plugin, which `wireplumber` and `pipewire-pulse` merely *Suggest*. No
   desktop metapackage brings it in, and a paired headset with no sink is what its absence looks
-  like. Images are headless and carry no PipeWire, so install it when you install the desktop.
+  like. Images are headless and contain no PipeWire, so install it when you install the desktop.
 - **`cpuidle.off=1` is in the kernel command line.** A core suspended into the DT
   `CPU_SLEEP` state can miss its wakeup on this platform's BL31. It is a board-level
   workaround, stated in `devices/h96-max-m9.toml` with the condition to drop it.
-- **Only the blue port beside HDMI carries SuperSpeed, and it does.** That port is
+- **Only the blue port beside HDMI provides SuperSpeed, and it does.** That port is
   `drd0`, running SuperSpeed on the usbdp PHY, and it needs nothing beyond the SoC dtsi
   to do it. Measured at 5 Gbps and holding it: 92 GB of continuous reads in 606 s at
   145-158 MB/s, with no link error. The port was still at `speed=5000` afterwards.
@@ -170,8 +170,8 @@ Things the board needs that are worth knowing about:
   leaves the SuperSpeed root hub silent. Receiver detection is a DC test for the
   device's termination, and an unmated pair reads as absent. Check the seating first.
 
-  The black ports are `drd1`, and they cannot carry SuperSpeed. They sit behind an
-  internal `1a86:8091` 4-port **USB 2.0** hub that also carries the bundled remote's
+  The black ports are `drd1`, and they cannot provide SuperSpeed. They sit behind an
+  internal `1a86:8091` 4-port **USB 2.0** hub that also connects the bundled remote's
   receiver. `drd1`'s own SuperSpeed lane reaches no connector.
 - **4K60 is not reachable on any `dw-hdmi-qp` board**, this one included, and you see it
   in the mode list rather than as a failure. On a 4K60 display the connector offers
@@ -187,7 +187,7 @@ Things the board needs that are worth knowing about:
   entry is the one that matters. The upstream SAI driver programmed that register only
   at probe, and the value did not survive to the running device. No in-tree board could
   notice, because they all describe the identity mapping the register already holds.
-  The `rk3576-fixes` series carries the driver fix, as patch 103.
+  The `rk3576-fixes` series includes the driver fix, as patch 103.
 
   It was verified at the register level, by driving each SDO port in turn and listening.
   The device tree alone cannot fix this board.
@@ -197,7 +197,7 @@ Things the board needs that are worth knowing about:
 `h96-max-m9/media-accel` adds the `media-accel-v4l2` feature on top of the base image.
 That is `ffmpeg-rk` built with V4L2-request decode, and `librga2` with the out-of-tree
 RGA driver the feature's own patch series and kconfig fragment bring in. The base image
-carries neither. The VDPU383 driver is on the SoC layer either way, but nothing in a
+contains neither. The VDPU383 driver is on the SoC layer either way, but nothing in a
 base image can drive it.
 
 ```sh
@@ -312,7 +312,7 @@ RGA does not close the gap. This SoC has RGA2 cores only, which take `NV15` in b
 no 10-bit format out. `P010` output is an RGA3 capability, and there is no RGA3 here. A
 hardware 10-bit-to-10-bit conversion therefore does not exist on this part, structurally.
 
-The VDPP block this SoC does carry is not a way round it either. Its pixel path takes
+The VDPP block this SoC does have is not a way round it either. Its pixel path takes
 `NV12` or `NV21` and nothing else, with a two-bit format field that has no bit-depth
 selector at all. The 10-bit formats it does name feed a histogram engine that produces
 statistics rather than a picture.
@@ -324,7 +324,7 @@ transcoding, not of playback.
 
 ### Vulkan: none on this GPU
 
-The image carries no Vulkan driver. Mesa's PanVk declines the Mali-G52 unless
+The image contains no Vulkan driver. Mesa's PanVk declines the Mali-G52 unless
 `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER` is set. With it set, on Mesa 26.1.6 and 26.2.2, every
 ffmpeg Vulkan filter measured computes the chroma planes wrong. `libplacebo` refuses the
 device outright, since PanVk offers Vulkan 1.0 on this GPU and libplacebo needs 1.2.
@@ -450,7 +450,7 @@ grep . /sys/bus/usb/devices/*/power/wakeup
 
 ## The NPU
 
-The RK3576 carries an RKNN neural accelerator, and mainline drives it — through the
+The RK3576 has an RKNN neural accelerator, and mainline drives it — through the
 in-tree `rocket` DRM-accel driver, no vendor RKNPU2 stack. **Every image for this board
 has it**: the shipped `h96-max-m9/forky` binds `rocket` on `27700000.npu` and presents
 **`/dev/accel/accel0`**.

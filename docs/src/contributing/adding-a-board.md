@@ -67,19 +67,19 @@ Chromebit is a stick PC with no SD slot, no keyboard, no EC and no analog audio.
 
 The rule that makes it work is simple. Anything true of the whole family belongs on the
 **SoC layer**, not on the board that happened to need it first. `socs/rk3288.toml` and
-`socs/rk3288/` carry the family's initramfs module list, radio blobs and network stack
+`socs/rk3288/` contain the family's initramfs module list, radio blobs and network stack
 for exactly that reason. When you find yourself copying a file from one board to another, move it up
 instead.
 
 ### 1. The arch layer
 
-`arches/<arch>.toml`, only for a CPU architecture not already present. It carries the
+`arches/<arch>.toml`, only for a CPU architecture not already present. It contains the
 arch-wide kbuild facts: the cross triple, kbuild's `ARCH=`, and the kernel image path.
-u-boot takes no `ARCH=` from here, because its defconfig carries it.
+u-boot takes no `ARCH=` from here, because its defconfig contains it.
 
 ### 2. The SoC layer
 
-`socs/<soc>.toml`, plus `socs/<soc>/overlay/` for files baked into the rootfs. It carries
+`socs/<soc>.toml`, plus `socs/<soc>/overlay/` for files baked into the rootfs. It contains
 the SoC's shared properties:
 
 - Device-tree directory
@@ -101,11 +101,11 @@ coupling is checked, not assumed.
 `boot-methods/<method>.toml`, which says how this family boots. **The file's shape depends
 on the method**, because the methods differ in kind:
 
-- `rockchip-rkbin` compiles a bootloader. It carries the u-boot source and ref, plus the
+- `rockchip-rkbin` compiles a bootloader. It contains the u-boot source and ref, plus the
   **raw-gap offsets**: where `idbloader` and `u-boot.itb` sit outside any partition, and
   where the rootfs partition starts.
 - `depthcharge` compiles nothing, because the firmware is the board's own and what it
-  loads is the signed kernel. The file carries the ChromeOS kernel partition's geometry,
+  loads is the signed kernel. The file contains the ChromeOS kernel partition's geometry,
   its GPT attribute bits, and the command line to sign into the kernel.
 
 A field from the other method is an unknown field and fails to parse. That is the point,
@@ -178,7 +178,7 @@ accumulate instead. See
 
 ### 5. The kmod layer
 
-`kmods/<name>.toml`, only if the board carries hardware whose driver is in nobody's kernel
+`kmods/<name>.toml`, only if the board has hardware whose driver is in nobody's kernel
 tree. Run `boot2deb list-kmods` first. If a kmod for the chip already exists, your board
 needs one line, `device_kmods = ["<name>"]`, and nothing else.
 
@@ -257,7 +257,7 @@ stage that consumes them compiles, so a typo produces a late, confusing failure:
 
 | Value | Layer | Fails at |
 | --- | --- | --- |
-| `kernel_dtb` | device | the kernel build — the DTB is not produced (unless the board carries `device_dts`, below, which makes this a resolve-time check) |
+| `kernel_dtb` | device | the kernel build — the DTB is not produced (unless the board contains `device_dts`, below, which makes this a resolve-time check) |
 | `uboot_defconfig` | device | the u-boot build — unknown defconfig |
 
 Take both from the board's upstream support. `kernel_dtb` is the device tree the mainline

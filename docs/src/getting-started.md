@@ -75,7 +75,7 @@ It reports your host arch, the two cross answers, and one line per requirement:
 ```
 host arch : x86_64
 target    : turing-rk1/forky (arch arm64)
-toolchain : cross — the build root carries a toolchain emitting arm64
+toolchain : cross — the build root contains a toolchain emitting arm64
 execution : emulated — needs qemu-user binfmt for arm64 maintainer scripts and sandbox compiles
 
   ok      git                          /usr/bin/git
@@ -100,7 +100,7 @@ There is no host `gcc`, no `make`, no `dpkg`, no `fakeroot` in the list, because
 them is what compiles or archives anything. The C compiler
 [What you need](#what-you-need) asks for is not an exception. It links the `boot2deb`
 binary, and no build stage invokes it. What remains is the handful of things no root can
-carry:
+contain:
 
 | Group | What it covers | When |
 | --- | --- | --- |

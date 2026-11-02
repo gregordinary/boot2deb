@@ -1,7 +1,7 @@
 //! What an image's package set weighs, rolled up — the pure half of `size`.
 //!
 //! Pure and deterministic: given the per-package rows a published plan document
-//! carries, group them and order them. Reading that document is the engine's job
+//! contains, group them and order them. Reading that document is the engine's job
 //! (`boot2deb_engine::rootfs::read_plan_weights`). Everything here is arithmetic over
 //! the rows it hands back, so the whole policy is unit-testable without a build.
 //!
@@ -17,7 +17,7 @@
 //! So a report here answers "what did the package set contribute", never "how large is
 //! the image", and everything it renders says so.
 //!
-//! Policy also *permits* a stanza to omit the field. An omission is carried as
+//! Policy also *permits* a stanza to omit the field. An omission is recorded as
 //! [`None`] and counted separately, rather than folded in as zero. A total that
 //! silently absorbed unknowns would read as complete when it is not.
 
@@ -36,12 +36,12 @@ pub struct PlannedWeight {
     /// The exact version installed.
     pub version: String,
     /// The source package this was built from, where the archive states one that
-    /// differs from [`name`](Self::name). `None` means the source carries the same
+    /// differs from [`name`](Self::name). `None` means the source has the same
     /// name, which is how Debian encodes the common case. A rollup by source therefore
     /// keys on `source.unwrap_or(name)` rather than on this field alone.
     pub source: Option<String>,
     /// The archive's `Installed-Size` in **kibibytes**, kept in Policy's own unit so it
-    /// compares against a mirror's value directly. `None` where the stanza carried
+    /// compares against a mirror's value directly. `None` where the stanza contained
     /// none.
     pub installed_kib: Option<u64>,
     /// Index of the repository the package was retained from, which is the index the
@@ -115,7 +115,7 @@ pub struct WeightReport {
     /// Every stated size in the plan, summed — the figure the rows partition,
     /// unchanged by any `top` truncation the caller applies afterwards.
     pub total_kib: u64,
-    /// How many packages the plan carries.
+    /// How many packages the plan contains.
     pub packages: usize,
     /// How many of those stated no size. Reported rather than hidden: a total is only
     /// as complete as this is small, and Policy permits the omission.
@@ -126,7 +126,7 @@ impl WeightReport {
     /// Roll `weights` up on `grouping`.
     ///
     /// `archive_labels` names the repositories by index, for [`Grouping::Archive`]. An
-    /// index it does not cover falls back to `archive <n>`. A plan carrying more
+    /// index it does not cover falls back to `archive <n>`. A plan containing more
     /// stanzas than the caller resolved therefore still produces a complete report,
     /// rather than dropping rows.
     pub fn build(
@@ -338,7 +338,7 @@ mod tests {
         let labels = vec!["deb.debian.org/debian".to_string()];
         let report = WeightReport::build(&sample(), Grouping::Archive, &labels);
         let keys: Vec<&str> = report.rows.iter().map(|r| r.key.as_str()).collect();
-        // Archive 1 has no label here — the plan carries a stanza the caller did not
+        // Archive 1 has no label here — the plan contains a stanza the caller did not
         // name — and the row is still reported rather than dropped.
         assert_eq!(keys, ["deb.debian.org/debian", "archive 1"]);
         assert_eq!(report.rows[0].packages, 3);
@@ -370,7 +370,7 @@ mod tests {
         assert!(!index.contains_key("systemd"));
         assert!(!index.contains_key("base-files"));
         // A stanza may also state a source *equal* to the package's own name, which the
-        // plan carries verbatim; it means the same thing and is indexed the same way.
+        // plan contains verbatim; it means the same thing and is indexed the same way.
         let explicit = vec![PlannedWeight {
             name: "systemd".into(),
             version: "1".into(),

@@ -2,7 +2,7 @@
 # release is verified, and what an Ubuntu image adds to the shared base set.
 #
 # A recipe never names this file. It names a suite, and resolution finds the one
-# distro layer whose `suites` list carries it.
+# distro layer whose `suites` list contains it.
 
 description = "Ubuntu"
 
@@ -15,13 +15,13 @@ suites = ["resolute"]
 rolling = []
 
 # The archive serving each suite's release pocket. apt verifies every Release
-# signature against the archive keyring, so plain http carries no integrity burden.
+# signature against the archive keyring, so plain http has no integrity burden.
 mirror = "http://archive.ubuntu.com/ubuntu"
 # The point-in-time copy of that archive. A captured snapshot timestamp is appended to
-# it, as `<snapshot>/<timestamp>/`. It carries the security pocket too.
+# it, as `<snapshot>/<timestamp>/`. It contains the security pocket too.
 snapshot = "https://snapshot.ubuntu.com/ubuntu"
 
-# The four components a stock Ubuntu install enables. Ubuntu's main carries the
+# The four components a stock Ubuntu install enables. Ubuntu's main contains the
 # firmware packages, so this layer offers no free-only set, and resolution refuses a
 # Linux-libre kernel on it.
 components = ["main", "restricted", "universe", "multiverse"]
@@ -40,7 +40,7 @@ default_user = "ubuntu"
 # recipe may pick initramfs-tools instead.
 initramfs_generator = "dracut"
 
-# The important set already carries ubuntu-minimal and systemd-resolved, and
+# The important set already includes ubuntu-minimal and systemd-resolved, and
 # ubuntu-minimal depends on netplan and chrony. Nothing beyond the base set is named
 # here.
 packages = []
@@ -53,7 +53,7 @@ exclude = []
 suffix = "-updates"
 
 # Marked NotAutomatic and ButAutomaticUpgrades by the archive, so a package installs
-# from here only when no other pocket carries it, as apt would choose.
+# from here only when no other pocket contains it, as apt would choose.
 [[pockets]]
 suffix = "-backports"
 

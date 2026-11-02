@@ -53,7 +53,7 @@ pub struct UpdateOptions<'a> {
     pub rootfs_manifest: &'a str,
     /// The rootfs `SOURCE_DATE_EPOCH` this lock records, in Unix seconds: the time of
     /// this update. The caller keeps the previous lock's value instead when no pin moved
-    /// ([`Lock::carry_source_date_epoch`]).
+    /// ([`Lock::keep_source_date_epoch`]).
     pub source_date_epoch: u64,
     /// Produces each `dotnet-deb` app's NuGet pin from its pinned trees. Consulted once
     /// per such app, after its trees are pinned.
@@ -126,7 +126,7 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
     } else {
         None
     };
-    // Resolution guarantees named series carry their source + ref, so a series is
+    // Resolution guarantees named series contain their source + ref, so a series is
     // never pinned without naming the repo and ref it came from.
     let patches = (!kernel_series.is_empty()).then(|| {
         let compiled = image
@@ -206,7 +206,7 @@ pub fn resolve_lock(build: &ResolvedBuild, opts: &UpdateOptions) -> Result<Lock,
         }
         None => (None, None),
     };
-    // Pin the media-accel sources only when the build carries them (a
+    // Pin the media-accel sources only when the build includes them (a
     // `requires_media_accel` feature is selected); a base build peels no such refs
     // and its lock omits both tables entirely.
     // One pin per tree the build compiles, in the SoC's declared order — so the lock's
@@ -406,7 +406,7 @@ fn assemble_lock(
         userspace,
         ffmpeg,
         // One pin per device `device_kmods` entry; empty (and omitted from the committed
-        // lock) for a board that carries no out-of-tree module.
+        // lock) for a board that has no out-of-tree module.
         kmods,
         // One pin per app a selected feature compiles; empty, and omitted, otherwise.
         apps,
@@ -1118,7 +1118,7 @@ mod tests {
                 "a no-patch build must not consult the patches checkout, got {e:?}"
             );
         }
-        // The pure assembly carries the real contract: no series -> no `[patches]`.
+        // The pure assembly enforces the real contract: no series -> no `[patches]`.
         // Sources and blob files mirror the resolved build so the drift gate below
         // sees a lock that genuinely describes it.
         let boot = build.rkbin_boot().unwrap();

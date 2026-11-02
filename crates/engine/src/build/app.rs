@@ -45,9 +45,9 @@ const TREE_STAGE_VERSION: u32 = 1;
 /// artifact built the old way is not restored.
 const OUTPUT_STAGE_VERSION: u32 = 1;
 
-/// The epoch every app's deb version carries. The rootfs solve and a device's
+/// The epoch every app's deb version contains. The rootfs solve and a device's
 /// `apt upgrade` both prefer the highest version across their repositories, and the
-/// archive's own build of the app carries none, so this build is preferred over every
+/// archive's own build of the app has none, so this build is preferred over every
 /// release the archive publishes later.
 const DEB_EPOCH: &str = "1";
 
@@ -55,7 +55,7 @@ const DEB_EPOCH: &str = "1";
 ///
 /// They are the sequencer the packaging's `debian/rules` runs, and the ICU its
 /// `dh_gencontrol` override reads the soname from, which the SDK also loads. The cross
-/// base carries the rest: `dpkg-dev`, the target's binutils, and the CA store.
+/// base includes the rest: `dpkg-dev`, the target's binutils, and the CA store.
 pub fn layer_packages() -> &'static [&'static str] {
     &["debhelper", "libicu-dev"]
 }
@@ -67,7 +67,7 @@ pub fn node_name(name: &str) -> String {
 }
 
 /// The name of the app's build root, `app-<name>`: the directory its overlay upper is
-/// staged under. Not the node name, whose `:` an overlay mount's options cannot carry.
+/// staged under. Not the node name, whose `:` an overlay mount's options do not allow.
 fn root_stage(name: &str) -> String {
     format!("app-{name}")
 }
@@ -309,9 +309,9 @@ fn apply_app_scope(
 /// A self-contained .NET publish writes the modification time of each static web
 /// asset into a manifest it ships (`*.staticwebassets.endpoints.json`, as a
 /// `Last-Modified` header). A fresh checkout's times are the time of the checkout.
-/// With this, the entries for assets read from the source tree carry the commit's time
+/// With this, the entries for assets read from the source tree contain the commit's time
 /// instead. The `.gz` and `.br` variants the SDK compresses during the build still
-/// carry the time they were written.
+/// have the time they were written.
 fn set_source_mtimes(dir: &Path, epoch: u64) -> Result<(), EngineError> {
     let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch);
     let mut stack = vec![dir.to_path_buf()];
@@ -755,11 +755,11 @@ mod tests {
         }
     }
 
-    /// The version carries the epoch that keeps the archive's own build from
+    /// The version contains the epoch that keeps the archive's own build from
     /// replacing this one, the release the packaging reads back out, and both
     /// commits that can change the bytes.
     #[test]
-    fn the_deb_version_carries_the_epoch_release_and_both_commits() {
+    fn the_deb_version_contains_the_epoch_release_and_both_commits() {
         assert_eq!(deb_version(&pin()), "1:12.1+gee91c75e7000.p4350b1a5e405");
         let mut unpatched = pin();
         unpatched.patches = None;
@@ -817,9 +817,9 @@ mod tests {
     }
 
     /// The build root's name becomes an overlay upper directory, and an overlay
-    /// mount's options cannot carry a `:` or a `,`. The node name has a `:`.
+    /// mount's options do not allow a `:` or a `,`. The node name has a `:`.
     #[test]
-    fn the_build_root_is_named_without_what_an_overlay_cannot_carry() {
+    fn the_build_root_is_named_without_what_an_overlay_does_not_allow() {
         assert_eq!(node_name("jellyfin"), "app:jellyfin");
         let stage = root_stage("jellyfin");
         assert!(!stage.contains(':') && !stage.contains(','), "{stage}");

@@ -58,7 +58,7 @@ pub struct ImportMeta {
     /// `From:` author for a synthesized header. Applied to `git-show` (as a
     /// fallback only) and `bare-diff`. A pass-through mbox keeps its own `From:`.
     pub author: Option<String>,
-    /// Subject override — the title for a `bare-diff` that carries none, or an
+    /// Subject override — the title for a `bare-diff` that contains none, or an
     /// override for `git-show`. Ignored for a pass-through mbox (it is canonical).
     pub subject: Option<String>,
     /// A DEP-3 `Origin:` provenance trailer to add to the commit message, for
@@ -85,7 +85,7 @@ pub fn classify(text: &str) -> PatchKind {
         return PatchKind::GitShow;
     }
     // An mbox `From ` separator (note the space — `From:` is a header, not this),
-    // or an email whose leading header block carries a `Subject:`.
+    // or an email whose leading header block contains a `Subject:`.
     if first.starts_with("From ") || has_subject_header(text) {
         return PatchKind::Mbox;
     }
@@ -149,7 +149,7 @@ fn is_git_show_header(line: &str) -> bool {
     }
 }
 
-/// True when the leading header block (lines up to the first blank line) carries a
+/// True when the leading header block (lines up to the first blank line) contains a
 /// `Subject:` header — the reliable mark of an email/mbox even without a `From `
 /// separator line.
 fn has_subject_header(text: &str) -> bool {
@@ -188,7 +188,7 @@ fn normalize_mbox(text: &str, meta: &ImportMeta) -> Result<Normalized, ConfigErr
 
 /// Reshape default `git show` output into canonical mbox: its `commit`/`Author:`/
 /// `Date:` become the mbox headers, the indented message is dedented, and the diff
-/// is carried through under a synthesized `---` cut.
+/// is passed through under a synthesized `---` cut.
 fn normalize_git_show(text: &str, meta: &ImportMeta) -> Result<Normalized, ConfigError> {
     let mut lines = text.lines();
     let commit_line = lines.next().unwrap_or("");
@@ -562,7 +562,7 @@ mod tests {
         assert!(n
             .mbox
             .contains("Subject: [PATCH] rga3: forward-port to 7.1\n"));
-        // Body dedented, and the diff carried under a synthesized `---` cut.
+        // Body dedented, and the diff passed through under a synthesized `---` cut.
         assert!(n
             .mbox
             .contains("\nThree API adjustments.\nSecond body line.\n"));

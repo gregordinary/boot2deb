@@ -10,7 +10,7 @@
 //! [`cross_identity`](crate::build::cross_identity) rather than by a `--version` line.
 //!
 //! `qemu-user` is the exception, and it is a real one. It is registered with the host
-//! *kernel's* binfmt handler and executes from the host filesystem. No root can carry
+//! *kernel's* binfmt handler and executes from the host filesystem. No root can provide
 //! it, and nothing but a probe can describe it. Where the host cannot execute the
 //! target's binaries, it interprets every compiler invocation in the target-arch
 //! sandbox. That makes it an input to every `.deb` produced there.
@@ -20,7 +20,7 @@
 //! What runs is whatever the kernel's binfmt registration names, and that is not
 //! necessarily what a `PATH` lookup finds. Debian registers a wrapper path under
 //! `/usr/libexec/qemu-binfmt/` rather than the `qemu-<arch>-static` on `PATH`. The two
-//! normally resolve to one file, and nothing makes them. A build whose `PATH` carries no
+//! normally resolve to one file, and nothing makes them. A build whose `PATH` contains no
 //! interpreter at all still runs every target binary, because binfmt reaches the
 //! registered path directly. A `PATH` probe can therefore report an absence that is not
 //! one, and can name a binary that never ran.

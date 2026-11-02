@@ -9,11 +9,11 @@
 //!
 //! A partition is three regions laid end to end:
 //!
-//! - The **keyblock** carries the *data key*, the public half of the key that signs
+//! - The **keyblock** contains the *data key*, the public half of the key that signs
 //!   everything after it. The firmware checks the keyblock against its own kernel subkey,
-//!   and a re-sign carries it unchanged.
+//!   and a re-sign keeps it unchanged.
 //! - The **preamble** records where the body loads and where its bootloader stub sits,
-//!   and carries the body's signature. Its own signature covers its header and that body
+//!   and contains the body's signature. Its own signature covers its header and that body
 //!   signature.
 //! - The **body** is the kernel blob (a FIT on these boards), a 4 KiB area holding the
 //!   NUL-terminated command line, a 4 KiB parameters area, and the bootloader stub.
@@ -51,7 +51,7 @@ const PUBLIC_EXPONENT: u32 = 65_537;
 /// The largest modulus a vboot algorithm uses, in bits.
 const MAX_MODULUS_BITS: usize = 8192;
 
-/// The DER `DigestInfo` header a PKCS#1 v1.5 signature over a SHA-256 digest carries
+/// The DER `DigestInfo` header a PKCS#1 v1.5 signature over a SHA-256 digest contains
 /// before the digest (RFC 8017 §9.2, note 1): the SHA-256 algorithm identifier, then an
 /// octet string of 32 bytes.
 const SHA256_DIGEST_INFO: [u8; 19] = [
@@ -153,7 +153,7 @@ pub(crate) struct KernelPartition {
 
 impl KernelPartition {
     /// Parse a signed kernel partition and verify both of its signatures against the
-    /// data key its keyblock carries.
+    /// data key its keyblock contains.
     ///
     /// Verification comes first because it proves the layout was read correctly. A
     /// partition whose fields were misread fails here instead of being re-signed into
@@ -163,7 +163,7 @@ impl KernelPartition {
     ///
     /// [`EngineError::KpartResign`] when the bytes are not a vboot kernel partition of
     /// structure version 2, are truncated, name an algorithm that does not hash with
-    /// SHA-256, or carry a signature that does not verify.
+    /// SHA-256, or contain a signature that does not verify.
     pub(crate) fn parse(bytes: Vec<u8>) -> Result<Self, EngineError> {
         if !bytes.starts_with(MAGIC) {
             return Err(resign_err(

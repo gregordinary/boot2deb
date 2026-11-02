@@ -3,7 +3,7 @@
 //!
 //! The bundled client speaks plain `http://` and `file://`, which covers the Debian
 //! mirror (integrity comes from the `Release` signature, not the transport) and the
-//! build's local `file://` pool. It does not speak TLS, deliberately, since carrying a
+//! build's local `file://` pool. It does not speak TLS, deliberately, since including a
 //! TLS stack is a decision a consumer makes rather than inherits.
 //!
 //! boot2deb has to make it. A feature can contribute an apt repository at any URL its

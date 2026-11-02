@@ -2,7 +2,7 @@
 # written into a ChromeOS kernel partition.
 #
 # This method builds no bootloader. The firmware is the board's own — coreboot plus
-# depthcharge, in an SPI chip that is not ours to produce — and what it loads is the
+# depthcharge, in an SPI chip that boot2deb does not build — and what it loads is the
 # kernel itself, signed and wrapped in a FIT. So there is no u-boot, no rkbin blob,
 # and no raw gap: the payload is a GPT partition, and the firmware finds it by type
 # GUID and picks it by the attribute bits below.
@@ -30,7 +30,7 @@ description = "ChromeOS depthcharge: a vboot-signed kernel FIT in a ChromeOS ker
 # kernel it is booted from (`--allow-current`), and a kernel that does not come up
 # leaves the board with nothing to boot and no way in but external media.
 # The slot size is the default for a board that does not state its own. It bounds
-# the payload the *image* can carry, and it has to agree with the firmware's own
+# the payload the *image* can contain, and it has to agree with the firmware's own
 # buffer, which is a property of the board profile. 16 MiB matches the stock Veyron
 # profile; a device built for a profile with a larger buffer overrides it in its
 # [depthcharge] block. The rootfs offset is not authored — resolution derives it from
@@ -55,9 +55,9 @@ kpart_successful = true                  # bit 56
 # --- The command line --------------------------------------------------------
 # Baked into the signed FIT, so it cannot be edited on the device — only re-signed.
 #
-# It carries no `root=`: depthchargectl derives that from the image's /etc/fstab and
+# It contains no `root=`: depthchargectl derives that from the image's /etc/fstab and
 # strips any root that disagrees, here and on every on-device kernel upgrade. It also
-# carries no '%': depthchargectl round-trips the computed cmdline through a
+# contains no '%': depthchargectl round-trips the computed cmdline through a
 # ConfigParser whose interpolation rejects one outright, and no escaping works. The
 # kern_guid=%U the firmware substitutes is prepended afterwards by mkdepthcharge,
 # past that round-trip. Resolution enforces both rules.

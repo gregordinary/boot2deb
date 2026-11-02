@@ -1,6 +1,6 @@
 # debs
 
-Pre-built `.deb`s a build consumes that no Debian suite carries, referenced by
+Pre-built `.deb`s a build consumes that no Debian suite contains, referenced by
 `[[extra_debs]]` with a `path` locator and pinned by sha256. `boot2deb update`
 verifies each file against its hash and copies it into the content store; a build
 materializes from that store, so the pin is what is trusted and the file here is
@@ -20,12 +20,12 @@ be configured against them from the archive.
   <https://github.com/pkuvcl/davs2> at `b41cf11` over Deepin's `debian/`
   packaging (<https://github.com/deepin-community/davs2>) at `843424c7`.
   **GPL-2 or later**, which is what lets it combine with an
-  `--enable-version3` FFmpeg. Built `--disable-asm`: davs2 carries no aarch64
+  `--enable-version3` FFmpeg. Built `--disable-asm`: davs2 contains no aarch64
   assembly at all, so the flag is what makes it compile here, and the packaged
   library correctly contains zero NEON symbols.
 - `libuavs3d1` / `libuavs3d-dev` — AVS3, built from upstream
   <https://github.com/uavs3/uavs3d> at `0e20d2c` with four packaging patches.
-  **BSD-3-Clause**, and it does carry real aarch64 assembly — 107 NEON symbols
+  **BSD-3-Clause**, and it does contain real aarch64 assembly — 107 NEON symbols
   in the packaged library.
 
 Both come from the `avs-debian` src2deb recipe, which holds the packaging, the

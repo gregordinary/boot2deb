@@ -40,7 +40,7 @@ pub(crate) fn commit() -> Option<&'static str> {
     option_env!("BOOT2DEB_GIT_COMMIT").filter(|s| !s.is_empty())
 }
 
-/// Whether the checkout carried uncommitted changes to [`SOURCE_PATHS`] when this
+/// Whether the checkout had uncommitted changes to [`SOURCE_PATHS`] when this
 /// binary was compiled. `true` means [`commit`] does not identify it.
 pub(crate) fn dirty() -> bool {
     matches!(option_env!("BOOT2DEB_GIT_DIRTY"), Some("true"))
@@ -57,7 +57,7 @@ pub(crate) fn dirty() -> bool {
 pub(crate) enum Freshness {
     /// No comparison is possible, and none is owed: the root is not a boot2deb source
     /// checkout (an out-of-tree config tree, or an unpacked tarball), or this binary
-    /// carries no commit stamp. An installed `boot2deb` run against a config tree is
+    /// contains no commit stamp. An installed `boot2deb` run against a config tree is
     /// the ordinary case here, not a degraded one.
     Unknown,
     /// The binary was compiled from this checkout's `HEAD`, and nothing it is compiled

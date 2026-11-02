@@ -68,8 +68,8 @@ pub(crate) fn run(
     );
 
     // The identifiers the build derived for this recipe, and the ones the pressed image
-    // carries: the re-assembly stamps them into the GPT and the superblock, and a
-    // template addition names them before any disk carries them. They are the build's
+    // contains: the re-assembly stamps them into the GPT and the superblock, and a
+    // template addition names them before any disk contains them. They are the build's
     // unless the press draws fresh ones for its medium. `--embed-image` implies that,
     // because its card stays in the machine beside the disk it installs, and two disks
     // there must not answer to one root PARTUUID.
@@ -96,7 +96,7 @@ pub(crate) fn run(
 
     // Seed keys and tree additions ride the rootfs; a build whose only artifact
     // is a boot image has nowhere to put either.
-    if !roles.iter().any(|r| r.carries_rootfs()) {
+    if !roles.iter().any(|r| r.contains_rootfs()) {
         if keys.is_some() {
             return Err("this build presses only a boot image, which has no seed \
                         partition — seed keys do not apply"
@@ -108,7 +108,7 @@ pub(crate) fn run(
                 .into());
         }
         if identity.is_fresh() {
-            return Err("this build presses only a boot image, which carries no \
+            return Err("this build presses only a boot image, which contains no \
                         partition table or rootfs — a fresh identity does not apply"
                 .into());
         }
@@ -132,8 +132,8 @@ pub(crate) fn run(
             stream(&out_dir, &stem, *role, out, &args, &sink)?;
         }
         // Personalization lands on the finished file, whichever path made it —
-        // and only on the artifact that carries the seed.
-        if role.carries_rootfs() {
+        // and only on the artifact that contains the seed.
+        if role.contains_rootfs() {
             if let Some(keys) = &keys {
                 seed::rewrite_seed(out, keys, now_secs())?;
                 let step = Step::start(&sink, "press");
@@ -163,7 +163,7 @@ fn stream(
     // Found before anything is written, so a press that cannot give its output a
     // listing fails without leaving an unlisted image behind.
     let listing = role
-        .carries_rootfs()
+        .contains_rootfs()
         .then(|| {
             let path = out_dir.join(boot2deb_engine::image::files::manifest_name(stem));
             if path.exists() {
@@ -197,7 +197,7 @@ fn stream(
     if !args.no_verify {
         step.log("verifying: re-reading what was written");
         verify::verify_digest(out, &written, &step)?;
-        // The table compare runs only where the artifact carries a table — a
+        // The table compare runs only where the artifact contains a table — a
         // boot image does not.
         match verify::planned_table(&artifact) {
             Ok(planned) => {
@@ -223,15 +223,15 @@ fn stream(
     Ok(())
 }
 
-/// Whether this output is re-assembled rather than streamed: it carries a rootfs, and
+/// Whether this output is re-assembled rather than streamed: it contains a rootfs, and
 /// the press either adds to that rootfs or gives the image a fresh identity. Either one
 /// changes bytes the build's artifact fixes, so neither can stream.
 fn reassembles(role: ArtifactRole, additions: &TreeAdditions, identity: &PressIdentity) -> bool {
-    role.carries_rootfs() && (!additions.is_empty() || identity.is_fresh())
+    role.contains_rootfs() && (!additions.is_empty() || identity.is_fresh())
 }
 
 /// The re-assembly path: rebuild the image from the kept rootfs tar with the
-/// additions merged in, and the identity it carries stamped, writing the output file
+/// additions merged in, and the identity it contains stamped, writing the output file
 /// directly.
 #[allow(clippy::too_many_arguments)] // one call site; the args are the press itself
 fn reassemble(
@@ -259,7 +259,7 @@ fn reassemble(
     boot2deb_engine::rootfs::validate_tar(&rootfs_tar)?;
 
     // The boot payload, only where this output places one: a combined image
-    // carries it, a split rootfs image is bootloader-agnostic.
+    // contains it, a split rootfs image is bootloader-agnostic.
     let idbloader = out_dir.join(format!("{stem}-idbloader.img"));
     let uboot_itb = out_dir.join(format!("{stem}-u-boot.itb"));
     let boot = match (role, &resolved.boot) {
@@ -286,7 +286,7 @@ fn reassemble(
 
     // A re-assembly rebuilds a rootfs into a new image, so it needs the image axis; a
     // u-boot deliverable never reaches here — `roles` gives it the boot role alone, and
-    // this path is only entered for a role that carries a rootfs.
+    // this path is only entered for a role that contains a rootfs.
     let image = resolved.as_image().ok_or(
         "a u-boot deliverable has no rootfs to re-assemble; press streams its boot artifact",
     )?;
@@ -305,7 +305,7 @@ fn reassemble(
         sink,
     )?;
     let step = Step::start(sink, "press");
-    let root = identity.carried().rootfs_partuuid.hyphenated().to_string();
+    let root = identity.pressed().rootfs_partuuid.hyphenated().to_string();
     if !args.no_verify {
         // The rootfs was already scan-verified inside the assembly; what is left
         // to hold is the disk around it, whose table must read back whole and root
@@ -313,13 +313,13 @@ fn reassemble(
         let table = verify::read_back_table(out)?;
         if !table.iter().any(|entry| entry.part_guid == root) {
             return Err(format!(
-                "the pressed image's partition table carries no partition with the root \
+                "the pressed image's partition table contains no partition with the root \
                  PARTUUID {root} it was pressed with"
             )
             .into());
         }
         step.log(format!(
-            "verified: the pressed image carries a readable GPT ({} entries) rooting on {root}",
+            "verified: the pressed image contains a readable GPT ({} entries) rooting on {root}",
             table.len()
         ));
     }
@@ -356,7 +356,7 @@ fn refuse_build_artifacts(
         let base = role.file_name(stem);
         let artifacts = [base.clone(), format!("{base}.xz"), format!("{base}.gz")];
         let on_artifact = artifacts.iter().any(|name| out == out_dir.join(name));
-        let on_listing = role.carries_rootfs() && out.with_extension("rootfs.uapi16") == listing;
+        let on_listing = role.contains_rootfs() && out.with_extension("rootfs.uapi16") == listing;
         if on_artifact || on_listing {
             return Err(format!(
                 "{} would overwrite the build's own {} artifacts in {} — press to a path \
@@ -452,7 +452,7 @@ fn dry_run(
                 println!("  needs a medium of at least {bytes} bytes");
             }
         }
-        if role.carries_rootfs() {
+        if role.contains_rootfs() {
             println!(
                 "  seed: {}",
                 keys.as_ref().map_or_else(
@@ -527,7 +527,7 @@ fn collect_additions(
     if args.embed_image {
         if resolved.layout != boot2deb_core::model::Layout::Combined || !resolved.produces_image() {
             return Err(
-                "--embed-image carries the recipe's own installable artifact, \
+                "--embed-image includes the recipe's own installable artifact, \
                         which only a combined-layout image build has"
                     .into(),
             );
@@ -561,7 +561,7 @@ pub(crate) fn find_artifact(
     .into())
 }
 
-/// The compressed combined artifact `--embed-image` carries: compressed only,
+/// The compressed combined artifact `--embed-image` includes: compressed only,
 /// because the embedded copy is decompressed by the board at install time and a
 /// raw multi-gigabyte payload would double the pressed image for nothing.
 fn find_compressed_artifact(
@@ -577,7 +577,7 @@ fn find_compressed_artifact(
     }
     Err(format!(
         "no compressed image artifact under {} (looked for {}) — --embed-image \
-         carries the build's compressed image; run `boot2deb build` with \
+         includes the build's compressed image; run `boot2deb build` with \
          compression on (the default) first",
         out_dir.display(),
         candidates.join(", "),
@@ -647,7 +647,7 @@ mod tests {
     }
 
     /// An output re-assembles when the press adds to its rootfs or draws a fresh identity,
-    /// and only an output that carries a rootfs can. Everything else streams the build's
+    /// and only an output that contains a rootfs can. Everything else streams the build's
     /// bytes.
     #[test]
     fn an_addition_or_a_fresh_identity_re_assembles_and_nothing_else_does() {

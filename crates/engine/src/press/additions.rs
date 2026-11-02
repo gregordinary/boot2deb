@@ -49,7 +49,7 @@ pub const FIRSTBOOT_DEBS_DIR: &str = "/var/lib/boot2deb/firstboot-debs";
 /// `boot2deb-install-to` (a base-overlay script in every image) looks here.
 pub const EMBEDDED_IMAGE_DIR: &str = "/var/lib/boot2deb/install";
 
-/// The identity document every boot2deb rootfs carries — where the merge writes
+/// The identity document every boot2deb rootfs contains — where the merge writes
 /// the `[pressed]` table, whose mtime stamps the added entries, and which every
 /// template expands against.
 const IMAGE_TOML: &[u8] = b"/etc/boot2deb/image.toml";
@@ -156,7 +156,7 @@ impl TreeAdditions {
     /// Additions for a press of `source_stem`'s artifacts, initially empty.
     ///
     /// `recipe` is the build point being pressed, and `identity` the identifiers
-    /// its image will carry. A [template] names them, and the marker records
+    /// its image will contain. A [template] names them, and the marker records
     /// whether the press drew them fresh.
     #[must_use]
     pub fn new(
@@ -168,7 +168,7 @@ impl TreeAdditions {
             source_stem: source_stem.into(),
             recipe: recipe.into(),
             seed_hostname: None,
-            identity: identity.carried(),
+            identity: identity.pressed(),
             fresh_identity: identity.is_fresh(),
             files: Vec::new(),
             copies: Vec::new(),
@@ -272,7 +272,7 @@ impl TreeAdditions {
     /// - Holds an entry that is neither a regular file, a symlink, nor a directory
     ///
     /// Anything else — a device node, a FIFO, a socket, a hard link — is refused
-    /// rather than silently dropped. A site tree carrying one means something
+    /// rather than silently dropped. A site tree containing one means something
     /// other than what a placement can do.
     pub fn copy_tree(&mut self, dir: &Path) -> Result<usize, EngineError> {
         let tree_err = |detail: String| EngineError::PressAddition {
@@ -315,7 +315,7 @@ impl TreeAdditions {
                 ),
                 other => {
                     return Err(tree_err(format!(
-                        "{path} is a {} — a copied tree carries regular files and \
+                        "{path} is a {} — a copied tree contains regular files and \
                          symlinks only",
                         kind_name(&other)
                     )))
@@ -368,7 +368,7 @@ impl TreeAdditions {
     }
 
     /// Add the `--embed-image` payload: the recipe's own compressed artifact,
-    /// carried at [`EMBEDDED_IMAGE_DIR`] for `boot2deb-install-to` to write onto
+    /// stored at [`EMBEDDED_IMAGE_DIR`] for `boot2deb-install-to` to write onto
     /// the board's internal storage from the booted system.
     ///
     /// # Errors
@@ -420,7 +420,7 @@ impl TreeAdditions {
     ///
     /// [`EngineError::PressAddition`] when two additions claim one path, a
     /// destination is a directory in the image, a parent exists as a
-    /// non-directory, or the tree carries no identity document (not a
+    /// non-directory, or the tree contains no identity document (not a
     /// boot2deb-built rootfs).
     pub(crate) fn apply(&self, entries: &mut Vec<SourceEntry>) -> Result<(), EngineError> {
         // The tree's own clock, its identity, and the proof this is a boot2deb
@@ -558,7 +558,7 @@ fn read_identity(
         .iter()
         .find(|e| e.path == IMAGE_TOML)
         .ok_or_else(|| {
-            marker_err("the rootfs carries no image identity — not a boot2deb rootfs".into())
+            marker_err("the rootfs contains no image identity — not a boot2deb rootfs".into())
         })?;
     let EntryKind::File(content) = &entry.kind else {
         return Err(marker_err(
@@ -615,7 +615,7 @@ fn normalize_tree_dest(
 }
 
 /// The mode an addition lands with: `0755` when the host file is executable,
-/// `0644` otherwise. Deliberately normalized rather than carried over, so a
+/// `0644` otherwise. Deliberately normalized rather than kept, so a
 /// site tree's umask is not a property of the image.
 fn file_mode(executable: bool) -> u16 {
     if executable {
@@ -744,7 +744,7 @@ mod tests {
     use super::*;
     use ferrosys::Timestamp;
 
-    /// The build point every test presses, and the identifiers its image carries.
+    /// The build point every test presses, and the identifiers its image contains.
     const RECIPE: &str = "turing-rk1/forky";
 
     fn identity() -> ImageIdentity {
@@ -854,7 +854,7 @@ mod tests {
             "an existing parent is never duplicated"
         );
 
-        // The marker carries the by-kind record and the source stem.
+        // The marker contains the by-kind record and the source stem.
         let marker = text_of(&entries, "/etc/boot2deb/image.toml");
         let identity = SystemIdentity::from_toml_str(&marker, "image.toml").unwrap();
         let pressed = identity.pressed.expect("pressed table present");
@@ -1026,7 +1026,7 @@ mod tests {
         assert_eq!(text_of(&entries, "/etc/myapp/plain.conf"), "plain\n");
         assert_eq!(by_path("/etc/myapp/plain.conf").meta.mode, 0o644);
 
-        // The executable bit is the one host mode carried over.
+        // The executable bit is the one host mode kept.
         assert_eq!(by_path("/usr/local/bin/site").meta.mode, 0o755);
 
         // A symlink is recorded as a symlink, not followed.

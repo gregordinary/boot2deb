@@ -27,7 +27,7 @@ foreign-architecture image wants `qemu-user`. boot2deb does not need to run on a
 Debian-family machine.
 
 **Not every board needs every stage.** A build compiles a kernel only if the board needs
-one of its own. It builds a bootloader only if the board's firmware is ours to make.
+one of its own. It builds a bootloader only if boot2deb provides the board's firmware.
 
 The Turing RK1 does both: a patched mainline kernel, and u-boot written into the disk's
 raw gap. The ASUS C201 Chromebook does neither. Debian's own kernel runs it, and its

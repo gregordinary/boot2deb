@@ -51,7 +51,7 @@ pub enum ConfigError {
     /// automatically does. A board's slug is the host name its image comes up under,
     /// unless the board states another. A slug outside the host-name shape would
     /// therefore make the default `boot2deb new-device` writes one no image could
-    /// carry.
+    /// have.
     #[error(
         "invalid device name '{name}': {why} — the slug is also the image's default \
          hostname, so it must be a valid host name (e.g. 'my-board')"
@@ -80,7 +80,7 @@ pub enum ConfigError {
     /// names the device rather than a merged value's field.
     #[error("device '{device}': extends must be a device name (a string), found {found}")]
     InvalidDeviceExtends {
-        /// The device whose file carries the bad value.
+        /// The device whose file contains the bad value.
         device: String,
         /// The TOML type that was found instead.
         found: &'static str,
@@ -106,7 +106,7 @@ pub enum ConfigError {
 
     /// A recipe reference (a CLI argument or config cross-reference) is not a valid
     /// `<device>/<leaf>` — or bare `<leaf>` — path. Recipes are the one layer that
-    /// nests one level under a device folder, so a reference can carry a *single*
+    /// nests one level under a device folder, so a reference can contain a *single*
     /// interior `/`. Both halves must be bare identifiers (`[A-Za-z0-9._-]`, non-empty,
     /// no leading dot). That bars `..`, a leading/trailing/absolute/doubled slash, and
     /// more than one separator. A reference can therefore never escape `recipes/` when
@@ -220,7 +220,7 @@ pub enum ConfigError {
     },
 
     /// A recipe declares `deliverable = "uboot"` on a board whose boot method builds
-    /// no bootloader of ours (e.g. depthcharge, whose firmware is its own) — so there
+    /// no bootloader (e.g. depthcharge, whose firmware is its own) — so there
     /// is no u-boot-only artifact to emit.
     #[error(
         "device '{device}' builds no bootloader under boot method '{boot_method}', \
@@ -313,7 +313,7 @@ pub enum ConfigError {
     /// requirement is method-scoped, not universal. A board that boots depthcharge
     /// has no `uboot_defconfig`, because it compiles no u-boot, and one that boots
     /// rkbin has no `[depthcharge]` block. The error therefore names the method that
-    /// wants it, rather than implying every device must carry it.
+    /// wants it, rather than implying every device must contain it.
     #[error("device '{device}' boots via '{boot_method}', which requires `{what}` — add it to devices/{device}.toml")]
     MissingBootField {
         /// The device being resolved.
@@ -716,13 +716,13 @@ pub enum ConfigError {
 
     /// A recipe declares `[[data_volumes]]` without selecting the `data-volume`
     /// feature, or selects that feature without declaring any volume. The two
-    /// halves are useless apart. The feature carries the first-boot hook that acts
+    /// halves are useless apart. The feature includes the first-boot hook that acts
     /// on the declarations, and the declarations are inert without it. Pulling the
     /// feature in implicitly would be the provider auto-resolution this config
     /// model does not do.
     #[error(
         "recipe '{recipe}' {problem} — a data volume needs both the 'data-volume' \
-         feature (which carries the first-boot hook) and at least one \
+         feature (which includes the first-boot hook) and at least one \
          [[data_volumes]] entry (which says what to mount where)"
     )]
     DataVolumeFeatureMismatch {
@@ -737,17 +737,17 @@ pub enum ConfigError {
     /// to publish. This one cannot be published at all, so the two cannot both stand.
     ///
     /// It is a gate on *authored* recipes only. The nonfree flavor is reached as a
-    /// feature-variant reference (`<recipe>+<feature>`), which carries no claim of its
+    /// feature-variant reference (`<recipe>+<feature>`), which has no claim of its
     /// own and appears in no support matrix. That path is unaffected.
     #[error(
         "recipe '{recipe}' declares a [support] claim but selects '{feature}', which \
          builds FFmpeg with --enable-nonfree — the result may be built and used but \
-         not redistributed, so it cannot carry a claim that it is fit to publish. \
+         not redistributed, so it cannot claim to be fit to publish. \
          Reach the nonfree flavour as '{recipe}+{feature}' instead of authoring a \
          recipe for it, or drop the [support] block"
     )]
     NonfreeSupportClaim {
-        /// The recipe carrying the claim.
+        /// The recipe containing the claim.
         recipe: String,
         /// The selected feature that makes the build undistributable.
         feature: String,
@@ -799,7 +799,7 @@ pub enum ConfigError {
 
     /// An `apt_sources` field cannot be rendered into the apt one-line source
     /// (`deb [signed-by=…] <uri> <suite> <components…>`). The line is positional and
-    /// space-separated. An empty value, or one carrying whitespace or `[`/`]`, would
+    /// space-separated. An empty value, or one containing whitespace or `[`/`]`, would
     /// be parsed as line structure rather than content. A non-http(s) URI would point
     /// the bootstrap solve at an arbitrary transport.
     ///
@@ -851,7 +851,7 @@ pub enum ConfigError {
     /// build is bootable but broken (`jellyfin` with no FFmpeg provider installs a
     /// server that exits at startup).
     ///
-    /// The message names the providers the config tree carries, because the fix is
+    /// The message names the providers the config tree contains, because the fix is
     /// always to add one. The user cannot be expected to know which features declare
     /// the capability.
     #[error("feature '{feature}' requires capability '{capability}', which no selected feature provides{}", providers_hint(.providers))]
@@ -866,7 +866,7 @@ pub enum ConfigError {
         providers: Vec<String>,
     },
 
-    /// A configured value cannot be carried to the file, line, or command line it has
+    /// A configured value cannot be passed to the file, line, or command line it has
     /// to reach. Resolution refuses it rather than emitting an image built around it.
     ///
     /// **One variant for eight axes**, because they are one failure: a value the config
@@ -881,17 +881,17 @@ pub enum ConfigError {
     /// - Kernel cmdline
     /// - Depthcharge board profile
     ///
-    /// The message says which axis and why. Its `what` field carries the axis as data,
+    /// The message says which axis and why. Its `what` field contains the axis as data,
     /// so a test asserting `what == "hostname"` pins more than a variant name did.
     ///
     /// The value is rendered with `{:?}`, not quoted by hand. Several of these are
-    /// rejected *for* carrying a newline or a quote. Printing one raw would put the
+    /// rejected *for* containing a newline or a quote. Printing one raw would put the
     /// thing being rejected into the operator's terminal unescaped.
     ///
     /// Axes with more to say keep their own variant — [`InvalidKmod`](Self::InvalidKmod)
     /// names the file, [`InvalidDeviceDts`](Self::InvalidDeviceDts) the device,
     /// [`AptSourceBadField`](Self::AptSourceBadField) the feature and the source. What
-    /// is collapsed here is what carried nothing the message did not already say.
+    /// is collapsed here is what contained nothing the message did not already say.
     #[error("invalid {what} {value:?}: {why}")]
     InvalidField {
         /// The axis, as the message names it: `locale`, `timezone`, `NTP server`,
@@ -983,13 +983,13 @@ pub enum ConfigError {
         known: String,
     },
 
-    /// A distro layer carries a value a bootstrap or an apt sources file could not
+    /// A distro layer contains a value a bootstrap or an apt sources file could not
     /// hold. Caught when the layer is resolved, before any archive is contacted.
     #[error("distro '{distro}': {field} '{value}' {why}")]
     DistroField {
         /// The distro layer's stem.
         distro: String,
-        /// The key carrying the bad value.
+        /// The key containing the bad value.
         field: &'static str,
         /// The value as written.
         value: String,
@@ -1020,7 +1020,7 @@ pub enum ConfigError {
 
     /// A Linux-libre kernel on a distribution whose layer names no free component set.
     /// The image's archive would offer the nonfree firmware that kernel has no loader
-    /// for. Carrying none of it is the one thing a libre image promises.
+    /// for. Containing none of it is the one thing a libre image promises.
     #[error(
         "kernel '{kernel}' is Linux-libre, and distro '{distro}' names no \
          free_components to provision a libre image from"
@@ -1035,7 +1035,7 @@ pub enum ConfigError {
     /// An initramfs generator the board's boot method has no configuration for. The
     /// image would boot an initrd built without the boot method's own settings.
     #[error(
-        "device '{device}' boots by {boot_method}, which carries initramfs \
+        "device '{device}' boots by {boot_method}, which has initramfs \
          configuration for initramfs-tools only, not {generator}"
     )]
     InitramfsGeneratorUnsupported {
@@ -1047,7 +1047,7 @@ pub enum ConfigError {
         generator: String,
     },
 
-    /// An `extra_debs` entry does not set exactly one locator: it must carry either
+    /// An `extra_debs` entry does not set exactly one locator: it must contain either
     /// a `url` or a `path`, not both and not neither. The sha256
     /// identifies the offending entry.
     #[error("extra_deb (sha256 {sha256}) must set exactly one of `url` or `path`")]
@@ -1098,7 +1098,7 @@ pub enum ConfigError {
     #[error("patch is empty")]
     PatchEmpty,
 
-    /// A patch handed to `patch import` carried no diff payload — a
+    /// A patch handed to `patch import` contained no diff payload — a
     /// metadata-only mail or prose, which would be written as an empty patch.
     #[error("patch has no diff (no `diff --git`/`--- a/…` payload found)")]
     PatchNoDiff,

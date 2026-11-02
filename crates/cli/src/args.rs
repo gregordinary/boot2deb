@@ -158,7 +158,7 @@ pub(crate) enum Command {
         #[command(flatten)]
         args: ConfigArgs,
     },
-    /// Ask the archives a build would resolve against whether they carry every
+    /// Ask the archives a build would resolve against whether they contain every
     /// package the recipe names, and report the ones they do not. Runs the read half
     /// of a resolve: release and indexes, nothing downloaded, no closure computed.
     /// One pass therefore answers every name at once, before any build work starts.
@@ -648,7 +648,7 @@ pub(crate) struct BuildArgs {
     /// After a whole build, record the sha256 of every output it wrote as this lock's
     /// committed outputs, `recipes/<recipe>.outputs`, under this build host's
     /// architecture. `verify-image` then holds a later build of the lock to those bytes.
-    /// Outputs that carry the per-image password are left out.
+    /// Outputs that contain the per-image password are left out.
     #[arg(long)]
     pub(crate) save_outputs: bool,
     /// Downgrade a solved-manifest drift from the committed pin to a warning instead
@@ -730,7 +730,7 @@ pub(crate) enum ShellStageArg {
     Kmod,
     /// The target-arch root the MPP/RGA/Mali packages compile in.
     Userspace,
-    /// The target-arch root ffmpeg compiles in, carrying this build's own userspace
+    /// The target-arch root ffmpeg compiles in, containing this build's own userspace
     /// `.deb`s. The userspace stage therefore has to have produced them first.
     Ffmpeg,
     /// The host-arch packaging root a staged tree becomes a `.deb` in.
@@ -780,7 +780,7 @@ pub(crate) struct ShellArgs {
     #[arg(long)]
     pub(crate) out_dir: Option<PathBuf>,
     /// Enter the userspace root as a build naming these optional trees would see it,
-    /// carrying the development packages their own probes need. This is the same set
+    /// containing the development packages their own probes need. This is the same set
     /// the userspace stage ran under.
     #[arg(long = "userspace", value_name = "NAME")]
     pub(crate) userspace: Vec<String>,
@@ -901,7 +901,7 @@ pub(crate) struct SeedKeyArgs {
     /// Static IPv4 (`ADDRESS/PREFIX[,GATEWAY[,DNS...]]`) for the connection the
     /// seed sets up. That is the Wi-Fi profile when `--wifi-ssid` is present, and the
     /// wired interface otherwise. It goes through NetworkManager or dhcpcd, whichever
-    /// the image carries. Omit for DHCP.
+    /// the image contains. Omit for DHCP.
     #[arg(long = "static-ip", value_name = "ADDR/PREFIX[,GW[,DNS...]]")]
     pub(crate) static_ip: Option<String>,
 }
@@ -951,7 +951,7 @@ pub(crate) struct PressArgs {
     /// Missing ones are fetched only if the board has network by then.
     #[arg(long = "deb", value_name = "PATH")]
     pub(crate) debs: Vec<PathBuf>,
-    /// Carry the recipe's own compressed image artifact inside the pressed image
+    /// Include the recipe's own compressed image artifact inside the pressed image
     /// (at /var/lib/boot2deb/install/), so the booted board can install itself to
     /// internal storage with `boot2deb-install-to`. This is the boot-from-card,
     /// install-to-eMMC workflow. Implies `--fresh-identity`, because the card stays in
@@ -1087,7 +1087,7 @@ pub(crate) struct UpdateArgs {
     /// and the build directory are all named `<recipe>+<feature>...`. The recipe's
     /// own lock is left alone, and two selections never collide. Order is significant,
     /// because kernel fragments and patch series compose in selection order. A variant
-    /// carries no `[support]` claim, since the claim belongs to the recipe.
+    /// has no `[support]` claim, since the claim belongs to the recipe.
     #[arg(long = "feature")]
     pub(crate) features: Vec<String>,
     /// Kernel ref to pin, resolved to a commit (e.g. v7.3). Optional once a lock
@@ -1150,7 +1150,7 @@ pub(crate) struct VerifyArgs {
     #[arg(long)]
     pub(crate) kernel_src: Option<String>,
     /// ffmpeg checkout to verify the ffmpeg series against. Optional. Omit it and,
-    /// when the series carries ffmpeg patches, the locked ffmpeg base is
+    /// when the series includes ffmpeg patches, the locked ffmpeg base is
     /// auto-fetched at its pin.
     #[arg(long)]
     pub(crate) ffmpeg_path: Option<PathBuf>,
@@ -1169,7 +1169,7 @@ pub(crate) struct VerifyArgs {
     #[arg(long)]
     pub(crate) uboot_src: Option<String>,
     /// Userspace (MPP/RGA) checkout to verify the userspace series against. Optional.
-    /// Omit it and, when the series carries userspace patches, the locked MPP tree
+    /// Omit it and, when the series includes userspace patches, the locked MPP tree
     /// is auto-fetched at its pin.
     #[arg(long)]
     pub(crate) userspace_path: Option<PathBuf>,
@@ -1296,7 +1296,7 @@ pub(crate) struct PatchImportArgs {
     /// `From:` author for a synthesized header (bare diff / `git show` fallback).
     #[arg(long, default_value = "boot2deb import <import@boot2deb>")]
     pub(crate) author: String,
-    /// Subject override — the title for a bare diff carrying none, or an override
+    /// Subject override — the title for a bare diff containing none, or an override
     /// for `git show`. Ignored for an already-formatted mbox.
     #[arg(long)]
     pub(crate) subject: Option<String>,
@@ -1423,7 +1423,7 @@ impl From<OverrideArgs> for Overrides {
             sudo: a.sudo,
             first_boot_password_length: a.password_length,
             // Authorized keys are config-only. A key is written down so that *every*
-            // build of a point carries it, which a per-invocation flag cannot express —
+            // build of a point includes it, which a per-invocation flag cannot express —
             // and a flag on `resolve` would name a point `build` could not reach.
             ssh_authorized_keys: None,
             // Config-only for the same reason, and one more: the resolved list is a

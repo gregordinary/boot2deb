@@ -10,13 +10,13 @@
 //!
 //! The layout is reproduced from a hardware-proven RK3576 loader, rather than
 //! guessed. The 102-byte header and 57-byte entry descriptors match rkdeveloptool's
-//! `rk_boot_header` and `rk_boot_entry`. The CODE471 group carries the generated
+//! `rk_boot_header` and `rk_boot_entry`. The CODE471 group contains the generated
 //! `UsbHead` RKNS block that the closed rkbin `boot_merger` writes under
 //! `CREATE_IDB` and `NEWIDB`.
 //!
 //! `rkdeveloptool db` downloads only the CODE471 and CODE472 entries, so the
 //! container omits the LOADER section. That section holds the storage-write blobs,
-//! which `db` never touches. It is also the only part carrying an encrypted or
+//! which `db` never touches. It is also the only part containing an encrypted or
 //! signed header, which is why omitting it keeps the writer pure and deterministic.
 //!
 //! Blobs are stored plaintext, with RC4 off (`rc4Flag = 1` signals "not
@@ -71,7 +71,7 @@ fn padded_len(len: usize) -> usize {
 
 /// The `UsbHead` RKNS block: the sector-0 IDB header for the CODE471 download
 /// group. It describes the two contiguous sections that follow it (the padded
-/// `usb471` then `usb472`) by start-sector and sector-count, carries a SHA-256 of
+/// `usb471` then `usb472`) by start-sector and sector-count, contains a SHA-256 of
 /// each padded section, and a SHA-256 of its own first 1536 bytes. Every field is
 /// deterministic in the two payloads; the byte offsets are those the reference
 /// RK3576 loader uses.

@@ -159,8 +159,8 @@ pub struct Lock {
     /// u-boot **and** the selected u-boot series names a real series (not the
     /// pristine sentinel). Symmetric with [`patches`](Self::patches), and reuses
     /// [`PatchesPin`] verbatim. The kernel and u-boot patch axes pin independently. A
-    /// u-boot-only build carries this with no `[patches]`, and an image build can
-    /// carry both. Omitted from the committed lock when u-boot ships pristine.
+    /// u-boot-only build records this with no `[patches]`, and an image build can
+    /// record both. Omitted from the committed lock when u-boot ships pristine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uboot_patches: Option<PatchesPin>,
     /// Exact media-accel userspace source pins, one `[[userspace]]` entry per tree the
@@ -251,8 +251,8 @@ impl Lock {
     /// replaces. An update that moves no pin, by the axes
     /// [`pin_changes`](crate::support::pin_changes) compares, therefore keeps the epoch.
     /// The rootfs cache stays warm, and a rebuild stamps the same times. Where either
-    /// lock carries no `[rootfs]`, there is no epoch to keep and this does nothing.
-    pub fn carry_source_date_epoch(&mut self, prev: &Lock) {
+    /// lock contains no `[rootfs]`, there is no epoch to keep and this does nothing.
+    pub fn keep_source_date_epoch(&mut self, prev: &Lock) {
         if !crate::support::pin_changes(prev, self).is_empty() {
             return;
         }
@@ -563,7 +563,7 @@ pub struct RootfsPin {
     /// from the artifact cache clones no tree to read. The compile stages keep their own
     /// epochs, read from the tree each one builds.
     ///
-    /// It changes only when a pin moves ([`Lock::carry_source_date_epoch`]). So it joins
+    /// It changes only when a pin moves ([`Lock::keep_source_date_epoch`]). So it joins
     /// the rootfs cache key without costing a cache hit, and `reproduce` replays it with
     /// the lock.
     pub source_date_epoch: u64,
@@ -808,11 +808,11 @@ mod tests {
     /// the new update's time. The epoch is not itself a pin, so two locks differing
     /// only in it count as unmoved.
     #[test]
-    fn the_rootfs_epoch_is_carried_until_a_pin_moves() {
+    fn the_rootfs_epoch_is_kept_until_a_pin_moves() {
         let prev = base_lock();
         let mut next = base_lock();
         next.rootfs.as_mut().unwrap().source_date_epoch = 1_800_000_000;
-        next.carry_source_date_epoch(&prev);
+        next.keep_source_date_epoch(&prev);
         assert_eq!(
             next.rootfs.as_ref().unwrap().source_date_epoch,
             1_790_347_034
@@ -821,7 +821,7 @@ mod tests {
         let mut moved = base_lock();
         moved.kernel.as_mut().unwrap().commit = "e".repeat(40);
         moved.rootfs.as_mut().unwrap().source_date_epoch = 1_800_000_000;
-        moved.carry_source_date_epoch(&prev);
+        moved.keep_source_date_epoch(&prev);
         assert_eq!(
             moved.rootfs.as_ref().unwrap().source_date_epoch,
             1_800_000_000
@@ -904,7 +904,7 @@ mod tests {
     fn pinned_commits_covers_every_source_axis() {
         // The liveness set a commit-addressed cache is swept against, so an axis
         // missing here is a live checkout deleted. Asserted against the full fixture
-        // rather than a hand-listed subset: every axis that carries a commit must
+        // rather than a hand-listed subset: every axis that contains a commit must
         // appear, whichever gate happens to fetch it today.
         let mut lock = base_lock();
         lock.uboot_patches = Some(PatchesPin {
@@ -979,7 +979,7 @@ mod tests {
         // The C201 shape: Debian's own kernel package, a boot method that compiles no
         // u-boot, and no rkbin blobs. Nothing is fetched from git and nothing is
         // compiled, so the only thing there *is* to pin is the package set — and the
-        // committed lock says exactly that, rather than carrying three tables of
+        // committed lock says exactly that, rather than containing three tables of
         // provenance for dependencies the build does not have.
         let lock = Lock {
             kernel: None,
@@ -1084,7 +1084,7 @@ mod tests {
             "commit = \"nope\"",
             1,
         );
-        assert_ne!(text, bad, "fixture must carry the kmod commit");
+        assert_ne!(text, bad, "fixture must contain the kmod commit");
         assert!(
             toml::from_str::<Lock>(&bad).is_err(),
             "a non-sha kmod commit must be rejected"
@@ -1123,7 +1123,7 @@ mod tests {
         // hashes.
         let good = base_lock().to_toml_string().unwrap();
         let atf = format!("atf@sha256:{}", "0".repeat(64));
-        assert!(good.contains(&atf), "fixture must carry the expected pin");
+        assert!(good.contains(&atf), "fixture must contain the expected pin");
         for (from, to, why) in [
             // No separator at all.
             (atf.clone(), "atf-no-separator".to_string(), "separator"),

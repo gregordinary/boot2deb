@@ -216,7 +216,7 @@ fn parse_atom(atom: &str) -> (String, Option<(String, String)>) {
 ///
 /// The format is RFC822-like stanzas separated by blank lines, with continuation lines
 /// indented. Unknown fields are ignored rather than rejected — a status database
-/// carries many, and this reads the four that bear on satisfaction.
+/// contains many, and this reads the four that bear on satisfaction.
 pub fn parse_status(text: &str) -> Vec<Package> {
     let mut out = Vec::new();
     for stanza in text.split("\n\n") {
@@ -482,7 +482,7 @@ Pre-Depends: absent-package
 
     #[test]
     fn the_glibc_skew_is_reported_with_both_versions() {
-        // The real failure: glib declares libc6 (>= 2.43) and the base carries 2.42-17,
+        // The real failure: glib declares libc6 (>= 2.43) and the base contains 2.42-17,
         // which produced a link error naming an unrelated library.
         let set = vec![
             pkg("libglib2.0-0t64", "2.88.3-3", "libc6 (>= 2.43)"),

@@ -151,7 +151,7 @@ fn resolve_redirect(base: &str, loc: &str) -> Result<String, FetchError> {
         // Network-path reference (RFC 3986 section 4.2): same scheme, new authority.
         format!("{}{rest}", &base[..scheme_end])
     } else {
-        // A reference carrying a path never inherits the base's query or fragment
+        // A reference containing a path never inherits the base's query or fragment
         // (RFC 3986 section 5.2.2), and a `/` inside either is not a path separator —
         // so both are cut away before anything is measured against the base.
         let hierarchical = match base[scheme_end..].find(['?', '#']) {
@@ -319,7 +319,7 @@ mod tests {
         );
     }
 
-    /// The base's query and fragment are not part of its path: a reference carrying a
+    /// The base's query and fragment are not part of its path: a reference containing a
     /// path does not inherit them (RFC 3986 section 5.2.2), and a `/` inside one is
     /// not a segment separator — so neither may be measured as though it were path.
     #[test]

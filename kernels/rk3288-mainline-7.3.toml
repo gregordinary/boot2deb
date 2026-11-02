@@ -1,7 +1,7 @@
 # kernels/rk3288-mainline-7.3.toml — compiled mainline 7.3.y for RK3288 boards.
 #
 # The RK3288's platform support is fully upstream, so unlike the RK3588 this
-# definition exists for control, not enablement: it carries driver fixes ahead
+# definition exists for control, not enablement: it applies driver fixes ahead
 # of the distro kernel (series `rk3288-fixes`) and gives a board a kconfig seam
 # to customize. The Debian kernel stays the default on every RK3288 device; a
 # recipe opts in by naming this kernel.

@@ -1,5 +1,5 @@
 //! Local apt repo — assembles the build's own `.deb`s into a small apt
-//! repository the rootfs node installs from. The provisioner then resolves our
+//! repository the rootfs node installs from. The provisioner then resolves the build's
 //! packages together with their dependencies (against this repo plus the suite
 //! mirror).
 //!
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 ///
 /// The provisioner speaks only the standard mirror layout: a
 /// `dists/<suite>/Release` indexing a per-component `Packages` file, whose
-/// packages carry a pool-relative `Filename`. So the build's own `.deb`s reach
+/// packages contain a pool-relative `Filename`. So the build's own `.deb`s reach
 /// the provisioner's resolution as one more `file://` mirror, trusted without a
 /// signature (apt's `[trusted=yes]` / ferroday's `trust_unsigned`). The layout:
 ///
@@ -82,7 +82,7 @@ impl LocalDistsRepo {
     /// provisioner's release check accepts it. `trust_unsigned` skips the signature
     /// and the freshness bound, so no `Valid-Until` is needed.
     ///
-    /// `source_date_epoch` pins the `Date` the `Release` carries, and pinning it is what
+    /// `source_date_epoch` pins the `Date` the `Release` contains, and pinning it is what
     /// makes the publish byte-reproducible. The indexes are a function of the package
     /// set, and the release is then a function of the indexes and this number. Without
     /// it, the release takes the wall clock and no two publishes of one package set
@@ -122,7 +122,7 @@ impl LocalDistsRepo {
             .description(POOL_DESCRIPTION);
         if let Some(epoch) = source_date_epoch {
             // `Pool::date` takes signed Unix seconds; a lock epoch past 2038-in-u64 is
-            // not a thing any kernel commit carries, and saturating is the only sane
+            // not a thing any kernel commit has, and saturating is the only sane
             // reading of one that did.
             pool = pool.date(i64::try_from(epoch).unwrap_or(i64::MAX));
         }
@@ -302,7 +302,7 @@ mod tests {
         let date = text
             .lines()
             .find_map(|l| l.strip_prefix("Date: "))
-            .expect("the release carries a Date");
+            .expect("the release contains a Date");
         assert!(
             date.contains("2023"),
             "the pinned epoch is what dates the release, got {date:?}"

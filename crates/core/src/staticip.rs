@@ -25,7 +25,7 @@ use std::net::Ipv4Addr;
 
 /// Check a `static_ip=` value: `address/prefix[,gateway[,dns...]]`.
 ///
-/// Every field must be IPv4. The seed grammar does not carry IPv6, whose addresses
+/// Every field must be IPv4. The seed grammar does not support IPv6, whose addresses
 /// would need an escaping story for `:` against the renderings' own separators. On
 /// every image both stacks keep IPv6 autoconfiguration on regardless of this key.
 ///
@@ -89,7 +89,7 @@ mod tests {
         assert!(check("192.168.1.50/33").is_err());
         assert!(check("192.168.1.50/+24").is_err(), "u8's sign is not ours");
         assert!(check("192.168.256.1/24").is_err());
-        assert!(check("fe80::1/64").is_err(), "IPv6 is not carried");
+        assert!(check("fe80::1/64").is_err(), "IPv6 is not supported");
         assert!(check("192.168.1.50/24,").is_err(), "trailing comma");
         assert!(check("192.168.1.50/24,,1.1.1.1").is_err(), "empty gateway");
         assert!(check("192.168.1.50/24,gateway").is_err());
@@ -97,7 +97,7 @@ mod tests {
         assert!(check("192.168.1.50 /24").is_err(), "whitespace");
         assert!(
             check("192.168.1.50/24\n").is_err(),
-            "a seed line cannot carry a newline"
+            "a seed line cannot contain a newline"
         );
     }
 }

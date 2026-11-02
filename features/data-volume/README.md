@@ -20,7 +20,7 @@ Chromebook's internal eMMC plus an SD card, an SBC's SD card plus a USB disk.
 
 ## How to use it
 
-Two halves, and resolution rejects either without the other: this feature carries
+Two halves, and resolution rejects either without the other: this feature includes
 the first-boot hook, and the recipe says what to mount where.
 
 ```toml
@@ -46,7 +46,7 @@ is what keeps `mmcblk<n>boot<n>` — the read-only eMMC boot hardware partitions
 which `lsblk` also reports as whole disks — out of the `mmc` kind.
 
 The build writes the `/etc/fstab` entry, so every boot after the first mounts the
-volume with no hook involved. The entry carries `nofail` and a short device
+volume with no hook involved. The entry contains `nofail` and a short device
 timeout: a data disk that is absent, dead, or slow to enumerate must never be the
 reason a system will not boot.
 
@@ -54,7 +54,7 @@ reason a system will not boot.
 
 On first boot, per volume, it stops at the first step that applies:
 
-1. **Adopt** — a filesystem already carries the label. Mount it. **Never format.**
+1. **Adopt** — a filesystem already has the label. Mount it. **Never format.**
    This is the path every boot of a reflashed board takes.
 2. **Create** — the matched disk is genuinely blank *and* `create = "if-blank"`.
    Write a GPT with one partition, `mkfs` with the label, mount.

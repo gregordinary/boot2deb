@@ -21,14 +21,14 @@
 //! published provenance manifest records which boot2deb produced the image. This
 //! reports how the running checkout compares, and leaves the decision to the
 //! operator. A stamped commit is a floor rather than a ceiling, and a newer builder
-//! usually reproduces the image and can carry fixes.
+//! usually reproduces the image and can include fixes.
 //!
 //! What *is* enforced is the result. The rebuild writes to a directory of its own, so the
 //! originals survive to be compared against. It runs with both caches off, since a
 //! restored output is the earlier build's and says nothing about this one.
 //!
 //! Each output the original's provenance manifest recorded then gets a [`Verdict`] from
-//! [`boot2deb_core::outputs::judge`]. An image carries a fresh first-boot password, so it
+//! [`boot2deb_core::outputs::judge`]. An image contains a fresh first-boot password, so it
 //! is judged through its file manifest and the disk around it. The disk is the partition
 //! table, the filesystem record, and the disk's size. A difference or a missing output
 //! exits non-zero.
@@ -204,9 +204,9 @@ fn judge(
 /// What differs between two builds' disks outside the rootfs's files, one sentence each.
 ///
 /// The partition table of each disk image the original recorded, read from both builds'
-/// copies. The table carries every partition's placement, type, GUID, name and
-/// attributes, and a split rootfs image carries one too. The filesystem record
-/// (`[filesystem]`) carries the format contract and the geometry it realized, and the
+/// copies. The table contains every partition's placement, type, GUID, name and
+/// attributes, and a split rootfs image contains one too. The filesystem record
+/// (`[filesystem]`) contains the format contract and the geometry it realized, and the
 /// disk's size is compared as recorded.
 fn disk_differences(
     original: &ProvenanceManifest,
@@ -409,7 +409,7 @@ fn builder_advice(stamp: &BuiltWithProvenance) -> String {
         }
         (Some(built_commit), _) => format!(
             "built with boot2deb {built}; running {running}. A newer builder usually \
-             reproduces the image and may carry fixes — step back with \
+             reproduces the image and may include fixes — step back with \
              `git checkout {built_commit}` only if it diverges."
         ),
         (None, _) => format!(
@@ -573,7 +573,7 @@ mod tests {
             .is_none());
     }
 
-    /// The stamp is read out of a whole provenance manifest, and the manifest carries a
+    /// The stamp is read out of a whole provenance manifest, and the manifest contains a
     /// banner of TOML comments plus sections this struct does not name — including the
     /// first-boot credential, which must not have to be parsed to read the builder.
     #[test]

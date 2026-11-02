@@ -24,7 +24,7 @@ image_size = "3G"
 #
 # What the move from the 7.2 generation changes on this SoC's paths. The pin is v7.3.
 # `h96-max-m9/forky` describes the board-wide part: the IOMMU fixes the NPU series no
-# longer carries, the regenerated power-domain patches, the aic8800 7.3 guard, and the
+# longer includes, the regenerated power-domain patches, the aic8800 7.3 guard, and the
 # HDMI PHY and `dw_hdmi_qp` changes that make the display the first thing to check on a
 # new image.
 #
@@ -45,7 +45,7 @@ image_size = "3G"
 # Main 10 profiles whose frames leave the decoder as `NV15`; 4K HEVC decodes at 136 fps
 # for a third of one core, and four concurrent 4K30 streams hold real time; RGA converts
 # colour and downscales exactly over DMA-BUF imports, with no IOMMU fault over 600 jobs;
-# and Panfrost opens a GLES 3.1 context that rasterises. That image also carried
+# and Panfrost opens a GLES 3.1 context that rasterises. That image also contained
 # `mesa-vulkan-drivers`, which this recipe does not. On this GPU it provided only the
 # software `lvp` device, and none of the paths above used it.
 #
@@ -53,7 +53,7 @@ image_size = "3G"
 # image: it booted kernel v7.2.3 with patches `daa40ed` on u-boot v2026.07, BL31 v1.24
 # and DDR init v1.12, and the pins here are v7.3 with patches `339beaf` on u-boot
 # v2026.10, BL31 v1.25 and DDR init v1.13, the bootloader `h96-max-m9/forky`
-# describes. Of the NPU patches that image carried, the kernel now supplies six itself
+# describes. Of the NPU patches that image included, the kernel now supplies six itself
 # -- four rocket fixes from 7.2.4 and the two Rockchip IOMMU fixes from 7.3 -- and four
 # more are rebased onto its error paths.
 # The NPU series at this pin follows its upstream v14 posting, which pulses the NPU

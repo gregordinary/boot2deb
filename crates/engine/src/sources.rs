@@ -34,7 +34,7 @@ const FETCH_BY_SHA_TIMEOUT: Duration = Duration::from_secs(30);
 const HISTORY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The re-fetch durability of a source pin, from a network probe of its configured
-/// URL. `detail` carries the human explanation (which tag/branch, or
+/// URL. `detail` contains the human explanation (which tag/branch, or
 /// why it is orphaned/skipped).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Durability {
@@ -208,7 +208,7 @@ pub enum PinWarning {
 }
 
 /// Run `git ls-remote <url>` bounded by [`LS_REMOTE_TIMEOUT`] and parse its refs.
-/// `Err` carries a human skip reason (network error / timeout / option-like URL).
+/// `Err` contains a human skip reason (network error / timeout / option-like URL).
 fn run_ls_remote(url: &str) -> Result<Vec<LsRef>, String> {
     // A URL beginning with `-` could be read as an option by git; refuse it.
     crate::build::reject_optionlike("source", url).map_err(|e| e.to_string())?;
@@ -244,7 +244,7 @@ fn run_ls_remote(url: &str) -> Result<Vec<LsRef>, String> {
 ///
 /// A human skip reason — a network error, the probe's 30-second timeout, or a
 /// URL that could be read as a git option. Never a typed error: a survey reports the
-/// reason in the row and carries on to the next remote.
+/// reason in the row and moves on to the next remote.
 pub fn advertised_refs(url: &str) -> Result<Vec<LsRef>, String> {
     run_ls_remote(url)
 }
@@ -262,7 +262,7 @@ pub fn advertised_refs(url: &str) -> Result<Vec<LsRef>, String> {
 ///
 /// A human skip reason: a network error, or the fetch's 60-second timeout. A URL that
 /// reads as a git option is refused too, and so is a directory the branch does not
-/// have. Never a typed error: a survey reports the reason in the row and carries on.
+/// have. Never a typed error: a survey reports the reason in the row and continues.
 pub fn tree_listing(url: &str, dir: &str) -> Result<(String, Vec<String>), String> {
     crate::build::reject_optionlike("source", url).map_err(|e| e.to_string())?;
     let tmp = tempfile::tempdir().map_err(|e| format!("could not create a scratch dir: {e}"))?;
@@ -607,7 +607,7 @@ abc1230000000000000000000000000000000000\trefs/heads/master\n";
 
     #[test]
     fn tag_target_is_durable() {
-        // An annotated tag: the peeled line carries the commit; the unpeeled line is
+        // An annotated tag: the peeled line contains the commit; the unpeeled line is
         // the tag object (different sha) and must not be mistaken for the commit.
         let commit = "c9acdc466e9aa96352f658b9276aa8a45b8e817d";
         let refs = vec![

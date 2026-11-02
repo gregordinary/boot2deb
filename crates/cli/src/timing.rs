@@ -1,7 +1,7 @@
 //! Where a build's time went: the per-step summary printed when it finishes.
 //!
 //! A [`Timeline`] is fed the whole [`Event`] stream. It keeps the one thing the
-//! stream carries that no other output surfaces. That is how long each build-graph
+//! stream contains that no other output surfaces. That is how long each build-graph
 //! node ran, and whether it ran at all or restored its outputs from the artifact
 //! cache. Those two together are the point. A thirty-second kernel step is a cache
 //! hit, and without the second column a reader has to infer that from the first.
@@ -47,7 +47,7 @@ impl Timeline {
     /// The durations stay out: a wall clock is not reproducible, which is why nothing
     /// else here reaches that document. *Where a step's outputs came from* is not a
     /// timing fact at all — it is what this run did or did not build, and no other
-    /// record carries it.
+    /// record contains it.
     pub(crate) fn restored_nodes(&self) -> Vec<boot2deb_core::provenance::RestoredNode> {
         self.rows
             .borrow()
@@ -188,7 +188,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("uboot", "restored"), ("userspace", "partly restored")]
         );
-        // Durations stay out of the manifest; nothing here carries one.
+        // Durations stay out of the manifest; nothing here contains one.
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # The account, sudo, and SSH keys
 
-Every image carries one account, `debian`. Four settings decide who can use it, what it
+Every image contains one account, `debian`. Four settings decide who can use it, what it
 costs them to become root, and what hardware they can reach. All four are config,
 resolved before the build.
 
@@ -121,7 +121,7 @@ the first boot. The password stays as the console fallback for the day the key i
 laptop you do not have.
 
 The entries are **key material, not paths**. A path would resolve differently on another
-machine, and the point of writing a key down is that every build of that recipe carries
+machine, and the point of writing a key down is that every build of that recipe contains
 it. Public keys are not secret, so they belong in config alongside everything else that
 describes the image.
 
@@ -197,7 +197,7 @@ through `sudo`.
 
 ## What the provenance records
 
-The `.provenance.toml` beside each image carries the full access picture in
+The `.provenance.toml` beside each image contains the full access picture in
 `[credentials]` — the generated password, the sudo policy, and every authorized key:
 
 ```toml
@@ -210,7 +210,7 @@ authorized_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBl5Nn9... operator@work
 ```
 
 That file holds a live credential, so treat it as sensitive. The image's own
-`/etc/boot2deb/image.toml` deliberately carries none of this. It is readable by anyone
+`/etc/boot2deb/image.toml` deliberately contains none of this. It is readable by anyone
 holding the disk. An image that inventoried its own access rules would hand a reader the
 list of what to go after.
 

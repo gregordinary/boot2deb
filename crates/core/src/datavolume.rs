@@ -3,7 +3,7 @@
 //!
 //! The layout this exists for puts the whole bootable system (u-boot, kernel,
 //! rootfs) on the medium the board's flashing route can actually write. The large
-//! disk then carries nothing the boot depends on. On a compute module in a cluster
+//! disk then contains nothing the boot depends on. On a compute module in a cluster
 //! carrier, that is eMMC + an M.2 NVMe. The property that makes it worth modeling
 //! is that **reflashing the OS does not touch the data**. The new image finds the
 //! volume already there, by label, and adopts it.
@@ -12,7 +12,7 @@
 //! image did not create is evidence of data someone wants, so the first-boot
 //! ladder is:
 //!
-//! 1. Adopt a volume carrying our label.
+//! 1. Adopt a volume that has the declared label.
 //! 2. Create one only on a genuinely blank disk.
 //! 3. Refuse anything else.
 //!
@@ -26,12 +26,12 @@
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 
-/// Longest filesystem label an ext4 volume can carry, in bytes. The label is the
+/// Longest filesystem label an ext4 volume can have, in bytes. The label is the
 /// volume's identity across reimaging, so a truncated one would silently fail to
 /// be re-adopted by the next image.
 pub const MAX_LABEL_BYTES: usize = 16;
 
-/// The feature that carries the first-boot hook acting on these declarations. A
+/// The feature that contains the first-boot hook acting on these declarations. A
 /// recipe needs it and at least one [`DataVolume`]. Either alone is inert, which
 /// [`ConfigError::DataVolumeFeatureMismatch`] reports.
 pub const FEATURE: &str = "data-volume";

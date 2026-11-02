@@ -9,7 +9,7 @@
 //! - [`mod@write`] streams a (compressed) artifact into a destination with a digest
 //!   tap.
 //! - [`verify`] re-reads what was written and holds it to the digest, and to the GPT
-//!   the artifact carries.
+//!   the artifact contains.
 //! - [`seed`] regenerates the per-unit personalization partition inside the file.
 //!
 //! Re-assembly with tree additions is the other way `press` produces a file. It is

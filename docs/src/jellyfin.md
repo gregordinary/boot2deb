@@ -151,7 +151,7 @@ each. The dashboard has no field for the two types. They live in
 `/etc/jellyfin/encoding.xml`, and setting the acceleration type in the dashboard leaves
 them as they are.
 
-**The server is held at its release.** The built `jellyfin-server` carries an epoch, and
+**The server is held at its release.** The built `jellyfin-server` has an epoch, and
 depends on the `jellyfin-web` of its own release, so `apt upgrade` moves neither. The
 Jellyfin repository stays configured for everything else it serves. A newer Jellyfin is
 a change to the app's `ref` in `features/jellyfin-v4l2request.toml`, then an `update` and
@@ -198,7 +198,7 @@ Hardware decode through `-hwaccel v4l2request` cuts decode CPU cost by 53x at 10
 and by 70-162x at 4K, and HEVC decode is bit-exact against software.
 
 Driving that path *from Jellyfin* has been measured on the board too. A patched
-server carrying a `v4l2request` acceleration type played files through the API on
+server supporting a `v4l2request` acceleration type played files through the API on
 2026-09-02. It emitted exactly the accelerated commands, with no software fallback.
 The two recipes install the stock server, so what ships there is the encoder half.
 The `jellyfin-v4l2request` build ships both. See the

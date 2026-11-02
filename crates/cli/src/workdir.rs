@@ -54,7 +54,7 @@ pub(crate) fn mark_work_dir(work_dir: &Path) -> Result<(), Box<dyn std::error::E
 
 /// The removal guard: `Ok` when `clean` may remove (within) `work_dir` —
 /// it is stamped with the [`WORK_DIR_MARKER`], the caller forced it, or it does
-/// not exist (the removal loop then just reports it absent). `Err` carries the
+/// not exist (the removal loop then just reports it absent). `Err` contains the
 /// refusal message.
 pub(crate) fn check_work_dir_removable(work_dir: &Path, force: bool) -> Result<(), String> {
     if force || !work_dir.exists() || work_dir.join(WORK_DIR_MARKER).exists() {

@@ -10,7 +10,7 @@
 //! therefore answers about historical pins without a checkout at either of them, and
 //! without disturbing a checkout at one.
 //!
-//! It needs the repo to be present and to carry both commits, which a co-developed
+//! It needs the repo to be present and to contain both commits, which a co-developed
 //! or freshly-fetched checkout does not always do. Every gap is therefore an
 //! [`Unavailable`](SeriesDelta::Unavailable) answer rather than a failure. A
 //! comparison missing one section is worth more than no comparison.
@@ -260,7 +260,7 @@ mod tests {
         assert!(delta.is_quiet(), "{delta:?}");
     }
 
-    /// The degradation the plan asks for: a commit the checkout does not carry
+    /// The degradation the plan asks for: a commit the checkout does not contain
     /// reports itself unavailable, naming the commit, rather than failing the whole
     /// comparison the section belongs to.
     #[test]

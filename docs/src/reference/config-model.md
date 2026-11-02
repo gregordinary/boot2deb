@@ -12,7 +12,7 @@ A build is a single point across the axes a user selects:
   (values from `list-kernels`). Some kernels are [not built at
   all](#kernels-are-compiled-or-installed).
 - **`suite`** — the Debian suite (e.g. `forky`, `trixie`). Override with `--suite`. The
-  image's `sources.list` carries the pockets that suite actually publishes, so a
+  image's `sources.list` contains the pockets that suite actually publishes, so a
   released suite gets `-security` and `-updates` alongside its base and `sid` gets
   neither.
 
@@ -33,7 +33,7 @@ A build is a single point across the axes a user selects:
   leaves the kernel tree untouched. A bootloader variant therefore costs a series rather
   than a whole kernel definition. See
   [The bootloader is its own axis](#the-bootloader-is-its-own-axis). Empty on a board
-  whose u-boot ships pristine, or whose firmware is not ours to build.
+  whose u-boot ships pristine, or whose firmware boot2deb does not build.
 - **`layout`** — how the disk image is packaged: `combined` (one whole-disk image, boot
   payload and rootfs on a single medium) or `split` (separate bootloader and rootfs
   images for a two-medium install). Override with `--layout`. Only a boot method that
@@ -115,7 +115,7 @@ kernel resolves exactly as it would if this axis did not exist:
 Nonfree firmware is declared by the two *hardware* layers, because which blobs a build
 needs is a fact about the silicon and the board. It is not a fact about the distro
 substrate, the bootloader, or a userspace feature. It sits on the SoC layer when it
-identifies a part every board on that SoC carries. It moves down to a device when
+identifies a part every board on that SoC has. It moves down to a device when
 boards differ.
 
 The package half is a subtraction from the *include* set rather than an entry in
@@ -131,14 +131,14 @@ by* would not change a byte of what is in it.
 A boot method is not a set of options on a common shape, because the shapes genuinely
 differ. `boot-methods/<method>.toml` is therefore a **variant per method**, and the
 file's own name selects it. A field belonging to another method is an *unknown field*.
-That is a parse error naming the file, not a value quietly carried into a build with
+That is a parse error naming the file, not a value quietly passed into a build with
 nowhere to put it.
 
 The two shipped methods:
 
-- **`rockchip-rkbin`** — boot2deb compiles the bootloader. The layer carries the u-boot
+- **`rockchip-rkbin`** — boot2deb compiles the bootloader. The layer contains the u-boot
   source and ref, and the raw-gap offsets (`idbloader_offset`, `uboot_itb_offset`,
-  `rootfs_offset`). The device carries `uboot_defconfig` and inherits an rkbin blob set
+  `rootfs_offset`). The device contains `uboot_defconfig` and inherits an rkbin blob set
   (ATF + DDR TPL) from its SoC. The payloads land *outside* any partition, in the gap
   ahead of the rootfs.
 
@@ -157,12 +157,12 @@ The two shipped methods:
   vboot-signed and wrapped in a FIT. It comes from a *ChromeOS kernel partition* the
   firmware finds by scanning each medium's GPT for a type GUID.
 
-  The layer carries those partitions' geometry, and the GPT attribute bits that make
-  the firmware boot one of them (`priority` / `tries` / `successful`). It also carries
-  the command line to bake into the signature. The device carries a **board profile**.
+  The layer contains those partitions' geometry, and the GPT attribute bits that make
+  the firmware boot one of them (`priority` / `tries` / `successful`). It also contains
+  the command line to bake into the signature. The device contains a **board profile**.
 
   `kpart_slots` is the field worth understanding. It is how many kernel partitions the
-  image lays down, back to back, and it is **2**. The first carries the signed kernel,
+  image lays down, back to back, and it is **2**. The first contains the signed kernel,
   and the second ships empty at priority 0.
 
   That spare is what makes an on-device kernel upgrade atomic. The upgrade writes the
@@ -172,7 +172,7 @@ The two shipped methods:
   [Upgrading the kernel](../kernel-upgrades.md).
 
 Both shapes lay the same GPT: the 1 MiB `b2d-seed` partition first, then the rootfs,
-which carries the **legacy-BIOS-bootable attribute**. That attribute is what points
+which has the **legacy-BIOS-bootable attribute**. That attribute is what points
 u-boot's `bootflow scan` at the rootfs. It narrows to the partitions marked bootable,
 and with none marked it looks at partition 1 alone, which is the seed. Depthcharge
 ignores it and selects a kernel slot by type GUID instead.
@@ -229,7 +229,7 @@ not in this one. Authoring workflow:
 [Adding a patch](../contributing/adding-a-patch.md).
 
 The lock's `[patches]` block records the series plus the same three fields every other
-pinned source carries. Those are where it came from, the ref that was resolved, and the
+pinned source contains. Those are where it came from, the ref that was resolved, and the
 exact commit:
 
 ```toml
@@ -411,11 +411,11 @@ deb, so two coexisting kernels never collide over one firmware path. `boot2deb
 list-kmods` prints what is available.
 
 **Why not the `patches` repo.** That repo is scoped to the four trees boot2deb pins
-itself, which are the kernel, u-boot, ffmpeg and userspace trees. Its series carry
+itself, which are the kernel, u-boot, ffmpeg and userspace trees. Its series contain
 kernel-version
 envelopes, because a kernel patch's applicability is keyed to a kernel version.
 
-A kmod's patches are keyed to a *driver revision* instead, and a lock carries exactly
+A kmod's patches are keyed to a *driver revision* instead, and a lock contains exactly
 one `patches` pin. Routing a kmod tweak through it would couple that tweak to every
 kernel, u-boot, and ffmpeg series pinned in the same lock.
 
@@ -459,7 +459,7 @@ exact pins in `recipes/<device>/<leaf>.lock`.
 The `[[userspace]]` entries and the `[ffmpeg]` source stanza at the soc layer are
 **optional**. They provide the trees a `requires_media_accel` feature compiles, and they
 are copied into a build only when a selected feature declares it. A recipe that builds no
-transcode stack carries no such sources and skips the userspace/ffmpeg compile nodes
+transcode stack contains no such sources and skips the userspace/ffmpeg compile nodes
 entirely. A SoC that never transcodes declares neither. Selecting a
 `requires_media_accel` feature on a SoC that lacks them is a resolve-time error, so the
 coupling is checked, not assumed.
@@ -500,7 +500,7 @@ Three more keys shape a tree that needs them:
   CMA fix).
 - `optional = true` means it is skipped unless a build names it with
   `--userspace <name>`.
-- `build_deps` and `targets_filter` carry the extra development packages a tree's probes
+- `build_deps` and `targets_filter` contain the extra development packages a tree's probes
   need, and a filter over a vendor variant matrix.
 
 That set is the capability statement the build reads, not just provenance. ffmpeg's
@@ -511,7 +511,7 @@ produces).
 `ffmpeg_requires` is what makes the rkrga rule data rather than a special case. Its
 filters allocate RKMPP frames, and ffmpeg's own `./configure` rejects `--enable-rkrga`
 without `--enable-rkmpp`. On the RK3576 `librga2` therefore still ships for programs
-that speak the API directly, and the produced ffmpeg carries no librga `NEEDED` entry at
+that speak the API directly, and the produced ffmpeg contains no librga `NEEDED` entry at
 all. The lock mirrors the declared set one-for-one, as `[[userspace]]` entries keyed by
 `name`.
 
@@ -534,7 +534,7 @@ in the rootfs merge.
 
 Putting them on the feature rather than the kernel layer is what keeps the opt-in and
 the thing opted into in one place. An RK3576 build that did not select
-`media-accel-v4l2` does not carry a large out-of-tree driver it has no consumer for.
+`media-accel-v4l2` does not include a large out-of-tree driver it has no consumer for.
 
 Both fields require a **compiled** kernel. A distro-package kernel merges no kconfig and
 applies no series, so selecting such a feature against one is a resolve-time error naming
@@ -626,14 +626,14 @@ other axis of the build point.
 
 Because a `[support]` claim says a configuration is fit to publish, a recipe that both
 declares one and selects `ffmpeg-nonfree` is rejected at resolution. Reach the flavor
-as a variant reference. A variant carries no claim and appears in no support matrix.
+as a variant reference. A variant has no claim and appears in no support matrix.
 
 Nothing on the hardware path depends on the choice. Audio is CPU work on these boards
 either way. FDK-AAC's advantages are bitrates below about 96 kbps and the HE-AAC
 profiles, which sit outside the 128-384 kbps range a media server transcodes to.
 FFmpeg's own native `aac` encoder covers that range.
 
-### A library FFmpeg links that Debian does not carry
+### A library FFmpeg links that Debian does not include
 
 Some codecs have no Debian package. AVS2 and AVS3 are the case here. FFmpeg wraps
 `libdavs2` and `libuavs3d`, and the archive ships neither. `./configure` therefore has
@@ -650,7 +650,7 @@ links = ["libdavs2-16", "libdavs2-dev"]
 ```
 
 `links` is the runtime library then its `-dev`, the same contract a compiled userspace
-tree carries, and both halves matter. The `-dev` alone gives `./configure` headers and a
+tree has, and both halves matter. The `-dev` alone gives `./configure` headers and a
 `.pc` file, with no library to link against and no `shlibs` for `dpkg-shlibdeps` to
 read. The produced `ffmpeg-rk` would then declare no dependency on a library it links.
 
@@ -687,7 +687,7 @@ restoring one built against the old bytes.
 
 A device normally names an in-tree DTB with `kernel_dtb`, and the kernel's own tree
 builds it. A freshly-supported SoC often has every driver upstream but none of its
-boards. A device can instead carry its device-tree **sources** in `device_dts`. Those
+boards. A device can instead name its device-tree **sources** in `device_dts`. Those
 are the board `.dts` plus any board-specific `.dtsi`, as config-root-relative paths
 resolved along the overlay search path like a fragment or blob:
 
@@ -737,7 +737,7 @@ buffer, where `dmesg` and `journalctl -k` still show it.
 This exists because a single chatty driver can otherwise print faster than a login can
 be typed. That costs you the console exactly when a first boot needs it.
 
-Out-of-tree vendor drivers are the usual source. A bare `printk()` carries no severity,
+Out-of-tree vendor drivers are the usual source. A bare `printk()` has no severity,
 so it lands at `KERN_WARNING` however trivial the message. Such calls are typically
 ungated by any of the driver's own debug knobs, so lowering a driver's debug level does
 not reach them. Gating the console bounds every driver at once, including the ones
@@ -751,7 +751,7 @@ value, so the board wins:
 kernel_cmdline = "loglevel=7"
 ```
 
-### The modules the initramfs must carry
+### The modules the initramfs must contain
 
 A SoC or device layer names the modules its hardware needs before the root filesystem
 mounts, in an `[initramfs]` table. Each entry's reason is a TOML comment beside it,
@@ -883,10 +883,10 @@ They are permanent fixtures of the archive, so naming one is never a typo even w
 recipe builds it yet. An entry naming an **empty** `suites` list is refused outright at
 resolution. Config that can never take effect is a mistake rather than a no-op.
 
-`exclude` takes plain names only. An include has to name a package the archive carries,
+`exclude` takes plain names only. An include has to name a package the archive contains,
 so which suite is being built decides whether the name is right. An exclude names
 something that must not be installed, and is satisfied just as well by a suite that
-never had it. Excluding a name a suite does not carry is therefore already a no-op.
+never had it. Excluding a name a suite does not contain is therefore already a no-op.
 
 **Six arrays are the exception and accumulate**: `caveats`, `expect`,
 `nonfree_firmware_packages`, `packages`, `exclude` and `initramfs.modules`. Each level's
@@ -964,7 +964,7 @@ and naming it is faster than searching for it. Both are checked by `resolve`, of
 rather than discovered mid-build. `update` and `build` run the same gate before anything
 is committed or compiled.
 
-`fit` is opt-in per board, and nothing else changes. The shipped recipes all carry a
+`fit` is opt-in per board, and nothing else changes. The shipped recipes all contain a
 hand-picked size, and a stated size lays out the disk first and formats into it exactly
 as before.
 
@@ -1027,7 +1027,7 @@ activate.
 somewhere other than the file it is written into. `hostname` defaults to the slug, and
 nearly every board keeps that default, so the two are the same string in practice. A
 slug outside the host-name shape would therefore make the default a value no image could
-carry. Holding the slug to the tighter rule is what makes the default correct by
+have. Holding the slug to the tighter rule is what makes the default correct by
 construction.
 
 A board that wants a different network name simply states `hostname`
@@ -1067,7 +1067,7 @@ ends of the range come from.
 
 A feature can declare an application that the build compiles from source, rather than
 installing the archive's build of it. The case it serves is an archive build that lacks
-patches this build carries. `jellyfin-v4l2request` compiles the Jellyfin server with the
+patches this build applies. `jellyfin-v4l2request` compiles the Jellyfin server with the
 `patches/jellyfin` series, whose stock build has no way to ask for the V4L2 request API
 decoder.
 
@@ -1096,7 +1096,7 @@ arm64 = "58ace73c…"
 ```
 
 `deb` is added to the image's package set, and it takes the archive's name on purpose:
-the built package replaces the archive's. Its version carries an epoch, so the rootfs
+the built package replaces the archive's. Its version has an epoch, so the rootfs
 solve prefers it over any release the archive publishes later, and so does a device's
 `apt upgrade`.
 
@@ -1153,7 +1153,7 @@ manifest digest.
 Recipes group under their device's folder, so a board's whole matrix, every suite and
 variant, sits together. The reference you build is that path without the extension
 (`turing-rk1/media-accel-forky`), the leaf dropping the device prefix the folder already
-carries.
+has.
 
 **A lock records what the build depends on, and nothing else.** Each table is present
 only when the build actually has that dependency. `[kernel]` appears when a kernel is
@@ -1179,7 +1179,7 @@ every one of those packages by name, version, and sha256.
 `source_date_epoch` is the time the rootfs stamps wherever it records one, in Unix
 seconds. That covers every file's modification time, the initrd's members, and the
 created account's password-change day. `update` sets it to the time of the `update`
-that last moved a pin, and carries it forward when nothing moved. An unchanged
+that last moved a pin, and keeps it when nothing moved. An unchanged
 re-pin therefore leaves the lock byte-identical.
 [Time and paths](reproducibility.md#time-and-paths) says where else it reaches.
 
@@ -1203,7 +1203,7 @@ See the [CLI reference](cli.md) for the commands that operate on these.
 The config layers declare a **constraint**, such as `uboot_ref = "v2026.10"` on the boot
 method or a `[[userspace]]` entry's `ref` on the SoC. The lock records the **exact pin**
 resolved from it. An `update` given no per-tree ref flag re-reads the constraint, so
-editing one and re-pinning carries every recipe that resolves through that layer with it:
+editing one and re-pinning moves every recipe that resolves through that layer with it:
 
 ```sh
 # after bumping uboot_ref in boot-methods/rockchip-rkbin.toml
@@ -1226,7 +1226,7 @@ first update, with no lock to inherit from, must supply one.
 
 ### A recipe declares what it has been taken through
 
-A recipe can carry a `[support]` claim — `validated`, `expected`, or `experimental` —
+A recipe can contain a `[support]` claim — `validated`, `expected`, or `experimental` —
 plus the `YYYY-MM-DD` the claim was last established. A `validated` claim also names the
 commit its booted image was built from:
 
@@ -1238,7 +1238,7 @@ commit = "7d1c6f5ec59975b96090c2e2e42ecc8625ff3608"
 ```
 
 The commit is the `config_commit` the image's provenance manifest records, and its
-12-character form is accepted as written. Only a `validated` claim carries one, and a
+12-character form is accepted as written. Only a `validated` claim contains one, and a
 `validated` claim without one does not load.
 
 The claim is per recipe, not per device, because it varies within a device. A board can
@@ -1278,7 +1278,7 @@ caveats = [
 
 # features/media-accel-rockchip.toml — true wherever this capability is selected
 caveats = [
-  "Scaling inside a hardware transcode runs on the CPU. The RGA filters accept only frames carrying an RKMPP hardware context ...",
+  "Scaling inside a hardware transcode runs on the CPU. The RGA filters accept only frames with an RKMPP hardware context ...",
 ]
 
 # recipes/asus-c201/libre-forky.toml — true of this build point alone
@@ -1315,7 +1315,7 @@ parent's. A board that genuinely lacks the limitation is its own device rather t
 variant.
 
 A caveat is a sentence, not a code, so the only rule at load is that it is non-empty
-and carries no ragged whitespace. **Where a limitation is mechanically checkable it
+and contains no ragged whitespace. **Where a limitation is mechanically checkable it
 belongs in the board's selftest expectations instead**, where it fails rather than
 merely informs. A caveat that could have been an `[[expect]]` entry is a check nobody
 runs. Caveats are for what cannot be asked of the running system.
@@ -1359,7 +1359,7 @@ u-boot, and blob commits the recipe was pinned at.
 
 Three things follow from a variant being a build point rather than a recipe:
 
-- **It carries no support claim.** The claim belongs to the recipe, and a different
+- **It has no support claim.** The claim belongs to the recipe, and a different
   feature set is a different build. `list-recipes` and the support matrix show only
   authored recipes, and a variant appears in neither.
 - **Feature order is significant, so it is preserved.** `config_fragments` and

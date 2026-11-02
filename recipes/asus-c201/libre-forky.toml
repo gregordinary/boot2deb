@@ -30,7 +30,7 @@ image_size = "2G"
 # drivers live. Under `drivers/gpu/drm/rockchip/` the deblob changes only the RK3399's
 # CDN DP firmware loader, and it touches nothing under hantro, panfrost or analogix. The
 # `rk3288-fixes` series applies to it unchanged. So the
-# reasoning that backs asus-c201/mainline-forky's claim carries over intact, and this
+# reasoning that backs asus-c201/mainline-forky's claim applies intact, and this
 # recipe stands exactly where that one does: `expected` until an image built from this
 # pin boots. The radio being dead is by construction, not a defect, and is not what the
 # claim is about.

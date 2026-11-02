@@ -81,7 +81,7 @@ is a real thing to do. A headless board just has no reason to *default* one.
 
 ### Why the default locale is `C.UTF-8` and not `en_US.UTF-8`
 
-`C.UTF-8` is a complete UTF-8 locale built into glibc. It is also neutral: this project
+`C.UTF-8` is a complete UTF-8 locale built into glibc. It is also neutral: boot2deb
 targets no one country, and a US locale is not a better default than any other.
 
 `en_US.UTF-8` is nevertheless **generated** into every image, and that is not a
@@ -89,7 +89,7 @@ contradiction — see the next section.
 
 ### Which languages ship
 
-Every image carries these compiled, in addition to the system locale:
+Every image contains these compiled, in addition to the system locale:
 
 `en_US` `en_GB` `de_DE` `fr_FR` `es_ES` `it_IT` `nl_NL` `pt_BR` `pl_PL` `uk_UA` `ru_RU`
 `vi_VN` `ja_JP` `ko_KR` `zh_CN` `zh_HK` `zh_TW` — all `.UTF-8`.
@@ -241,7 +241,7 @@ Budget roughly 1 MiB of image per added language, and check the result with
 boot2deb resolve h96-max-m9/forky | grep locale
 ```
 
-There is no `locales-all` option here, and that is on purpose: it carries every locale
+There is no `locales-all` option here, and that is on purpose: it contains every locale
 Debian has for 231 MiB installed.
 
 ## Notes for the curious
@@ -256,7 +256,7 @@ Debian has for 231 MiB installed.
   ungenerated. The `locales` package builds the choice list that `dpkg-reconfigure
   locales` offers for the *default locale* out of `/etc/locale.gen`. A system locale
   missing from that file is one the user cannot see or re-select on the board.
-- **Not `locales-all`.** It carries every locale Debian has, at 231 MiB installed. The
+- **Not `locales-all`.** It contains every locale Debian has, at 231 MiB installed. The
   three packages boot2deb ships cost about 44 MiB installed (measured on forky/arm64),
   plus 19.2 MiB for the generated locale archive — call it ~63 MiB on the image. On a
   2 GiB rootfs that is about 3%, and it compresses well into the shipped `.img.xz`.

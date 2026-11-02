@@ -6,16 +6,16 @@
 # It is a feature of its own rather than part of either side because it is
 # meaningful only where both are present. `jellyfin` is portable and must not
 # ship RK35xx encoder settings to an x86 box; `media-accel-rockchip` serves any
-# consumer of the stack (a Plex recipe, a bare-ffmpeg box) and must not carry one
+# consumer of the stack (a Plex recipe, a bare-ffmpeg box) and must not include one
 # application's config file. A recipe that wants accelerated Jellyfin names all
 # three — there is no provider auto-resolution (non-goal).
 #
 # Both halves of the composition are required rather than assumed. `requires_capability
 # = ["jellyfin"]` names the application this configures, so selecting the glue alone —
 # which would seed `/etc/jellyfin/encoding.xml` into an image with no server to read it
-# — is rejected at resolve. That requirement also carries the FFmpeg one transitively:
+# — is rejected at resolve. That requirement also includes the FFmpeg one transitively:
 # `jellyfin` itself declares `requires_capability = ["ffmpeg"]`, so a selection holding
-# this file has been shown to carry a provider. `requires_soc` below covers the other
+# this file has been shown to include a provider. `requires_soc` below covers the other
 # half — that the provider is the *Rockchip* one — since only an RK3588 build resolves
 # it.
 description  = "Configure Jellyfin to transcode on the Rockchip stack (ffmpeg-rk + VEPU580)"

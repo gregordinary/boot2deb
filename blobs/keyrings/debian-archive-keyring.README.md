@@ -3,7 +3,7 @@
 `debian-archive-keyring.gpg` verifies the `Release`/`InRelease` signatures of the
 Debian suites the rootless build sandbox and (later) the image rootfs bootstrap
 . It is vendored because the build host is frequently **not** Debian —
-an Ubuntu, Pop!_OS, or Fedora host carries its own distro's apt keys, not Debian's,
+an Ubuntu, Pop!_OS, or Fedora host has its own distro's apt keys, not Debian's,
 so relying on a host-installed keyring is not portable. Vendoring keeps
 the bootstrap reproducible, offline, and host-distro-independent, matching how the
 rkbin blobs are vendored under `blobs/<soc>/`.

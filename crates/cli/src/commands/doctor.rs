@@ -110,7 +110,7 @@ pub(crate) fn run(
             "toolchain : {}",
             if pf.cross_toolchain {
                 format!(
-                    "cross — the build root carries a toolchain emitting {}",
+                    "cross — the build root contains a toolchain emitting {}",
                     build.arch
                 )
             } else {
@@ -179,7 +179,7 @@ pub(crate) fn run(
     finish(blocking, json, doc, "all required host tools present")
 }
 
-/// One verified trust anchor: the keyring file's name and the vetted keys it carries.
+/// One verified trust anchor: the keyring file's name and the vetted keys it contains.
 type Anchor = (String, Vec<boot2deb_engine::keyring::Key>);
 
 /// Verify every apt keyring this run bootstraps against — each named distro's archive

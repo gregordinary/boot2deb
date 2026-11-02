@@ -25,17 +25,17 @@ image_size = "2G"
 # `vdd_npu_s0` rail that domain's supply, so the rail switches with the domain the way
 # the GPU's does.
 #
-# usb_drd0 runs at SuperSpeed on the usbdp PHY, carrying nothing beyond the SoC dtsi
+# usb_drd0 runs at SuperSpeed on the usbdp PHY, needing nothing beyond the SoC dtsi
 # to do it. That is measured, on the sibling media-accel recipe, which shares this
 # board description: 5 Gbps, ~154 MB/s over 92 GB of continuous reads, no link error.
 # A device that lands at 480 Mb/s there is a seating problem — see the board page.
 #
 # What the move from the 7.2 generation changes on this SoC's paths. The pin is v7.3.
 #
-# The patch series gets shorter. 7.3 carries the Rockchip IOMMU's all-clocks and
-# stale-fault fixes, which the NPU series carried as 0004 and 0005, so it no longer
+# The patch series gets shorter. 7.3 includes the Rockchip IOMMU's all-clocks and
+# stale-fault fixes, which the NPU series included as 0004 and 0005, so it no longer
 # does; images from this recipe already ran both. rk3576/100 and npu/0002 are
-# regenerated because `pm-domains.c` gains a regulator-carrying `DOMAIN_M_R` macro for
+# regenerated because `pm-domains.c` gains a `DOMAIN_M_R` macro with a regulator argument for
 # the RK3568 NPU beside the one they extend. The RK3576 GPU domain is still unflagged
 # upstream, so 100 still does its work.
 #
@@ -70,7 +70,7 @@ image_size = "2G"
 # how the high-temperature refresh derate reads MR4; its other fixes are for LPDDR5.
 # u-boot v2026.10 sizes the DRAM banks earlier in start-up, and the kernel's memory node
 # is built from that result, so `bdinfo` and `/proc/iomem` are the first thing to
-# compare on a new image. The `rk3576-display` series no longer carries the build
+# compare on a new image. The `rk3576-display` series no longer includes the build
 # host's pylibfdt fix, which v2026.10 has itself. rk3576/0008, the PMU power-domain
 # driver, places its Kconfig and Makefile entries in upstream's sorted order, and its
 # driver source is the same.

@@ -1,7 +1,7 @@
 //! Build points — a recipe plus the feature selection a build was asked for.
 //!
 //! A [`Recipe`](crate::model::Recipe) names one curated point across the build axes
-//! and carries a support claim. The feature axis, though, is a *list*, and the set a
+//! and contains a support claim. The feature axis, though, is a *list*, and the set a
 //! caller wants is often not one anybody curated. "The shipped H96 image, plus
 //! transcode, plus Jellyfin" is a legal selection with no recipe behind it. A
 //! [`BuildPoint`] is that pairing — the recipe supplying every other axis, and the
@@ -147,7 +147,7 @@ impl BuildPoint {
     /// and `turing-rk1/forky`, and sits one letter from `asus-c201/mainline-forky`.
     ///
     /// An image outlives the directory it was built in, getting copied to a flashing
-    /// host and kept beside three others. Its name therefore has to carry the whole
+    /// host and kept beside three others. Its name therefore has to contain the whole
     /// point on its own.
     ///
     /// **Every artifact the build point owns is named for this**, `.deb`s aside:
@@ -159,7 +159,7 @@ impl BuildPoint {
     /// - The provenance document.
     ///
     /// That is what lets several recipes share one `--out-dir` without one silently
-    /// folding another's bootloader or rootfs into its image. (`.deb`s carry a package
+    /// folding another's bootloader or rootfs into its image. (`.deb`s have a package
     /// name and version instead, and are scoped by the output dir's artifact ledger.)
     ///
     /// A variant keeps its `+feature` suffixes, so a selection never publishes over the
@@ -231,8 +231,8 @@ mod tests {
 
     #[test]
     fn the_artifact_stem_names_the_whole_point_not_just_its_leaf() {
-        // The stem travels with the file, so it carries the device as well as the
-        // recipe — and a variant carries its features, or a `--feature` build would
+        // The stem travels with the file, so it contains the device as well as the
+        // recipe — and a variant includes its features, or a `--feature` build would
         // publish over the recipe it started from.
         for (reference, stem) in [
             ("turing-rk1/forky", "turing-rk1-forky"),

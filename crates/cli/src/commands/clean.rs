@@ -36,7 +36,7 @@
 //! subuid-owned tree.
 //!
 //! Each target names its own [`PublicationLock`]. The removal can take the
-//! `<target>.lock` a published rootfs carries beside it, and only this module knows
+//! `<target>.lock` a published rootfs has beside it, and only this module knows
 //! which targets are such trees. `--build-roots` names base trees, so its targets are
 //! [`PublicationLock::Take`], and it names each lock as a target in its own right
 //! besides.
@@ -225,7 +225,7 @@ fn unpinned_checkouts(store: &Path, pinned: &BTreeSet<String>) -> Vec<PathBuf> {
     dead
 }
 
-/// The publication lock a provisioned rootfs at `path` carries — `<path>.lock`, beside
+/// The publication lock a provisioned rootfs at `path` has — `<path>.lock`, beside
 /// the tree rather than inside it.
 ///
 /// Named here because [`boot2deb_engine::sandbox::reclaim_tree`] removes it with the
@@ -248,7 +248,7 @@ pub(crate) fn run(
     // With no selector at all the target is the whole work dir, which is work-scoped.
     let work_scoped = work_scoped || !root_scoped;
 
-    // Each target carries what its removal may take beside it: only this module knows
+    // Each target records what its removal may take beside it: only this module knows
     // which of them are rootfs trees the provisioner published and which merely hold
     // some, and `reclaim_tree` cannot tell them apart from the path.
     let mut targets: Vec<(PathBuf, PublicationLock)> = Vec::new();
@@ -346,7 +346,7 @@ pub(crate) fn run(
 
     let mut removed_any = false;
     // Every path an earlier removal in this run already took. A `PublicationLock::Take`
-    // removal takes the `<tree>.lock` a published rootfs carries along with the tree —
+    // removal takes the `<tree>.lock` a published rootfs has, along with the tree —
     // and `--build-roots`, the one selector that asks for that, names each such lock as
     // a target in its own right. Reporting it "absent" would read as a target that was
     // never there, and would contradict the `--dry-run` line that listed it.
@@ -802,7 +802,7 @@ mod tests {
         // checks, which is where a mistyped `--work-dir` would land.
         //
         // The `.pkgs` sibling is the control: nothing ever took it, and both files are
-        // ours in exactly the same sense.
+        // the test's own in exactly the same sense.
         for sandbox_only in [false, true] {
             let outer = tempfile::tempdir().unwrap();
             let work_dir = outer.path().join("work");
@@ -845,7 +845,7 @@ mod tests {
             publication_lock(Path::new("/w/sandbox/build-arm64-forky-abc")),
             Some(PathBuf::from("/w/sandbox/build-arm64-forky-abc.lock"))
         );
-        // A path with no final component names no tree, so it carries no lock.
+        // A path with no final component names no tree, so it has no lock.
         assert_eq!(publication_lock(Path::new("/")), None);
     }
 

@@ -3,17 +3,17 @@
 //! Generating a `.config` means shelling out to the pinned kernel tree: `make
 //! <base_defconfig>` for the base, then the tree's own
 //! `scripts/kconfig/merge_config.sh` to layer the fragments (it runs
-//! `make KCONFIG_ALLCONFIG=<merged> alldefconfig` to dependency-resolve). We reuse
+//! `make KCONFIG_ALLCONFIG=<merged> alldefconfig` to dependency-resolve). This module reuses
 //! the kernel's Kconfig machinery rather than reimplementing dependency resolution.
 //! The pure value comparison lives in [`boot2deb_core::kconfig`].
 //!
-//! The parity check ([`check_parity`]) compares our fragment-merged config against
-//! a reference config. It generates our fragment-merged `.config` and, separately,
+//! The parity check ([`check_parity`]) compares the fragment-merged config against
+//! a reference config. It generates the fragment-merged `.config` and, separately,
 //! `olddefconfig(<reference>)` on the same patched tree with the same toolchain. It
 //! then diffs them over the normalized `CONFIG_*` set.
 //!
 //! Comparing against the olddefconfig'd reference, rather than the raw file, is
-//! deliberate. A raw reference carries toolchain-probed symbols (MTE, RELR, `CC_*`)
+//! deliberate. A raw reference contains toolchain-probed symbols (MTE, RELR, `CC_*`)
 //! and no-prompt `default y` entries that the kernel's own `olddefconfig`
 //! overrides. It is therefore not the config the reference build actually compiles.
 //! Generating both sides on one tree and toolchain makes those probed symbols
@@ -64,7 +64,7 @@ pub struct ConfigInputs<'a> {
     /// Sharing the root is what makes "the same toolchain context" structural rather
     /// than a matter of two call sites agreeing.
     ///
-    /// Its binds carry the tree and the out-of-tree config directory, plus each
+    /// Its binds include the tree and the out-of-tree config directory, plus each
     /// fragment. A fragment lives in the config root, outside the work dir, and is
     /// read from inside by absolute path.
     pub cr: &'a CompileRoot<'a>,
@@ -95,7 +95,7 @@ pub struct Generated {
 
 /// Outcome of the config-parity check.
 pub struct ParityReport {
-    /// Symbols where our generated config differs from the effective reference
+    /// Symbols where the generated config differs from the effective reference
     /// config. Empty ⇒ byte-identical `CONFIG_*` parity.
     pub differences: Vec<kconfig::Diff>,
     /// Fragment symbols `merge_config.sh` reported as unmet (see [`Generated`]).
@@ -156,7 +156,7 @@ pub fn effective_reference(
     Ok(KernelConfig::parse(&text))
 }
 
-/// The config-parity check: generate our fragment-merged config and the
+/// The config-parity check: generate the fragment-merged config and the
 /// effective reference config on the same tree, and diff them over the normalized
 /// `CONFIG_*` set. `work_dir` holds the two out-of-tree builds (`gen/`,
 /// `reference/`), left in place so a failing check can be inspected.
@@ -264,7 +264,7 @@ fn run_merge_config(
     // a tree-derived script path must be absolute or it re-resolves *inside* the
     // tree and dangles whenever `tree` itself is relative (e.g. the verify cache
     // under the default relative `--root`). Canonicalizing keeps the invocation
-    // CWD-independent and fails here, naming the script, when the tree carries no
+    // CWD-independent and fails here, naming the script, when the tree contains no
     // merge_config.sh at all.
     let script =
         std::fs::canonicalize(&script).map_err(|source| EngineError::io(&script, source))?;

@@ -21,13 +21,13 @@ boot2deb build asus-c201/forky
 ```
 
 That produces `build/asus-c201/forky/artifacts/asus-c201-forky.img.xz` — a whole-disk image
-carrying a signed kernel partition and the ext4 rootfs, so one write lays down
+containing a signed kernel partition and the ext4 rootfs, so one write lays down
 everything the firmware needs.
 
 ## What is unusual about this board
 
 Almost nothing is built. The RK3288 and all ten Veyron boards are upstream, Debian's own
-armhf kernel runs them, and the bootloader is not ours to make. So `asus-c201/forky`
+armhf kernel runs them, and boot2deb does not build the bootloader. So `asus-c201/forky`
 compiles neither a kernel nor a bootloader, and its lock pins nothing from git:
 
 ```toml
@@ -48,7 +48,7 @@ The signature is built by `depthchargectl` **inside the rootfs**, deliberately. 
 the same packaged tool, reading the same `/etc/fstab`, that re-signs and rewrites a
 kernel partition. It does that again when `apt` upgrades the kernel on the running board.
 
-So the image carries **three** partitions: two ChromeOS kernel slots and the rootfs.
+So the image contains **three** partitions: two ChromeOS kernel slots and the rootfs.
 
 | # | partition | contents |
 |---|---|---|
@@ -76,7 +76,7 @@ identical: the same signed-kernel boot payload, the same board profiles, the sam
 boot2deb build asus-c201/mainline-forky
 ```
 
-That series currently carries one patch, and it is a good illustration of why the recipe
+That series currently includes one patch, and it is a good illustration of why the recipe
 exists. RK3288's `crypto/rk_crypto` hashes do not inherit their fallback's `statesize`,
 so any user of the shash export/import path gets a truncated state. The fix is four lines,
 and nothing about it is board-specific. It is simply not in a released kernel yet. A
@@ -88,7 +88,7 @@ a shift mismatch between the pre-emphasis and voltage-swing values it programs d
 link training. In 7.3 it takes the training waits from the panel's own DPCD instead of
 fixed delays. That is on the one path between this machine and a picture.
 
-The in-tree V4L2 RGA driver, which the RK3288 does use, took the rework that carried RGA3
+The in-tree V4L2 RGA driver, which the RK3288 does use, took the rework that brought RGA3
 support into mainline. On the RGA2 side that means five things:
 
 - Colorimetry is announced and synchronised rather than ignored
@@ -121,7 +121,7 @@ boot2deb build asus-c201-libreboot/libre-forky    # libreboot, 32 MiB slots
 ```
 
 Choosing that kernel is what makes the whole *image* free, not just the kernel. The
-kernel definition carries `libre = true`, and resolution reads it:
+kernel definition contains `libre = true`, and resolution reads it:
 
 - The SoC layer's `firmware-brcm80211` is dropped from the package set.
 - Its `overlay-nonfree/` tree, the two vendored Broadcom blobs, is not laid in.
@@ -204,7 +204,7 @@ Everything else is the C201's and is inherited: the DTB, the kernel set, the key
 **What the headroom is spent on** is the boot you watch. A signed payload holds the
 kernel and the initramfs in one fixed budget. At 16 MiB that budget dictates both halves
 of a slow, blind boot. The initramfs is compressed with xz, which is the smallest and by
-some way the slowest to decompress. It carries no display driver, so nothing can draw
+some way the slowest to decompress. It contains no display driver, so nothing can draw
 until the real root is mounted and udev loads one. The board sits on the firmware's
 blank screen for the whole of it.
 
@@ -233,7 +233,7 @@ sudo dd if=card.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 `press` verifies the file it wrote, and `--hostname`/`--ssh-key` personalize the
-unit. `--embed-image` carries the compressed artifact for
+unit. `--embed-image` includes the compressed artifact for
 [installing to the eMMC](#installing-to-the-emmc) later — see
 [Producing images](../press.md). Confirm the device with `lsblk` first, because `dd`
 overwrites it whole.
@@ -247,7 +247,7 @@ boot2deb press asus-c201-libreboot/mainline-forky stick.img --fresh-identity
 ```
 
 The press re-signs the card's kernel for the new root with the developer key the image
-carries. See [Giving a medium its own identifiers](../press.md#giving-a-medium-its-own-identifiers).
+contains. See [Giving a medium its own identifiers](../press.md#giving-a-medium-its-own-identifiers).
 
 The unit must be in **developer mode**. Then, from a full power-off, boot the medium
 with **Ctrl+U** at the developer-mode screen. What that takes depends on the firmware:
@@ -268,7 +268,7 @@ Expect white screen before the display comes up, and how much depends on the bui
 `asus-c201` image leaves the DRM stack out of the initramfs to keep the signed payload
 under its 16 MiB ceiling. The console therefore appears only once the real root is
 mounted. That is about 5 seconds from eMMC and about 8 from USB, the difference being the
-time the initramfs spends enumerating the stick. The `asus-c201-libreboot` image carries the DRM
+time the initramfs spends enumerating the stick. The `asus-c201-libreboot` image contains the DRM
 stack, so the panel lights during the initramfs instead.
 
 ## Installing to the eMMC
@@ -374,7 +374,7 @@ Bluetooth **audio** takes one package beyond that, if you install a desktop. Sou
 a headset through PipeWire's Bluetooth plugin, `libspa-0.2-bluetooth`. Both
 `wireplumber` and `pipewire-pulse` merely *Suggest* it, so no desktop metapackage pulls it
 in. Its absence looks like a headset that pairs and connects but offers nothing to play
-to. Install it alongside the desktop. Images are headless and carry no PipeWire, so it is
+to. Install it alongside the desktop. Images are headless and contain no PipeWire, so it is
 not in the image.
 
 ## Display
@@ -401,7 +401,7 @@ A boot2deb-built image boots this board. Confirmed end to end on a libreboot uni
 from USB via Ctrl+U. forky comes up, runs first boot, and reaches a login prompt. The
 per-image password works and is changed at first login, and `nmtui` joins Wi-Fi.
 
-The `root=` baked into the *signed* kernel names the rootfs PARTUUID the image carries.
+The `root=` baked into the *signed* kernel names the rootfs PARTUUID the image has.
 That is the build's, or the one `press --fresh-identity` drew for the medium. The device
 keeps it for life. First boot grows the partition but never rewrites its PARTUUID, so the
 signature stays valid with nothing to re-sign.
@@ -425,7 +425,7 @@ rather than `validated`. That kernel has not been on the board.
 
 Expect a **white screen of a few seconds** after Ctrl+U before the boot messages appear.
 It is measured at about 5 seconds from eMMC and about 8 from USB. That is normal and not
-a fault. This image carries no display driver in the initramfs. The panel therefore holds
+a fault. This image contains no display driver in the initramfs. The panel therefore holds
 the firmware's last frame until the kernel's DRM stack loads from the mounted root.
 
 Audio is **confirmed on hardware**: the internal speakers and volume control work out

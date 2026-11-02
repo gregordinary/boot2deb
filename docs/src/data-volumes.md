@@ -48,7 +48,7 @@ operator does not have.
 
 So it is something you add to your own recipe — copy a shipped one and extend it,
 as in [Adapting a shipped recipe](tutorials/adapting-a-recipe.md). There are two
-halves, and a build fails if it has only one. The `data-volume` **feature** carries
+halves, and a build fails if it has only one. The `data-volume` **feature** includes
 the first-boot hook, and the recipe's `[[data_volumes]]` says what to mount where.
 
 ```toml
@@ -104,7 +104,7 @@ data volume  : b2d-data on nvme -> /srv (ext4, create if blank)
 
 Per volume, it stops at the first step that applies:
 
-1. **Adopt** — a filesystem already carries the label. Mount it. **Never format.**
+1. **Adopt** — a filesystem already has the label. Mount it. **Never format.**
    This is the path every boot of a reflashed board takes.
 2. **Create** — the matched disk is genuinely blank *and* `create = "if-blank"`.
    Write a GPT with one partition, `mkfs` with the label, mount.
@@ -120,7 +120,7 @@ reason is logged. If that is still more latitude than you want, `create = "never
 removes the blank-disk case too.
 
 The `/etc/fstab` entry is written at **build** time, so every boot after the first
-mounts the volume with no hook involved. It carries `nofail` and a short device
+mounts the volume with no hook involved. It contains `nofail` and a short device
 timeout. A data disk that is absent, dead, or slow to enumerate must never be the
 reason a system will not boot. A node with no second disk boots normally and simply
 has an empty mount point.

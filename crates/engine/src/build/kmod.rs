@@ -58,7 +58,7 @@ const OUTPUT_STAGE_VERSION: u32 = 4;
 /// firmware collect or package logic changes the produced `.deb`.
 const FIRMWARE_STAGE_VERSION: u32 = 3;
 
-/// Filesystem inputs for the kmod stage. The resolved build carries the descriptors
+/// Filesystem inputs for the kmod stage. The resolved build contains the descriptors
 /// (`subdir`/patches/`make_args`/modules), and the lock the git pins. These are the
 /// on-disk locations plus the resolved local-patch paths the CLI expanded.
 pub struct KmodOptions<'a> {
@@ -455,7 +455,7 @@ struct ModuleMake<'a> {
     /// The cross root both `make` runs happen in — the same one that built `ktree`, so
     /// the module is compiled by the compiler whose `Module.symvers` it links against.
     /// Anything else is a vermagic mismatch the module only reveals at `insmod` time.
-    /// Its binds carry the kernel tree, the driver tree, and the staging directory
+    /// Its binds include the kernel tree, the driver tree, and the staging directory
     /// `modules_install` writes into.
     cr: &'a CompileRoot<'a>,
     /// Sink for the two `make` runs' output.

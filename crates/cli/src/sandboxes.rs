@@ -33,7 +33,7 @@ pub(crate) struct Roots {
     /// `None` for a build that resolves no image suite and so has no suite to bootstrap
     /// one for — a `deliverable = uboot` build, whose stages never ask for it.
     pub(crate) target: Option<Box<dyn BuildSandbox>>,
-    /// The **host-arch** root the kernel, u-boot and kmod stages compile in, carrying a
+    /// The **host-arch** root the kernel, u-boot and kmod stages compile in, containing a
     /// cross toolchain that emits the target's objects — so a multi-minute kernel build
     /// runs natively and never passes through `qemu-user`.
     ///
@@ -140,7 +140,7 @@ pub(crate) fn roots(build: &ResolvedBuild, inputs: &RootInputs) -> Roots {
 /// reviewer cannot read. An explicit `--keyring` is the operator's own anchor, chosen
 /// deliberately, and is used as given.
 ///
-/// A distro layer naming a keyring the tree does not carry is an error rather than a
+/// A distro layer naming a keyring the tree does not contain is an error rather than a
 /// fallback. No other anchor would verify that distribution's archive.
 ///
 /// `unsafe_overlay` allows an overlay to supply it; without that the anchor is resolved
@@ -160,7 +160,7 @@ pub(crate) fn keyring(
         .ok_or_else(|| {
             format!(
                 "distro '{}' names the archive keyring {rel}, which the config tree does not \
-             carry",
+             contain",
                 distro.name
             )
         })?;

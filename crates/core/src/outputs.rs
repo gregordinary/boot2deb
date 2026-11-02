@@ -7,7 +7,7 @@
 //! A reproduction is judged output by output against the original build's record:
 //!
 //! - An output whose bytes are a function of the lock compares by sha256.
-//! - An output that carries the per-image first-boot password
+//! - An output that contains the per-image first-boot password
 //!   ([`per_image`](Output::per_image)) can never match byte for byte. It is compared
 //!   through the two images instead ([`ImageComparison`]). Their file manifests
 //!   ([`crate::files`]) must agree outside the password's content
@@ -42,7 +42,7 @@ pub struct Output {
     pub size: u64,
     /// The lowercase-hex sha256 of its bytes.
     pub sha256: String,
-    /// Whether it carries the per-image first-boot password: an image holding the rootfs
+    /// Whether it contains the per-image first-boot password: an image holding the rootfs
     /// partition, a compressed copy of one, or the rootfs file manifest. Written even
     /// when false, so a reader never has to decide what an absent key meant.
     pub per_image: bool,
@@ -64,7 +64,7 @@ impl Output {
     }
 }
 
-/// Two builds' images compared, which is how the outputs that carry the per-image
+/// Two builds' images compared, which is how the outputs that contain the per-image
 /// password are judged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImageComparison {
@@ -180,7 +180,7 @@ pub fn judge(
                             .join(". "),
                     },
                     None => Verdict::NotComparable {
-                        reason: "it carries the per-image password, and one of the two \
+                        reason: "it contains the per-image password, and one of the two \
                                  builds recorded no file manifest to compare it through"
                             .into(),
                     },
@@ -228,7 +228,7 @@ const OUTPUTS_BANNER: &str = "\
 ///
 /// Only outputs that are a function of the lock are recorded. A disk image and its
 /// containers are not ([`Output::is_disk_image`]). Which of them a build writes follows
-/// its flags, and the image carries the per-image password, which never matches.
+/// its flags, and the image contains the per-image password, which never matches.
 /// Neither is the file manifest, which lists that password's file. The rootfs tar stands
 /// in for the image, since the account in it is still locked. The image is that tar
 /// through a deterministic formatter plus the password splice.

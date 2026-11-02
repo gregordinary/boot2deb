@@ -131,7 +131,7 @@ pub(crate) fn run(
 /// A path is taken as a document and read by its shape; anything else is a recipe
 /// name. Naming a recipe is the fuller of the two: it yields the lock, the solved
 /// manifest committed beside it, *and* the resolved kernel fragments, which no
-/// single document on disk carries.
+/// single document on disk contains.
 fn read_side(root: &ConfigRoot, spec: &str) -> Result<Side> {
     let path = Path::new(spec);
     if path.is_file() {
@@ -571,7 +571,7 @@ mod tests {
     use boot2deb_core::diff::Change;
 
     /// A provenance side reads the manifest its own build published, named for the
-    /// artifact stem, and not the committed name its `manifest` key carries.
+    /// artifact stem, and not the committed name its `manifest` key contains.
     #[test]
     fn a_provenance_side_reads_the_manifest_published_beside_it() {
         assert_eq!(

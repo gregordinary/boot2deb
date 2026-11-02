@@ -1,6 +1,6 @@
 # Image identity
 
-Every image boot2deb builds carries **`/etc/boot2deb/image.toml`** — a small TOML
+Every image boot2deb builds contains **`/etc/boot2deb/image.toml`** — a small TOML
 document in which the image says what it is.
 
 It exists for readers that are not the running system. A tool repairing a board that will
@@ -88,7 +88,7 @@ bootloader beside it is looking at an expected state, not a fault.
 
 ## `pressed` marks a derived image
 
-An image `press` re-assembled carries one extra table. Adding files, or drawing
+An image `press` re-assembled contains one extra table. Adding files, or drawing
 a fresh identity, makes a press re-assemble:
 
 ```toml
@@ -107,7 +107,7 @@ the artifact stem the file derives from.
 `fresh_identity = true` says the press drew the disk's identifiers for this one
 medium (see [Producing images](../press.md#giving-a-medium-its-own-identifiers)).
 None of them match the ones the recipe derives, and this key is how a reader
-knows why. An image carrying the recipe's identifiers has no such key.
+knows why. An image with the recipe's identifiers has no such key.
 
 The other keys list what was added, by kind and destination, never by content.
 `reproduce` reproduces builds, not pressings.
@@ -116,14 +116,14 @@ The seed partition is deliberately not summarized here. It is self-describing, a
 `boot2deb seed` can rewrite it later without touching the filesystem, so a copy of it in
 this file would go stale. See [Producing images](../press.md).
 
-## It carries no secrets
+## It contains no secrets
 
 boot2deb also emits a **provenance manifest** (a `.provenance.toml`) beside the
 image. It records every source pin, the toolchain, the solved package manifest's
 digest, and the image's initial first-boot password. That document stays with the build.
 
 It never ships inside an image. `image.toml` is a deliberately chosen subset of it, with
-the credential left out, along with everything else an image has no business carrying.
+the credential left out, along with everything else an image has no business containing.
 
 Two values that are in the manifest cannot be in `image.toml` even in principle. The
 solved-manifest digest and the package count are *produced by* the rootfs bootstrap.

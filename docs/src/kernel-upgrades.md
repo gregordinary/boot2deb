@@ -130,7 +130,7 @@ daemon, its renderers, the theme, and the text plugin with its whole font stack 
 every initramfs built afterwards. That is several MB, and the next slot write fails as
 above. That write is a kernel upgrade, or any package that triggers `update-initramfs`.
 
-On a board at the stock ceiling the cost buys nothing anyway. Its initramfs carries no
+On a board at the stock ceiling the cost buys nothing anyway. Its initramfs contains no
 DRM modules, so plymouth cannot draw before the root pivot regardless. It says so itself
 during the rebuild:
 
@@ -140,7 +140,7 @@ W: plymouth: not including drm modules since MODULES=list
 
 That warning is about plymouth's own hook declining to add modules, so it prints on any
 `MODULES=list` board. It only means "plymouth is dead weight" where nothing *else* put a
-DRM module in the initramfs. A board that carries the display stack in its module list
+DRM module in the initramfs. A board that includes the display stack in its module list
 has one either way.
 
 Remove it:
@@ -190,7 +190,7 @@ safe as any other.
 > the kernel, the device tree, and the initramfs, but *not* the kernel modules. Those
 > live on the root filesystem in `/lib/modules/<version>` and are where Wi-Fi, graphics
 > and sound actually come from. A kernel written without its modules boots into a system
-> with no drivers. The `.deb` carries both, which is why it is what you move around.
+> with no drivers. The `.deb` contains both, which is why it is what you move around.
 >
 > The signed blob is also **specific to the image it was built from**. The rootfs
 > PARTUUID is baked into the *signature*, and every device keeps the PARTUUID its image

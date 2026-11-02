@@ -1,12 +1,12 @@
 # kmods/aic8800.toml -- AICSemi AIC8800 SDIO Wi-Fi, tracked at radxa's packaging repo.
 #
 # A device opts in with `device_kmods = ["aic8800"]`. Everything below is a property of
-# the driver, not of any board, so a second board carrying the chip names this kmod
+# the driver, not of any board, so a second board with the chip names this kmod
 # rather than restating it -- and cannot retune it, since the deb (`aic8800-modules-
 # <kver>`) and the artifact-cache node (`kmod:aic8800`) are keyed on the name alone.
 #
 # The build fetches the repo at the locked commit, applies `repo_patches` (radxa's own
-# quilt) then `local_patches` (ours, from kmods/aic8800/patches/), builds `aic8800_bsp`
+# quilt) then `local_patches` (boot2deb's own, from kmods/aic8800/patches/), builds `aic8800_bsp`
 # and `aic8800_fdrv` against the board's freshly built kernel, and ships them as
 # `aic8800-modules-<kver>`.
 
@@ -22,7 +22,7 @@ subdir = "src/SDIO/driver_fw/driver/aic8800"
 # PCIE/USB/Allwinner/BT entries radxa also ships are irrelevant to an SDIO arm64 build
 # and are omitted.
 #
-# The 7.1, 7.2 and 7.3 guards are what carry this driver onto a current kernel. 7.1
+# The 7.1, 7.2 and 7.3 guards are what port this driver to a current kernel. 7.1
 # moved the cfg80211 key and station ops from `net_device *` to `wireless_dev *`; 7.2
 # removed `strncpy()` from the kernel and gave `remain_on_channel` a trailing
 # receive-address filter; 7.3 has cfg80211 assign the remain-on-channel and probe
@@ -54,7 +54,7 @@ repo_patches = [
     "fix-linux-7.3-build.patch",
 ]
 
-# Ours, from kmods/aic8800/patches/, applied after radxa's. All three are behaviour
+# The local patches, from kmods/aic8800/patches/, applied after radxa's. All three are behaviour
 # changes this image wants, not build fixes -- the build guards all come from radxa's
 # series above.
 #
@@ -66,7 +66,7 @@ repo_patches = [
 #    0001 and `loglevel=`. The tx-power one is the reason this exists: it is on
 #    rwnx_cfg80211_get_tx_power(), so it reprints for as long as the system runs.
 #  - 0003: makes system suspend survivable. `CONFIG_FDRV_NO_REG_SDIO` (below) skips
-#    `sdio_register_driver()`, so the `dev_pm_ops` that driver struct carries never
+#    `sdio_register_driver()`, so the `dev_pm_ops` that driver struct contains never
 #    attach and the driver's own suspend/resume never run -- leaving `is_bus_suspend`,
 #    the flag its three bus threads gate on, permanently clear. They then touch SDIO
 #    after the host is suspended, take a synchronous external abort, and die holding

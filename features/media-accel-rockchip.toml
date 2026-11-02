@@ -5,7 +5,7 @@
 # box, all compose this same feature. Use-case bundling belongs to a recipe
 # (e.g. recipes/turing-rk1/jellyfin.toml), not to this feature's name.
 #
-# Capability features carry a hardware compatibility gate — here `requires_soc`,
+# Capability features contain a hardware compatibility gate — here `requires_soc`,
 # since the stack is SoC-integrated (VEPU/VDPU/RGA). A cross-arch sibling (an
 # Intel/AMD `media-accel-vaapi`, an NVIDIA `media-accel-nvenc`) would be a
 # separate feature gated on `requires_arch`; the user picks the one matching
@@ -16,7 +16,7 @@
 # currently exist.
 description  = "Rockchip HW video transcode (MPP + RGA + ffmpeg-rk) for RK35xx"
 packages     = ["ffmpeg-rk", "librockchip-mpp1", "librga2"]
-# Only the SoCs whose kernel carries the vendor `mpp_service` this stack talks to,
+# Only the SoCs whose kernel includes the vendor `mpp_service` this stack talks to,
 # and only those the config tree can actually resolve — `list-features` publishes
 # this list to users, so a SoC named here without a socs/<soc>.toml layer would
 # advertise a configuration no device can select. Not RK3576: that part is
@@ -43,7 +43,7 @@ provides     = ["ffmpeg"]
 # feature provides — so they hold in every recipe that composes it, on any RK3588
 # board, and belong here rather than being restated by each.
 caveats = [
-  "Scaling and compositing inside a hardware transcode run on RGA, but only when the RKMPP device is named explicitly. The RGA filters (`scale_rkrga`, `vpp_rkrga`, `overlay_rkrga`) allocate their output pool from an RKMPP device. They take one from `-filter_hw_device` when the incoming frames carry a different one. A chain fed by `-hwaccel v4l2request` therefore needs `-init_hw_device rkmpp=rk -filter_hw_device rk`, and then keeps every frame in hardware from decode to encode. Without it the filters fail to configure with `No RKMPP hardware context provided`, which reads like a frame-format problem and is not one.",
+  "Scaling and compositing inside a hardware transcode run on RGA, but only when the RKMPP device is named explicitly. The RGA filters (`scale_rkrga`, `vpp_rkrga`, `overlay_rkrga`) allocate their output pool from an RKMPP device. They take one from `-filter_hw_device` when the incoming frames have a different one. A chain fed by `-hwaccel v4l2request` therefore needs `-init_hw_device rkmpp=rk -filter_hw_device rk`, and then keeps every frame in hardware from decode to encode. Without it the filters fail to configure with `No RKMPP hardware context provided`, which reads like a frame-format problem and is not one.",
   "`hwmap` does not bridge a Vulkan frame to an RKMPP one in either direction. A Vulkan filter stage must therefore round-trip through system memory before the encoder.",
   "The `h264_rkmpp`, `hevc_rkmpp`, `vp8_rkmpp` and `vp9_rkmpp` *decoders* are compiled in but fail to open. MPP finds no decode client on a mainline kernel, where `rkvdec` is a V4L2 stateless driver rather than an MPP service. Hardware decode is reached with `-hwaccel v4l2request`. The matching `*_rkmpp` encoders do work.",
   "10-bit decoded frames are `NV15`, packed 4:2:0 at four samples per five bytes. The decoder cannot be asked for `P010` instead: `rkvdec` declares `NV12`/`NV15`/`NV16`/`NV20` and no `P010`, because the hardware writes packed.",
@@ -51,7 +51,7 @@ caveats = [
   "`hwdownload` offers only the frame's own format, so asking for `yuv420p10le` in one step leaves the graph with no viable target. `hwmap` does not substitute either: deriving a Vulkan frames context from the mapped frame fails with `Unsupported pixel format: nv15`.",
   "Vulkan cannot import `NV15` at all, because there is no VkFormat for a packed 10-bit 4:2:0 sample. A Vulkan stage always needs the swscale unpack in front of it. It must upload `yuv420p10le` rather than `p010le`, which corrupts silently.",
   "Hardware JPEG encode is `mjpeg_v4l2m2m`, and it is a different device from the H.264/HEVC encoders with different rules. It is the mainline VEPU121 on `/dev/video2` rather than MPP, so it takes system-memory frames only: `yuv420p`, `nv12`, `yuyv422` or `uyvy422`, never `drm_prime`. A hardware-decoded frame reaches it through FFmpeg's own transfer or an explicit `hwdownload,format=nv12`, not through `-filter_hw_device`.",
-  "JPEG quality is `-quality 5..100`, or `-q:v` on the same scale, larger being better. Omitting both keeps the driver default of 50. That inverts the software `mjpeg` encoder, where `-q:v` is a quantizer and lower is better. A value carried over from a software command line therefore asks for the opposite quality.",
+  "JPEG quality is `-quality 5..100`, or `-q:v` on the same scale, larger being better. Omitting both keeps the driver default of 50. That inverts the software `mjpeg` encoder, where `-q:v` is a quantizer and lower is better. A value copied from a software command line therefore asks for the opposite quality.",
   "What the JPEG device buys is CPU rather than elapsed time. It holds a fixed 4.9 CPU-seconds per 300 1080p frames, but software `mjpeg` threads across all eight cores while this path submits serially. A batch therefore finishes slower in wall clock for about half the CPU.",
   "Two JPEG limits are the driver's, not the wrapper's. The largest frame it accepts is 8176x8176, which is 511 macroblocks in each axis and the most the hardware's nine-bit dimension registers hold. Widths are rounded up to a multiple of 4, which the encoder reports when it happens.",
   "Clamp your own JPEG input to 8176 rather than relying on the refusal. V4L2 has the driver substitute a size it can do. A larger request is honored at 8176 while ffmpeg keeps feeding the wider frame in. The result is a JPEG whose header looks right and whose picture is garbage. The encoder logs `encoder coded size is ...` first, so treat that message as an error whenever the size it reports is smaller than the one requested.",
@@ -62,7 +62,7 @@ caveats = [
 # This feature's packages are built from the SoC's media-accel source trees
 # (socs/<soc>.toml [userspace]/[ffmpeg]), not the Debian mirror. The flag requires
 # the resolved SoC to supply those stanzas and schedules the userspace/ffmpeg
-# compile nodes; a build without this feature carries no sources and skips them.
+# compile nodes; a build without this feature has no sources and skips them.
 requires_media_accel = true
 
 # The capability's own proof, checked by boot2deb-selftest wherever this feature

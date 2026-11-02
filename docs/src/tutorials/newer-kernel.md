@@ -196,10 +196,10 @@ kernel = [
 A rebase needs no pair when the floor has moved past the divergence. `rocket/083` keeps
 the IOMMU domain attached across jobs, and 7.2.4 rewrote the error handling around the
 `iommu_attach_group()` call it replaces. With the floor past 7.2.4 that patch is rebased
-onto the kernel's `goto err_put_pm`, with no second variant to carry.
+onto the kernel's `goto err_put_pm`, with no second variant to maintain.
 
 Regenerate a rebased patch with `git format-patch` rather than hand-editing the diff —
-`git am --3way` needs the index lines a hand-written hunk does not carry.
+`git am --3way` needs the index lines a hand-written hunk does not contain.
 
 **Obsolete.** Nothing needs it any more, at any version. Retire the entry and its file:
 an old lock names an old `patches` commit, whose tree still contains both.

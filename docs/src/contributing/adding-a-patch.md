@@ -6,7 +6,7 @@ userspace, u-boot) before it compiles. The series is declared by a
 lives in the separate `patches` repo. Adding a patch means getting it into that series
 and then into a build. This page walks the loop end to end.
 
-This page is about getting a *new* patch into a series. Carrying an existing series
+This page is about getting a *new* patch into a series. Keeping an existing series
 across a kernel version is
 [Moving a board to a newer kernel](../tutorials/newer-kernel.md). That page measures
 what breaks, and encodes the boundary in the series.
@@ -71,7 +71,7 @@ next steps — no build reads the patch until the series is committed and re-pin
 
 The re-pin line names each recipe that applies the series you imported into, on either
 axis. A device's `default_uboot_series` counts the same as a kernel's `patch_series`, so
-importing into a u-boot series names the recipes that carry it.
+importing into a u-boot series names the recipes that apply it.
 
 The checkout path it prints is the one it wrote to: `--patches-path` when you passed one,
 else the config root's sibling `../patches`. That path is anchored to `--root`, not to
@@ -107,7 +107,7 @@ large. If you already have a checkout, point `--kernel-src` at it to skip the cl
 boot2deb verify-patches turing-rk1/forky --kernel-src ../linux
 ```
 
-A `--scope uboot` import verifies the same way, against the recipe that carries the
+A `--scope uboot` import verifies the same way, against the recipe that applies the
 u-boot series. The locked u-boot is auto-fetched at its pin, and the run reports the
 `uboot` series at the u-boot tag rather than a kernel one:
 

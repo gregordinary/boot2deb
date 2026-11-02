@@ -26,7 +26,7 @@ pub const MAX_LABEL_LEN: usize = 63;
 /// - Neither starting nor ending with `-`.
 ///
 /// Labels are joined by `.` into at most [`MAX_HOSTNAME_LEN`] characters. Dots are
-/// allowed so a board can carry a fully qualified name.
+/// allowed so a board can have a fully qualified name.
 ///
 /// A shape that fails returns *why*: a terse clause naming the offending property. The
 /// caller wraps that clause in the typed error that suits where the value was authored.
@@ -61,7 +61,7 @@ pub fn check(name: &str) -> Result<(), &'static str> {
             return Err("has an empty label — a leading, trailing, or doubled '.'");
         }
         if label.len() > MAX_LABEL_LEN {
-            return Err("has a label longer than 63 characters, which DNS cannot carry");
+            return Err("has a label longer than 63 characters, which DNS does not allow");
         }
         if label.starts_with('-') || label.ends_with('-') {
             return Err("has a label starting or ending with '-'");
@@ -78,7 +78,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_the_shapes_a_board_may_carry() {
+    fn accepts_the_shapes_a_board_may_have() {
         for ok in [
             "turing-rk1",
             "h96-max-m9",
@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_what_dns_and_the_kernel_cannot_carry() {
+    fn rejects_what_dns_and_the_kernel_do_not_allow() {
         for bad in [
             "",
             "-rk1",

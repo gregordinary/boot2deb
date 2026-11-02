@@ -164,7 +164,7 @@ pub enum EngineError {
     /// dirty) holds work the lock has to include. The fix is to commit and re-run
     /// `boot2deb update`, not to discard the work by re-checking-out the pin. Only
     /// a stale checkout is fixed by checking out the locked commit. The `relation`
-    /// field ([`PinRelation`]) carries that distinction into the message.
+    /// field ([`PinRelation`]) passes that distinction into the message.
     #[error(
         "patches checkout {root} is at {actual}{}, but the lock pins {expected}\n  {}",
         if *.dirty { " (with uncommitted changes)" } else { "" },
@@ -274,7 +274,7 @@ pub enum EngineError {
 
     /// A `boot2deb try` run failed. The guest never reached a login prompt, or
     /// authentication with the generated password was refused. Or a unit failed,
-    /// the selftest failed, or first-boot re-ran on the second boot. It carries
+    /// the selftest failed, or first-boot re-ran on the second boot. It contains
     /// the phase and what the console showed. The message is the whole diagnosis,
     /// since the guest is gone by the time the error is read.
     #[error("try: {context}: {message}")]
@@ -287,7 +287,7 @@ pub enum EngineError {
 
     /// The rootless Debian bootstrap (ferroday-cage's in-process provisioner)
     /// could not produce the target-arch rootfs — a configuration error, a
-    /// download/verification failure, or a failed in-cage dpkg wave. Carries the
+    /// download/verification failure, or a failed in-cage dpkg wave. Contains the
     /// provisioner's own message: the provision and configuration error types are
     /// distinct, so it is flattened to text here rather than wrapped.
     #[error("rootfs bootstrap failed ({context}): {message}")]
@@ -305,7 +305,7 @@ pub enum EngineError {
     /// a failed bootstrap would name a stage the command never ran.
     ///
     /// The plan format is versioned, and a mismatch is refused rather than guessed at.
-    /// The provisioner's own message, which names both versions, is carried verbatim.
+    /// The provisioner's own message, which names both versions, is kept verbatim.
     #[error("cannot read the plan document {path}: {message}")]
     PlanDocument {
         /// The document that could not be read.
@@ -314,7 +314,7 @@ pub enum EngineError {
         message: String,
     },
 
-    /// A [`SandboxRun`](crate::sandbox::SandboxRun) carried an empty `argv`, so there
+    /// A [`SandboxRun`](crate::sandbox::SandboxRun) contained an empty `argv`, so there
     /// is no program to run. The field's contract states it is non-empty, and every
     /// in-tree call site honors it. This makes the invariant structural rather than
     /// conventional, since the alternative at the indexing site is a panic.
@@ -345,7 +345,7 @@ pub enum EngineError {
     /// size, putting it in raw mode, restoring it, or the `signalfd` the session
     /// follows `SIGWINCH` through.
     ///
-    /// Distinct from [`Sandbox`](Self::Sandbox), which carries what the sandbox
+    /// Distinct from [`Sandbox`](Self::Sandbox), which contains what the sandbox
     /// library refused. This is the *caller's* end of the relay, which the library
     /// never touches.
     #[error("failed to {context}: {source}")]
@@ -510,7 +510,7 @@ pub enum EngineError {
     },
 
     /// A media-accel build stage (userspace or ffmpeg) was invoked for a build
-    /// whose lock carries no media-accel source pins. These stages run only when
+    /// whose lock contains no media-accel source pins. These stages run only when
     /// the resolved build selects a `requires_media_accel` feature, which pins the
     /// sources. Reaching one without pins is therefore an internal scheduling bug,
     /// not a user misconfiguration, and the CLI gates the stages on the pins'
@@ -603,7 +603,7 @@ pub enum EngineError {
     /// under the new root.
     ///
     /// The partition does not parse as a vboot kernel, or a signature the build wrote
-    /// does not verify. Or the image carries no private key that matches the key the
+    /// does not verify. Or the image contains no private key that matches the key the
     /// kernel was signed with. The press stops here instead of writing a kernel that the
     /// firmware or the initramfs rejects.
     #[error("cannot re-sign the kernel partition for a fresh identity: {detail}")]
@@ -615,7 +615,7 @@ pub enum EngineError {
     /// A press giving its image a fresh identity found the build's identifiers in a place
     /// it cannot rewrite.
     ///
-    /// Either a file the press rewrites does not carry them the way the build writes
+    /// Either a file the press rewrites does not contain them the way the build writes
     /// them, or another file under `/etc` or `/boot` names them. Both leave the pressed
     /// image naming a disk it is not.
     #[error("cannot give the pressed image a fresh identity: {detail}")]
@@ -775,7 +775,7 @@ pub enum EngineError {
     },
 
     /// The partition table in the written file does not match the one the source
-    /// artifact carries (or could not be read back at all).
+    /// artifact contains (or could not be read back at all).
     #[error("partition-table verification failed on {target}: {detail}")]
     ImageVerifyGpt {
         /// The written file (or the artifact, for the planned-table half).
@@ -923,7 +923,7 @@ pub enum EngineError {
 
     /// No `patches` source could be resolved: no local checkout at
     /// `--patches-path` / `../patches`, no `--patches-url`, and the lock's pin
-    /// records no repo either. The message carries the exact commit so the user can
+    /// records no repo either. The message contains the exact commit so the user can
     /// fetch the series manually.
     ///
     /// The pin's `source` is written by `update` from the resolved config, so the

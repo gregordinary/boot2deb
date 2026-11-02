@@ -35,8 +35,8 @@ pub fn resolve_device(
     let bm = root.boot_method(boot_method)?;
 
     let uboot_only = overrides.deliverable == Deliverable::Uboot;
-    // A u-boot-only deliverable only exists where the boot method builds a u-boot of
-    // ours; a depthcharge board's firmware is not ours to emit.
+    // A u-boot-only deliverable only exists where the boot method builds a u-boot;
+    // boot2deb does not emit a depthcharge board's firmware.
     if uboot_only && boot_method != BootMethod::RockchipRkbin {
         return Err(ConfigError::UbootOnlyWithoutBootloader {
             device: device_name.to_string(),
@@ -44,7 +44,7 @@ pub fn resolve_device(
         });
     }
 
-    // A board carrying its own device tree must actually build the DTB it boots;
+    // A board having its own device tree must actually build the DTB it boots;
     // check that here so a filename typo is a typed error rather than a kernel that
     // builds fine and then finds no DTB at boot.
     validate_device_dts(&device.device_dts, &device.kernel_dtb, device_name)?;
@@ -94,7 +94,7 @@ pub fn resolve_device(
     // A u-boot-only build resolves no kernel, suite, features, or rootfs: its sole
     // deliverable is the bootloader the u-boot node emits, so every image axis is
     // absent and the lock records only the u-boot pins. The `image_size`/`hostname`
-    // it carries are the device defaults, never read on this path (no image node).
+    // it contains are the device defaults, never read on this path (no image node).
     if uboot_only {
         // Every rootfs-axis override is rejected before the early return rather than
         // dropped with it. This path skips feature loading, `resolve_l10n`, and the
@@ -242,7 +242,7 @@ pub fn resolve_device(
     // A feature that builds the media-accel stack (`requires_media_accel`) needs the
     // SoC to supply the `[userspace]`/`[ffmpeg]` source trees its `.deb`s compile
     // from. Gate here so a bad composition fails at resolve, not deep in the build.
-    // The flag also decides whether this build carries sources at all: a selection
+    // The flag also decides whether this build contains sources at all: a selection
     // with no such feature drops them, and the userspace/ffmpeg nodes are skipped.
     let needs_media_accel = crate::feature::first_requiring_media_accel(&loaded_features);
     if let Some(feature) = needs_media_accel {
@@ -289,7 +289,7 @@ pub fn resolve_device(
     // The components the image resolves against and offers on the board. A libre
     // kernel narrows them to the distro's free subset, and a distro with none cannot
     // host one: its archive would offer exactly the firmware the image promises not to
-    // carry.
+    // contain.
     let components = distro_layer
         .image_components(libre)
         .ok_or_else(|| ConfigError::LibreWithoutFreeComponents {
@@ -485,7 +485,7 @@ pub fn resolve_device(
         soc: device.soc,
         boot_method,
         // The image's own suite archives the image's own `.deb`s: one `dpkg` for the
-        // whole build, so a `--suite sid` image does not carry a u-boot deb that
+        // whole build, so a `--suite sid` image does not contain a u-boot deb that
         // forky's `dpkg` produced.
         packaging_suite: suite.clone(),
         distro: distro_layer.resolve(&distro_name, &suite),
@@ -656,7 +656,7 @@ fn resolve_boot(
         }
         BootMethodLayer::Depthcharge(l) => {
             // `split` exists to put the bootloader on a *different* medium from the
-            // rootfs. Depthcharge has no bootloader of ours, and the firmware finds
+            // rootfs. boot2deb builds no bootloader for depthcharge, and the firmware finds
             // the kernel partition by scanning the GPT of the same disk it will root
             // from — so there is nothing to split off.
             if layout == Layout::Split {
@@ -684,7 +684,7 @@ fn resolve_boot(
                 });
             }
             // Membership says the profile is one the device offers; this says the string
-            // is one the rootfs stage can carry. Both are needed: `supported_boards` is
+            // is one the rootfs stage can write. Both are needed: `supported_boards` is
             // itself config, so a device file could offer a profile whose *name* is
             // hostile.
             validate_board_profile(&board)?;
@@ -859,8 +859,8 @@ fn validate_kernel_cmdline(cmdline: Option<&str>) -> Result<String, ConfigError>
     Ok(value.to_string())
 }
 
-/// Reject a depthcharge cmdline that `depthchargectl` cannot carry, or that claims
-/// something it is not ours to claim.
+/// Reject a depthcharge cmdline that `depthchargectl` cannot pass, or that claims
+/// something `depthchargectl` decides.
 ///
 /// Two rules, each learned from a boot that failed:
 ///  - **No `%`.** `depthchargectl` writes its computed cmdline back through a
@@ -1079,10 +1079,10 @@ fn validate_device_dts(
 /// Load and validate each kmod a device named, in declared order.
 ///
 /// The name list is the device's; everything else comes from `kmods/<name>.toml`, so a
-/// second board carrying the same chip names it instead of copying its declaration. A
+/// second board having the same chip names it instead of copying its declaration. A
 /// repeat in the list is rejected: one kmod is one build node, one deb, and one lock pin.
 ///
-/// An empty list imposes no constraint — the board carries no out-of-tree module.
+/// An empty list imposes no constraint — the board has no out-of-tree module.
 fn resolve_kmods(
     root: &ConfigRoot,
     names: &[String],
@@ -1091,7 +1091,7 @@ fn resolve_kmods(
     let mut seen = std::collections::BTreeSet::new();
     let mut resolved = Vec::with_capacity(names.len());
     // The kmods' selftest expectations, grouped per kmod in the device's order —
-    // returned beside the resolved kmods (rather than carried on [`ResolvedKmod`])
+    // returned beside the resolved kmods (rather than contained in [`ResolvedKmod`])
     // because they join the build-wide expectation list, where every other layer's
     // groups live.
     let mut expectations = Vec::new();
@@ -1563,7 +1563,7 @@ fn apt_file_stem(v: &str) -> bool {
 ///    would need a sanitizing map on the way to disk, and a map that is not injective
 ///    lets two names this function accepted as distinct land on one file.
 ///  - `signed_by` is joined onto the vendored keyring directory to find the repo's
-///    trust anchor, so a value carrying `/` or `..` would choose a key from outside
+///    trust anchor, so a value containing `/` or `..` would choose a key from outside
 ///    the set a reviewer vetted.
 fn validate_apt_source(feature: &str, src: &AptSource) -> Result<(), ConfigError> {
     let bad = |field: &'static str, value: &str| ConfigError::AptSourceBadField {
@@ -1635,7 +1635,7 @@ fn merge_apt_sources(
 /// Resolve a [build reference](crate::buildpoint::BuildPoint::reference). Recipe
 /// fields are the base axes, and `cli` overrides win.
 ///
-/// The reference is a recipe name, optionally carrying a `+`-separated feature
+/// The reference is a recipe name, optionally containing a `+`-separated feature
 /// suffix. A suffix replaces the recipe's own `features` list the same way
 /// `--feature` does. So `turing-rk1/forky+jellyfin` resolves the `turing-rk1/forky`
 /// axes with `jellyfin` as the feature selection.
@@ -1917,9 +1917,9 @@ fn join<T: std::fmt::Display>(items: &[T]) -> String {
 /// [`resolve_boot`] and are validated there like any other build's.
 ///
 /// **Why the type split does not remove this.** [`ResolvedImage`] makes the *result*
-/// shape-correct — a u-boot build carries no field these flags would set — but an
+/// shape-correct — a u-boot build contains no field these flags would set — but an
 /// [`Overrides`] is assembled from CLI flags and a recipe before the deliverable is
-/// known, so it can always carry one. The rejection is a check on user input, not an
+/// known, so it can always contain one. The rejection is a check on user input, not an
 /// invariant of the model, and it stays a table because that is what a list of flag
 /// names is.
 ///
@@ -2012,7 +2012,7 @@ fn check_suite_supported(
 /// image lacks — the failure that makes a shell print `Setting locale failed` on every
 /// login.
 ///
-/// It leads the set even when glibc would carry it anyway (`C.UTF-8` is built into
+/// It leads the set even when glibc would include it anyway (`C.UTF-8` is built into
 /// `libc-bin` and needs no `locale-gen` line to *work*). That is not redundant: the
 /// `locales` package builds the choice list `dpkg-reconfigure locales` offers for the
 /// default locale out of `/etc/locale.gen`, so a system locale missing from that file
@@ -2156,7 +2156,7 @@ fn resolve_account(
     })
 }
 
-/// The modules the initramfs must carry: the SoC layer's list, then the device's, in
+/// The modules the initramfs must contain: the SoC layer's list, then the device's, in
 /// authored order.
 ///
 /// The device list already holds its whole `extends` lineage, accumulated base-most
@@ -2183,7 +2183,7 @@ fn resolve_initramfs_modules(
 ///
 /// The resolved list is passed to the target-side customize program as one
 /// comma-separated environment value, and `usermod -aG` splits it on commas. A name
-/// carrying a comma would silently become two names. One carrying whitespace would be
+/// containing a comma would silently become two names. One containing whitespace would be
 /// a name no `/etc/group` line can hold.
 ///
 /// The rest of the rule is Debian's own `NAME_REGEX` from `adduser.conf`. A name
@@ -2228,7 +2228,7 @@ pub fn check_group_name(group: &str) -> Result<(), ConfigError> {
 ///
 /// The name becomes a `LANG=` value in `/etc/locale.conf` (shell-sourced by `pam_env`)
 /// and the left half of an `/etc/locale.gen` line, so it must be a bare locale name —
-/// and it must carry a codeset, since `locale-gen` is given `<name> <codeset>` pairs
+/// and it must contain a codeset, since `locale-gen` is given `<name> <codeset>` pairs
 /// and there is nowhere else for that half to come from. This is a UTF-8-era
 /// constraint on the *build-time* knob only: a legacy 8-bit locale is still one
 /// `dpkg-reconfigure locales` away on the running image.
@@ -2358,7 +2358,7 @@ fn validate_ntp_server(server: &str) -> Result<(), ConfigError> {
                   'ntp://ntp.example.org')",
         });
     }
-    // A bracketed IPv6 literal is the URL form and carries a port; the bare address is
+    // A bracketed IPv6 literal is the URL form and contains a port; the bare address is
     // what `timesyncd` wants.
     if server.starts_with('[') || server.ends_with(']') {
         return Err(ConfigError::InvalidField {
@@ -2373,7 +2373,7 @@ fn validate_ntp_server(server: &str) -> Result<(), ConfigError> {
         return Err(ConfigError::InvalidField {
             what: "NTP server",
             value: server.to_string(),
-            why: "must not carry a port (timesyncd always uses 123)",
+            why: "must not contain a port (timesyncd always uses 123)",
         });
     }
     if server
@@ -2389,7 +2389,7 @@ fn validate_ntp_server(server: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Reject a depthcharge board profile name the rootfs stage cannot carry.
+/// Reject a depthcharge board profile name the rootfs stage cannot write.
 ///
 /// The value is written into `/etc/depthcharge-tools/config` — through a **quoted
 /// heredoc** in the customize script, so it is not shell-expanded, but a line reading
@@ -2419,7 +2419,7 @@ fn validate_board_profile(board: &str) -> Result<(), ConfigError> {
     }
 }
 
-/// Reject a hostname the image's `/etc/hostname` and `/etc/hosts` could not carry.
+/// Reject a hostname the image's `/etc/hostname` and `/etc/hosts` could not contain.
 ///
 /// The value is written into both verbatim — as the whole of the first file, and as
 /// the name half of a `127.0.1.1` line in the second. `/etc/hosts` is line- and
@@ -2602,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_series_always_carries_its_source_and_ref() {
+    fn a_patch_series_always_contains_its_source_and_ref() {
         // The lock records `source` + `ref` beside the pinned commit, so the three
         // travel together or not at all: a commit id is meaningless outside its repo,
         // and `update` takes this one from a local HEAD rather than a remote, making it
@@ -2694,7 +2694,7 @@ mod tests {
         assert_eq!(image_of(&img).suite, "forky");
         // An image build archives its own `.deb`s with its own suite's `dpkg`.
         assert_eq!(img.packaging_suite, "forky");
-        // The kernel carries the SoC-wide `rk3576-fixes` and the board's own
+        // The kernel includes the SoC-wide `rk3576-fixes` and the board's own
         // `rk3576-npu`, in that order — a device's series compose after its kernel's.
         // The H96's AIC8800 Wi-Fi driver is *not* among them: it is an out-of-tree
         // module built from a pinned repo, composed via `device_kmods`.
@@ -2784,7 +2784,7 @@ mod tests {
         // The H96 declares an out-of-tree Wi-Fi driver, and its image recipes build
         // one. Its u-boot-only deliverable compiles no kernel, so there is nothing to
         // build a module against — and a resolved kmod would be pinned in the lock and
-        // published in the support matrix as a driver this bootloader image carries.
+        // published in the support matrix as a driver this bootloader image contains.
         let root = repo_root();
         let img = resolve_device(&root, "h96-max-m9", &Default::default()).unwrap();
         assert!(
@@ -3037,7 +3037,7 @@ mod tests {
 
     #[test]
     fn the_system_locale_is_always_generated() {
-        // The invariant: LANG can never name a locale the image does not carry. It
+        // The invariant: LANG can never name a locale the image does not contain. It
         // holds even when the locale is one the config never listed, and even when it
         // is C.UTF-8 — which glibc builds in and *would* work ungenerated, but which
         // must still appear in /etc/locale.gen, because that file is where the `locales`
@@ -3068,7 +3068,7 @@ mod tests {
                 .iter()
                 .any(|l| l == "en_US.UTF-8"),
             "en_US.UTF-8 is generated on every image, so an SSH client forwarding it \
-             lands on a locale the image carries"
+             lands on a locale the image contains"
         );
 
         // An override the base never lists is generated anyway, and leads the set.
@@ -3179,7 +3179,7 @@ mod tests {
 
     /// The initramfs list is the SoC family's, then the board's. The libreboot C201 adds
     /// its display stack after the family's root-device drivers, and the stock C201,
-    /// whose 16 MiB payload has no room for it, carries the family's list alone. A board
+    /// whose 16 MiB payload has no room for it, has the family's list alone. A board
     /// on a SoC that names none leaves the choice to `initramfs-tools`.
     #[test]
     fn the_initramfs_list_is_the_socs_then_the_boards() {
@@ -3222,7 +3222,7 @@ mod tests {
     }
 
     /// A name a later layer restates, in either spelling, keeps its first position, and
-    /// a name no module can carry is refused at resolve.
+    /// a name no module can have is refused at resolve.
     #[test]
     fn the_initramfs_union_dedups_by_module_name_and_refuses_a_bad_one() {
         let layer = |names: &[&str]| InitramfsLayer {
@@ -3309,7 +3309,7 @@ mod tests {
     }
 
     /// The resolved list is joined with commas into one `usermod -aG` argument, so a
-    /// name carrying a comma would silently become two groups — the one malformation
+    /// name containing a comma would silently become two groups — the one malformation
     /// that changes the meaning of the command rather than failing it.
     #[test]
     fn a_group_name_usermod_could_not_act_on_is_refused() {
@@ -3486,7 +3486,7 @@ mod tests {
     /// here automatically, and a new key without one fails this instead of silently
     /// giving tests a value no config root would produce.
     fn base_layer_fixture() -> BaseLayer {
-        toml::from_str("").expect("every base.toml key carries a default")
+        toml::from_str("").expect("every base.toml key has a default")
     }
 
     #[test]
@@ -3707,7 +3707,7 @@ mod tests {
     }
 
     /// The shape itself is `hostname::check`'s to test; what matters here is that a
-    /// device carrying a bad one fails *resolution*, with the typed error naming the
+    /// device having a bad one fails *resolution*, with the typed error naming the
     /// value — rather than reaching the image writer, which would render it verbatim.
     #[test]
     fn a_bad_hostname_is_a_typed_resolve_error() {
@@ -3729,7 +3729,7 @@ mod tests {
     /// resolves, on the image path and on the u-boot-only path that returns before
     /// the rootfs axes are touched.
     #[test]
-    fn every_shipped_device_carries_a_valid_hostname() {
+    fn every_shipped_device_has_a_valid_hostname() {
         let root = repo_root();
         for device in root.list("devices").unwrap() {
             let build = resolve_device(&root, &device, &Overrides::default())
@@ -3785,14 +3785,14 @@ mod tests {
         // The shipped default is redistributable; no feature here asks otherwise.
         assert!(!image_of(&b).ffmpeg_nonfree);
         // media-accel-rockchip declares `requires_media_accel`, so the resolved
-        // build carries the SoC's userspace + ffmpeg source trees (built as a unit).
+        // build contains the SoC's userspace + ffmpeg source trees (built as a unit).
         assert!(
             !image_of(&b).userspace.is_empty(),
-            "media-accel build carries userspace sources"
+            "media-accel build contains userspace sources"
         );
         assert!(
             image_of(&b).ffmpeg.is_some(),
-            "media-accel build carries ffmpeg sources"
+            "media-accel build contains ffmpeg sources"
         );
         // The shipped media-accel-rockchip feature adds no third-party apt source.
         assert!(image_of(&b).apt_sources.is_empty());
@@ -3823,7 +3823,7 @@ mod tests {
                 "device/turing-rk1"
             ]
         );
-        // The boot half resolves as the rkbin variant, carrying the u-boot source,
+        // The boot half resolves as the rkbin variant, containing the u-boot source,
         // the raw-gap offsets, and the SoC-inherited blob set.
         let boot = b.rkbin_boot().expect("the RK1 boots via rockchip-rkbin");
         assert_eq!(boot.uboot_ref, "v2026.10");
@@ -3839,7 +3839,7 @@ mod tests {
     fn rk1_base_recipe_keeps_the_accel_kernel_but_no_media_userspace() {
         // The base image is the media-accel build minus the Rockchip userspace: the
         // capability still ships, because the accel patch series and the accel/full
-        // kconfig live on the kernel axis, not the feature. A base build carries the
+        // kconfig live on the kernel axis, not the feature. A base build has the
         // same kernel (VEPU/VDPU/RGA + NPU drivers) and only omits the ffmpeg-rk / MPP
         // / RGA userspace, which installs later from the media-accel debs.
         let root = repo_root();
@@ -3853,11 +3853,11 @@ mod tests {
         // are scheduled and no media userspace lands in the rootfs.
         assert!(
             image_of(&b).userspace.is_empty(),
-            "base carries no userspace sources"
+            "base contains no userspace sources"
         );
         assert!(
             image_of(&b).ffmpeg.is_none(),
-            "base carries no ffmpeg sources"
+            "base contains no ffmpeg sources"
         );
         assert!(!image_of(&b)
             .rootfs_packages
@@ -3879,10 +3879,10 @@ mod tests {
     #[test]
     fn a_capability_feature_contributes_its_kernel_patch_series_and_fragment() {
         // The whole point of the feature reaching the kernel: `media-accel-v4l2` needs
-        // an out-of-tree RGA driver, so it carries both the series that adds the source
+        // an out-of-tree RGA driver, so it includes both the series that adds the source
         // and the fragment that compiles it. Neither is on the RK3576 kernel or the
         // board, so a build that does not select the capability gets neither — even
-        // though this board does carry a kernel series and an accel fragment of its
+        // though this board does have a kernel series and an accel fragment of its
         // own, which is what makes the RGA pair's absence meaningful.
         let root = repo_root();
         let base = resolve_recipe(&root, "h96-max-m9/forky", &Overrides::default()).unwrap();
@@ -3996,7 +3996,7 @@ mod tests {
             Some(("cap", "config_fragments"))
         );
         // And the resolve-time rejection, on a synthetic config: a distro kernel plus a
-        // feature that contributes a fragment. The feature carries no SoC gate, so the
+        // feature that contributes a fragment. The feature has no SoC gate, so the
         // failure is unambiguously this one and not an earlier gate.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
@@ -4081,7 +4081,7 @@ mod tests {
     fn rk1_trixie_variants_resolve_the_accel_kernel_over_trixie() {
         // The forky/trixie split is purely the Debian userland: every source pin
         // (kernel, u-boot, userspace, ffmpeg, blobs) is suite-independent, so only the
-        // rootfs suite changes. Both trixie variants resolve, carry the accel kernel,
+        // rootfs suite changes. Both trixie variants resolve, have the accel kernel,
         // and differ from their forky siblings only in `suite`.
         let root = repo_root();
 
@@ -4112,7 +4112,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(image_of(&accel).suite, "trixie");
-        // The same feature pair as the forky sibling — the media-accel recipes carry
+        // The same feature pair as the forky sibling — the media-accel recipes include
         // the GPU userspace on both suites.
         assert_eq!(
             image_of(&accel).features,
@@ -4120,7 +4120,7 @@ mod tests {
         );
         assert!(
             !image_of(&accel).userspace.is_empty(),
-            "the media-accel variant carries userspace"
+            "the media-accel variant contains userspace"
         );
         assert!(image_of(&accel).ffmpeg.is_some());
     }
@@ -4246,7 +4246,7 @@ mod tests {
     #[test]
     fn the_libreboot_variant_pairs_its_profile_with_the_slot_that_profile_needs() {
         // A board profile bounds the payload the *firmware* accepts; the slot bounds
-        // what the *image* can carry. Selecting the 32 MiB profile without the 32 MiB
+        // what the *image* can contain. Selecting the 32 MiB profile without the 32 MiB
         // slot buys nothing, so the two travel together on one device — and the rootfs
         // offset follows the slots rather than being authored beside them.
         let root = repo_root();
@@ -4440,7 +4440,7 @@ mod tests {
     #[test]
     fn a_depthcharge_board_cannot_split_its_bootloader_off() {
         // `split` puts the bootloader on a different medium from the rootfs. This board
-        // has no bootloader of ours, and the firmware finds its kernel by scanning the
+        // has no bootloader boot2deb builds, and the firmware finds its kernel by scanning the
         // GPT of the disk it will root from — so there is nothing to split.
         let root = repo_root();
         let ov = Overrides {
@@ -4461,7 +4461,7 @@ mod tests {
     }
 
     #[test]
-    fn a_depthcharge_cmdline_may_not_carry_a_percent_or_a_root() {
+    fn a_depthcharge_cmdline_may_not_contain_a_percent_or_a_root() {
         // Both rules are the hardware talking. depthchargectl round-trips the computed
         // cmdline through a ConfigParser that rejects a raw `%` outright — no escaping
         // works — and it derives root from /etc/fstab, stripping any root that
@@ -4482,7 +4482,7 @@ mod tests {
                 "{bad:?} must be rejected"
             );
         }
-        // What the shipped board actually carries.
+        // What the shipped board actually has.
         assert!(
             validate_depthcharge_cmdline("console=tty1 rootwait ro sysctl.kernel.panic=30").is_ok()
         );
@@ -4614,7 +4614,7 @@ mod tests {
 
         let c201 = resolve_device(&root, "asus-c201", &Overrides::default()).unwrap();
         assert!(c201.depthcharge_boot().is_some());
-        // And the C201's device file genuinely carries neither — this is not an
+        // And the C201's device file genuinely contains neither — this is not an
         // inherited default quietly filling in.
         let device = root.device("asus-c201").unwrap();
         assert!(device.uboot_defconfig.is_none());
@@ -4875,7 +4875,7 @@ mod tests {
         // `patch_dir` defaults rather than being restated in every kmod file.
         assert_eq!(resolved[0].patch_dir, "debian/patches");
 
-        // An empty list is always fine — the board carries no out-of-tree module.
+        // An empty list is always fine — the board has no out-of-tree module.
         assert!(resolve_kmods(&root, &[], "dev").unwrap().0.is_empty());
     }
 
@@ -4992,7 +4992,7 @@ mod tests {
     fn a_boot_method_layer_rejects_another_methods_fields() {
         // The variant is chosen by the filename, so a raw-gap offset in the depthcharge
         // layer is an *unknown field* — a parse error naming the file, not a value
-        // silently carried into a build with no raw gap to write it to.
+        // silently passed into a build with no raw gap to write it to.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         std::fs::create_dir_all(p.join("boot-methods")).unwrap();
@@ -5016,7 +5016,7 @@ mod tests {
     #[test]
     fn base_resolution_selects_no_media_accel_sources() {
         // A plain device resolution (no recipe, hence no features) builds no
-        // transcode stack, so it carries neither userspace nor ffmpeg sources even
+        // transcode stack, so it contains neither userspace nor ffmpeg sources even
         // though the RK3588 SoC layer supplies them — sources ride the feature, not
         // the SoC.
         let root = repo_root();
@@ -5026,7 +5026,7 @@ mod tests {
         assert!(image_of(&b).ffmpeg.is_none());
     }
 
-    /// Build a feature carrying a set of apt sources, for the merge tests.
+    /// Build a feature containing a set of apt sources, for the merge tests.
     fn feat_with_sources(sources: Vec<AptSource>) -> crate::feature::Feature {
         crate::feature::Feature {
             config_fragments: vec![],
@@ -5248,7 +5248,7 @@ mod tests {
             "{:#?}",
             sibling.caveats
         );
-        // ...while the hardware's carry over unchanged, because they are the board's.
+        // ...while the hardware's are kept unchanged, because they are the board's.
         assert_eq!(
             sibling.caveats.iter().map(|c| &c.text).collect::<Vec<_>>(),
             build
@@ -5598,7 +5598,7 @@ mod fixture_tests {
             .contains("firmware          arm/mali/arch10.8/mali_csffw.bin\n"));
 
         // A malformed expectation fails at load, naming the field. The device file
-        // is the one carrying it here, and the error is a parse error on that file.
+        // is the one containing it here, and the error is a parse error on that file.
         let bad = Tree {
             device_extra: "[[expect]]\ncheck = \"firmware\"\ndriver = \"panthor\"\n",
             ..Default::default()
@@ -6041,7 +6041,7 @@ mod fixture_tests {
 
     /// A `dotnet-deb` app declaration as a feature file writes it, with `edit`
     /// applied to the field set first. The fields are the ones a real declaration
-    /// carries, so a test changes only what it is about.
+    /// contains, so a test changes only what it is about.
     fn dotnet_app_toml(edit: impl FnOnce(&mut std::collections::BTreeMap<&str, String>)) -> String {
         let mut f: std::collections::BTreeMap<&str, String> = [
             ("name", "\"jellyfin\"".to_string()),
@@ -6159,7 +6159,7 @@ mod fixture_tests {
     }
 
     /// Two features naming one app at different refs is refused rather than silently
-    /// resolved to whichever was selected first — a build would otherwise carry a
+    /// resolved to whichever was selected first — a build would otherwise contain a
     /// version neither feature asked for.
     #[test]
     fn apps_that_disagree_are_a_resolve_error() {
@@ -6323,7 +6323,7 @@ mod fixture_tests {
     fn a_nonfree_variant_reference_resolves_but_a_claimed_recipe_does_not() {
         // The intended path: reach the flavour as `<recipe>+<feature>`. The base
         // recipe's claim describes the point it authored, not this one, so the variant
-        // resolves — and carries no claim of its own, since a claim lives on a recipe
+        // resolves — and has no claim of its own, since a claim lives on a recipe
         // and there is no recipe here.
         let dir = nonfree_tree(
             &[],
@@ -6427,7 +6427,7 @@ mod fixture_tests {
         assert_eq!(
             image_of(&b).rootfs_packages,
             vec!["initramfs-tools", "network-manager", "network-manager-tui"],
-            "forky carries the split-out package",
+            "forky includes the split-out package",
         );
 
         let dir = tree("trixie").write();

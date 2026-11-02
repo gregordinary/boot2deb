@@ -42,6 +42,7 @@
 - [Image identity](reference/image-identity.md)
 - [The maskrom loader](reference/maskrom-loader.md)
 - [Reproducibility](reference/reproducibility.md)
+- [Glossary](reference/glossary.md)
 
 # Contributing
 

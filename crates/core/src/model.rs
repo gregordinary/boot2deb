@@ -19,7 +19,7 @@ use std::str::FromStr;
 /// lets a single chatty driver print faster than a login can be typed. The console
 /// becomes unusable exactly when a first boot needs it.
 ///
-/// Out-of-tree vendor drivers are the usual source. A bare `printk()` carries no
+/// Out-of-tree vendor drivers are the usual source. A bare `printk()` has no
 /// severity, so it lands at `CONFIG_MESSAGE_LOGLEVEL_DEFAULT` (`KERN_WARNING`) no
 /// matter how trivial the message. Such calls are often ungated by any of the driver's
 /// own debug knobs.
@@ -297,7 +297,7 @@ pub struct GitSource {
     pub git_ref: String,
 }
 
-/// One media-accel userspace source tree, as the SoC layer authors it. It carries a
+/// One media-accel userspace source tree, as the SoC layer authors it. It contains a
 /// pinned fork, the `.deb`s its packaging produces, and how the ffmpeg build relates
 /// to it.
 ///
@@ -342,7 +342,7 @@ pub struct UserspaceTree {
     /// A build root given only the `-dev` packages therefore has librga's headers and
     /// its `.pc` file but no `librga.so`, and ffmpeg's link probe fails.
     ///
-    /// The runtime library is also what carries the `shlibs` `dpkg-shlibdeps` reads,
+    /// The runtime library is also what contains the `shlibs` `dpkg-shlibdeps` reads,
     /// which is what makes the produced deb's `Depends` resolvable.
     ///
     /// Empty for a tree nothing links against — libmali, which ships a GPU blob no
@@ -360,7 +360,7 @@ pub struct UserspaceTree {
     /// The live case is rkrga. Its filters allocate `AVRKMPPFramesContext` frames, and
     /// ffmpeg's own `./configure` rejects `--enable-rkrga` without `--enable-rkmpp`.
     ///
-    /// On a SoC that pins `librga` and no `mpp`, the produced ffmpeg therefore carries
+    /// On a SoC that pins `librga` and no `mpp`, the produced ffmpeg therefore contains
     /// no librga `NEEDED` entry at all. `librga2` still ships, for programs that speak
     /// the API directly.
     #[serde(default)]
@@ -400,12 +400,12 @@ fn default_kmod_patch_dir() -> String {
     "debian/patches".to_string()
 }
 
-/// One out-of-tree kernel-module set, as authored in `kmods/<name>.toml`. It carries a
+/// One out-of-tree kernel-module set, as authored in `kmods/<name>.toml`. It contains a
 /// pinned git repo, the in-repo subdirectory the `make M=` build runs in, the patches
 /// to apply first, and the module objects to ship.
 ///
 /// Its own config layer rather than a block on the device. Every field here is a
-/// property of the *driver* rather than of the board. Two boards carrying the same
+/// property of the *driver* rather than of the board. Two boards having the same
 /// chip name the same kmod, instead of copying its declaration.
 ///
 /// A device selects one by name ([`device_kmods`](DeviceLayer::device_kmods)) and
@@ -447,8 +447,8 @@ pub struct KmodLayer {
     /// Ordered boot2deb-authored patches applied *after* the repo's own, each a bare
     /// filename under `kmods/<name>/patches/` (resolved along the overlay search path
     /// like a fragment, so an out-of-tree overlay can replace a shim without forking the
-    /// kmod). This is where a per-kernel compat shim we maintain — and intend to
-    /// upstream — lives until the tracked fork carries it.
+    /// kmod). This is where a per-kernel compat shim boot2deb maintains — and intends to
+    /// upstream — lives until the tracked fork includes it.
     #[serde(default)]
     pub local_patches: Vec<String>,
     /// Extra `make` variables for the module build, each a bare `KEY=VALUE`
@@ -477,14 +477,14 @@ pub struct KmodLayer {
 
 /// A [`KmodLayer`] with the name resolution took it from — the `kmods/<name>.toml` stem,
 /// which is the whole identity of a kmod (the deb is `<name>-modules-<kver>`, the cache
-/// node `kmod:<name>`, the lock pin keyed on it). Carrying the name only here, and not in
+/// node `kmod:<name>`, the lock pin keyed on it). Recording the name only here, and not in
 /// the authored layer, keeps a file and the thing it declares from disagreeing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedKmod {
     /// The `kmods/<name>.toml` stem. Resolution guarantees it is dpkg-package-name-safe
     /// (lowercase alphanumeric plus `-`/`+`/`.`, starting alphanumeric).
     pub name: String,
-    /// One-line description of the driver, carried so a resolved build reads as what it
+    /// One-line description of the driver, recorded so a resolved build reads as what it
     /// builds rather than a list of part numbers.
     pub description: String,
     /// Clone URL. The exact commit is pinned in the lock.
@@ -548,7 +548,7 @@ pub struct KmodFirmware {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FfmpegSources {
-    /// Base tree carrying mainline V4L2-request stateless decode.
+    /// Base tree containing mainline V4L2-request stateless decode.
     pub base: GitSource,
     /// Rockchip rkmpp encoder + rkrga filter tree the graft patches were derived
     /// from — provenance, pinned in the lock. Not fetched at build time. `None` on a
@@ -575,7 +575,7 @@ pub struct FfmpegSources {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitramfsLayer {
-    /// Kernel modules the initramfs must carry, as `modules.order` spells them.
+    /// Kernel modules the initramfs must contain, as `modules.order` spells them.
     ///
     /// Unioned across the SoC and device layers into
     /// [`ResolvedImage::initramfs_modules`]. The rootfs stage writes the union into a
@@ -627,7 +627,7 @@ pub struct SocLayer {
     /// Only a recipe replaces the resolved set outright.
     #[serde(default)]
     pub groups: Vec<String>,
-    /// Packages carrying **nonfree firmware** this SoC's hardware loads at runtime,
+    /// Packages containing **nonfree firmware** this SoC's hardware loads at runtime,
     /// separated from [`packages`](Self::packages) so a
     /// [`libre`](CompiledKernelDef::libre) build can drop exactly them and nothing
     /// else. Merged into the rootfs set on any other build, in the same position.
@@ -638,7 +638,7 @@ pub struct SocLayer {
     /// the bootloader, or a userspace add-in.
     ///
     /// It sits at the SoC layer when it identifies a part every board on that SoC
-    /// carries. It moves down to a device when boards differ.
+    /// has. It moves down to a device when boards differ.
     #[serde(default)]
     pub nonfree_firmware_packages: Vec<PackageEntry>,
     /// Packages this SoC layer drops from the merged rootfs set — the
@@ -649,11 +649,11 @@ pub struct SocLayer {
     /// Plain names, where every *include* list is a [`PackageEntry`] that can name the
     /// suites it applies to. The difference is not an oversight.
     ///
-    /// An include has to name a package the archive carries, so which suite is being
+    /// An include has to name a package the archive contains, so which suite is being
     /// built decides whether the name is right. An exclude names something that must not
     /// be installed, and is satisfied just as well by a suite that never had it.
     ///
-    /// Excluding a name a suite does not carry is already a no-op, so there is nothing
+    /// Excluding a name a suite does not include is already a no-op, so there is nothing
     /// for a condition to express.
     #[serde(default)]
     pub exclude: Vec<String>,
@@ -661,7 +661,7 @@ pub struct SocLayer {
     /// reads. See [`Support::caveats`] for what belongs in one and
     /// [`DeviceLayer::caveats`] for the board-level half.
     ///
-    /// Here when the limitation is a property of the part every board on it carries. A
+    /// Here when the limitation is a property of the part every board on it has. A
     /// display controller that cannot reach 4K60 constrains every board built on it.
     /// At the device layer when boards differ.
     #[serde(default)]
@@ -845,9 +845,9 @@ pub struct RockchipRkbinLayer {
 /// The `depthcharge` boot method, which is a vboot-signed FIT written into a
 /// **ChromeOS kernel partition**. The board's firmware finds it by GPT type GUID and
 /// selects it by the partition's attribute bits. That firmware is coreboot plus
-/// depthcharge, in an SPI chip that is not ours to build.
+/// depthcharge, in an SPI chip boot2deb does not build.
 ///
-/// Nothing here is a bootloader we produce — the payload *is* the kernel. It is built
+/// Nothing here is a bootloader boot2deb produces — the payload *is* the kernel. It is built
 /// by `depthchargectl` **inside the rootfs**. The same packaged hooks therefore re-sign
 /// and re-flash it when the kernel is upgraded on the running board. The image node only
 /// has to place the blob it produced.
@@ -864,7 +864,7 @@ pub struct DepthchargeLayer {
     /// `12MiB` does on eMMC and costs nothing on SD/USB.
     pub kpart_offset: String,
     /// Size of **each** ChromeOS kernel slot (e.g. `16MiB`), for a device that does
-    /// not state its own. It bounds the signed payload the image can carry.
+    /// not state its own. It bounds the signed payload the image can contain.
     ///
     /// The *firmware's* own ceiling is a property of the board profile, and is enforced
     /// by `depthchargectl`. A device built for a profile with a larger buffer overrides
@@ -874,7 +874,7 @@ pub struct DepthchargeLayer {
     /// [`kpart_offset`](Self::kpart_offset). Range
     /// 1..=[`MAX_KPART_SLOTS`](crate::chromeos::MAX_KPART_SLOTS).
     ///
-    /// **Two is what makes a kernel upgrade survivable.** The first slot carries the
+    /// **Two is what makes a kernel upgrade survivable.** The first slot contains the
     /// signed payload. The rest ship empty at
     /// [`SPARE_KPART_FLAGS`](crate::chromeos::SPARE_KPART_FLAGS).
     ///
@@ -1021,10 +1021,10 @@ pub enum PackageEntry {
 pub struct ConditionalPackage {
     /// The package name, as the archive spells it.
     pub name: String,
-    /// The suites that carry this package.
+    /// The suites that include this package.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suites: Option<Vec<String>>,
-    /// The distro layers whose archives carry this package, by layer stem.
+    /// The distro layers whose archives contain this package, by layer stem.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distros: Option<Vec<String>>,
 }
@@ -1109,7 +1109,7 @@ impl From<&str> for PackageEntry {
 }
 
 impl From<String> for PackageEntry {
-    /// As for `&str`: a name alone carries no condition.
+    /// As for `&str`: a name alone has no condition.
     fn from(name: String) -> PackageEntry {
         PackageEntry::Plain(name)
     }
@@ -1117,7 +1117,7 @@ impl From<String> for PackageEntry {
 
 impl std::fmt::Display for PackageEntry {
     /// The name alone. What a reader wants from a package entry in a message is which
-    /// package it is. The condition is context that the message around it carries.
+    /// package it is. The condition is context that the message around it contains.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
     }
@@ -1132,7 +1132,7 @@ impl std::fmt::Display for PackageEntry {
 /// rebuild, while a URL that later serves different bytes is a verification failure
 /// rather than a silent swap.
 ///
-/// The pin gives *integrity*, not *authenticity*. An arbitrary-HTTP deb carries no
+/// The pin gives *integrity*, not *authenticity*. An arbitrary-HTTP deb has no
 /// signed `Release` chain. It reaches the image only through the local apt repo the
 /// engine assembles, which is its trust boundary. Never through a `dpkg -i`.
 ///
@@ -1158,7 +1158,7 @@ pub struct ExtraDeb {
     /// Mandatory content hash (lowercase hex sha256) — the pin the build trusts and
     /// the signature keys on. The shape is enforced by [`validate`](Self::validate)
     /// at resolution (and re-checked in the engine), not at the parse boundary, so
-    /// the failure carries the typed [`ConfigError::ExtraDebBadHash`] context.
+    /// the failure contains the typed [`ConfigError::ExtraDebBadHash`] context.
     pub sha256: String,
     /// Where these bytes are wanted. Defaults to [`ExtraDebTarget::Image`] alone —
     /// the local apt repo the rootfs solves against.
@@ -1190,7 +1190,7 @@ pub enum ExtraDebTarget {
     Ffmpeg,
 }
 
-/// One library the ffmpeg build links that Debian does not carry, supplied as
+/// One library the ffmpeg build links that Debian does not include, supplied as
 /// pinned [`ExtraDeb`]s targeting [`ExtraDebTarget::Ffmpeg`].
 ///
 /// The prebuilt counterpart of a [`UserspaceTree`] ffmpeg is configured against, and
@@ -1218,14 +1218,14 @@ pub struct FfmpegLib {
 
 /// An application this build compiles from source, rather than installing the
 /// archive's build of it, because the archive's build lacks patches this build
-/// carries.
+/// applies.
 ///
 /// Jellyfin's own `jellyfin-server` has no acceleration type that reaches a V4L2
 /// request-API decoder. The patched server is built here from Jellyfin's source and
 /// Jellyfin's own packaging, and replaces the archive's package.
 ///
 /// Declared by a *feature*, never by a hardware layer. Which silicon is present
-/// decides what the accelerated FFmpeg can do. Whether an image carries an
+/// decides what the accelerated FFmpeg can do. Whether an image contains an
 /// application is a capability someone asked for. The feature names what it needs
 /// through [`requires_capability`](crate::feature::Feature::requires_capability), so
 /// it composes with any provider of it without naming one.
@@ -1290,7 +1290,7 @@ pub enum AppBuild {
     /// offline. The engine fetches the SDK and every NuGet package the restore needs,
     /// verifies each against its pin, and hands them to the build.
     ///
-    /// The produced deb carries an epoch in its version. The rootfs solve takes the
+    /// The produced deb has an epoch in its version. The rootfs solve takes the
     /// highest version across its repositories, and a device's `apt upgrade` does
     /// the same. The epoch makes both prefer this build over any release the archive
     /// publishes later. Without it, that release would replace this build with one
@@ -1547,7 +1547,7 @@ pub struct DeviceDepthcharge {
     /// Size of each ChromeOS kernel slot, overriding the boot method's
     /// [`kpart_size`](DepthchargeLayer::kpart_size) (authored string, e.g. `32MiB`).
     ///
-    /// The slot bounds the payload the *image* can carry. The firmware's own ceiling
+    /// The slot bounds the payload the *image* can contain. The firmware's own ceiling
     /// is a property of the board profile and lives in `depthchargectl`'s database.
     /// The two have to agree to be useful — a profile whose firmware buffers 32 MiB
     /// buys nothing while the partition holding the payload is 16 MiB. So a device built
@@ -1622,7 +1622,7 @@ pub struct DeviceLayer {
     pub supported_boot_methods: Vec<BootMethod>,
     /// u-boot defconfig for this board. Required by the `rockchip-rkbin` boot
     /// method, which compiles u-boot from source. Absent on a board whose firmware
-    /// is not ours to build (a depthcharge Chromebook boots coreboot out of an SPI
+    /// boot2deb does not build (a depthcharge Chromebook boots coreboot out of an SPI
     /// chip). Resolution enforces it per method, so an omission is a typed error
     /// only where it matters.
     #[serde(default)]
@@ -1659,7 +1659,7 @@ pub struct DeviceLayer {
     /// own [`patch_series`](CompiledKernelDef::patch_series) — the patch-series
     /// analogue of [`device_config_fragments`](Self::device_config_fragments).
     ///
-    /// A driver only one board carries, an out-of-tree wireless part say, lives here
+    /// A driver only one board has, an out-of-tree wireless part say, lives here
     /// rather than on the SoC-wide kernel. Sibling boards on the same kernel never patch
     /// it in.
     /// The series come from the kernel's `patches_url` checkout like the kernel's own.
@@ -1671,11 +1671,11 @@ pub struct DeviceLayer {
     /// kernel and stages into `/lib/modules/<kver>/updates/`, each resolved from
     /// `kmods/<name>.toml` ([`KmodLayer`]). Board opt-in works like
     /// [`device_patch_series`](Self::device_patch_series), so a driver only one board
-    /// carries never rides its siblings.
+    /// has never rides its siblings.
     ///
     /// The driver's own declaration is shared, so a second board with the same chip names
     /// it rather than copying it. A distro-package kernel compiles nothing, so naming any
-    /// here is a typed error. Empty/absent for a board that carries no out-of-tree module.
+    /// here is a typed error. Empty/absent for a board that has no out-of-tree module.
     ///
     /// This array replaces wholesale across [`extends`](Self::extends), because it
     /// *selects* which drivers a kernel is built with rather than describing the board.
@@ -1691,7 +1691,7 @@ pub struct DeviceLayer {
     /// [`supported_kernels`](Self::supported_kernels). Selecting one applies its
     /// `uboot`-scope series over the compiled u-boot. The kernel tree is untouched, so
     /// a u-boot variant costs a series here, not a whole kernel definition. Empty on a
-    /// board whose u-boot ships pristine, or whose firmware is not ours to build (a
+    /// board whose u-boot ships pristine, or whose firmware boot2deb does not build (a
     /// depthcharge Chromebook). Only meaningful under `rockchip-rkbin`.
     #[serde(default)]
     pub supported_uboot_series: Vec<String>,
@@ -1750,7 +1750,7 @@ pub struct DeviceLayer {
     ///
     /// Where the SoC layer states what the silicon gives every board on it, this states
     /// what one board's own hardware adds. That is a capture card, or a codec the SoC does
-    /// not carry. Only a recipe replaces the resolved set outright.
+    /// not have. Only a recipe replaces the resolved set outright.
     #[serde(default)]
     pub groups: Vec<String>,
     /// The modules this board adds to its SoC's initramfs, unioned after the SoC's.
@@ -1758,14 +1758,14 @@ pub struct DeviceLayer {
     /// Here when the need is one board's. That is a display stack only a board with a
     /// roomy kernel slot can afford, or a controller only this board wires. `modules`
     /// accumulates across [`extends`](Self::extends), since a variant is the same
-    /// hardware and still needs what its parent's initramfs carried.
+    /// hardware and still needs what its parent's initramfs contained.
     #[serde(default)]
     pub initramfs: InitramfsLayer,
-    /// Packages carrying **nonfree firmware** this board's hardware loads at runtime,
+    /// Packages containing **nonfree firmware** this board's hardware loads at runtime,
     /// under the same contract as [`SocLayer::nonfree_firmware_packages`]. It is dropped
     /// on a [`libre`](CompiledKernelDef::libre) build, and merged in place on any other.
     ///
-    /// This is where a blob belongs when boards on one SoC carry different parts, two
+    /// This is where a blob belongs when boards on one SoC have different parts, two
     /// radios in the same family say. The SoC layer is where it belongs when they do not.
     /// Accumulates across [`extends`](Self::extends): the part a parent needed firmware
     /// for is on the variant's board too.
@@ -1821,7 +1821,7 @@ pub struct BaseLayer {
     /// here and not on a device. A recipe or `--locale` overrides it.
     ///
     /// Defaults to `C.UTF-8`, which glibc builds in. It is a complete UTF-8 locale that
-    /// resolves on an image carrying no locale data at all. A config root that omits this
+    /// resolves on an image containing no locale data at all. A config root that omits this
     /// still yields a working system.
     #[serde(default = "default_locale")]
     pub locale: String,
@@ -1890,7 +1890,7 @@ pub struct BaseLayer {
     ///
     /// Public key material is not secret, so entries are the keys themselves rather than
     /// paths to them. A recipe that named a path would resolve differently on another
-    /// machine. The point of writing a key down is that every build of that recipe carries
+    /// machine. The point of writing a key down is that every build of that recipe contains
     /// it. Empty by default, so an image authorizes nobody unless a config root says
     /// who.
     ///
@@ -1937,7 +1937,7 @@ fn default_groups() -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// The system locale a config root falls back to: `C.UTF-8`, which glibc builds into
-/// `libc-bin` — so it resolves even on an image carrying no locale data at all.
+/// `libc-bin` — so it resolves even on an image containing no locale data at all.
 fn default_locale() -> String {
     "C.UTF-8".to_string()
 }
@@ -1960,7 +1960,7 @@ const DEFAULT_XKB_MODEL: &str = "pc105";
 /// `sr_RS.UTF-8@latin` → `UTF-8`.
 ///
 /// `locale-gen` reads `<name> <codeset>` pairs, and the codeset is not free-standing
-/// config. It is carried inside the locale name, after the `.` and before any
+/// config. It is contained inside the locale name, after the `.` and before any
 /// `@modifier`. Returns `None` for a name with no codeset (`de_DE`), which resolution
 /// rejects: `locale-gen` could not act on it.
 pub fn locale_codeset(locale: &str) -> Option<&str> {
@@ -2352,7 +2352,7 @@ pub struct Support {
     /// `YYYY-MM-DD` the claim was last established: for
     /// [`Validated`](SupportStatus::Validated) the day the image booted, otherwise
     /// the day the claim was last assessed. Validated as a real calendar date at
-    /// load, so a published claim cannot carry an impossible one.
+    /// load, so a published claim cannot contain an impossible one.
     ///
     /// A date is unavoidably an assertion, since nothing mechanical knows when a board
     /// was booted. So it lives here, with the rest of the assertion, rather than in the
@@ -2376,7 +2376,7 @@ pub struct Support {
     /// has a broken filter, or a suite whose package is too old.
     ///
     /// A caveat is a sentence, not a code, so the only load-time rule is that it is
-    /// non-empty and carries no leading or trailing whitespace. It is published into the
+    /// non-empty and contains no leading or trailing whitespace. It is published into the
     /// support matrix and printed after a build. A blank entry or a ragged one is a defect
     /// a reader sees.
     pub caveats: Vec<String>,
@@ -2522,7 +2522,7 @@ fn check_iso_date(s: &str) -> Result<(), String> {
 /// [`--stage uboot`](crate) artifacts.
 ///
 /// The marker is what lets such a recipe drop the suite from its identity. A `loader`
-/// is the same tool whatever Debian release it sits next to, so its `.toml` carries no
+/// is the same tool whatever Debian release it sits next to, so its `.toml` contains no
 /// `suite`/`kernel`/`image_size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -2637,12 +2637,12 @@ pub struct Recipe {
     /// Declared at the recipe rather than the device because populating a board's M.2 slot
     /// is a deployment choice, not a hardware invariant. Two recipes for the same board can
     /// disagree about whether a data disk exists. Requires the `data-volume` feature, which
-    /// carries the first-boot hook that acts on these — see [`crate::datavolume`].
+    /// includes the first-boot hook that acts on these — see [`crate::datavolume`].
     #[serde(default)]
     pub data_volumes: Vec<crate::datavolume::DataVolume>,
     /// Run `boot2deb-selftest` automatically once per boot, after
     /// `multi-user.target`, logging to the journal (the shipped
-    /// `boot2deb-selftest.service`, which every image carries disabled. This flag
+    /// `boot2deb-selftest.service`, which every image contains disabled. This flag
     /// enables it). For a board validated over a serial console, where nobody is logged
     /// in to run the selftest by hand. The failed unit in `systemctl --failed` and the
     /// journal entry are the announcement.
@@ -2718,7 +2718,7 @@ pub struct Overrides {
     /// Override the generated first-boot password length.
     pub first_boot_password_length: Option<u8>,
     /// Override the authorized SSH keys (`Some` replaces the base list). Set from a recipe
-    /// rather than a flag. A key is written down so that every build of a point carries it,
+    /// rather than a flag. A key is written down so that every build of a point contains it,
     /// which a per-invocation override cannot express.
     pub ssh_authorized_keys: Option<Vec<String>>,
     /// Override the default account's supplementary groups (`Some` replaces the base
@@ -2835,7 +2835,7 @@ pub struct ResolvedDistroKernel {
     pub package: String,
 }
 
-/// Raw-gap layout offsets for a build, carried as authored strings (parsed to
+/// Raw-gap layout offsets for a build, kept as authored strings (parsed to
 /// bytes only when the image is written).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Offsets {
@@ -2852,7 +2852,7 @@ pub struct Offsets {
 ///
 /// An image lays down [`slots`](Self::slots) partitions of the ChromeOS kernel type,
 /// back to back from [`offset`](Self::offset), each [`size`](Self::size) long. The
-/// **first** carries the signed payload and the attributes below. Every other ships
+/// **first** contains the signed payload and the attributes below. Every other ships
 /// empty at [`SPARE_KPART_FLAGS`](crate::chromeos::SPARE_KPART_FLAGS), waiting for the
 /// first on-device kernel upgrade to write it. The spare is the entire reason an
 /// upgrade can be rolled back — see [`chromeos`](crate::chromeos).
@@ -2875,7 +2875,7 @@ pub struct Kpart {
     /// word — what actually lands on disk. Computed at resolution by
     /// [`kpart_flags`](crate::chromeos::kpart_flags), which also range-checks
     /// `priority` and `tries`, so the image node writes a value it does not have to
-    /// re-validate. Spare slots carry
+    /// re-validate. Spare slots have
     /// [`SPARE_KPART_FLAGS`](crate::chromeos::SPARE_KPART_FLAGS) instead.
     pub flags: u64,
 }
@@ -2946,7 +2946,7 @@ pub struct ResolvedRkbinBoot {
 /// else, which is why this is resolved rather than authored. A board that widens its
 /// slot gets the faster compressor with it.
 ///
-/// The cost lands where it is most visible. A depthcharge initramfs carries no display
+/// The cost lands where it is most visible. A depthcharge initramfs contains no display
 /// driver unless the board has the headroom to add one. On a board that does not, every
 /// second spent decompressing is a second of the firmware's blank screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -3031,7 +3031,7 @@ pub struct ResolvedDepthchargeBoot {
 /// much as for an image. Hardware here means device, SoC, arch and boot method.
 ///
 /// Everything an image alone has is in [`image`](Self::image). A [`Deliverable::Uboot`]
-/// build therefore carries no neutral placeholder for an axis it does not have, and
+/// build therefore contains no neutral placeholder for an axis it does not have, and
 /// nothing can read one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedBuild {
@@ -3040,7 +3040,7 @@ pub struct ResolvedBuild {
     /// The resolved device and everything it extends, base-most first, ending with
     /// [`device`](Self::device).
     ///
-    /// Carried because the merged layers no longer show the chain, and the engine needs
+    /// Recorded because the merged layers no longer show the chain, and the engine needs
     /// it. A device's `overlay/` tree is found by its *name*. Laying in only the resolved
     /// device's would silently drop the parent's runtime config from a variant image.
     ///
@@ -3114,7 +3114,7 @@ pub struct ResolvedBuild {
     /// What this build point does **not** do, in sentences. It is the SoC's, the device
     /// lineage's, each selected feature's, and the recipe's [`Support::caveats`]
     /// concatenated in that order and de-duplicated by text, first-appearance order.
-    /// Each entry carries the [`CaveatScope`] of the layer that stated it, which is
+    /// Each entry contains the [`CaveatScope`] of the layer that stated it, which is
     /// what the `(soc)`/`(board)`/`(feature)`/`(recipe)` prefix renders from.
     ///
     /// Silicon, then board, then capability, then build point, because that is the order
@@ -3210,7 +3210,7 @@ pub struct ResolvedImage {
     /// Second disks this image mounts for data, in recipe order. Empty on a build
     /// that stores everything on the boot medium. Validated at resolution
     /// ([`crate::datavolume::validate_all`]) and paired with the `data-volume`
-    /// feature, which carries the first-boot hook.
+    /// feature, which includes the first-boot hook.
     ///
     /// This is an image property, not a source pin. It changes bytes in the rootfs, an
     /// fstab entry and a generated config, and nothing about what is compiled. That is why
@@ -3270,14 +3270,14 @@ pub struct ResolvedImage {
     /// SSH public keys written to the default account's `~/.ssh/authorized_keys`, in
     /// the order the config named them. Empty when no config root authorizes anyone.
     /// Resolution guarantees each entry is a single well-formed `authorized_keys` line
-    /// carrying a public key ([`crate::authkeys::check_authorized_key`]).
+    /// containing a public key ([`crate::authkeys::check_authorized_key`]).
     pub ssh_authorized_keys: Vec<String>,
     /// Supplementary groups the default account is added to, in the order the config
     /// named them and with duplicates removed. Resolution guarantees each is a name
     /// `usermod` accepts, and that the set is non-empty of nothing. An empty list is legal
     /// and means the account gets its login group only.
     pub groups: Vec<String>,
-    /// Kernel modules the initramfs must carry: the SoC layer's
+    /// Kernel modules the initramfs must contain: the SoC layer's
     /// [`initramfs`](SocLayer::initramfs) list, then the device lineage's, in authored
     /// order and de-duplicated by [`module_key`](crate::initramfs::module_key).
     ///
@@ -3290,7 +3290,7 @@ pub struct ResolvedImage {
     pub initramfs_modules: Vec<String>,
     /// Out-of-tree kernel-module sets, in the order the device named them: each
     /// `kmods/<name>.toml` loaded and validated, built against this build's kernel tree
-    /// and staged into `/lib/modules/<kver>/updates/`. Empty for a board that carries
+    /// and staged into `/lib/modules/<kver>/updates/`. Empty for a board that has
     /// none. Resolution guarantees each name is unique and dpkg-safe, each
     /// `subdir`/`patch_dir` is contained, and each patch/module entry is a bare name. It
     /// also guarantees the kernel is compiled rather than a distro package, since the
@@ -3319,13 +3319,13 @@ pub struct ResolvedImage {
     ///
     /// It is the license *flavor* of the FFmpeg this build produces. It decides two things
     /// together: the `./configure` flags, and the build root's package set. A free build
-    /// therefore carries neither the nonfree encoder nor its headers.
+    /// therefore contains neither the nonfree encoder nor its headers.
     ///
     /// `false` means the produced `ffmpeg-rk` `.deb`, and any image holding it, can be
     /// redistributed. `true` means it cannot.
     ///
     /// Meaningful only where the build has an FFmpeg to flavor. The feature that sets it
-    /// requires the `ffmpeg` capability. A selection carrying it without a provider fails
+    /// requires the `ffmpeg` capability. A selection including it without a provider fails
     /// at resolution, rather than resolving to a flag nothing reads.
     pub ffmpeg_nonfree: bool,
     /// Third-party apt repositories the selected features contribute,
@@ -3339,7 +3339,7 @@ pub struct ResolvedImage {
     /// the lock. `build` materializes them into the local apt repo before the
     /// solve. Empty when no layer or feature adds one.
     pub extra_debs: Vec<ExtraDeb>,
-    /// Libraries the ffmpeg build links that Debian does not carry, unioned across
+    /// Libraries the ffmpeg build links that Debian does not include, unioned across
     /// the selected features and de-duplicated by `flag`. Their bytes are the
     /// [`extra_debs`](Self::extra_debs) targeting [`ExtraDebTarget::Ffmpeg`]. This is
     /// what tells the stage which packages to layer and which flags to pass.
@@ -3410,7 +3410,7 @@ impl std::fmt::Display for Caveat {
     /// The sentence prefixed with where it comes from — `(SoC) …`, `(board) …`,
     /// `(recipe) …`.
     ///
-    /// The prefix is the whole reason the scope is carried: "the chip cannot" and
+    /// The prefix is the whole reason the scope is recorded: "the chip cannot" and
     /// "this board does not" are different answers to "would another board do it",
     /// and a bare list of sentences makes the reader guess which they are reading.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -3432,7 +3432,7 @@ impl CaveatScope {
 
 /// Which layer a [`Caveat`] came from.
 ///
-/// Carried because a flat list loses the one thing a reader most wants from it. A
+/// Recorded because a flat list loses the one thing a reader most wants from it. A
 /// limitation of the silicon holds for every board on it, and for every recipe for those
 /// boards. One from a recipe holds for that recipe alone.
 ///

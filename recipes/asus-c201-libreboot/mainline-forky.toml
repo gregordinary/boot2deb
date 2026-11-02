@@ -9,7 +9,7 @@
 # The two opt-ins reinforce each other, which is why this pairing is worth its own
 # recipe: the wider slot is headroom a *signed* payload can use, and a compiled kernel is
 # the one whose payload you control — so this is the build point for a debug initramfs
-# carrying the display stack, which a 16 MiB stock slot cannot hold.
+# containing the display stack, which a 16 MiB stock slot cannot hold.
 #
 # The image boots only on a unit running libreboot. Reach for `asus-c201/mainline-forky`
 # on stock firmware; its stock profile boots on either.

@@ -37,7 +37,7 @@ use std::path::PathBuf;
 ///
 /// One point is an ordinary build. Several share every flag, so a flag that names one
 /// point's own paths or sources is refused with them, as is `--json`, whose stream
-/// carries no field saying which point an event belongs to. A failure stops the run
+/// contains no field saying which point an event belongs to. A failure stops the run
 /// unless `keep_going`. Either way each point's outcome is in its build record, and a
 /// closing table says what happened to every point, including those not reached.
 pub(crate) fn run_many(
@@ -315,7 +315,7 @@ fn run_point(
              accept the mismatch in the provenance record.",
             freshness
                 .note()
-                .expect("a stale verdict always carries its explanation"),
+                .expect("a stale verdict always contains its explanation"),
         )
         .into());
     }
@@ -531,7 +531,7 @@ fn run_point(
     let emitted = crate::artifacts::EmittedArtifacts::default();
     // The one stdout contract for a build: human rendering, or NDJSON under
     // --json — artifact locations travel as Event::Artifact either way.
-    // A closure rather than a `fn` pointer: the human renderer has to carry the
+    // A closure rather than a `fn` pointer: the human renderer has to capture the
     // verbosity, and `--json` deliberately ignores it (the NDJSON stream is the
     // record of the build, and a filtered record is a wrong one).
     //
@@ -601,13 +601,13 @@ fn run_point(
 
     // Resolve the patches source only when there is a series to apply: the lock pins
     // one (its kernel names a patch series) *and* this run includes a stage that
-    // applies it (kernel/u-boot/userspace/ffmpeg — the userspace stage carries the MPP
+    // applies it (kernel/u-boot/userspace/ffmpeg — the userspace stage applies the MPP
     // CMA fix). A rootfs/image-only build, or any build of a no-patch kernel, never
     // reads or fetches the `patches` repo.
     //
     // The source is an explicit --patches-path co-dev checkout, else the default
     // ../patches if present, else an auto-fetch at the pinned commit.
-    // The kmod stage carries its own quilt for the *driver* tree, but it builds that
+    // The kmod stage has its own quilt for the *driver* tree, but it builds that
     // module against the *kernel* tree — which `ensure_module_tree` may have to build
     // from source (a stale or absent tree), and that needs the board's kernel patch
     // series like any kernel build. So kmod resolves the kernel patches too.
@@ -790,7 +790,7 @@ fn run_point(
     };
 
     // The build graph, in order. Every node is here — including the ones this build does
-    // not have, which carry `applies: false` and the sentence that says why.
+    // not have, which contain `applies: false` and the sentence that says why.
     let stages: Vec<Stage> = vec![
         // The kernel stage and the DTB fast path share every filesystem input; both
         // prepare the same `<work>/linux` tree, which is why they are one node.
@@ -925,7 +925,7 @@ fn run_point(
             }),
         },
         // The userspace and ffmpeg nodes run only for a media-accel build — the one whose
-        // resolved image carries the SoC's transcode sources.
+        // resolved image contains the SoC's transcode sources.
         Stage {
             selectors: &[StageArg::Userspace],
             applies: media_accel,
@@ -971,7 +971,7 @@ fn run_point(
                     .ffmpeg_base_src
                     .clone()
                     .unwrap_or_else(|| ff.base.git.clone());
-                // The libraries ffmpeg links that Debian does not carry arrive as
+                // The libraries ffmpeg links that Debian does not include arrive as
                 // pinned bytes rather than as a compiled tree, so they are materialized
                 // here — verified against the lock's hashes — and handed to the stage
                 // for its build pool. Materialized in the stage that consumes them,
@@ -987,7 +987,7 @@ fn run_point(
                     userspace_debs: &out_dir,
                     // The licence flavour is resolved from the selected features, not
                     // chosen here: there is no `--nonfree` flag, because which FFmpeg an
-                    // image carries is a property of the build point and belongs in the
+                    // image contains is a property of the build point and belongs in the
                     // recipe or its variant reference, where it is recorded, rather than
                     // in a shell history.
                     nonfree: ib.image.ffmpeg_nonfree,
@@ -1471,7 +1471,7 @@ fn write_provenance(
         // recorded is of what a reader will open. One rootfs run writes both, so a
         // manifest without a plan means the directory was edited between the two runs —
         // an error rather than a silently thinner record, since the archive state is
-        // exactly what this section exists to carry.
+        // exactly what this section exists to record.
         let plan_path = image_plan.as_deref().ok_or_else(|| {
             format!(
                 "no plan document beside the solved manifest {} — the rootfs stage \
@@ -1583,11 +1583,11 @@ fn write_provenance(
             config_commit: r.config_stamp.as_ref().map(|(commit, _)| commit.as_str()),
             config_dirty: r.config_stamp.as_ref().is_some_and(|(_, dirty)| *dirty),
             // Reported by the image stage that formatted it, so the manifest states the
-            // contract the rootfs actually carries and the geometry that actually came
+            // contract the rootfs actually has and the geometry that actually came
             // out — neither of them a value re-derived here from a declaration.
             filesystem: filesystem.clone(),
             // Reported by the image stage that ran them: the external cross-check is
-            // present only where the host carries e2fsprogs, so verification depth is
+            // present only where the host has e2fsprogs, so verification depth is
             // host-determined and belongs in the record.
             rootfs_verified_with: &r.state.rootfs_verified_with,
             // The one host binary behind the arch selection above. The compilers are
@@ -1682,7 +1682,7 @@ struct BuildState {
     /// paired with the medium each goes to. Empty for every run that stops short of the
     /// image node, which is what makes the hint absent rather than wrong there.
     flashables: Vec<crate::nextstep::Flashable>,
-    /// The artifacts that carry the per-image first-boot password: an image holding the
+    /// The artifacts that contain the per-image first-boot password: an image holding the
     /// rootfs partition, each compressed copy of one, and the rootfs file manifest. Set by
     /// the image stage, which is the only one that knows which of its files those are.
     per_image: Vec<PathBuf>,
@@ -1921,7 +1921,7 @@ fn rootfs_stage(s: RootfsStage) -> Result<(), Box<dyn std::error::Error>> {
         out_dir: s.out_dir,
         stem: s.stem,
         // The build's own scratch tree: the provisioned userland is multi-GB and
-        // carries xattrs, so it must not land on whatever `TMPDIR` names.
+        // has xattrs, so it must not land on whatever `TMPDIR` names.
         scratch_dir: s.work_dir,
         keyring: s.keyring,
         interpreter_id: interpreter_id.as_deref(),
@@ -2052,9 +2052,9 @@ fn image_stage(s: ImageStage) -> Result<(), Box<dyn std::error::Error>> {
         emit_artifact(s.sink, "image", "compressed", &c.path);
     }
     emit_artifact(s.sink, "image", "files-manifest", &artifacts.files_manifest);
-    // What carries the password spliced into this image: the rootfs-bearing raw image,
+    // What contains the password spliced into this image: the rootfs-bearing raw image,
     // every container compressed from it, and the listing that hashes `/etc/shadow`. A
-    // split layout's boot image carries no rootfs, and neither do its containers.
+    // split layout's boot image contains no rootfs, and neither do its containers.
     let rootfs_image = match &artifacts.output {
         ImageOutput::Combined { image } => image.clone(),
         ImageOutput::Split { rootfs, .. } => rootfs.clone(),

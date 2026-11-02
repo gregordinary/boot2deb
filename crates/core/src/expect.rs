@@ -19,13 +19,13 @@
 //! argument text to end of line, split on whitespace only where the kind takes
 //! two arguments (`driver-bound`). Blank lines and full-line `#` comments are
 //! skipped. There are no inline comments and no quoting, so a pattern or a card
-//! name is carried verbatim.
+//! name is kept verbatim.
 //!
 //! Four check kinds exist only in the generated stream and cannot be authored.
 //! `kernel-release` and `kernel-flavor` are derived from the image identity by
 //! the build (see the rootfs stage). A layer restating the pinned kernel would
 //! drift from the lock that owns it. `single-kernel` takes no argument at all and
-//! is not a property of any layer. It states that the image carries one kernel.
+//! is not a property of any layer. It states that the image contains one kernel.
 //! That is true of every image this builder produces, and is a claim only the
 //! build is in a position to make.
 //!
@@ -252,7 +252,7 @@ impl Expectation {
         }
     }
 
-    /// The check's argument text as one `.checks` line carries it — the fields
+    /// The check's argument text as one `.checks` line contains it — the fields
     /// joined with single spaces, in field order. The inverse of nothing: the
     /// runner never reconstructs the TOML, it splits `driver-bound`'s two words
     /// and takes every other kind's text whole.
@@ -368,7 +368,7 @@ fn line(what: &str, value: &str) -> Result<(), String> {
 
 /// Which config layer declared a group of expectations.
 ///
-/// Carried for the same reason [`CaveatScope`](crate::model::CaveatScope) is.
+/// Recorded for the same reason [`CaveatScope`](crate::model::CaveatScope) is.
 /// "The SoC expects this" and "one feature expects this" answer different
 /// questions when a check fails. The scope plus the layer name is also the
 /// generated file's identity: `<scope>-<name>.checks`.
@@ -555,7 +555,7 @@ node = "extra""#,
     }
 
     #[test]
-    fn shape_rules_reject_what_the_line_grammar_cannot_carry() {
+    fn shape_rules_reject_what_the_line_grammar_cannot_express() {
         // Space in a path: the grammar splits on whitespace.
         assert!(parse(
             r#"check = "file"

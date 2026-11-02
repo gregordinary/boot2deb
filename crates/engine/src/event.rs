@@ -8,7 +8,7 @@
 //! `{"event":"step_started","step":"kernel"}`. Variants and fields can still grow, so
 //! a consumer must ignore an unknown `event` tag.
 //!
-//! Every event carries the `step` it belongs to (a build-graph node such as
+//! Every event contains the `step` it belongs to (a build-graph node such as
 //! `kernel` or `uboot`), so a flat stream stays self-describing once
 //! independent nodes emit concurrently.
 
@@ -113,7 +113,7 @@ pub enum Event {
     StepFinished {
         /// The step that finished.
         step: String,
-        /// How long it ran, measured monotonically from [`Step::start`]. Carried on
+        /// How long it ran, measured monotonically from [`Step::start`]. Recorded on
         /// the event rather than left to each consumer's own clock, so a stream read
         /// from a saved NDJSON log still says how long the build took, and a buffered
         /// consumer does not time its own delivery.

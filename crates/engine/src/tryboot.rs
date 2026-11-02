@@ -14,7 +14,7 @@
 //! half of the board's expectations is checked too.
 //!
 //! The board kernel is deliberately not booted. It is configured from the board's
-//! fragments and has no reason to carry virtio drivers. Adding them would change the
+//! fragments and has no reason to include virtio drivers. Adding them would change the
 //! shipped kernel to serve the test. The guest instead boots the suite's own generic
 //! kernel ([`fixture_kernel`]) — the kernel is a fixture, the userland is what is
 //! under test. No bootloader is in the loop either: QEMU loads the kernel directly,
@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Names the fixture harvest: the step a `try` run reports it under, and the label
-/// its transient root carries in the work dir.
+/// its transient root has in the work dir.
 pub const FIXTURE_STAGE: &str = "try-fixture";
 
 /// How long the guest gets to power off after the assertions, before the
@@ -105,7 +105,7 @@ pub struct FixtureKernel {
 /// `try` stands this root up for itself rather than borrowing the build's.
 ///
 /// A `systemd` postinst cannot be configured under the **single-identity** map, which
-/// is the map every [`BuildSandbox`](crate::sandbox::BuildSandbox) root carries. The
+/// is the map every [`BuildSandbox`](crate::sandbox::BuildSandbox) root uses. The
 /// postinst `fchownat`s `/var/lib/systemd/network` to `systemd-network` and sets a
 /// POSIX ACL naming `adm`. A user namespace that maps no id but root returns `EINVAL`
 /// for both.
@@ -265,7 +265,7 @@ pub struct TryOptions<'a> {
     pub boot_timeout: Duration,
     /// Keep the disk copy after the run — for a post-mortem, or to boot it by
     /// hand. Note the first login was forced to change the account password. The
-    /// report carries the one that is now set.
+    /// report contains the one that is now set.
     pub keep_disk: bool,
 }
 
@@ -402,7 +402,7 @@ fn err(context: &str, message: impl Into<String>) -> EngineError {
 /// speaking a terminal protocol, and [`VtFilter`] stops treating it as one.
 const MAX_SEQUENCE: usize = 4096;
 
-/// Reduces the guest's console bytes to the text they carry: control sequences
+/// Reduces the guest's console bytes to the text they contain: control sequences
 /// dropped, and `\r` with them.
 ///
 /// Every sentinel here is anchored at a line start (`\nB2D-READY`, `\nB2D-RC-`), and
@@ -428,7 +428,7 @@ struct VtFilter {
 }
 
 impl VtFilter {
-    /// Feed `chunk`; return the printable text it carried.
+    /// Feed `chunk`; return the printable text it contained.
     fn push(&mut self, chunk: &[u8]) -> String {
         const ESC: u8 = 0x1b;
         let mut out: Vec<u8> = Vec::with_capacity(chunk.len());
@@ -704,7 +704,7 @@ fn login(
 ///
 /// The command line is echoed back by the tty before it runs, so the exit-code
 /// sentinel is matched only at a line start (`\nB2D-RC-`) and only when digits
-/// follow — the echo carries the unexpanded `$?`, which fails the digit check.
+/// follow — the echo contains the unexpanded `$?`, which fails the digit check.
 fn run_cmd(
     console: &mut Console,
     cmd: &str,
@@ -768,7 +768,7 @@ fn run_cmd(
 /// that is not the board. Root is what makes dmesg and the initramfs readable, so both
 /// policies reach it: `nopasswd` directly, and `password` by handing `sudo -S` the
 /// account's `active` password on stdin — the one [`login`] set, which the run's report
-/// already carries. `-p ''` keeps sudo's prompt out of the output the summary is read
+/// already contains. `-p ''` keeps sudo's prompt out of the output the summary is read
 /// from.
 fn selftest_command(sudo: SudoPolicy, active: &str) -> String {
     const SELFTEST: &str = "/usr/lib/boot2deb/selftest --mode userland";
@@ -1032,7 +1032,7 @@ pub fn try_boot(opts: &TryOptions, sink: &dyn EventSink) -> Result<TryReport, En
     } else if run.is_ok() {
         step.log(format!(
             "kept the try disk at {} (its account password was changed at first login; \
-             the report carries it)",
+             the report contains it)",
             opts.disk.display()
         ));
     }
@@ -1077,7 +1077,7 @@ mod tests {
     }
 
     /// A read can end anywhere, including inside a sequence, so the filter has to
-    /// carry the partial one across chunks. One byte at a time is the worst case.
+    /// keep the partial one across chunks. One byte at a time is the worst case.
     #[test]
     fn a_sequence_split_across_reads_is_still_stripped() {
         let raw = format!("up\r\n{OSC_MARKER}B2D-RC-0\r\n");
@@ -1126,7 +1126,7 @@ mod tests {
         );
     }
 
-    /// A spec standing in for a `try` run's, carrying only what the provisioner reads.
+    /// A spec standing in for a `try` run's, containing only what the provisioner reads.
     fn fixture_spec<'a>(
         archive: &'a crate::Archive,
         components: &'a [String],
@@ -1166,7 +1166,7 @@ mod tests {
         for package in ["linux-image-arm64", "initramfs-tools", "busybox"] {
             assert!(rendered.contains(package), "{package} missing: {rendered}");
         }
-        // Nothing layers this root, so it carries no base to increment.
+        // Nothing layers this root, so it has no base to increment.
         assert!(rendered.contains("base_layer: None"), "{rendered}");
     }
 

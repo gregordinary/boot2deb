@@ -48,7 +48,7 @@ check = "sound-card"
 name  = "VEYRON-I2S"
 
 # --- The board profile ---------------------------------------------------------
-# One profile: depthcharge-tools carries `minnie` as a first-class board, and it ships
+# One profile: depthcharge-tools includes `minnie` as a first-class board, and it ships
 # no libreboot variant for it — the family's only libreboot profile is the C201's.
 # The payload shape is the family's: a 16 MiB ceiling and firmware that ignores a FIT
 # ramdisk, so depthchargectl patches the initrd address into the DTB.

@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn the_json_node_carries_both_verdicts_and_the_full_store_keys() {
+    fn the_json_node_contains_both_verdicts_and_the_full_store_keys() {
         let mut n = node("kmod:aic8800", ArtifactStatus::Miss);
         n.status = NodeStatus::Unstamped;
         n.keys = Some(vec![

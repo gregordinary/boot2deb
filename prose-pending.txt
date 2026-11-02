@@ -1,4 +1,5 @@
-# Surfaces not yet held to the style guide's Part 5, with the weight they stood at.
+# 0 weight over 242 surfaces at baseline.
+# Surfaces not yet held to the style guide's Part 6, with the weight they stood at.
 #
 # A ratchet, not an exemption: a surface here may not get worse, and comes off the
 # list when it reaches zero. Delete a line once its surface is clean.

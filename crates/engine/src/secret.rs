@@ -50,7 +50,7 @@ pub(crate) fn fill_random(buf: &mut [u8]) -> Result<(), EngineError> {
 /// above the largest multiple of the alphabet length are discarded, so `byte % len`
 /// maps no symbol more often than another (no modulo bias).
 ///
-/// Each symbol carries log2(56) ≈ 5.81 bits, so the length the config resolved to
+/// Each symbol encodes log2(56) ≈ 5.81 bits, so the length the config resolved to
 /// *is* the entropy statement. Fails only if the CSPRNG cannot be read.
 ///
 /// `len` comes from
@@ -158,7 +158,7 @@ mod tests {
         );
     }
 
-    /// The hash the image's `/etc/shadow` carries: `sha512crypt`, salted per call,
+    /// The hash the image's `/etc/shadow` contains: `sha512crypt`, salted per call,
     /// and computed with no host tool involved (so this test cannot skip).
     #[test]
     fn crypt_password_produces_a_sha512crypt_hash() {

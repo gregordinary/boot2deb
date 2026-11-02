@@ -67,7 +67,7 @@ pub enum ArtifactStatus {
 pub enum NodeStatus {
     /// No previous build: the tree is absent, so it will be freshly built.
     Absent,
-    /// The tree exists but carries no readable current-format signature stamp — an
+    /// The tree exists but contains no readable current-format signature stamp — an
     /// interrupted build or a foreign/older stamp. It will be rebuilt (fail-safe:
     /// an unverifiable tree is never trusted).
     Unstamped,
@@ -187,7 +187,7 @@ pub struct PlanInputs<'a> {
     /// shim is reported as a rebuild. A kmod absent here folds no local patch.
     pub kmod_local_patches: &'a [(String, Vec<PathBuf>)],
     /// The resolved build. The Tier-2 output signatures fold axes the lock does not
-    /// carry — the kernel arch, the `KBUILD_IMAGE` path, the base defconfig, the
+    /// contain — the kernel arch, the `KBUILD_IMAGE` path, the base defconfig, the
     /// u-boot defconfig. Predicting the artifact cache therefore needs the resolution,
     /// not just the pins.
     pub build: &'a ResolvedBuild,
@@ -332,7 +332,7 @@ pub fn plan_nodes(inputs: &PlanInputs) -> Vec<NodePlan> {
         // the plan and the build agree on what exists for this SoC and this build.
         for pin in &lock.userspace {
             let Some(tree) = inputs.userspace.iter().find(|t| t.name == pin.name) else {
-                // The lock pins a tree this resolution does not carry. The drift gate
+                // The lock pins a tree this resolution does not include. The drift gate
                 // reports that as drift; a prediction here would name a node no build
                 // will run.
                 continue;

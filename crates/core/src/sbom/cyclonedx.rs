@@ -5,7 +5,7 @@
 //! they are the same document with different keys:
 //!
 //! - **CycloneDX has no source-tree component type.** A pinned tree is a `library`
-//!   carrying a `vcs` external reference. Its role is in the description.
+//!   containing a `vcs` external reference. Its role is in the description.
 //! - **CycloneDX has one relationship kind.** `dependencies` says the image depends
 //!   on a component. That is true of a package it ships *and* of a tree it was
 //!   compiled from, so both appear there. The distinction SPDX draws with `CONTAINS`
@@ -163,7 +163,7 @@ fn component(c: &Component) -> CdxComponent {
         kind: match c.kind {
             ComponentKind::Image => "operating-system",
             // No CycloneDX type says "source tree", so a pinned tree is a library
-            // whose `vcs` reference and description carry what it actually is.
+            // whose `vcs` reference and description record what it actually is.
             ComponentKind::DebianPackage
             | ComponentKind::Source
             | ComponentKind::ExtraDeb
@@ -207,7 +207,7 @@ mod tests {
     use crate::sbom::tests::sbom;
 
     #[test]
-    fn the_bom_carries_every_field_the_schema_requires() {
+    fn the_bom_contains_every_field_the_schema_requires() {
         let bom = Bom::render(&sbom());
         let json = serde_json::to_value(&bom).unwrap();
         assert_eq!(json["bomFormat"], "CycloneDX");
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn a_source_pin_carries_a_vcs_reference_and_a_shipped_deb_a_distribution_one() {
+    fn a_source_pin_contains_a_vcs_reference_and_a_shipped_deb_a_distribution_one() {
         // The reference *type* is where CycloneDX keeps the distinction SPDX draws
         // with GENERATED_FROM, so getting it wrong loses the only signal that a tree
         // was compiled rather than installed.

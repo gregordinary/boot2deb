@@ -27,7 +27,7 @@ pub fn manifest_name(stem: &str) -> String {
 /// # Errors
 ///
 /// [`EngineError::Ext4Format`] when the image cannot be read, or holds a name or a time
-/// the manifest format cannot carry.
+/// the manifest format cannot contain.
 pub fn manifest_of(ext4: &Path) -> Result<FileManifest, EngineError> {
     let file = std::fs::File::open(ext4).map_err(|s| EngineError::io(ext4, s))?;
     let reader = Reader::open(std::io::BufReader::new(file)).map_err(|e| read_failed(ext4, e))?;
@@ -48,7 +48,7 @@ pub fn manifest_of(ext4: &Path) -> Result<FileManifest, EngineError> {
 /// # Errors
 ///
 /// [`EngineError`] when the artifact cannot be read or decompressed, has no rootfs
-/// partition, or holds a tree the manifest format cannot carry.
+/// partition, or holds a tree the manifest format cannot contain.
 pub fn manifest_of_image(artifact: &Path, scratch: &Path) -> Result<FileManifest, EngineError> {
     let partition = crate::image::inspect::rootfs_partition(artifact)?;
     let options = ferrosys::ext::OpenOptions::new()
@@ -114,7 +114,7 @@ fn walk<R: Read + Seek>(mut reader: Reader<R>, source: &Path) -> Result<FileMani
             let name =
                 String::from_utf8(w.path[1..].to_vec()).map_err(|_| EngineError::Ext4Format {
                     detail: format!(
-                        "{} holds {:?}, a name the file manifest cannot carry (not UTF-8)",
+                        "{} holds {:?}, a name the file manifest cannot contain (not UTF-8)",
                         source.display(),
                         String::from_utf8_lossy(&w.path)
                     ),
@@ -139,7 +139,7 @@ fn walk<R: Read + Seek>(mut reader: Reader<R>, source: &Path) -> Result<FileMani
 enum WalkError {
     /// The reader's own failure.
     Read(ferrosys::ext::ReadError),
-    /// An entry the manifest cannot carry, already worded.
+    /// An entry the manifest cannot contain, already worded.
     Entry(EngineError),
 }
 
@@ -156,7 +156,7 @@ impl From<EngineError> for WalkError {
 }
 
 /// One inode as a manifest entry: its type and ownership, its time, and what its type
-/// carries — a regular file's digest, a link's target, a device's numbers.
+/// contains — a regular file's digest, a link's target, a device's numbers.
 fn describe<R: Read + Seek>(
     reader: &mut Reader<R>,
     name: String,

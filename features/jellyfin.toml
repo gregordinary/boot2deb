@@ -1,5 +1,5 @@
 # features/jellyfin.toml — the Jellyfin media server, an *application* feature.
-# Named for the app, not for any hardware: it carries no transcode stack of its
+# Named for the app, not for any hardware: it includes no transcode stack of its
 # own. Hardware-accelerated transcode comes from composing this with a capability
 # feature that matches the target — e.g. `media-accel-rockchip` on an RK35xx board
 # — plus the glue feature that points Jellyfin at that stack's encoder
@@ -16,7 +16,7 @@
 # sha256, the local apt repo takes exactly one architecture, and a `.deb` whose
 # `Architecture` is neither the build's nor `all` fails the build rather than
 # being skipped. So the arch-pinned bytes decide the feature's arch. Supporting
-# `amd64` means a sibling feature carrying that arch's deb; the rest of this file
+# `amd64` means a sibling feature containing that arch's deb; the rest of this file
 # is arch-neutral and would be shared.
 #
 # Jellyfin is not in the Debian mirror, so this feature adds its signed upstream
@@ -28,7 +28,7 @@
 # vendored under blobs/keyrings/ like the Debian archive keyring; see
 # blobs/keyrings/README.md.
 #
-# The overlay tree at features/jellyfin/overlay/ carries one thing, and it is the
+# The overlay tree at features/jellyfin/overlay/ contains one thing, and it is the
 # consequence of the no-bundled-FFmpeg decision rather than a transcode-stack
 # setting: a jellyfin.service drop-in that removes the `--ffmpeg=` argument
 # Debian puts on the command line, pointing at the jellyfin-ffmpeg this feature
@@ -63,7 +63,7 @@ provides = ["jellyfin"]
 # `jellyfin-ffmpeg8 | ffmpeg`, and this builder never installs Recommends. Naming
 # the two real packages keeps the bundled FFmpeg out, which is what an image that
 # supplies its own encoder wants: `jellyfin-ffmpeg8` is linked against library
-# sonames its own pocket carries, so pulling it onto a different Debian suite drags
+# sonames its own pocket contains, so pulling it onto a different Debian suite drags
 # that pocket's versions in behind it and perturbs the codec libraries the rest of
 # the image resolved against.
 #
@@ -81,7 +81,7 @@ packages = ["jellyfin-server", "jellyfin-web"]
 # `trixie` is current and lists `Architectures: amd64 arm64`. So a forky image
 # takes trixie packages, and they are self-contained .NET publishes that link the
 # *system* ICU by soname: `jellyfin-server` declares `Depends: libicu76`, which is
-# trixie's ICU. Forky ships `libicu78` and carries no `libicu76` at all, so the
+# trixie's ICU. Forky ships `libicu78` and contains no `libicu76` at all, so the
 # dependency is unsatisfiable from the mirror — see the `extra_debs` entry below,
 # which supplies exactly that one library. Retarget both when a forky pocket ships.
 #

@@ -27,7 +27,7 @@ image_size = "3G"                        # Jellyfin + media-accel over the base
 
 # turing-rk1/media-accel-forky plus the application layer. With the seeded
 # configuration the stock server this recipe installs decodes in software and encodes
-# on `hevc_rkmpp` or `h264_rkmpp`. A server carrying the `patches/jellyfin` series was
+# on `hevc_rkmpp` or `h264_rkmpp`. A server including the `patches/jellyfin` series was
 # driven through Jellyfin on the board: it adds `-hwaccel v4l2request` decode in front
 # of the same encoders, declines 10-bit by design, and never fell back to libx264.
 # Re-assessed over the 7.3 generation: the encode path it uses is the

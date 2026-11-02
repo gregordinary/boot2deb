@@ -16,7 +16,7 @@
 //! - [`Rule::Architecture`]: the package is `all` or the build's target architecture,
 //!   which is what a cross build that picked up the host's comes out as.
 //! - [`Rule::ForeignElf`] and [`Rule::ElfInArchAll`]: every ELF object is for the
-//!   target, and an `all` package carries none. Firmware is exempt from both, since it
+//!   target, and an `all` package contains none. Firmware is exempt from both, since it
 //!   runs on a processor that is not the one the package installs on.
 //! - [`Rule::Owner`]: every entry is owned by root. Anything else is the build user's
 //!   id leaking through a missing `--root-owner-group`.
@@ -58,7 +58,7 @@ pub enum EntryKind {
     Symlink,
     /// A hard link to an earlier member.
     Hardlink,
-    /// A device node, FIFO, or anything else tar can carry.
+    /// A device node, FIFO, or anything else tar can store.
     Other,
 }
 
@@ -95,7 +95,7 @@ pub fn elf_ident(prefix: &[u8]) -> Option<ElfIdent> {
     Some(ElfIdent { wide, machine })
 }
 
-/// The ELF identity an object built for `arch` carries.
+/// The ELF identity an object built for `arch` has.
 pub fn target_elf(arch: Arch) -> ElfIdent {
     match arch {
         Arch::Arm64 => ElfIdent {
@@ -151,11 +151,11 @@ pub enum Rule {
     Architecture,
     /// An ELF object is for another architecture than the package's.
     ForeignElf,
-    /// An `Architecture: all` package carries an ELF object.
+    /// An `Architecture: all` package contains an ELF object.
     ElfInArchAll,
     /// A member is not owned by root.
     Owner,
-    /// A member carries the setuid or setgid bit.
+    /// A member has the setuid or setgid bit.
     Setuid,
     /// A member is writable by everyone (a sticky directory excepted).
     WorldWritable,
@@ -282,7 +282,7 @@ pub fn check(contents: &DebContents, arch: Arch) -> Vec<Finding> {
                 out.push(Finding {
                     rule: Rule::ElfInArchAll,
                     path: path(),
-                    detail: "an Architecture: all package carries an ELF object".into(),
+                    detail: "an Architecture: all package contains an ELF object".into(),
                 });
             } else if elf != target {
                 out.push(Finding {
@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn an_arch_all_package_carries_no_elf_and_names_no_other_arch() {
+    fn an_arch_all_package_contains_no_elf_and_names_no_other_arch() {
         let deb = DebContents {
             control: control("all"),
             entries: vec![elf("./usr/share/x/helper", true, 183)],
@@ -521,7 +521,11 @@ mod tests {
             })
         );
         assert_eq!(elf_ident(b"#!/bin/sh\nexit 0\n\0\0\0"), None);
-        assert_eq!(elf_ident(b"\x7fELF"), None, "too short to carry a machine");
+        assert_eq!(
+            elf_ident(b"\x7fELF"),
+            None,
+            "too short to contain a machine"
+        );
     }
 
     #[test]

@@ -83,7 +83,7 @@ use std::path::{Path, PathBuf};
 
 /// The command a session runs when the caller names none.
 ///
-/// `bash` rather than `sh`: it is Essential in Debian, so every root here carries it,
+/// `bash` rather than `sh`: it is Essential in Debian, so every root here contains it,
 /// and an interactive session is the one place its line editing and history are worth
 /// having. Resolved against `PATH` inside the root like every other bare tool name the
 /// stages pass, so it is the root's own `bash` and never the host's.
@@ -215,7 +215,7 @@ pub struct ShellOptions<'a> {
     /// Which root to enter and what to layer over it.
     pub stage: ShellStage,
     /// The build's scratch tree, bound read-write at its host path. Every stage's
-    /// tree, scratch and output live under it, so one bind carries all of them.
+    /// tree, scratch and output live under it, so one bind covers all of them.
     pub work_dir: &'a Path,
     /// Where the compile stages stage their `.deb`s. Read only by
     /// [`ShellStage::Ffmpeg`], whose layer resolves this build's own userspace packages
@@ -234,11 +234,11 @@ pub struct ShellOptions<'a> {
     /// The command and its arguments, or empty for an interactive `bash`.
     pub argv: &'a [String],
     /// Environment entries applied over the stage's own. `TERM` matters above all,
-    /// and the declared sandbox environment does not carry it because a build has no
+    /// and the declared sandbox environment does not contain it because a build has no
     /// terminal to describe.
     pub env: &'a [(String, String)],
     /// The userspace trees the build being reproduced compiles — the SoC's set narrowed
-    /// by its `--userspace` flags. It decides what the layer carries: a tree's own
+    /// by its `--userspace` flags. It decides what the layer contains: a tree's own
     /// `build_deps` are layered for the whole stage. Read only by
     /// [`ShellStage::Userspace`] and [`ShellStage::Ffmpeg`].
     pub userspace: &'a [boot2deb_core::model::UserspaceTree],
@@ -389,7 +389,7 @@ fn session_env(build: &ResolvedBuild, lock: &Lock, opts: &ShellOptions) -> Vec<(
     env
 }
 
-/// The build variables the stage's own `make` invocations carry, so a command re-run by
+/// The build variables the stage's own `make` invocations pass, so a command re-run by
 /// hand in here is the command the stage ran.
 ///
 /// Split from [`session_env`] around the two values that need a lock and a work dir, so
@@ -437,7 +437,7 @@ fn stage_env(
 /// The build-dependency set the stage layers over its base — each stage's own
 /// declaration, read from the stage module rather than restated.
 ///
-/// `build` supplies the axes a set depends on that the lock does not carry — the ffmpeg
+/// `build` supplies the axes a set depends on that the lock does not contain — the ffmpeg
 /// stage's licence flavour, whose two forms layer different `-dev` packages. Taken from
 /// the resolution rather than repeated as a session option, so the session cannot be
 /// told a flavour the build was not.
@@ -515,7 +515,7 @@ fn ffmpeg_pool(
 /// The lock's userspace pins, which decide which of this build's own packages the
 /// ffmpeg root layers.
 ///
-/// The caller schedules the media-accel stages only for a build whose lock carries
+/// The caller schedules the media-accel stages only for a build whose lock contains
 /// them, so reaching this without pins is a scheduling bug rather than a
 /// misconfiguration — the same contract the ffmpeg stage itself states.
 fn userspace_pins(lock: &Lock) -> Result<&[boot2deb_core::lock::UserspacePin], EngineError> {
@@ -740,11 +740,11 @@ mod tests {
         );
     }
 
-    /// The kernel and kmod sessions carry the kbuild variables their stage compiles
+    /// The kernel and kmod sessions include the kbuild variables their stage compiles
     /// with, so a `make` re-run by hand in there is the `make` the stage ran; the
-    /// stages that are not kbuild invocations carry none.
+    /// stages that are not kbuild invocations include none.
     #[test]
-    fn a_kbuild_session_carries_the_kbuild_variables() {
+    fn a_kbuild_session_contains_the_kbuild_variables() {
         let build = rk1_build();
         let dir = PathBuf::from("/nonexistent");
         let env = |stage| {
@@ -795,10 +795,10 @@ mod tests {
         assert!(env(ShellStage::Packaging).is_empty());
     }
 
-    /// A native cross root — one already at the target's architecture — carries no
+    /// A native cross root — one already at the target's architecture — has no
     /// prefix, since there is no cross toolchain in it to name.
     #[test]
-    fn a_native_root_carries_no_toolchain_prefix() {
+    fn a_native_root_has_no_toolchain_prefix() {
         let build = rk1_build();
         let dir = PathBuf::from("/nonexistent");
         let env = stage_env(&build, &opts(ShellStage::Uboot, &dir, &[], &[]), None, None);
@@ -806,7 +806,7 @@ mod tests {
     }
 
     /// The session's own entries win over the stage's, which is what lets a caller pass
-    /// the `TERM` the declared build environment has no reason to carry.
+    /// the `TERM` the declared build environment has no reason to contain.
     #[test]
     fn the_callers_environment_is_applied_last() {
         let build = rk1_build();

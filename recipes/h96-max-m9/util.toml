@@ -6,7 +6,7 @@
 # autoboots. The deliverable is the maskrom USB boot images from `--stage uboot`.
 #
 # It differs from recipes/rk3576-generic/util.toml only by its u-boot series:
-# the board profile h96-max-m9-util carries the ethernet patch with this board's
+# the board profile h96-max-m9-util includes the ethernet patch with this board's
 # PHY address, reset GPIO, and RGMII TX delay. Being a pure bootloader tool
 # unrelated to any Debian release, it names no suite, kernel, or image — only the
 # u-boot series.

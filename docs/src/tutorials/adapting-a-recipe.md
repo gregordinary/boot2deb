@@ -81,7 +81,7 @@ things are worth knowing before you rely on it:
 - **Order matters and is preserved** — kconfig fragments and patch series compose in
   selection order, so `a+b` and `b+a` are two different builds and two different
   references.
-- **A variant carries no support claim.** The claim belongs to the recipe, and a
+- **A variant has no support claim.** The claim belongs to the recipe, and a
   different feature set is a different build. Variants appear in neither `list-recipes`
   nor the support matrix.
 
@@ -236,6 +236,6 @@ is not here yet, or a device tree that is not upstream. See
 
 ## When the change is worth a claim
 
-A recipe is the unit that carries a `[support]` claim, and a claim is a statement about
+A recipe is the unit that contains a `[support]` claim, and a claim is a statement about
 hardware. If you have booted your adapted image and want to say so, in your own overlay
 or in a contribution, see [Authoring a recipe](authoring-a-recipe.md).

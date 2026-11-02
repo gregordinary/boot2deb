@@ -8,9 +8,9 @@ transcodes on the Rockchip stack instead of in software.
 features = ["jellyfin", "media-accel-rockchip", "jellyfin-rockchip"]
 ```
 
-All three are named explicitly. `jellyfin` is portable and must not carry RK35xx
+All three are named explicitly. `jellyfin` is portable and must not contain RK35xx
 settings; `media-accel-rockchip` serves any consumer of the stack and must not
-carry one application's config file. Neither can imply the other, so the binding
+contain one application's config file. Neither can imply the other, so the binding
 between them is its own feature.
 
 ## What the seed says, and why
@@ -32,7 +32,7 @@ last component of the ffmpeg path with `ffprobe`. From the prefix path that give
 `-rk`-suffixed symlink it gives `/usr/bin/ffprobe`, which this image does not
 install — Jellyfin would start, encode, and fail every probe.
 
-The prefix binary runs with no environment help: `ffmpeg-rk` carries
+The prefix binary runs with no environment help: `ffmpeg-rk` sets
 `DT_RUNPATH=/opt/ffmpeg-rk/lib` on every object it ships, and its build fails if
 that RUNPATH did not reach the link.
 

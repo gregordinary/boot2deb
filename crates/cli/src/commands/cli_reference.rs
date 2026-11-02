@@ -1,7 +1,7 @@
 //! `cli-reference`: the complete flag table, generated from the clap surface.
 //!
 //! The book's `cli.md` is a curated narrative. It explains the model and the flags
-//! that carry it, and it is the better page to read. What a narrative cannot do is
+//! that express it, and it is the better page to read. What a narrative cannot do is
 //! stay *complete*. A flag added in [`crate::args`] appears here the moment it
 //! exists, and a committed page that no longer matches fails this module's
 //! staleness test.
@@ -221,7 +221,7 @@ mod tests {
         );
     }
 
-    /// Every flag carries a description, because the generated table is only worth
+    /// Every flag has a description, because the generated table is only worth
     /// having if its rows say something. A `#[arg]` with no `///` renders an empty
     /// cell, which this catches at the source rather than in review.
     #[test]

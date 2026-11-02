@@ -57,7 +57,7 @@ pub fn decode(s: &str) -> Option<Vec<u8>> {
     let body = &bytes[..bytes.len() - pad];
     let mut out = Vec::with_capacity(body.len() / 4 * 3);
     for group in body.chunks(4) {
-        // A lone character carries 6 bits, which is less than one byte.
+        // A lone character encodes 6 bits, which is less than one byte.
         if group.len() == 1 {
             return None;
         }
@@ -65,7 +65,7 @@ pub fn decode(s: &str) -> Option<Vec<u8>> {
         for &c in group {
             acc = (acc << 6) | sextet(c)?;
         }
-        // A partial final group carries 6 bits per character; `acc` is left-aligned to
+        // A partial final group encodes 6 bits per character; `acc` is left-aligned to
         // the group's full 24 bits so the same shifts read every case.
         acc <<= 6 * (4 - group.len());
         let full = [(acc >> 16) as u8, (acc >> 8) as u8, acc as u8];

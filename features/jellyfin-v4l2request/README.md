@@ -74,7 +74,7 @@ The config model page covers the mechanism.
 The built `jellyfin-server` replaces the one Jellyfin's repository serves, and two things
 keep it in place:
 
-- **Its version carries an epoch** (`1:12.2+g…`). The rootfs solve takes the highest
+- **Its version has an epoch** (`1:12.2+g…`). The rootfs solve takes the highest
   version across its repositories, so it takes this build over any release the
   repository publishes later. A device's `apt upgrade` does the same.
 - **It depends on the `jellyfin-web` of its own release.** The solve installs the

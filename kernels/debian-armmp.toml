@@ -1,6 +1,6 @@
 # kernels/debian-armmp.toml — Debian's own armhf kernel, installed from the mirror.
 #
-# `distro-package` is the flavor for a board that needs no kernel of ours. Nothing is
+# `distro-package` is the flavor for a board that needs no kernel built by boot2deb. Nothing is
 # compiled, patched, or configured: Debian builds `linux-image-armmp` and this
 # definition just names it. So there is no source ref, no defconfig, no fragment list,
 # and no patch series — and the lock records no kernel commit, because the exact
@@ -9,7 +9,7 @@
 #
 # This is the honest model for the Veyron Chromebooks. The RK3288 and all ten Veyron
 # boards are fully upstream and actively maintained, and Debian's own armhf kernel
-# runs them: there is no patch to carry and no config to curate, so compiling a kernel
+# runs them: there is no patch to maintain and no config to curate, so compiling a kernel
 # would add a 30-minute cross-build and a maintenance burden to arrive at a worse
 # version of what `apt` already ships — one that would also stop receiving Debian's
 # security updates on the running board.
@@ -29,7 +29,7 @@ supported_socs = ["rk3288"]
 # libre definition states none.
 #
 #   brcmfmac4354-sdio.bin  wifi firmware, from Debian's firmware-brcm80211
-#   brcmfmac4354-sdio.txt  board NVRAM, vendored (Debian does not carry it)
+#   brcmfmac4354-sdio.txt  board NVRAM, vendored (Debian does not include it)
 #   BCM4354.hcd            Bluetooth patchram, vendored
 [[expect]]
 check = "firmware"

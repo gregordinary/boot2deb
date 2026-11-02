@@ -2,7 +2,7 @@
 //! overlay ships.
 //!
 //! The runner itself is POSIX sh (`base/overlay/usr/lib/boot2deb/selftest`). It
-//! executes on the device, where no Rust of ours runs. This module holds the paths
+//! executes on the device, where no boot2deb Rust code runs. This module holds the paths
 //! the engine and `boot2deb try` address it by. It also holds the harness tests that
 //! drive every check kind through a fixture root. The shell's contract is therefore
 //! pinned by `cargo test` like any other stage's.
@@ -33,7 +33,7 @@ mod tests {
     use std::process::Command;
 
     /// The shipped runner, straight from the base overlay in this checkout —
-    /// the tests drive the exact bytes an image will carry.
+    /// the tests drive the exact bytes an image will contain.
     fn runner() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -145,7 +145,7 @@ mod tests {
         assert!(out.contains("11 ok."), "{out}");
     }
 
-    /// The one-kernel invariant: the fixture carries one and passes; a second
+    /// The one-kernel invariant: the fixture contains one and passes; a second
     /// kernel and a kernel whose module tree is for another version both fail,
     /// each naming the versions it found rather than just the count.
     #[test]
@@ -202,7 +202,7 @@ mod tests {
     }
 
     /// Every check kind's fail case: nothing in the empty root satisfies them,
-    /// and each failure carries a reason. One run, exit 1.
+    /// and each failure has a reason. One run, exit 1.
     #[test]
     fn every_check_kind_fails_on_an_empty_root() {
         if !crate::hosttool::require(&["sh"]) {
@@ -212,7 +212,7 @@ mod tests {
         let dmesg = tmp.path().join("dmesg.txt");
         std::fs::write(&dmesg, "SError Interrupt on CPU6\n").unwrap();
         // An empty /boot means the disk-content checks name what is absent; a
-        // wrong uname fails the identity pair; the dmesg fixture carries the
+        // wrong uname fails the identity pair; the dmesg fixture contains the
         // pattern that must not be there.
         checks(
             tmp.path(),
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(code, 2);
     }
 
-    /// The shipped wrapper and runner carry the executable bit in the
+    /// The shipped wrapper and runner have the executable bit in the
     /// checkout, like the first-boot hooks — the guard against shipping a
     /// selftest nothing can run.
     #[test]

@@ -76,7 +76,7 @@ error. The plan is an *instruction*. Hand it back and the rootfs installs that s
 without solving at all. That is the difference between detecting drift and not being
 subject to it.
 
-The plan also carries what neither the manifest nor the lock does:
+The plan also contains what neither the manifest nor the lock does:
 
 - The mirror that answered, and the suite and components.
 - The sha256 of the release body that was verified, and its `Date` and `Valid-Until`.
@@ -155,11 +155,11 @@ it exists, and a frozen build turns it on.
 ### 3. The builder (boot2deb itself)
 
 The same lock built by a different boot2deb can produce a different image, or fail to
-read an old lock. During active development, breaking changes are expected, and the
-project does not carry compatibility shims to read old locks forever. So the builder is
+read an old lock. During active development, breaking changes are expected, and
+boot2deb does not include compatibility shims to read old locks forever. So the builder is
 an input like any other, and the provenance manifest records it in `[built_with]`.
 
-That section carries **two** commits, because "what produced this image" has two answers
+That section contains **two** commits, because "what produced this image" has two answers
 that move independently:
 
 | field | names | captured |
@@ -179,7 +179,7 @@ front of it.
 A single binary building two different config trees is the ordinary case, not an exotic
 one.
 
-The section carries one more coordinate, `ferroday_cage`. It is a version rather than a
+The section contains one more coordinate, `ferroday_cage`. It is a version rather than a
 commit, because it names a released dependency instead of a checkout. That library is
 what boot2deb sandboxes every build command with, and what it provisions every Debian
 root through.
@@ -229,7 +229,7 @@ compile nodes.
 
 The builder also decides the environment a compile runs in. Every package build and the
 rootfs customize run in an unprivileged sandbox. What they produce depends on the
-variables they carry, the filesystem they see, and the identity they hold. It also
+variables they have, the filesystem they see, and the identity they hold. It also
 depends on whether they can reach a network, and on which syscalls succeed. No source pin
 covers any of that, and all of it moves with the sandbox library boot2deb links.
 
@@ -244,12 +244,12 @@ binds are per-build paths, and its root is a per-build path. The subordinate ide
 the rootfs customize adds is its own. None of them is recorded.
 
 The rooting mode contributes its *kind* (`plain` or `overlay`) and nothing else, for the
-same reason. A record carrying an overlay's lower stack or a range map's id extents would
+same reason. A record containing an overlay's lower stack or a range map's id extents would
 be a property of the machine rather than of the builder.
 
 That stamp is an **as-built record, not a requirement.** The stamped commit is a *floor*.
 It reproduces the image, as do later commits up to the next change that alters the output
-for this lock. A later one might carry fixes you want. A commit past that change will not
+for this lock. A later one might contain fixes you want. A commit past that change will not
 reproduce it.
 
 The floor is all that can ever be recorded, because the breaking change is in the future
@@ -278,7 +278,7 @@ What is kept out:
   it, is isolated from `/etc/gitconfig`, `~/.gitconfig`, and `/etc/gitattributes`.
 
   The setting that decides this is `url.<base>.insteadOf`. It rewrites a remote URL, so a
-  host carrying one would fetch a pinned commit from a remote the lock does not name.
+  host with one would fetch a pinned commit from a remote the lock does not name.
   That is the exact input the lock exists to fix. `core.hooksPath`, `am.threeWay`,
   `apply.whitespace`, and a system
   `gitattributes` are the same class. Transport settings are the cost: express a proxy or
@@ -300,7 +300,7 @@ What is kept out:
   staged tree is already root-owned where it is archived, and `dpkg-buildpackage` needs
   no gain-root command.
 - **Your compiler.** Every compile runs in a provisioned root. The kernel, u-boot and the
-  out-of-tree modules build in a host-arch **cross root** carrying
+  out-of-tree modules build in a host-arch **cross root** containing
   `crossbuild-essential-<target>`, and the media-accel `.deb`s in a target-arch **build
   sandbox**. Neither your `gcc` nor your `make` is on any build path, and the host cross
   toolchain is not either.
@@ -345,13 +345,13 @@ What is kept out:
   Drop the cached build roots so the next build provisions them against the current
   archive: `boot2deb clean RECIPE --build-roots`.
   ```
-- **Your `TMPDIR`.** The provisioned rootfs — the whole target userland, carrying xattrs
+- **Your `TMPDIR`.** The provisioned rootfs — the whole target userland, with xattrs
   and mapped ownership — is staged in the build's work dir. On `/tmp` it would land on a
   RAM-backed `tmpfs` on most desktops, making "does the build fit" a property of your
   mount table.
 - **Your shell environment.** Every build command runs with `TZ=UTC` and
   `LC_ALL=C.UTF-8`, and with `KCPPFLAGS` and `MAKEFLAGS` cleared. `KCFLAGS` and
-  `KAFLAGS` carry the build's own path map (see [Time and paths](#time-and-paths)) and
+  `KAFLAGS` contain the build's own path map (see [Time and paths](#time-and-paths)) and
   nothing of yours. A flag exported in your shell therefore cannot shape kernel bytes
   that a lock-keyed cache entry claims to reproduce.
 - **Your `openssl`.** The image's first-boot `/etc/shadow` entry is hashed in-process. No
@@ -371,7 +371,7 @@ What is recorded, because it genuinely does reach the image:
   natively, so it records none.
 
   This is the one compile input still probed on the host. It is registered with the host
-  kernel's binfmt handler, and no provisioned root can carry it.
+  kernel's binfmt handler, and no provisioned root can contain it.
 
   It is taken from **the kernel's binfmt registration**, not from a `PATH` lookup, and
   the difference is not academic. The registered path is normally a wrapper under
@@ -396,7 +396,7 @@ What is recorded, because it genuinely does reach the image:
   all fails the build.
 
   The independent `e2fsck -fn` cross-check runs only where the host
-  carries `e2fsprogs`. Its value is not extra depth (the scan is deeper) but independence,
+  has `e2fsprogs`. Its value is not extra depth (the scan is deeper) but independence,
   since the scan is one implementation checking its own output. That makes verification
   *depth* host-determined, so it is stated rather than left to a log line, and a release
   build can be gated on it.
@@ -427,9 +427,9 @@ What is recorded, because it genuinely does reach the image:
 
   An empty `signed_by` is a fact rather than a gap. It says that repository was trusted
   unsigned, which is how the build's own `.deb` pool is configured, and `signing_key` is
-  empty exactly when it is. That pool's entry is marked `local` and carries no mirror,
+  empty exactly when it is. That pool's entry is marked `local` and contains no mirror,
   because its URL is a per-run path under a per-run directory. That is a property of the
-  machine, kept out for the same reason the sandbox record carries no working or artifact
+  machine, kept out for the same reason the sandbox record contains no working or artifact
   path.
 - **`[build_sandbox]`, `[cross_sandbox]` and `[packaging_root]`** — the package sets of
   the three provisioned roots that produced the build's `.deb`s. Those are the
@@ -437,7 +437,7 @@ What is recorded, because it genuinely does reach the image:
   *compiled* the kernel, u-boot and out-of-tree modules. The third is the host-arch root
   whose `dpkg` *archived* the staged ones.
 
-  `[rootfs]` records what the image *carries*. These record what *produced* the parts of
+  `[rootfs]` records what the image *contains*. These record what *produced* the parts of
   it boot2deb built: further Debian trees, resolved from the same mirrors, that no source
   pin covers.
 
@@ -446,7 +446,7 @@ What is recorded, because it genuinely does reach the image:
   the rootfs manifest is.
 
   `[cross_sandbox]` in particular is where the compiler is named, by package and sha256
-  rather than by the version string it prints. That is why `[toolchain]` above carries no
+  rather than by the version string it prints. That is why `[toolchain]` above contains no
   `cc`.
 
   Each is absent when the build produced nothing of its kind. There is no cross root for
@@ -496,7 +496,7 @@ What is recorded, because it genuinely does reach the image:
   outputs, and are not rows themselves. A run of some stages alone, such as
   `--stage image`, writes a provenance manifest whose rows are that run's outputs.
 
-  `per_image = true` marks an output that carries the first-boot password: the image,
+  `per_image = true` marks an output that contains the first-boot password: the image,
   each compressed copy of it, and its file manifest. No rebuild can match those byte for
   byte. [`reproduce`](#reproducing-a-frozen-image) judges a rebuild against these rows.
 - **`[sandbox]`, `[sandbox_env]` and `[[sandbox_mounts]]`** — the posture, the environment
@@ -552,9 +552,9 @@ It is three records, because three things move for three different reasons.
 
 #### `policy_pin`
 
-The intent: the formatter's own policy document, carried whole.
+The intent: the formatter's own policy document, recorded whole.
 That is every feature word twice over, as exact bits and as names, plus the block and
-inode sizes. It also carries the seven options outside the feature set entirely:
+inode sizes. It also contains the seven options outside the feature set entirely:
 
 - The grow reservation and the inode ratio.
 - The reserved share and the error behavior.
@@ -564,7 +564,7 @@ Every one of those moves bytes, and `errors` is the sharp case. It reaches neith
 feature word nor the geometry, so no other record here would notice it changing.
 
 Nothing image-specific is in it, meaning no UUID, timestamp, label or block count. Two
-images built from these constants therefore carry byte-identical policy pins, and a
+images built from these constants therefore contain byte-identical policy pins, and a
 difference always means the contract changed.
 
 #### `reference_geometry_pin`
@@ -603,7 +603,7 @@ kernel needs two more settings, because parts of it read no `SOURCE_DATE_EPOCH`:
 
 The rootfs takes its epoch from the lock, as `[rootfs] source_date_epoch`. `update`
 writes it: the time of the `update` that last moved a pin. An `update` that moves
-nothing carries it forward, so the lock stays byte-identical. The rootfs epoch reaches
+nothing keeps it, so the lock stays byte-identical. The rootfs epoch reaches
 three places:
 
 - It is the ceiling that every rootfs tar member's modification time is clamped to.
@@ -709,7 +709,7 @@ the result:
    `.rootfs.uapi16`.** The manifest names the builder that produced it and the archives
    it resolved against, and records every output. The plan is the document that replays
    them. The file manifest is what a rebuilt image is compared through. The committed
-   lock, recoverable at that commit, carries the snapshot timestamp and every source pin.
+   lock, recoverable at that commit, contains the snapshot timestamp and every source pin.
 5. **Ship a bill of materials with it**, for the consumers who read one rather than a
    provenance manifest: `--sbom spdx --sbom cyclonedx` on the build, or
    [`boot2deb sbom`](cli.md#bill-of-materials) later from the manifest in step 4. It is
@@ -725,7 +725,7 @@ the result:
    and not only the inputs they came from.
 
 The record leaves out the disk images and their compressed copies. Which of them a build
-writes follows its flags (`--keep-raw`, `--compress`, `--layout`), and they carry the
+writes follows its flags (`--keep-raw`, `--compress`, `--layout`), and they contain the
 per-image password. It also leaves out the file manifest, which lists that password's
 file. The rootfs tar stands in for them. The account in it is still locked, and the
 image is that tar through a deterministic formatter plus the password splice. The
@@ -735,7 +735,7 @@ A record is keyed by the build host's architecture because a cross build and a n
 build compile with different compilers. A record from an x86_64 host says nothing about
 an arm64 host's bytes, and `verify-image` says so rather than failing.
 
-Only a lock that replays can carry a record. The outputs follow the solved package set,
+Only a lock that replays can have a record. The outputs follow the solved package set,
 and a rolling mirror moves that daily. A snapshot pin (step 1) is what holds it still.
 
 ## Reproducing a frozen image
@@ -767,7 +767,7 @@ verdict:
 | `missing` | the rebuild wrote no such output |
 | `not comparable` | the two records cannot decide it, and the reason says why |
 
-An output that carries the per-image password never matches byte for byte. The image,
+An output that contains the per-image password never matches byte for byte. The image,
 each compressed copy of it, and its file manifest are that kind. They are judged
 through the two images instead, in two parts:
 
@@ -788,7 +788,7 @@ pressed from.
 
 The command reads the `[built_with]` stamp beside the plan and reports how the running
 checkout compares. That is advice rather than a gate, because the stamp is a floor and
-not a ceiling. A newer builder usually reproduces the image too, and might carry fixes.
+not a ceiling. A newer builder usually reproduces the image too, and might include fixes.
 A current clone is the normal first attempt, and `git checkout <built_with.commit>` is
 the step to take only if it diverges.
 
@@ -804,7 +804,7 @@ mechanical. Freeze fewer and it is reproducible to whatever strength you chose.
 ## What is deliberately outside the claim
 
 The per-image first-boot password is unique per build by design. `/etc/shadow` is
-therefore never byte-reproducible, and neither is an output that carries it: the image,
+therefore never byte-reproducible, and neither is an output that contains it: the image,
 its compressed copies, and its file manifest. `reproduce` compares those through the
 file manifests, with the content of `/etc/shadow` set aside.
 

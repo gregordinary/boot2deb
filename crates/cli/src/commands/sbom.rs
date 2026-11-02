@@ -297,7 +297,7 @@ mod tests {
             artifact_stem(Path::new("out/turing-rk1-forky.provenance.toml")).unwrap(),
             "turing-rk1-forky"
         );
-        // A feature variant's stem carries the feature, which is the whole reason the
+        // A feature variant's stem contains the feature, which is the whole reason the
         // sibling manifest is found by stem rather than by directory: both documents
         // sit in one output directory.
         assert_eq!(

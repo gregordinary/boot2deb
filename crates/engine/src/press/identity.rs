@@ -1,13 +1,13 @@
-//! The identifiers a pressed image carries: the build's, or a set drawn for one medium.
+//! The identifiers a pressed image contains: the build's, or a set drawn for one medium.
 //!
 //! Every build of a recipe derives the same identifiers
-//! ([`ImageIdentity::derive`]). Every medium written from its image therefore carries the
+//! ([`ImageIdentity::derive`]). Every medium written from its image therefore contains the
 //! same GPT disk GUID, root PARTUUID, ext4 UUID, seed serial, and kernel-slot GUIDs. Two
 //! such media in one machine look the same to the initramfs. It roots on the first
 //! partition it finds with the PARTUUID it was given, which can be the other disk's.
 //!
 //! A press with [`PressIdentity::Fresh`] gives its one medium identifiers no other image
-//! carries. The re-assembly stamps them into the GPT, the superblock, and the seed volume
+//! contains. The re-assembly stamps them into the GPT, the superblock, and the seed volume
 //! as it lays those out. The tree is the rest of the work, because the build wrote the
 //! root PARTUUID into it:
 //!
@@ -29,35 +29,35 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// The identifiers a pressed image carries.
+/// The identifiers a pressed image contains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PressIdentity {
-    /// The build's own identifiers, derived from the recipe. A streamed press carries
+    /// The build's own identifiers, derived from the recipe. A streamed press keeps
     /// these by construction, because it copies the build's bytes.
     Built(ImageIdentity),
     /// Identifiers drawn for this one medium ([`ImageIdentity::fresh`]), which replace
     /// the build's in the GPT, the superblock, the seed volume, and the tree. Only a
-    /// re-assembly can carry them.
+    /// re-assembly can write them.
     Fresh {
         /// The identifiers the build derived. The kept rootfs names them, and the press
         /// replaces them.
         built: ImageIdentity,
-        /// The identifiers this medium carries instead.
+        /// The identifiers this medium contains instead.
         fresh: ImageIdentity,
     },
 }
 
 impl PressIdentity {
-    /// The identifiers the pressed image carries on disk.
+    /// The identifiers the pressed image contains on disk.
     #[must_use]
-    pub fn carried(&self) -> ImageIdentity {
+    pub fn pressed(&self) -> ImageIdentity {
         match self {
             PressIdentity::Built(identity) => *identity,
             PressIdentity::Fresh { fresh, .. } => *fresh,
         }
     }
 
-    /// The identifiers the build derived, which the kept artifacts carry.
+    /// The identifiers the build derived, which the kept artifacts contain.
     #[must_use]
     pub fn built(&self) -> ImageIdentity {
         match self {
@@ -278,7 +278,7 @@ fn regular_file<'a>(
     let entry = entries.iter_mut().find(|e| e.path == path).ok_or_else(|| {
         EngineError::IdentityRewrite {
             detail: format!(
-                "the rootfs carries no {}, which the build writes the root PARTUUID into",
+                "the rootfs contains no {}, which the build writes the root PARTUUID into",
                 printable(path)
             ),
         }
@@ -401,14 +401,14 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_identity_carries_the_fresh_ids_and_remembers_the_builds() {
+    fn a_fresh_identity_contains_the_fresh_ids_and_remembers_the_builds() {
         let (built, fresh) = identities();
         let id = PressIdentity::Fresh { built, fresh };
-        assert_eq!(id.carried(), fresh);
+        assert_eq!(id.pressed(), fresh);
         assert_eq!(id.built(), built);
         assert!(id.is_fresh());
         let id = PressIdentity::Built(built);
-        assert_eq!(id.carried(), built);
+        assert_eq!(id.pressed(), built);
         assert!(!id.is_fresh());
     }
 
@@ -507,7 +507,7 @@ mod tests {
         let entries = vec![
             file("/etc/fstab", &fstab(fresh.rootfs_partuuid)),
             file("/etc/site.conf", &format!("disk = {upper}\n")),
-            // Outside /etc and /boot, so not read: an embedded install image carries
+            // Outside /etc and /boot, so not read: an embedded install image contains
             // the build's identity by design.
             file(
                 "/var/lib/boot2deb/install/note",

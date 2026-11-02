@@ -1,7 +1,7 @@
 //! The depthcharge boot payload: the vboot-signed kernel FIT that goes into the
 //! ChromeOS kernel partition.
 //!
-//! Unlike a bootloader we compile, this payload is produced **inside the rootfs**,
+//! Unlike a bootloader boot2deb compiles, this payload is produced **inside the rootfs**,
 //! by `depthchargectl`, during the rootfs customize step. That is deliberate. The
 //! same packaged tool re-signs and re-writes the kernel partition through its
 //! `/etc/kernel/postinst.d` hook, whenever the kernel is upgraded on the running
@@ -22,7 +22,7 @@ use std::process::Command;
 use uuid::Uuid;
 
 /// Where `depthchargectl` writes what it builds, inside the rootfs. The filename
-/// carries the kernel version, so the payload is found by glob rather than by name.
+/// contains the kernel version, so the payload is found by glob rather than by name.
 const KPART_GLOB: &str = "./boot/depthcharge/*.img";
 
 /// The directory [`KPART_GLOB`] matches in, as the tree's own absolute path.
@@ -107,7 +107,7 @@ pub(crate) fn extract_kpart(
         // something else put a kernel there.
         n => Err(EngineError::KpartInvalid {
             detail: format!(
-                "the rootfs carries {n} signed kernel images under /boot/depthcharge — \
+                "the rootfs contains {n} signed kernel images under /boot/depthcharge — \
                  exactly one kernel is expected, so which would boot is ambiguous"
             ),
         }),
@@ -151,14 +151,14 @@ pub(crate) fn verify_kpart(kpart: &Path, rootfs_partuuid: Uuid) -> Result<(), En
     let root = format!("root=PARTUUID={}", hyphenated_lower(rootfs_partuuid));
     if !contains(&bytes, root.as_bytes()) {
         return bad(format!(
-            "its signed command line does not carry `{root}` — depthchargectl derives root \
+            "its signed command line does not contain `{root}` — depthchargectl derives root \
              from the image's /etc/fstab, so the fstab it read names a different partition \
              than the one this image writes"
         ));
     }
     if !contains(&bytes, b"kern_guid=%U") {
         return bad(
-            "its signed command line does not carry `kern_guid=%U`, which the firmware \
+            "its signed command line does not contain `kern_guid=%U`, which the firmware \
              substitutes with the booted kernel partition's PARTUUID — without it, an \
              on-device kernel upgrade has no partition to re-sign"
                 .into(),
@@ -176,7 +176,7 @@ pub(crate) fn verify_kpart(kpart: &Path, rootfs_partuuid: Uuid) -> Result<(), En
 }
 
 /// The path `kpart` was extracted from, in the tree's own absolute form: where the
-/// rootfs carries the same signed image the kernel slot does.
+/// rootfs contains the same signed image the kernel slot does.
 pub(crate) fn tree_path(kpart: &Path) -> Vec<u8> {
     let name = kpart.file_name().map(|n| n.to_string_lossy().into_owned());
     format!("{KPART_DIR}/{}", name.unwrap_or_default()).into_bytes()
@@ -190,11 +190,11 @@ pub(crate) fn tree_path(kpart: &Path) -> Vec<u8> {
 /// `depthcharge-tools`' own search order ([`KEY_DIRS`]). That keeps the pressed kernel
 /// and the next on-device upgrade signed alike. A key that is not the one the kernel was
 /// signed with is refused rather than used. Everything outside the `root=` value is
-/// carried over unchanged, `kern_guid=%U` included.
+/// kept unchanged, `kern_guid=%U` included.
 ///
 /// # Errors
 ///
-/// [`EngineError::KpartResign`] when the image carries no signing key, the command line
+/// [`EngineError::KpartResign`] when the image contains no signing key, the command line
 /// does not name `root=PARTUUID=<from>` exactly once, or the partition cannot be
 /// re-signed (see [`KernelPartition::resign`]).
 pub(crate) fn resign_kpart(
@@ -267,7 +267,7 @@ fn extract_signing_key(
     let result = match found {
         None => Err(EngineError::KpartResign {
             detail: format!(
-                "the image carries no kernel signing key in any directory depthcharge-tools \
+                "the image contains no kernel signing key in any directory depthcharge-tools \
                  searches (/{})",
                 KEY_DIRS.join(", /")
             ),
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_cmdline_a_booting_image_carries() {
+    fn accepts_the_cmdline_a_booting_image_contains() {
         let tmp = tempfile::tempdir().unwrap();
         let kpart = write(tmp.path(), &good_cmdline());
         verify_kpart(&kpart, ROOTFS_UUID).unwrap();

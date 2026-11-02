@@ -35,7 +35,7 @@ use std::path::Path;
 /// Project a resolved plan onto manifest packages, in the plan's own order.
 ///
 /// The plan *is* the installed set, resolved through the same path the provisioner
-/// installs, and it carries each `.deb`'s archive-recorded sha256. A manifest
+/// installs, and it contains each `.deb`'s archive-recorded sha256. A manifest
 /// therefore needs neither a dpkg-status parse nor an in-bootstrap hash hook.
 pub fn packages(plan: &Plan) -> Vec<Package> {
     plan.packages

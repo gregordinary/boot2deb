@@ -20,7 +20,7 @@
 # drives), video decode (hantro/rockchip_vdec), audio (max98090), storage
 # (dw_mmc), USB, and the ChromeOS EC keyboard. The supported way onto a network is
 # an AR9271 USB adapter, whose firmware is Free and comes from Debian `main`
-# (`firmware-ath9k-htc`, carried by socs/rk3288). The board page has the full
+# (`firmware-ath9k-htc`, included by socs/rk3288). The board page has the full
 # account.
 #
 # The kconfig is deliberately identical to the blobbed kernel's, so a driver whose

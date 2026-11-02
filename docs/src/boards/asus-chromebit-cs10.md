@@ -10,7 +10,7 @@ boot2deb build asus-chromebit-cs10/forky
 ```
 
 That produces `build/asus-chromebit-cs10/forky/artifacts/asus-chromebit-cs10-forky.img.xz` — a
-whole-disk image carrying two ChromeOS kernel slots and the ext4 rootfs, so one write lays
+whole-disk image containing two ChromeOS kernel slots and the ext4 rootfs, so one write lays
 down everything the firmware needs. The kernel is in the first slot. The second ships
 empty, and is what lets a later kernel upgrade roll itself back if the new kernel does not
 boot. See [Upgrading the kernel](../kernel-upgrades.md).
@@ -40,7 +40,7 @@ and a handful of defaults, and ships no overlay at all.
 
 ## Board profiles
 
-One: `mickey`, which `depthcharge-tools` carries as a first-class board. There is no
+One: `mickey`, which `depthcharge-tools` supports as a first-class board. There is no
 libreboot port for the Chromebit, since the family's only libreboot profile is the
 C201's. **This board always runs stock ChromeOS firmware**, so the `crossystem` step
 below is not optional the way it is on a libreboot C201.
@@ -136,7 +136,7 @@ First boot on the eMMC then does what it did on the stick: it grows the rootfs t
 device. That is all it changes — identity is stamped at build time and nothing on the
 device rewrites it.
 
-Both installs therefore carry the same rootfs PARTUUID. That matters less here than it
+Both installs therefore have the same rootfs PARTUUID. That matters less here than it
 would elsewhere, because nothing on this boot path is automatic. Ctrl+D and Ctrl+U each
 name a medium explicitly, and the firmware verifies and loads *that* medium's own signed
 kernel. You get the kernel you asked for.

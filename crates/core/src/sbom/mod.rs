@@ -83,7 +83,7 @@ pub enum Relation {
 pub struct Component {
     /// Document-local identifier, unique within one [`Sbom`] and always valid as an
     /// SPDX id (`[a-zA-Z0-9.-]+`). Assigned by [`Sbom::from_provenance`] by position
-    /// and kind rather than derived from the name, because a package name can carry
+    /// and kind rather than derived from the name, because a package name can contain
     /// characters SPDX ids forbid (`libstdc++6`).
     pub id: String,
     /// Component name as its ecosystem spells it.
@@ -107,7 +107,7 @@ pub struct Component {
     /// rendered as `NOASSERTION` by SPDX, which requires the field.
     pub download: Option<String>,
     /// One line of human context, where there is something to say that the fields
-    /// above do not carry.
+    /// above do not contain.
     pub description: Option<String>,
     /// How it relates to the image.
     pub relation: Relation,
@@ -381,7 +381,7 @@ pub struct Tool {
 
 impl Tool {
     /// One line naming the builder as precisely as the manifest allows, for the
-    /// free-text field each format carries.
+    /// free-text field each format contains.
     pub fn describe(&self) -> String {
         let mut out = format!("{} {}", self.name, self.version);
         match (&self.commit, self.dirty) {
@@ -508,7 +508,7 @@ fn tool_identity(manifest: &ProvenanceManifest) -> Tool {
 ///
 /// `upstream` is the qualifier Debian-aware scanners read for that relationship, and it
 /// is emitted only where the source name differs — absence is how the ecosystem spells
-/// "the source carries this package's own name", so writing the redundant case would
+/// "the source has this package's own name", so writing the redundant case would
 /// make the qualifier's absence ambiguous rather than informative.
 ///
 /// Qualifiers are ordered alphabetically, which the purl specification requires of a
@@ -545,9 +545,9 @@ fn generic_purl(name: &str, commit: &str) -> String {
 /// Percent-encode a purl component: everything outside the unreserved set
 /// (`A-Za-z0-9-._~`) is escaped.
 ///
-/// Strictly required rather than cosmetic. A Debian version carries an epoch as
+/// Strictly required rather than cosmetic. A Debian version contains an epoch as
 /// `1:2.41-1`, and a bare `:` in a purl version terminates the type; a package name
-/// carries `+` (`libstdc++6`), which some readers decode as a space. Encoding to the
+/// contains `+` (`libstdc++6`), which some readers decode as a space. Encoding to the
 /// unreserved set is the canonical purl form and leaves neither ambiguity.
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -577,7 +577,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The solved package set the fixture manifest describes — deliberately carrying
+    /// The solved package set the fixture manifest describes — deliberately containing
     /// the two names that break a naive purl: an epoch in the version and a `+` in the
     /// name.
     pub(crate) fn packages() -> Vec<Package> {
@@ -731,7 +731,7 @@ pub(crate) mod tests {
             Some("built from source package gcc-14")
         );
 
-        // `libc6`'s source carries its own name, which Debian encodes by omitting the
+        // `libc6`'s source has its own name, which Debian encodes by omitting the
         // field — so the qualifier must be absent rather than redundant, since absence
         // is what a consumer reads as "the same name".
         let plain = package("libc6");
@@ -768,7 +768,7 @@ pub(crate) mod tests {
                 .unwrap()
         };
         assert_eq!(purl("libc6"), "pkg:deb/debian/libc6@2.41-1?arch=arm64");
-        // The fixture attributes this one to a source package, so its purl carries the
+        // The fixture attributes this one to a source package, so its purl contains the
         // qualifier too — encoding is what is under test here, and the qualifier is part
         // of the string that has to come out right.
         assert_eq!(

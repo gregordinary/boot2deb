@@ -17,7 +17,7 @@
 //! outside any partition. `depthcharge` puts one signed payload in a *GPT
 //! partition* of its own.
 //!
-//! [`BootGeometry`] carries that difference. Everything after it is shared: the
+//! [`BootGeometry`] contains that difference. Everything after it is shared: the
 //! rootfs partition, the filesystem, and the backup table.
 
 use crate::error::EngineError;
@@ -63,7 +63,7 @@ pub(crate) enum BootGeometry {
     /// `depthcharge`: a signed kernel FIT in a ChromeOS kernel partition, which the
     /// firmware finds by scanning the GPT for its type GUID.
     Kpart {
-        /// The kernel slots, in on-disk order and back to back. `slots[0]` carries
+        /// The kernel slots, in on-disk order and back to back. `slots[0]` contains
         /// the signed payload; the rest ship empty at priority 0 so an on-device
         /// upgrade has a slot to write that is not the one it booted from.
         slots: Vec<KpartSlot>,
@@ -292,7 +292,7 @@ impl BootRegion {
         }
         // The payload slot's attribute word is recomputed from the resolved fields
         // rather than trusted: resolution already range-checked them, so this cannot
-        // fail, and keeping the packing in one place means the disk can only ever carry
+        // fail, and keeping the packing in one place means the disk can only ever contain
         // what `kpart_flags` produces.
         let payload_flags =
             kpart_flags(boot.kpart.priority, boot.kpart.tries, boot.kpart.successful)?;
@@ -461,7 +461,7 @@ impl Geometry {
     ///
     /// The inverse of [`resolve`](Self::resolve): there the authored size fixes the disk
     /// and the rootfs fills what is left, here the fitted filesystem fixes the partition
-    /// and the disk is sized to carry it plus the backup GPT. `rootfs_bytes` is what the
+    /// and the disk is sized to contain it plus the backup GPT. `rootfs_bytes` is what the
     /// format reported, so the partition is exactly the filesystem — there is no slack
     /// between them to floor away.
     ///
@@ -482,7 +482,7 @@ impl Geometry {
     ) -> Result<Geometry, EngineError> {
         let region = BootRegion::resolve(boot)?;
         // The disk is the head, the partition, and the backup GPT behind it — the
-        // smallest medium that carries this filesystem at this offset.
+        // smallest medium that contains this filesystem at this offset.
         let total_size = region
             .rootfs_off
             .checked_add(rootfs_bytes)
@@ -581,7 +581,7 @@ const MAX_SLACK_BYTES: u64 = 64 << 30;
 /// time as well as at build time: a `fit+95%` that the formatter would refuse must fail
 /// before a rootfs is built, not after.
 ///
-/// `image_size` is the authored string, carried only so the message names what the
+/// `image_size` is the authored string, passed only so the message names what the
 /// recipe wrote rather than a number the reader has to map back.
 ///
 /// # Errors
@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn resolves_the_c201_kernel_slot_layout() {
-        // The exact numbers the C201 image carries: KERN-A at LBA 24576 spanning 32768
+        // The exact numbers the C201 image contains: KERN-A at LBA 24576 spanning 32768
         // sectors, KERN-B abutting it at LBA 57344, and the rootfs behind both at LBA
         // 90112.
         let g = Geometry::resolve(&c201_boot(), 4 << 30).unwrap();
@@ -832,7 +832,7 @@ mod tests {
         assert_eq!(g.rootfs_bytes, rootfs_bytes);
         assert_eq!(g.rootfs_bytes, g.rootfs_length_lba * SECTOR);
 
-        // And the disk carries the head, the partition, and the backup table.
+        // And the disk contains the head, the partition, and the backup table.
         assert_eq!(
             g.total_size,
             g.rootfs_off + rootfs_bytes + GPT_BACK_SECTORS * SECTOR

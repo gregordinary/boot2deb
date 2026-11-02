@@ -16,7 +16,7 @@
 # Rockchip one, since the seeded encoder is the VEPU580's.
 #
 # The server it builds replaces the `jellyfin-server` the `jellyfin` feature names:
-# its version carries an epoch, so the rootfs solve takes it over the repository's,
+# its version has an epoch, so the rootfs solve takes it over the repository's,
 # and it depends on the `jellyfin-web` of its own release, so the solve takes the
 # matching web client too. On the device the same two properties keep `apt upgrade`
 # from replacing it with a stock server. See README.md.
@@ -26,7 +26,7 @@ requires_capability = ["jellyfin", "ffmpeg"]
 conflicts = ["jellyfin-rockchip"]
 
 caveats = [
-  "The Jellyfin server is built from source and held at its release. `apt upgrade` moves neither `jellyfin-server` nor `jellyfin-web`. The built server carries an epoch, and it depends on the web client of its own release. A newer Jellyfin arrives by moving the app's `ref` and packaging `ref` in this feature and rebuilding the image.",
+  "The Jellyfin server is built from source and held at its release. `apt upgrade` moves neither `jellyfin-server` nor `jellyfin-web`. The built server has an epoch, and it depends on the web client of its own release. A newer Jellyfin arrives by moving the app's `ref` and packaging `ref` in this feature and rebuilding the image.",
   "Hardware decode covers H.264, HEVC and VP9, at 8 and 10 bits. The CPU unpacks each 10-bit frame from the decoder's packed NV15 layout, and that is most of what a 10-bit transcode costs. One 4K HEVC Main 10 stream transcodes to 1080p at 1.6x realtime. Two at once hold just under realtime each, limited by the CPU rather than the decoder.",
   "The Jellyfin dashboard has no field for the decode/encode split. `HardwareDecodingType` and `HardwareEncodingType` live in `/etc/jellyfin/encoding.xml`, and setting `HardwareAccelerationType` in the dashboard leaves them as they are.",
 ]

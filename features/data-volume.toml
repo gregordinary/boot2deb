@@ -1,7 +1,7 @@
 # features/data-volume.toml — mount a second disk for data, and keep it across
 # reimaging.
 #
-# The mechanism half of the data-volume axis. This feature carries the first-boot
+# The mechanism half of the data-volume axis. This feature includes the first-boot
 # hook; the recipe's `[[data_volumes]]` entries say what to mount where, and
 # resolution rejects either half without the other. It is portable — no
 # `requires_soc`/`requires_arch` gate — because "there is a second disk" is a
@@ -13,7 +13,7 @@
 # adopts it. On a compute module in a cluster carrier that is eMMC + M.2 NVMe, and
 # it means an OS reinstall costs nothing but the OS.
 #
-# The hook never formats a disk that holds anything. It adopts a volume carrying
+# The hook never formats a disk that holds anything. It adopts a volume with
 # the configured label, creates one only on a genuinely blank disk (and only under
 # `create = "if-blank"`), and otherwise refuses and logs. A feature that exists to
 # preserve data across reimaging cannot also be one that reformats on a boot.

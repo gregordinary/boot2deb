@@ -25,7 +25,7 @@ the locks rather than from prose, so read it from the tool:
 boot2deb support-matrix
 ```
 
-Each recipe carries a status and the date its claim was last established:
+Each recipe contains a status and the date its claim was last established:
 
 - `validated`: an image from these exact pins booted on the hardware.
 - `expected`: derived from a validated sibling, along an axis not expected to change the
@@ -72,7 +72,7 @@ axis of the model, so the nearest example to a board you care about is usually o
 | [H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html) | RK3576 / arm64 | A board mainline does not know: its device tree ships with the config, its Wi-Fi driver is an out-of-tree `kmods/` layer, and its u-boot is its own axis. Some recipes deliver only a maskrom-streamable bootloader |
 | [ASUS Chromebook C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html) | RK3288 / armhf | The opposite extreme: 32-bit, Debian's own kernel, ChromeOS firmware in SPI. It compiles nothing, its lock pins nothing from git, and the deliverable is a vboot-signed kernel in a ChromeOS partition. A/B slots make a bad kernel upgrade cost one reboot |
 | [ASUS C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html) · [Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 / armhf | What a board costs once its family is here: one device file each, no overlay, no kernel, no code. Everything shared lives on the SoC layer |
-| [RK3576 EVB1 v10](https://gregordinary.github.io/boot2deb/boards/rk3576-evb1-v10.html) | RK3576 / arm64 | The reference board beside the retail one, sharing a SoC layer and a kernel while carrying none of the TV box's peripherals |
+| [RK3576 EVB1 v10](https://gregordinary.github.io/boot2deb/boards/rk3576-evb1-v10.html) | RK3576 / arm64 | The reference board beside the retail one, sharing a SoC layer and a kernel while having none of the TV box's peripherals |
 
 Hardware video transcode is the RK1's headline capability, measured on a boot2deb-built
 image. The `h264_rkmpp` and `hevc_rkmpp` encoders produce correct streams. Hardware decode
@@ -200,8 +200,8 @@ verify-applies gate holds them. A series declares which kernel versions it claim
 
 ### Stages a board needs
 
-When the board needs a kernel of its own, the build compiles one. When the board's firmware
-is ours to make, the build produces a bootloader. The model states what is true of each
+When the board needs a kernel of its own, the build compiles one. When boot2deb provides
+the board's firmware, the build produces a bootloader. The model states what is true of each
 board.
 
 ## Documentation
@@ -210,7 +210,7 @@ The full documentation is published as a book at
 **[gregordinary.github.io/boot2deb](https://gregordinary.github.io/boot2deb/)**. The sources
 live in [`docs/`](docs/). To build them locally, run `mdbook serve docs`.
 
-The book carries its own contents page. These are the entry points into it:
+The book contains its own contents page. These are the entry points into it:
 
 | Section | Start here |
 | --- | --- |

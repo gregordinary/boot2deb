@@ -14,7 +14,7 @@
 //! A manifest is an RFC 7464 JSON text sequence: each object is preceded by an ASCII record
 //! separator (`0x1e`) and followed by a line feed. The sequence is:
 //!
-//! 1. The root object, for the filesystem's root directory. It carries no `name`, and its
+//! 1. The root object, for the filesystem's root directory. It contains no `name`, and its
 //!    `mediaType` is [`MEDIA_TYPE`].
 //! 2. One object per inode name, in pre-order: a directory's entries follow it directly.
 //! 3. A trailer object whose `mediaType` is [`TRAILER_MEDIA_TYPE`].
@@ -23,14 +23,14 @@
 //!
 //! Each object is compact JSON with its keys sorted by byte value, so one tree always writes
 //! the same bytes. Siblings are sorted by the raw bytes of their names, which the draft
-//! recommends and which ferrosys does not promise. An entry carries `name`, `type`, `mode`
+//! recommends and which ferrosys does not promise. An entry contains `name`, `type`, `mode`
 //! (not on a symlink), `uid`, `gid` and `mTimeNSec`, then by type:
 //!
-//! - A regular file carries `size`, and `sha256` when it is not empty.
-//! - A symbolic link carries `size`, the target's length, and its target as one `literal`
+//! - A regular file contains `size`, and `sha256` when it is not empty.
+//! - A symbolic link contains `size`, the target's length, and its target as one `literal`
 //!   entry in `contents`, base64-encoded.
-//! - A character or block device carries `major` and `minor`.
-//! - Every name of a hard-linked inode carries the same `inodeToken`, counted from 1 in
+//! - A character or block device contains `major` and `minor`.
+//! - Every name of a hard-linked inode contains the same `inodeToken`, counted from 1 in
 //!   manifest order.
 //! - Extended attributes go in [`XATTRS_FIELD`], an object from attribute name to base64
 //!   value. The draft names attributes only as future work, and its extension rule is what
@@ -51,7 +51,7 @@ pub const MEDIA_TYPE: &str = "application/vnd.uapi.16.manifest";
 /// makes the manifest invalid.
 pub const TRAILER_MEDIA_TYPE: &str = "application/vnd.uapi.16.trailer";
 
-/// The vendor field carrying an entry's extended attributes, named by the draft's
+/// The vendor field containing an entry's extended attributes, named by the draft's
 /// `x<Vendor><Field>` extension rule.
 pub const XATTRS_FIELD: &str = "xBoot2debXattrs";
 
@@ -146,7 +146,7 @@ impl FileType {
 
 /// One inode name in a manifest, or the root directory.
 ///
-/// A resolved entry: what it carries is what the manifest states, and a field the draft
+/// A resolved entry: what it contains is what the manifest states, and a field the draft
 /// does not allow on its type is empty here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
@@ -175,7 +175,7 @@ pub struct FileEntry {
     /// A device's `(major, minor)` numbers. `None` for every other type.
     pub device: Option<(u32, u32)>,
     /// The hard-link group this name belongs to: every name of one multiply-linked inode
-    /// carries the same token, counted from 1 in manifest order. Zero for an inode with one
+    /// has the same token, counted from 1 in manifest order. Zero for an inode with one
     /// name, and always zero for a directory.
     pub inode_token: u64,
     /// Extended attributes, by name.
@@ -206,7 +206,7 @@ pub struct FileManifest {
 /// Why a tree cannot be written as a manifest, or a manifest cannot be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FilesError {
-    /// A name the draft cannot encode: not UTF-8, carrying a control character, a `.` or
+    /// A name the draft cannot encode: not UTF-8, containing a control character, a `.` or
     /// `..` component, an empty component, or the reserved manifest name.
     #[error("the manifest cannot name {name:?}: {why}")]
     InvalidName {
@@ -412,7 +412,7 @@ impl FileManifest {
             .ok_or_else(|| FilesError::Format("the manifest has no trailer".into()))?;
         if *last != trailer().as_bytes() {
             return Err(FilesError::Format(
-                "the last record is not the trailer, or carries more than its media type".into(),
+                "the last record is not the trailer, or contains more than its media type".into(),
             ));
         }
         let root = read_canonical(first, true)?;
@@ -488,11 +488,11 @@ fn check_entry(e: &FileEntry, is_root: bool) -> Result<(), FilesError> {
         return bad(format!("mode {:o} is past 0o7777", e.mode));
     }
     if e.file_type == FileType::Lnk && e.mode != 0 {
-        return bad("a symbolic link carries no mode".into());
+        return bad("a symbolic link contains no mode".into());
     }
     let sized = matches!(e.file_type, FileType::Reg | FileType::Lnk);
     if !sized && e.size != 0 {
-        return bad(format!("a {} carries no size", e.file_type.as_str()));
+        return bad(format!("a {} contains no size", e.file_type.as_str()));
     }
     match (&e.sha256, e.file_type, e.size) {
         (Some(h), FileType::Reg, s) if s > 0 => {
@@ -501,8 +501,8 @@ fn check_entry(e: &FileEntry, is_root: bool) -> Result<(), FilesError> {
             }
         }
         (None, FileType::Reg, 0) | (None, FileType::Lnk, _) => {}
-        (None, FileType::Reg, _) => return bad("a non-empty regular file carries a sha256".into()),
-        (Some(_), _, _) => return bad("only a non-empty regular file carries a sha256".into()),
+        (None, FileType::Reg, _) => return bad("a non-empty regular file contains a sha256".into()),
+        (Some(_), _, _) => return bad("only a non-empty regular file contains a sha256".into()),
         (None, _, _) => {}
     }
     match (&e.target, e.file_type) {
@@ -510,19 +510,19 @@ fn check_entry(e: &FileEntry, is_root: bool) -> Result<(), FilesError> {
         (Some(_), FileType::Lnk) => {
             return bad("a link's size must be its non-empty target's length".into())
         }
-        (None, FileType::Lnk) => return bad("a symbolic link carries its target".into()),
-        (Some(_), _) => return bad("only a symbolic link carries a target".into()),
+        (None, FileType::Lnk) => return bad("a symbolic link contains its target".into()),
+        (Some(_), _) => return bad("only a symbolic link contains a target".into()),
         (None, _) => {}
     }
     match (e.device, e.file_type) {
         (Some(_), FileType::Chr | FileType::Blk) | (None, _) => {}
-        (Some(_), _) => return bad("only a device carries major and minor numbers".into()),
+        (Some(_), _) => return bad("only a device contains major and minor numbers".into()),
     }
     if matches!(e.file_type, FileType::Chr | FileType::Blk) && e.device.is_none() {
-        return bad("a device carries its major and minor numbers".into());
+        return bad("a device contains its major and minor numbers".into());
     }
     if e.file_type == FileType::Dir && e.inode_token != 0 {
-        return bad("a directory carries no inodeToken".into());
+        return bad("a directory contains no inodeToken".into());
     }
     if let Some(name) = e
         .xattrs
@@ -617,7 +617,7 @@ fn quote(s: &str) -> String {
     out
 }
 
-/// The JSON object for one entry, with the fields its type carries.
+/// The JSON object for one entry, with the fields its type allows.
 fn object(e: &FileEntry, is_root: bool) -> String {
     let mut o = Json::default();
     if is_root {
@@ -767,7 +767,7 @@ fn read_entry(
                 "the first record is not a root object with mediaType {MEDIA_TYPE}"
             )))
         }
-        (false, _, _) => return Err(bad("an entry must carry a name and no mediaType".into())),
+        (false, _, _) => return Err(bad("an entry must contain a name and no mediaType".into())),
     }
     let file_type = string("type")?
         .and_then(FileType::parse)
@@ -812,7 +812,7 @@ fn read_entry(
         file_type,
         mode: if file_type == FileType::Lnk {
             if map.contains_key("mode") {
-                return Err(bad("a symbolic link carries no mode".into()));
+                return Err(bad("a symbolic link contains no mode".into()));
             }
             0
         } else {
@@ -824,7 +824,7 @@ fn read_entry(
         size: match file_type {
             FileType::Reg | FileType::Lnk => required("size", number("size")?)?,
             _ if map.contains_key("size") => {
-                return Err(bad(format!("a {} carries no size", file_type.as_str())))
+                return Err(bad(format!("a {} contains no size", file_type.as_str())))
             }
             _ => 0,
         },
@@ -1071,10 +1071,10 @@ mod tests {
         );
     }
 
-    /// Each object's keys are sorted by byte and the output carries no whitespace, so one
+    /// Each object's keys are sorted by byte and the output contains no whitespace, so one
     /// tree always writes the same bytes; the per-type fields follow the draft.
     #[test]
-    fn objects_carry_sorted_keys_and_the_fields_their_type_allows() {
+    fn objects_contain_sorted_keys_and_the_fields_their_type_allows() {
         let text = String::from_utf8(sample().to_bytes()).unwrap();
         let line = |name: &str| {
             text.split(['\u{1e}', '\n'])
@@ -1182,10 +1182,10 @@ mod tests {
         records.join("\u{1e}")
     }
 
-    /// A name the draft cannot carry is refused where the tree is assembled, not written
+    /// A name the draft cannot encode is refused where the tree is assembled, not written
     /// into a manifest no reader accepts.
     #[test]
-    fn a_name_the_draft_cannot_carry_is_refused() {
+    fn a_name_the_draft_cannot_encode_is_refused() {
         for name in [
             "",
             "a/./b",

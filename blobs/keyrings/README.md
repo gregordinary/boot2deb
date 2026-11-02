@@ -10,7 +10,7 @@ Each `.gpg` file here is a binary (dearmored) OpenPGP keyring that verifies the
 - `jellyfin.gpg` — the Jellyfin upstream repository the `jellyfin` feature adds.
 
 Keyrings are vendored because the build host is frequently not Debian — an
-Ubuntu, Pop!_OS, or Fedora host carries its own distro's apt keys — and a
+Ubuntu, Pop!_OS, or Fedora host has its own distro's apt keys — and a
 third-party repo's key is on no host at all. Vendoring keeps the bootstrap
 reproducible, offline-friendly, and host-distro-independent, the same convention
 as the rkbin blobs under `blobs/<soc>/`.

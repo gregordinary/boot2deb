@@ -161,7 +161,7 @@ pub enum BootPayload<'a> {
         /// `u-boot.itb`.
         uboot_itb: &'a Path,
     },
-    /// `depthcharge`: the signed kernel FIT, which carries no path because it is not
+    /// `depthcharge`: the signed kernel FIT, which contains no path because it is not
     /// produced by a compile stage at all. `depthchargectl` built it *inside the
     /// rootfs*, so the image node reads it out of the rootfs tarball (see the
     /// `depthcharge` submodule for why that is the right place for it to be built).
@@ -174,7 +174,7 @@ pub struct ImageOptions<'a> {
     /// and formatted by the `ext4` submodule. It holds `./dev/` and nothing under
     /// it. The export filters the tree's `/dev` contents out, because the kernel
     /// mounts devtmpfs over the mount point at boot. Under `depthcharge` it also
-    /// carries the signed kernel partition image.
+    /// contains the signed kernel partition image.
     pub rootfs_tar: &'a Path,
     /// The boot payload to place, per the resolved boot method.
     pub boot: BootPayload<'a>,
@@ -219,7 +219,7 @@ pub struct ImageOptions<'a> {
 /// them, which is the reproducibility contract, while distinct recipes (or devices)
 /// still get distinct values.
 ///
-/// Every medium written from one build carries the same values. A press can give one
+/// Every medium written from one build has the same values. A press can give one
 /// medium identifiers of its own ([`fresh`](Self::fresh), [`PressIdentity::Fresh`]).
 ///
 /// It is computed **once, by the caller**, and shared by the rootfs and image nodes.
@@ -278,7 +278,7 @@ impl ImageIdentity {
     ///
     /// They are derived exactly as [`derive`](Self::derive) derives them, from a seed
     /// read out of the kernel CSPRNG instead of from the recipe. Every guarantee that
-    /// does not rest on the seed carries over, the distinct kernel-slot GUIDs among them.
+    /// does not rest on the seed is preserved, the distinct kernel-slot GUIDs among them.
     ///
     /// # Errors
     ///
@@ -352,7 +352,7 @@ pub struct ImageArtifacts {
     pub password: String,
     /// The checks the rootfs filesystem passed before it shipped, in the order they
     /// ran. Reported rather than re-probed by the caller. One of them is present only
-    /// where the build host carries `e2fsprogs`, so the record has to come from the
+    /// where the build host has `e2fsprogs`, so the record has to come from the
     /// node that actually ran it. Recorded in the provenance manifest's
     /// `[verification]`.
     pub rootfs_verified_with: Vec<String>,
@@ -364,12 +364,12 @@ pub struct ImageArtifacts {
     pub rootfs_filesystem: FilesystemProvenance,
     /// The rootfs file manifest, `<stem>.rootfs.uapi16`: every file the formatted rootfs
     /// holds, read back from the filesystem after the scan passed it ([`files`]). It
-    /// carries the spliced `/etc/shadow`, so it is as unique to this image as the image.
+    /// contains the spliced `/etc/shadow`, so it is as unique to this image as the image.
     pub files_manifest: PathBuf,
     /// The whole-disk size this build laid out, in bytes.
     ///
     /// Reported rather than re-parsed from the recipe, because under a fitted
-    /// `image_size` the recipe does not carry it. The format decided how large the
+    /// `image_size` the recipe does not contain it. The format decided how large the
     /// rootfs is, and the disk was sized around the answer. This node is therefore the
     /// only place the number exists. Recorded in the provenance manifest's `[image]`.
     pub image_bytes: u64,
@@ -443,7 +443,7 @@ pub fn build_image(
     let size = parse_image_size(&image.image_size)?;
     // The head of the disk resolves first and on its own, because under a fitted size the
     // rest of the layout answers to the filesystem rather than the other way round: the
-    // format decides how large the rootfs is, and the disk is then sized to carry it. The
+    // format decides how large the rootfs is, and the disk is then sized to contain it. The
     // boot region is the half that is the same either way, and it is the half the payload
     // check below asks about.
     let region = geometry::BootRegion::resolve(&build.boot)?;
@@ -703,7 +703,7 @@ pub struct PressOptions<'a> {
     /// file `press` streams unchanged).
     pub boot: Option<BootPayload<'a>>,
     /// Which artifact this output derives from: `Combined` or `Rootfs`. A
-    /// [`Boot`](ArtifactRole::Boot) image carries no filesystem, so it is never
+    /// [`Boot`](ArtifactRole::Boot) image contains no filesystem, so it is never
     /// re-assembled.
     pub role: ArtifactRole,
     /// The file to write — the caller's named output, not an artifact directory.
@@ -712,7 +712,7 @@ pub struct PressOptions<'a> {
     pub work_dir: &'a Path,
     /// ext4 volume label and GPT partition name (≤ 16 bytes), e.g. `rootfs`.
     pub rootfs_label: &'a str,
-    /// The identifiers the pressed image carries: the build's, or ones drawn for this
+    /// The identifiers the pressed image has: the build's, or ones drawn for this
     /// medium alone. A fresh identity rewrites the tree's references to the build's
     /// root PARTUUID and re-signs a depthcharge kernel to match.
     pub identity: PressIdentity,
@@ -751,14 +751,14 @@ pub struct PressedImage {
 /// exactly as a build's is (the in-process scan, plus `e2fsck -fn` where present)
 /// before the disk is laid out.
 ///
-/// Under [`PressIdentity::Fresh`] the disk carries the press's own identifiers. The
+/// Under [`PressIdentity::Fresh`] the disk has the press's own identifiers. The
 /// tree's references to the build's root PARTUUID are rewritten, and a depthcharge
 /// kernel is re-signed for the new root before it is placed. See
 /// [`press::identity`](crate::press::identity) for what changes and what is refused.
 ///
 /// # Errors
 ///
-/// [`EngineError::StageNotApplicable`] for a role that carries no rootfs, or a
+/// [`EngineError::StageNotApplicable`] for a role that has no rootfs, or a
 /// combined press without its boot payload. [`EngineError::PressAddition`] when
 /// an addition cannot be placed. Under a fresh identity, [`EngineError::KpartResign`]
 /// when the kernel cannot be re-signed, and [`EngineError::IdentityRewrite`] when the
@@ -777,7 +777,7 @@ pub fn press_image(
         ArtifactRole::Boot => {
             return Err(EngineError::StageNotApplicable {
                 stage: "press (re-assembly)",
-                why: "a boot image carries no rootfs to add anything to",
+                why: "a boot image contains no rootfs to add anything to",
             })
         }
     };
@@ -788,7 +788,7 @@ pub fn press_image(
         std::fs::create_dir_all(parent).map_err(|s| EngineError::io(parent, s))?;
     }
 
-    let identity = opts.identity.carried();
+    let identity = opts.identity.pressed();
     // The boot payload, exactly as the image node resolves it: a combined press
     // places it, and under depthcharge that means taking the signed kernel out
     // of the rootfs tarball and holding it to this identity's root PARTUUID. The
@@ -825,7 +825,7 @@ pub fn press_image(
     }
 
     // A fresh identity rewrites the tree's own references to the build's root. The
-    // tree's copy of the signed kernel becomes the re-signed one the slot carries, so
+    // tree's copy of the signed kernel becomes the re-signed one the slot contains, so
     // the two stay identical, as a build leaves them.
     let rekey = match opts.identity {
         PressIdentity::Built(_) => None,
@@ -1045,7 +1045,7 @@ fn assemble_disk(
 }
 
 /// Write a bootloader-only image: a raw medium sized to the gap, holding just the
-/// two payloads at their offsets (no GPT — this medium carries only the
+/// two payloads at their offsets (no GPT — this medium contains only the
 /// bootloader). Shared by the split layout and [`build_bootloader_image`].
 fn assemble_bootloader(
     image: &Path,
@@ -1306,7 +1306,7 @@ mod tests {
         std::fs::create_dir_all(root.join("usr/bin")).unwrap();
         std::fs::write(root.join("etc/hostname"), b"turing-rk1\n").unwrap();
         std::fs::write(root.join("usr/bin/true"), b"#!/bin/true\n").unwrap();
-        // The identity document every rootfs carries — what the pressed marker is
+        // The identity document every rootfs contains — what the pressed marker is
         // written into.
         std::fs::write(
             root.join("etc/boot2deb/image.toml"),
@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn compress_gz_is_a_function_of_the_input_bytes_alone() {
-        // The gzip header carries an mtime field, which the encoder pins to zero.
+        // The gzip header contains an mtime field, which the encoder pins to zero.
         // Without that a rebuild would produce a different `.gz` for an identical
         // image, and the reproducibility claim is about artifact bytes.
         let tmp = tempfile::tempdir().unwrap();
@@ -1522,7 +1522,7 @@ mod tests {
             build_bootloader_image(&build, "turing-rk1-forky", &idb, &itb, &out, &sink).unwrap();
 
         // Named after the build point, and sized to the raw gap (rootfs offset =
-        // 16 MiB), NOT the 48 MiB image size — this medium carries only the bootloader.
+        // 16 MiB), NOT the 48 MiB image size — this medium contains only the bootloader.
         assert_eq!(image.file_name().unwrap(), "turing-rk1-forky-boot.img");
         assert_eq!(std::fs::metadata(&image).unwrap().len(), 16 * 1024 * 1024);
 
@@ -1538,7 +1538,7 @@ mod tests {
     /// A press with additions re-assembles from the kept tar: the added files land
     /// with their modes and synthesized parents, the pressed marker is stamped —
     /// and every other file in the rootfs is identical to what a plain build of
-    /// the same inputs carries. `/etc/shadow` is the one deliberate exception:
+    /// the same inputs contains. `/etc/shadow` is the one deliberate exception:
     /// each press draws its own first-boot password.
     #[test]
     fn a_pressed_image_adds_files_and_changes_nothing_else() {
@@ -1707,7 +1707,7 @@ mod tests {
                 .2
                 .as_deref()
                 .is_some_and(|body| !body.windows(9).any(|w| w == b"[pressed]")),
-            "the build's own image carries no pressed table"
+            "the build's own image contains no pressed table"
         );
 
         // Everything the press did not touch is identical to the baseline —
@@ -1866,7 +1866,7 @@ mod tests {
         );
     }
 
-    /// A depthcharge board pressed with a fresh identity: the kernel slot carries a kernel
+    /// A depthcharge board pressed with a fresh identity: the kernel slot contains a kernel
     /// re-signed for the fresh root, with the image's own key, and the tree's copy of it
     /// is the same bytes.
     #[test]

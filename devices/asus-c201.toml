@@ -14,11 +14,11 @@ boot_method             = "depthcharge"
 supported_boot_methods  = ["depthcharge"]
 
 # The board is upstream, so the kernel builds this DTB from its own tree and there is
-# no `device_dts` to carry. It is what makes the rest of the Veyron family nearly
+# no `device_dts` to maintain. It is what makes the rest of the Veyron family nearly
 # free: a sibling board is a device file and nothing else.
 kernel_dtb              = "rockchip/rk3288-veyron-speedy.dtb"
 
-# No `uboot_defconfig`: the bootloader is coreboot in SPI, never ours to build.
+# No `uboot_defconfig`: the bootloader is coreboot in SPI, which boot2deb never builds.
 # `device_config_fragments` stays empty — the board needs no kconfig beyond the
 # rk3288 SoC slice when a recipe compiles the mainline kernel.
 device_config_fragments = []

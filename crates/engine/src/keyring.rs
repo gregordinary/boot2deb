@@ -83,7 +83,7 @@ pub fn verify(keyring: &Path) -> Result<Vec<Key>, EngineError> {
             .difference(&expected_set)
             .map(|f| (*f).to_string())
             .collect();
-        // Report the manifest's label alongside a key the keyring no longer carries:
+        // Report the manifest's label alongside a key the keyring no longer contains:
         // "which key went missing" is the question a stale-manifest failure raises.
         let missing: Vec<String> = expected
             .iter()
@@ -98,7 +98,7 @@ pub fn verify(keyring: &Path) -> Result<Vec<Key>, EngineError> {
         });
     }
     // Asked only of a keyring that matched, so the certificates named here are the
-    // vetted ones and each carries its manifest label.
+    // vetted ones and each has its manifest label.
     let unusable: Vec<String> = expected
         .iter()
         .filter(|k| {
@@ -118,7 +118,7 @@ pub fn verify(keyring: &Path) -> Result<Vec<Key>, EngineError> {
 }
 
 /// One trusted primary key: its fingerprint and the human label the manifest
-/// carries beside it (the key's UID, so a reviewer reading the diff sees *whose*
+/// contains beside it (the key's UID, so a reviewer reading the diff sees *whose*
 /// key is being added, not just 40 hex digits).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
@@ -187,7 +187,7 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Key>, String> {
 /// Uppercase-hex fingerprints of every certificate's **primary** key in an OpenPGP
 /// keyring, in keyring order.
 ///
-/// Pure: the whole keyring is one byte slice in, fingerprints out. `Err` carries a
+/// Pure: the whole keyring is one byte slice in, fingerprints out. `Err` contains a
 /// human-readable reason. The caller wraps it with the keyring's path.
 pub fn fingerprints(bytes: &[u8]) -> Result<Vec<String>, String> {
     certificates(bytes).map(|read| read.into_iter().map(|c| c.fingerprint).collect())

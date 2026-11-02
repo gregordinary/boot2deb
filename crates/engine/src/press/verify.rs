@@ -1,6 +1,6 @@
 //! Verify a written image file. It re-reads what was written and holds it to the
 //! digest computed during the write. It then re-reads the partition table and holds
-//! it to the one the source artifact carries.
+//! it to the one the source artifact contains.
 //!
 //! The two checks catch different faults with the same symptom. One is a truncated
 //! copy, from a filesystem that ran out of space mid-write. The other is a table
@@ -8,7 +8,7 @@
 //! itself. Together they keep the property `press` exists for: the file handed to a
 //! flasher is exactly what the build made.
 //!
-//! An image written to a medium larger than itself carries its *backup* GPT at the
+//! An image written to a medium larger than itself contains its *backup* GPT at the
 //! image's end rather than the medium's. Every tool reports that until first boot
 //! moves it, and it is not a fault. Both reads therefore judge the primary table
 //! only, which is the one the backup is reconstructed from.
@@ -29,7 +29,7 @@ const GPT_PREFIX_BYTES: usize = 34 * 512;
 
 /// One partition entry as the table comparison sees it: the fields the firmware and
 /// the kernel act on. The partition GUID is deliberately included, because on
-/// depthcharge it is how the booted slot knows itself. The attribute word carries
+/// depthcharge it is how the booted slot knows itself. The attribute word contains
 /// the boot selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableEntry {
@@ -108,7 +108,7 @@ pub fn verify_digest(
 ///
 /// # Errors
 ///
-/// [`EngineError::ImageVerifyGpt`] when the artifact carries no readable primary
+/// [`EngineError::ImageVerifyGpt`] when the artifact contains no readable primary
 /// table, which a `-boot.img` legitimately does not. The caller skips the table
 /// comparison for an artifact this refuses.
 pub fn planned_table(artifact: &Path) -> Result<Vec<TableEntry>, EngineError> {
@@ -148,7 +148,7 @@ pub fn planned_image_bytes(artifact: &Path) -> Result<u64, EngineError> {
     Ok((header.backup_lba + 1) * 512)
 }
 
-/// The partition table `target` actually carries, read back from the medium.
+/// The partition table `target` actually contains, read back from the medium.
 ///
 /// # Errors
 ///

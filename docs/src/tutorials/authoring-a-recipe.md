@@ -78,7 +78,7 @@ and [RK3576 u-boot images](../reference/rk3576-uboot-images.md).
 
 ## Naming the leaf
 
-The leaf drops the device prefix its folder already carries, and names the axis that makes
+The leaf drops the device prefix its folder already has, and names the axis that makes
 the point distinct. The shipped tree uses four conventions, in rough order of how often
 they come up:
 
@@ -96,7 +96,7 @@ holds the exact tag, and a leaf named after it goes stale on the next bump. A le
 
 ## The support claim
 
-A recipe can carry the one thing no lock can know, which is whether a human booted the
+A recipe can contain the one thing no lock can know, which is whether a human booted the
 result:
 
 ```toml

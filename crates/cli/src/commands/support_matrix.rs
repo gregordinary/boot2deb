@@ -63,7 +63,7 @@ fn print_table(matrix: &Matrix) {
         let mut s = String::new();
         for (i, (c, w)) in row.iter().zip(widths).enumerate() {
             // The last column is not padded: trailing whitespace on every line is
-            // noise a reader's terminal and their copy-paste both carry.
+            // noise a reader's terminal and their copy-paste both contain.
             if i + 1 == row.len() {
                 s.push_str(c);
             } else {

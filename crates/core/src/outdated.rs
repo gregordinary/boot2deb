@@ -292,12 +292,12 @@ fn split_file_version(name: &str) -> Option<(&str, Vec<u64>, &str)> {
 /// compared with `rk3588_bl31_v1.56.elf` and never with
 /// `rk3588_bl31_primary_v1.60.elf`, a different file that happens to share a family.
 /// A file's line is its major version. `listed_at` is the commit the listing was read
-/// at, carried onto every candidate.
+/// at, recorded on every candidate.
 pub fn compare_file(pinned: &str, listing: &[&str], listed_at: Option<&str>) -> Upgrade {
     let Some((prefix, version, suffix)) = split_file_version(pinned) else {
         return Upgrade::Unknown {
             why: format!(
-                "the pinned file '{pinned}' carries no version, so nothing orders against it"
+                "the pinned file '{pinned}' contains no version, so nothing orders against it"
             ),
         };
     };
@@ -481,7 +481,7 @@ fn percent_decode(s: &str) -> String {
 /// The commit each advertised tag resolves to, keyed by bare tag name.
 ///
 /// An annotated tag advertises twice — the tag object, then the peeled `^{}` line
-/// carrying the commit — and the peeled line is the one an `update` would pin, so it
+/// containing the commit — and the peeled line is the one an `update` would pin, so it
 /// wins wherever both are present.
 fn tag_targets<'a>(refs: &[RemoteRef<'a>]) -> BTreeMap<String, String> {
     let mut peeled: BTreeMap<String, String> = BTreeMap::new();
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn an_ffmpeg_pin_reports_its_point_release_line() {
-        // FFmpeg spells releases `nX.Y.Z`, carries `-dev` tags on master, and keeps
+        // FFmpeg spells releases `nX.Y.Z`, has `-dev` tags on master, and keeps
         // the request-API fork's branches in other repos. The line answer is the
         // point release a graft written against 8.1 can take; the newest release
         // is a generation change it cannot take unreviewed.
@@ -679,7 +679,7 @@ mod tests {
 
     #[test]
     fn an_annotated_tags_peeled_target_is_the_commit_reported() {
-        // The unpeeled line carries the tag object's sha, not the commit — reporting
+        // The unpeeled line contains the tag object's sha, not the commit — reporting
         // it would hand an operator a value no checkout resolves to.
         let refs = vec![
             ("refs/tags/v1.0".into(), sha('a')),

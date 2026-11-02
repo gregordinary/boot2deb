@@ -40,6 +40,9 @@ jobs:
   # `--self-test` is not optional. Both length rules rest on where one sentence ends, so
   # a boundary the splitter cannot see reports findings that are not there while missing
   # the ones that are.
+  #
+  # `--voice` fails only on the families `prose-lint.toml` raises to `hard` or `ratchet`.
+  # The rest print a total, which is a worklist for a reviewer rather than a build result.
   prose:
     runs-on: ubuntu-latest
     steps:
@@ -51,6 +54,8 @@ jobs:
         run: python3 style/prose-lint.py --config prose-lint.toml --self-test
       - name: Check the prose
         run: python3 style/prose-lint.py --config prose-lint.toml
+      - name: Check the voice families
+        run: python3 style/prose-lint.py --config prose-lint.toml --voice
 
   # Tests, clippy, and rustdoc share one job so they share a target directory; a
   # second job would pay the same compile twice for no extra signal.
@@ -115,7 +120,7 @@ jobs:
       # an unrelated change; fix the lint or add a scoped `#[allow]` with a reason.
       - name: Lint, warning-clean
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # `core` and `engine` carry `#![warn(missing_docs)]`; denying warnings here
+      # `core` and `engine` contain `#![warn(missing_docs)]`; denying warnings here
       # is what makes an undocumented public item, or a broken intra-doc link, a
       # build failure instead of a note nobody reads.
       - name: Build the docs, warning-clean

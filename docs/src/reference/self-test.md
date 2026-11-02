@@ -1,6 +1,6 @@
 # The on-image self-test
 
-Every image carries `boot2deb-selftest`, a small POSIX-sh program that compares
+Every image contains `boot2deb-selftest`, a small POSIX-sh program that compares
 what the image claims to be against what is actually running. It exits non-zero
 on any disagreement.
 
@@ -67,12 +67,12 @@ change another's file.
 `identity.checks` is generated, never authored. It restates what the lock and
 the resolved device already own: the pinned kernel version, the `uname -r`
 flavor suffix, the board's DTB. A layer restating any of those could drift from
-the pin. It also carries `single-kernel`, which restates nothing and belongs to
+the pin. It also contains `single-kernel`, which restates nothing and belongs to
 no layer. That is a claim about how every boot2deb image is built, and only the
 build is in a position to make it.
 
-It carries one `initramfs-module` line per name in the board's
-[`[initramfs] modules`](config-model.md#the-modules-the-initramfs-must-carry) lists as
+It contains one `initramfs-module` line per name in the board's
+[`[initramfs] modules`](config-model.md#the-modules-the-initramfs-must-contain) lists as
 well. The build already checked each against the initramfs it built. The line re-checks
 it on the device, where an on-device kernel upgrade regenerates the initramfs with no
 build watching. A layer that needs a module at early boot names it in that list, which
@@ -189,7 +189,7 @@ where nobody is logged in to run the check by hand. The failed unit in
 journalctl -u boot2deb-selftest -b
 ```
 
-The unit carries `ConditionVirtualization=no`. The hardware checks describe the
+The unit contains `ConditionVirtualization=no`. The hardware checks describe the
 board, and under emulation the `boot2deb try` harness runs the selftest itself
 in the mode built for that.
 
@@ -228,6 +228,6 @@ boot2deb-selftest --root /mnt/image --mode userland
 
 In userland mode the kernel checks read `/boot` instead of `uname -r`. The
 running kernel is whatever machine or emulator this is. The question becomes
-"does the image carry the kernel it pins", which is still answerable.
+"does the image contain the kernel it pins", which is still answerable.
 This is exactly how `boot2deb try` runs the selftest inside a QEMU-booted
 guest, where the running kernel is a fixture and the board hardware is absent.

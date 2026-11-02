@@ -20,12 +20,12 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 # on a network, or which radio is soldered to them — so those live here, once,
 # and a device file states only its own deltas. The initramfs module list is the
 # `[initramfs]` table below; `overlay/`, `overlay-pre/` and `overlay-nonfree/` beside
-# this file carry the matching trees: the panic breadcrumb, the btsdio blacklist, the
+# this file contain the matching trees: the panic breadcrumb, the btsdio blacklist, the
 # max98090 first-boot hook, and the two Broadcom blobs.
 #
 # Wi-Fi and Bluetooth. Every Veyron is a Broadcom BCM4354 combo part on this SoC:
-# Wi-Fi over SDIO, Bluetooth over uart0. Debian's firmware-brcm80211 carries the
-# brcmfmac4354-sdio .bin and its .clm_blob; it carries neither the board NVRAM nor
+# Wi-Fi over SDIO, Bluetooth over uart0. Debian's firmware-brcm80211 contains the
+# brcmfmac4354-sdio .bin and its .clm_blob; it contains neither the board NVRAM nor
 # any BCM4354 patchram, so those two are vendored in this layer's `overlay-nonfree`
 # (see socs/rk3288/README.md). One copy of each serves the whole family — they
 # identify the radio module, and it is the same module on every board.
@@ -56,7 +56,7 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 # offers `nmcli` and nothing else, which is a poor thing to hand someone at a bare
 # console on a machine with no ethernet port. 568 KiB buys it.
 #
-# Which package carries `nmtui` depends on the suite. It left `network-manager` for a
+# Which package contains `nmtui` depends on the suite. It left `network-manager` for a
 # `network-manager-tui` of its own at 1.56.0-4 — forky's entry declares
 # `Replaces: network-manager (<< 1.56.0-4~)`, which is that move recorded — so forky
 # and sid need the separate package named and trixie (1.52.1-1) must not name it,
@@ -72,14 +72,14 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 #
 # firmware-ath9k-htc is the one firmware package here that is Free — it is built
 # from the open-ath9k-htc-firmware sources and ships in Debian `main` — so it is
-# carried on every build rather than gated with the Broadcom blobs. On a libre
+# included in every build rather than gated with the Broadcom blobs. On a libre
 # image it is the whole radio story; on any other it is 100 KB that makes an AR9271
 # adapter work the moment it is plugged in, on a family of laptops with no ethernet
 # port and one soldered radio.
 packages = [
     "firmware-ath9k-htc",
     "network-manager",
-    # Split out of `network-manager` at 1.56.0-4; trixie predates that and carries
+    # Split out of `network-manager` at 1.56.0-4; trixie predates that and has
     # `nmtui` inside `network-manager`, where naming this would fail the resolve.
     { name = "network-manager-tui", suites = ["forky", "sid"] },
     "wpasupplicant",
@@ -93,7 +93,7 @@ packages = [
 
 # The BCM4354's own firmware, from Debian's non-free-firmware component. Separated
 # from `packages` so a libre build drops it and nothing else: see the radio note
-# above, and `overlay-nonfree/` for the two blobs Debian does not carry.
+# above, and `overlay-nonfree/` for the two blobs Debian does not include.
 nonfree_firmware_packages = ["firmware-brcm80211"]
 
 exclude = ["dhcpcd"]
@@ -137,7 +137,7 @@ caveats = [
 # release, and the headroom is what absorbs that growth. A board at that ceiling
 # therefore leaves the stack out and accepts a console that appears only after the
 # real root mounts. A board whose firmware buffers 32 MiB has headroom to spend, and
-# carries the stack in its own `[initramfs]` list -- see
+# includes the stack in its own `[initramfs]` list -- see
 # devices/asus-c201-libreboot.toml.
 #
 # Because an initramfs failure is invisible on a board without the display stack,
@@ -148,7 +148,7 @@ caveats = [
 # hanging on a white screen); and scripts/panic/boot2deb-breadcrumb writes the full
 # dmesg to every reachable ext4 partition and then does that reboot itself. The
 # timeout is `sysctl.kernel.panic=30` rather than `panic=30` for the hook's sake:
-# initramfs-tools skips every panic hook when the cmdline carries `panic=` (see
+# initramfs-tools skips every panic hook when the cmdline contains `panic=` (see
 # boot-methods/depthcharge.toml).
 [initramfs]
 modules = [
@@ -165,7 +165,7 @@ modules = [
     "rk808-regulator",
     # The RK808's 32 kHz clock output. Consumed by the wifi power sequence
     # (sdio-pwrseq defers with "external clock not ready" without it -- observed on
-    # the panel on real hardware) and cheap enough to carry rather than leave as a
+    # the panel on real hardware) and cheap enough to include rather than leave as a
     # confounder in every deferred-probe listing.
     "clk-rk808",
 
@@ -209,7 +209,7 @@ modules = [
     # modules above bind nothing there. Its only input is a USB keyboard -- which is
     # also how its *firmware* reads Ctrl+U, since the Chromebit is the one board in the
     # family whose depthcharge is built with USB HID. The initramfs needs the same
-    # driver to offer a shell anyone can type at. Carried on every board rather than
+    # driver to offer a shell anyone can type at. Included on every board rather than
     # only the Chromebit, because a USB keyboard is a real fallback on a laptop whose
     # EC keyboard has failed and the two modules cost ~40 KB against megabytes of
     # spare budget.

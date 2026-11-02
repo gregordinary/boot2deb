@@ -3,7 +3,7 @@
 //! A build streams [`Event`]s, rendered either for a human ([`print_event_at`], at the
 //! caller's [`Verbosity`]) or as NDJSON under `--json` ([`print_event_json`]).
 //! Artifact locations travel on that same stream ([`emit_artifact`]) rather than as
-//! stray prints. Status lines go through [`note`], so both modes carry the same
+//! stray prints. Status lines go through [`note`], so both modes contain the same
 //! facts. The
 //! remaining helpers format the non-streaming commands' output — [`print_columns`]
 //! sizing every `list-*` table from its own data.
@@ -15,7 +15,7 @@ use std::path::Path;
 
 /// How much of the [`Event`] stream a human rendering shows.
 ///
-/// The levels exist because the stream carries two very different volumes: what a
+/// The levels exist because the stream contains two very different volumes: what a
 /// stage *decided* is tens of lines, and what its subprocesses *printed* is tens of
 /// thousands. Showing both by default made a documented tens-of-minutes kernel
 /// compile unreadable, and showing neither would hide the one thing a stuck build has
@@ -120,11 +120,11 @@ pub(crate) fn emit_artifact(sink: &dyn EventSink, step: &str, role: &str, path: 
     });
 }
 
-/// A build status line: printed for a human, or carried on the `--json` stream
+/// A build status line: printed for a human, or written to the `--json` stream
 /// as a stdout-tagged [`Event::Log`] under `step` — scripted consumers see the
 /// same facts without stdout mixing plain text into the NDJSON.
 ///
-/// `verbosity` gates the human side only; the `--json` stream carries the line
+/// `verbosity` gates the human side only; the `--json` stream contains the line
 /// regardless, since it is part of the record of the build. Tagged
 /// [`LogOrigin::Stage`], because it is the command speaking rather than a subprocess.
 pub(crate) fn note(
@@ -149,7 +149,7 @@ pub(crate) fn note(
 /// Print `rows` as aligned columns, each width taken from the widest cell in it.
 ///
 /// Every column but the last is padded and separated by two spaces; the last is
-/// written bare, so no line carries trailing whitespace into a reader's terminal or
+/// written bare, so no line passes trailing whitespace into a reader's terminal or
 /// their copy-paste. A row shorter than the widest is padded with empty cells rather
 /// than truncating the table.
 ///
@@ -260,7 +260,7 @@ pub(crate) fn human_size(bytes: u64) -> String {
 /// rootfs, image, sources).
 ///
 /// A u-boot-only build reports the axes it does not have once, in words, and then
-/// omits their lines entirely. Resolution carries device defaults in those fields
+/// omits their lines entirely. Resolution keeps device defaults in those fields
 /// that no node ever reads, so printing them would show an image size and a hostname
 /// for an artifact that has neither — and a blank locale line reads as a bug rather
 /// than as an axis that does not exist here.
@@ -430,7 +430,7 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             }
         );
         println!("dtb          : {}", b.kernel_dtb);
-        // Only a board carrying its own (not-yet-upstream) device tree has sources to
+        // Only a board with its own (not-yet-upstream) device tree has sources to
         // show; an upstream-DTB board would print an empty line for nothing.
         if !b.device_dts.is_empty() {
             println!("device dts   : {}", b.device_dts.join(", "));
@@ -487,7 +487,7 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
     if image.is_some() {
         println!("modules      : {}", b.modules.join(", "));
     }
-    // The modules the initramfs must carry, SoC first and then the board's. A build
+    // The modules the initramfs must contain, SoC first and then the board's. A build
     // that names none leaves the choice to initramfs-tools, and prints nothing here.
     if let Some(i) = image.filter(|i| !i.initramfs_modules.is_empty()) {
         println!(

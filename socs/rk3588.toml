@@ -8,7 +8,7 @@ dt_dir      = "rockchip"                 # arch/arm64/boot/dts/<dt_dir>
 # they are guaranteed present on first boot.
 modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket"]
 
-# What every RK3588 image carries, regardless of board or feature selection.
+# What every RK3588 image contains, regardless of board or feature selection.
 #
 # Non-free firmware the RK3588 loads at runtime, from the distribution's archive and
 # pinned in the solved manifest like every other package -- so no linux-firmware
@@ -113,14 +113,14 @@ build_deps     = [
 # ffmpeg source pair: an FFmpeg release tag as the base, plus the Rockchip
 # rkmpp-encode / rkrga-filter graft (nyanmisaka). The rk3588-accel series' `ffmpeg`
 # scope applies onto the tag, in order: Kwiboo's V4L2 request-API decode hwaccel,
-# carried verbatim from the `v4l2-request-n8.1` branch, then the graft, then the
+# taken verbatim from the `v4l2-request-n8.1` branch, then the graft, then the
 # fixes. The graft is a `git am` series rather than a cherry-pick because one graft
 # commit (the RKMPP hwcontext) needs a 3-way conflict resolution a plain cherry-pick
 # cannot reproduce, so `rockchip` here is recorded as provenance and is not fetched
 # at build time.
 #
 # The base is a tag on FFmpeg's `release/8.1` rather than Kwiboo's branch, whose own
-# base is `n8.1`. The image therefore carries the point releases' demuxer, decoder
+# base is `n8.1`. The image therefore includes the point releases' demuxer, decoder
 # and swscale fixes. Both refs stay on 8.1, the generation the graft is written
 # against.
 [ffmpeg.base]

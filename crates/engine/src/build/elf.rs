@@ -14,11 +14,11 @@
 /// legacy `DT_RPATH` when no `DT_RUNPATH` is present.
 ///
 /// Returns `None` for a file that is not an ELF, has no dynamic segment (a static
-/// binary), or carries neither tag.
+/// binary), or contains neither tag.
 ///
 /// The two tags differ in a way that matters to a bundled library set. `DT_RPATH` is
 /// searched transitively for a dependency's own dependencies, while `DT_RUNPATH`
-/// applies **only** to the object that carries it. So a library that must find its
+/// applies **only** to the object that contains it. So a library that must find its
 /// siblings needs its own entry, and checking the executable alone would prove nothing
 /// about the libraries. Modern toolchains emit `DT_RUNPATH` (`--enable-new-dtags`).
 /// Both tags are accepted here because either satisfies the object being asked about.
@@ -197,7 +197,7 @@ impl<'a> Elf<'a> {
 mod tests {
     use super::*;
 
-    /// Lay out a minimal but structurally valid ELF carrying one `PT_LOAD` and one
+    /// Lay out a minimal but structurally valid ELF containing one `PT_LOAD` and one
     /// `PT_DYNAMIC`, with `tag` naming `path` through the string table. Built by hand
     /// rather than checked in as a fixture so the class/endianness matrix is a
     /// parameter rather than a binary blob.

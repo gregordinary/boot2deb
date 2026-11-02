@@ -8,7 +8,7 @@
 //! hand-written fixture allows. And the schema check needs the documents on disk, so
 //! something has to write them.
 //!
-//! The unit tests beside each renderer assert the *content*: which fields carry what,
+//! The unit tests beside each renderer assert the *content*: which fields contain what,
 //! how identifiers are formed, what the relationship graph claims. This asserts the
 //! documents exist, describe the real package set, and are valid JSON; the schema
 //! conformance check is the CI step that reads what this writes.
@@ -46,7 +46,7 @@ fn out_dir() -> PathBuf {
     dir
 }
 
-/// The build facts a render needs that no committed document carries — the shape of
+/// The build facts a render needs that no committed document contains — the shape of
 /// the run rather than of the build point. Fixed values, so the output is stable.
 fn facts<'a>(
     archives: &'a [boot2deb_core::provenance::ArchiveProvenance],

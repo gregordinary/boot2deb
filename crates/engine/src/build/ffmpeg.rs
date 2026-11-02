@@ -7,7 +7,7 @@
 //! fix. One of them, the RKMPP hwcontext, needs a 3-way conflict resolution a plain
 //! cherry-pick cannot reproduce. A patch that will not apply is a hard error naming
 //! it, the "never silently skip" contract of the verify gate. The build fetches only
-//! the base tree, and the series carries the graft.
+//! the base tree, and the series includes the graft.
 //!
 //! Then `./configure` + `make` + `make install` run inside a target-arch
 //! [`BuildSandbox`]. The staged install tree is wrapped into a self-contained `.deb`
@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 /// Install prefix baked into the build; keeps `ffmpeg-rk` out of the system FFmpeg's
 /// paths so both can coexist. The coexistence is load-bearing rather than tidy: this
-/// tree's `libav*`/`libsw*` carry the same sonames as the suite's own FFmpeg packages,
+/// tree's `libav*`/`libsw*` have the same sonames as the suite's own FFmpeg packages,
 /// so the two sets must never meet on one search path — see [`rpath_ldflag`], which is
 /// what makes the separation hold at runtime.
 ///
@@ -144,7 +144,7 @@ const NONFREE_DEPS: &[&str] = &["libfdk-aac-dev"];
 /// One predicate, read by [`configure_flags`], the build root's package list and the
 /// produced deb's runtime `Depends`, so those three cannot disagree about what was
 /// linked — a disagreement fails the stage on a correct build, since the deb declares a
-/// dependency the binary does not carry.
+/// dependency the binary does not have.
 fn linked_userspace(trees: &[UserspaceTree]) -> Vec<&UserspaceTree> {
     let have = |name: &str| trees.iter().any(|t| t.name == name);
     trees
@@ -186,7 +186,7 @@ fn userspace_dep_prefixes(trees: &[UserspaceTree]) -> Vec<String> {
 /// declares no dependencies at all — so asking only for the `-dev` packages yields a
 /// build root with librga's headers and `librga.pc` but no `librga.so`, and ffmpeg's
 /// `./configure` fails its link probe with "librga not found using pkg-config". The
-/// runtime library is also what carries the `shlibs` `dpkg-shlibdeps` reads, so naming
+/// runtime library is also what contains the `shlibs` `dpkg-shlibdeps` reads, so naming
 /// it is what makes the produced deb's `Depends` resolvable at all.
 ///
 /// Derived from [`linked_userspace`] for the same reason the prefixes are: asking for
@@ -229,7 +229,7 @@ pub fn layer_packages(trees: &[UserspaceTree], nonfree: bool, libs: &[FfmpegLib]
 ///
 /// The *first* entry of each linked tree's `links`, which is that tree's runtime library
 /// (the `-dev` follows it). It is what was linked, not what was pinned: on a SoC with
-/// librga and no MPP the binary carries no librga soname, so requiring `librga2` here
+/// librga and no MPP the binary contains no librga soname, so requiring `librga2` here
 /// would reject an ffmpeg that is correct for that SoC.
 fn required_runtime_depends<'a>(trees: &'a [UserspaceTree], libs: &'a [FfmpegLib]) -> Vec<&'a str> {
     linked_userspace(trees)
@@ -276,7 +276,7 @@ fn assert_userspace_depends(
     Err(EngineError::ArtifactMissing {
         what: format!(
             "runtime Depends on {} in the ffmpeg-rk control file — dpkg-shlibdeps \
-             resolved `{depends}`, so the build root did not carry the shlibs of the \
+             resolved `{depends}`, so the build root did not contain the shlibs of the \
              userspace package(s) this build links against",
             missing.join(", ")
         ),
@@ -339,7 +339,7 @@ const BASE_CONFIGURE_FLAGS: &[&str] = &[
 /// The two are one flag, not two: `--enable-nonfree` is the licence gate that admits
 /// encoders whose terms cannot be combined with the GPL, and FFmpeg's own
 /// `./configure` *rejects* `--enable-libfdk-aac` against `--enable-gpl` without it. So
-/// they are added together and removed together, and a build carrying one and not the
+/// they are added together and removed together, and a build including one and not the
 /// other does not configure.
 ///
 /// FDK-AAC is today's only member of that class here. The set is named for the gate
@@ -350,7 +350,7 @@ const NONFREE_CONFIGURE_FLAGS: &[&str] = &["--enable-nonfree", "--enable-libfdk-
 /// The linker flag that bakes the install `libdir` into every object this stage
 /// builds, so each finds its siblings without help from the environment.
 ///
-/// The bundled `libav*`/`libsw*` carry the *same* sonames as Debian's own FFmpeg
+/// The bundled `libav*`/`libsw*` have the *same* sonames as Debian's own FFmpeg
 /// packages — `libavcodec.so.62`, `libavutil.so.60`, `libavfilter.so.11` and the rest
 /// — so the one thing this deb must never do is put its `libdir` on the system-wide
 /// search path. An `/etc/ld.so.conf.d` drop-in would silently re-point every program
@@ -482,7 +482,7 @@ pub fn build_ffmpeg(
     let tree = tree_dir(opts.work_dir);
 
     // ffmpeg build-depends on the userspace debs, so a media-accel build always
-    // carries both pin sets; the CLI schedules this stage only then. Reaching it
+    // contains both pin sets; the CLI schedules this stage only then. Reaching it
     // without pins is an internal scheduling bug.
     let ffmpeg = lock
         .ffmpeg
@@ -566,7 +566,7 @@ pub fn build_ffmpeg(
     // dependencies, in one resolution. This is ffmpeg's own pool, assembled from the
     // packages it build-depends on: the rootfs node's pool is a per-build snapshot of the
     // whole artifact ledger that it clears and rewrites after every stage, so it cannot
-    // carry anything forward.
+    // keep anything.
     // Deterministic build timestamp from the locked base commit; the tree's HEAD is a
     // `git am` patch commit stamped now, so read the base explicitly. It dates both the
     // pool's `Release` — without which a publish takes the wall clock and is not
@@ -574,7 +574,7 @@ pub fn build_ffmpeg(
     let source_date_epoch = git::commit_epoch(&tree, &ffmpeg.base.commit).ok();
     let pool_dir = stage_root.join("build-pool");
     // The pinned `extra_debs` this stage was given join the pool beside them, so a
-    // library Debian does not carry is resolved by name with its own dependencies
+    // library Debian does not include is resolved by name with its own dependencies
     // rather than unpacked into the root behind the resolver's back — the same
     // contract the build's own `.deb`s get.
     let mut debs = debs;
@@ -689,7 +689,7 @@ pub fn build_ffmpeg(
 /// from the lock. The built ffmpeg deb links against those `.deb`s. A change to a
 /// userspace pin, patch series, suite, or arch must invalidate the cached deb rather
 /// than restore a stale one. Only
-/// MPP carries the `userspace` patch scope, so its dep folds `us_patches`
+/// MPP has the `userspace` patch scope, so its dep folds `us_patches`
 /// while RGA is unpatched. Folding the lock-derived dep *signatures* (not the built
 /// deb bytes) keeps the key computable without the userspace `.deb`s present.
 /// Public so `why-rebuild` ([`crate::plan`]) asks the artifact store the same
@@ -712,7 +712,7 @@ pub struct OutputKeyInputs<'a> {
     pub sandbox_id: &'a str,
     /// The userspace trees this build compiles, as the SoC declares them and resolution
     /// narrowed them. They decide the configure flags, the layered build-deps and the
-    /// folded dependency signatures at once. The key therefore carries the set rather
+    /// folded dependency signatures at once. The key therefore contains the set rather
     /// than a flag per tree.
     pub trees: &'a [UserspaceTree],
     /// The license flavor — `--enable-nonfree`. It moves both folded inputs at once
@@ -962,9 +962,9 @@ fn install_to_stage(
 /// No `fakeroot`: the root maps the caller to uid 0
 /// ([`sandbox`](crate::sandbox) module docs), so a tree `make install` staged is
 /// already `root:root` where it is archived, and `dpkg-deb` records the ownership a
-/// `.deb` must carry with nothing faking anything.
+/// `.deb` must have with nothing faking anything.
 ///
-/// `build_env` carries `SOURCE_DATE_EPOCH` (the locked base commit's committer
+/// `build_env` contains `SOURCE_DATE_EPOCH` (the locked base commit's committer
 /// date), so `dpkg-deb` clamps every archive member's mtime to it — the `.deb`
 /// is byte-reproducible rather than stamped with the build clock.
 fn package_deb(
@@ -1115,7 +1115,7 @@ fn resolve_depends(
 /// that caused it.
 ///
 /// Every object is checked, not just the executables: `DT_RUNPATH` is consulted only
-/// for the object that carries it and is **not** inherited by that object's own
+/// for the object that contains it and is **not** inherited by that object's own
 /// dependencies, so an `ffmpeg` binary that resolves perfectly proves nothing about
 /// whether `libavcodec` can find `libavutil`.
 fn assert_runpath(pkg_stage: &Path, step: &Step) -> Result<(), EngineError> {
@@ -1149,7 +1149,7 @@ fn assert_runpath(pkg_stage: &Path, step: &Step) -> Result<(), EngineError> {
 }
 
 /// The staged objects whose search path does not name `libdir`, rendered as
-/// `name (what it carries instead)` for the failure message. Pure, so the policy is
+/// `name (its RUNPATH)` for the failure message. Pure, so the policy is
 /// testable without staging a build tree.
 ///
 /// The search path is field-split on `:` rather than substring-matched: a `RUNPATH` of
@@ -1298,7 +1298,7 @@ fn parse_shlibs_depends(substvars: &str) -> Option<String> {
 ///
 /// The dir and file are mode-normalized (0755/0644) so the host umask does not leak
 /// into the packaged control metadata. Only the metadata this code writes is
-/// normalized — the `make install` payload carries its own explicit install modes.
+/// normalized — the `make install` payload has its own explicit install modes.
 fn write_control(pkg_stage: &Path, control: &str) -> Result<(), EngineError> {
     let debian = pkg_stage.join("DEBIAN");
     std::fs::create_dir_all(&debian).map_err(|source| EngineError::io(&debian, source))?;
@@ -1477,7 +1477,7 @@ mod tests {
         }
     }
 
-    /// Every flavour carries a software AV1 decoder, and its build root the library it
+    /// Every flavour includes a software AV1 decoder, and its build root the library it
     /// links. A build without it succeeds and decodes everything else, so its loss
     /// would show only as AV1 sources that fail to transcode.
     #[test]
@@ -1505,7 +1505,7 @@ mod tests {
         for flag in NONFREE_CONFIGURE_FLAGS {
             assert!(
                 !free.contains(&(*flag).to_string()),
-                "the default build must not carry {flag}"
+                "the default build must not include {flag}"
             );
         }
         // What the free build *is*: GPL + version3, which admit only licences that
@@ -1515,7 +1515,7 @@ mod tests {
 
         // The opt-in adds the whole set and nothing else. Both halves matter:
         // ffmpeg's configure rejects `--enable-libfdk-aac` against `--enable-gpl`
-        // without `--enable-nonfree`, so a flavour carrying one and not the other
+        // without `--enable-nonfree`, so a flavour including one and not the other
         // does not configure at all.
         let nonfree = configure_flags(&all_trees(), true, NO_LIBS);
         for flag in NONFREE_CONFIGURE_FLAGS {
@@ -1568,7 +1568,7 @@ mod tests {
     #[test]
     fn a_soc_with_rga_and_no_mpp_neither_layers_nor_requires_librga() {
         // The three consumers of LinkedUserspace must agree with configure_flags: an
-        // ffmpeg built without --enable-rkrga carries no librga soname, so demanding
+        // ffmpeg built without --enable-rkrga contains no librga soname, so demanding
         // `librga2` in its Depends rejects a correct build, and layering librga-dev
         // puts headers in the root that no `./configure` probe reads.
         let rga = rga_only();
@@ -1743,7 +1743,7 @@ mod tests {
         match &err {
             EngineError::ArtifactMissing { what, .. } => {
                 assert!(what.contains("librga2"), "{what}");
-                // The error carries what was resolved, so the failure is diagnosable
+                // The error contains what was resolved, so the failure is diagnosable
                 // without re-running the build.
                 assert!(what.contains(dropped), "{what}");
             }

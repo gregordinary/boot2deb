@@ -6,7 +6,7 @@
 //! deciding what changed is this module's.
 //!
 //! A side can be described by a [`Lock`], by a [`ProvenanceManifest`], or by both.
-//! The two carry overlapping but different facts: a lock has no toolchain, and a
+//! The two contain overlapping but different facts: a lock has no toolchain, and a
 //! manifest has no patch-series `ref`. So both are normalized into one [`Side`]
 //! first, and a section neither side can answer reports itself
 //! [`Unavailable`](Section::Unavailable) rather than as "nothing changed". The
@@ -127,7 +127,7 @@ pub struct BlobFacts {
 /// What produced a build, as only a provenance manifest records it.
 ///
 /// The section that answers "nothing changed in the config but the output moved". It
-/// carries the builder that ran, the host it cross-compiled from, and the archive
+/// contains the builder that ran, the host it cross-compiled from, and the archive
 /// state the rootfs resolved against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderFacts {
@@ -433,7 +433,7 @@ impl Side {
     /// boards' kernels would compare as absent.
     ///
     /// Everything else a resolve holds is a *declaration*. The lock's pins are what a
-    /// build used, and those are what the other constructors carry.
+    /// build used, and those are what the other constructors record.
     ///
     /// Folded onto a lock's side with [`merge`](Self::merge), which keeps the lock's
     /// pinned ref over the declared one.
@@ -500,7 +500,7 @@ impl Side {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Section<T> {
-    /// One or both sides carry nothing to compare, and why.
+    /// One or both sides contain nothing to compare, and why.
     Unavailable {
         /// What is missing, in words, for the report to print in place of a diff.
         why: String,
@@ -525,7 +525,7 @@ impl<T: IsEmpty> Section<T> {
 
 /// A section payload that can be empty — the "both sides agree" case.
 pub trait IsEmpty {
-    /// Whether the payload carries no differences.
+    /// Whether the payload contains no differences.
     fn is_empty(&self) -> bool;
 }
 
@@ -659,7 +659,7 @@ pub struct KernelChanges {
     /// The package a distro-package kernel installs.
     pub package: Option<Change>,
     /// Symbols whose requested value differs between the two fragment sets. It is a
-    /// section of its own, because a side can carry a kernel pin and no fragment set
+    /// section of its own, because a side can contain a kernel pin and no fragment set
     /// at all. An empty delta then means "nothing compared" rather than "identical
     /// configuration".
     pub kconfig: Section<Vec<SymbolChange>>,

@@ -240,7 +240,7 @@ pub(crate) fn run(
 /// The closing handoff: the ordered commands that take the scaffold to an image.
 ///
 /// It has to be runnable exactly as printed, which is why it takes more than the
-/// recipe reference. Two things that reference does not carry, and both are known
+/// recipe reference. Two things that reference does not contain, and both are known
 /// here rather than being the user's to rediscover from an error:
 ///
 /// - `overlay` — the `--overlay` without which nothing finds the files just written.
@@ -331,7 +331,7 @@ mod tests {
         );
         assert!(s.contains("rk3588-mainline-7.1"), "{s}");
 
-        // Scaffolded into the primary root: no flag to carry, and a distro-package
+        // Scaffolded into the primary root: no flag to pass, and a distro-package
         // kernel pins no commit, so no ref placeholder either.
         let s = next_steps(dev, None, Some("my-board/forky"), None);
         assert!(s.contains("boot2deb update my-board/forky    #"), "{s}");
@@ -386,7 +386,7 @@ mod tests {
             .path()
             .join("recipes/test-board/forky.toml")
             .is_file());
-        // The scaffolded recipe resolves against the composed search path, carrying
+        // The scaffolded recipe resolves against the composed search path, including
         // its selected feature — and the media-accel feature pulls in the SoC sources
         //. (The device alone has no features; they live in the recipe.)
         let build = resolve_recipe(&root, "test-board/forky", &Overrides::default()).unwrap();

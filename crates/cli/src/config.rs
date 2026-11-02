@@ -479,7 +479,7 @@ pub(crate) fn apt_source_keyrings<'a>(
 /// — the same relationship its TOML keys have. A device that extends nothing
 /// contributes exactly one tree.
 ///
-/// The two hardware layers may also carry an [`OVERLAY_NONFREE`] tree, which stacks
+/// The two hardware layers may also contain an [`OVERLAY_NONFREE`] tree, which stacks
 /// directly after their own and is skipped entirely on a
 /// [`libre`](boot2deb_core::ResolvedImage::libre) build.
 ///
@@ -680,7 +680,7 @@ pub(crate) fn default_patches_checkout(root: &ConfigRoot) -> PathBuf {
 /// The URL comes from the *pin*, not from the current config, for two reasons.
 /// The commit is the lock's, so the repo must be too: re-pointing a kernel's
 /// `patches_url` after a lock was written would otherwise fetch the pinned commit
-/// from a different repo. And the pin is the only source both axes carry — a
+/// from a different repo. And the pin is the only source both axes have — a
 /// `deliverable = "uboot"` recipe resolves no kernel at all
 /// ([`resolve_device`]), so a config-derived kernel URL leaves it with nothing to
 /// fetch from.
@@ -720,7 +720,7 @@ pub(crate) fn resolve_patches_source(
 /// `rockchip` pin is provenance-only (never fetched at build), so it is omitted.
 pub(crate) struct SourceAxis<'a> {
     /// Human name for the report (`kernel`, `u-boot`, `mpp`, …). Owned so a per-name
-    /// axis like a kmod (`kmod:aic8800`) can carry a formatted label; the fixed axes
+    /// axis like a kmod (`kmod:aic8800`) can have a formatted label; the fixed axes
     /// are cheap borrowed literals.
     pub(crate) name: std::borrow::Cow<'static, str>,
     /// The configured upstream clone URL.
@@ -791,7 +791,7 @@ pub(crate) fn source_axes<'a>(
     // it is the pin most likely to name something that exists nowhere else — a series
     // committed locally and not yet pushed pins fine and fails for everyone else.
     // Every other axis was already graded; this one could not be until the pin
-    // carried a source.
+    // contained a source.
     if let Some(pin) = &lock.patches {
         axes.push(SourceAxis {
             name: "patches".into(),
@@ -1078,7 +1078,7 @@ mod tests {
     fn the_patch_pin_supplies_the_fetch_url_without_any_kernel() {
         // A `deliverable = "uboot"` recipe resolves no kernel at all, so a
         // config-derived kernel URL would leave both shipped u-boot-only recipes
-        // unable to fetch the series they pin. The pin carries the repo itself, and
+        // unable to fetch the series they pin. The pin contains the repo itself, and
         // that is what the fetch takes — no ResolvedBuild is consulted.
         let (_tmp, root) = root_without_sibling_patches();
         let pin = patches_pin("https://example.invalid/patches.git");
@@ -1191,7 +1191,7 @@ mod tests {
         assert!(axes
             .iter()
             .all(|a| !a.url.is_empty() && !a.commit.is_empty()));
-        // The patches axis is the reason the pin carries a source at all: `update`
+        // The patches axis is the reason the pin contains a source at all: `update`
         // takes its commit from a local HEAD, so it is the likeliest of any axis to
         // name something unreachable, and it could not be graded until now.
         let patches = axes.iter().find(|a| a.name == "patches").unwrap();
@@ -1240,7 +1240,7 @@ mod tests {
             "the extended board's overlay tree is missing from {dirs:?}"
         );
 
-        // The tree carries the files whose absence produced a verbose console and a
+        // The tree contains the files whose absence produced a verbose console and a
         // dead 5 GHz band on this board; name one so the assertion is about reaching
         // real config, not about a directory existing.
         assert!(base_tree.join("etc/modprobe.d/aic8800.conf").is_file());
@@ -1416,7 +1416,7 @@ mod tests {
     #[test]
     fn a_libre_build_lays_in_no_vendored_blob() {
         // The failure this guards is the one that matters most on this axis and is the
-        // least visible: an image advertised as free that quietly carries two Broadcom
+        // least visible: an image advertised as free that quietly contains two Broadcom
         // blobs. Nothing at build time would complain — the files copy fine and the
         // kernel simply never reads them — so the only place it can be caught is here.
         let root = ConfigRoot::new(repo_root_path());
@@ -1447,7 +1447,7 @@ mod tests {
         let libre = resolve_device(&root, "asus-c201", &ov("rk3288-libre-7.3")).unwrap();
         assert!(image_of(&libre).libre);
         let dirs = overlay_dirs(&root, &libre, OverlayStage::Customize);
-        assert!(!dirs.contains(&blobs), "a libre image carries {blobs:?}");
+        assert!(!dirs.contains(&blobs), "a libre image contains {blobs:?}");
         assert!(dirs.contains(&soc));
         assert!(!image_of(&libre)
             .rootfs_packages
@@ -1485,7 +1485,7 @@ mod tests {
 
     #[test]
     fn a_variant_board_inherits_the_patch_series_of_what_it_extends() {
-        // `device_patch_series` is the field that carries the H96's NPU series, and a
+        // `device_patch_series` is the field that contains the H96's NPU series, and a
         // variant silently losing it would build a kernel whose `rocket` driver has no
         // RK3576 support compiled in -- an image that boots fine and has no /dev/accel.
         let (_overlay, root) = root_with_variant();
@@ -1499,7 +1499,7 @@ mod tests {
         assert_eq!(base, series("h96-max-m9-variant"));
         assert!(
             base.iter().any(|p| p == "rk3576-npu"),
-            "the H96 carries its NPU series on the device layer: {base:?}"
+            "the H96 has its NPU series on the device layer: {base:?}"
         );
     }
 
@@ -1512,7 +1512,7 @@ mod tests {
         let root = repo_root();
         let build = resolve_device(&root, "h96-max-m9", &Overrides::default()).unwrap();
         let resolved = kmod_local_patches(&root, &build).unwrap();
-        let (name, paths) = resolved.first().expect("the H96 carries one kmod");
+        let (name, paths) = resolved.first().expect("the H96 has one kmod");
         assert_eq!(name, "aic8800");
         let names: Vec<&str> = paths
             .iter()
@@ -1665,7 +1665,7 @@ mod tests {
                 .is_empty()
         );
 
-        // Past `narrow`'s cap: it alone is reported, carrying its declared range.
+        // Past `narrow`'s cap: it alone is reported, with its declared range.
         let out = series_outside_envelope(dir.path(), &names, Scope::Kernel, "v7.2").unwrap();
         assert_eq!(out, vec![("narrow".to_string(), ">=7.0, <7.2".to_string())]);
 
@@ -1710,7 +1710,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // Past its cap: reported, carrying the declared range as authored.
+        // Past its cap: reported, with the declared range as authored.
         let out = series_outside_envelope(dir.path(), &names, Scope::Uboot, "v2027.04").unwrap();
         assert_eq!(
             out,

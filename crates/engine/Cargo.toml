@@ -34,13 +34,13 @@ irongall = "0.1.1"
 # C deps. lzma-rust2's `optimization` feature (its only `unsafe`) is left off.
 gpt = "4"
 # Deterministic ext4 UUID + GPT disk/partition GUIDs derived from the lock, so the
-# image carries no `/dev/urandom` identifiers. Same major as gpt.
+# image contains no `/dev/urandom` identifiers. Same major as gpt.
 uuid.workspace = true
 # The decoder is unconditional (only the encoder is feature-gated); `flash`
 # streams a compressed image through it straight onto the target device.
 #
 # Held at the version `ferroday-cage` reads its own `.xz` through, so the graph
-# carries one copy of the format rather than two. This line's encoder takes a single
+# contains one copy of the format rather than two. This line's encoder takes a single
 # stream past 2 GiB, which is inside the range an image reaches.
 lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder"] }
 # `.gz` image compression, for the one consumer that cannot read `.xz`: u-boot's
@@ -56,17 +56,17 @@ tar = { version = "0.4", default-features = false }
 ruzstd = "0.9"
 # Pure-Rust ext2/3/4 formatter (see the engine's image::ext4): builds the resize-safe
 # rootfs filesystem directly from the rootfs tar, replacing host mke2fs/e2fsprogs and
-# the userns staging they required. The `tar` feature carries the archive source that
+# the userns staging they required. The `tar` feature includes the archive source that
 # reads the rootfs tarball's ownership, xattrs, ACLs, and device nodes, and reads each
 # member's bytes out of the archive as that file is placed rather than buffering the
 # whole rootfs.
-# `fat` additionally formats the 1 MiB FAT12 seed partition every image carries
+# `fat` additionally formats the 1 MiB FAT12 seed partition every image contains
 # (see the engine's press::seed) — a text file an operator can edit from any OS.
 # `dir` adds the host-directory walk `press --copy-tree` places a site tree
 # with: it yields the same `SourceEntry` values the tar source does, recording
 # symlinks rather than following them and leaving file bytes on the host until
 # the formatter places them.
-# The families are named rather than taken from the crate's default, which carries
+# The families are named rather than taken from the crate's default, which includes
 # every family it has, APFS and its decoders among them. With this set ferrosys
 # compiles only its own MIT OR Apache-2.0 code, and only the families boot2deb writes
 # and reads.
@@ -116,7 +116,7 @@ sha-crypt = "0.6"
 # sandbox library's resolved record (sandbox.rs).
 serde_json.workspace = true
 # The same ferroday-cage with its `serde` feature, for tests only: the sandbox record's
-# completeness test reads every key the library's resolved inputs carry through the
+# completeness test reads every key the library's resolved inputs contain through the
 # library's own serialization of them.
 ferroday-cage = { version = "0.5.1", features = ["serde"] }
 

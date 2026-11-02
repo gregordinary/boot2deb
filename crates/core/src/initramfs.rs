@@ -1,5 +1,5 @@
-//! Initramfs module coverage — the modules a board's initramfs must carry, and the
-//! decision whether a built initrd carries them.
+//! Initramfs module coverage — the modules a board's initramfs must contain, and the
+//! decision whether a built initrd contains them.
 //!
 //! Pure: the name rule, the parse of what a built initrd holds, and the verdict. The
 //! rootfs stage runs a target-side report program over the finished rootfs and hands
@@ -13,7 +13,7 @@
 //! Either way a board whose list names a module its kernel does not build gets an
 //! initrd without it. The first sign is a boot that never reaches its root.
 //!
-//! A listed name is **covered** when the built initrd carries its `.ko`, under any
+//! A listed name is **covered** when the built initrd contains its `.ko`, under any
 //! compression suffix, or when the kernel builds it in (`modules.builtin`). Names match
 //! exactly by basename, with `-` and `_` equivalent, as `modprobe` treats them.
 //!
@@ -28,14 +28,14 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// `modules_install` appends one of these to `.ko` under `CONFIG_MODULE_COMPRESS_*`,
 /// and firmware packages ship `.xz` or `.zst` files that the kernel's loader
-/// decompresses. A path carrying one is the same file for every question asked here.
+/// decompresses. A path ending in one is the same file for every question asked here.
 const COMPRESSION_SUFFIXES: [&str; 3] = [".xz", ".zst", ".gz"];
 
 /// Reject a module name the generated drop-in and the landing check cannot hold.
 ///
 /// A name is what `modules.order` spells: the `.ko` basename without its suffix, from
 /// ASCII letters, digits, `-` and `_`. It becomes one line of a `modules.d` drop-in,
-/// which `mkinitramfs` reads word by word. A name carrying a `.ko` suffix, a path or
+/// which `mkinitramfs` reads word by word. A name containing a `.ko` suffix, a path or
 /// whitespace would match no module, and that failure is silent until boot.
 pub fn check_module_name(name: &str) -> Result<(), ConfigError> {
     let bad = |why| {
@@ -49,7 +49,7 @@ pub fn check_module_name(name: &str) -> Result<(), ConfigError> {
         return bad("empty");
     }
     if name.ends_with(".ko") || name.contains(".ko.") {
-        return bad("carries a `.ko` suffix, where the list takes the name modules.order spells");
+        return bad("has a `.ko` suffix, where the list takes the name modules.order spells");
     }
     if !name
         .chars()
@@ -68,7 +68,7 @@ pub fn module_key(name: &str) -> String {
     name.replace('-', "_")
 }
 
-/// `path` with one trailing [`COMPRESSION_SUFFIXES`] entry removed, if it carries one.
+/// `path` with one trailing [`COMPRESSION_SUFFIXES`] entry removed, if it has one.
 fn strip_compression(path: &str) -> &str {
     COMPRESSION_SUFFIXES
         .iter()
@@ -225,9 +225,9 @@ pub struct MissingFirmware {
 /// named them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Coverage {
-    /// Listed names whose `.ko` the initrd carries.
+    /// Listed names whose `.ko` the initrd contains.
     pub in_initrd: Vec<String>,
-    /// Listed names the kernel builds in, so no `.ko` exists to carry.
+    /// Listed names the kernel builds in, so no `.ko` exists to include.
     pub built_in: Vec<String>,
     /// Listed names in neither. Non-empty means the initrd cannot do what the list
     /// says it must, and the build fails naming these.
@@ -313,7 +313,7 @@ mod tests {
 
     const MMC: &str = "usr/lib/modules/7.2.8-1-armv7/kernel/drivers/mmc/host/dw_mmc-rockchip.ko";
 
-    /// A name the initrd carries is covered, and one it does not is named. The missing
+    /// A name the initrd contains is covered, and one it does not is named. The missing
     /// name is the build failure, so it is asserted by value rather than by count.
     #[test]
     fn a_listed_module_the_initrd_lacks_is_named() {
@@ -428,7 +428,7 @@ mod tests {
         );
     }
 
-    /// A declaration can carry a `*` wildcard, which `modinfo` reports as written.
+    /// A declaration can contain a `*` wildcard, which `modinfo` reports as written.
     #[test]
     fn a_wildcard_firmware_declaration_matches_what_it_names() {
         assert!(firmware_matches(
@@ -462,7 +462,7 @@ mod tests {
         assert_eq!(ok.initrd, ["a b"]);
     }
 
-    /// The names a drop-in can carry: what `modules.order` spells, and nothing a word
+    /// The names a drop-in can contain: what `modules.order` spells, and nothing a word
     /// reader could split or a basename match could never meet.
     #[test]
     fn a_module_name_is_what_modules_order_spells() {

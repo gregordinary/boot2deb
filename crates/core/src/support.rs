@@ -82,7 +82,7 @@ pub struct PatchesCell {
     pub commit: String,
 }
 
-/// One out-of-tree kernel module the image carries: which driver, and the commit its
+/// One out-of-tree kernel module the image contains: which driver, and the commit its
 /// `.ko` was built from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KmodCell {
@@ -99,7 +99,7 @@ pub struct KmodCell {
 pub struct Matrix {
     /// One row per recipe declaring a support claim, ordered by recipe name.
     pub rows: Vec<MatrixRow>,
-    /// Recipes carrying no claim, ordered by name. Reported rather than silently
+    /// Recipes containing no claim, ordered by name. Reported rather than silently
     /// dropped. For a locally authored recipe an absent claim is correct, but for one
     /// about to ship it is an omission. Only the caller knows which it is.
     pub unclaimed: Vec<String>,
@@ -536,7 +536,7 @@ pub fn render_markdown(matrix: &Matrix) -> String {
     }
     // Below the table rather than in it: a caveat is a sentence, and sentences in a
     // cell make a table nothing can read. Omitted entirely when no recipe declares
-    // one, so the page does not carry an empty heading.
+    // one, so the page does not contain an empty heading.
     if matrix.rows.iter().any(|r| !r.caveats.is_empty()) {
         s.push_str(CAVEATS_INTRO);
         s.push_str(&render_caveats(matrix));
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(distro.patches_cell(), "none");
 
         // A u-boot-only recipe has no kernel or suite; its cells say so, and the
-        // u-boot pin carries the series.
+        // u-boot pin contains the series.
         let uboot_only = MatrixRow {
             recipe: "rk3576-generic/loader".into(),
             device: "rk3576-generic".into(),
@@ -656,7 +656,7 @@ mod tests {
         assert_eq!(uboot_only.uboot_cell(), "rk3576-loader main (e86ef2a00000)");
 
         // A board with out-of-tree modules states each one's pin: the driver `.ko` is
-        // shipped bytes, and a reader asking "which AIC8800 does this image carry"
+        // shipped bytes, and a reader asking "which AIC8800 does this image contain"
         // gets an answer instead of an omission.
         let with_kmods = MatrixRow {
             kmods: vec![
@@ -679,7 +679,7 @@ mod tests {
         );
     }
 
-    /// The rendered page carries the generated banner and one table row per matrix
+    /// The rendered page contains the generated banner and one table row per matrix
     /// row, in matrix order.
     #[test]
     fn the_rendered_page_is_a_generated_artifact() {

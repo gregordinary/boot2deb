@@ -9,7 +9,7 @@
 //!   on exit status silently reports such a tool absent, which downgrades a real check
 //!   into a skipped one.
 //! - **Version** ([`version`]) is the first line the tool prints, from stdout *or*
-//!   stderr, since which stream carries it is per-tool (`e2fsck -V` writes to stderr).
+//!   stderr, since which stream contains it is per-tool (`e2fsck -V` writes to stderr).
 //!   Only for a caller that must gate on a version floor. Presence never needs it.
 //!
 //! Side-effecting (it spawns processes), so it lives in the engine rather than `core`.
@@ -34,7 +34,7 @@ pub fn have(tool: &str) -> bool {
 pub fn version(tool: &str, flag: &str) -> Option<String> {
     let out = Command::new(tool).arg(flag).output().ok()?;
     // stdout first: a tool that writes to both (a banner plus a warning) should be
-    // read by the stream carrying the banner.
+    // read by the stream containing the banner.
     [out.stdout, out.stderr].iter().find_map(|stream| {
         String::from_utf8_lossy(stream)
             .lines()
@@ -47,7 +47,7 @@ pub fn version(tool: &str, flag: &str) -> Option<String> {
 /// like a dotted number (`"e2fsck 1.47.0 (5-Feb-2023)"` → `(1, 47)`).
 ///
 /// Pure, so a version-floor gate is unit-testable against real banner text rather than
-/// against whatever the test host happens to carry.
+/// against whatever the test host happens to have.
 pub fn major_minor(line: &str) -> Option<(u32, u32)> {
     line.split_whitespace().find_map(|token| {
         // Trim the punctuation a banner wraps a version in, then require the first two
@@ -65,7 +65,7 @@ pub fn major_minor(line: &str) -> Option<(u32, u32)> {
 ///
 /// When something is missing the behaviour depends on `BOOT2DEB_REQUIRE_HOST_TOOLS`:
 /// a CI job that guarantees the tools sets it, and a miss then **panics**, so the
-/// assertions those tests carry cannot silently drop out of the run. Unset (a
+/// assertions those tests contain cannot silently drop out of the run. Unset (a
 /// tool-minimal dev host), the caller skips with a printed note.
 ///
 /// One implementation, because a test that skips quietly is a coverage regression that
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn version_reads_the_line_whichever_stream_carries_it() {
+    fn version_reads_the_line_whichever_stream_contains_it() {
         // `tar --version` writes to stdout...
         if have("tar") {
             let line = version("tar", "--version").expect("tar prints a version");

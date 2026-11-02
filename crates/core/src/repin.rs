@@ -21,7 +21,7 @@
 //! Those pins are left alone. [`PinForm`](crate::sources::PinForm) draws the same
 //! named-ref/bare-commit line for durability.
 //!
-//! An axis with no declared constraint at all (the kernel, whose config carries a
+//! An axis with no declared constraint at all (the kernel, whose config contains a
 //! `track` rather than a concrete ref) does not come through here. Its ref is
 //! inherited from the lock directly.
 
@@ -40,7 +40,7 @@ use crate::sources::is_full_sha;
 ///
 /// Returns the empty string when nothing declares the axis and no lock holds it.
 /// That is how the caller spells "this build has no such tree". The engine never
-/// reads a ref for a tree the build does not carry.
+/// reads a ref for a tree the build does not include.
 ///
 /// `flag` is taken by value because it is moved straight into the engine's ref set.
 /// The other two are borrows of config and lock.
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn an_authored_constraint_bump_propagates_to_an_existing_lock() {
         // The reported case: `boot-methods/rockchip-rkbin.toml` moves to v2026.07 and a
-        // plain `update` carries every already-locked board with it.
+        // plain `update` moves every already-locked board with it.
         assert_eq!(pick_ref(None, Some("v2026.04"), "v2026.07"), "v2026.07");
         assert!(is_config_bump(Some("v2026.04"), "v2026.07", "v2026.07"));
     }
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn a_hand_pinned_bare_commit_survives_a_constraint_it_differs_from() {
-        // librga/libmali/ffmpeg carry deliberate sha pins against a `master`
+        // librga/libmali/ffmpeg have deliberate sha pins against a `master`
         // constraint. Re-reading the config over them would float the tree.
         assert_eq!(pick_ref(None, Some(SHA), "master"), SHA);
         assert_eq!(pick_ref(None, Some(SHA), "v4l2-request-n8.1"), SHA);

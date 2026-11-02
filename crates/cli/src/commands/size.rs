@@ -1,7 +1,7 @@
 //! `size`: what an image's package set weighs, and the parts that weight has.
 //!
 //! Reads the plan document a build published, then rolls it up. That document is the
-//! one file carrying the archive's own `Installed-Size` and `Source` per package.
+//! one file containing the archive's own `Installed-Size` and `Source` per package.
 //! Offline, and it builds nothing. The input is a *published build*, because a lock
 //! says what an image would be made of. Only a build says what one is.
 //!

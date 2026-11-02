@@ -80,7 +80,7 @@ impl KernelConfig {
             // "CONFIG_X=<value>" — split on the first '=' so quoted string
             // values containing '=' are preserved verbatim. The symbol side is
             // trimmed (so `CONFIG_FOO =m` is `CONFIG_FOO`, not a spaced phantom) and
-            // rejected if it still carries whitespace.
+            // rejected if it still contains whitespace.
             if let Some((sym, val)) = line.split_once('=') {
                 let sym = sym.trim();
                 if let Some(stripped) = sym.strip_prefix("CONFIG_") {

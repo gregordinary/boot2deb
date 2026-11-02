@@ -3,7 +3,7 @@
 //!
 //! A `distros/<name>.toml` layer states one distribution's archive facts. A recipe
 //! never names it. The recipe names a suite, and resolution finds the one layer whose
-//! [`suites`](DistroLayer::suites) carries that suite. Debian codenames and Ubuntu
+//! [`suites`](DistroLayer::suites) contains that suite. Debian codenames and Ubuntu
 //! codenames do not collide, and [`ConfigRoot::distro_for_suite`] refuses a suite that
 //! two layers claim, so that property is enforced rather than assumed.
 //!
@@ -63,7 +63,7 @@ impl fmt::Display for InitramfsGenerator {
 /// initramfs generator, and the packages its images add to the base set.
 ///
 /// Validated by [`validate`](Self::validate) before resolution reads any of it. A
-/// malformed URL or component therefore fails on the layer that carries it, not in a
+/// malformed URL or component therefore fails on the layer that contains it, not in a
 /// bootstrap.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,7 +101,7 @@ pub struct DistroLayer {
     /// The archive components every build root and image resolves against.
     pub components: Vec<String>,
     /// The subset of [`components`](Self::components) a Linux-libre image resolves
-    /// against, carrying no nonfree firmware. Absent where the distribution offers no
+    /// against, containing no nonfree firmware. Absent where the distribution offers no
     /// such subset, and resolution then refuses a libre kernel on it.
     #[serde(default)]
     pub free_components: Option<Vec<String>>,
@@ -245,8 +245,8 @@ impl DistroLayer {
     /// Refuse a layer whose facts a bootstrap or an apt sources file could not hold.
     /// `name` is the layer's stem, which every failure names.
     ///
-    /// The checks are the ones a typo would otherwise carry to a bootstrap failure or
-    /// to a board whose `apt update` errors:
+    /// The checks catch the typos that would otherwise surface as a bootstrap failure or
+    /// on a board whose `apt update` errors:
     ///
     /// - Every suite and pocket name is a bare archive token, and none repeats.
     /// - Every rolling suite is one the layer serves.
@@ -398,7 +398,7 @@ fn check_url(distro: &str, field: &'static str, url: &str) -> Result<(), ConfigE
     let why = if !(url.starts_with("http://") || url.starts_with("https://")) {
         Some("must be an http or https URL")
     } else if !is_archive_token(url) {
-        Some("must carry no whitespace or brackets")
+        Some("must contain no whitespace or brackets")
     } else if url.ends_with('/') {
         Some("must not end in `/`, which the build appends itself")
     } else {
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn the_resolved_form_carries_the_release_pocket_first() {
+    fn the_resolved_form_lists_the_release_pocket_first() {
         let r = debian().resolve("debian", "trixie");
         assert_eq!(r.name, "debian");
         assert_eq!(r.release().suite, "trixie");

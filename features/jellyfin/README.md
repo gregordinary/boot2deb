@@ -1,6 +1,6 @@
 # `jellyfin` feature
 
-An **application feature**: it installs the Jellyfin media server and carries no
+An **application feature**: it installs the Jellyfin media server and includes no
 transcode stack of its own. It is named for the app, so it composes with whatever
 hardware-acceleration **capability feature** matches the target. It is `arm64`
 only, and that gate comes from the vendored ICU `.deb` below rather than from
@@ -48,7 +48,7 @@ it drags in a second complete FFmpeg. `jellyfin-server` only *Recommends*
 `jellyfin-ffmpeg8 | ffmpeg`, and this builder never installs Recommends, so
 naming the two real packages keeps the bundled build out. That is what an image
 supplying its own encoder wants: `jellyfin-ffmpeg8` is linked against the sonames
-its own pocket carries, and pulling it onto a different Debian suite drags that
+its own pocket contains, and pulling it onto a different Debian suite drags that
 pocket's library versions in behind it.
 
 ## No bundled FFmpeg, and what that costs
@@ -147,7 +147,7 @@ candidates are reachable.
 Taking trixie packages onto a forky rootfs is not free. Jellyfin's packages are
 self-contained .NET publishes that link the *system* ICU by soname, so
 `jellyfin-server` declares `Depends: libicu76`. That is trixie's ICU; forky ships
-`libicu78` and carries no `libicu76` at all, so the dependency cannot be
+`libicu78` and contains no `libicu76` at all, so the dependency cannot be
 satisfied from the mirror.
 
 An `[[extra_debs]]` entry supplies exactly that one library, pinned by sha256.
@@ -168,6 +168,6 @@ This is where the feature's `arm64` gate comes from. `extra_debs` has no arch
 templating, the local apt repo takes exactly one architecture, and a `.deb` whose
 `Architecture` is neither the build's nor `all` fails the build rather than being
 skipped — so the arch-pinned bytes decide the feature's arch. Supporting `amd64`
-means a sibling feature carrying that arch's deb; everything else here is
+means a sibling feature containing that arch's deb; everything else here is
 arch-neutral and would be shared. Retarget both the suite and the ICU pin when a
 `forky` pocket ships.

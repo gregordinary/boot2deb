@@ -8,7 +8,7 @@
 //!
 //! The roles are derived from the [`ResolvedBuild`] rather than from flags. That is
 //! what makes pressing a `split` build to one output path a resolution-shaped error.
-//! The error names both artifacts, where a board page would only carry prose about
+//! The error names both artifacts, where a board page would only contain prose about
 //! them.
 //!
 //! The mapping is small because resolution has already narrowed the space. A
@@ -19,7 +19,7 @@
 
 use crate::model::{Layout, ResolvedBuild};
 
-/// Size of the per-unit seed partition every GPT-bearing image carries: a FAT12
+/// Size of the per-unit seed partition every GPT-bearing image contains: a FAT12
 /// volume holding `seed.txt`, regenerated whole by `press` and `seed`.
 ///
 /// 1 MiB is roomy for a hostname and a few keys, and small enough to rebuild in
@@ -39,7 +39,7 @@ pub const SEED_PARTLABEL: &str = "b2d-seed";
 /// Which of a build's image artifacts one pressed output derives from.
 ///
 /// The role also names the artifact on disk: a build's images share one stem and
-/// differ only in the suffix this role carries ([`file_name`](Self::file_name)).
+/// differ only in the suffix this role has ([`file_name`](Self::file_name)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactRole {
     /// The whole-disk image of a `combined` build — boot payload and rootfs on one
@@ -77,12 +77,12 @@ impl ArtifactRole {
         }
     }
 
-    /// Whether this artifact carries the rootfs — and with it the seed partition
-    /// and everything post-hoc customization can touch. A boot image carries
+    /// Whether this artifact contains the rootfs — and with it the seed partition
+    /// and everything post-hoc customization can touch. A boot image contains
     /// neither a GPT nor a filesystem, so seed keys and tree additions do not
     /// apply to it.
     #[must_use]
-    pub fn carries_rootfs(self) -> bool {
+    pub fn contains_rootfs(self) -> bool {
         !matches!(self, ArtifactRole::Boot)
     }
 }
@@ -136,9 +136,9 @@ mod tests {
     }
 
     #[test]
-    fn only_the_boot_image_carries_no_rootfs() {
-        assert!(ArtifactRole::Combined.carries_rootfs());
-        assert!(ArtifactRole::Rootfs.carries_rootfs());
-        assert!(!ArtifactRole::Boot.carries_rootfs());
+    fn only_the_boot_image_contains_no_rootfs() {
+        assert!(ArtifactRole::Combined.contains_rootfs());
+        assert!(ArtifactRole::Rootfs.contains_rootfs());
+        assert!(!ArtifactRole::Boot.contains_rootfs());
     }
 }

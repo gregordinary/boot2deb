@@ -273,7 +273,7 @@ pub(crate) fn kernel_packages(
 ///
 /// The debs built in *this* run (`kmod_debs`) are authoritative. For a standalone
 /// `--stage rootfs` (built by a prior invocation) the names come from the ledger, matched
-/// by the `-modules-` infix or `-firmware` suffix a kmod `.deb` carries. A board may
+/// by the `-modules-` infix or `-firmware` suffix a kmod `.deb` has. A board may
 /// declare several modules, so — unlike the single kernel — a count above one is not an
 /// error; but modules pinned to *two* kernel releases sharing an `out_dir` are stale
 /// residue that would each pull a different `linux-image`, so that is refused, mirroring
@@ -332,7 +332,7 @@ impl EmittedArtifacts {
     /// The artifacts recorded so far as `[[outputs]]` rows, sized and hashed, sorted by
     /// file name. A file announced twice is one row, as its last announcement names it.
     ///
-    /// `per_image` holds the paths that carry the per-image first-boot password, which the
+    /// `per_image` holds the paths that contain the per-image first-boot password, which the
     /// image stage names ([`Output::per_image`](boot2deb_core::outputs::Output::per_image)).
     pub(crate) fn rows(
         &self,

@@ -75,7 +75,7 @@ pub struct DeviceScaffold {
 pub const PLACEHOLDER: &str = "CHANGEME";
 
 /// One value the scaffold could not determine, surfaced to the author after the
-/// files are written. The rendered file carries a best-effort suggestion so it still
+/// files are written. The rendered file contains a best-effort suggestion so it still
 /// *resolves*, proving the layer composition. These notes say which suggestions are
 /// guesses that fail late if wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +143,7 @@ impl DeviceScaffold {
     }
 
     /// Render `devices/<name>.toml`. Derivable values are filled. The researched
-    /// values carry a best-effort suggestion and a `# TODO:` line, so the file
+    /// values get a best-effort suggestion and a `# TODO:` line, so the file
     /// resolves immediately while flagging what still needs verifying.
     ///
     /// The boot method decides which fields the board even *has*. A board that

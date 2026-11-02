@@ -1,4 +1,4 @@
-//! The four UTC timestamp spellings this project writes, and the calendar
+//! The four UTC timestamp spellings boot2deb writes, and the calendar
 //! conversion behind all of them.
 //!
 //! Pure: the caller reads the clock and passes whole Unix seconds, so the civil-date
@@ -54,7 +54,7 @@ pub fn format_date_c(unix_secs: u64) -> String {
 
 /// Format whole Unix seconds as RFC 2822 in UTC, `Www, dd Mmm YYYY HH:MM:SS +0000`.
 ///
-/// It is the date a `debian/changelog` entry's trailer line carries, which
+/// It is the date a `debian/changelog` entry's trailer line contains, which
 /// `dpkg-parsechangelog` reads back as the entry's timestamp.
 ///
 /// ```
@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(format_rfc3339(951_782_400), "2000-02-29T00:00:00Z");
         // 2100 is *not* a leap year by the 100-rule.
         assert_eq!(format_rfc3339(4_107_542_400), "2100-03-01T00:00:00Z");
-        // Time of day, carried through both fields.
+        // Time of day, preserved through both fields.
         assert_eq!(format_rfc3339(1_767_225_600 + 3661), "2026-01-01T01:01:01Z");
     }
 }

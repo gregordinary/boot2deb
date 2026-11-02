@@ -92,7 +92,7 @@ vol_mmc="$(vol mmc)"
 rk1="mmcblk0: mmcblk0boot0: mmcblk0boot1: nvme0n1:nvme"
 
 echo "-- the ladder"
-case_ "adopts a volume already carrying our label" clean "$vol_nvme" \
+case_ "adopts a volume that already has our label" clean "$vol_nvme" \
     STUB_LABEL_DEV=/dev/nvme0n1p1
 case_ "refuses a disk holding a partition table" clean "$vol_nvme" \
     STUB_DISKS=nvme0n1:nvme STUB_PTTYPE=gpt

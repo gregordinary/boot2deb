@@ -25,7 +25,7 @@ Merge order is base → soc → accel → device (device last so a board can ove
 
 The target RK1 config differs from `defconfig` in ~6600 symbols, of which only
 ~60 are rockchip SoC/accel choices; the rest is generic Debian kernel policy.
-Splitting that bulk "by concern" adds no value (it is Debian's policy, not ours),
+Splitting that bulk "by concern" adds no value (it is Debian's policy, not boot2deb's),
 so it lives in one generated baseline while the small rockchip slices stay
 legible and reusable across kernels/SoCs. **The resulting `.config` depends only on
 the union of the fragments**, so which slice a symbol lands in is a legibility
@@ -48,7 +48,7 @@ recorded. Add a slice for a different SoC that selects it differently and the li
 turns into a gate failure describing nothing — kconfig's answer is the correct one
 and no fragment edit can change it.
 
-So a generated baseline carries prompted symbols only. Finding the promptless ones
+So a generated baseline contains prompted symbols only. Finding the promptless ones
 is mechanical: walk the tree's `Kconfig` files, and for each `config X` block up to
 its `help`, look for a quoted string on the type line or a `prompt` directive.
 Two traps: Kconfig quotes prompts with either `"` or `'` (`tristate '"ah" match
@@ -78,6 +78,6 @@ Last, merge the new baseline with its slices and drop every baseline line the fi
 `.config` does not hold. A slice that turns a whole subsystem off voids the
 baseline's requests inside it. `soc/rk3288` turns off the other SoC families, PCI
 and raw NAND, so Debian's `=m` for a PCI network card can never take on that kernel.
-Carried anyway, each such line is a clean-merge failure no edit could fix. Dropping
+Kept anyway, each such line is a clean-merge failure no edit could fix. Dropping
 them leaves the resulting `.config` unchanged, since the slice already decided those
 symbols.

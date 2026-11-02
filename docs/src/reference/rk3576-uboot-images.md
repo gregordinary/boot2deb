@@ -43,7 +43,7 @@ reset on gpio2 PB3, `tx_delay 0x1b`, and `rgmii-rxid`.
 It therefore ships in a board series (`h96-max-m9-util`) that layers one board
 patch on the generic util series, leaving the SoC-generic images ethernet-free.
 The board patch adds the nodes to the shared `rk3576-generic` control DTB. A
-board wanting its own control DTB would carry the ethernet there instead.
+board wanting its own control DTB would include the ethernet there instead.
 
 ## USB port roles
 
@@ -57,7 +57,7 @@ them, so each build fixes their roles at build time:
 
 A single build is therefore both a device (to a laptop, on drd0) and a host (for
 peripherals, on drd1) at once, one role per connector. A USB hub on the drd1 port
-carries a keyboard and a bootable stick together. u-boot enumerates hubs during
+supports a keyboard and a bootable stick together. u-boot enumerates hubs during
 `usb start`, and boots from a device behind one.
 
 The images with a USB keyboard (display and util) run `usb start` automatically

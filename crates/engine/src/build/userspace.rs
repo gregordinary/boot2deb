@@ -93,7 +93,7 @@ const RELAX_CFLAGS: &str =
 /// One buildable userspace package: the tree as the SoC declares it, where to fetch it,
 /// and the exact commit the lock pins.
 ///
-/// The declaration is carried whole rather than copied field by field, so a tree that
+/// The declaration is kept whole rather than copied field by field, so a tree that
 /// gains a knob reaches the stage without this type changing.
 struct Package<'a> {
     /// The SoC's `[[userspace]]` entry: name, `.deb`s, patch scope, variant filter.
@@ -374,7 +374,7 @@ fn build_one(
     }
 
     // Deterministic build timestamp from the locked *base* commit. For
-    // MPP the tree now carries the patch series, so — like the kernel/ffmpeg stages —
+    // MPP the tree now includes the patch series, so — like the kernel/ffmpeg stages —
     // read the base pin explicitly (still reachable after `git am`), not HEAD.
     let epoch = crate::git::commit_epoch(&tree, &pkg.pin.commit).ok();
     let dpkg_env = dpkg_env(env.jobs(), epoch);
@@ -453,7 +453,7 @@ pub fn receives_userspace_patches(tree: &UserspaceTree) -> bool {
 /// The patch inputs folded into a userspace package's tree signature when it
 /// receives the `userspace` scope. They are the series name, its pinned commit, and
 /// the applied-series identity. This mirrors how the kernel/ffmpeg tree signatures fold
-/// their series (`build::fold_patch_series`). A package that carries no patch folds
+/// their series (`build::fold_patch_series`). A package that has no patch folds
 /// none of this.
 pub struct PatchInputs<'a> {
     /// The lock's patch pin (series + `patches` repo commit), or `None` when the
@@ -1126,8 +1126,8 @@ arm-linux-gnueabihf/libmali-utgard-450 x11
     /// The sandbox that compiled a package is part of that package's identity.
     ///
     /// The suite names the userland but does not identify the instance of it: a
-    /// snapshot-pinned sandbox and a live-mirror one carry the same suite and can
-    /// carry different compilers, and on a cross host the `qemu-user` that executes
+    /// snapshot-pinned sandbox and a live-mirror one have the same suite and can
+    /// contain different compilers, and on a cross host the `qemu-user` that executes
     /// that compiler is an input too. Both travel in the one `sandbox` scalar, so it
     /// is asserted as one: change it, and the store must not restore the other
     /// sandbox's `.deb`s.

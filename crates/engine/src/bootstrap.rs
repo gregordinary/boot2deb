@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn a_live_archive_carries_every_pocket_on_its_own_mirror() {
+    fn a_live_archive_contains_every_pocket_on_its_own_mirror() {
         let a = Archive::resolve(&debian(), None, SnapshotMode::Off).unwrap();
         assert!(!a.point_in_time);
         assert_eq!(a.suite(), "forky");

@@ -3,7 +3,7 @@
 description = "Rockchip idbloader + u-boot.itb in the raw gap (rkbin ATF/TPL)"
 
 # u-boot's canonical upstream, run by the project itself. `github.com/u-boot/u-boot`
-# is a mirror carrying byte-identical tag objects, so `--uboot-src` reaches the same
+# is a mirror containing byte-identical tag objects, so `--uboot-src` reaches the same
 # tree if this host is unreachable.
 uboot_source = "https://git.u-boot-project.org/u-boot/u-boot.git"
 uboot_ref    = "v2026.10"                # default constraint; pinned exactly in the lock

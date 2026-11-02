@@ -11,7 +11,7 @@
 //! provisioned Debian root* ([`crate::sandbox`]). It is resolved from the build's own
 //! mirror list and sha256-pinned in that root's manifest. It is therefore an input the
 //! lock names rather than a fact about the machine. What is asked of the host is what
-//! no root can carry:
+//! no root can provide:
 //!
 //! - **Every build:** unprivileged user namespaces. Each root a build provisions is
 //!   bootstrapped and entered in-process through the ferroday-cage library, which
@@ -62,9 +62,9 @@ pub struct Check {
 /// The outcome of probing for a [`Check`].
 #[derive(Debug, Clone)]
 pub enum CheckStatus {
-    /// Found. Carries a detail — a resolved path, or `"registered (flags …)"`.
+    /// Found. Contains a detail — a resolved path, or `"registered (flags …)"`.
     Present(String),
-    /// Absent. Carries a host-specific install hint (e.g. `sudo apt install …`).
+    /// Absent. Contains a host-specific install hint (e.g. `sudo apt install …`).
     Missing(String),
 }
 
@@ -214,7 +214,7 @@ pub struct ToolNeeds {
     /// compiler would be noise a genuinely missing tool could hide in.
     ///
     /// The path is the build's own work dir rather than the host temp dir. The
-    /// capability is therefore probed on the filesystem that will carry the uppers. An
+    /// capability is therefore probed on the filesystem that will contain the uppers. An
     /// operator whose work dir is on another volume can get a different answer there.
     pub compiles: Option<PathBuf>,
     /// The build assembles a rootfs and a disk image.

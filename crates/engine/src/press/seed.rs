@@ -42,7 +42,7 @@ const SEED_LABEL: &str = "B2D-SEED";
 /// file's mtime would invert the priorities.
 const FAT_EPOCH_FLOOR: i64 = 315_532_800;
 
-/// The keys a seed can carry. Every field is optional, and the default is the empty
+/// The keys a seed can contain. Every field is optional, and the default is the empty
 /// seed the built image ships. Unknown keys in the file are ignored on both
 /// sides, so an old image meets a newer seed (and the reverse) safely.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub struct SeedKeys {
     /// `authorized_keys`, one entry each.
     pub authorized_keys: Vec<String>,
     /// `wifi_ssid=` — the network the hook writes a NetworkManager connection
-    /// profile for, on images that carry NetworkManager (every Wi-Fi-capable
+    /// profile for, on images that contain NetworkManager (every Wi-Fi-capable
     /// board's do). Elsewhere the hook logs and skips. The canonical per-site
     /// value that must never sit in a committed recipe.
     pub wifi_ssid: Option<String>,
@@ -65,8 +65,8 @@ pub struct SeedKeys {
     /// `static_ip=` — static IPv4 (`address/prefix[,gateway[,dns...]]`, validated by
     /// `boot2deb_core::staticip`) for the connection the seed sets up. That is the
     /// Wi-Fi profile when [`wifi_ssid`](Self::wifi_ssid) is present, and the wired
-    /// interface otherwise. It is applied through NetworkManager on images that carry
-    /// it, `dhcpcd.conf` on images that carry dhcpcd, and a logged skip on images with
+    /// interface otherwise. It is applied through NetworkManager on images that contain
+    /// it, `dhcpcd.conf` on images that contain dhcpcd, and a logged skip on images with
     /// neither. Absent means DHCP.
     pub static_ip: Option<String>,
 }
@@ -163,7 +163,7 @@ pub fn parse(text: &str) -> SeedKeys {
     keys
 }
 
-/// Build the whole 1 MiB partition image: a FAT12 volume carrying
+/// Build the whole 1 MiB partition image: a FAT12 volume containing
 /// [`SEED_FILE`] with `keys` rendered into it.
 ///
 /// `volume_id` and `time_secs` are the two values a FAT format would otherwise
@@ -218,7 +218,7 @@ pub fn partition_image(
 ///
 /// # Errors
 ///
-/// [`EngineError::ImageVerifyGpt`] when the target carries no readable GPT or
+/// [`EngineError::ImageVerifyGpt`] when the target contains no readable GPT or
 /// no seed partition (an image from before the seed existed), and I/O errors
 /// naming the target.
 pub fn rewrite_seed(target: &Path, keys: &SeedKeys, time_secs: i64) -> Result<(), EngineError> {

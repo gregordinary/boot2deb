@@ -5,7 +5,7 @@
 //!
 //! RK3588 u-boot builds with the aarch64 toolchain (`CROSS_COMPILE` on a
 //! non-arm64 host) and `CONFIG_ARM64=y` from the defconfig, so no `ARCH=` is
-//! passed. The defconfig carries it. The blobs are verified against the lock's
+//! passed. The defconfig contains it. The blobs are verified against the lock's
 //! hashes ([`crate::blobs`]) before `make` consumes them.
 
 use crate::blobs;
@@ -100,7 +100,7 @@ pub struct UbootOptions<'a> {
     /// u-boot's build compiles host tools (`mkimage`, `dtc`) as well as target ones,
     /// generates its `pylibfdt` device-tree bindings, and runs `binman`. The
     /// toolchain, `swig`, the Python dev headers and `pyelftools` therefore all come
-    /// from this root, and the host carries none of them. Bootstrapped lazily, like
+    /// from this root, and the host has none of them. Bootstrapped lazily, like
     /// [`packaging`](Self::packaging) and for the same reason.
     pub cross: &'a dyn BuildSandbox,
     /// Directory the produced boot payloads are staged into.
@@ -242,7 +242,7 @@ pub fn build_uboot(
     {
         let idbloader = publish(opts, idbloader)?;
         let uboot_itb = publish(opts, uboot_itb)?;
-        // The deb carries a package name and version of its own, so it publishes
+        // The deb contains a package name and version of its own, so it publishes
         // unrenamed — the artifact ledger, not the file name, scopes a `.deb`.
         let deb = stage_artifact(opts.out_dir, deb)?;
         let maskrom = match maskrom_in(&restored.0) {
@@ -263,7 +263,7 @@ pub fn build_uboot(
         });
     }
     // The probe missed, or restored an entry missing a role: discard the staging dir
-    // rather than carry it through the compile below.
+    // rather than keep it through the compile below.
     drop(restored);
 
     // Tier-1 reuse of the cloned+patched tree: a lock bump rebuilds it.
@@ -343,7 +343,7 @@ pub fn build_uboot(
     //
     // Stored from the *tree*, not from the published copies: the signature keys on the
     // inputs that shape the bytes, and the build point is not one of them, so an entry
-    // must carry the canonical names to be servable to any point whose inputs match.
+    // must contain the canonical names to be servable to any point whose inputs match.
     let mut outputs = vec![
         ("idbloader", tree.join(IDBLOADER)),
         ("uboot_itb", tree.join(UBOOT_ITB)),
@@ -390,7 +390,7 @@ pub fn output_manifest(
     env: &BuildEnv,
     patches: SeriesIdentity,
 ) -> Result<crate::signature::SignatureManifest, EngineError> {
-    // Fold the Tier-1 tree signature (carrying the co-dev series fingerprint, if any),
+    // Fold the Tier-1 tree signature (containing the co-dev series fingerprint, if any),
     // so a co-dev build never shares an output entry with a pinned one and an edited
     // patch invalidates the cached deb.
     let tree_sig = clone_manifest(lock, patches)?.signature();
@@ -765,7 +765,7 @@ fn package_name(device: &str) -> String {
 ///
 /// The deb stages `idbloader.img` + `u-boot.itb` under `/usr/lib/u-boot/<device>/`
 /// with an `install.conf` recording their raw byte offsets, and documents the
-/// manual `dd` in `README.Debian`. It carries **no** maintainer script: the
+/// manual `dd` in `README.Debian`. It contains **no** maintainer script: the
 /// bootloader lives in a raw gap outside any filesystem, so flashing is the image
 /// build's job (or a documented manual step), never an `apt` side effect that
 /// could brick a board by writing to the wrong device.
@@ -1490,7 +1490,7 @@ mod tests {
         }
         // The `fakeroot`-less claim, asserted rather than assumed: the root maps the
         // caller to uid 0, so a tree the build user staged on the host is archived with
-        // the ownership a `.deb` must carry. A member owned by anyone else would install
+        // the ownership a `.deb` must have. A member owned by anyone else would install
         // files owned by whoever happened to run the build.
         for line in contents.lines().filter(|l| l.contains("/usr/lib/u-boot/")) {
             assert!(

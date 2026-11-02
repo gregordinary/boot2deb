@@ -35,7 +35,7 @@
 //!   which is worse than a transient.
 //!
 //! Heavy load is the one variable both occurrences shared, and none of the clean
-//! audits reproduced. The report therefore also carries the load average and the
+//! audits reproduced. The report therefore also contains the load average and the
 //! reclaimable-memory lines of `/proc/meminfo`, **read before the retries**. The
 //! machine's state at the moment of failure is thereby recorded rather than inferred.
 //!
@@ -83,13 +83,13 @@ const RESTAT_ATTEMPTS: u32 = 10;
 /// exits with its status; on success it does no work beyond one `sh`. A stage asks for
 /// it through [`SandboxRun::probe`](crate::sandbox::SandboxRun::probe) rather than by
 /// calling this directly, so the spec keeps naming the command the build asked for and
-/// only what is *launched* carries the wrapper.
+/// only what is *launched* includes the wrapper.
 pub(crate) fn wrap(argv: &[String], report: &Path) -> Vec<String> {
     let script = SCRIPT
         .replace("@CAPTURE@", CAPTURE)
         .replace("@REPORT@", &report.display().to_string())
         .replace("@ATTEMPTS@", &RESTAT_ATTEMPTS.to_string());
-    // `$@` carries the original argv, so nothing is re-quoted into the script and a
+    // `$@` contains the original argv, so nothing is re-quoted into the script and a
     // path holding a shell metacharacter cannot change what runs.
     let mut wrapped = vec![
         "/bin/sh".to_string(),
@@ -115,7 +115,7 @@ pub(crate) fn wrap(argv: &[String], report: &Path) -> Vec<String> {
 /// `No such file or directory` is on stderr, so the log the scan below reads has to
 /// hold both; the caller's two streams do not.
 ///
-/// `4>&1` inside the outer group carries the caller's stdout past the inner pipeline,
+/// `4>&1` inside the outer group passes the caller's stdout past the inner pipeline,
 /// which is what lets the inner group send stderr into a pipe (`2>&1`) and *then* put
 /// stdout back where it belongs (`1>&4`).
 const SCRIPT: &str = r#"
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn the_original_command_is_passed_through_untouched() {
-        // The wrapper must not re-quote the command: `$@` carries it, so the argv the
+        // The wrapper must not re-quote the command: `$@` contains it, so the argv the
         // build asked for appears verbatim at the tail.
         let original = argv(&["make", "-j32"]);
         let wrapped = wrap(&original, Path::new("/work/ffmpeg/lookup-probe.log"));

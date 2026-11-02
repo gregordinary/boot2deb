@@ -453,7 +453,7 @@ impl ConfigRoot {
     /// straight into that method's struct. Fields belonging to another method are
     /// unknown fields here and are rejected. An `idbloader_offset` in
     /// `boot-methods/depthcharge.toml` is a parse error naming the file. It is not a
-    /// value silently carried into a build that has no raw gap to write it to.
+    /// value silently passed into a build that has no raw gap to write it to.
     pub fn boot_method(&self, bm: BootMethod) -> Result<BootMethodLayer, ConfigError> {
         let rel = format!("boot-methods/{}.toml", bm.as_str());
         let (value, path) = self.merge_value("boot-method", bm.as_str(), &rel)?;
@@ -466,8 +466,8 @@ impl ConfigRoot {
     }
 
     /// Load `kernels/<id>.toml`, dispatching on its `flavor` to the variant that
-    /// flavor's fields belong to. A compiled kernel carries a source ref, a
-    /// defconfig, fragments and patch series. A `distro-package` kernel carries only
+    /// flavor's fields belong to. A compiled kernel contains a source ref, a
+    /// defconfig, fragments and patch series. A `distro-package` kernel contains only
     /// a package name. Each variant is strict, so a fragment list on a distro kernel
     /// fails at load rather than being ignored. Nothing would ever read it.
     pub fn kernel(&self, id: &str) -> Result<KernelDef, ConfigError> {
@@ -494,7 +494,7 @@ impl ConfigRoot {
         })
     }
     /// Load a recipe by its `<device>/<leaf>` reference
-    /// (`recipes/<device>/<leaf>.toml`). The one config key that carries a directory
+    /// (`recipes/<device>/<leaf>.toml`). The one config key that contains a directory
     /// separator. A recipe lives under its device's folder, and the reference is the
     /// path to it (minus the extension). The leaf therefore drops the redundant
     /// device prefix: `turing-rk1/media-accel-forky`, not
@@ -513,7 +513,7 @@ impl ConfigRoot {
     }
 
     /// Load `kmods/<name>.toml` — one out-of-tree kernel-module set a device selects by
-    /// name. The stem *is* the kmod's identity (the layer carries no `name` field), so
+    /// name. The stem *is* the kmod's identity (the layer contains no `name` field), so
     /// the caller pairs the two into a [`ResolvedKmod`].
     pub fn kmod(&self, name: &str) -> Result<KmodLayer, ConfigError> {
         self.load("kmod", "kmods", name)
@@ -637,7 +637,7 @@ impl ConfigRoot {
     /// is. An overlay recipe's files therefore land in that overlay, not in the primary
     /// root. `name` is validated as `lock_path` validates it, which admits a variant's
     /// feature suffix. `filename` is held to a bare filename: no separator, not `.` or
-    /// `..`, and not option-like. A variant's leaf carries `+`, which a bare identifier
+    /// `..`, and not option-like. A variant's leaf contains `+`, which a bare identifier
     /// would refuse. This is a *write* target: an unchecked `../` or absolute component
     /// would let `build --save-manifest` write outside `recipes/`.
     pub fn lock_sibling(&self, name: &str, filename: &str) -> Result<PathBuf, ConfigError> {
@@ -837,7 +837,7 @@ fn at_key<'a>(value: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
 
 /// Write `entries` at a dotted [`ACCUMULATED`] key of the merged device table. The
 /// enclosing tables exist, because some level of the chain declared the key and the
-/// merge carried its tables up. A malformed intermediate is left for the deserializer
+/// merge passed its tables up. A malformed intermediate is left for the deserializer
 /// to refuse.
 fn set_key(table: &mut toml::Table, key: &str, entries: Vec<toml::Value>) {
     let mut segments: Vec<&str> = key.split('.').collect();
@@ -975,7 +975,7 @@ fn validate_device_name(name: &str) -> Result<(), ConfigError> {
 
 /// Reject any recipe reference that is not `<device>/<leaf>` (or a bare `<leaf>`)
 /// before it joins into a filesystem path. Recipes are the one config layer that
-/// nests one level under a device folder, so a reference may carry a *single*
+/// nests one level under a device folder, so a reference may contain a *single*
 /// interior `/` separating two [bare identifiers](is_bare_name); each half is held to
 /// the same rule [`validate_name`] enforces. Because each segment must be bare and
 /// non-empty, this rejects a leading/trailing/absolute/doubled slash, more than one
@@ -1012,7 +1012,7 @@ pub(crate) fn check_feature_name(name: &str) -> Result<(), ConfigError> {
     validate_name("feature", name)
 }
 
-/// Validate a *build reference* — a recipe reference optionally carrying a
+/// Validate a *build reference* — a recipe reference optionally containing a
 /// `+`-separated feature suffix, the form
 /// [`BuildPoint::reference`](crate::buildpoint::BuildPoint::reference) produces.
 ///
@@ -1217,7 +1217,7 @@ packages = [
     }
 
     /// A variant's NuGet sidecar and solved package manifest sit beside the variant's
-    /// own lock, and their names carry the `+` the variant's leaf does. A name with a
+    /// own lock, and their names contain the `+` the variant's leaf does. A name with a
     /// separator is refused.
     #[test]
     fn a_lock_sibling_sits_beside_a_variants_lock() {
@@ -1281,7 +1281,7 @@ packages = [
 
     // ---- Search-path behaviour (overlays) ------------------------------------
 
-    /// A primary root + one overlay, each optionally carrying a `base.toml` and a
+    /// A primary root + one overlay, each optionally containing a `base.toml` and a
     /// `recipes/<name>.toml`. Returns both tempdirs (kept alive) and the root.
     fn overlaid(
         primary_base: Option<&str>,
@@ -1900,7 +1900,7 @@ packages = [
         let k = shipped.kmod("aic8800").unwrap();
         assert_eq!(k.git_ref, "main");
         assert_eq!(k.modules, ["a"]);
-        // The layer carries no `name`: the stem is the identity, so the file and the
+        // The layer contains no `name`: the stem is the identity, so the file and the
         // thing it declares cannot disagree.
         assert_eq!(k.patch_dir, "debian/patches", "patch_dir defaults");
 
@@ -1961,7 +1961,7 @@ impl ConfigRoot {
     /// layer no recipe reaches is not walked. It contributes to no image, so a suite
     /// name in it is a different kind of dead config.
     ///
-    /// A report is advice, not a verdict. A tree that legitimately carries a layer
+    /// A report is advice, not a verdict. A tree that legitimately contains a layer
     /// ahead of the recipe that will use it produces one. A suite being prepared for
     /// is such a layer, and a caller says so rather than refusing.
     pub fn unreachable_suites(&self) -> Result<Vec<UnreachableSuite>, ConfigError> {

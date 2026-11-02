@@ -19,7 +19,7 @@
 //! GPT entry, so the `gpt` crate's raw `flags: u64` writes them. The build needs no
 //! ChromeOS host tooling at all.
 //!
-//! # Why an image carries more than one kernel slot
+//! # Why an image contains more than one kernel slot
 //!
 //! Those three fields are not just a boot order. Together they are an **atomic
 //! update protocol with firmware-level rollback**, and it only works if there is
@@ -52,7 +52,7 @@ const PRIORITY_SHIFT: u32 = 48;
 /// `priority` and `tries` are 4 bits each.
 const NIBBLE_MAX: u8 = 0xF;
 
-/// The most kernel slots one image can carry, and the length of the `KERN-A`..`KERN-D`
+/// The most kernel slots one image can contain, and the length of the `KERN-A`..`KERN-D`
 /// name set the image node draws from.
 ///
 /// Two is the useful number — it is what buys an upgrade its fallback — and nothing
@@ -98,7 +98,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shipped_attributes_pack_to_the_value_a_booting_board_carries() {
+    fn the_shipped_attributes_pack_to_the_value_a_booting_board_has() {
         // priority=10, tries=5, successful=1 — read back off the working image and
         // off the postmarketOS install on the target unit. If this constant ever
         // changes, an image stops booting, so it is asserted literally.

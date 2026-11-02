@@ -139,7 +139,7 @@ impl NugetManifest {
     /// # Errors
     ///
     /// [`ConfigError::NugetManifestInvalid`], naming `origin`, when an entry is not a
-    /// usable pin or one id and version carry two different hashes. The same error
+    /// usable pin or one id and version have two different hashes. The same error
     /// refuses a runtime .NET does not publish for.
     pub fn new(
         runtime: &str,

@@ -147,7 +147,7 @@ impl pins::NugetResolver for NoDotnetApps {
 /// moved config constraint.
 ///
 /// Thin wrapper over [`boot2deb_core::repin::pick_ref`] that adds the two things the
-/// command needs around it: `configured: None` is the "this build carries no such
+/// command needs around it: `configured: None` is the "this build has no such
 /// tree" case (an undeclared SoC source, or u-boot on a board whose firmware is its
 /// own), which pins nothing and yields the empty string `resolve_lock` never reads;
 /// and a followed bump is appended to `bumps` under `axis` for the post-write report.
@@ -206,7 +206,7 @@ pub(crate) fn run(
     // propagated move is visible at pin time instead of surfacing later as an
     // unexplained ref change in the lock diff.
     let mut bumps: Vec<String> = Vec::new();
-    // The kernel ref has no config default (the config carries only a `track`, not a
+    // The kernel ref has no config default (the config contains only a `track`, not a
     // concrete tag), so an omitted `--kernel-ref` inherits the previous lock's ref —
     // the "re-pin what changed" model for a patch-only update. Only the first update
     // (no prior lock) must supply it.
@@ -239,12 +239,12 @@ pub(crate) fn run(
         build.rkbin_boot().map(|b| b.uboot_ref.as_str()),
     );
     // Media-accel source refs are pinned only when the recipe builds the transcode
-    // stack (its resolved build carries the sources). A base build leaves them empty —
+    // stack (its resolved build contains the sources). A base build leaves them empty —
     // `resolve_lock` never reads a ref without a matching source, and the lock omits
     // both pin tables.
     let prev_us = prev.as_ref().map(|l| l.userspace.as_slice()).unwrap_or(&[]);
     let prev_ff = prev.as_ref().and_then(|l| l.ffmpeg.as_ref());
-    // One ref per tree the resolved build carries, keyed by name — the same rule the
+    // One ref per tree the resolved build contains, keyed by name — the same rule the
     // out-of-tree modules follow, and for the same reason: which trees exist is the
     // SoC's statement, so there is no fixed set of flags to write.
     let userspace_refs: Vec<(String, String)> = build
@@ -319,7 +319,7 @@ pub(crate) fn run(
         // folder, so it is named for the recipe's leaf, not the slashed reference:
         // `recipes/turing-rk1/media-accel-forky.pkgs.lock`, filename
         // `media-accel-forky.pkgs.lock`. Deliberately *not* the point's artifact stem,
-        // which carries the device: the stem exists to disambiguate a flat output
+        // which contains the device: the stem exists to disambiguate a flat output
         // directory, and inside `recipes/turing-rk1/` the device is the folder name
         // already. `build` publishes its own copy under the stem.
         let leaf = recipe.rsplit('/').next().unwrap_or(recipe);
@@ -351,7 +351,7 @@ pub(crate) fn run(
     // re-resolves to the same pins keeps the epoch it had, so it neither changes the
     // times a rebuild stamps nor invalidates the rootfs cache.
     if let Some(prev) = &prev {
-        lock.carry_source_date_epoch(prev);
+        lock.keep_source_date_epoch(prev);
     }
     // Fetch + verify + store each pre-built extra_deb before committing the lock, so
     // a dead URL, a missing file, or a wrong hash fails now rather than at the next

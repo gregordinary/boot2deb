@@ -89,7 +89,7 @@ pub struct SpdxPackage {
     /// External identifiers — the purl, where the component has one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub external_refs: Vec<ExternalRef>,
-    /// Free text, where the model carries a description.
+    /// Free text, where the model contains a description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }
@@ -128,7 +128,7 @@ pub struct Relationship {
     pub related_spdx_element: String,
 }
 
-/// The document id every SPDX document's root carries.
+/// The document id every SPDX document's root contains.
 const DOCUMENT_ID: &str = "SPDXRef-DOCUMENT";
 
 impl Document {
@@ -224,7 +224,7 @@ mod tests {
     use crate::sbom::tests::sbom;
 
     #[test]
-    fn the_document_carries_every_field_the_schema_requires() {
+    fn the_document_contains_every_field_the_schema_requires() {
         let doc = Document::render(&sbom());
         let json = serde_json::to_value(&doc).unwrap();
         assert_eq!(json["spdxVersion"], "SPDX-2.3");
@@ -236,7 +236,7 @@ mod tests {
             .starts_with("https://"));
         assert_eq!(json["creationInfo"]["created"], "2026-08-05T00:00:00Z");
         assert_eq!(json["creationInfo"]["creators"][0], "Tool: boot2deb-0.1.0");
-        // Every package carries the three fields SPDX requires of one, and the
+        // Every package contains the three fields SPDX requires of one, and the
         // license triple that a compliance scanner reads.
         for p in json["packages"].as_array().unwrap() {
             assert!(p["SPDXID"].as_str().unwrap().starts_with("SPDXRef-"));
@@ -258,7 +258,7 @@ mod tests {
             .packages
             .iter()
             .find(|p| p.name == "libstdc++6")
-            .expect("the fixture carries it");
+            .expect("the fixture contains it");
         assert_eq!(stdcpp.spdx_id, "SPDXRef-Package-1");
         for p in &doc.packages {
             let body = p.spdx_id.strip_prefix("SPDXRef-").unwrap();
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn a_source_pin_states_its_commit_where_a_consumer_looks_for_it() {
-        // Its purl version and its comment both carry the commit, because a consumer
+        // Its purl version and its comment both contain the commit, because a consumer
         // scanning purls and a human reading the document look in different places.
         let doc = Document::render(&sbom());
         let linux = doc.packages.iter().find(|p| p.name == "linux").unwrap();

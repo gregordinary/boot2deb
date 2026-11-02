@@ -45,7 +45,7 @@ const SUPERBLOCK_BYTES: usize = 0x400;
 ///
 /// # Errors
 ///
-/// [`EngineError::ImageVerifyGpt`] when the artifact carries no readable primary
+/// [`EngineError::ImageVerifyGpt`] when the artifact contains no readable primary
 /// table, or no partition labeled [`ROOTFS_PARTLABEL`]. A `-boot.img` legitimately
 /// has neither, and the caller reports that rather than treating it as a
 /// zero-length one.
@@ -78,7 +78,7 @@ pub struct RootfsPartition {
     /// The partition's length. The filesystem inside must be exactly this: larger and
     /// it will not mount, smaller and the difference is wasted.
     pub bytes: u64,
-    /// Whether the entry carries the legacy-BIOS-bootable attribute.
+    /// Whether the entry has the legacy-BIOS-bootable attribute.
     ///
     /// U-Boot's `bootflow scan` narrows to the partitions marked with it as soon as
     /// any partition on the medium is. It scans partition 1 alone when none is, and
@@ -149,7 +149,7 @@ mod tests {
             panic!("set IMAGE=<path to a built .img/.img.xz>");
         };
         let image = std::path::Path::new(&image);
-        let part = rootfs_partition(image).expect("the artifact carries a rootfs partition");
+        let part = rootfs_partition(image).expect("the artifact contains a rootfs partition");
         let free = rootfs_free_blocks(image).expect("its superblock reads");
         assert!(part.bytes > 0, "the partition has a length");
         // A rootfs the build just filled has free blocks, and fewer than the whole

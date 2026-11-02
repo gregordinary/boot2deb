@@ -3,7 +3,7 @@
 `ubuntu-archive-keyring.gpg` verifies the `Release`/`InRelease` signatures of the
 Ubuntu suites the `ubuntu` distro layer serves: the build roots and the image rootfs
 of an Ubuntu recipe both bootstrap against it. It is vendored for the reason the
-Debian keyring is. A build host carries its own distribution's apt keys, so relying
+Debian keyring is. A build host has its own distribution's apt keys, so relying
 on a host-installed keyring is not portable.
 
 - Provenance: extracted from `ubuntu-keyring_2023.11.28.1build1_all.deb`, fetched on

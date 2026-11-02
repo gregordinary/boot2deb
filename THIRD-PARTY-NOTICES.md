@@ -52,7 +52,7 @@ Redistributable Broadcom firmware, the same class as the blobs Debian ships in
 redistribution of the unmodified binary; the files are provided as-is with no warranty.
 
 They are vendored because Debian ships neither: its only BCM4354 NVRAM is an nVidia
-Jetson board file, and it carries no BCM4354 `.hcd` at all. Taken from
+Jetson board file, and it contains no BCM4354 `.hcd` at all. Taken from
 <https://github.com/jenneron/firmware-google-veyron-brcm>, which is what postmarketOS
 installs on these boards. They sit on the SoC layer because they identify the radio
 module, which is the same one on every Broadcom board in the family, and in an
@@ -72,5 +72,5 @@ One optional feature changes that. Selecting `ffmpeg-nonfree` adds FFmpeg's
 `--enable-nonfree`, which admits encoders — today FDK-AAC — whose licence terms cannot
 be combined with the GPL, and the resulting binary may be built and used but **not
 distributed**. No recipe selects it; it is reached as a variant reference
-(`<recipe>+ffmpeg-nonfree`), which carries no support claim and appears in no support
+(`<recipe>+ffmpeg-nonfree`), which has no support claim and appears in no support
 matrix. See `docs/src/reference/config-model.md`.

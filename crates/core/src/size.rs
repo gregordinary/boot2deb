@@ -1,6 +1,6 @@
 //! Parse human-authored size / offset strings (`32KiB`, `8MiB`, `2G`) to bytes.
 //!
-//! Config carries the raw-gap offsets and the image size as authored strings
+//! Config contains the raw-gap offsets and the image size as authored strings
 //! ([`Offsets`](crate::model::Offsets), [`ResolvedImage::image_size`](crate::model::ResolvedBuild)).
 //! They are parsed to exact byte counts only when an artifact is written. Those are
 //! the u-boot deb's documented `dd` offsets, and the image node's partition geometry.
@@ -51,7 +51,7 @@ pub fn parse_size(input: &str) -> Result<u64, ConfigError> {
 ///
 /// For a value resolution *derived* rather than read from config — the depthcharge
 /// rootfs offset, computed from the slot geometry. Everything else on a resolved
-/// build carries the author's own string. A derived value therefore reads like one,
+/// build keeps the author's own string. A derived value therefore reads like one,
 /// instead of appearing as the lone bare byte count in the output.
 ///
 /// Exact division only: `76MiB` for 79691776. A value no unit divides stays bytes
@@ -160,7 +160,7 @@ pub fn parse_image_size(input: &str) -> Result<ImageSize, ConfigError> {
 ///
 /// Two fraction digits, because that is the unit's whole resolution. A third is refused
 /// rather than rounded away: a size grammar that quietly discards part of what it was
-/// given is worse than one that says it cannot carry it.
+/// given is worse than one that says it cannot represent it.
 fn parse_hundredths(share: &str, input: &str) -> Result<u16, ConfigError> {
     let (whole, frac) = match share.split_once('.') {
         Some((whole, frac)) if frac.len() <= 2 => (whole, frac),
