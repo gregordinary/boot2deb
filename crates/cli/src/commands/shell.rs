@@ -1,7 +1,7 @@
 //! `shell`: open an interactive session in the root a build stage compiles in.
 //!
 //! A thin client over [`boot2deb_engine::shell`], like every other command here. What
-//! it owns is the part that is config:
+//! it handles is the part that is config:
 //!
 //! - Which build point's roots these are.
 //! - Which of them the requested stage has.
@@ -117,7 +117,7 @@ pub(crate) fn run(
         .flatten()
         .collect();
 
-    // The same narrowing `build` applies, so a session lands in the root that build
+    // The same narrowing `build` applies, so a session enters the root that build
     // compiled in rather than one that resembles it.
     let userspace = crate::config::enabled_userspace(
         resolved

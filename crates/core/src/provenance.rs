@@ -10,7 +10,7 @@
 //!
 //! So the assembly and its canonical TOML form are unit-testable without a build. It is
 //! a join of pins the build already computes, rather than new tracking. License and
-//! SBOM data rides on the Debian packages themselves, and is out of scope.
+//! SBOM data comes with the Debian packages themselves, and is out of scope.
 //!
 //! The document reads back as well as it writes
 //! ([`ProvenanceManifest::from_toml_str`], [`SystemIdentity::from_toml_str`]). That is
@@ -46,7 +46,7 @@ const IDENTITY_VERSION: u32 = 1;
 /// and [`ImageBuild`]. Those are the host/cross identity, the solved manifest's digest
 /// and size, and the generated first-boot credential.
 ///
-/// The engine owns these because they are side effects (hashing the manifest, reading
+/// The engine supplies these because they are side effects (hashing the manifest, reading
 /// the RNG) that the pure core does not perform.
 pub struct BuildFacts<'a> {
     /// Detected build-host architecture (e.g. `x86_64`, `arm64`).
@@ -96,7 +96,7 @@ pub struct BuildFacts<'a> {
     /// Whether that config tree had uncommitted changes at build time. Only meaningful
     /// when `config_commit` is `Some`.
     pub config_dirty: bool,
-    /// The on-disk contract the rootfs filesystem was formatted to. The engine owns
+    /// The on-disk contract the rootfs filesystem was formatted to. The engine supplies
     /// it because the values come from the formatter it links, which the pure core
     /// does not depend on.
     pub filesystem: FilesystemProvenance,
@@ -106,7 +106,7 @@ pub struct BuildFacts<'a> {
     pub rootfs_verified_with: &'a [String],
     /// The `qemu-user` interpreter the kernel's binfmt registration names, `None` where
     /// nothing is interpreted or where the registration named nothing readable. The
-    /// engine owns it: reading a binfmt registration is a host side effect.
+    /// engine supplies it: reading a binfmt registration is a host side effect.
     pub qemu: Option<QemuProvenance>,
     /// The build steps that restored their outputs from the artifact store rather than
     /// compiling them, in build order. Engine-owned because it is a fact about what this
@@ -119,7 +119,7 @@ pub struct BuildFacts<'a> {
     /// The parallelism the build ran at. See [`ToolchainProvenance::jobs`].
     pub jobs: usize,
     /// The environment and mounts every sandboxed build command ran under. The engine
-    /// owns it for the same reason as [`filesystem`](Self::filesystem): the values are
+    /// supplies it for the same reason as [`filesystem`](Self::filesystem): the values are
     /// resolved by the sandbox library it links.
     pub sandbox: SandboxProvenance,
     /// The package set of the target-arch sandbox's base — the toolchain that compiled
@@ -400,7 +400,7 @@ pub struct SandboxRlimit {
     pub resource: String,
     /// The soft limit — what the kernel enforces — as a decimal count, or `unlimited`.
     pub soft: String,
-    /// The hard limit: the ceiling the command can raise its soft limit to. Same
+    /// The hard limit: the maximum the command can raise its soft limit to. Same
     /// spelling as [`soft`](Self::soft).
     pub hard: String,
 }
@@ -980,7 +980,7 @@ pub struct RootfsProvenance {
     pub plan_sha256: String,
     /// The `SOURCE_DATE_EPOCH` the rootfs was built under, in Unix seconds: the lock's
     /// [`source_date_epoch`](crate::lock::RootfsPin::source_date_epoch). It is the
-    /// ceiling of every mtime the rootfs contains, and the time the customize step
+    /// upper bound on every mtime the rootfs contains, and the time the customize step
     /// stamped into it. Two builds that record different values were never meant to
     /// agree byte for byte.
     pub source_date_epoch: u64,
@@ -1161,7 +1161,7 @@ pub struct FilesystemGeometry {
     pub block_size: u32,
     /// Total blocks in the filesystem, so `block_size * total_blocks` is its size.
     pub total_blocks: u64,
-    /// Total inodes, the ceiling on the file count the image can ever hold. Fixed at
+    /// Total inodes, the limit on the file count the image can ever hold. Fixed at
     /// format time for every block group the image starts with. An image that grows
     /// therefore gains inodes only in the groups the growth adds.
     pub total_inodes: u32,
@@ -1187,8 +1187,8 @@ pub struct FilesystemGeometry {
     /// Blocks held back for the super-user, from the reserved-block ratio.
     pub reserved_blocks: u64,
     /// The largest block count this filesystem can be grown to in place, which is what
-    /// [`reserved_gdt_blocks`](Self::reserved_gdt_blocks) buys. First boot resizes the
-    /// root onto the whole of whatever disk it lands on. An image whose ceiling fell
+    /// [`reserved_gdt_blocks`](Self::reserved_gdt_blocks) provides. First boot resizes the
+    /// root onto the whole of whatever disk it is written to. An image whose limit fell
     /// below that disk would therefore come up at its built size and stay there.
     pub max_grow_blocks: u64,
 }
@@ -1811,7 +1811,7 @@ struct StampedManifest {
 /// The counterpart to [`assemble`] for the one section a *later* run acts on. A
 /// reproduce flow compares the stamped builder with the running one.
 ///
-/// The stamp is a floor rather than a ceiling, saying when the build worked and never
+/// The stamp is a lower bound rather than an upper bound, saying when the build worked and never
 /// when it breaks. What a reader does with it is therefore advice.
 ///
 /// # Errors
@@ -2592,7 +2592,7 @@ pub(crate) mod tests {
     /// Both extremes are exercised. The full document catches a field that serializes
     /// to a form it cannot be parsed from; the bare one catches the opposite failure —
     /// a skipped absent field the reader would demand — which is what the `default` on
-    /// every `skip_serializing_if` field buys.
+    /// every `skip_serializing_if` field provides.
     #[test]
     fn a_rendered_manifest_parses_back_to_the_value_that_wrote_it() {
         let archives = sample_archives();
@@ -2726,7 +2726,7 @@ pub(crate) mod tests {
     /// un-pressed identity contains no trace of it, which is what lets a reader take
     /// the table's absence as "this file is the canonical artifact".
     #[test]
-    fn the_pressed_marker_rides_the_identity_document() {
+    fn the_pressed_marker_is_part_of_the_identity_document() {
         let mut identity = identity_of(depthcharge_build(), &sample_lock());
         assert!(!identity.to_toml_string().unwrap().contains("[pressed]"));
 
@@ -2916,7 +2916,7 @@ pub(crate) mod tests {
             text.contains("reference_geometry_pin = \"\"\"\nferrosys-geometry-pin 1\n"),
             "the reference geometry pin document must render multi-line:\n{text}"
         );
-        // The realized geometry lands in its own subtable, after the scalars above.
+        // The realized geometry is written to its own subtable, after the scalars above.
         assert_eq!(
             parsed["filesystem"]["geometry"]["total_blocks"].as_integer(),
             Some(520_187)

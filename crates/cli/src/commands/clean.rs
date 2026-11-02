@@ -373,7 +373,7 @@ pub(crate) fn run(
             // delete on its own: a provisioned rootfs whose files belong to
             // subordinate uids, and the mode-`0` work area an unprivileged overlay
             // leaves under every layer. `sweep_provisioned` reclaims the first through
-            // the id-map that owns it; `reclaim_tree` then removes what is left by the
+            // the id-map whose uids own it; `reclaim_tree` then removes what is left by the
             // same route, which is what makes `clean` proof against both. The kconfig
             // scratch needs exactly this: each work dir holds a provisioned cross root.
             boot2deb_engine::rootfs::sweep_provisioned(target);

@@ -483,7 +483,7 @@ fn module_root(opts: &KmodOptions, step: &Step) -> Result<BuildRoot, EngineError
 
 /// `make -C <ktree> M=<subdir> [make_args] modules` (after a `clean`), with the kernel's
 /// `ARCH`/`SOURCE_DATE_EPOCH` and cross toolchain. The `make_args` (bare `KEY=VALUE`,
-/// validated at resolve) are command-line overrides — how a board selects a build knob
+/// validated at resolve) are command-line overrides — how a board selects a build option
 /// like the direct-probe SDIO path or drops a module that will not build.
 fn compile_module(mk: &ModuleMake, epoch: Option<u64>) -> Result<(), EngineError> {
     // A clean first, so a make_args change (which kbuild does not track per-object) never
@@ -581,7 +581,7 @@ fn install_modules(mk: &ModuleMake, kver: &str, pkg_stage: &Path) -> Result<(), 
 /// e.g. Wi-Fi without a Bluetooth helper that is out of scope). An empty set ships all.
 ///
 /// `modules_install` preserves each module's build-relative subdirectory, so a module
-/// lands at `updates/<subdir>/<name>.ko` (e.g. `updates/aic8800_bsp/aic8800_bsp.ko`),
+/// is installed at `updates/<subdir>/<name>.ko` (e.g. `updates/aic8800_bsp/aic8800_bsp.ko`),
 /// not flat under `updates/`. The `.ko` set is therefore collected recursively, matched
 /// by basename; pruning an unlisted module also removes any subdirectory it emptied.
 fn prune_and_verify_modules(

@@ -139,7 +139,7 @@ pub struct CacheKeyInputs<'a> {
     /// The rootfs `SOURCE_DATE_EPOCH`
     /// ([`RootfsOptions::source_date_epoch`](crate::rootfs::RootfsOptions::source_date_epoch)).
     ///
-    /// It decides every time the tree contains: the export's mtime ceiling, and what the
+    /// It decides every time the tree contains: the export's mtime upper bound, and what the
     /// customize step stamps into the initrd and the account databases. It moves only
     /// when a lock pin moves, so folding it costs no hit a moved pin would not already
     /// have cost.

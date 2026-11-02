@@ -69,7 +69,7 @@ timezone = "UTC"
 # None of the boards here ships a battery-backed RTC, so every one of them boots with a
 # clock restored from the mtime of /var/lib/systemd/timesync/clock -- as stale as its
 # last power-off -- until NTP corrects it. Images hold the maintenance timers behind
-# time-sync.target until that lands (see the systemd-time-wait-sync drop-in in
+# time-sync.target until the clock is synchronized (see the systemd-time-wait-sync drop-in in
 # base/overlay), so this setting decides how long that wait is, not whether it happens.
 ntp_servers = []
 
@@ -114,7 +114,7 @@ sudo = "password"
 #
 # Before shortening this: the friction is transcribing a password at a console, and
 # `ssh_authorized_keys` below removes that entirely without giving anything up. Reach
-# for it first. If you do shorten, 8 (~46 bits) is the floor and it is a real floor —
+# for it first. If you do shorten, 8 (~46 bits) is the minimum and it is a real minimum —
 # still far beyond guessing at an sshd that services tens of attempts per second, but
 # with the offline margin spent. It suits an image one operator flashes and boots, not
 # one that is copied or published.
@@ -216,7 +216,7 @@ packages = [
     "file",
 
     # Shell usability. man-db brings groff-base, bsdextrautils and libpipeline1 for
-    # ~9.2 MiB total, which buys the ~3.9 MiB of manual pages the image already contains
+    # ~9.2 MiB total, which gives access to the ~3.9 MiB of manual pages the image already contains
     # from every other package and otherwise has no reader for.
     "bash-completion",
     "man-db",
@@ -224,7 +224,7 @@ packages = [
     # The three packages that make a *pre-built* image reconfigurable with no network.
     # `dpkg-reconfigure locales` / `keyboard-configuration` / `tzdata` only exist if
     # the package does, so an image without them forces a user who wants a German
-    # locale or a UK keymap onto the network before the knob even appears. Measured on
+    # locale or a UK keymap onto the network before the setting even appears. Measured on
     # forky/arm64 they cost ~44 MiB installed (locales 15.4 + xkb-data 10.6 +
     # console-setup-linux 7.1 + libc-l10n 4.7 + kbd 2.9 + keyboard-configuration 2.8 +
     # console-setup 0.4), plus the generated locale-archive above.

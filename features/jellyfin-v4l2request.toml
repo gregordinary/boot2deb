@@ -7,7 +7,7 @@
 #
 # It takes the place of `jellyfin-rockchip` rather than adding to it. Both seed
 # `/etc/jellyfin/encoding.xml`, and that file is one document the server rewrites as
-# a whole, so exactly one feature owns it. `conflicts` says so, and a selection
+# a whole, so exactly one feature seeds it. `conflicts` says so, and a selection
 # naming both is refused at resolve rather than resolved by overlay order.
 #
 # `requires_capability` names both halves it configures: the `jellyfin` feature,

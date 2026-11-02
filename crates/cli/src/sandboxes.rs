@@ -21,7 +21,7 @@ use boot2deb_engine::sandbox::{
 use std::path::PathBuf;
 
 /// The three roots a run can provision, standing by. None is bootstrapped here:
-/// constructing one costs nothing, and each pays for its tree the first time something
+/// constructing one costs nothing, and each provisions its tree the first time something
 /// calls `ensure_ready` on it.
 pub(crate) struct Roots {
     /// The **target-arch** root the userspace and ffmpeg stages compile in — never the

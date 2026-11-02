@@ -1,4 +1,4 @@
-//! One module per subcommand: each owns its handler and the helpers only it uses.
+//! One module per subcommand: each contains its handler and the helpers only it uses.
 //! [`crate::main`] parses and dispatches. The shared machinery lives in
 //! [`crate::config`], [`crate::render`], and their siblings.
 

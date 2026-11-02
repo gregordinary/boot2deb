@@ -144,7 +144,7 @@ Every failure is one of three things, and each has its own encoding in the serie
 
 **Upstreamed.** The patch is in the new kernel already, and the failure is the code being
 there twice. Give the entry an upper bound while an older kernel in the envelope still
-needs it. Delete it once the floor passes the version that took it:
+needs it. Delete it once the minimum kernel passes the version that took it:
 
 ```toml
 kernel = [
@@ -155,8 +155,8 @@ kernel = [
 Read what upstream took, not just that it applied, and check that a clean apply still
 builds. Three shapes get through the `git am` pass:
 
-*Partial absorption.* The Verisilicon IOMMU's driver, binding and DT node landed in 7.2
-but its `CONFIG_VSI_IOMMU=m` defconfig line did not. Dropping the patch therefore stopped
+*Partial absorption.* The Verisilicon IOMMU's driver, binding and DT node were merged in 7.2
+but its `CONFIG_VSI_IOMMU=m` defconfig line was not. Dropping the patch therefore stopped
 building the driver, until a kconfig fragment picked the symbol up.
 
 *A conflicting fix in the same function.* 7.2.5 added its own bounds check to
@@ -175,7 +175,7 @@ Rockchip IOMMU's all-clocks change, word for word, comment included. In the same
 the driver moved its ops struct onto the domain, so the patch's context no longer matched.
 It failed forward like a patch that needs rebasing. It would not reverse-apply either,
 which is the usual quick test for "upstream has this". Reading the probe function in the
-new tree settled it.
+new tree confirmed it.
 
 **Reworked.** The patch is still needed but no longer applies. Rebase it, keep both
 versions, and give them complementary ranges. One list then builds both generations
@@ -193,9 +193,9 @@ kernel = [
 ]
 ```
 
-A rebase needs no pair when the floor has moved past the divergence. `rocket/083` keeps
+A rebase needs no pair when the minimum kernel has moved past the divergence. `rocket/083` keeps
 the IOMMU domain attached across jobs, and 7.2.4 rewrote the error handling around the
-`iommu_attach_group()` call it replaces. With the floor past 7.2.4 that patch is rebased
+`iommu_attach_group()` call it replaces. With the minimum kernel past 7.2.4 that patch is rebased
 onto the kernel's `goto err_put_pm`, with no second variant to maintain.
 
 Regenerate a rebased patch with `git format-patch` rather than hand-editing the diff —
@@ -227,7 +227,7 @@ git -C ../patches push
 
 ### Step 4: write the kernel definition
 
-A kernel definition owns everything version-coupled, so 7.4 is a new file rather than an
+A kernel definition contains everything version-coupled, so 7.4 is a new file rather than an
 edit — `kernels/rk3588-mainline-7.4.toml`:
 
 ```toml

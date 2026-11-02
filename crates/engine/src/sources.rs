@@ -235,8 +235,8 @@ fn run_ls_remote(url: &str) -> Result<Vec<LsRef>, String> {
 /// The refs `url` advertises — one bounded `git ls-remote`, parsed.
 ///
 /// The whole network cost of both read-only surveys over a remote. `verify-sources`
-/// spends it through [`probe`], which can then follow up with an ancestry fetch.
-/// `outdated` spends it here once per *URL*, and compares every pin that names that
+/// incurs it through [`probe`], which can then follow up with an ancestry fetch.
+/// `outdated` incurs it here once per *URL*, and compares every pin that names that
 /// URL against the one advertisement. Several recipes commonly share a kernel or
 /// patches repo.
 ///

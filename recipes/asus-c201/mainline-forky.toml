@@ -3,7 +3,7 @@
 # Same board and suite as asus-c201/forky, but the kernel is compiled from
 # mainline 7.3.y instead of installed from Debian: kconfig comes from the
 # fragments (Debian-parity baseline + rk3288 slice) and the `rk3288-fixes`
-# patch series rides on top. This is the customization seam — pick this recipe
+# patch series is applied on top. This is the customization seam — pick this recipe
 # to change the kernel; pick asus-c201/forky to track Debian's.
 device     = "asus-c201"
 kernel     = "rk3288-mainline-7.3"
@@ -25,7 +25,7 @@ image_size = "2G"
 #
 # In 7.2 the in-tree V4L2 RGA driver, which this recipe builds and the RK3588 recipes
 # deliberately do not, takes the rework that added RGA3 support to mainline. The
-# RGA2 half is where this board sits, and it gains real behaviour: colorimetry is
+# RGA2 half is where this board sits, and it gains real behavior: colorimetry is
 # announced and synchronised rather than ignored, offsets are computed from the stride
 # instead of the width, strides are aligned to four bytes, odd frame sizes are refused
 # for YUV formats, and the scaling factor is range-checked. The hardware-specific parts

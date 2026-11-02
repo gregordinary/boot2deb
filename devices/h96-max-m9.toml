@@ -39,7 +39,7 @@ kernel_cmdline          = "cpuidle.off=1"
 
 # Board IR + regdb kconfig deltas, plus the NPU enable (DRM_ACCEL + ROCKCHIP_IOMMU
 # + the rocket driver). The NPU is board opt-in rather than SoC-wide because the
-# enable rides this board's NPU `.dts` and its rail.
+# enable depends on this board's NPU `.dts` and its rail.
 device_config_fragments = ["device/h96-max-m9", "accel/rk3576-npu"]
 
 # The RK3576 NPU (rocket) kernel series, composed after the kernel's SoC-wide
@@ -91,7 +91,7 @@ default_kernel          = "rk3576-mainline-7.3"
 supported_uboot_series = ["rk3576-display", "h96-max-m9-util"]
 default_uboot_series    = "rk3576-display"
 
-# forky only. The RK3576 landed in 6.13 and this board's Wi-Fi rides an out-of-tree
+# forky only. RK3576 support was merged in 6.13 and this board's Wi-Fi uses an out-of-tree
 # driver built against the kernel it ships with, so an older suite has neither the
 # SoC support nor a kernel the driver builds for.
 supported_suites        = ["forky"]

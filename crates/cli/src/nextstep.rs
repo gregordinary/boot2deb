@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn the_first_container_requested_is_the_one_hinted() {
         // `--compress gz,xz` emits both for the same raw image; the hint names the
-        // one asked for first rather than whichever sorts or lands first.
+        // one asked for first rather than whichever sorts or finishes first.
         let both = [
             compressed("/out/x.img", ImageCompression::Gz),
             compressed("/out/x.img", ImageCompression::Xz),

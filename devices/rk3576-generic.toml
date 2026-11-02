@@ -3,8 +3,8 @@
 # This "device" is not a board. It exists to home the SoC-generic u-boot
 # tools (the loader and util recipes) that build from the `rk3576-generic`
 # control DTB and are therefore identical on any RK3576 board. A real board
-# (h96-max-m9, rk3576-evb1-v10) still owns its own image recipes and any
-# board-specific u-boot series; this device owns only the board-neutral
+# (h96-max-m9, rk3576-evb1-v10) still hosts its own image recipes and any
+# board-specific u-boot series; this device hosts only the board-neutral
 # u-boot-only tool recipes.
 #
 # The kernel/image fields below are required by the device schema but never

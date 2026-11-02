@@ -81,7 +81,7 @@ Reading the eMMC back over rockusb does **not** work — the read path truncates
 Maskrom is the BootROM's USB download mode, and it is the entry that depends on
 nothing already working on the board. There are two ways in:
 
-- **The floor, on any firmware:** short the two **eMMC test pads** (clock and ground,
+- **The fallback, on any firmware:** short the two **eMMC test pads** (clock and ground,
   on the solder side next to the `EMMC` silkscreen) at power-on. The BootROM cannot
   clock data out of the flash and falls through to USB device mode. The status LED
   glowing *dim* rather than bright confirms it.
@@ -91,7 +91,7 @@ nothing already working on the board. There are two ways in:
 
 The AV-jack button behaves differently on factory firmware depending on the build. Some
 reach loader mode, and the reference unit's newer firmware boots Android recovery
-instead. That is exactly why the pad short is the documented floor.
+instead. That is exactly why the pad short is the documented fallback.
 
 ## Serial console
 
@@ -135,7 +135,7 @@ Validated on the reference unit (8 GB / 128 GB) running a boot2deb image:
 | Analog audio (3.5 mm) | fixed in tree — the DAC is on `sdo2`. End-to-end confirmation on a shipped image still owed |
 | HW video decode, HEVC | works — 1080p and 4K on the VDPU383, bit-exact against software |
 | HW video decode, H.264 | works — a silicon power-up erratum exists, and the shipped kernel works around it. See below |
-| HW video decode, 10-bit | works — Main 10 and High 10 land as `NV15` and unpack on the CPU, bit-exact. See below |
+| HW video decode, 10-bit | works — Main 10 and High 10 decode to `NV15` and unpack on the CPU, bit-exact. See below |
 | HW video encode | no mainline driver |
 | RGA 2D accelerator | works — both RGA2 cores, over DMA-BUF only. See below |
 | Vulkan | none — Mesa's PanVk does not drive this GPU. See below |
@@ -163,7 +163,7 @@ Things the board needs that are worth knowing about:
   145-158 MB/s, with no link error. The port was still at `speed=5000` afterwards.
   That rate is the drive's flash rather than the link.
 
-  **A device landing at 480 Mb/s here is a mechanical fault, not a configuration one.**
+  **A device connecting at 480 Mb/s here is a mechanical fault, not a configuration one.**
   With the board seated back from the enclosure's front panel, a plug bottoms out on the
   case before the connector's five recessed SuperSpeed contacts mate. The four USB 2.0
   contacts at the leading edge do mate. That enumerates flawlessly at high speed and
@@ -178,7 +178,7 @@ Things the board needs that are worth knowing about:
   3840x2160 at 30, 29.97, 25, 24 and 23.98 Hz with 30 preferred. It also offers
   2560x1440 at 60 and 1920x1080 at 60. There is no 4K60 entry at all, because the driver
   rejects the mode before userspace sees it. The bridge rejects every mode above 340 MHz
-  TMDS, because it has no SCDC/scrambling support. 4K30 (297 MHz) is the ceiling even
+  TMDS, because it has no SCDC/scrambling support. 4K30 (297 MHz) is the maximum even
   when the display advertises 4K60. This is upstream behavior, not a board or
   device-tree limitation.
 - **The 3.5 mm analog jack needed both a device-tree and a kernel fix.** Its DAC sits on
@@ -234,7 +234,7 @@ What the decoder is worth, over 300-frame clips on the shipped image:
 | 4K HEVC Main 10 | 34 fps, 6.5 cores | 134 fps, 0.40 cores |
 
 Four concurrent 4K30 HEVC streams hold real time at 1.17x. A fifth falls to 0.95x, so
-four is the ceiling for live playback. The gain is in CPU cost far more than in wall
+four is the maximum for live playback. The gain is in CPU cost far more than in wall
 clock. The decoder frees the cores rather than racing them.
 
 ### H.264 decode: a power-up erratum, worked around in the shipped kernel
@@ -273,19 +273,21 @@ ffmpeg is not one of them here. `scale_rkrga` and `vpp_rkrga` need MPP, which ne
 vendor kernel framework mainline does not have. This ffmpeg therefore scales on the CPU,
 and RGA is reached directly.
 
-**Import buffers with `importbuffer_fd`, never `wrapbuffer_virtualaddr`.** The
-virtual-address path builds an IOMMU mapping per call over ordinary process memory, and
-faults roughly a third of jobs. The job times out after a second, the core is soft
-reset, and the destination is left untouched. It is also about seven times slower when
-it does work. The same operations over DMA-BUF run clean on both cores.
+> [!CAUTION]
+> Import buffers with `importbuffer_fd`, never `wrapbuffer_virtualaddr`. The
+> virtual-address path builds an IOMMU mapping per call over ordinary process memory, and
+> faults roughly a third of jobs. The job times out after a second, the core is soft
+> reset, and the destination is left untouched. It is also about seven times slower when
+> it does work. The same operations over DMA-BUF run clean on both cores.
 
-**Bracket every CPU access to a dma-heap buffer in `DMA_BUF_IOCTL_SYNC`.** Use `START`
-with `WRITE` before filling a source and `END` after. Use `START` with `READ` before
-checking a result. These buffers are cached.
-
-Skip the bracket and the engine reads a stale source while the CPU reads a stale
-destination. That looks exactly like an RGA correctness bug and is not one. The trap
-catches the destination pre-fill as readily as the source.
+> [!CAUTION]
+> Bracket every CPU access to a dma-heap buffer in `DMA_BUF_IOCTL_SYNC`. Use `START`
+> with `WRITE` before filling a source and `END` after. Use `START` with `READ` before
+> checking a result. These buffers are cached.
+>
+> Skip the bracket and the engine reads a stale source while the CPU reads a stale
+> destination. That looks exactly like an RGA correctness bug and is not one. The trap
+> catches the destination pre-fill as readily as the source.
 
 One consequence is worth knowing if a client dies without a message. Failing to open
 `/dev/rga` or a DMA-BUF heap makes librga segfault rather than fail gracefully. The
@@ -319,7 +321,7 @@ statistics rather than a picture.
 
 The one route with no conversion at all is the display. The controller scans `NV15` out
 unconverted, so a player that hands the decoder's DMA-BUF straight to a KMS plane plays
-10-bit with nothing in between. The CPU unpack above is the price of *filtering* or
+10-bit with nothing in between. The CPU unpack above is the cost of *filtering* or
 transcoding, not of playback.
 
 ### Vulkan: none on this GPU

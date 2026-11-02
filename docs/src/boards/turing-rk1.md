@@ -218,7 +218,7 @@ boot2deb build turing-rk1/forky --layout split
 
 `press` emits the same pair as personalized copies —
 `press turing-rk1/forky --layout split --boot-out emmc.img --rootfs-out
-nvme.img --hostname rk1-03` — with the seed riding the rootfs half.
+nvme.img --hostname rk1-03` — with the seed in the rootfs half.
 
 **Just the bootloader.** If you only need the eMMC u-boot image (e.g. to re-flash the
 bootloader across nodes) without building a whole OS, the u-boot stage emits it on its
@@ -454,7 +454,7 @@ support-matrix`](../reference/support-matrix.md).
 | VP9 | `rkvdec` VDPU381, `/dev/video0` | `NV12` (profile 0) | `NV15` (profile 2) | profiles 1 and 3 are 4:2:2/4:4:4, which the hardware cannot do |
 | AV1 | Hantro VPU981, `/dev/video3` | `NV12` | `NV15`, `P010` | to 8192x4352. Decodes to a 4x4-tiled buffer and post-processes out |
 | VP8 | Hantro VDPU2, `/dev/video1` | `NV12` | — | to 3840x2160 |
-| MPEG-2 | Hantro VDPU2, `/dev/video1` | `NV12` | — | 1080p ceiling. Within ±2 of software decode and almost never bit-exact. Bottom-field-first field pictures have one reference-parity defect |
+| MPEG-2 | Hantro VDPU2, `/dev/video1` | `NV12` | — | 1080p maximum. Within ±2 of software decode and almost never bit-exact. Bottom-field-first field pictures have one reference-parity defect |
 
 FFmpeg's `v4l2request` decides where a stream goes. Of the decoders that take the
 stream's codec, it tries the one reporting the widest frame-size range first
@@ -471,7 +471,7 @@ as control:
   depth, which software fails too. A stream that keeps its reference picture sets in the
   SPS needs the `EXT_SPS_ST_RPS`/`EXT_SPS_LT_RPS` controls filled. `ffmpeg-rk` includes
   the patch that does (`media-accel/ffmpeg/0016`), and with it the ffmpeg harness
-  reaches its own software ceiling (141/147). Without it such streams (HM-encoded
+  reaches its own software maximum (141/147). Without it such streams (HM-encoded
   material, not x265 output) decode against wrong references.
 - **H.264** (JVT-AVC_V1): **129/135** on either decoder. The failures are flexible
   macroblock ordering and SP slices, which no decoder here does, and one
@@ -537,13 +537,13 @@ Pick the quality with `-quality` (5–100, larger is better) or with `-q:v`, whi
 the same percentage. Note that is the **opposite** of the software `mjpeg` encoder,
 where `-q:v` is a quantizer and lower means better. `-q:v 5` here asks for 5% quality
 rather than near-lossless. Leaving both off keeps the driver's default of 50, which
-lands a 1080p frame at 116 KB and 40.6 dB.
+encodes a 1080p frame at 116 KB and 40.6 dB.
 
 ```sh
 ffmpeg-rk -i input.mkv -frames:v 1 -c:v mjpeg_v4l2m2m -quality 80 -update 1 out.jpg
 ```
 
-Two things to expect. **What it buys is CPU, not speed.** It spends 4.9 CPU-seconds per
+Two things to expect. **What it saves is CPU, not speed.** It uses 4.9 CPU-seconds per
 300 1080p frames, against 8.1 for a single-threaded software encode. That is a
 fixed-function cost, steady across content, and most of what is left is the copy of each
 frame into the V4L2 buffer.
@@ -570,12 +570,12 @@ an advertised maximum of 8192. That maximum produced a JPEG whose header said 0x
 silently, in GStreamer as well as FFmpeg. Widths are rounded up to a multiple of 4 (854
 becomes 856) and the encoder says so.
 
-**Clamp your own input to 8176, because asking for more is still wrong.** V4L2 has the
-driver substitute a size it can do, so a 8192-wide request is honored at 8176. FFmpeg
-goes on feeding the wider frame in, exits 0, and writes a JPEG whose header looks right
-and whose picture is garbage. It does log `encoder coded size is 8176x..., not
-8192x...` first, so treat that message as an error when the size it reports is
-*smaller* than the one you asked for.
+> [!CAUTION]
+> Clamp your own input to 8176. V4L2 has the driver substitute a size it can do, so a
+> 8192-wide request is honored at 8176. FFmpeg goes on feeding the wider frame in, exits
+> 0, and writes a JPEG whose header looks right and whose picture is garbage. It does log
+> `encoder coded size is 8176x..., not 8192x...` first, so treat that message as an
+> error when the size it reports is *smaller* than the one you asked for.
 
 The silicon has four of these cores. The driver registers the first and logs `missing
 multi-core support, ignoring this instance` for the other three, so the limit is
@@ -596,7 +596,7 @@ they fail to configure with `No RKMPP hardware context provided`.
 
 There is no hardware deinterlacer. RGA does not deinterlace. `bwdif_vulkan`
 produces correct fields, but costs the same CPU as the CPU filter at about a seventh of
-its throughput. That is once the upload/download round-trips are paid: 15 fps against
+its throughput. That is with the upload/download round-trips included: 15 fps against
 110 fps at 1080i on this box.
 
 Deinterlace on the CPU with `bwdif`, and budget for it. A hardware-decoded 1080i to
@@ -626,7 +626,7 @@ and exactly two things can:
             -c:v hevc_rkmpp out.mp4
   ```
 
-  Three things about that graph are load-bearing:
+  Three things about that graph are essential:
 
   **Scale on RGA first.** The unpack is a serial CPU stage, so its cost follows the
   frame size. Putting `scale_rkrga` in front hands swscale a 720p frame instead of a
@@ -655,13 +655,13 @@ and exactly two things can:
   | the chain above | **18.8** | **26.5** |
   | same, but unpacking at 1080p with an explicit `hwupload` | 32.8 | 21.9 |
   | software decode + `libplacebo` | 50.4 | 24.6 |
-  | floor: hardware decode + RGA scale, no tone mapping | 1.8 | 335.2 |
+  | lower bound: hardware decode + RGA scale, no tone mapping | 1.8 | 335.2 |
 
   So the hardware path costs about a third of the CPU of software decode *and* runs
   faster. At 4K to 1080p the same chain is 12.5 CPU-s at 12.1 fps against 56.9 at 9.9.
   That is under a quarter of the CPU, though 4K tone mapping is still short of realtime. The
-  floor row is the point worth remembering: tone mapping, not decode, is what this
-  chain spends its time on.
+  lower-bound row is the point worth remembering: tone mapping, not decode, is where this
+  chain's time goes.
 
   Output correctness was checked, not assumed: this chain and the software-decode chain
   produce **bit-identical** frames, so the `NV15` unpack is exact.
@@ -676,7 +676,7 @@ alike, which is what RGA's importer requires.
 
 The AV1 decoder's format list does also offer `P010`, but nothing can reach it. The
 `v4l2request` hwaccel negotiates `NV15`, and `hwdownload,format=p010le` on an AV1 frame
-is refused. That costs nothing: P010 would spend 60% more write bandwidth per frame than
+is refused. That costs nothing: P010 would use 60% more write bandwidth per frame than
 NV15 for the same samples.
 
 ### What the silicon has that this image does not drive
@@ -693,7 +693,7 @@ whose saves chasing them:
   userspace. Software decodes them, cheaply.
 - **A dedicated JPEG decoder block** exists, and the devicetree contains its clock and
   QoS plumbing. A mainline driver is in flight upstream. It is a stateful V4L2
-  M2M device, so once it lands ffmpeg reaches it the same way the encoder above is
+  M2M device, so once it is merged ffmpeg reaches it the same way the encoder above is
   reached. Nothing new is needed beyond a decoder counterpart to that wrapper.
 - **An IEP block** (the vendor kernels' hardware deinterlacer) has power-domain and
   QoS plumbing in the mainline devicetree and no mainline driver. Deinterlacing
@@ -701,7 +701,7 @@ whose saves chasing them:
   anyway. That costs real cores for HD, and none for SD.
 - **8K decode** is validated on this board for the `rkvdec` codecs. H.264, HEVC and
   VP9 decode 7680x4320 bit-exact at 8 *and* 10 bits, and `hevc_rkmpp` encodes 8K
-  that decodes back cleanly. What made 10-bit look like a ceiling was the RCB SRAM
+  that decodes back cleanly. What made 10-bit look like a limit was the RCB SRAM
   mapping kernel patch `082` fixes. The decoder's line buffers were mapped into
   the DMA domain at an address the IOVA allocator did not know was taken. A
   workload whose cumulative demand reached it therefore collided, and fell back to
@@ -713,7 +713,7 @@ whose saves chasing them:
   is bit-exact at 4096x2304, 7680x4320 and 8192x4352 alike.
 - **10-bit encode does not exist on this stack, or any other.** The VEPU580's own
   vendor userspace maps every 10-bit input format to "unsupported", so the 8-bit
-  encode ceiling is structural. An HDR transcode tone-maps to SDR, which is what
+  encode limit is structural. An HDR transcode tone-maps to SDR, which is what
   the chain above is for. VC-1 decode is similar: silicon the vendor stack itself
   declines to drive.
 - **There is no VP8, VP9 or AV1 encoder** in the silicon. H.264, HEVC and JPEG are

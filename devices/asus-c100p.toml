@@ -38,7 +38,7 @@ keymap                  = "us"
 # What no build lifts on this board, beyond what socs/rk3288.toml states of the
 # silicon. Rendered in the support matrix and printed at the end of a build.
 caveats = [
-  "Two display controllers advertise the same maximum resolution, and DRM decides at runtime which one the HDMI encoder lands on. The smaller of the two (VOPL) tops out at 2560x1600. A 4K display showing only part of the picture is that, and `dmesg | grep -i vop` says which controller it got.",
+  "Two display controllers advertise the same maximum resolution, and DRM decides at runtime which one the HDMI encoder is routed to. The smaller of the two (VOPL) tops out at 2560x1600. A 4K display showing only part of the picture is that, and `dmesg | grep -i vop` says which controller it got.",
 ]
 
 # The board's one sound card — the same analog-audio DT include as the C201,
@@ -50,7 +50,7 @@ name  = "VEYRON-I2S"
 # --- The board profile ---------------------------------------------------------
 # One profile: depthcharge-tools includes `minnie` as a first-class board, and it ships
 # no libreboot variant for it — the family's only libreboot profile is the C201's.
-# The payload shape is the family's: a 16 MiB ceiling and firmware that ignores a FIT
+# The payload shape is the family's: a 16 MiB limit and firmware that ignores a FIT
 # ramdisk, so depthchargectl patches the initrd address into the DTB.
 [depthcharge]
 board            = "minnie"

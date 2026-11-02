@@ -10,7 +10,7 @@ already built a shipped recipe once ([Getting started](../getting-started.md)).
 
 | What you want to change | How | What it writes |
 | --- | --- | --- |
-| The artifact's geometry or where it lands (`--layout`, `--image-size`, `--out-dir`) | flags on `build` | nothing — the lock is untouched |
+| The artifact's geometry or where it is written (`--layout`, `--image-size`, `--out-dir`) | flags on `build` | nothing — the lock is untouched |
 | Which features are in the image | `update <recipe> --feature …`, then build the variant reference | a variant lock beside the recipe |
 | Adding an app or capability of your own | a `features/<name>.toml` of your own — no code | your feature, selectable at once |
 | Suite, kernel, u-boot series, board profile, locale, timezone, keymap | a recipe file of your own | your recipe plus its lock |
@@ -73,7 +73,7 @@ boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin
 ```
 
 The variant gets its own lock, its own solved package manifest, and its own work
-directory and image identity. It therefore never lands on the recipe's artifacts. Three
+directory and image identity. It therefore never overwrites the recipe's artifacts. Three
 things are worth knowing before you rely on it:
 
 - **The selection replaces the recipe's `features` list**, it does not add to it. Name
@@ -111,7 +111,7 @@ signed_by  = "navidrome.gpg"
 boot2deb build turing-rk1/forky+navidrome --overlay ~/my-boards
 ```
 
-Config files ride alongside in `features/<name>/overlay/`, laid into the rootfs after
+Config files go alongside in `features/<name>/overlay/`, laid into the rootfs after
 every package so they win over what the packages shipped. Use
 `features/<name>/overlay-pre/` for the rarer case where a package's own maintainer
 scripts have to see the file *while they run* — see [Overlays](../reference/overlays.md).

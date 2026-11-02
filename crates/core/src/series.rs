@@ -8,7 +8,7 @@
 //!
 //! A series belongs to a *kernel definition*, not a device. A series that applies to
 //! one kernel version will not apply to another, so the series lives with the kernel
-//! that owns it. Supporting a new kernel version means authoring a new series. Old
+//! it belongs to. Supporting a new kernel version means authoring a new series. Old
 //! series stay so old kernels keep building.
 //!
 //! Pure: parsing plus version-range matching only. Fetching the patches repo and
@@ -506,7 +506,7 @@ pub fn patch_prefix(label: &str) -> Option<u32> {
 /// Choose a zero-padded filename prefix that sorts a new patch at list index
 /// `index` among the series scope's ordered entries.
 ///
-/// The prefix mirrors the list order — a reading aid, not load-bearing (the list
+/// The prefix mirrors the list order — a reading aid that nothing depends on (the list
 /// is authoritative). It is the integer midpoint between the numeric prefixes of
 /// the neighbors on either side of `index` (`before + 10` when appending, half the
 /// first when prepending, `010` into an empty list). Padding width matches the
@@ -1199,7 +1199,7 @@ mod tests {
             userspace: vec![],
             uboot: vec![
                 always("rk3576/loader/0001-live.patch"),
-                // Capped below the envelope's floor: nothing the series admits selects it.
+                // Capped below the envelope's lower bound: nothing the series admits selects it.
                 ranged("rk3576/loader/0002-dead.patch", "<2025.01"),
             ],
         };

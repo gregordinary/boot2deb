@@ -91,11 +91,11 @@ git checkout cannot preserve that mode to begin with. A `0440` sudoers drop-in a
 home are the usual cases. Ship it from a first-boot hook, which runs as root on the
 board.
 
-## Locks land in the owning overlay
+## Locks in an overlay
 
 `update` writes a recipe's lock, and `build --save-manifest` writes its solved manifest,
-into the **root that owns the recipe**. `build --save-outputs` writes its outputs record
-there too. An overlay recipe's lock and manifest therefore land in that overlay, beside
+into the **root that contains the recipe**. `build --save-outputs` writes its outputs record
+there too. An overlay recipe's lock and manifest therefore go into that overlay, beside
 the recipe, not in the shipped tree. An out-of-tree recipe
 stays fully self-contained: recipe, lock, and manifest are all versioned together in
 your repo.
@@ -120,5 +120,5 @@ Two paths, chosen by intent:
   tree directly and open a pull request.
 
 [Adding a board](../contributing/adding-a-board.md) walks through the layers to write,
-and applies to both paths. The only difference is whether the files land in your overlay
+and applies to both paths. The only difference is whether the files go into your overlay
 or in the vendored tree.

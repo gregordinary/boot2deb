@@ -1,4 +1,4 @@
-//! boot2deb engine — executes on Linux, owns build side effects, and emits the
+//! boot2deb engine — executes on Linux, performs build side effects, and emits the
 //! structured event stream.
 //!
 //! # Lock, patches, and config

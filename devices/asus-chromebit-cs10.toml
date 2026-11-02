@@ -55,7 +55,7 @@ name  = "VEYRON-HDMI"
 # --- The board profile ---------------------------------------------------------
 # One profile: depthcharge-tools includes `mickey` as a first-class board, and there is
 # no libreboot port for the Chromebit — the family's only libreboot profile is the
-# C201's. The payload shape is the family's: a 16 MiB ceiling and firmware that
+# C201's. The payload shape is the family's: a 16 MiB limit and firmware that
 # ignores a FIT ramdisk, so depthchargectl patches the initrd address into the DTB.
 [depthcharge]
 board            = "mickey"

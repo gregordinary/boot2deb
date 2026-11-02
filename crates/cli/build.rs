@@ -20,7 +20,7 @@ fn main() {
     // a file. The stamp stays correct in both, which is what matters; watching only the
     // markers that exist would leave a worktree's stamp at whatever commit it first saw.
     //
-    // The reflog is the load-bearing one: `.git/HEAD`'s *contents* change only on a
+    // The reflog is the essential one: `.git/HEAD`'s *contents* change only on a
     // branch switch — an ordinary commit moves `refs/heads/<branch>` and leaves HEAD
     // naming the same ref — while `.git/logs/HEAD` gains a line on every commit, amend,
     // checkout and reset. The index is watched too, since staging alone changes what

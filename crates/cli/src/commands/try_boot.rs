@@ -2,7 +2,7 @@
 //! [`boot2deb_engine::tryboot`] for what the run asserts and how the guest is
 //! driven.
 //!
-//! This module owns the config half. It locates the recipe's image artifact and
+//! This module handles the config half. It locates the recipe's image artifact and
 //! provenance manifest, says where the fixture root is provisioned from, and reports
 //! the result.
 
@@ -50,7 +50,7 @@ pub(crate) fn run(
         .expect("an image build has a rootfs-containing artifact");
     let image = super::press::find_artifact(&out_dir, &stem, role)?;
 
-    // The generated password rides the provenance manifest, which stays with
+    // The generated password is recorded in the provenance manifest, which stays with
     // the build — `try` authenticates with it, which is the assertion that it
     // works.
     let prov_path = out_dir.join(format!("{stem}.provenance.toml"));

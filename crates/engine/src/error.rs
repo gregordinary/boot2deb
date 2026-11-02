@@ -522,7 +522,7 @@ pub enum EngineError {
     },
 
     /// A `device_dts` source would overwrite a device-tree file the kernel already
-    /// ships. `device_dts` owns the *new* board file. An edit to an *existing*
+    /// ships. `device_dts` supplies the *new* board file. An edit to an *existing*
     /// upstream `.dts`/`.dtsi` is a patch in the kernel's patch series, which `git
     /// am` applies with conflict detection. Silently clobbering the upstream file
     /// would hide that the fork has drifted, so the copy refuses.

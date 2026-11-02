@@ -55,7 +55,7 @@ const NIBBLE_MAX: u8 = 0xF;
 /// The most kernel slots one image can contain, and the length of the `KERN-A`..`KERN-D`
 /// name set the image node draws from.
 ///
-/// Two is the useful number — it is what buys an upgrade its fallback — and nothing
+/// Two is the useful number — it is what gives an upgrade its fallback — and nothing
 /// on these boards wants more. The cap exists so a typo in `kpart_slots` is a config
 /// error rather than a partition table full of kernel slots eating the rootfs.
 pub const MAX_KPART_SLOTS: u8 = 4;
@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn each_field_lands_in_its_own_bits() {
+    fn each_field_occupies_its_own_bits() {
         // Fields are independent: setting one must not disturb another.
         assert_eq!(kpart_flags(15, 0, false).unwrap(), 0x000F_0000_0000_0000);
         assert_eq!(kpart_flags(0, 15, false).unwrap(), 0x00F0_0000_0000_0000);

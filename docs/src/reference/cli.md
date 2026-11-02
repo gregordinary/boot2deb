@@ -63,7 +63,7 @@ were restored and some were built. The userspace stage is that shape: it builds 
 
 `total` is the command's own wall clock, so it exceeds the sum of the rows by
 whatever the build does outside any step. The summary is suppressed under `--quiet`
-and under `--json`, where the same numbers ride on each `step_finished` event.
+and under `--json`, where the same numbers are part of each `step_finished` event.
 
 A build that wrote an image closes with what to do with it:
 
@@ -90,7 +90,7 @@ recovery media) document it on their [board page](../boards/turing-rk1.md).
 
 | command | `--json` form |
 | --- | --- |
-| `list-*` | one JSON array, where an unreadable entry rides along as `{"name", "error"}` |
+| `list-*` | one JSON array, where an unreadable entry is included as `{"name", "error"}` |
 | `resolve` | the fully resolved build as one JSON document. Everything only an *image* has — the kernel, suite, rootfs set, localization, account, out-of-tree modules, media-accel sources — is nested under `image`, which is absent on a `deliverable = "uboot"` recipe |
 | `doctor` | host facts, every check with its status and remedy, the trust anchors, and a `result` |
 | `verify-patches` | per axis: how many patches applied, and every one that did not |
@@ -144,7 +144,7 @@ boot2deb doctor turing-rk1/forky
   stale.
 - **`list-kernels` / `list-features`** enumerate the valid values for the `--kernel`
   and `--feature` overrides. That is name, version or compatibility, and (for kernels)
-  the patch series, so the override knobs are discoverable without reading the TOML tree.
+  the patch series, so the override options are discoverable without reading the TOML tree.
 - **`list-kmods`** enumerates the out-of-tree kernel-module sets a device's
   `device_kmods` can name, with the driver ref each tracks and the modules it ships.
 
@@ -258,7 +258,7 @@ One flag is worth calling out:
 - **`--feature <name>`**, repeatable, pins a [feature
   selection](config-model.md#a-feature-selection-is-a-build-point-not-a-new-recipe)
   as a *variant* of the recipe. Everything but the features comes from the recipe,
-  and the lock lands beside it as `<leaf>+<feature>...lock`. A variant's first
+  and the lock is written beside it as `<leaf>+<feature>...lock`. A variant's first
   `update` inherits the recipe's pins, so it needs no `--kernel-ref`.
 
 An example:
@@ -291,7 +291,7 @@ stream says nothing about which point an event belongs to.
 
 Every build records how it ended beside its artifacts, in `<point>.build.toml`. The
 record is written as soon as the point's lock has been read, marked `running`. When the
-build ends it settles to `succeeded`, or to `failed` with the error it ended on. A build refused after that, by a
+build ends it changes to `succeeded`, or to `failed` with the error it ended on. A build refused after that, by a
 stale builder say, is recorded as failed too. `verify-image` reads it first, so it never
 vouches for an image the newest build did not write.
 
@@ -307,7 +307,7 @@ Notable flags:
   ```
 
   A variant builds in its own work directory under its own image identity, so it never
-  lands on the recipe's artifacts.
+  overwrites the recipe's artifacts.
 
 - **`--stage <node>`** runs a single node, and the default builds everything. The nodes
   are `kernel`, `dtb`, `kmod`, `uboot`, `userspace`, `ffmpeg`, `app`, `rootfs`, and
@@ -380,7 +380,7 @@ inputs*:
 - The build-dependencies it layered over that root.
 
 On a hit, `build` restores that node's stored `.deb`s and **skips the compile
-entirely**. That is the single largest lever there is. It is the difference between
+entirely**. That is the single largest optimization there is. It is the difference between
 restoring a file and a 30-minute kernel cross-compile, or a 70-minute emulated ffmpeg
 build.
 
@@ -554,7 +554,7 @@ window resizes the session's. A `^C` you type reaches the program inside. A `SIG
 Your terminal is restored however the session ends.
 
 If the root has never been provisioned in this work dir, the first `shell` bootstraps
-it. That is the same minutes a first build would spend. Later ones reuse the tree.
+it. That is the same minutes a first build would take. Later ones reuse the tree.
 
 ## reproduce
 
@@ -846,7 +846,7 @@ override the fetch *source*. That is a git URL or local path used in place of th
 configured upstream. The first three have the same names and meaning as `build`'s, and
 the last names the patched tree's source.
 
-The tree still lands at exactly the locked commit. Those flags are consulted only on the
+The tree is still checked out at exactly the locked commit. Those flags are consulted only on the
 first materialization, and ignored when the matching `--*-path` is given.
 
 The `patches` checkout is resolved the way `build` does. It takes an explicit
@@ -1415,7 +1415,7 @@ so a count short of the tree you know is the signal that something was left out.
 `--kconfig` empties `verify-config`'s scratch, one work dir per recipe. Each holds a
 provisioned cross root and an out-of-tree kbuild output dir, both re-created on the next
 run. Each is also a base that ages against the archive exactly as a build root does.
-Dropping them costs a re-provision, and buys back the largest of the four stores after
+Dropping them costs a re-provision, and frees the largest of the four stores after
 the artifact cache.
 
 A kernel re-pin strands every kernel, module and u-boot entry keyed on the old pins.

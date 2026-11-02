@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(missing.len(), 1, "the vetted key is reported as gone");
         assert!(
             missing[0].contains("Test Key"),
-            "the label rides along: {missing:?}"
+            "the label is included: {missing:?}"
         );
     }
 

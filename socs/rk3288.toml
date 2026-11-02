@@ -49,12 +49,12 @@ modules = ["hantro_vpu", "rockchip_vdec"]
 # no firmware is the same answer for Bluetooth that the AR9271 is for Wi-Fi.
 #
 # Networking. No Veyron has an ethernet port — they are Chromebooks — so Wi-Fi is
-# the only link on all of them and NetworkManager owns the interfaces, which means
+# the only link on all of them and NetworkManager manages the interfaces, which means
 # dropping the base layer's dhcpcd rather than running two things that both want to
 # configure a NIC. `nmtui` is not optional in practice: joining a network is the
 # first thing anyone does and everything else waits behind it. Without it the image
 # offers `nmcli` and nothing else, which is a poor thing to hand someone at a bare
-# console on a machine with no ethernet port. 568 KiB buys it.
+# console on a machine with no ethernet port. It costs 568 KiB.
 #
 # Which package contains `nmtui` depends on the suite. It left `network-manager` for a
 # `network-manager-tui` of its own at 1.56.0-4 — forky's entry declares
@@ -98,7 +98,7 @@ nonfree_firmware_packages = ["firmware-brcm80211"]
 
 exclude = ["dhcpcd"]
 
-# `audio` rides with alsa-utils above. /dev/snd/* is root:audio 0660, and logind's
+# `audio` belongs with alsa-utils above. /dev/snd/* is root:audio 0660, and logind's
 # `uaccess` ACL reaches only a seated session -- which covers someone at the laptop's
 # own keyboard but not one reached over SSH, and not `alsactl` restoring the mixer
 # outside a session at all. On boards whose whole audio story is a codec that has to
@@ -133,8 +133,8 @@ caveats = [
 # NO DISPLAY STACK on a 16 MiB board -- a headroom policy, not a size limit. The DRM
 # stack (rockchipdrm + analogix_dp + panel + backlight, with the DRM helpers they
 # pull in) is 15 modules and about 490 KB of the initramfs. It fits under even the
-# stock 16 MiB ceiling, but the kernel and the initramfs both grow from release to
-# release, and the headroom is what absorbs that growth. A board at that ceiling
+# stock 16 MiB limit, but the kernel and the initramfs both grow from release to
+# release, and the headroom is what absorbs that growth. A board at that limit
 # therefore leaves the stack out and accepts a console that appears only after the
 # real root mounts. A board whose firmware buffers 32 MiB has headroom to spend, and
 # includes the stack in its own `[initramfs]` list -- see
@@ -194,7 +194,7 @@ modules = [
     "uas",
     "sd_mod",
 
-    # Input for a rescue shell, which the family needs in two flavours because it has
+    # Input for a rescue shell, which the family needs in two flavors because it has
     # two kinds of console.
     #
     # The laptops type through the ChromeOS EC, which hangs off spi0 -- so the SPI bus

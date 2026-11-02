@@ -42,7 +42,7 @@ pub struct LocalDistsRepo {
     /// Absolute repo root — the `file://` mirror URL base the provisioner fetches
     /// `dists/<suite>/…` and `pool/…` under.
     dir: PathBuf,
-    /// The mirror URL naming [`dir`](Self::dir), as the [`Pool`] that owns the layout
+    /// The mirror URL naming [`dir`](Self::dir), as the [`Pool`] that defines the layout
     /// spells it. Taken from the pool rather than composed here, so the base the
     /// provisioner is pointed at and the tree the pool wrote cannot disagree.
     mirror_url: String,
@@ -296,7 +296,7 @@ mod tests {
         let second = publish(&tmp.path().join("b"), Some(EPOCH));
         assert_eq!(first, second, "a pinned date publishes the same bytes");
 
-        // The pinned value is the one that lands, not merely *a* fixed one — so the
+        // The pinned value is the one that is written, not merely *a* fixed one — so the
         // release dates with the lock rather than with whatever this run inherited.
         let text = String::from_utf8(first).unwrap();
         let date = text

@@ -47,7 +47,7 @@
 # `vulkan-tools` is here for the same reason `v4l-utils` is on the RK3588 SoC layer:
 # this feature installs a driver, and without `vulkaninfo` nothing in the image can
 # say whether it loaded, which device it bound, or whether that device is the GPU.
-# The llvmpipe hazard above makes it load-bearing rather than nice to have -- "it
+# The llvmpipe hazard above makes it required rather than nice to have -- "it
 # ran" and "it ran on the GPU" are different claims and only `vulkaninfo` separates
 # them. It costs ~5.8 MiB, of which ~3.9 MiB is the X11/Wayland WSI libraries
 # `vulkaninfo` links for surface enumeration and a headless box never uses.

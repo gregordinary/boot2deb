@@ -1,4 +1,3 @@
-# 0 weight over 242 surfaces at baseline.
 # Surfaces not yet held to the style guide's Part 6, with the weight they stood at.
 #
 # A ratchet, not an exemption: a surface here may not get worse, and comes off the

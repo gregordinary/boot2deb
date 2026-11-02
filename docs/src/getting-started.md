@@ -3,7 +3,8 @@
 This gets you from a clone of the repo to a built image. It uses the shipped
 `turing-rk1/forky` recipe as the running example, and other boards build the same way
 with their own recipe name. Flashing and board-specific notes live on each board's
-page. For the RK1, see [Turing RK1](boards/turing-rk1.md).
+page. For the RK1, see [Turing RK1](boards/turing-rk1.md). The
+[glossary](reference/glossary.md) defines the terms this guide uses, such as recipe and lock.
 
 > **Which track are you on?** This is the **shipped-recipe track** — `doctor` then
 > `build`, for a recipe that already ships a committed lock (like `turing-rk1/forky`).
@@ -186,7 +187,7 @@ subuid mapping), and if it fails it prints the fix for your host. The usual case
   ```
 - Either way, `kernel.max_user_namespaces` (or `user.max_user_namespaces`) must be
   **at least 2**. Every launch holds two nested user namespaces, and each is charged
-  against that ceiling. They are the sandbox's own, and the one its command enters so
+  against that limit. They are the sandbox's own, and the one its command enters so
   the kernel locks the sandbox's mount flags. A host set to `1` creates one namespace
   perfectly well and fails every build at launch, so `doctor` probes both.
 - Your user needs a subuid/subgid range (usually present by default):
@@ -256,7 +257,7 @@ unchanged skips the multi-minute bootstrap. To force a clean rootfs, add
 
 ### What you get
 
-Artifacts land under the recipe's work dir, `build/turing-rk1/forky/artifacts/`:
+Artifacts are written under the recipe's work dir, `build/turing-rk1/forky/artifacts/`:
 
 - **`turing-rk1-forky.img.xz`** — the compressed bootable image.
 - **`turing-rk1-forky.provenance.toml`** — exactly what went into the image: the

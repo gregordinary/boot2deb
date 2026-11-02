@@ -30,7 +30,7 @@ try turing-rk1/forky: PASS
 
 One run is two boots of the same disk, and each boot must pass all of:
 
-1. systemd settles as `running` — no unit in `systemctl --failed`.
+1. systemd reaches the `running` state — no unit in `systemctl --failed`.
 2. The image's account logs in on the serial console with the generated
    first-boot password from the provenance manifest. The first login walks the
    forced password change the image ships with. That the whole conversation

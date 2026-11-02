@@ -168,7 +168,7 @@ fn resolve_redirect(base: &str, loc: &str) -> Result<String, FetchError> {
             (true, _) => format!("{}{loc}", &hierarchical[..authority_end]),
             // Path-relative onto a base that has a path: `loc` replaces the base's
             // last segment (RFC 3986 section 5.2.3). Searching from `path_start`
-            // always lands on at least the `/` that begins the path, so the cut can
+            // always finds at least the `/` that begins the path, so the cut can
             // never reach back into the authority.
             (false, Some(path_start)) => {
                 let last_slash = path_start + hierarchical[path_start..].rfind('/').unwrap_or(0);

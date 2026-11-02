@@ -126,7 +126,7 @@ pub(crate) enum Command {
         target: Option<String>,
         /// Scratch dir the target would build in. Default: `<root>/build/<target>`.
         /// Only the overlay check reads it, and it probes the filesystem that dir
-        /// lands on. Checking a build you will run with `--work-dir` therefore needs
+        /// is on. Checking a build you will run with `--work-dir` therefore needs
         /// the same path here.
         #[arg(long)]
         work_dir: Option<std::path::PathBuf>,
@@ -504,7 +504,7 @@ pub(crate) enum StageArg {
 }
 
 /// `build`'s flags: the stage selector, per-tree clone-source overrides, the
-/// scratch/output locations, and the lock-independent image + cache knobs.
+/// scratch/output locations, and the lock-independent image + cache options.
 #[derive(Args, Clone)]
 pub(crate) struct BuildArgs {
     /// Rootfs feature to select, repeatable — the same selection `update --feature`
@@ -546,7 +546,7 @@ pub(crate) struct BuildArgs {
     /// Also build an *optional* media-accel userspace tree, by name, repeatable.
     ///
     /// A tree the SoC marks `optional` is skipped unless named here. libmali is the
-    /// live case. The transcode pipeline rides the VPU and the RGA rather than the
+    /// live case. The transcode pipeline runs on the VPU and the RGA rather than the
     /// GPU, so a headless box never needs the blob. Compiling its variant matrix
     /// is minutes for nothing. Naming an optional tree also changes what the *whole*
     /// userspace stage layers, so every tree's cache key moves with it.
@@ -687,7 +687,7 @@ pub(crate) struct BuildArgs {
     pub(crate) allow_stale_builder: bool,
 }
 
-/// `why-rebuild`'s flags: the work dir whose stamps are read, plus the build knobs
+/// `why-rebuild`'s flags: the work dir whose stamps are read, plus the build options
 /// that change what the prediction assumes.
 #[derive(Args)]
 pub(crate) struct WhyRebuildArgs {
@@ -771,7 +771,7 @@ pub(crate) struct ShellArgs {
     #[arg(long = "feature")]
     pub(crate) features: Vec<String>,
     /// Build scratch dir whose roots to enter (default: `<root>/build/RECIPE`). That
-    /// is the same default `build` uses, so a session lands in the tree a build made.
+    /// is the same default `build` uses, so a session enters the tree a build made.
     #[arg(long)]
     pub(crate) work_dir: Option<PathBuf>,
     /// Directory holding the `.deb`s the compile stages staged (default:
@@ -800,7 +800,7 @@ pub(crate) struct ShellArgs {
     pub(crate) command: Vec<String>,
 }
 
-/// `clean`'s flags: which subtree to remove, and the two safety knobs
+/// `clean`'s flags: which subtree to remove, and the two safety options
 /// (`--dry-run` preview, `--force` past the ownership stamp).
 ///
 /// The selectors fall in two scopes, and which scope is asked for decides whether the
@@ -918,7 +918,7 @@ impl SeedKeyArgs {
 }
 
 /// `press`'s flags. These are the split-build output names, the per-unit seed keys,
-/// the tree additions, and the verification knob.
+/// the tree additions, and the verification option.
 #[derive(Args)]
 pub(crate) struct PressArgs {
     /// The boot image's output file, for a `split` build — what goes onto the
@@ -936,14 +936,14 @@ pub(crate) struct PressArgs {
     /// source is executable), owner root. Re-assembles the image from the kept
     /// rootfs tar, so the build must have run. A source named `*.tmpl` is a
     /// template: its `{{image.<name>}}` references (hostname, PARTUUIDs, suite,
-    /// …) are expanded at press time and it lands at DEST.
+    /// …) are expanded at press time and it is written to DEST.
     #[arg(long = "copy", value_name = "SRC:DEST")]
     pub(crate) copy: Vec<String>,
     /// Copy a whole directory that mirrors the target rootfs, repeatable —
-    /// `DIR/etc/site.conf` lands at `/etc/site.conf`. Every regular file and
+    /// `DIR/etc/site.conf` is placed at `/etc/site.conf`. Every regular file and
     /// symlink under it is placed. Directories are not, since the parents each
     /// file needs are created root-owned 0755. Same modes as `--copy`, and a
-    /// `*.tmpl` file is expanded and lands without the suffix.
+    /// `*.tmpl` file is expanded and placed without the suffix.
     #[arg(long = "copy-tree", value_name = "DIR")]
     pub(crate) copy_tree: Vec<PathBuf>,
     /// Stage a local .deb (repeatable) for installation at first boot via
@@ -1005,7 +1005,7 @@ pub(crate) struct SeedArgs {
 pub(crate) struct TryArgs {
     /// Seconds one boot is allowed to take to reach a login prompt (and to settle
     /// after it). The default is sized for TCG emulation on a loaded host. With KVM
-    /// a boot takes a fraction of it, and the timeout is a ceiling, not a wait.
+    /// a boot takes a fraction of it, and the timeout is a limit, not a wait.
     #[arg(long, default_value_t = 900)]
     pub(crate) timeout: u64,
     /// Keep the booted disk copy under the work dir after the run, for a
@@ -1032,7 +1032,7 @@ pub(crate) struct TryArgs {
 }
 
 /// `new-device`'s flags: one per scaffolded axis (each prompted when omitted on a
-/// terminal), plus the write-behavior knobs.
+/// terminal), plus the write-behavior options.
 #[derive(Args)]
 pub(crate) struct NewDeviceArgs {
     /// Board description. Prompted if omitted on a terminal.
@@ -1266,7 +1266,7 @@ pub(crate) enum PatchAction {
     },
 }
 
-/// `patch import`'s flags: where the patch lands (series, scope, position, name)
+/// `patch import`'s flags: where the patch goes (series, scope, position, name)
 /// and how it is verified before the series edit is kept.
 #[derive(Args)]
 pub(crate) struct PatchImportArgs {

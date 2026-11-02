@@ -20,9 +20,9 @@ use std::str::FromStr;
 /// becomes unusable exactly when a first boot needs it.
 ///
 /// Out-of-tree vendor drivers are the usual source. A bare `printk()` has no
-/// severity, so it lands at `CONFIG_MESSAGE_LOGLEVEL_DEFAULT` (`KERN_WARNING`) no
+/// severity, so it is logged at `CONFIG_MESSAGE_LOGLEVEL_DEFAULT` (`KERN_WARNING`) no
 /// matter how trivial the message. Such calls are often ungated by any of the driver's
-/// own debug knobs.
+/// own debug options.
 ///
 /// Gating the *console* bounds that noise for every driver at once, including the
 /// ones whose verbosity nothing else can reach.
@@ -112,7 +112,7 @@ pub enum Soc {
 
 /// How a board boots: what the boot payload is, where it is written, and what the
 /// firmware expects to find. A device selects one from its
-/// `supported_boot_methods`, and the method's [`BootMethodLayer`] variant owns the
+/// `supported_boot_methods`, and the method's [`BootMethodLayer`] variant defines the
 /// details.
 ///
 /// This is the closed set of *implemented* methods. Every variant has a layer
@@ -188,7 +188,7 @@ pub const DEFAULT_PASSWORD_LENGTH: u8 = 12;
 /// Shortest generated first-boot password a config root can ask for.
 ///
 /// 8 symbols is ~46 bits, still far beyond reach at the tens-of-guesses-per-second an
-/// `sshd` on one of these boards will service. That is what makes it a floor rather
+/// `sshd` on one of these boards will service. That is what makes it a minimum rather
 /// than a recommendation.
 ///
 /// It gives up the offline margin [`DEFAULT_PASSWORD_LENGTH`] keeps. It therefore
@@ -373,7 +373,7 @@ pub struct UserspaceTree {
     /// Built only when a build asks for it by name (`--userspace <name>`). `false` — the
     /// default — is built whenever the SoC declares it.
     ///
-    /// The live case is libmali. The transcode pipeline rides the VPU and the RGA
+    /// The live case is libmali. The transcode pipeline runs on the VPU and the RGA
     /// rather than the GPU, so a headless box never needs the blob. Compiling its
     /// variant matrix is minutes for nothing.
     #[serde(default)]
@@ -802,8 +802,8 @@ pub struct RockchipRkbinLayer {
     /// lock.
     pub uboot_ref: String,
     /// Clone URL of the `patches` repo the u-boot series is fetched from and pinned
-    /// against, for a device that selects a real u-boot series. The boot method owns
-    /// u-boot, so it owns u-boot's patch source — the counterpart of a kernel
+    /// against, for a device that selects a real u-boot series. The boot method defines
+    /// u-boot, so it defines u-boot's patch source — the counterpart of a kernel
     /// definition's [`patches_url`](CompiledKernelDef::patches_url). Required at
     /// resolution only when a device on this method selects a series other than
     /// [`NO_PATCH_SERIES`](crate::series::NO_PATCH_SERIES).
@@ -866,7 +866,7 @@ pub struct DepthchargeLayer {
     /// Size of **each** ChromeOS kernel slot (e.g. `16MiB`), for a device that does
     /// not state its own. It bounds the signed payload the image can contain.
     ///
-    /// The *firmware's* own ceiling is a property of the board profile, and is enforced
+    /// The *firmware's* own limit is a property of the board profile, and is enforced
     /// by `depthchargectl`. A device built for a profile with a larger buffer overrides
     /// it with [`DeviceDepthcharge::kpart_size`].
     pub kpart_size: String,
@@ -1525,7 +1525,7 @@ pub struct Rkbin {
 /// layer).
 ///
 /// A *board profile* is `depthcharge-tools`' codename for a firmware behavior set.
-/// That covers its payload ceiling, and whether the firmware loads a FIT ramdisk or
+/// That covers its payload limit, and whether the firmware loads a FIT ramdisk or
 /// needs the initramfs address patched into every DTB's `/chosen`. It is a property of
 /// the **firmware the unit runs**, not of the board model. That is why it is a
 /// selectable axis rather than a constant. The same C201 has one profile on stock
@@ -1541,18 +1541,18 @@ pub struct DeviceDepthcharge {
     /// Board profiles this device can use. A `--board` override or a recipe's
     /// [`board`](Recipe::board) must be one of these. Each is passed verbatim to
     /// `depthchargectl`, which resolves it against its own board database. The payload
-    /// ceiling and DTB-patching policy live there and are deliberately not duplicated
+    /// limit and DTB-patching policy live there and are deliberately not duplicated
     /// here.
     pub supported_boards: Vec<String>,
     /// Size of each ChromeOS kernel slot, overriding the boot method's
     /// [`kpart_size`](DepthchargeLayer::kpart_size) (authored string, e.g. `32MiB`).
     ///
-    /// The slot bounds the payload the *image* can contain. The firmware's own ceiling
+    /// The slot bounds the payload the *image* can contain. The firmware's own limit
     /// is a property of the board profile and lives in `depthchargectl`'s database.
     /// The two have to agree to be useful — a profile whose firmware buffers 32 MiB
-    /// buys nothing while the partition holding the payload is 16 MiB. So a device built
+    /// gains nothing while the partition holding the payload is 16 MiB. So a device built
     /// for such a profile states the matching slot size here. Every other board keeps the
-    /// method's default rather than paying for headroom it cannot use. The slots sit ahead
+    /// method's default rather than reserving headroom it cannot use. The slots sit ahead
     /// of the rootfs, so a larger one costs image space on every medium.
     ///
     /// Resolution derives the rootfs offset from this, so widening a slot moves the
@@ -1671,7 +1671,7 @@ pub struct DeviceLayer {
     /// kernel and stages into `/lib/modules/<kver>/updates/`, each resolved from
     /// `kmods/<name>.toml` ([`KmodLayer`]). Board opt-in works like
     /// [`device_patch_series`](Self::device_patch_series), so a driver only one board
-    /// has never rides its siblings.
+    /// has is never built for its siblings.
     ///
     /// The driver's own declaration is shared, so a second board with the same chip names
     /// it rather than copying it. A distro-package kernel compiles nothing, so naming any
@@ -2156,11 +2156,11 @@ impl<'de> Deserialize<'de> for KernelSource {
 
 /// A kernel definition (`kernels/<id>.toml`), tagged by [`KernelFlavor`].
 ///
-/// A kernel is a versioned entity that owns everything version-coupled, so bumping
+/// A kernel is a versioned entity that defines everything version-coupled, so bumping
 /// one means authoring a *new* definition rather than editing a device. What it
-/// owns depends on where it comes from: a compiled kernel owns a source ref, a base
-/// defconfig, config fragments, and a patch series. A distribution kernel owns
-/// only its package name, because Debian owns everything else.
+/// defines depends on where it comes from: a compiled kernel defines a source ref, a base
+/// defconfig, config fragments, and a patch series. A distribution kernel defines
+/// only its package name, because Debian provides everything else.
 ///
 /// The variant is chosen by the file's `flavor` key. [`ConfigRoot::kernel`] reads it and
 /// deserializes into that variant's struct, so each keeps `deny_unknown_fields`. A
@@ -2219,7 +2219,7 @@ pub struct DistroKernelDef {
     pub expect: Vec<crate::expect::Expectation>,
 }
 
-/// A kernel compiled from source: it owns its source ref, base defconfig, config
+/// A kernel compiled from source: it defines its source ref, base defconfig, config
 /// fragments, and patch series.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2537,7 +2537,7 @@ pub enum Deliverable {
 }
 
 /// A recipe (`recipes/<name>.toml`): a named, buildable point across the
-/// device, kernel, suite, features, and image-knob axes. Holds *constraints*, and
+/// device, kernel, suite, features, and image-option axes. Holds *constraints*, and
 /// the exact resolution is written to the sibling lock. Every axis but `device`
 /// is optional and falls back to the device default.
 #[derive(Debug, Clone, Deserialize)]
@@ -2566,7 +2566,7 @@ pub struct Recipe {
     ///
     /// A profile is a property of the *firmware a unit runs*, not of the board model. It
     /// decides what the signed kernel partition is built for. Like the localization
-    /// axes, it is config an image is resolved from rather than a knob applied to a
+    /// axes, it is config an image is resolved from rather than an option applied to a
     /// finished lock. Selecting a non-default profile is therefore a recipe that pins it,
     /// not a `build` flag.
     #[serde(default)]
@@ -2872,7 +2872,7 @@ pub struct Kpart {
     /// Known-good flag for the payload slot (bit 56).
     pub successful: bool,
     /// The three fields above packed into the payload slot's 64-bit GPT attribute
-    /// word — what actually lands on disk. Computed at resolution by
+    /// word — what is actually written to disk. Computed at resolution by
     /// [`kpart_flags`](crate::chromeos::kpart_flags), which also range-checks
     /// `priority` and `tries`, so the image node writes a value it does not have to
     /// re-validate. Spare slots have
@@ -2884,7 +2884,7 @@ pub struct Kpart {
 ///
 /// Resolution has already enforced each method's own requirements. Those are rkbin blobs
 /// and a `uboot_defconfig` for `rockchip-rkbin`, and a board profile for `depthcharge`.
-/// Every field here is therefore guaranteed present for the method that owns it, and the
+/// Every field here is therefore guaranteed present for the method it belongs to, and the
 /// engine matches once rather than testing for absent fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "method", rename_all = "kebab-case")]
@@ -2946,14 +2946,14 @@ pub struct ResolvedRkbinBoot {
 /// else, which is why this is resolved rather than authored. A board that widens its
 /// slot gets the faster compressor with it.
 ///
-/// The cost lands where it is most visible. A depthcharge initramfs contains no display
+/// The cost is visible at every boot. A depthcharge initramfs contains no display
 /// driver unless the board has the headroom to add one. On a board that does not, every
 /// second spent decompressing is a second of the firmware's blank screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InitramfsCompress {
     /// `xz` — the smallest and the slowest to decompress. What a 16 MiB slot has to take.
-    /// At that ceiling a `zstd` initramfs leaves around 141 KB before the FIT and vboot
+    /// At that limit a `zstd` initramfs leaves around 141 KB before the FIT and vboot
     /// headers are added. That is not margin a growing kernel can live in.
     Xz,
     /// `zstd` — Debian's own default, several times faster to decompress for roughly
@@ -2964,7 +2964,7 @@ pub enum InitramfsCompress {
 /// Kernel-slot size from which the payload budget stops choosing the compressor.
 ///
 /// A 32 MiB slot holds an image of the shape these boards build with room to spare.
-/// There is nothing left for `xz` to buy, and its decompression time is pure boot
+/// There is nothing left for `xz` to save, and its decompression time is pure boot
 /// latency.
 const ROOMY_KPART_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -3012,7 +3012,7 @@ pub struct ResolvedDepthchargeBoot {
     /// rather than failing to boot it.
     pub rootfs_offset: String,
     /// The compressor this board's initramfs is built with, derived from
-    /// [`kpart.size`](Kpart::size). See [`InitramfsCompress`] for the trade it settles.
+    /// [`kpart.size`](Kpart::size). See [`InitramfsCompress`] for the trade it decides.
     /// Written into the pre-install overlay, so the first initramfs a kernel package
     /// builds is already the right one.
     pub initramfs_compress: InitramfsCompress,

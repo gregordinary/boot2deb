@@ -12,7 +12,7 @@ boot2deb build  turing-rk1/forky+media-accel-rockchip+jellyfin+jellyfin-v4l2requ
 
 It takes the place of `jellyfin-rockchip`, and the two cannot be combined. Both seed
 `/etc/jellyfin/encoding.xml`, which the server reads and rewrites as one document, so
-one feature owns it.
+one feature is responsible for it.
 
 ## Why the server is patched
 
@@ -40,8 +40,8 @@ measurements are in `patches/jellyfin/README.md`.
 | Tone mapping | off |
 
 The codec list is what `rkvdec` decodes: H.264, HEVC and VP9, at 8 and 10 bits. FFmpeg
-tries the decoder with the widest frame-size range for a codec first, so all three land
-on `rkvdec` rather than on Hantro's slower VDPU2. A 10-bit frame is unpacked from `NV15`
+tries the decoder with the widest frame-size range for a codec first, so all three go
+to `rkvdec` rather than to Hantro's slower VDPU2. A 10-bit frame is unpacked from `NV15`
 on the CPU, and Jellyfin's 10-bit HEVC and VP9 switches apply as for any other type. AV1 is a separate
 `hantro-vpu` decoder with known gaps on some streams, so it is left for an operator to
 add.

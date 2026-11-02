@@ -20,7 +20,7 @@
 //! The builder is the third reproducibility axis and is not enforced here. The
 //! published provenance manifest records which boot2deb produced the image. This
 //! reports how the running checkout compares, and leaves the decision to the
-//! operator. A stamped commit is a floor rather than a ceiling, and a newer builder
+//! operator. A stamped commit is a minimum rather than a maximum, and a newer builder
 //! usually reproduces the image and can include fixes.
 //!
 //! What *is* enforced is the result. The rebuild writes to a directory of its own, so the
@@ -97,7 +97,7 @@ pub(crate) fn run(
         .into());
     }
 
-    // The build's own event stream does not exist yet — `build::run` owns it — so these
+    // The build's own event stream does not exist yet — `build::run` creates it — so these
     // two lines go out on the same stdout contract, rendered for a human or as NDJSON,
     // and are then followed by the build's own stream on the same terminal.
     let sink = move |e: boot2deb_engine::event::Event| {

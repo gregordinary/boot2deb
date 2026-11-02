@@ -148,7 +148,7 @@ impl HostToolchain {
     /// armhf compiles through a cross toolchain and then runs the result natively
     /// (`CONFIG_COMPAT=y`). It interprets nothing and passes `None` here.
     ///
-    /// **The caller owns that decision**, which is why it is a parameter rather than
+    /// **The caller makes that decision**, which is why it is a parameter rather than
     /// something probed here. The reader this delegates to has its own, more
     /// conservative rule for which pairs are native. boot2deb's rule is the one that
     /// decides whether an interpreter is an input to this build.

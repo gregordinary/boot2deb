@@ -87,7 +87,7 @@ pub(crate) struct KpartSlot {
 ///
 /// All offsets are byte counts from the start of the medium. `rootfs_first_lba`
 /// / `rootfs_length_lba` are the exact GPT partition bounds — the partition fills
-/// the usable disk after whatever the boot method owns at the head, and the GPT
+/// the usable disk after whatever the boot method occupies at the head, and the GPT
 /// reservations. `rootfs_bytes` (a multiple of [`EXT4_BLOCK`], and exactly
 /// `rootfs_length_lba * SECTOR`) is the size of the ext4 filesystem placed in that
 /// partition; first boot grows it past the image onto the physical medium.
@@ -113,7 +113,7 @@ pub(crate) struct Geometry {
     pub(crate) rootfs_bytes: u64,
 }
 
-/// The head of the disk: what the boot method owns there, and where the rootfs
+/// The head of the disk: what the boot method occupies there, and where the rootfs
 /// partition begins.
 ///
 /// Resolved on its own because it is the half of the layout that does **not** answer to
@@ -143,7 +143,7 @@ impl BootRegion {
     /// Resolve the head of the disk from the resolved boot configuration, validating
     /// every invariant that does not answer to the image's size: the offsets parse, they
     /// are aligned, they increase, they clear the primary GPT, and whatever the boot
-    /// method owns ends at or before the rootfs begins.
+    /// method occupies ends at or before the rootfs begins.
     ///
     /// # Errors
     ///
@@ -168,7 +168,7 @@ impl BootRegion {
                 "rootfs offset ({rootfs_off}) is not a multiple of the ext4 block size {EXT4_BLOCK}"
             )));
         }
-        // Whatever the boot method owns at the head must end before the rootfs does.
+        // Whatever the boot method occupies at the head must end before the rootfs does.
         if boot_end > rootfs_off {
             return Err(geom(format!(
                 "the boot region ends at {boot_end}, past the rootfs offset ({rootfs_off})"
@@ -366,7 +366,7 @@ impl BootRegion {
                     uboot_itb_off,
                     "u-boot.itb offset",
                 )?;
-                // The seed partition owns the last MiB before the rootfs, so the
+                // The seed partition occupies the last MiB before the rootfs, so the
                 // itb's budget ends where the seed begins, not where the rootfs
                 // does — an itb that spilled into the seed would be corrupted by
                 // the very first `flash --hostname`.
@@ -445,7 +445,7 @@ impl Geometry {
         // one rootfs partition spanning the disk. The filesystem is formatted to
         // exactly the partition size (the formatter takes an explicit block count).
         let partition_bytes = (available_bytes / EXT4_BLOCK) * EXT4_BLOCK;
-        // The floor belongs to this direction only: it catches a *mis-authored* number
+        // The minimum belongs to this direction only: it catches a *mis-authored* number
         // before any work happens. See [`around_rootfs`](Self::around_rootfs) for why a
         // measured size is not held to it.
         if partition_bytes < MIN_ROOTFS_BYTES {
@@ -465,10 +465,10 @@ impl Geometry {
     /// format reported, so the partition is exactly the filesystem — there is no slack
     /// between them to floor away.
     ///
-    /// [`MIN_ROOTFS_BYTES`] deliberately does **not** apply here. That floor exists to
+    /// [`MIN_ROOTFS_BYTES`] deliberately does **not** apply here. That minimum exists to
     /// catch a *mis-authored* number before work happens; a fitted size is a measurement
-    /// of a rootfs that provably fits. Honouring it would mean either re-formatting at
-    /// the floor — a wasted pass — or laying out a partition larger than the filesystem
+    /// of a rootfs that provably fits. Honoring it would mean either re-formatting at
+    /// the minimum — a wasted pass — or laying out a partition larger than the filesystem
     /// written into it, which does not mount.
     ///
     /// # Errors
@@ -507,7 +507,7 @@ impl Geometry {
     /// rather than argued twice: the partition is whole ext4 blocks, it is a whole number
     /// of sectors, and it ends at or before the last LBA the backup table leaves usable.
     ///
-    /// That last one is the load-bearing check. A filesystem laid past the usable range is
+    /// That last one is the essential check. A filesystem laid past the usable range is
     /// a partition the GPT writer refuses; a partition laid *larger* than its filesystem is
     /// worse, because the table is written happily and the image only fails when a board
     /// tries to mount it.
@@ -533,9 +533,9 @@ impl Geometry {
         }
         let rootfs_first_lba = rootfs_off / SECTOR;
         let rootfs_length_lba = rootfs_bytes / SECTOR;
-        // The rootfs must end at or before the last usable LBA: the backup table owns
+        // The rootfs must end at or before the last usable LBA: the backup table occupies
         // the final GPT_BACK_SECTORS, and the last LBA a partition may use is one before
-        // it. A fitted disk lands exactly on that bound, so there is no slack here to
+        // it. A fitted disk ends exactly on that bound, so there is no slack here to
         // absorb an off-by-one in either direction's arithmetic.
         let end_lba = rootfs_first_lba
             .checked_add(rootfs_length_lba)
@@ -565,7 +565,7 @@ impl Geometry {
 
 /// The largest byte slack a fit search will look for — 64 GiB.
 ///
-/// The share ceiling is the formatter's own ([`Slack::MAX_SHARE`]); this one is not,
+/// The share limit is the formatter's own ([`Slack::MAX_SHARE`]); this one is not,
 /// because a byte slack is an absolute quantity the search has no opinion about. Past
 /// this the caller has effectively named a size, and naming it outright is both faster
 /// and what they meant: the search would otherwise place the rootfs into candidate
@@ -844,7 +844,7 @@ mod tests {
         // into a partition that would describe it wrongly.
         assert!(Geometry::around_rootfs(&rk1_boot(), rootfs_bytes + 1).is_err());
 
-        // But the authored-size floor does *not* apply to a fitted one. A format that
+        // But the authored-size minimum does *not* apply to a fitted one. A format that
         // returned a small filesystem returned a working one, and rejecting it here
         // would fail a build after the whole rootfs had been written — which is exactly
         // what an 8 MiB fitted rootfs did before this was separated out.
@@ -914,12 +914,12 @@ mod tests {
         let EngineError::ImageGeometry { detail } = err else {
             panic!("expected an image-geometry error");
         };
-        // The message names what the recipe wrote and what the ceiling is, so the fix
+        // The message names what the recipe wrote and what the limit is, so the fix
         // does not require mapping a number back to the authored string.
         assert!(detail.contains("fit+95%"), "{detail}");
         assert!(detail.contains("90%"), "{detail}");
 
-        // The byte form has a ceiling of its own. It is boot2deb's, not the formatter's
+        // The byte form has a limit of its own. It is boot2deb's, not the formatter's
         // — ferrosys refuses an oversized *share* and has no opinion about bytes — so
         // without this a `fit+1T` would search geometries a terabyte wide before
         // failing, long after the rootfs had been built.

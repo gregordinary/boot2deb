@@ -90,9 +90,9 @@ an initramfs that gives up writes its dmesg and every stalled task's stack to
 
 Expect a few seconds of white screen on a healthy boot before the display comes up. The
 image leaves the DRM stack out of the initramfs to keep the signed payload under its
-16 MiB ceiling. The console therefore appears only once the real root is mounted. The same
+16 MiB limit. The console therefore appears only once the real root is mounted. The same
 arrangement on the [C201](asus-c201.md) takes about 5 seconds from eMMC and about 8 from
-USB. The difference is the time the initramfs spends enumerating the stick.
+USB. The difference is the time the initramfs takes to enumerate the stick.
 
 ## Installing to the eMMC
 
@@ -209,7 +209,7 @@ Nothing in the image configures any of this.
 
 Like the C201, this board lights two display controllers. The smaller one (VOPL) tops
 out at 2560x1600 while advertising the same maximum as the larger. Which one the HDMI
-encoder lands on is decided at runtime by DRM, not by configuration. `dmesg | grep -i vop`
+encoder is connected to is decided at runtime by DRM, not by configuration. `dmesg | grep -i vop`
 says which it got. That is the thing to check if a 4K display comes up showing only part of
 the picture.
 
@@ -235,7 +235,7 @@ unverified here.
 
 ## The family
 
-The depthcharge boot method is not board-specific, and this is what that buys: the C100P is
+The depthcharge boot method is not board-specific, and this is what that gives: the C100P is
 a device file and nothing else. No overlay, no kernel, no engine change — its device tree is
 upstream and everything that makes a Veyron boot lives on the shared layers. The same holds
 for the [Chromebit CS10](asus-chromebit-cs10.md), and for the seven Veyron boards not yet

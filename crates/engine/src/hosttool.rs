@@ -10,7 +10,7 @@
 //!   into a skipped one.
 //! - **Version** ([`version`]) is the first line the tool prints, from stdout *or*
 //!   stderr, since which stream contains it is per-tool (`e2fsck -V` writes to stderr).
-//!   Only for a caller that must gate on a version floor. Presence never needs it.
+//!   Only for a caller that must gate on a minimum version. Presence never needs it.
 //!
 //! Side-effecting (it spawns processes), so it lives in the engine rather than `core`.
 
@@ -20,7 +20,7 @@ use std::process::Command;
 ///
 /// Presence is whether the probe **spawns**: a missing binary fails to exec with
 /// `ENOENT`, while a present one that rejects `--version` merely exits non-zero. The
-/// distinction is load-bearing — see the module docs.
+/// distinction is essential — see the module docs.
 pub fn have(tool: &str) -> bool {
     Command::new(tool).arg("--version").output().is_ok()
 }
@@ -46,7 +46,7 @@ pub fn version(tool: &str, flag: &str) -> Option<String> {
 /// Parse a `MAJOR.MINOR` pair out of a version line, from the first token that looks
 /// like a dotted number (`"e2fsck 1.47.0 (5-Feb-2023)"` → `(1, 47)`).
 ///
-/// Pure, so a version-floor gate is unit-testable against real banner text rather than
+/// Pure, so a minimum-version gate is unit-testable against real banner text rather than
 /// against whatever the test host happens to have.
 pub fn major_minor(line: &str) -> Option<(u32, u32)> {
     line.split_whitespace().find_map(|token| {
@@ -63,7 +63,7 @@ pub fn major_minor(line: &str) -> Option<(u32, u32)> {
 
 /// Every self-skipping test's one gate: `true` when all of `tools` are present.
 ///
-/// When something is missing the behaviour depends on `BOOT2DEB_REQUIRE_HOST_TOOLS`:
+/// When something is missing the behavior depends on `BOOT2DEB_REQUIRE_HOST_TOOLS`:
 /// a CI job that guarantees the tools sets it, and a miss then **panics**, so the
 /// assertions those tests contain cannot silently drop out of the run. Unset (a
 /// tool-minimal dev host), the caller skips with a printed note.

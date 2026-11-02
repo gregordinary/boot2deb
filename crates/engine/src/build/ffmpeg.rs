@@ -38,7 +38,7 @@ use boot2deb_core::model::{ExtraDebTarget, FfmpegLib, UserspaceTree};
 use std::path::{Path, PathBuf};
 
 /// Install prefix baked into the build; keeps `ffmpeg-rk` out of the system FFmpeg's
-/// paths so both can coexist. The coexistence is load-bearing rather than tidy: this
+/// paths so both can coexist. The coexistence is required, not merely tidy: this
 /// tree's `libav*`/`libsw*` have the same sonames as the suite's own FFmpeg packages,
 /// so the two sets must never meet on one search path — see [`rpath_ldflag`], which is
 /// what makes the separation hold at runtime.
@@ -94,7 +94,7 @@ const LOOKUP_PROBE_REPORT: &str = "lookup-probe.log";
 /// `librockchip-mpp-dev` / `librga-dev` are *not* here — they are this build's own
 /// output, added per SoC by [`userspace_dev_packages`] and resolved from the pool.
 ///
-/// The nonfree flavour's own dep is not here either, for the same reason it is not in
+/// The nonfree flavor's own dep is not here either, for the same reason it is not in
 /// [`BASE_CONFIGURE_FLAGS`]: see [`NONFREE_DEPS`].
 const FFMPEG_DEPS: &[&str] = &[
     "nasm",
@@ -121,7 +121,7 @@ const FFMPEG_DEPS: &[&str] = &[
     "glslc",
 ];
 
-/// The build-deps the nonfree flavour adds, layered only when this build is one
+/// The build-deps the nonfree flavor adds, layered only when this build is one
 /// ([`ResolvedImage::ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree)).
 ///
 /// `./configure` is a probe suite, so a `-dev` package left in the root of a free
@@ -207,7 +207,7 @@ fn userspace_layer_packages(trees: &[UserspaceTree]) -> Vec<String> {
 /// output signature that keys on it. A package therefore cannot reach `./configure`
 /// without reaching the key. That matters here more than anywhere: ffmpeg's
 /// `./configure` is a probe suite, and every entry decides whether a codec is compiled
-/// in. [`crate::shell`] reads it too, so an interactive session lands in the root this
+/// in. [`crate::shell`] reads it too, so an interactive session starts in the root this
 /// stage compiles in rather than one that resembles it.
 ///
 /// `nonfree` is the build's license flavor, and it moves this set in step with the
@@ -310,7 +310,7 @@ fn assert_userspace_depends(
 /// be decoded at all, and an image that decodes in software cannot transcode AV1.
 ///
 /// This set is redistributable: `--enable-gpl` and `--enable-version3` admit only
-/// libraries whose licences combine with the GPL, so the binary it produces may be
+/// libraries whose licenses combine with the GPL, so the binary it produces may be
 /// passed on. The flags that forfeit that are [`NONFREE_CONFIGURE_FLAGS`], and they
 /// are added per build rather than kept here.
 const BASE_CONFIGURE_FLAGS: &[&str] = &[
@@ -336,7 +336,7 @@ const BASE_CONFIGURE_FLAGS: &[&str] = &[
 /// for a build whose selection asked for them
 /// ([`ResolvedImage::ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree)).
 ///
-/// The two are one flag, not two: `--enable-nonfree` is the licence gate that admits
+/// The two are one flag, not two: `--enable-nonfree` is the license gate that admits
 /// encoders whose terms cannot be combined with the GPL, and FFmpeg's own
 /// `./configure` *rejects* `--enable-libfdk-aac` against `--enable-gpl` without it. So
 /// they are added together and removed together, and a build including one and not the
@@ -360,7 +360,7 @@ const NONFREE_CONFIGURE_FLAGS: &[&str] = &["--enable-nonfree", "--enable-libfdk-
 ///
 /// It is spelled as an explicit linker flag rather than configure's `--enable-rpath`
 /// so the emitted tag does not depend on how a given tree spells that option.
-/// [`assert_runpath`] then proves it landed, rather than trusting that it did.
+/// [`assert_runpath`] then proves it was emitted, rather than trusting that it was.
 fn rpath_ldflag() -> String {
     format!("--extra-ldflags=-Wl,-rpath,{INSTALL_PREFIX}/lib")
 }
@@ -379,7 +379,7 @@ fn rpath_ldflag() -> String {
 /// built and shipped for programs that speak its API directly; it just is not an
 /// ffmpeg filter.
 ///
-/// `nonfree` is the build's licence flavour
+/// `nonfree` is the build's license flavor
 /// ([`ResolvedImage::ffmpeg_nonfree`](boot2deb_core::ResolvedImage::ffmpeg_nonfree)):
 /// it appends [`NONFREE_CONFIGURE_FLAGS`] and is the one input here that is a choice
 /// rather than a consequence of the hardware.
@@ -838,7 +838,7 @@ pub fn clone_manifest(
 ///
 /// On any failure the partial tree is removed, so a re-run after a failed `git am`
 /// starts clean rather than silently reusing a half-applied series (the reuse
-/// check in [`build_ffmpeg`] only ever sees a completed tree). The graft rides in
+/// check in [`build_ffmpeg`] only ever sees a completed tree). The graft is part of
 /// the series' ffmpeg scope; no kernel-range gate here — that guards the kernel
 /// node, and the series is already validated there.
 fn fetch_and_patch(
@@ -1477,7 +1477,7 @@ mod tests {
         }
     }
 
-    /// Every flavour includes a software AV1 decoder, and its build root the library it
+    /// Every flavor includes a software AV1 decoder, and its build root the library it
     /// links. A build without it succeeds and decodes everything else, so its loss
     /// would show only as AV1 sources that fail to transcode.
     #[test]
@@ -1494,13 +1494,13 @@ mod tests {
     /// The default build is redistributable, and it takes an explicit ask to make one
     /// that is not.
     ///
-    /// This is the assertion the whole licence axis rests on: `--enable-nonfree`
+    /// This is the assertion the whole license axis rests on: `--enable-nonfree`
     /// forfeits the right to pass the binary on, so its absence from the default is
     /// what every image boot2deb ships depends on. A regression here is silent — the
     /// build succeeds and the binary works — which is why it is pinned rather than
     /// left to the flag list being read correctly.
     #[test]
-    fn the_default_flavour_is_free_and_the_nonfree_flags_move_together() {
+    fn the_default_flavor_is_free_and_the_nonfree_flags_move_together() {
         let free = configure_flags(&all_trees(), false, NO_LIBS);
         for flag in NONFREE_CONFIGURE_FLAGS {
             assert!(
@@ -1508,14 +1508,14 @@ mod tests {
                 "the default build must not include {flag}"
             );
         }
-        // What the free build *is*: GPL + version3, which admit only licences that
+        // What the free build *is*: GPL + version3, which admit only licenses that
         // combine for redistribution.
         assert!(free.contains(&"--enable-gpl".to_string()));
         assert!(free.contains(&"--enable-version3".to_string()));
 
         // The opt-in adds the whole set and nothing else. Both halves matter:
         // ffmpeg's configure rejects `--enable-libfdk-aac` against `--enable-gpl`
-        // without `--enable-nonfree`, so a flavour including one and not the other
+        // without `--enable-nonfree`, so a flavor including one and not the other
         // does not configure at all.
         let nonfree = configure_flags(&all_trees(), true, NO_LIBS);
         for flag in NONFREE_CONFIGURE_FLAGS {
@@ -1523,7 +1523,7 @@ mod tests {
         }
         assert_eq!(nonfree.len(), free.len() + NONFREE_CONFIGURE_FLAGS.len());
 
-        // The licence axis is orthogonal to the hardware one: flavouring a build must
+        // The license axis is orthogonal to the hardware one: flavoring a build must
         // not disturb what the SoC's declared trees derive.
         for trees in [all_trees(), rga_only(), no_trees()] {
             let (free, nonfree) = (
@@ -1534,20 +1534,20 @@ mod tests {
                 assert_eq!(
                     free.contains(&flag.to_string()),
                     nonfree.contains(&flag.to_string()),
-                    "{flag} must not depend on the licence flavour"
+                    "{flag} must not depend on the license flavor"
                 );
             }
         }
     }
 
-    /// The flavour moves the configure flags and the build root's packages together.
+    /// The flavor moves the configure flags and the build root's packages together.
     ///
     /// `./configure` is a probe suite, so these two are one decision: leaving the
     /// nonfree encoder's headers in a free build's root would make its inputs describe
     /// a binary it did not produce, and asking for the flag without them would fail the
     /// probe. Asserted from the same constants both sides read.
     #[test]
-    fn the_licence_flavour_moves_the_build_deps_with_the_flags() {
+    fn the_license_flavor_moves_the_build_deps_with_the_flags() {
         let free = layer_packages(&all_trees(), false, NO_LIBS);
         let nonfree = layer_packages(&all_trees(), true, NO_LIBS);
         for pkg in NONFREE_DEPS {
@@ -1558,7 +1558,7 @@ mod tests {
             assert!(nonfree.contains(&(*pkg).to_string()));
         }
         assert_eq!(nonfree.len(), free.len() + NONFREE_DEPS.len());
-        // The userspace half is untouched by the licence axis, as in the flags.
+        // The userspace half is untouched by the license axis, as in the flags.
         assert_eq!(
             userspace_layer_packages(&all_trees()).len(),
             free.len() - FFMPEG_DEPS.len()
@@ -2002,7 +2002,7 @@ mod tests {
         .is_ok());
     }
 
-    /// The two licence flavours of one recipe never share a cached `.deb`.
+    /// The two license flavors of one recipe never share a cached `.deb`.
     ///
     /// They are the same source tree at the same pins built two ways, so nothing about
     /// the *sources* separates them — only the configure surface and the build root do,
@@ -2010,7 +2010,7 @@ mod tests {
     /// free deb from the artifact store (or the reverse, which is the dangerous
     /// direction: an image that must not be redistributed shipped as one that may).
     #[test]
-    fn the_two_licence_flavours_never_share_an_output_entry() {
+    fn the_two_license_flavors_never_share_an_output_entry() {
         let lock = lock_with("bc1", "pc1");
         let sig = |nonfree| {
             output_manifest(
@@ -2031,7 +2031,7 @@ mod tests {
             .clone()
         };
         assert_ne!(sig(false), sig(true));
-        // And each is stable, so the separation is the flavour and not noise.
+        // And each is stable, so the separation is the flavor and not noise.
         assert_eq!(sig(false), sig(false));
         assert_eq!(sig(true), sig(true));
     }

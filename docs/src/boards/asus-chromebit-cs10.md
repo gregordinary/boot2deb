@@ -112,7 +112,7 @@ rebooting, an initramfs that gives up writes its dmesg and every stalled task's 
 
 Expect several seconds of blank HDMI on a healthy boot before the console appears. The
 standard image leaves the DRM stack out of the initramfs to keep the signed payload under
-its 16 MiB ceiling. The display therefore comes up only once the real root is mounted.
+its 16 MiB limit. The display therefore comes up only once the real root is mounted.
 
 ## Installing to the eMMC
 
@@ -143,7 +143,7 @@ kernel. You get the kernel you asked for.
 
 The one thing the keypress does not cover is the `root=` lookup that kernel then performs,
 which resolves the PARTUUID by scanning attached disks. With the stick still plugged in it
-can land on the other medium's rootfs. It is the same build either way, so it boots
+can resolve to the other medium's rootfs. It is the same build either way, so it boots
 normally, but you could be writing to the disk you thought you had left behind. Pull the
 stick once the eMMC is written and the question does not arise.
 
@@ -235,14 +235,14 @@ login prompt. What is untested is this board's own firmware, and its DTB.
 
 Two things to know before you try it, because they are the reported failure modes:
 
-- **USB boot on the Chromebit has been reported to fail.** A 2015 review could not boot
+- **USB boot.** It has been reported to fail on the Chromebit. A 2015 review could not boot
   a stick at all, and there is an unanswered forum thread where Ctrl+U flashes black on a
   postmarketOS image. Both are most consistent with malformed boot media rather than a
   firmware limit. That is a kernel partition not in ChromeOS format, or one whose GPT
   attribute bits are unset. boot2deb's payload is built by `depthchargectl` against the
   board's own profile, and its attribute bits are asserted at build time. Expect it to
   work, but this is the board's open question.
-- **No one has confirmed an eMMC install on a Chromebit.** The one public attempt fails
+- **eMMC install.** No one has confirmed one on a Chromebit. The one public attempt fails
   with "Primary GPT header is being ignored". That is the factory GPT being preserved,
   which writing a whole-disk image does not do. The reasoning in *Installing to the
   eMMC* above is sound, and the same flow works on the C201. It has not been run on

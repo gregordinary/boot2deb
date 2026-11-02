@@ -34,7 +34,7 @@ pub(crate) fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let build = resolve_recipe(root, recipe, &Overrides::default())?;
     // There is a kernel config to verify only where a kernel is configured. A distro
-    // kernel arrives pre-built from the mirror: Debian owns its `.config`, so there
+    // kernel arrives pre-built from the mirror: Debian defines its `.config`, so there
     // are no fragments to merge and nothing this gate could compare.
     let kernel = build
         .image
@@ -135,7 +135,7 @@ pub(crate) fn run(
                 None => None,
             };
             // `--kernel-src` overrides the configured upstream for the fetch (a local
-            // ../linux is near-instant); the tree still lands at the locked commit.
+            // ../linux is near-instant); the tree is still checked out at the locked commit.
             let url = match args.kernel_src {
                 Some(s) => s,
                 None => pins::kernel_source_url(&kernel.source)?,

@@ -274,7 +274,7 @@ mod tests {
             parse_image_size("fit+0.01%").unwrap(),
             ImageSize::Fit(Slack::Share(1))
         );
-        // An explicit zero is a decision and is honoured; an unstated one is not.
+        // An explicit zero is a decision and is honored; an unstated one is not.
         assert_eq!(
             parse_image_size("fit+0%").unwrap(),
             ImageSize::Fit(Slack::Share(0))

@@ -243,9 +243,9 @@ impl ConfigRoot {
             .collect()
     }
 
-    /// The root that *owns* a layer file — the highest-precedence root containing
+    /// The root a layer file *belongs to* — the highest-precedence root containing
     /// `<subdir>/<name>.toml`, or the primary root if none does. A write target
-    /// derived from a layer (a recipe's lock) lands beside the file it belongs to,
+    /// derived from a layer (a recipe's lock) is placed beside the file it belongs to,
     /// so `update` on an overlay recipe writes into that overlay, not the shipped
     /// tree.
     fn owning_root(&self, subdir: &str, name: &str) -> &Path {
@@ -584,12 +584,12 @@ impl ConfigRoot {
     /// Load `recipes/<name>.lock` — the resolved exact pins for a recipe.
     /// `boot2deb build` reads only this. `boot2deb update` writes it. A lock is an
     /// *atomic* artifact (exact pins), not a mergeable layer. It is read from the
-    /// root that **owns the recipe**, the same root [`lock_path`](Self::lock_path)
+    /// root that **contains the recipe**, the same root [`lock_path`](Self::lock_path)
     /// writes to. `update`'s write target and `build`'s read source can therefore
     /// never address two different locks for one recipe.
     ///
     /// An overlay that wants different pins overlays the recipe and its lock as a
-    /// unit. An overlay retuning a shipped recipe owns both automatically.
+    /// unit. An overlay retuning a shipped recipe is automatically the root of both.
     pub fn lock(&self, name: &str) -> Result<crate::lock::Lock, ConfigError> {
         let path = self.lock_path(name)?;
         match Self::read_file(&path)? {
@@ -613,7 +613,7 @@ impl ConfigRoot {
     }
 
     /// Filesystem path of `recipes/<name>.lock`, whether or not it exists — the
-    /// target `boot2deb update` writes to. The lock lands in the root that *owns*
+    /// target `boot2deb update` writes to. The lock is written to the root that *contains*
     /// the recipe (an overlay recipe's lock goes into that overlay), or the primary
     /// root if the recipe is not on the path. The name is validated first, since
     /// this is a *write* target: an unchecked `../` or absolute name would let
@@ -633,8 +633,8 @@ impl ConfigRoot {
     /// package manifest (`<leaf>.pkgs.lock`) and an app's NuGet sidecar. Both are named
     /// for the point's leaf, so a variant's sit beside the variant's own lock.
     ///
-    /// Anchored to the root that *owns* the recipe, as [`lock_path`](Self::lock_path)
-    /// is. An overlay recipe's files therefore land in that overlay, not in the primary
+    /// Anchored to the root that *contains* the recipe, as [`lock_path`](Self::lock_path)
+    /// is. An overlay recipe's files therefore go into that overlay, not in the primary
     /// root. `name` is validated as `lock_path` validates it, which admits a variant's
     /// feature suffix. `filename` is held to a bare filename: no separator, not `.` or
     /// `..`, and not option-like. A variant's leaf contains `+`, which a bare identifier
@@ -660,7 +660,7 @@ impl ConfigRoot {
 
     /// Filesystem path of `recipes/<name>.outputs`, whether or not it exists: the
     /// [committed outputs](crate::outputs::CommittedOutputs) that `build --save-outputs`
-    /// writes and `verify-image` reads. It sits beside the lock, in the root that owns
+    /// writes and `verify-image` reads. It sits beside the lock, in the root that contains
     /// the recipe, and the name is validated for the same reason
     /// [`lock_path`](Self::lock_path)'s is.
     pub fn outputs_path(&self, name: &str) -> Result<PathBuf, ConfigError> {
@@ -1033,7 +1033,7 @@ fn validate_build_ref(name: &str) -> Result<(), ConfigError> {
 /// [`FEATURE_SEP`](crate::buildpoint::FEATURE_SEP).
 ///
 /// A variant's lock and manifest live beside the recipe they derive from, so the
-/// root that *owns* them is the root owning that recipe, not one owning a `.toml`
+/// root they *belong to* is the root containing that recipe, not one looked up by a `.toml`
 /// that does not exist.
 fn recipe_half(name: &str) -> &str {
     name.split(crate::buildpoint::FEATURE_SEP)
@@ -1045,7 +1045,7 @@ fn recipe_half(name: &str) -> &str {
 mod tests {
     /// A misspelt suite is the one failure enumerating suites can hide: the entry never
     /// applies, so the package goes missing from every image with nothing said. The
-    /// report is what pays that price back.
+    /// report is what makes it visible.
     #[test]
     fn a_suite_no_recipe_builds_is_reported() {
         let dir = tempfile::tempdir().unwrap();
@@ -1279,7 +1279,7 @@ packages = [
         assert_eq!(base["k"]["inner"].as_integer(), Some(2));
     }
 
-    // ---- Search-path behaviour (overlays) ------------------------------------
+    // ---- Search-path behavior (overlays) ------------------------------------
 
     /// A primary root + one overlay, each optionally containing a `base.toml` and a
     /// `recipes/<name>.toml`. Returns both tempdirs (kept alive) and the root.
@@ -1341,7 +1341,7 @@ packages = [
     #[test]
     fn nested_recipe_ref_addresses_lock_and_manifest_in_the_device_dir() {
         // A `<device>/<leaf>` recipe's lock and manifest sit in the device folder
-        // beside the recipe toml, anchored to the root that owns the recipe.
+        // beside the recipe toml, anchored to the root that contains the recipe.
         let p = tempfile::tempdir().unwrap();
         let o = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(o.path().join("recipes/turing-rk1")).unwrap();
@@ -1372,7 +1372,7 @@ packages = [
 
     #[test]
     fn lock_path_targets_the_owning_root() {
-        // A recipe living only in the overlay: its lock write-target lands in the
+        // A recipe living only in the overlay: its lock write-target is in the
         // overlay, not the primary root.
         let p = tempfile::tempdir().unwrap();
         let o = tempfile::tempdir().unwrap();
@@ -1391,7 +1391,7 @@ packages = [
         assert!(lp2.starts_with(p.path()));
 
         // The manifest sibling anchors to the same owning root as the lock, so an
-        // overlay recipe's manifest lands beside its lock rather than in the primary
+        // overlay recipe's manifest is placed beside its lock rather than in the primary
         // root (Finding 5). A recipe not on the path defaults to the primary root.
         let ms = root.lock_sibling("ov", "ov.pkgs.lock").unwrap();
         assert!(
@@ -1732,7 +1732,7 @@ packages = [
         let root =
             ConfigRoot::with_overlays(p.path().to_path_buf(), [o.path().to_path_buf()]).unwrap();
 
-        // The primary root owns the recipe, so its lock is the one read...
+        // The primary root contains the recipe, so its lock is the one read...
         assert_eq!(
             root.lock("r").unwrap().kernel.unwrap().commit,
             "a".repeat(40)
@@ -1932,10 +1932,10 @@ packages = [
 /// One conditional package entry whose `suites` name nothing this config tree builds.
 ///
 /// Almost always a typo. Enumerating suites is what makes a conditional entry checkable
-/// against the archive (see [`crate::model::PackageEntry`]). The price of enumerating
+/// against the archive (see [`crate::model::PackageEntry`]). The cost of enumerating
 /// is that a misspelled suite name is silent. The entry simply never applies, so the
 /// package goes missing from every image with nothing said. This is the check that
-/// pays that price back.
+/// makes it visible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnreachableSuite {
     /// The layer or feature the entry was read from.

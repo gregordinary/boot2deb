@@ -27,7 +27,7 @@
 //!
 //! The userspace and ffmpeg stages are the first case. The kernel, u-boot and kmod
 //! stages are the second, so they compile natively in a host-arch root through a cross
-//! toolchain. That is the standard distro cross-build shape, and it pays no emulation
+//! toolchain. That is the standard distro cross-build shape, and it uses no emulation
 //! for a multi-minute kernel build. Archiving resolves nothing at all, which is why the
 //! packaging root is host-arch too.
 //!
@@ -1075,13 +1075,13 @@ impl BuildSandbox for RootlessSandbox {
 ///   build sandbox, which is target-arch because `dpkg-shlibdeps` must see the target's
 ///   libraries. Archiving a pre-staged tree resolves nothing.
 ///
-/// What it buys is that `dpkg-deb`'s version and its `liblzma` become sha256-pinned
+/// What it provides is that `dpkg-deb`'s version and its `liblzma` become sha256-pinned
 /// packages resolved from the build's own mirror list, like every other input. Both do
 /// shape the archive bytes, and neither is then a property of whichever distribution
 /// ran the build.
 ///
 /// The base is entered read-write, as every cage root is. Nothing written during a
-/// packaging run lands in it. The archive goes to a bind-mounted host path, and
+/// packaging run goes into it. The archive goes to a bind-mounted host path, and
 /// `dpkg-deb`'s scratch to the cage's own `/tmp` tmpfs. The tree therefore stays what
 /// its manifest says it is.
 pub struct PackagingSandbox {
@@ -1606,7 +1606,7 @@ fn base_tree_name<S: AsRef<str>>(
 /// attributes, which a tmpfs older than Linux 6.6 cannot hold. An upper placed in a
 /// tmpfs `TMPDIR` therefore fails on a host whose work dir would have supported it.
 ///
-/// Which filesystem this lands on is a host requirement, and
+/// Which filesystem holds this directory is a host requirement, and
 /// [`overlay_check`](crate::checks::overlay_check) probes this directory rather than
 /// `/tmp` for exactly that reason.
 pub fn build_root_uppers(work_dir: &Path) -> PathBuf {
@@ -2028,7 +2028,7 @@ pub(crate) fn forward_bootstrap_event(step: &Step, event: DebianEvent<'_>) {
         }
         // Two levels of openness, and each needs its own escape. The wildcard absorbs a
         // future *variant*; the `..` in every struct arm above absorbs a future *field*
-        // within a variant already matched here. Both are load-bearing: a milestone this
+        // within a variant already matched here. Both are required: a milestone this
         // build has no line for is silently ignored rather than breaking the match.
         _ => {}
     }
@@ -2399,7 +2399,7 @@ mod tests {
     /// key omitted because the feature is compiled out, would each be a record that
     /// silently stopped describing the build.
     ///
-    /// `network` is the load-bearing assertion. It is a *declared* posture — [`profile`]
+    /// `network` is the essential assertion. It is a *declared* posture — [`profile`]
     /// sets it so that this record can state it — and a build step acquiring an egress
     /// surface because a library default moved is exactly what declaring it prevents. The
     /// hardening key is the other: boot2deb selects no `hardening` feature, so
@@ -2430,7 +2430,7 @@ mod tests {
         assert!(recorded.posture.landlock_net.is_empty());
         assert_eq!(recorded.posture.seccomp_instructions, None);
         assert_eq!(recorded.posture.keep_capabilities, None);
-        // Declared for the same reason `network` is, and load-bearing for a second: a
+        // Declared for the same reason `network` is, and required for a second: a
         // `/dev/null` standard input puts the command in a session of its own, out of
         // reach of the operator's controlling terminal. Inherited, a maintainer script
         // could open `/dev/tty` and read from it — or push characters into its input
@@ -2595,7 +2595,7 @@ mod tests {
         // only it can express.
         assert_ne!(base, name(&deps, BASE_STAGE_VERSION - 1));
 
-        // And the separators are load-bearing: a package set cannot be spelled as part
+        // And the separators are required: a package set cannot be spelled as part
         // of the archive's identity.
         assert_ne!(
             name(&["a", "b"], 1),
@@ -2906,7 +2906,7 @@ mod tests {
                 role.token()
             )));
         }
-        // The separator is load-bearing: without it a longer name sharing the token's
+        // The separator is required: without it a longer name sharing the token's
         // letters would be spared, and a build root would survive the sweep.
         assert!(!is_packaging_root("packages"));
         assert!(!is_packaging_root("package"));

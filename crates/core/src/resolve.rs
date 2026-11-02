@@ -254,9 +254,9 @@ pub fn resolve_device(
         }
     }
     let build_media_accel = needs_media_accel.is_some();
-    // The licence flavour of the FFmpeg this build produces. No gate is needed
+    // The license flavor of the FFmpeg this build produces. No gate is needed
     // alongside it: the feature that sets it declares `requires_capability =
-    // ["ffmpeg"]`, so a selection asking for the nonfree flavour without a provider
+    // ["ffmpeg"]`, so a selection asking for the nonfree flavor without a provider
     // has already failed the capability check above.
     let ffmpeg_nonfree = crate::feature::first_enabling_ffmpeg_nonfree(&loaded_features).is_some();
 
@@ -268,7 +268,7 @@ pub fn resolve_device(
 
     // Merge the rootfs package set: base ∪ soc ∪ boot-method ∪ device ∪ kernel ∪ Σ
     // features, de-duplicated with order preserved (base first). apt solves the
-    // set, so order is not load-bearing — it only keeps the merged list stable.
+    // set, so nothing depends on the order — it only keeps the merged list stable.
     //
     // A distro-package kernel joins the set here: it installs from the mirror like
     // any other package (and is pinned like one, in the solved manifest), rather than
@@ -1517,7 +1517,7 @@ fn check_app(
 }
 
 /// A relative path made only of plain components: not empty, not absolute, and with
-/// no `.` or `..` component. What a stage can join onto a tree it owns without the
+/// no `.` or `..` component. What a stage can join onto a tree it manages without the
 /// result leaving that tree.
 fn is_plain_relative_path(path: &str) -> bool {
     !path.is_empty()
@@ -1742,7 +1742,7 @@ pub fn resolve_recipe(
             }
         }
     }
-    // A claim says a configuration is fit to publish; the nonfree FFmpeg flavour may
+    // A claim says a configuration is fit to publish; the nonfree FFmpeg flavor may
     // not be published at all. Rejecting the pair is what keeps "only the free build
     // ships" a property of the config tree rather than something a reviewer has to
     // remember — the shipped tree authors no nonfree recipe, and this is what stops one
@@ -2224,13 +2224,13 @@ pub fn check_group_name(group: &str) -> Result<(), ConfigError> {
 }
 
 /// Reject a locale `locale-gen` could not act on, or that would not survive the two
-/// files it lands in.
+/// files it is written to.
 ///
 /// The name becomes a `LANG=` value in `/etc/locale.conf` (shell-sourced by `pam_env`)
 /// and the left half of an `/etc/locale.gen` line, so it must be a bare locale name —
 /// and it must contain a codeset, since `locale-gen` is given `<name> <codeset>` pairs
 /// and there is nowhere else for that half to come from. This is a UTF-8-era
-/// constraint on the *build-time* knob only: a legacy 8-bit locale is still one
+/// constraint on the *build-time* setting only: a legacy 8-bit locale is still one
 /// `dpkg-reconfigure locales` away on the running image.
 fn validate_locale(locale: &str) -> Result<(), ConfigError> {
     if locale.is_empty() {
@@ -2713,7 +2713,7 @@ mod tests {
             .find(|k| k.name == "aic8800")
             .expect("aic8800 device_kmod");
         assert_eq!(kmod.modules, ["aic8800_bsp", "aic8800_fdrv"]);
-        // Both make args are load-bearing: without NO_REG_SDIO the driver never creates
+        // Both make args are required: without NO_REG_SDIO the driver never creates
         // wlan0, and BTLPM does not compile on a 7.1 kernel.
         assert_eq!(
             kmod.make_args,
@@ -3068,7 +3068,7 @@ mod tests {
                 .iter()
                 .any(|l| l == "en_US.UTF-8"),
             "en_US.UTF-8 is generated on every image, so an SSH client forwarding it \
-             lands on a locale the image contains"
+             selects a locale the image contains"
         );
 
         // An override the base never lists is generated anyway, and leads the set.
@@ -3355,7 +3355,7 @@ mod tests {
                 },
             )
         };
-        // Both ends of the range are accepted — a floor that rejected its own value
+        // Both ends of the range are accepted — a lower bound that rejected its own value
         // would leave the documented minimum unreachable.
         assert!(with_len(MIN_PASSWORD_LENGTH).is_ok());
         assert!(with_len(MAX_PASSWORD_LENGTH).is_ok());
@@ -3451,7 +3451,7 @@ mod tests {
         for bad in [
             "",                    // empty
             "de_DE",               // no codeset: locale-gen takes `<name> <codeset>` pairs
-            "en_US.UTF-8; rm -rf", // shell metacharacters (it lands in a sourced file)
+            "en_US.UTF-8; rm -rf", // shell metacharacters (it is written to a sourced file)
             "en_US.UTF-8\"$(id)",  // quote + substitution
             "../../etc/passwd",    // path shape
         ] {
@@ -3469,7 +3469,7 @@ mod tests {
     fn locale_codeset_is_the_half_after_the_dot_and_before_any_modifier() {
         assert_eq!(crate::model::locale_codeset("en_US.UTF-8"), Some("UTF-8"));
         assert_eq!(crate::model::locale_codeset("C.UTF-8"), Some("UTF-8"));
-        // A modifier rides *after* the codeset: `sr_RS.UTF-8@latin UTF-8` is the real
+        // A modifier comes *after* the codeset: `sr_RS.UTF-8@latin UTF-8` is the real
         // /etc/locale.gen line, so the modifier must not be swept into the codeset.
         assert_eq!(
             crate::model::locale_codeset("sr_RS.UTF-8@latin"),
@@ -3482,7 +3482,7 @@ mod tests {
     /// A [`BaseLayer`] with every key at the value a config root that omits it gets.
     ///
     /// Deserialized from an empty document rather than built field by field, so it
-    /// stays the *real* set of defaults: a new key with a `#[serde(default)]` lands
+    /// stays the *real* set of defaults: a new key with a `#[serde(default)]` appears
     /// here automatically, and a new key without one fails this instead of silently
     /// giving tests a value no config root would produce.
     fn base_layer_fixture() -> BaseLayer {
@@ -3850,7 +3850,7 @@ mod tests {
             "a base recipe selects no features"
         );
         // No feature sets `requires_media_accel`, so no userspace/ffmpeg source trees
-        // are scheduled and no media userspace lands in the rootfs.
+        // are scheduled and no media userspace is installed in the rootfs.
         assert!(
             image_of(&b).userspace.is_empty(),
             "base contains no userspace sources"
@@ -4196,7 +4196,7 @@ mod tests {
             boot.cmdline
         );
 
-        // A laptop whose primary link is wifi: NetworkManager owns the interfaces, so
+        // A laptop whose primary link is wifi: NetworkManager manages the interfaces, so
         // the base layer's dhcpcd is dropped rather than left to fight it.
         assert!(image_of(&b)
             .rootfs_packages
@@ -4247,7 +4247,7 @@ mod tests {
     fn the_libreboot_variant_pairs_its_profile_with_the_slot_that_profile_needs() {
         // A board profile bounds the payload the *firmware* accepts; the slot bounds
         // what the *image* can contain. Selecting the 32 MiB profile without the 32 MiB
-        // slot buys nothing, so the two travel together on one device — and the rootfs
+        // slot gains nothing, so the two travel together on one device — and the rootfs
         // offset follows the slots rather than being authored beside them.
         let root = repo_root();
         let b = resolve_recipe(&root, "asus-c201-libreboot/forky", &Overrides::default()).unwrap();
@@ -4262,7 +4262,7 @@ mod tests {
             boot.rootfs_offset, "76MiB",
             "derived from the wider slots: 12 + 32 + 32"
         );
-        // And the slot spends itself: the wider budget is what lets the initramfs take
+        // And the slot is put to use: the wider budget is what lets the initramfs take
         // the compressor that costs bytes and saves boot time.
         assert_eq!(boot.initramfs_compress, InitramfsCompress::Zstd);
 
@@ -4498,7 +4498,7 @@ mod tests {
             validate_kernel_cmdline(Some(" video=HDMI-A-1:d cpuidle.off=1 ")).unwrap(),
             "video=HDMI-A-1:d cpuidle.off=1"
         );
-        // The value lands inside a double-quoted assignment in a shell-sourced file
+        // The value is written inside a double-quoted assignment in a shell-sourced file
         // (board.conf), so shell-active characters, control characters, and a
         // second `root=` source of truth are all typed errors at resolve time.
         for bad in [
@@ -4862,7 +4862,7 @@ mod tests {
     #[test]
     fn kmods_resolve_in_the_order_the_device_named_them() {
         // The device supplies only the order and the names; every field comes from the
-        // kmod's own layer, and the stem lands on the resolved struct as its identity.
+        // kmod's own layer, and the stem is set on the resolved struct as its identity.
         let (_d, root) = kmod_root(&[("beta", &kmod_toml("v2")), ("alpha", &kmod_toml("v1"))]);
         let names = ["beta".to_string(), "alpha".to_string()];
         let (resolved, _) = resolve_kmods(&root, &names, "dev").unwrap();
@@ -4882,7 +4882,7 @@ mod tests {
     #[test]
     fn a_kmod_named_twice_is_rejected() {
         // One kmod is one build node, one deb, and one lock pin, so a repeat has no
-        // meaning to honour.
+        // meaning to honor.
         let (_d, root) = kmod_root(&[("alpha", &kmod_toml("v1"))]);
         let names = ["alpha".to_string(), "alpha".to_string()];
         match resolve_kmods(&root, &names, "dev").unwrap_err() {
@@ -5017,7 +5017,7 @@ mod tests {
     fn base_resolution_selects_no_media_accel_sources() {
         // A plain device resolution (no recipe, hence no features) builds no
         // transcode stack, so it contains neither userspace nor ffmpeg sources even
-        // though the RK3588 SoC layer supplies them — sources ride the feature, not
+        // though the RK3588 SoC layer supplies them — sources come with the feature, not
         // the SoC.
         let root = repo_root();
         let b = resolve_device(&root, "turing-rk1", &Overrides::default()).unwrap();
@@ -5535,7 +5535,7 @@ mod fixture_tests {
         }
     }
 
-    /// Every layer's `[[expect]]` lands in the resolved build as its own group,
+    /// Every layer's `[[expect]]` appears in the resolved build as its own group,
     /// tagged with the declaring layer and in merge order — SoC, boot method,
     /// device, kernel, then the selected feature. Layers declaring nothing (the
     /// second feature) contribute no group rather than an empty one.
@@ -6303,7 +6303,7 @@ mod fixture_tests {
     }
 
     #[test]
-    fn the_licence_flavour_is_free_unless_a_feature_asks_otherwise() {
+    fn the_license_flavor_is_free_unless_a_feature_asks_otherwise() {
         // The default across every build: no feature sets it, so nothing ships an
         // undistributable FFmpeg by accident.
         let dir = nonfree_tree(&[], "");
@@ -6321,7 +6321,7 @@ mod fixture_tests {
 
     #[test]
     fn a_nonfree_variant_reference_resolves_but_a_claimed_recipe_does_not() {
-        // The intended path: reach the flavour as `<recipe>+<feature>`. The base
+        // The intended path: reach the flavor as `<recipe>+<feature>`. The base
         // recipe's claim describes the point it authored, not this one, so the variant
         // resolves — and has no claim of its own, since a claim lives on a recipe
         // and there is no recipe here.
@@ -6350,7 +6350,7 @@ mod fixture_tests {
         }
 
         // Without the claim the same authored recipe is fine — the gate is on the
-        // pairing, not on the flavour, which is buildable by design.
+        // pairing, not on the flavor, which is buildable by design.
         let dir = nonfree_tree(&["nonfree"], "");
         let root = ConfigRoot::new(dir.path());
         assert!(
@@ -6580,7 +6580,7 @@ mod fixture_tests {
     }
 
     /// Two layers claiming one suite would make the archive depend on which file was
-    /// read first, so the claim is refused rather than settled by order.
+    /// read first, so the claim is refused rather than decided by order.
     #[test]
     fn a_suite_two_distro_layers_claim_is_refused() {
         let dir = recipe_on("forky").write();

@@ -221,7 +221,7 @@ pub struct MissingFirmware {
 
 /// The verdict on one initrd against the resolved module list.
 ///
-/// Each listed name lands in exactly one of the three name lists, in the order the list
+/// Each listed name goes into exactly one of the three name lists, in the order the list
 /// named them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Coverage {

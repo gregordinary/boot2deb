@@ -29,7 +29,7 @@ between them using three fields in each partition's GPT attribute bits:
 |---|---|
 | `priority` | boot order among candidates, where `0` means **never boot** |
 | `tries` | attempts remaining, decremented *before* each attempt |
-| `successful` | known-good, which stops the firmware spending `tries` |
+| `successful` | known-good, which stops the firmware decrementing `tries` |
 
 A slot is a boot candidate while `priority > 0` and (`successful` or `tries > 0`).
 
@@ -41,9 +41,9 @@ When a kernel package is installed, Debian's `depthcharge-tools` package runs it
 2. Write it into the slot the board is **not currently booted from**.
 3. Mark that slot highest-priority with `tries = 1, successful = 0`.
 
-On the next boot the firmware spends that single try on the new slot. If the system comes
+On the next boot the firmware uses that single try on the new slot. If the system comes
 up, `depthcharge-tools.service` runs `depthchargectl bless`, which sets `successful` and
-commits the upgrade. If the system *never* comes up, the try is already spent and the
+commits the upgrade. If the system *never* comes up, the try is already used and the
 slot stops being a candidate. The firmware falls back to the other slot, which still
 holds the kernel that worked, still marked `successful`.
 
@@ -97,11 +97,11 @@ sudo reboot
 Then pin or downgrade the kernel package so the next `apt upgrade` does not simply put it
 back.
 
-## When the write fails: the payload ceiling
+## When the write fails: the payload limit
 
 The signed blob must fit its kernel slot, 16 MiB on stock firmware (a board page can
 list roomier firmware series). `depthchargectl` builds the new image first and writes
-second, so when nothing it tries fits under the ceiling, it fails **without touching the
+second, so when nothing it tries fits under the limit, it fails **without touching the
 slot**:
 
 ```
@@ -113,16 +113,16 @@ from, and the board keeps booting. The change that triggered the rebuild has not
 reached the slot, and nothing will until the payload fits again.
 
 The payload is kernel + device tree + initramfs, and the part that grows is the
-initramfs. Under the stock ceiling the image ships it deliberately small: an explicit
+initramfs. Under the stock limit the image ships it deliberately small: an explicit
 module list (`MODULES=list`), xz compression, and no copy of udev's hardware database.
 Debian's udev hook would otherwise add that database at 1.7 MB. On the C201 this leaves
 about 3.6 MiB of headroom.
 
-A board with a roomier firmware buffer spends that margin instead. `boot2deb resolve`
+A board with a roomier firmware buffer uses that margin instead. `boot2deb resolve`
 shows which compressor a build gets on its `initramfs` line. A board at `COMPRESS=zstd`
 has slot to spare and is unlikely to meet this failure at all.
 
-**What spends that headroom is initramfs-tools hooks**, and the one that spends it all at
+**What uses up that headroom is initramfs-tools hooks**, and the one that uses it all at
 once is plymouth. Desktop metapackages (`cinnamon-desktop-environment`,
 `task-gnome-desktop`, and the rest) pull plymouth in through Recommends, and
 `desktop-base` registers a graphical boot theme. Plymouth's hook then copies the splash
@@ -130,7 +130,7 @@ daemon, its renderers, the theme, and the text plugin with its whole font stack 
 every initramfs built afterwards. That is several MB, and the next slot write fails as
 above. That write is a kernel upgrade, or any package that triggers `update-initramfs`.
 
-On a board at the stock ceiling the cost buys nothing anyway. Its initramfs contains no
+On a board at the stock limit the cost has no benefit anyway. Its initramfs contains no
 DRM modules, so plymouth cannot draw before the root pivot regardless. It says so itself
 during the rebuild:
 

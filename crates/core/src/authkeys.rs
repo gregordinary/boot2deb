@@ -1,7 +1,7 @@
 //! The shape of an `authorized_keys` entry.
 //!
 //! Its own module because the check has to be strict about one thing in particular.
-//! The value is authored as an SSH key. It lands in the file that decides who can log
+//! The value is authored as an SSH key. It is written to the file that decides who can log
 //! in as the image's default account.
 //!
 //! A malformed entry is not a cosmetic problem. `sshd` skips a line it cannot parse
@@ -86,7 +86,7 @@ pub fn check_authorized_key(entry: &str) -> Result<(), &'static str> {
         return Err("expected '<type> <base64-key> [comment]'");
     }
     if !KEY_TYPES.contains(&key_type) {
-        // An options prefix with a key after it lands here, since the first field is
+        // An options prefix with a key after it reaches this branch, since the first field is
         // then the options rather than a type.
         return Err(
             "unknown key type — expected one of ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256/384/521, \

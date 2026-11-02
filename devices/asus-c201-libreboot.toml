@@ -8,7 +8,7 @@
 # holding it can also hold. So the profile and the slot size come as a pair, and the
 # pair is what this file is.
 #
-# What the pairing buys is a signed payload up to 32 MiB, and this file spends it. The
+# What the pairing gives is a signed payload up to 32 MiB, and this file uses it. The
 # budget is what forces a 16 MiB board to build a slow initramfs and boot blind; with it
 # lifted, resolution picks zstd over xz for the initramfs (see `InitramfsCompress`) and
 # the `[initramfs]` list below adds the display stack to it. Together those
@@ -44,7 +44,7 @@ kpart_size       = "32MiB"
 # whose firmware buffers 32 MiB has room for a display stack inside it — so the profile,
 # the slot, and this list are one decision, made once, in one place.
 #
-# What it buys: on a board without it nothing can draw until the real root is mounted
+# What it gives: on a board without it nothing can draw until the real root is mounted
 # and udev loads these same modules, so a boot is a blank firmware screen from Ctrl+U
 # until systemd is well underway, and an initramfs that *fails* is a blank screen
 # forever. With it the panel lights during the initramfs, which is both a faster-looking

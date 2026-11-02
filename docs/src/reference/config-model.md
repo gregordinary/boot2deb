@@ -6,7 +6,7 @@ A build is a single point across the axes a user selects:
 
 - **`device`** — the target hardware. It resolves through a layered hardware stack (see
   below).
-- **`kernel`** — an orthogonal axis that owns everything version-coupled: its source
+- **`kernel`** — an orthogonal axis that defines everything version-coupled: its source
   refs, `.config` fragments, and [patch series](#patch-series-belong-to-the-kernel).
   A device declares which kernels it supports and a default. Override with `--kernel`
   (values from `list-kernels`). Some kernels are [not built at
@@ -51,7 +51,7 @@ A build is a single point across the axes a user selects:
   at that capability. Override with `--feature` (repeatable, with values from
   `list-features`).
 
-Two more knobs round out a build without being headline axes: `--boot-method` (a device
+Two more settings round out a build without being headline axes: `--boot-method` (a device
 property, rarely overridden) and `--image-size`. The depthcharge **board profile** is a
 third — see [Board profiles](#board-profiles). Like the localization axes, it is
 resolved from config rather than set at build time.
@@ -67,13 +67,13 @@ resolve alongside them, from `base.toml` — see
 A kernel definition's `flavor` decides what shape it has, because the two kinds of
 kernel have almost nothing in common:
 
-- **`mainline` / `vendor`** — compiled from source. The definition owns a source ref, a
+- **`mainline` / `vendor`** — compiled from source. The definition contains a source ref, a
   base defconfig, a fragment list, and a patch series. The build clones the tree,
   applies the series, merges the config, and runs `make bindeb-pkg`. The lock pins the
   exact commit.
 
-- **`distro-package`** — installed from the Debian mirror. The definition owns nothing
-  but a package name (`linux-image-armmp`). Debian owns the source, the config, and the
+- **`distro-package`** — installed from the Debian mirror. The definition contains nothing
+  but a package name (`linux-image-armmp`). Debian maintains the source, the config, and the
   patches. There is no compile node, no fragment merge, no patch series, and **no
   `[kernel]` table in the lock**. The exact version and hash are pinned in the solved
   package manifest, alongside every other package in the image.
@@ -139,7 +139,7 @@ The two shipped methods:
 - **`rockchip-rkbin`** — boot2deb compiles the bootloader. The layer contains the u-boot
   source and ref, and the raw-gap offsets (`idbloader_offset`, `uboot_itb_offset`,
   `rootfs_offset`). The device contains `uboot_defconfig` and inherits an rkbin blob set
-  (ATF + DDR TPL) from its SoC. The payloads land *outside* any partition, in the gap
+  (ATF + DDR TPL) from its SoC. The payloads are written *outside* any partition, in the gap
   ahead of the rootfs.
 
   The blobs are vendored under `blobs/<soc>/` and pinned by sha256, so a build reads
@@ -184,7 +184,7 @@ omitting them is not an error. Omitting its `[depthcharge]` block is.
 ### Board profiles
 
 A depthcharge **board profile** is `depthcharge-tools`' codename for a *firmware
-behavior set*. That covers its payload ceiling, and whether it loads a FIT ramdisk or
+behavior set*. That covers its payload limit, and whether it loads a FIT ramdisk or
 needs the initramfs address patched into every DTB.
 
 It describes **the firmware a unit runs**, not the board model. The same C201 takes one
@@ -201,7 +201,7 @@ finished lock. `build` takes no `--board`: selecting a non-default profile means
 recipe that pins it. `resolve --board` previews one and names the file to write.
 
 A profile also bounds the payload its firmware will accept, and a bound the *partition*
-cannot hold buys nothing. A device built for a wider profile therefore states the
+cannot hold is of no use. A device built for a wider profile therefore states the
 matching `kpart_size` in its own `[depthcharge]` block. Resolution derives the rootfs
 offset from `kpart_offset + slots x kpart_size`, so the partitions cannot disagree.
 `devices/asus-c201-libreboot.toml` is that pairing. It `extends = "asus-c201"` and
@@ -211,8 +211,8 @@ The slot size then decides more than the layout. The signed payload holds the ke
 the initramfs in one budget, so `kpart_size` also picks the initramfs compressor. A
 narrow slot takes `xz` for its size, a roomy one takes `zstd` for its speed, and
 `boot2deb resolve` prints which on its `initramfs` line. It is derived rather than
-authored, so widening a slot cannot leave a board paying a decompression cost it no
-longer owes.
+authored, so widening a slot cannot leave a board with a decompression cost its slot no
+longer requires.
 
 ## Patch series belong to the kernel
 
@@ -224,7 +224,7 @@ feature compiles names its own series, on its own axis. See
 [Applications a feature compiles](#applications-a-feature-compiles).
 
 A series that applies to one kernel version does not apply to another, so the series is
-version-coupled to the kernel that owns it. Series live in a separate `patches` repo,
+version-coupled to the kernel it belongs to. Series live in a separate `patches` repo,
 not in this one. Authoring workflow:
 [Adding a patch](../contributing/adding-a-patch.md).
 
@@ -332,7 +332,7 @@ selected per recipe (`uboot_series = "..."`) or per invocation (`--uboot-series`
 validated against the device's supported set exactly as the kernel axis is.
 
 The repo it is fetched from is the boot method's `patches_url`/`patches_ref`. The
-resolved commit lands in the lock's `[uboot_patches]` block, a full pin like every
+resolved commit is recorded in the lock's `[uboot_patches]` block, a full pin like every
 other fetched source. It is graded by `verify-sources` and recorded in each image's
 provenance manifest.
 
@@ -454,7 +454,7 @@ with vendored bootloader blobs under `blobs/<soc>/`, kernel `.config` fragments 
 `fragments/`, each kmod's own patches under `kmods/<name>/patches/`, and the resolved
 exact pins in `recipes/<device>/<leaf>.lock`.
 
-### Media-accel sources ride the feature, not the SoC
+### Media-accel sources come with the feature, not the SoC
 
 The `[[userspace]]` entries and the `[ffmpeg]` source stanza at the soc layer are
 **optional**. They provide the trees a `requires_media_accel` feature compiles, and they
@@ -738,8 +738,8 @@ This exists because a single chatty driver can otherwise print faster than a log
 be typed. That costs you the console exactly when a first boot needs it.
 
 Out-of-tree vendor drivers are the usual source. A bare `printk()` has no severity,
-so it lands at `KERN_WARNING` however trivial the message. Such calls are typically
-ungated by any of the driver's own debug knobs, so lowering a driver's debug level does
+so it is logged at `KERN_WARNING` however trivial the message. Such calls are typically
+ungated by any of the driver's own debug options, so lowering a driver's debug level does
 not reach them. Gating the console bounds every driver at once, including the ones
 nothing else can quiet.
 
@@ -778,7 +778,7 @@ a `dracut.conf.d` drop-in with one `force_drivers+=` line per name. Either way e
 module is installed and loaded early in the initramfs. The drop-in ships in the image, and
 an on-device kernel upgrade regenerates the initramfs from the same list.
 
-**Every name must land.** `initramfs-tools` skips a listed module it cannot find without
+**Every name must be present.** `initramfs-tools` skips a listed module it cannot find without
 a word. Under dracut the miss is logged as an error, and the initramfs is still finished
 without it. The rootfs stage therefore checks the initramfs it built. A name that is neither
 in it nor built into the kernel (`modules.builtin`) fails the build:
@@ -866,11 +866,11 @@ Whether a package still exists in one is a fact only that archive can answer.
 
 Enumerating forces the claim to be restated when a suite is added, and
 [`verify-packages`](cli.md) then checks each claim against the archive it is about. It
-also means boot2deb owns no release sequence. There is no ordering to maintain and no
+also means boot2deb maintains no release sequence. There is no ordering to maintain and no
 special case for `sid`.
 
-The price of enumerating is that a misspelt suite is silent. The entry never applies, so
-the package goes missing with nothing said. `verify-packages` pays it back by reporting a
+The cost of enumerating is that a misspelt suite is silent. The entry never applies, so
+the package goes missing with nothing said. `verify-packages` compensates for it by reporting a
 `suites` name that no recipe in the tree builds:
 
 ```text
@@ -984,7 +984,7 @@ config repo than saving a few lines.
 The redundancy is not unchecked. Resolution rejects a `default_kernel` outside
 `supported_kernels`, a `boot_method` outside `supported_boot_methods`, and so on, so a
 drifted duplicate fails fast rather than silently. `boot2deb new-device` emits these
-values for you, so the boilerplate is paid by the generator, not the author.
+values for you, so the boilerplate is written by the generator, not the author.
 
 ### A value that becomes a file or a line is checked at resolve
 
@@ -1014,7 +1014,7 @@ space in it is not trimmed, and an out-of-set source name is not folded to a leg
 neighbor.
 
 The mapping that would do the folding is not one-to-one. Two names the config states as
-different repositories could therefore land on one file. The one that lost would be
+different repositories could therefore map to one file. The one that lost would be
 missing from the finished image, with its packages already installed. Failing at the
 point of authorship is the only outcome that cannot silently change what was asked for.
 
@@ -1263,7 +1263,7 @@ inputs against its commit, and names every claim whose inputs have changed since
 
 `validated` means an image built from this recipe booted. It does not mean everything on
 the board works, and a claim that leaves that unsaid overstates itself. What a build
-point does *not* do is a `caveats` list, on the layer that owns the limitation:
+point does *not* do is a `caveats` list, on the layer the limitation belongs to:
 
 ```toml
 # socs/rk3576.toml — true of the part, so of every board on it
@@ -1351,7 +1351,7 @@ boot2deb build  h96-max-m9/forky+media-accel-v4l2
 **A variant is locked like anything else.** `update` writes
 `recipes/h96-max-m9/forky+media-accel-v4l2.lock` beside the recipe's own, with its own
 solved package manifest. `build` compiles it in its own work directory under a distinct
-image identity, so two selections can coexist without one landing on the
+image identity, so two selections can coexist without one overwriting the
 other's artifacts. Every lock-reading command takes the reference, so `why-rebuild`,
 `verify-patches`, `verify-sources`, and `clean` all work on a variant unchanged. A
 variant's first `update` inherits the recipe's pins, so it starts from the same kernel,

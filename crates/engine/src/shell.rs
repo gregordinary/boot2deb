@@ -181,7 +181,7 @@ impl ShellStage {
     /// Read from each stage module's own accessor rather than composed here, so the
     /// session and the compile cannot disagree about where a stage's tree lives.
     /// [`ShellStage::Packaging`] has none: it archives trees the other stages staged
-    /// and owns no tree of its own.
+    /// and has no tree of its own.
     fn tree_dir(self, work_dir: &Path) -> Option<PathBuf> {
         match self {
             ShellStage::Kernel => Some(kernel::tree_dir(work_dir)),
@@ -438,9 +438,9 @@ fn stage_env(
 /// declaration, read from the stage module rather than restated.
 ///
 /// `build` supplies the axes a set depends on that the lock does not contain — the ffmpeg
-/// stage's licence flavour, whose two forms layer different `-dev` packages. Taken from
+/// stage's license flavor, whose two forms layer different `-dev` packages. Taken from
 /// the resolution rather than repeated as a session option, so the session cannot be
-/// told a flavour the build was not.
+/// told a flavor the build was not.
 fn layer_packages(
     build: &ResolvedBuild,
     lock: &Lock,
@@ -733,7 +733,7 @@ mod tests {
             start_dir(&opts(ShellStage::Kernel, work, &[], &[])),
             kernel::tree_dir(work)
         );
-        // The packaging root owns no tree, so it always starts in the work dir.
+        // The packaging root has no tree, so it always starts in the work dir.
         assert_eq!(
             start_dir(&opts(ShellStage::Packaging, work, &[], &[])),
             work

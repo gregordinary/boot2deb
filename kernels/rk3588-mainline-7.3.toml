@@ -1,5 +1,5 @@
 # kernels/rk3588-mainline-7.3.toml — a kernel is its own versioned entity that
-# owns everything version-coupled: source ref, config fragments, patch series.
+# defines everything version-coupled: source ref, config fragments, patch series.
 flavor           = "mainline"
 source           = "linux-stable"        # 7.3.x releases live in linux-stable
 track            = "7.3.y"               # resolved to an exact tag/SHA in the lock

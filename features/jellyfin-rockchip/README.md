@@ -61,7 +61,7 @@ Jellyfin's default for this field is `["h264", "vc1"]`, so leaving it unset woul
 put that misleading flag on every H.264 transcode. Empty makes Jellyfin emit no
 `-hwaccel` at all: decode runs in software across eight cores, and the encoder
 stays in hardware. On this board that is also the faster arrangement — RGA
-scaling only pays for itself on frames already held in an MPP context, which on
+scaling only saves time on frames already held in an MPP context, which on
 this decode path they never are.
 
 Hardware decode *is* available to FFmpeg here, as `-hwaccel v4l2request`. It is
@@ -91,9 +91,9 @@ real path with `FileMode.Create`. There is no write-to-temp-and-rename, so
 directory permissions do not save a file the service cannot open for writing. A
 root-owned `encoding.xml` throws during startup.
 
-Overlay trees are copied with `cp -a` and land root-owned, and the `jellyfin` uid
+Overlay trees are copied with `cp -a` and are root-owned, and the `jellyfin` uid
 is allocated at install time, so the repo tree cannot pre-assign it. The
-pre-install overlay solves this by handing the problem to the package that owns
+pre-install overlay solves this by handing the problem to the package responsible for
 it: `jellyfin-server.postinst` runs
 
 ```sh
@@ -118,5 +118,5 @@ scripts must see while they run.
   comments in the shipped file are gone after the first start. Change the
   defaults here for the next image; change the running server in its dashboard.
 - The `jellyfin` feature installs no bundled FFmpeg (see its README), so
-  `EncoderAppPath` is load-bearing. If it is wrong there is no encoder at all
+  `EncoderAppPath` is essential. If it is wrong there is no encoder at all
   rather than a silent fallback to one that cannot reach the hardware.

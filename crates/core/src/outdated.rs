@@ -93,7 +93,7 @@ pub enum Upgrade {
     /// The pin names a branch whose tip has moved.
     ///
     /// Deliberately not "N commits behind": counting needs the repo's history, and
-    /// this survey deliberately buys its whole answer with one `ls-remote` per
+    /// this survey deliberately gets its whole answer from one `ls-remote` per
     /// remote. The tip's identity is what the advertisement can say honestly.
     TipMoved {
         /// The branch's current tip commit.

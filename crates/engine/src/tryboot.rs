@@ -190,7 +190,7 @@ pub fn fixture_kernel(
     // One kernel exists in a fresh root, so the globs are unambiguous. The copy runs
     // inside the root because `initramfs-tools` writes its initrd `0600 root:root`,
     // which the calling user cannot read from outside; inside the subordinate map the
-    // command is that root, and `dir` is bound at its own path so the pair lands on the
+    // command is that root, and `dir` is bound at its own path so the pair is written to the
     // host. The map's inside-root is the calling user, so the harvested pair belongs to
     // the caller rather than to a subuid.
     let script = format!(
@@ -219,7 +219,7 @@ pub fn fixture_kernel(
 ///
 /// `busybox` is named outright because `initramfs-tools` only Recommends it, and
 /// Recommends are never installed — an initramfs built without it has no rescue shell.
-/// The base stays at the library's `required` floor: this root exists to run one
+/// The base stays at the library's `required` minimum: this root exists to run one
 /// postinst, not to be a userland anyone works in.
 fn fixture_provisioner(spec: &FixtureSpec, package: &str) -> Result<Debian, EngineError> {
     let b = Debian::builder(spec.archive.suite())
@@ -370,7 +370,7 @@ fn qemu_argv(
 }
 
 /// The rootfs partition's PARTUUID, read back from the prepared disk's own GPT —
-/// no assumption about which index the rootfs landed at.
+/// no assumption about which index the rootfs was placed at.
 fn rootfs_partuuid(disk: &Path) -> Result<String, EngineError> {
     let table = crate::press::verify::read_back_table(disk)?;
     table
@@ -1229,7 +1229,7 @@ mod tests {
                 let _ = reader.read_line(&mut l);
                 l.trim_end().to_string()
             };
-            // Coloured status lines and the shell's own markers, as a forky guest
+            // Colored status lines and the shell's own markers, as a forky guest
             // sends them. Without them the driver is tested against a stream no
             // guest produces, and a sentinel it can never match reads as passing.
             send("[\u{1b}[0;32m  OK  \u{1b}[0m] Reached target multi-user.target\r\n");
@@ -1274,7 +1274,7 @@ mod tests {
                     break;
                 }
                 // tty echo, then the marker the shell writes before the command's
-                // own output — which lands between the newline and the first
+                // own output — which appears between the newline and the first
                 // character of every line the driver anchors a sentinel to.
                 send(&format!("{line}\r\n{OSC_MARKER}")); // tty echo
                 if line.starts_with("PS1=") {

@@ -303,7 +303,7 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Option<bool> {
 
 /// Classify how a checkout's HEAD (`actual`) relates to a locked pin
 /// (`expected`), for [`PinRelation`]-driven remedy wording. Best-effort: any
-/// git failure lands on [`PinRelation::Unknown`] rather than replacing the
+/// git failure resolves to [`PinRelation::Unknown`] rather than replacing the
 /// pin-mismatch error this decorates.
 pub(crate) fn pin_relation(repo: &Path, expected: &str, actual: &str) -> PinRelation {
     match is_ancestor(repo, expected, actual) {

@@ -331,7 +331,7 @@ fn verify_point(
             detail: match &free {
                 Err(e) => format!("could not read the free-block count: {e}"),
                 Ok(f) if *f >= required => format!(
-                    "{f} free of {} blocks; the floor is {required} — honoured",
+                    "{f} free of {} blocks; the minimum is {required} — honored",
                     geom.total_blocks
                 ),
                 Ok(f) => format!(
@@ -438,15 +438,13 @@ fn verify_point(
     })
 }
 
-/// Check 0: the build record beside the artifacts says the newest build of this point
-/// was a whole build that succeeded ([`BuildRecord::vouches_for_image`]).
-/// The fewest free blocks a fitted filesystem of `total_blocks` must keep to honour
+/// The fewest free blocks a fitted filesystem of `total_blocks` must keep to honor
 /// `slack`.
 ///
-/// Both floors round up to whole blocks, because the formatter cannot leave a fraction
+/// Both minimums round up to whole blocks, because the formatter cannot leave a fraction
 /// of one free. A share is the fewest blocks that are at least that share of the
 /// filesystem, which is what the formatter searches for, so a filesystem sitting exactly
-/// on the floor passes and one a fraction of a block short of the share does not.
+/// at the minimum passes and one a fraction of a block short of the share does not.
 fn required_free_blocks(
     slack: boot2deb_core::size::Slack,
     total_blocks: u64,
@@ -460,6 +458,8 @@ fn required_free_blocks(
     }
 }
 
+/// Check 0: the build record beside the artifacts says the newest build of this point
+/// was a whole build that succeeded ([`BuildRecord::vouches_for_image`]).
 fn build_record_check(dir: &Path, stem: &str) -> Check {
     let path = dir.join(boot2deb_core::buildrecord::record_name(stem));
     let parsed = std::fs::read_to_string(&path)
@@ -634,7 +634,7 @@ mod tests {
         assert!(!none.ok && none.detail.contains("no "), "{}", none.detail);
 
         let started = || BuildRecord::started("d/p", "all", "2026-10-08T12:00:00Z".into());
-        write(started().settled("2026-10-08T13:00:00Z".into(), None));
+        write(started().ended("2026-10-08T13:00:00Z".into(), None));
         let ok = build_record_check(tmp.path(), "p");
         assert!(
             ok.ok && ok.detail.contains("2026-10-08T13:00:00Z"),
@@ -642,7 +642,7 @@ mod tests {
             ok.detail
         );
 
-        write(started().settled(
+        write(started().ended(
             "2026-10-08T12:10:00Z".into(),
             Some("u-boot: make failed".into()),
         ));
@@ -653,7 +653,7 @@ mod tests {
             failed.detail
         );
 
-        write(BuildRecord::started("d/p", "kernel", "t".into()).settled("t".into(), None));
+        write(BuildRecord::started("d/p", "kernel", "t".into()).ended("t".into(), None));
         assert!(!build_record_check(tmp.path(), "p").ok);
 
         std::fs::write(tmp.path().join("p.build.toml"), "not = [toml").unwrap();
@@ -695,15 +695,15 @@ mod tests {
     }
 
     /// A share asks for whole blocks rounded up, as the formatter's fit search does: a
-    /// fifth of 1001 blocks is 200.2, so 200 free is short and 201 is the floor.
+    /// fifth of 1001 blocks is 200.2, so 200 free is short and 201 is the minimum.
     #[test]
-    fn a_slack_floor_rounds_up_to_whole_blocks() {
+    fn a_slack_minimum_rounds_up_to_whole_blocks() {
         use boot2deb_core::size::Slack;
         assert_eq!(required_free_blocks(Slack::Share(2000), 1001, 4096), 201);
         // A share that divides exactly asks for exactly that many.
         assert_eq!(required_free_blocks(Slack::Share(2000), 1000, 4096), 200);
         assert_eq!(required_free_blocks(Slack::Share(150), 10_000, 4096), 150);
-        // A byte floor is whole blocks too: one byte past a block needs a second.
+        // A byte minimum is whole blocks too: one byte past a block needs a second.
         assert_eq!(required_free_blocks(Slack::Bytes(4097), 1000, 4096), 2);
         assert_eq!(required_free_blocks(Slack::Bytes(8192), 1000, 4096), 2);
     }

@@ -30,7 +30,7 @@ modules = ["vsi_iommu", "rockchip_vdec", "hantro_vpu", "rga3", "rkvenc", "rocket
 #     than with the userspace that drives them. ~5.6 MiB installed with its
 #     closure (libv4l-0t64, libv4lconvert0t64, libv4l2rds0t64, libjpeg62-turbo).
 #
-# The firmware packages are named per distribution. Debian splits them by licence
+# The firmware packages are named per distribution. Debian splits them by license
 # and ships the blobs uncompressed. Ubuntu splits linux-firmware by vendor and ships
 # every blob zstd-compressed (mali_csffw.bin.zst), which the kernel's loader reads
 # under FW_LOADER_COMPRESS_ZSTD.
@@ -88,7 +88,7 @@ ffmpeg_flag     = "--enable-rkrga"
 ffmpeg_requires = ["mpp"]
 
 # The Mali GPU userspace blob, for the G610 — a CSF part with no mainline driver.
-# Optional: the transcode pipeline rides the VPU and the RGA, not the GPU, so a headless
+# Optional: the transcode pipeline runs on the VPU and the RGA, not the GPU, so a headless
 # box never needs it and compiling the variant matrix is minutes for nothing. Ask for it
 # with `--userspace libmali`. Nothing links it, so it names no `links` and no ffmpeg
 # flag; its `build_deps` are the X11/Wayland `.pc` files its variants probe for, and

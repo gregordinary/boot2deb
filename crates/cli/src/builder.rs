@@ -198,7 +198,7 @@ pub(crate) fn config_stamp(root: &ConfigRoot) -> Option<(String, bool)> {
 
 /// Whether `path` is a boot2deb *source* checkout rather than only a config tree.
 ///
-/// Both conditions are load-bearing. The crate manifest is what says this tree could
+/// Both conditions are required. The crate manifest is what says this tree could
 /// have produced the running binary; the `.git` directory is what gives it a commit to
 /// be compared against. A source tree exported without its history has neither an
 /// answer nor a problem.

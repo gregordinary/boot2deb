@@ -247,12 +247,12 @@ The rooting mode contributes its *kind* (`plain` or `overlay`) and nothing else,
 same reason. A record containing an overlay's lower stack or a range map's id extents would
 be a property of the machine rather than of the builder.
 
-That stamp is an **as-built record, not a requirement.** The stamped commit is a *floor*.
+That stamp is an **as-built record, not a requirement.** The stamped commit is a *lower bound*.
 It reproduces the image, as do later commits up to the next change that alters the output
 for this lock. A later one might contain fixes you want. A commit past that change will not
 reproduce it.
 
-The floor is all that can ever be recorded, because the breaking change is in the future
+The lower bound is all that can ever be recorded, because the breaking change is in the future
 and unknowable at build time. Even a bugfix can be output-affecting. So the stamp says
 *when the build worked*, never *when it will break*. A reproduce flow reads it to
 **advise**, never to enforce. It says "built with X, you are on Y, newer, likely fine,
@@ -346,7 +346,7 @@ What is kept out:
   archive: `boot2deb clean RECIPE --build-roots`.
   ```
 - **Your `TMPDIR`.** The provisioned rootfs — the whole target userland, with xattrs
-  and mapped ownership — is staged in the build's work dir. On `/tmp` it would land on a
+  and mapped ownership — is staged in the build's work dir. On `/tmp` it would be written to a
   RAM-backed `tmpfs` on most desktops, making "does the build fit" a property of your
   mount table.
 - **Your shell environment.** Every build command runs with `TZ=UTC` and
@@ -579,8 +579,8 @@ went into the image.
 #### `[filesystem.geometry]`
 
 What the format realized for this image: block and
-inode counts, group layout, and `max_grow_blocks`, the ceiling the reserved descriptor
-blocks buy. `max_grow_blocks` is how large a disk the image can still grow onto at first
+inode counts, group layout, and `max_grow_blocks`, the maximum the reserved descriptor
+blocks allow. `max_grow_blocks` is how large a disk the image can still grow onto at first
 boot. This record answers to the image's size as well as to the policy. A larger
 partition therefore moves every number in it with both pins unchanged.
 
@@ -606,7 +606,7 @@ writes it: the time of the `update` that last moved a pin. An `update` that move
 nothing keeps it, so the lock stays byte-identical. The rootfs epoch reaches
 three places:
 
-- It is the ceiling that every rootfs tar member's modification time is clamped to.
+- It is the upper bound that every rootfs tar member's modification time is clamped to.
 - It is set in the customize step's environment. There `mkinitramfs` dates the initrd's
   members, and `useradd` dates the account it creates. On a depthcharge board, `mkimage`
   dates the signed kernel partition that packs the initrd.
@@ -616,7 +616,7 @@ A board that installs Debian's kernel compiles nothing, and still gets an epoch 
 way. The value is folded into the rootfs cache key. It moves only when a pin does, so a
 rolling build loses no cache hit to it.
 
-The export applies the ceiling in its encoder, which records each mtime as
+The export applies the upper bound in its encoder, which records each mtime as
 `min(mtime, epoch)` as it writes. The encoder is the one place that can. Under the
 subordinate id-map that gives the tree its real ownership, the provisioned files sit at
 ids the host user cannot set times on.
@@ -669,9 +669,9 @@ Three commands read it:
 
 ## Two audiences
 
-Because reproducibility is a property of a lock, the story splits by who owns the lock.
+Because reproducibility is a property of a lock, the story splits by who controls the lock.
 
-**The project, publishing a release.** The project owns every axis: the recipe and its
+**The project, publishing a release.** The project controls every axis: the recipe and its
 lock, the snapshot timestamp, the patch-repo tag, and the builder commit. It offers a
 *closed*
 guarantee for a shipped image. Check out boot2deb at the stamped commit, build this lock,
@@ -682,7 +682,7 @@ the release ritual below.
 point, not the project's. Their reproducibility is forward-looking — "make my current
 build re-buildable later" — rather than "rebuild what the project shipped."
 
-They own their lock: when to `update`, whether to `--save-snapshot`, and which builder
+They control their lock: when to `update`, whether to `--save-snapshot`, and which builder
 they are on. The project does not guarantee their build. It hands them the *same
 machinery* and lets them set the strength.
 
@@ -787,8 +787,8 @@ per-site additions is a derived copy (marked as such in its own
 pressed from.
 
 The command reads the `[built_with]` stamp beside the plan and reports how the running
-checkout compares. That is advice rather than a gate, because the stamp is a floor and
-not a ceiling. A newer builder usually reproduces the image too, and might include fixes.
+checkout compares. That is advice rather than a gate, because the stamp is a lower bound and
+not an upper bound. A newer builder usually reproduces the image too, and might include fixes.
 A current clone is the normal first attempt, and `git checkout <built_with.commit>` is
 the step to take only if it diverges.
 

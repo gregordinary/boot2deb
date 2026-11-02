@@ -26,7 +26,7 @@ pub const MAX_PSK_LEN: usize = 63;
 
 /// Check an SSID: 1 to [`MAX_SSID_LEN`] bytes with no control characters.
 ///
-/// 802.11 itself allows arbitrary octets, but this SSID rides two line-based text
+/// 802.11 itself allows arbitrary octets, but this SSID is written to two line-based text
 /// files (`seed.txt`, the NetworkManager keyfile). A value a line-based parser
 /// cannot read, such as a newline or any other control character, is refused here
 /// rather than mangled there. Spaces and non-ASCII UTF-8 are fine.

@@ -577,7 +577,7 @@ pub struct BlobPaths {
 /// stale `.config` and stops for interactive input — a build that hangs on stdin.
 /// The two invocations must therefore see one environment. (`TEE` is also what makes
 /// u-boot copy OP-TEE's reserved-memory nodes into the FDT it hands the kernel, so
-/// having it at config time is the correct behaviour, not a workaround.)
+/// having it at config time is the correct behavior, not a workaround.)
 fn blob_vars(argv: &mut Vec<String>, blobs: &BlobPaths) {
     argv.push(format!("BL31={}", blobs.atf.display()));
     argv.push(format!("ROCKCHIP_TPL={}", blobs.tpl.display()));

@@ -46,7 +46,7 @@ as coined.
 | pays, spends, prices | costs, takes, uses | |
 | lands, landed | is placed, measures, is | |
 | rides | is programmed in, is added through | |
-| the wall | wall-clock time, limit | wall-clock |
+| the wall | wall-clock time, limit | wall-clock, wall clock |
 | floor, floors | minimum, threshold, fixed overhead | noise floor |
 | ceiling | maximum, limit | |
 | lever, levers | optimization, option | |

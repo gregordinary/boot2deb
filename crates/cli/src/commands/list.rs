@@ -89,7 +89,7 @@ pub(crate) fn recipes(root: &ConfigRoot, json: bool) -> Result {
 }
 
 /// `list-kernels`: the `--kernel` override's valid values, each with the
-/// version-ish knob (a mainline track, a `-` for a vendor tree pinned by ref, or the
+/// version-ish setting (a mainline track, a `-` for a vendor tree pinned by ref, or the
 /// package a distro kernel installs) and the SoCs it accepts, so a reader can pick
 /// one and know it fits their device.
 pub(crate) fn kernels(root: &ConfigRoot, json: bool) -> Result {
@@ -117,7 +117,7 @@ pub(crate) fn kernels(root: &ConfigRoot, json: bool) -> Result {
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join(",");
-                // The version knob is labelled for what it *is*: a compiled kernel
+                // The version setting is labelled for what it *is*: a compiled kernel
                 // tracks an upstream version, a distro kernel names a package and lets
                 // the suite decide the version.
                 let version = match &k {
@@ -150,9 +150,9 @@ pub(crate) fn kernels(root: &ConfigRoot, json: bool) -> Result {
 }
 
 /// The three display fields of a kernel definition, per flavor: how it is obtained,
-/// its version knob, and its patch series.
+/// its version setting, and its patch series.
 ///
-/// The knobs differ because the kernels do. A compiled kernel tracks an upstream
+/// The settings differ because the kernels do. A compiled kernel tracks an upstream
 /// version and applies a patch series; a distro kernel has neither — its version
 /// comes from the suite and it is patched by Debian — so what a reader wants to see
 /// there is the package that installs it.
@@ -205,7 +205,7 @@ pub(crate) fn features(root: &ConfigRoot, json: bool) -> Result {
             }
             Ok(f) => {
                 // The cell is empty rather than absent for a feature with no relations,
-                // so every row's description still lands in one column.
+                // so every row's description still lines up in one column.
                 let relations = [
                     ("conflicts", &f.conflicts),
                     ("provides", &f.provides),
@@ -332,8 +332,8 @@ mod tests {
         // `list-features` prints these gates verbatim, so a SoC or arch with no layer
         // under the config root advertises a configuration nobody can select: no
         // device resolves to it, so the feature it gates is unreachable. The enums are
-        // wider than the tree deliberately (a variant lands in `model.rs` before its
-        // layer does), which is exactly why the shipped config must not name one.
+        // wider than the tree deliberately (a variant is added to `model.rs` before its
+        // layer is), which is exactly why the shipped config must not name one.
         let root = repo_root();
         for name in root.list("features").unwrap() {
             let f = root.feature(&name).unwrap();

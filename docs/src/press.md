@@ -27,7 +27,7 @@ Beside each output that contains a rootfs, `press` writes its
 [file manifest](reference/reproducibility.md#the-rootfs-file-manifest), named
 for the output: `card.img` gets `card.rootfs.uapi16`. A plain press copies the
 build's, since the rootfs is the build's to the byte. A press with additions
-formats a new rootfs, so it writes a manifest of that one. Seed keys land in
+formats a new rootfs, so it writes a manifest of that one. Seed keys are written to
 the seed partition, outside the rootfs, and leave the manifest true.
 
 A press never writes over the build's own artifacts. An output named for the
@@ -176,7 +176,7 @@ boot2deb press turing-rk1/forky site.img \
   (`0755` when the source is executable), owner root. Missing parent
   directories are created. Copying over a shipped file replaces it.
 - **`--copy-tree DIR`** (repeatable) — a whole directory that **mirrors the
-  target rootfs**: `DIR/etc/myapp/site.conf` lands at `/etc/myapp/site.conf`.
+  target rootfs**: `DIR/etc/myapp/site.conf` is placed at `/etc/myapp/site.conf`.
   See [A directory that mirrors the rootfs](#a-directory-that-mirrors-the-rootfs).
 - **`--deb PATH`** (repeatable) — a local `.deb` staged into
   `/var/lib/boot2deb/firstboot-debs/`, installed at first boot with `dpkg -i`
@@ -209,13 +209,13 @@ site/
 Every **regular file and symlink** under `DIR` is placed at its corresponding
 absolute path. Directories are not placed as entries of their own. The parents
 each file needs are created root-owned `0755`, so your site tree's umask never
-reaches the image. Files land `0644`, or `0755` when they are executable on the
+reaches the image. Files are created `0644`, or `0755` when they are executable on the
 host, exactly as `--copy` does. A symlink is recorded as a symlink and never
-followed, so a link pointing outside the tree lands as the link it is.
+followed, so a link pointing outside the tree is placed as the link it is.
 
 The refusals are per file and name what they found:
 
-- A destination the reserved set owns (`/etc/shadow`, `/etc/boot2deb/image.toml`)
+- A destination in the reserved set (`/etc/shadow`, `/etc/boot2deb/image.toml`)
 - A path under `/dev`
 - An entry that is neither a regular file, a symlink, nor a directory
 
@@ -231,8 +231,8 @@ with package resolution and maintainer scripts behind it.
 ### Files that depend on the image: `*.tmpl`
 
 A copy is byte-for-byte, which cannot express a file whose content depends on
-the image it lands in. A source named `*.tmpl` is a **template**: its
-`{{image.<name>}}` references are expanded at press time and it lands without
+the image it is written to. A source named `*.tmpl` is a **template**: its
+`{{image.<name>}}` references are expanded at press time and it is placed without
 the suffix.
 
 ```
@@ -288,7 +288,7 @@ template -> /etc/myapp/node.conf (3 reference(s))
 `--copy` honors the same suffix, so `--copy node.conf.tmpl:/etc/myapp/node.conf`
 expands. The destination there is exactly what you named. The suffix decides a
 destination only in a tree, where the destination is derived. To ship a file
-that really is called `*.tmpl`, name it `foo.tmpl.tmpl`: it expands and lands as
+that really is called `*.tmpl`, name it `foo.tmpl.tmpl`: it expands and is placed as
 `foo.tmpl`. A template must be UTF-8 and is read whole to be parsed, so it is
 capped at 1 MiB. Drop the suffix to copy a large file verbatim.
 
@@ -315,7 +315,7 @@ content. A press that drew the image's identifiers adds
 `fresh_identity = true`.
 
 A tree's entries are recorded there one destination at a time, exactly as a
-`--copy` is. A template is recorded by the name it landed under, rather than
+`--copy` is. A template is recorded by the name it was placed under, rather than
 the one it was authored as.
 `reproduce` reproduces builds, not pressings. The seed partition is not
 summarized there: it is self-describing, and `boot2deb seed` can rewrite it
@@ -357,5 +357,5 @@ boot2deb press turing-rk1/forky --layout split \
 
 The boot image goes to the medium the board boots from (eMMC or SPI), and the
 rootfs image to whatever disk the OS lives on. The seed, and any addition,
-rides with the rootfs, so personalization lands on the disk the OS reads. The
+goes into the rootfs image, so personalization is written to the disk the OS reads. The
 boot image is streamed unchanged.

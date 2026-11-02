@@ -175,5 +175,5 @@ boot2deb build turing-rk1/forky --patches-path ../patches
 An explicit `--patches-path` **downgrades a pin mismatch from an error to a loud
 warning**, so you can build from an uncommitted, un-re-pinned series. The trade-off is
 reproducibility: that build is no longer pinned by the lock, so it is a development
-convenience, not a committed result. When the patch is settled, commit it, `update`, and
+convenience, not a committed result. When the patch is final, commit it, `update`, and
 drop the flag.

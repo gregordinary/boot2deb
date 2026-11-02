@@ -65,7 +65,7 @@ contract, and de-duplicating across them would let one layer's edit silently
 change another's file.
 
 `identity.checks` is generated, never authored. It restates what the lock and
-the resolved device already own: the pinned kernel version, the `uname -r`
+the resolved device already define: the pinned kernel version, the `uname -r`
 flavor suffix, the board's DTB. A layer restating any of those could drift from
 the pin. It also contains `single-kernel`, which restates nothing and belongs to
 no layer. That is a claim about how every boot2deb image is built, and only the

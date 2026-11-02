@@ -24,7 +24,7 @@
 //! Four check kinds exist only in the generated stream and cannot be authored.
 //! `kernel-release` and `kernel-flavor` are derived from the image identity by
 //! the build (see the rootfs stage). A layer restating the pinned kernel would
-//! drift from the lock that owns it. `single-kernel` takes no argument at all and
+//! drift from the lock that pins it. `single-kernel` takes no argument at all and
 //! is not a property of any layer. It states that the image contains one kernel.
 //! That is true of every image this builder produces, and is a claim only the
 //! build is in a position to make.
@@ -510,7 +510,7 @@ pattern = "SError|Synchronous External Abort""#,
     fn an_unknown_kind_is_named_in_the_error() {
         let err = parse(r#"check = "device-node""#).unwrap_err();
         assert!(err.contains("unknown check kind 'device-node'"), "{err}");
-        // The known set rides along so the fix needs no manual lookup.
+        // The known set is part of the message so the fix needs no manual lookup.
         assert!(err.contains("devnode"), "{err}");
     }
 

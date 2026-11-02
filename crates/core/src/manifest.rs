@@ -1,9 +1,9 @@
 //! The solved package manifest's text form: one `name version arch sha256` line
 //! per installed package, sorted, under a `#` header.
 //!
-//! Pure — no I/O here, only rendering and parsing a text format. The engine owns the
+//! Pure — no I/O here, only rendering and parsing a text format. The engine is responsible for the
 //! *production* of a manifest (projecting a resolved provisioner plan, writing the
-//! file, hashing it). This module owns what the bytes are. The writer and every reader
+//! file, hashing it). This module defines what the bytes are. The writer and every reader
 //! agree on one definition of the format rather than on two that happen to match.
 //!
 //! Every sha256 is the one the signed archive records for that `.deb`. A manifest
@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 /// beside the `<recipe>.lock` that names it.
 ///
 /// Part of the format this module defines, so a writer and a reader cannot disagree
-/// about which files are manifests. That distinction is load-bearing beyond parsing.
+/// about which files are manifests. Code beyond the parser depends on that distinction.
 /// A manifest shares the `.lock` extension with a recipe lock but is not TOML. A
 /// consumer that walks `recipes/` by extension alone therefore reads one as the other.
 pub const MANIFEST_SUFFIX: &str = ".pkgs.lock";

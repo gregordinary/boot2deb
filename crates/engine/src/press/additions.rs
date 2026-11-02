@@ -1,5 +1,5 @@
 //! Tree additions for a pressed image: the files `press --copy`, `--copy-tree`,
-//! `--deb`, and `--embed-image` place into the rootfs. The merge that lands them
+//! `--deb`, and `--embed-image` place into the rootfs. The merge that places them
 //! in the image node's entry list lives here too.
 //!
 //! An addition belongs to a *unit or a site*, never to the recipe. A recipe
@@ -16,7 +16,7 @@
 //! size-capped for it.
 //!
 //! A whole directory is placed with [`copy_tree`](TreeAdditions::copy_tree),
-//! which mirrors the target rootfs: `DIR/etc/site.conf` lands at
+//! which mirrors the target rootfs: `DIR/etc/site.conf` is placed at
 //! `/etc/site.conf`. The walk is
 //! [`ferrosys::DirectorySource`], the same machinery the image node's own sources
 //! use. Symlinks are recorded as symlinks rather than followed. Every file's bytes,
@@ -54,7 +54,7 @@ pub const EMBEDDED_IMAGE_DIR: &str = "/var/lib/boot2deb/install";
 /// template expands against.
 const IMAGE_TOML: &[u8] = b"/etc/boot2deb/image.toml";
 
-/// Destinations an addition may not claim, each because something else owns the
+/// Destinations an addition may not claim, each because something else writes the
 /// path's content: the identity document belongs to the pressed marker, and
 /// `/etc/shadow` to the per-image password splice that runs after the merge —
 /// a copy there would be silently overwritten, so it is refused instead.
@@ -104,7 +104,7 @@ pub struct TreeAdditions {
 struct AddedFile {
     /// Normalized absolute destination (`/etc/site.conf`), as entry-list bytes.
     dest: Vec<u8>,
-    /// What lands there — host bytes, a rendered template, or a link target.
+    /// What is placed there — host bytes, a rendered template, or a link target.
     content: AddedContent,
     /// Permission bits; ownership is always root:root, like the rest of the
     /// generated tree.
@@ -137,7 +137,7 @@ impl AddedFile {
         }
     }
 
-    /// One plan line: what kind of addition this is and where it lands, plus a
+    /// One plan line: what kind of addition this is and where it is placed, plus a
     /// template's reference count — an operator who expected four expansions
     /// and is told three has found a mistyped namespace, which is literal text
     /// by design.
@@ -253,12 +253,12 @@ impl TreeAdditions {
     /// the parents it needs as root-owned `0755`, so a site tree's umask never
     /// reaches the image. Files take `0644`, or `0755` when executable on the
     /// host, exactly as [`copy`](Self::copy) does. Symlinks are recorded as
-    /// symlinks and never followed, so a link pointing outside the tree lands as
+    /// symlinks and never followed, so a link pointing outside the tree is placed as
     /// the link it is.
     ///
-    /// A file named `*.tmpl` is a [template] and lands at the destination with
+    /// A file named `*.tmpl` is a [template] and is placed at the destination with
     /// the suffix removed. That is also the escape for shipping a literal one:
-    /// `site.tmpl.tmpl` lands as `site.tmpl`.
+    /// `site.tmpl.tmpl` is placed as `site.tmpl`.
     ///
     /// Returns the number of entries placed.
     ///
@@ -268,7 +268,7 @@ impl TreeAdditions {
     ///
     /// - Cannot be walked
     /// - Names no files at all
-    /// - Holds a path that is not UTF-8, or that lands on a reserved destination
+    /// - Holds a path that is not UTF-8, or that resolves to a reserved destination
     /// - Holds an entry that is neither a regular file, a symlink, nor a directory
     ///
     /// Anything else — a device node, a FIFO, a socket, a hard link — is refused
@@ -453,7 +453,7 @@ impl TreeAdditions {
         }
 
         let mut appended: Vec<SourceEntry> = Vec::new();
-        // Paths that will exist once the merge lands, for parent checks across
+        // Paths that will exist once the merge is applied, for parent checks across
         // the not-yet-appended entries.
         let mut planned_dirs: Vec<Vec<u8>> = Vec::new();
         for file in files {
@@ -614,7 +614,7 @@ fn normalize_tree_dest(
     normalize_dest(dest).map_err(|detail| tree_err(format!("{dest}: {detail}")))
 }
 
-/// The mode an addition lands with: `0755` when the host file is executable,
+/// The mode an addition is placed with: `0755` when the host file is executable,
 /// `0644` otherwise. Deliberately normalized rather than kept, so a
 /// site tree's umask is not a property of the image.
 fn file_mode(executable: bool) -> u16 {
@@ -659,7 +659,7 @@ fn parse_template(content: &FileContent, src: &Path, dest: &str) -> Result<Templ
     if content.len() > MAX_TEMPLATE_BYTES {
         return Err(bad(format!(
             "{} is {} bytes; a template is a config file and is read whole, so \
-             {MAX_TEMPLATE_BYTES} is the ceiling (drop the {} suffix to copy it \
+             {MAX_TEMPLATE_BYTES} is the limit (drop the {} suffix to copy it \
              verbatim instead)",
             src.display(),
             content.len(),
@@ -838,7 +838,7 @@ mod tests {
         // Replacement is in place; the shipped mode is superseded by the copy's.
         assert_eq!(text_of(&entries, "/etc/motd"), "pressed\n");
 
-        // New file landed with both missing parents synthesized as directories,
+        // New file placed with both missing parents synthesized as directories,
         // and /var/lib was not re-created (it exists).
         for dir in ["/opt", "/opt/site", "/var/lib/boot2deb/firstboot-debs"] {
             let entry = entries
@@ -950,7 +950,7 @@ mod tests {
         assert!(err.to_string().contains("not a boot2deb rootfs"), "{err}");
     }
 
-    /// An executable source lands `0755`, a plain one `0644`, and both take the
+    /// An executable source gets `0755`, a plain one `0644`, and both take the
     /// identity document's timestamp rather than the host file's.
     #[test]
     fn modes_and_times_are_the_trees_own() {
@@ -1000,9 +1000,9 @@ mod tests {
         std::os::unix::fs::symlink("/etc/myapp/site.conf", root.join("etc/current.conf")).unwrap();
     }
 
-    /// A copied tree mirrors the rootfs: every file lands at its own absolute
+    /// A copied tree mirrors the rootfs: every file is placed at its own absolute
     /// path, the executable bit survives, a symlink stays a symlink, and a
-    /// `.tmpl` lands expanded under the name without the suffix.
+    /// `.tmpl` is placed, expanded, under the name without the suffix.
     #[test]
     fn a_copied_tree_places_files_symlinks_and_templates() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1038,7 +1038,7 @@ mod tests {
             "symlink target preserved"
         );
 
-        // The template landed without its suffix, expanded against this image.
+        // The template was placed without its suffix, expanded against this image.
         assert!(
             !entries
                 .iter()
@@ -1189,7 +1189,7 @@ mod tests {
         .unwrap();
         let err = additions("s").copy(&big, "/etc/huge.conf").unwrap_err();
         let text = err.to_string();
-        assert!(text.contains("ceiling"), "{text}");
+        assert!(text.contains("limit"), "{text}");
         assert!(text.contains(".tmpl"), "{text}");
     }
 }

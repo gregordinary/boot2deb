@@ -46,7 +46,7 @@ is the closure most of these parentheses are describing.
 | `unzip`, `zip`, `xz-utils`, `zstd` | Archives. |
 | `pciutils`, `usbutils` | Hardware inventory. `lsusb` earns its place ahead of `lspci` on these boards: an SBC's peripherals are far more often on USB than on PCIe. |
 | `htop`, `lsof`, `psmisc`, `xxd`, `file` (~10.6 MiB) | Looking at a running system, and at bytes. Nearly all of `file`'s cost is `libmagic-mgc`, the compiled magic database. |
-| `bash-completion`, `man-db` (~9.2 MiB) | Shell usability. `man-db` pulls `groff-base`, `bsdextrautils`, and `libpipeline1`. It buys the ~3.9 MiB of manual pages every *other* package already puts on the image and that nothing else can read. |
+| `bash-completion`, `man-db` (~9.2 MiB) | Shell usability. `man-db` pulls `groff-base`, `bsdextrautils`, and `libpipeline1`. It gives access to the ~3.9 MiB of manual pages every *other* package already puts on the image and that nothing else can read. |
 | `locales`, `keyboard-configuration`, `console-setup` (~44 MiB) | What makes a **pre-built** image reconfigurable with no network. See [Locale, timezone, and keyboard](../localization.md). |
 
 `isc-dhcp-client` is excluded. `dhcpcd` is the DHCP client, and boards whose SoC layer

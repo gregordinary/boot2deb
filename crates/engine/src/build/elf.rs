@@ -31,7 +31,7 @@ pub fn runpath(bytes: &[u8]) -> Option<String> {
     // The string table is addressed by virtual address, which has to be mapped back
     // through the loadable segments to a file offset.
     let strtab = elf.vaddr_to_offset(elf.dyn_value(dynamic, DT_STRTAB)?)?;
-    // DT_RUNPATH wins where both are present: a loader that honours it ignores RPATH.
+    // DT_RUNPATH wins where both are present: a loader that honors it ignores RPATH.
     let offset = elf
         .dyn_value(dynamic, DT_RUNPATH)
         .or_else(|| elf.dyn_value(dynamic, DT_RPATH))?;

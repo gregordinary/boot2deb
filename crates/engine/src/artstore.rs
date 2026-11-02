@@ -105,7 +105,7 @@ impl ArtifactStore {
     }
 
     /// Filesystem-safe directory component for a node name: `userspace:mpp` →
-    /// `userspace-mpp`, so a `:` never lands in a path component.
+    /// `userspace-mpp`, so a `:` never appears in a path component.
     fn node_dir(&self, node: &str) -> PathBuf {
         self.root.join(node.replace(':', "-"))
     }
@@ -242,7 +242,7 @@ impl ArtifactStore {
 /// The node name is read back from the manifest rather than from the directory. The
 /// directory name is the path-safe form of it (`:` becomes `-`), which does not
 /// invert. An in-flight or abandoned `put` temp is not an entry and is never listed.
-/// The store's own sweep owns those ([`crate::gc`]), and a concurrent build's temp is
+/// The store's own sweep is responsible for those ([`crate::gc`]), and a concurrent build's temp is
 /// not garbage.
 ///
 /// # Errors

@@ -325,7 +325,7 @@ pub(crate) fn build_inputs(root: &ConfigRoot, reference: &str) -> Result<()> {
 /// ship the fragments for a device/kernel it adds; the highest-precedence copy
 /// wins.
 pub(crate) fn fragment_paths(root: &ConfigRoot, build: &ResolvedBuild) -> Result<Vec<PathBuf>> {
-    // A distro kernel merges no fragments — Debian owns its config — so it resolves
+    // A distro kernel merges no fragments — Debian defines its config — so it resolves
     // to an empty list rather than an error.
     let Some(kernel) = build.image.as_ref().and_then(|i| i.kernel.compiled()) else {
         return Ok(Vec::new());
@@ -548,7 +548,7 @@ pub(crate) const OVERLAY_NONFREE: &str = "overlay-nonfree";
 ///    first initramfs is built at `MODULES=most` — three times the size budget the
 ///    signed payload has — and then thrown away and rebuilt.
 ///  - Jellyfin's `/etc/jellyfin/encoding.xml` has to end up owned by the service
-///    user, which rewrites it on every start. An overlay file lands root-owned and
+///    user, which rewrites it on every start. An overlay file is installed root-owned and
 ///    that uid is allocated at install time, so the tree cannot pre-assign it —
 ///    but `jellyfin-server.postinst` chowns the whole directory while it is still
 ///    root's, and a file laid in beforehand is inside that sweep.
@@ -1330,10 +1330,10 @@ mod tests {
 
     #[test]
     fn every_veyron_initramfs_leaves_the_hardware_database_out() {
-        // Silent the other way round: a hook that is never collected, or that lands
+        // Silent the other way round: a hook that is never collected, or that is installed
         // without its execute bit (mkinitramfs skips those without a word), costs
         // nothing at build time and puts udev's hardware database back into the signed
-        // payload, about 1.7 MB of the stock 16 MiB ceiling.
+        // payload, about 1.7 MB of the stock 16 MiB limit.
         use std::os::unix::fs::PermissionsExt;
         let root = ConfigRoot::new(repo_root_path());
         let family = root

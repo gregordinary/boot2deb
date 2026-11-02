@@ -200,7 +200,7 @@ pub(crate) fn run(
     // the research notes below name what still fails at build time if left as-is.
     //
     // Name the tree it actually resolved against: saying "the config root" for a
-    // scaffold that landed in an overlay would credit the wrong tree, and the whole
+    // scaffold that was written into an overlay would credit the wrong tree, and the whole
     // point of the check is that the composition across the two works.
     let wrote_into = if out_dir == root.path() {
         "the config root".to_string()
@@ -289,7 +289,7 @@ mod tests {
     use crate::testsupport::{repo_root, repo_root_path};
     use boot2deb_core::resolve_recipe;
 
-    /// A `NewDeviceArgs` with every knob unset — the non-interactive baseline a test
+    /// A `NewDeviceArgs` with every option unset — the non-interactive baseline a test
     /// tweaks per case. `non_interactive` is set so the helpers never touch stdin.
     fn new_device_args() -> NewDeviceArgs {
         NewDeviceArgs {

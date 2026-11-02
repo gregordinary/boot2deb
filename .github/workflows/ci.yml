@@ -33,7 +33,7 @@ jobs:
   # it needs no compile and fails in seconds. `style/README.md` says what it holds and
   # how to run it locally.
   #
-  # Python is pinned to the floor `style/prose-lint.py` declares, so the claim that 3.11
+  # Python is pinned to the minimum version `style/prose-lint.py` declares, so the claim that 3.11
   # is enough is the thing CI actually tests. The gate itself has no dependency beyond
   # the standard library, which is why nothing is installed here.
   #
@@ -58,7 +58,7 @@ jobs:
         run: python3 style/prose-lint.py --config prose-lint.toml --voice
 
   # Tests, clippy, and rustdoc share one job so they share a target directory; a
-  # second job would pay the same compile twice for no extra signal.
+  # second job would run the same compile twice for no extra signal.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -130,9 +130,9 @@ jobs:
 
   # An MSRV nobody builds is a guess. `rust-version` in the workspace manifest is a
   # promise to anyone on an older toolchain; this job is what keeps it true, failing
-  # as soon as a newer language or library feature slips in. The floor is read back
+  # as soon as a newer language or library feature slips in. The MSRV is read back
   # out of Cargo.toml rather than repeated here, so the gate cannot drift from the
-  # claim it enforces. `--all-targets` because the floor covers test code too.
+  # claim it enforces. `--all-targets` because the MSRV covers test code too.
   msrv:
     runs-on: ubuntu-latest
     steps:
@@ -143,7 +143,7 @@ jobs:
           echo "Declared MSRV: $msrv"
           echo "MSRV=$msrv" >> "$GITHUB_ENV"
           rustup toolchain install "$msrv" --profile minimal --no-self-update
-      - name: Build at the MSRV floor
+      - name: Build at the declared MSRV
         run: cargo "+$MSRV" check --workspace --all-targets
 
   # The dependency half of the gate: a RustSec advisory against any crate in
@@ -175,7 +175,7 @@ jobs:
       # treating it as satisfied, so a restored cache fails the step it was
       # meant to skip. That only surfaces on the *second* run: the first
       # populates the cache and installs cleanly. Skipping the install on a hit
-      # is what the cache is for; `--force` would reinstall every time and buy
+      # is what the cache is for; `--force` would reinstall every time and gain
       # nothing.
       - name: Install cargo-audit
         if: steps.cargo-audit-cache.outputs.cache-hit != 'true'

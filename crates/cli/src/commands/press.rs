@@ -12,19 +12,19 @@
 //!   from the kept rootfs tar, through [`boot2deb_engine::image::press_image`].
 //!
 //! Either way the seed keys are written last, into the finished file, and a rootfs file
-//! manifest lands beside it as `<output stem>.rootfs.uapi16`. A streamed press copies
+//! manifest is written beside it as `<output stem>.rootfs.uapi16`. A streamed press copies
 //! the build's, since its rootfs is the build's to the byte. A re-assembly formats a new
 //! rootfs and writes its own. The seed partition sits outside the rootfs, so the keys
 //! leave either listing true.
 //!
-//! What this module owns is config:
+//! What this module handles is config:
 //!
 //! - Which build point's artifacts these are.
 //! - How the resolved roles bind to output paths: one positional for one artifact,
 //!   or `--boot-out` and `--rootfs-out` for a split build.
 //! - Validating the seed keys and additions before anything is written.
 //!
-//! The engine owns the bytes.
+//! The engine handles the bytes.
 
 use crate::args::{PressArgs, SeedKeyArgs};
 use crate::fsutil::absolutize;
@@ -131,8 +131,8 @@ pub(crate) fn run(
         } else {
             stream(&out_dir, &stem, *role, out, &args, &sink)?;
         }
-        // Personalization lands on the finished file, whichever path made it —
-        // and only on the artifact that contains the seed.
+        // Personalization is applied to the finished file, whichever path made it —
+        // and only to the artifact that contains the seed.
         if role.contains_rootfs() {
             if let Some(keys) = &keys {
                 seed::rewrite_seed(out, keys, now_secs())?;
@@ -626,8 +626,8 @@ pub(crate) fn now_secs() -> i64 {
 mod tests {
     use super::*;
 
-    /// A press never lands on the build's image, a compressed copy of it, or, through its
-    /// listing, on the build's file manifest. A path of its own, even in the same
+    /// A press never overwrites the build's image, a compressed copy of it, or, through its
+    /// listing, the build's file manifest. A path of its own, even in the same
     /// directory, is fine.
     #[test]
     fn a_press_output_never_overwrites_the_builds_artifacts() {

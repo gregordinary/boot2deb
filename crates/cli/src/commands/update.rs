@@ -210,7 +210,7 @@ pub(crate) fn run(
     // concrete tag), so an omitted `--kernel-ref` inherits the previous lock's ref —
     // the "re-pin what changed" model for a patch-only update. Only the first update
     // (no prior lock) must supply it.
-    // Only a compiled kernel has a ref to pin; a distro kernel's version rides the
+    // Only a compiled kernel has a ref to pin; a distro kernel's version comes from the
     // package set, so an absent `--kernel-ref` is fine and the value goes unread.
     let kernel_ref = match (args.kernel_ref, build.compiles_kernel()) {
         (Some(r), _) => r,

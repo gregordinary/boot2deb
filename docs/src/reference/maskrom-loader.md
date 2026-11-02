@@ -5,7 +5,7 @@ a Rockchip SoC over USB to run that u-boot from RAM, writing nothing to storage.
 
 It exists for the case where the board's own bootloader cannot help you. A Rockchip SoC
 whose eMMC contains no bootloader, or a broken one, still enters the BootROM's download
-mode. The BootROM will accept a bootloader over USB and jump to it. That is the floor
+mode. The BootROM will accept a bootloader over USB and jump to it. That is the fallback
 beneath every other recovery path: it does not need the board to boot, and it does not need
 the case open.
 

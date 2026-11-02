@@ -1,7 +1,7 @@
 //! `build`: drive the compile / rootfs / image pipeline from the recipe's lock.
 //!
 //! Reads only the lock for pinned sources, since re-pinning is `update`'s job. The
-//! resolved build supplies the axes. The lock-independent image knobs, layout and
+//! resolved build supplies the axes. The lock-independent image options, layout and
 //! size, are the only build-time overrides. Every stage streams the structured event
 //! stream, rendered for a human or as NDJSON under `--json`. Every produced artifact
 //! travels on it as an [`Event::Artifact`], so both modes share one stdout contract.
@@ -147,8 +147,8 @@ pub(crate) fn run(
     let Some(record) = record else {
         return result;
     };
-    let settled = record.settle(result.as_ref().err().map(|e| e.to_string()));
-    match (result, settled) {
+    let ended = record.end(result.as_ref().err().map(|e| e.to_string()));
+    match (result, ended) {
         (Ok(()), Err(e)) => Err(format!(
             "the build succeeded but its outcome could not be recorded, so nothing can \
              vouch for its artifacts: {e}"
@@ -191,10 +191,10 @@ impl RecordFile {
         Ok(file)
     }
 
-    /// Settle the record: succeeded when `error` is `None`, failed with it otherwise.
-    fn settle(self, error: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-        let settled = self.record.clone().settled(now_rfc3339(), error);
-        self.write(&settled)
+    /// End the record: succeeded when `error` is `None`, failed with it otherwise.
+    fn end(self, error: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+        let ended = self.record.clone().ended(now_rfc3339(), error);
+        self.write(&ended)
     }
 
     /// Write `record` in place of the file, atomically, so a reader never sees half of
@@ -229,7 +229,7 @@ fn now_rfc3339() -> String {
 }
 
 /// One build point's pipeline. `record` is set once the build is admitted, which is
-/// what lets [`run`] settle it however this returns.
+/// what lets [`run`] end it however this returns.
 fn run_point(
     root: &ConfigRoot,
     recipe: &str,
@@ -240,7 +240,7 @@ fn run_point(
     record: &mut Option<RecordFile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // `build` reads only the lock for pinned sources; the resolved build
-    // supplies the axes. Only the lock-independent image knobs (layout, size) are
+    // supplies the axes. Only the lock-independent image options (layout, size) are
     // overridable here — the lock pins no image geometry. The source-pinning axes
     // (kernel/suite/features/boot-method) would mismatch the lock, so re-pinning
     // those is `update`'s job, not a build-time override.
@@ -985,7 +985,7 @@ fn run_point(
                     base_src: &ffmpeg_base_src,
                     patches: kernel_patches,
                     userspace_debs: &out_dir,
-                    // The licence flavour is resolved from the selected features, not
+                    // The license flavor is resolved from the selected features, not
                     // chosen here: there is no `--nonfree` flag, because which FFmpeg an
                     // image contains is a property of the build point and belongs in the
                     // recipe or its variant reference, where it is recorded, rather than
@@ -1604,7 +1604,7 @@ fn write_provenance(
             build_sandbox,
         };
         let prov = boot2deb_core::provenance::assemble(r.ib, r.lock, &facts);
-        // The provenance lands in this recipe's own out_dir, named for the leaf
+        // The provenance is written to this recipe's own out_dir, named for the leaf
         // (slash-free), matching the committed manifest's leaf-based filename.
         std::fs::write(&prov_path, prov.to_toml_string()?)
             .map_err(|e| format!("write provenance {}: {e}", prov_path.display()))?;
@@ -1663,7 +1663,7 @@ struct BuildState {
     /// the committed pin and recorded into the lock by `--save-manifest`.
     solved_manifest_digest: Option<String>,
     /// The per-image first-boot password, captured when this run assembles the image
-    /// (the image stage owns it, splicing it into the staged rootfs).
+    /// (the image stage generates it, splicing it into the staged rootfs).
     first_boot_password: Option<String>,
     /// Which checks the image stage ran over the finished rootfs filesystem — reported
     /// by that stage rather than re-probed here, since one of them depends on a host
@@ -1800,7 +1800,7 @@ struct ImageStage<'a> {
     work_dir: &'a std::path::Path,
     /// The containers to compress the finished image into, in preference order.
     compress: &'a [image::ImageCompression],
-    /// The worker bound `--jobs` set, honoured by the `.xz` encoder.
+    /// The worker bound `--jobs` set, honored by the `.xz` encoder.
     jobs: Option<usize>,
     /// `--json`.
     json: bool,

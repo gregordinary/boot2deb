@@ -513,7 +513,7 @@ pub fn check_lock_consistency(lock: &Lock, build: &ResolvedBuild) -> Result<(), 
         }
     }
     // The kernel *package* is what a distro-kernel build depends on instead, and it
-    // rides the resolved package set, so a change to it is caught by the manifest —
+    // is part of the resolved package set, so a change to it is caught by the manifest —
     // but the id must still agree between lock and config.
     presence(
         &mut axes,
@@ -950,7 +950,7 @@ mod tests {
     }
 
     /// `patches_drift` reads a real checkout: silent when it is on the pin and clean,
-    /// and speaking up for each way it can depart. The `None` case is the load-bearing
+    /// and speaking up for each way it can depart. The `None` case is the essential
     /// one — a survey that warned on every run would train the reader to ignore it.
     #[test]
     fn patches_drift_is_silent_only_on_a_clean_checkout_at_the_pin() {
@@ -1402,7 +1402,7 @@ mod tests {
         assert_eq!(ff.base.commit, "b57fbbe50c9b2656fad86a1a7eeabfd2b2a50935");
         assert_eq!(ff.rockchip.as_ref().unwrap().reference, "8.1");
         assert_eq!(lock.rootfs.as_ref().unwrap().suite, "forky");
-        // The distro the suite resolved to rides with it, from the resolved build.
+        // The distro the suite resolved to comes with it, from the resolved build.
         assert_eq!(lock.rootfs.as_ref().unwrap().distro, "debian");
         assert_eq!(
             lock.rootfs.as_ref().unwrap().manifest,

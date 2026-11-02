@@ -12,7 +12,7 @@ modules = []
 
 # Networking + audio userspace. The H96's Wi-Fi is an AIC8800 (out-of-tree driver +
 # vendored firmware, both on the device layer); these are the host-side packages that
-# make it usable. NetworkManager owns the interfaces -- so the base layer's dhcpcd is
+# make it usable. NetworkManager manages the interfaces -- so the base layer's dhcpcd is
 # dropped rather than running two things that both configure a NIC -- and
 # `nmtui` is not optional in practice: it is how a Wi-Fi network is
 # joined at a bare console, the first thing anyone does. wireless-regdb + iw +
@@ -37,7 +37,7 @@ packages = [
 ]
 exclude = ["dhcpcd"]
 
-# `audio` rides with alsa-utils above. /dev/snd/* is root:audio 0660 and logind's
+# `audio` belongs with alsa-utils above. /dev/snd/* is root:audio 0660 and logind's
 # `uaccess` ACL only reaches a *seated* session, so on a headless board reached over
 # SSH the group is the whole of what makes the sound cards openable -- without it
 # `aplay -l` reports no soundcards to the default account and works only as root.
@@ -53,7 +53,7 @@ caveats = [
   "There is no mainline hardware video encoder for this SoC. Decode is driven (VDPU383, H.264 and HEVC, 1080p and 4K). Encode is not driven at all.",
   "Hardware H.264 decode has a silicon erratum here, and the kernel this builder ships works around it. Whether the decoder comes up correct is decided when its power domain powers up. Unwarmed, roughly one power-up in three comes up bad: 634 of 2000 measured power-ups, 95% CI 30-34%. Resolution makes no difference, at 92 of 300 against 84 of 300 interleaved.",
   "The bad-power-up draw is independent every time, so no boot is luckier than another. A power-up that decoded correctly says nothing about the next one. Every H.264 decode made on a bad power-up is corrupt, and retrying does not help until the block powers down and up again.",
-  "H.264 corruption from a bad power-up is visible, about 17 dB PSNR, and diverges from the first frame. Exactly one row in eight of each plane is wrong, because a deblocking filter runs on a horizontal edge the stream does not contain. The damage lands in the reference buffers, so motion compensation spreads it across the rest of the picture within a few frames.",
+  "H.264 corruption from a bad power-up is visible, about 17 dB PSNR, and diverges from the first frame. Exactly one row in eight of each plane is wrong, because a deblocking filter runs on a horizontal edge the stream does not contain. The damage is written into the reference buffers, so motion compensation spreads it across the rest of the picture within a few frames.",
   "The H.264 work-around decodes a canned 2x2 frame on the decoder at every runtime resume, before any decode of that power cycle can run. It holds across system sleep as well as runtime PM. On the shipped kernel, 0 of 400 power-ups came up corrupt against an interleaved control's 128 of 400. A further 200 alternating 1080p and 4K were also clean.",
   "If the warm-up ever fails the driver says so in dmesg: `vdpu383 warm-up job timed out`, or `... not ready`. H.264 decoded on that power cycle is then suspect. HEVC is unaffected either way, and is bit-exact against software on every run at every block size. Do not rely on a kernel without the work-around for hardware H.264 decode on this SoC. Its software decoder is correct and fast enough, at about 160 fps at 1080p and 40 at 4K.",
   "The NPU computes but nothing can drive it yet: the rocket userspace stack targets RK3588 only, so no RK3576 userspace exists.",
@@ -88,7 +88,7 @@ dir = "bin/rk35"
 #
 # No `[userspace.mpp]`. librockchip-mpp talks to the vendor `mpp_service` kernel
 # framework, which is not mainline and is far larger a port than the RGA driver, so
-# there is nothing here for MPP to bind. That also settles ffmpeg: the rkrga filters
+# there is nothing here for MPP to bind. That also determines the ffmpeg build: the rkrga filters
 # require `--enable-rkmpp` (they allocate frames as AVRKMPPFramesContext, and
 # ffmpeg's own configure rejects the pair), so this SoC gets librga for programs
 # that speak its API directly, not as an ffmpeg filter. HW decode instead comes

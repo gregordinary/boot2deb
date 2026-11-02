@@ -978,7 +978,7 @@ fn clone_pinned_inner(spec: &ClonePinned, step: &Step) -> Result<usize, EngineEr
     match spec.mode {
         CloneMode::Shallow => {
             clone_shallow(spec.source, spec.reference, spec.tree, step)?;
-            // The build reads only the lock: a clone that lands on a different
+            // The build reads only the lock: a clone that resolves to a different
             // commit is a hard error, not a silently different tree. Normalize
             // the expected side like the `Fetch` arm does, so both arms accept
             // the same pin spellings (an uppercase-hex hand edit names the same
@@ -1048,7 +1048,7 @@ pub(crate) struct ApplyScope<'a> {
 /// Shared by [`clone_pinned`] (which clones/fetches first) and the userspace stage
 /// (which fetches its own tree but applies its `userspace` scope the same way),
 /// so the pin enforcement and verify-applies gate are one implementation.
-/// The caller owns removing a partial tree on failure — [`clone_pinned`] and the
+/// The caller is responsible for removing a partial tree on failure — [`clone_pinned`] and the
 /// userspace stage both do (a resume must never reuse a half-patched tree).
 pub(crate) fn apply_series_scope(spec: &ApplyScope, step: &Step) -> Result<usize, EngineError> {
     let Some(patches) = spec.patches else {
@@ -1391,7 +1391,7 @@ pub(crate) fn series_identity<'a>(
 /// the tree. Editing the board `.dts` must restamp the tree, so the next build
 /// re-copies and recompiles rather than reusing a stale one.
 ///
-/// Only the basename is folded, since that is what lands in the kernel's DT dir. Moving
+/// Only the basename is folded, since that is what is copied into the kernel's DT dir. Moving
 /// a source within the config root therefore changes nothing about the resulting tree.
 ///
 /// Best-effort like the patch-series fingerprint. An unreadable file folds a stable
@@ -1462,7 +1462,7 @@ fn stage_artifact(out_dir: &Path, src: &Path) -> Result<PathBuf, EngineError> {
 ///
 /// The published name is separate from the source's because the two answer different
 /// questions: a build tree names a file for what it *is* (`idbloader.img`), while the
-/// output dir names it for the build point that owns it
+/// output dir names it for the build point it belongs to
 /// ([`BuildPoint::artifact_stem`](boot2deb_core::buildpoint::BuildPoint::artifact_stem)),
 /// so several recipes can share one `--out-dir` without overwriting each other. The
 /// same split lets the artifact cache store one copy under the canonical name and
@@ -2678,7 +2678,7 @@ mod tests {
     ///
     /// Asserted through the consequence rather than the mask value, because the
     /// consequence is the defect: `mkdir` asks for `0777` and takes what the umask
-    /// leaves, so under a `002` host umask a `make install` staging tree lands `0775`
+    /// leaves, so under a `002` host umask a `make install` staging tree puts `0775`
     /// directories in the shipped `.deb` and no per-file mode in the packaging touches
     /// them.
     #[test]

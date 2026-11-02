@@ -4,7 +4,7 @@ Every image contains one account, `debian`. Four settings decide who can use it,
 costs them to become root, and what hardware they can reach. All four are config,
 resolved before the build.
 
-## The knobs
+## The settings
 
 | field | layer | default | what it sets |
 |---|---|---|---|
@@ -92,7 +92,7 @@ There are two different attacks, and they have very different reach:
 
 - **Guessing at the login.** Bounded by what an `sshd` on one of these boards will
   service — tens of attempts per second, not thousands. Even 8 characters (~46 bits) is
-  far out of reach here. This is why 8 is the floor rather than a recommendation.
+  far out of reach here. This is why 8 is the minimum rather than a recommendation.
 - **Attacking the hash offline.** `/etc/shadow` travels *inside the image file*, and the
   password appears in the `.provenance.toml` beside it. Anyone holding a copy of either
   can attack the hash with no rate limit and no board involved. Against that, 8

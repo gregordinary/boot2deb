@@ -13,7 +13,7 @@ The second is the reason the first is not enough. A pre-built image is something
 hand to someone else. Typing on a German keyboard must not cost them a rebuild, or
 getting the board onto a network.
 
-## The knobs
+## The settings
 
 | field | layer | default | what it sets |
 |---|---|---|---|
@@ -220,7 +220,7 @@ new locales are compiled on the spot.
 
 **In an image**, so every board built from it ships the language: edit
 `locales_generate` in `base.toml` (all images) or in the recipe (that build point only).
-There is no build-time flag for it, deliberately — see [The knobs](#the-knobs). Each
+There is no build-time flag for it, deliberately — see [The settings](#the-settings). Each
 entry is a full locale name **with its codeset**, so `sv_SE.UTF-8` and not `sv_SE`.
 Resolution rejects the bare form rather than let `locale-gen` fail mid-build. The system
 `locale` is always generated whether or not it appears in the list, so it never needs

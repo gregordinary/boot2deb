@@ -157,7 +157,7 @@ pub fn build_rootfs(
     // 3. The build's own `.deb`s as a trusted `dists/` local mirror, and the
     //    feature repositories, both merged into the provisioner's resolution.
     //
-    //    The pool sits beside the download cache rather than in `work`, so it lands
+    //    The pool sits beside the download cache rather than in `work`, so it is placed
     //    on the volume sized for build artifacts instead of `TMPDIR`, and on a
     //    filesystem that can share extents with the build tree it holds each `.deb`
     //    as a reflink rather than a second copy. It is named per-build because
@@ -449,7 +449,7 @@ pub struct PlanWeights {
 ///
 /// A copy rather than an edit of the plan the node goes on to install from, so what is
 /// redacted is the *record* and not the run. The install is unaffected either way — a
-/// package names its archive by index — but a build whose behaviour depended on which
+/// package names its archive by index — but a build whose behavior depended on which
 /// of the two values it held would be a build that reads its own provenance.
 fn published_plan(plan: &Plan) -> Plan {
     let mut published = plan.clone();
@@ -834,7 +834,7 @@ fn customize(
     // through the same subordinate map the tree was provisioned under, so each entry
     // is created at the ownership the rootfs intends: the copy forks a child into the
     // map and reads each source id *backwards* through it, so a caller-owned staged
-    // file lands as root inside — and a file the host stores at `100000 + n` would land
+    // file is created as root inside — and a file the host stores at `100000 + n` would be created
     // as uid n, which is the thing a caller-side `cp` structurally cannot express.
     // A directory already in the rootfs is kept and descended into; a file or symlink
     // at an existing path is replaced.
@@ -1118,7 +1118,7 @@ fn run_customize_cage(
 /// setgid ownerships come through. Everything under `/dev` is left out — see the
 /// filter below — as are device nodes anywhere, which the export never includes.
 ///
-/// `source_date_epoch` is the `SOURCE_DATE_EPOCH` ceiling: each member's mtime is
+/// `source_date_epoch` is the `SOURCE_DATE_EPOCH` upper bound: each member's mtime is
 /// recorded as `min(mtime, epoch)`, pulling the bootstrap's wall-clock stamps down
 /// to the epoch.
 fn export_rootfs_tar(
@@ -1626,7 +1626,7 @@ mod tests {
     /// The shipped bytes must parse as POSIX `sh`, because the only thing between them
     /// and a rootfs is the target's `/bin/sh` — and a syntax error there fails a
     /// multi-hour build at the last step. `sh -n` on the *committed file* rather than on
-    /// one build's rendering, which is the whole of what the constant now buys.
+    /// one build's rendering, which is the whole of what the constant now provides.
     #[test]
     fn the_customize_program_is_valid_posix_shell() {
         let mut child = Command::new("sh")
@@ -1878,7 +1878,7 @@ mod tests {
         );
 
         // sshd's StrictModes refuses a key it can reach through a group-writable path,
-        // so the directory mode, the file mode, and the ownership are all load-bearing —
+        // so the directory mode, the file mode, and the ownership are all required —
         // and the `.ssh` directory is made after `useradd -m` has created the home it
         // sits in. Reversed, `install -d` would create a root-owned /home/<user> and
         // `useradd -m` would then decline to populate or chown it.

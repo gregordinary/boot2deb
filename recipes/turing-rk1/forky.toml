@@ -33,7 +33,7 @@ image_size = "2G"
 # bank to stall. Every node it binds on this SoC lists exactly the `aclk` and `iface` pair
 # the driver took before, so the clock change is a no-op here. The stall change reaches
 # decode, RGA and the NPU alike, and it is the one change here that could move
-# behaviour on hardware. The PCIe controller driver can now reset its root port when the
+# behavior on hardware. The PCIe controller driver can now reset its root port when the
 # link goes down, which reaches the M.2 slot and the second PCIe port this board
 # enables.
 #

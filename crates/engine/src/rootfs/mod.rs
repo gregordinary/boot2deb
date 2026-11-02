@@ -20,7 +20,7 @@
 //! config this module produces from the resolved values (fstab, hostname, apt
 //! sources, locale, machine-id).
 //!
-//! This module owns the node's inputs, the two staged overlay trees, and the
+//! This module is responsible for the node's inputs, the two staged overlay trees, and the
 //! generated config. The bootstrap itself is the `provisioner` submodule.
 //!
 //! The manifest is fully content-pinned, `name + version + arch + sha256` per
@@ -187,7 +187,7 @@ pub struct RootfsOptions<'a> {
     /// The rootfs build's `SOURCE_DATE_EPOCH`: the lock's
     /// [`source_date_epoch`](boot2deb_core::lock::RootfsPin::source_date_epoch).
     ///
-    /// It is the ceiling the tar export clamps every member's mtime to, and the time
+    /// It is the upper bound the tar export clamps every member's mtime to, and the time
     /// the staged overlays are stamped with. The bootstrap's maintainer scripts and the
     /// target-side customize step both run under it. What the account tools,
     /// `mkinitramfs` and `useradd` write therefore contains it rather than the wall clock.
@@ -334,7 +334,7 @@ fn normalize_overlay_modes(root: &Path) -> Result<(), EngineError> {
     } else {
         use std::os::unix::fs::PermissionsExt;
         // Any execute bit means git recorded `100755` — the hooks and first-boot
-        // scripts, whose `+x` is load-bearing (the runner refuses a non-executable
+        // scripts, whose `+x` is required (the runner refuses a non-executable
         // hook). Everything else is `100644`.
         let exec = meta.permissions().mode() & 0o111 != 0;
         set_mode(root, if exec { 0o755 } else { 0o644 })?;
@@ -656,7 +656,7 @@ fn write_staged_exec(staging: &Path, rel: &str, content: &str) -> Result<(), Eng
 /// Create `staging/<rel>` as a symlink to `target`, replacing whatever is there.
 ///
 /// The overlay copy preserves symlinks (`cp -dR`), so the link — not a copy of what it
-/// points at — is what lands in the rootfs; the cache key fingerprints it by its target
+/// points at — is what goes into the rootfs; the cache key fingerprints it by its target
 /// ([`crate::rootcache::dir_fingerprints`]), so re-pointing it rebuilds.
 fn symlink_staged(staging: &Path, rel: &str, target: &str) -> Result<(), EngineError> {
     let path = staging.join(rel);
@@ -831,7 +831,7 @@ mod config {
     ///  - `rockchip-rkbin`: the `mk_extlinux` hook reads root back out of here to
     ///    build the bootloader's cmdline on every kernel install.
     ///
-    ///  - `depthcharge`: this file is load-bearing for the boot itself —
+    ///  - `depthcharge`: the boot itself depends on this file —
     ///    `depthchargectl` reads it to derive the `root=` it bakes into the kernel's
     ///    *signature*, at image build and again on every on-device kernel upgrade. A
     ///    label would work for the kernel but not for the tool: it resolves root from
@@ -902,7 +902,7 @@ mod config {
     /// `/etc/boot2deb/selftest.d/identity.checks` — the checks derived from the
     /// build itself, as opposed to the authored `[[expect]]` files written beside
     /// it. Derived rather than authored because each restates something the lock
-    /// or the device layer already owns, and a layer restating it could drift:
+    /// or the device layer already defines, and a layer restating it could drift:
     ///
     ///  - `kernel-release` — from the pinned kernel ref, for a compiled kernel
     ///    whose ref reads as a version tag, normalized to the release the kernel
@@ -917,7 +917,7 @@ mod config {
     ///    PREEMPT_RT kernel.
     ///  - `dtb` — the resolved `kernel_dtb`, on the boot method that installs
     ///    DTBs into the filesystem (`rockchip-rkbin`). A depthcharge board's DTB
-    ///    rides inside the signed FIT, where no file check can see it.
+    ///    is inside the signed FIT, where no file check can see it.
     ///  - `single-kernel` — unconditional, and the one line here that restates
     ///    nothing: every image installs one solved plan with one `linux-image`
     ///    in it and never dist-upgrades mid-build, so a second version on `/boot`
@@ -1079,7 +1079,7 @@ mod config {
     ///
     /// `MODULES=list`, not `dep`, for two reasons and the second is the sharp edge:
     ///
-    ///  - Budget. A `MODULES=most` initramfs does not fit under the payload ceiling once
+    ///  - Budget. A `MODULES=most` initramfs does not fit under the payload limit once
     ///    the kernel image has taken its share.
     ///  - Correctness under cross-build. `MODULES=dep` guesses from the *building*
     ///    system's mounted `/sys` and `/`, so in an armhf rootfs on an x86_64 host it
@@ -1472,7 +1472,7 @@ mod tests {
 
     /// A staged overlay's modification times are the lock's, not the checkout's.
     ///
-    /// This is load-bearing rather than cosmetic. The tree is laid into the rootfs by a
+    /// This is required rather than cosmetic. The tree is laid into the rootfs by a
     /// copy that *preserves* times, and the tar export clamps each member to
     /// `min(mtime, SOURCE_DATE_EPOCH)` — so a working copy older than the epoch would
     /// ship its own mtimes and two hosts building one lock would export different bytes.
@@ -1545,7 +1545,7 @@ mod tests {
     /// ([`normalize_overlay_modes`]), so a hook's executable bit in the repo is its
     /// executable bit in the image, and
     /// [the runner](../../../base/overlay/usr/lib/boot2deb/first-boot)
-    /// refuses to run a non-executable one. The hooks are load-bearing — depthcharge's
+    /// refuses to run a non-executable one. The hooks are essential — depthcharge's
     /// re-signs the kernel partition against the UUID first-boot has just changed — so a
     /// lost `+x` bit is the difference between a board that boots and one that boots
     /// exactly once. Nothing else in the build would notice, hence this test.
@@ -1948,7 +1948,7 @@ mod tests {
         ]);
         assert_eq!(
             g, "C.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\nsr_RS.UTF-8@latin UTF-8\n",
-            "a modifier rides after the codeset, not inside it"
+            "a modifier goes after the codeset, not inside it"
         );
     }
 
@@ -2068,7 +2068,7 @@ mod tests {
             ("v7.2", "7.2.0", "7.2.0-1-arm64"),
             // A point release already spells all three.
             ("v7.1.6", "7.1.6", "7.1.6-1-arm64"),
-            // Linux-libre: namespaced tag, and `-gnu` lands in the release suffix.
+            // Linux-libre: namespaced tag, and `-gnu` goes into the release suffix.
             ("sources/v7.1.6-gnu", "7.1.6", "7.1.6-gnu-1-arm64"),
             // A prerelease survives, and still pads.
             ("v7.2-rc3", "7.2.0-rc3", "7.2.0-rc3-1-arm64"),
@@ -2110,7 +2110,7 @@ mod tests {
     /// The derived file's contents differ by what the build is, and both shapes
     /// are asserted: a compiled-kernel rkbin board states its flavor and its DTB;
     /// a distro-kernel depthcharge board states the package's flavor and no DTB
-    /// (its DTB rides inside the signed FIT, invisible to a file check). Neither
+    /// (its DTB is inside the signed FIT, invisible to a file check). Neither
     /// states a `kernel-release` here because the fixture lock pins no kernel —
     /// exactly the distro case, and the compiled case is covered by
     /// [`a_pinned_ref_becomes_the_release_the_kernel_reports`].
@@ -2498,7 +2498,7 @@ mod tests {
             "an unconfigured image contains no timesyncd drop-in"
         );
 
-        // Configured, the drop-in lands where timesyncd reads drop-ins — not as an
+        // Configured, the drop-in is written where timesyncd reads drop-ins — not as an
         // edit of timesyncd.conf, which is a systemd conffile a rewrite would make
         // every future upgrade prompt about.
         let configured = resolve_recipe(
@@ -2533,7 +2533,7 @@ mod tests {
     fn only_a_board_with_a_keyboard_gets_a_keyboard_file() {
         let sink = |_e: crate::event::Event| {};
 
-        // The C201 is a laptop: its layout is configured, and the file it lands in is
+        // The C201 is a laptop: its layout is configured, and the file it is written to is
         // the one keyboard-configuration seeds its debconf answers from.
         let laptop = tempfile::tempdir().unwrap();
         let step = Step::start(&sink, "test");

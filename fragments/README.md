@@ -28,7 +28,7 @@ The target RK1 config differs from `defconfig` in ~6600 symbols, of which only
 Splitting that bulk "by concern" adds no value (it is Debian's policy, not boot2deb's),
 so it lives in one generated baseline while the small rockchip slices stay
 legible and reusable across kernels/SoCs. **The resulting `.config` depends only on
-the union of the fragments**, so which slice a symbol lands in is a legibility
+the union of the fragments**, so which slice a symbol goes in is a legibility
 choice with no effect on the output.
 
 Toolchain-probed symbols (MTE / RELR / `CC_*` / `AS_*` / `PAHOLE_*`) are **not**

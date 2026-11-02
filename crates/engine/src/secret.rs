@@ -16,7 +16,7 @@
 //! the board and whoever else reaches it first.
 //!
 //! Both the draw and the hash are in-process. Nothing on the credential path shells
-//! out to a host binary. What lands in the image's `/etc/shadow` therefore does not
+//! out to a host binary. What is written to the image's `/etc/shadow` therefore does not
 //! depend on which host built it.
 
 use crate::error::EngineError;
@@ -55,7 +55,7 @@ pub(crate) fn fill_random(buf: &mut [u8]) -> Result<(), EngineError> {
 ///
 /// `len` comes from
 /// [`ResolvedImage::first_boot_password_length`](boot2deb_core::model::ResolvedImage::first_boot_password_length),
-/// which resolution has already bounded — so this imposes no floor of its own. It has
+/// which resolution has already bounded — so this imposes no minimum of its own. It has
 /// no business second-guessing a validated config value, and a second, quieter bound
 /// here would be a place for the two to disagree.
 pub fn generate_password(len: usize) -> Result<String, EngineError> {

@@ -16,7 +16,7 @@ include = ["README.md", "docs/src/**/*.md"]
 # `SUMMARY.md` is the contents page and contains no prose. The other two are generated, and
 # a generated page is not the surface: its sentences were authored once and are repeated
 # once per row, so a ratchet over it measures how much the world grew rather than how the
-# prose reads. Each is held at its source instead, where a fix lands once.
+# prose reads. Each is held at its source instead, where a fix is made once.
 #
 #   `support-matrix.md`   `boot2deb support-matrix --markdown`, over the caveats in the
 #                         config tree. Held by the `data` surface below.

@@ -195,7 +195,7 @@ fn read_recipe(root: &ConfigRoot, recipe: &str) -> Result<Side> {
 /// Merge a resolved build's kernel fragments, naming each by its config-root-relative
 /// path so the delta can attribute a symbol to a file a reader can open.
 ///
-/// `None` for a distro-package kernel, which merges no fragments because Debian owns
+/// `None` for a distro-package kernel, which merges no fragments because Debian defines
 /// its configuration. That is an absence and not an empty set: comparing it as empty
 /// would report every symbol the other side's fragments name as newly enabled, which
 /// says nothing about how the two kernels differ.

@@ -68,7 +68,7 @@ here from **mainline 7.3.y** instead of installed from the archive. Its kconfig 
 the fragments, a Debian-parity baseline plus the RK3288 slice, on top of the in-tree
 `multi_v7_defconfig`. The slice turns off every other SoC family that base builds in,
 which keeps the kernel small enough for the signed payload. The `rk3288-fixes` patch
-series rides along. Everything else is
+series is applied to it. Everything else is
 identical: the same signed-kernel boot payload, the same board profiles, the same
 `combined` layout.
 
@@ -201,7 +201,7 @@ therefore travel together on `devices/asus-c201-libreboot.toml`, which
 `extends = "asus-c201"` and states only the profile and `kpart_size = "32MiB"`.
 Everything else is the C201's and is inherited: the DTB, the kernel set, the keymap.
 
-**What the headroom is spent on** is the boot you watch. A signed payload holds the
+**What the headroom is used for** is the boot you watch. A signed payload holds the
 kernel and the initramfs in one fixed budget. At 16 MiB that budget dictates both halves
 of a slow, blind boot. The initramfs is compressed with xz, which is the smallest and by
 some way the slowest to decompress. It contains no display driver, so nothing can draw
@@ -266,9 +266,9 @@ task's stack to `BOOT2DEB-PANIC.txt` on each ext4 partition it reaches.
 
 Expect white screen before the display comes up, and how much depends on the build. The
 `asus-c201` image leaves the DRM stack out of the initramfs to keep the signed payload
-under its 16 MiB ceiling. The console therefore appears only once the real root is
+under its 16 MiB limit. The console therefore appears only once the real root is
 mounted. That is about 5 seconds from eMMC and about 8 from USB, the difference being the
-time the initramfs spends enumerating the stick. The `asus-c201-libreboot` image contains the DRM
+time the initramfs takes to enumerate the stick. The `asus-c201-libreboot` image contains the DRM
 stack, so the panel lights during the initramfs instead.
 
 ## Installing to the eMMC
@@ -329,7 +329,7 @@ the first thing to do after logging in:
 sudo nmtui        # pick "Activate a connection", choose the network, enter the key
 ```
 
-NetworkManager owns the interfaces (the base layer's `dhcpcd` is excluded here, so the
+NetworkManager manages the interfaces (the base layer's `dhcpcd` is excluded here, so the
 two do not fight over the NIC), and it remembers the network, so this is a one-time
 step. `nmcli device wifi list` and `nmcli device wifi connect <ssid> --ask` do the same
 job without the interface.
@@ -384,13 +384,13 @@ An eDP panel and a real HDMI port, both driven by mainline `rockchip-drm`.
 HDMI does **4K30** (3840x2160 at a 297 MHz pixel clock) and cannot do 4K60. That is the
 hardware. The RK3288 caps TMDS at 340 MHz, its HDMI PHY has no scrambling above that,
 and the VOP cannot emit YUV420. There is no reduced-rate path to 4K60 either. Nothing
-in the image configures any of this. The ceilings are constants in the driver, and the
+in the image configures any of this. The limits are constants in the driver, and the
 kernel Debian ships already supports everything the SoC can do.
 
 One quirk is worth knowing if a 4K display comes up showing only part of the picture.
 The RK3288 has two display controllers, and the smaller one (VOPL) tops out at 2560x1600
 while advertising the same maximum as the larger one. Which controller the HDMI encoder
-lands on is decided at runtime by DRM, not by configuration. `dmesg | grep -i vop` says
+is connected to is decided at runtime by DRM, not by configuration. `dmesg | grep -i vop` says
 which one it got.
 
 ## Status

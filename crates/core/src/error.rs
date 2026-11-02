@@ -339,7 +339,7 @@ pub enum ConfigError {
     },
 
     /// The derived rootfs offset (`kpart_offset + slots × kpart_size`) overflows
-    /// [`u64`]. Only reachable from author-supplied sizes near the type's ceiling, and
+    /// [`u64`]. Only reachable from author-supplied sizes near the type's maximum, and
     /// reported rather than wrapped. A wrapped value would place the rootfs partition
     /// inside the kernel slots.
     #[error(
@@ -743,7 +743,7 @@ pub enum ConfigError {
         "recipe '{recipe}' declares a [support] claim but selects '{feature}', which \
          builds FFmpeg with --enable-nonfree — the result may be built and used but \
          not redistributed, so it cannot claim to be fit to publish. \
-         Reach the nonfree flavour as '{recipe}+{feature}' instead of authoring a \
+         Reach the nonfree flavor as '{recipe}+{feature}' instead of authoring a \
          recipe for it, or drop the [support] block"
     )]
     NonfreeSupportClaim {
@@ -1149,7 +1149,7 @@ pub enum ConfigError {
     /// Nothing about a booted board reveals how much entropy its first credential had.
     #[error(
         "first_boot_password_length {value} is outside {min}..={max} — \
-         {min} is the floor at which guessing the login over the network stays \
+         {min} is the minimum at which guessing the login over the network stays \
          infeasible, and the default {default} keeps that margin even if the image \
          itself (and so the password hash in it) is shared"
     )]

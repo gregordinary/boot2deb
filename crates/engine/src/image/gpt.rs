@@ -41,7 +41,7 @@ const KPART_NAMES: [&str; MAX_KPART_SLOTS as usize] = ["KERN-A", "KERN-B", "KERN
 /// GPT attribute bit 2, "legacy BIOS bootable" — the flag a scanning bootloader
 /// reads to decide which partitions are boot candidates.
 ///
-/// Load-bearing under `rockchip-rkbin`. U-Boot's `bootflow scan`, which is
+/// Required under `rockchip-rkbin`. U-Boot's `bootflow scan`, which is
 /// `bootcmd` on every board this builds, considers **only** partitions having
 /// this bit, and when no partition on the medium has it falls back to
 /// scanning partition 1 alone. The rootfs is what holds
@@ -103,7 +103,7 @@ pub(crate) fn write_table(
     let mut parts = Vec::with_capacity(usize::from(MAX_KPART_SLOTS) + 2);
     // The seed sits below the kernel slots on depthcharge and below the rootfs
     // on rkbin (see the geometry), so pushing it here keeps the list in on-disk
-    // order for the former; the sort below settles the latter.
+    // order for the former; the sort below handles the latter.
     parts.push(PartitionSpec {
         index: 0, // re-numbered after the sort
         name: SEED_PARTLABEL,
@@ -415,14 +415,14 @@ mod tests {
     /// spare sector anywhere to absorb an off-by-one.
     ///
     /// [`Geometry::resolve`] cannot catch that: it starts from a disk size and floors the
-    /// partition into what is left, so it always lands at or below the ceiling however the
+    /// partition into what is left, so it always ends at or below the limit however the
     /// reservation is counted. Only the inverse direction puts the arithmetic against the
     /// real GPT writer, which is the one that decides whether the range is legal.
     ///
     /// Both boot shapes, because they place the rootfs at different offsets and the
     /// depthcharge one also has to fit its kernel entries into the same table.
     #[test]
-    fn a_fitted_geometry_lands_exactly_on_the_last_usable_lba() {
+    fn a_fitted_geometry_ends_exactly_on_the_last_usable_lba() {
         let tmp = tempfile::tempdir().unwrap();
         for (name, boot) in [("rkbin", rkbin_boot()), ("depthcharge", depthcharge_boot())] {
             let rootfs_bytes = 256 * 1024 * 1024;
@@ -478,8 +478,8 @@ mod tests {
     /// silently refuses the image.
     ///
     /// The **spare** slot is asserted just as closely, because it is what makes a
-    /// kernel upgrade recoverable and each of its fields is load-bearing in a different
-    /// direction: the type GUID is how `depthchargectl` finds it as an upgrade target
+    /// kernel upgrade recoverable and each of its fields is required for a different
+    /// reason: the type GUID is how `depthchargectl` finds it as an upgrade target
     /// at all, and priority 0 is what stops the firmware booting a partition that so
     /// far contains nothing but zeroes.
     #[test]

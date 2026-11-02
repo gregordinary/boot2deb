@@ -28,7 +28,7 @@ image_size = "2G"
 # usb_drd0 runs at SuperSpeed on the usbdp PHY, needing nothing beyond the SoC dtsi
 # to do it. That is measured, on the sibling media-accel recipe, which shares this
 # board description: 5 Gbps, ~154 MB/s over 92 GB of continuous reads, no link error.
-# A device that lands at 480 Mb/s there is a seating problem — see the board page.
+# A device that enumerates at 480 Mb/s there is a seating problem — see the board page.
 #
 # What the move from the 7.2 generation changes on this SoC's paths. The pin is v7.3.
 #
@@ -47,9 +47,9 @@ image_size = "2G"
 #
 # The display path is where 7.3 moves most on this board. The Samsung HDMI PHY drops the
 # TMDS-rate workarounds it kept for the old clock interface and programs a link rate or
-# colour depth that changed while its clock stayed prepared, and the `dw_hdmi_qp` glue
+# color depth that changed while its clock stayed prepared, and the `dw_hdmi_qp` glue
 # hands the bridge the output formats it supports, so the common HDMI code now picks
-# among them. The mode list, the colour format and 4K output are the first things to
+# among them. The mode list, the color format and 4K output are the first things to
 # check on a new image. The power-domain driver no longer treats a clock that is not
 # ready yet as the end of a domain's clock list: a deferred clock now defers the device
 # instead of leaving it without clock management. `rkvdec` computes its CTB counts with

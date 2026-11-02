@@ -30,7 +30,7 @@ const SIDECAR_SUFFIX: &str = ".nuget.lock";
 
 /// The file an app's NuGet pins live in: `<stem>.<app>.nuget.lock`.
 ///
-/// One spelling for both places it lands. Beside the lock, `stem` is the recipe's
+/// One spelling for both places it is written. Beside the lock, `stem` is the recipe's
 /// leaf, as the rootfs manifest's is. Beside a published image it is the image's
 /// artifact stem, which is where an SBOM reads it from.
 pub fn sidecar_name(stem: &str, app: &str) -> String {

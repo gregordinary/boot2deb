@@ -87,7 +87,7 @@ the SoC's shared properties:
 - Arch
 - Any SoC-wide firmware packages
 
-**Media-accel sources are optional and ride the feature.** Supply the one `[[userspace]]`
+**Media-accel sources are optional and come with the feature.** Supply the one `[[userspace]]`
 entry per vendor tree the part has, plus the `[ffmpeg.base]` and `[ffmpeg.rockchip]`
 stanzas. Do that **only if** a board of this SoC will enable a `media-accel-*` feature.
 The feature compiles them into `.deb`s. Copy the block from `socs/rk3588.toml`.

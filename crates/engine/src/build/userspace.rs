@@ -8,7 +8,7 @@
 //! `librga2`, their `-dev`s, …) are staged out. `ffmpeg-rk` later build-depends on
 //! the `-dev`s and runtime-depends on `librockchip-mpp1` + `librga2`.
 //!
-//! Libmali is off by default: the transcode pipeline rides the VPU + RGA, not the
+//! Libmali is off by default: the transcode pipeline runs on the VPU + RGA, not the
 //! GPU, so a headless box never needs it. When requested, its
 //! `debian/targets` is filtered to the board's Mali variant to avoid compiling the
 //! full variant matrix.
@@ -62,7 +62,7 @@ const USERSPACE_DEPS: &[&str] = &[
 /// One function, read by the [`BuildRootSpec`] that stages the layer *and* by
 /// [`output_manifest_for`], which keys every package of the stage on it. A package
 /// therefore cannot reach a `./configure` without reaching the key. [`crate::shell`]
-/// reads it too, so an interactive session lands in the root this stage compiles in
+/// reads it too, so an interactive session starts in the root this stage compiles in
 /// rather than one that resembles it.
 ///
 /// A tree's own `build_deps` are an increment to the layer for the *whole stage*, not a
@@ -94,7 +94,7 @@ const RELAX_CFLAGS: &str =
 /// and the exact commit the lock pins.
 ///
 /// The declaration is kept whole rather than copied field by field, so a tree that
-/// gains a knob reaches the stage without this type changing.
+/// gains an option reaches the stage without this type changing.
 struct Package<'a> {
     /// The SoC's `[[userspace]]` entry: name, `.deb`s, patch scope, variant filter.
     tree: &'a UserspaceTree,
@@ -280,7 +280,7 @@ pub fn build_userspace(
     for (i, pkg) in packages.iter().enumerate() {
         let restored = if cached[i] {
             let store = store.as_ref().expect("cached implies a store");
-            // The restore lands beside whatever the shared stage dir already
+            // The restore is written beside whatever the shared stage dir already
             // holds, and `collect` copies *every* matching name — sweep the
             // package's stale-version `.deb`s first so a leftover from a build
             // at different pins cannot ride along with the restored set.
@@ -757,7 +757,7 @@ fn keep_variant_lines(content: &str, variant: &str) -> String {
 #[cfg(test)]
 mod tests {
 
-    /// A tree fixture: the declaration the SoC would author, minus the knobs a
+    /// A tree fixture: the declaration the SoC would author, minus the options a
     /// signature test does not exercise.
     fn tree(name: &str) -> UserspaceTree {
         UserspaceTree {
@@ -817,7 +817,7 @@ mod tests {
         assert!(env
             .iter()
             .any(|(k, v)| k == "DEB_BUILD_OPTIONS" && v == "parallel=8"));
-        // The locked commit's epoch rides along for a reproducible timestamp.
+        // The locked commit's epoch is passed in for a reproducible timestamp.
         assert!(env
             .iter()
             .any(|(k, v)| k == "SOURCE_DATE_EPOCH" && v == "1700000000"));

@@ -24,12 +24,12 @@ layout     = "combined"                  # omit -> device default_layout
 image_size = "2G"
 
 # Derived from turing-rk1/forky along the userspace axis, and re-assessed over the 7.3
-# generation: see that recipe for what the bump moves. One of its items lands on this
+# generation: see that recipe for what the bump moves. One of its items applies to this
 # recipe's own path rather than the base's: the IOMMU's stale-fault acknowledgement
 # before a stall reaches the decoders and the RGA cores this image's filter path drives.
 # The RGA the `/dev/rga` consumers here talk to is still the multicore vendor driver --
 # the kernel's in-tree V4L2 RGA3 driver is left unbuilt, because it exposes one core per
-# video node, does scale and colour conversion only, and has no 10-bit YUV, so NV15 out
+# video node, does scale and color conversion only, and has no 10-bit YUV, so NV15 out
 # of a 10-bit HEVC decode has no path through it and `librga`, `scale_rkrga` and
 # `vpp_rkrga` cannot speak to it at all. `rkvdec`'s `DIV_ROUND_UP()` CTB counts are the
 # same values. The `vulkan` feature is a userspace package set over panthor, whose 7.3

@@ -150,7 +150,7 @@ impl BuildPoint {
     /// host and kept beside three others. Its name therefore has to contain the whole
     /// point on its own.
     ///
-    /// **Every artifact the build point owns is named for this**, `.deb`s aside:
+    /// **Every artifact the build point produces is named for this**, `.deb`s aside:
     ///
     /// - The image.
     /// - The rootfs tarball.
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_order_is_preserved_because_resolution_honours_it() {
+    fn feature_order_is_preserved_because_resolution_honors_it() {
         // Two orderings of one set are two different builds: `config_fragments` and
         // `patch_series` compose in selection order, so the later feature wins a
         // kconfig conflict. Canonicalizing by sorting would give both the same lock

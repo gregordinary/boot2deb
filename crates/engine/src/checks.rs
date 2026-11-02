@@ -446,12 +446,12 @@ fn exe(
 /// **Two namespaces, not one**, because that is what a launch holds: the sandbox's own,
 /// and the nested one its command enters so the kernel locks the sandbox's mount flags.
 /// They are charged against `user.max_user_namespaces` at every level, so a host with a
-/// ceiling of 1 satisfies a single-namespace probe and then fails every build at launch.
+/// limit of 1 satisfies a single-namespace probe and then fails every build at launch.
 /// The probe's whole premise is that it performs the sequence a build performs.
 ///
 /// The probe answers *whether*, and [`userns_blocker_detail`] answers *why* — but a
 /// blocker is consulted even when the probe passes, because the probe is necessary and
-/// not sufficient. A ceiling this process fits under is not one every build fits under:
+/// not sufficient. A limit this process fits under is not one every build fits under:
 /// a host allowing four namespaces with three already live passes here and exhausts its
 /// budget at launch. Where the library names a condition, that condition is the answer
 /// regardless of what one successful `unshare` proved.
@@ -486,13 +486,13 @@ fn userns_check() -> Check {
 
 /// Why the user-namespace probe failed, asked of the sandbox library rather than
 /// guessed — the same delegation [`overlay_check`] makes, and for the same reason: the
-/// library owns these conditions, so only it can keep an answer current.
+/// library tracks these conditions, so only it can keep an answer current.
 ///
 /// Two independent things must hold, and they fail for unrelated reasons, so both are
 /// consulted in the order the kernel needs them:
 ///
 ///  1. **The namespaces can be created at all** — three sysctls, one of them
-///     Ubuntu-specific, and the ceiling read against the *two* a launch holds rather
+///     Ubuntu-specific, and the limit read against the *two* a launch holds rather
 ///     than against zero ([`userns_blocker`](ferroday_cage::host::userns_blocker)).
 ///  2. **A subordinate *range* can be mapped into it**
 ///     ([`range_map_blocker`](ferroday_cage::host::range_map_blocker)). An

@@ -1,15 +1,15 @@
 # features/ffmpeg-nonfree.toml — build this image's FFmpeg under
-# `--enable-nonfree`, admitting the encoders whose licences cannot be combined
+# `--enable-nonfree`, admitting the encoders whose licenses cannot be combined
 # with the GPL for redistribution.
 #
-# It is a *licence flavour*, not a package set: it installs nothing, replaces
+# It is a *license flavor*, not a package set: it installs nothing, replaces
 # nothing, and changes no dependency of the image. What it changes is how the
 # FFmpeg provider already in the selection is configured — so it is composed
 # alongside a provider rather than instead of one, which is what
 # `requires_capability` below enforces. Selecting it on an image with no FFmpeg is
 # a resolution error, not a flag nobody reads.
 #
-# Both flavours are buildable and only one is shippable, which is why there is no
+# Both flavors are buildable and only one is shippable, which is why there is no
 # recipe that names this feature. Reach it as a variant of any recipe:
 #
 #     boot2deb build turing-rk1/media-accel-forky                 # free
@@ -25,7 +25,7 @@ description = "Build FFmpeg with --enable-nonfree (FDK-AAC) -- the result is not
 # No packages, no overlay, no apt source. The whole of this feature is the flag it
 # sets on the build, declared in the `ffmpeg_nonfree` line at the foot of the file.
 
-# There has to be an FFmpeg to re-flavour. Named as a capability rather than as
+# There has to be an FFmpeg to re-flavor. Named as a capability rather than as
 # `media-accel-rockchip` so this works unchanged against any provider — the V4L2
 # one, or a future VAAPI/NVENC sibling on another platform.
 requires_capability = ["ffmpeg"]

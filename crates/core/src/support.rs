@@ -37,7 +37,7 @@ pub struct MatrixRow {
     /// u-boot-only recipe, which resolves no kernel.
     pub kernel: Option<String>,
     /// The exact kernel the lock pins (e.g. `v7.1.1`), or [`None`] for a distro kernel
-    /// or a u-boot-only recipe. A distro kernel's version rides the suite's package
+    /// or a u-boot-only recipe. A distro kernel's version is set by the suite's package
     /// set rather than a commit, so the lock has none to state.
     pub kernel_ref: Option<String>,
     /// The kernel patch series pinned for this build: series, ref, and short commit.

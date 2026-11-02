@@ -57,7 +57,7 @@ With no bundled FFmpeg there is no fallback encoder, and on this application no
 encoder means no server: Jellyfin resolves an FFmpeg path during startup,
 validates that it runs, and `ApplicationHost` throws
 `FfmpegException("Failed to find valid ffmpeg")` if it does not. It does not
-start with transcoding switched off. So the encoder path is load-bearing, which
+start with transcoding switched off. So the encoder path is essential, which
 is a deliberate trade — a wrong path is a dead service rather than a silent
 fallback to a binary that cannot reach the hardware — and it is the reason the
 path is validated on hardware before a recipe using it stops being

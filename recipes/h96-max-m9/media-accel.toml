@@ -44,7 +44,7 @@ image_size = "3G"
 # Main at 1080p, H.264 High and HEVC Main at 4K, and the 10-bit H.264 High 10 and HEVC
 # Main 10 profiles whose frames leave the decoder as `NV15`; 4K HEVC decodes at 136 fps
 # for a third of one core, and four concurrent 4K30 streams hold real time; RGA converts
-# colour and downscales exactly over DMA-BUF imports, with no IOMMU fault over 600 jobs;
+# color and downscales exactly over DMA-BUF imports, with no IOMMU fault over 600 jobs;
 # and Panfrost opens a GLES 3.1 context that rasterises. That image also contained
 # `mesa-vulkan-drivers`, which this recipe does not. On this GPU it provided only the
 # software `lvp` device, and none of the paths above used it.

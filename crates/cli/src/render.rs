@@ -397,7 +397,7 @@ pub(crate) fn print_build(b: &ResolvedBuild) {
             }
         );
         // A headless board has no keymap and prints none — an empty line would suggest
-        // the knob exists and was left blank, when in fact Debian's default is what
+        // the setting exists and was left blank, when in fact Debian's default is what
         // ships.
         if let Some(k) = &i.keymap {
             let mut km = k.layout.clone();

@@ -31,13 +31,13 @@ exactly that list and concludes hardware decoding is available. It is not.
 
 Turning a codec on in that list makes Jellyfin emit `-hwaccel rkmpp`. That hwaccel
 finds no MPP decoder, and FFmpeg decodes in software without saying so, at the same CPU
-cost as no hwaccel at all. The list buys nothing and hides what is actually running.
+cost as no hwaccel at all. The list adds nothing and hides what is actually running.
 
 So: leave *Playback → Transcoding → Enable hardware decoding for* empty. Everything
 else in that page is yours to tune.
 
 On this board that is also the faster arrangement rather than a concession. RGA
-scaling only pays for itself on frames already held in an MPP context, which on a
+scaling only saves time on frames already held in an MPP context, which on a
 software-decode path they never are. The round trip to and from the 2D engine costs
 more than swscale saves. Eight Cortex cores decode and scale, and the encoder — the
 part that actually would not keep up in software — is in hardware.
@@ -71,7 +71,7 @@ works if you turn it on.
 ## Jellyfin's bundled FFmpeg is not installed
 
 The image installs `jellyfin-server` and `jellyfin-web`, not the `jellyfin`
-metapackage, so `jellyfin-ffmpeg` never lands. It would be a second complete FFmpeg
+metapackage, so `jellyfin-ffmpeg` is never installed. It would be a second complete FFmpeg
 that cannot reach the hardware, and it pulls its own pocket's library versions in
 behind it.
 

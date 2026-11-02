@@ -8,7 +8,7 @@
 //! says it.
 //!
 //! `build` writes the record beside the artifacts as soon as it is admitted, marked
-//! [`Outcome::Running`]. When the run ends the record settles to
+//! [`Outcome::Running`]. When the run ends the record changes to
 //! [`Succeeded`](Outcome::Succeeded) or [`Failed`](Outcome::Failed). A run that never
 //! ends, killed or crashed, leaves it `running`, which is the truth.
 //!
@@ -75,9 +75,9 @@ impl BuildRecord {
         }
     }
 
-    /// This record settled at `finished`: succeeded when `error` is `None`, failed with
+    /// This record, ended at `finished`: succeeded when `error` is `None`, failed with
     /// it otherwise.
-    pub fn settled(mut self, finished: String, error: Option<String>) -> Self {
+    pub fn ended(mut self, finished: String, error: Option<String>) -> Self {
         self.outcome = match error {
             None => Outcome::Succeeded,
             Some(_) => Outcome::Failed,
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn only_a_whole_build_that_succeeded_vouches() {
-        let ok = record("all").settled("2026-10-08T13:00:00Z".into(), None);
+        let ok = record("all").ended("2026-10-08T13:00:00Z".into(), None);
         assert_eq!(ok.outcome, Outcome::Succeeded);
         assert_eq!(ok.vouches_for_image(), Ok(()));
 
@@ -159,7 +159,7 @@ mod tests {
             .unwrap_err()
             .contains("never finished"));
 
-        let failed = record("all").settled(
+        let failed = record("all").ended(
             "2026-10-08T12:05:00Z".into(),
             Some("rootfs: solve failed".into()),
         );
@@ -167,7 +167,7 @@ mod tests {
         let why = failed.vouches_for_image().unwrap_err();
         assert!(why.contains("rootfs: solve failed"), "{why}");
 
-        let partial = record("kernel").settled("2026-10-08T12:30:00Z".into(), None);
+        let partial = record("kernel").ended("2026-10-08T12:30:00Z".into(), None);
         let why = partial.vouches_for_image().unwrap_err();
         assert!(why.contains("--stage kernel"), "{why}");
     }
@@ -180,7 +180,7 @@ mod tests {
         assert!(!text.contains("finished"), "{text}");
         assert_eq!(BuildRecord::from_toml_str(&text, "t").unwrap(), running);
 
-        let failed = running.settled("2026-10-08T12:05:00Z".into(), Some("boom".into()));
+        let failed = running.ended("2026-10-08T12:05:00Z".into(), Some("boom".into()));
         assert_eq!(
             BuildRecord::from_toml_str(&failed.to_toml(), "t").unwrap(),
             failed

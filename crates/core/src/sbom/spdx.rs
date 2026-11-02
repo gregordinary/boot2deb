@@ -53,7 +53,7 @@ pub struct CreationInfo {
     /// RFC 3339 UTC creation timestamp.
     pub created: String,
     /// Creators, each `Tool: <name>-<version>`. SPDX admits no more than a name and a
-    /// version there, so the builder's commit rides in [`comment`](Self::comment).
+    /// version there, so the builder's commit is recorded in [`comment`](Self::comment).
     pub creators: Vec<String>,
     /// The builder in full, including the commit and whether its checkout was dirty.
     pub comment: String,

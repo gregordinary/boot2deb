@@ -2,7 +2,7 @@
 //! addition receives at press time, and the closed set of names it can draw on.
 //!
 //! An addition is normally a byte-for-byte copy, which cannot express a file
-//! whose content depends on the image it lands in. The values that matter there
+//! whose content depends on the image it is placed in. The values that matter there
 //! are the ones an operator *cannot* produce by hand. Above all those are the
 //! partition and filesystem identifiers, which [`ImageIdentity`] derives from the
 //! recipe. Naming one in a config file would otherwise mean pressing the image,
@@ -26,7 +26,7 @@ use crate::image::ImageIdentity;
 use boot2deb_core::provenance::SystemIdentity;
 
 /// Source-file suffix that marks an addition as a template. A `--copy-tree`
-/// entry's destination drops it (`site.conf.tmpl` lands as `site.conf`), which
+/// entry's destination drops it (`site.conf.tmpl` is placed as `site.conf`), which
 /// also gives the escape for shipping a literal one: name it `site.tmpl.tmpl`.
 pub const TEMPLATE_SUFFIX: &str = ".tmpl";
 
@@ -339,7 +339,7 @@ impl Template {
     }
 }
 
-/// The destination a template source lands at: its path with
+/// The destination a template source is placed at: its path with
 /// [`TEMPLATE_SUFFIX`] removed, or `None` when the name does not have one.
 #[must_use]
 pub fn strip_suffix(name: &str) -> Option<&str> {

@@ -20,7 +20,7 @@
 //! reserved group-descriptor-table blocks to the most the format can address (~8 TiB
 //! under this feature set, at a cost of ~4 MiB). First boot then grows the mounted root
 //! onto a larger NVMe with `resize2fs` and no descriptor-table relocation. (`Max` never
-//! spends more than a sixty-fourth of the filesystem on headroom, so a filesystem below
+//! uses more than a sixty-fourth of the filesystem for headroom, so a filesystem below
 //! 256 MiB reserves proportionally less. Every shipped image is well past that knee.)
 //!
 //! The feature set is chosen here rather than left to the formatter's default. It is
@@ -56,12 +56,12 @@
 //! writer's code. `e2fsprogs` is not required. Where it is absent, the pure-Rust gate
 //! stands alone and the image's provenance records that only it ran.
 //!
-//! "New enough" is [`E2FSCK_MIN`], and the floor is not a formality. The pinned feature
+//! "New enough" is [`E2FSCK_MIN`], and the minimum is not a formality. The pinned feature
 //! set includes `metadata_csum_seed`, which e2fsprogs only learned in 1.43. An older
-//! `e2fsck` rejects the image over a feature it does not know. Without the floor, a
+//! `e2fsck` rejects the image over a feature it does not know. Without the minimum, a
 //! host with an ancient `e2fsck` fails a build that a host with **no** `e2fsck`
 //! completes. An optional cross-check must never be worse than absent, so below the
-//! floor it is skipped with a log line.
+//! minimum it is skipped with a log line.
 //!
 //! The output is the standalone ext4 image the [image orchestrator](super) splices
 //! into the whole-disk image at the rootfs partition offset.
@@ -531,7 +531,7 @@ impl PressTree<'_> {
 ///
 /// `metadata_csum_seed` is in the pinned feature set, and e2fsprogs only learned it in
 /// 1.43 (2016). An older `e2fsck` reports the seed as an unknown feature and exits
-/// non-zero on a perfectly good image — so without this floor, a host with an
+/// non-zero on a perfectly good image — so without this minimum, a host with an
 /// ancient or non-GNU `e2fsck` on `PATH` fails a build that a host with **no** `e2fsck`
 /// completes. An optional cross-check must never be worse than absent.
 const E2FSCK_MIN: (u32, u32) = (1, 43);
@@ -565,7 +565,7 @@ const E2FSCK_MIN: (u32, u32) = (1, 43);
 /// are returned and recorded in the image's provenance (`[verification]`) rather than
 /// left to a log line. `doctor` lists `e2fsck` as an optional tool for the same reason.
 ///
-/// Below the floor the check is skipped with a log line rather than run: an e2fsprogs
+/// Below the minimum the check is skipped with a log line rather than run: an e2fsprogs
 /// that predates `metadata_csum_seed` would reject the image over a feature it does not
 /// know, which is a disagreement about the *checker*, not about the layout.
 fn verify_clean(dest: &Path, step: &Step) -> Result<Vec<String>, EngineError> {
@@ -697,7 +697,7 @@ enum E2fsck {
 
 /// Decide from `e2fsck -V`'s banner (`None` when the binary could not be spawned).
 ///
-/// Pure, so the floor is unit-testable against real banner text rather than against
+/// Pure, so the minimum-version check is unit-testable against real banner text rather than against
 /// whatever e2fsprogs the test host happens to have. An unparseable banner runs the
 /// check: a version this cannot read is far more likely to be a newer format than a
 /// pre-2016 one, and refusing to check on a spelling change would quietly weaken every
@@ -741,11 +741,11 @@ mod tests {
         let why = skip("e2fsck 1.42.13 (17-May-2015)");
         assert!(why.contains("1.42"), "{why}");
         assert!(why.contains("metadata_csum_seed"), "{why}");
-        assert!(why.contains("1.43"), "the floor is named: {why}");
+        assert!(why.contains("1.43"), "the minimum is named: {why}");
         assert!(skip("e2fsck 0.9 (old)").contains("predates"));
         assert!(skip("e2fsck 1.42.0").contains("predates"));
 
-        // At and above the floor it runs — including the version this project is
+        // At and above the minimum it runs — including the version this project is
         // developed against.
         for banner in [
             "e2fsck 1.43 (17-May-2016)",
@@ -874,7 +874,7 @@ mod tests {
 
     /// The formatted image must have the supplied UUID, the resize-critical layout
     /// (`sparse_super` + `resize_inode` with reserved GDT blocks reaching the format
-    /// ceiling), the pinned `remount-ro` error policy, and exactly the requested size —
+    /// maximum), the pinned `remount-ro` error policy, and exactly the requested size —
     /// and pass the scan `build_rootfs_ext4` runs over it.
     ///
     /// Read back through the formatter's own reader rather than by indexing superblock
@@ -902,13 +902,13 @@ mod tests {
         // `s_errors = 2` is remount-ro. A literal because the format's own spelling of
         // the policy is not readable back as the typed value that set it.
         assert_eq!(sb.errors, 2, "errors must be remount-ro");
-        // The online-resize headroom reaches the format ceiling — 1024 GDT blocks
+        // The online-resize headroom reaches the format maximum — 1024 GDT blocks
         // (8 TiB) under this feature set, one of which this filesystem already uses, so
         // at least 1023 are reserved. This is what lets a small image grow onto a large
         // disk at first boot without relocating its descriptor table.
         assert!(
             sb.reserved_gdt_blocks >= 1023,
-            "reserved GDT blocks must reach the resize ceiling, got {}",
+            "reserved GDT blocks must reach the resize maximum, got {}",
             sb.reserved_gdt_blocks
         );
 
@@ -941,11 +941,11 @@ mod tests {
             "the recorded headroom is the headroom the image has"
         );
         // The one number no superblock field states: what those reserved blocks buy.
-        // The floor is a 2 TiB disk — a size a board this image ships to can plausibly
+        // The minimum is a 2 TiB disk — a size a board this image ships to can plausibly
         // be given, and one a filesystem built at 512 MiB must still be able to fill.
         assert!(
             geom.max_grow_blocks >= 2 * 1024 * 1024 * 1024 * 1024 / EXT4_BLOCK,
-            "must grow onto a large disk in place, ceiling is {} blocks",
+            "must grow onto a large disk in place, maximum is {} blocks",
             geom.max_grow_blocks
         );
         // And the record says which checks it passed, the in-process one first.
@@ -1190,10 +1190,10 @@ mod tests {
     /// document names every feature word twice over — as bits and as names, which
     /// therefore cannot drift apart — plus the two sizes that are not features, plus the
     /// seven options outside the feature set entirely. `errors remount_read_only` is the
-    /// one that is *only* here: the error behaviour reaches neither a feature word nor
+    /// one that is *only* here: the error behavior reaches neither a feature word nor
     /// the geometry, so no other record in the tree would notice it changing. And because
     /// the formatter builds the document by destructuring its own options exhaustively, a
-    /// *field* it gains lands in this string too, where a projection written here would
+    /// *field* it gains appears in this string too, where a projection written here would
     /// have kept compiling and silently stopped covering it.
     ///
     /// A failure here is not necessarily a defect — it means the contract images are

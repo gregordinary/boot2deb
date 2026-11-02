@@ -211,7 +211,7 @@ fn indent(s: &str) -> String {
 
 /// One tree in a [`verify_series`] run: what to apply, where, and at what version.
 ///
-/// The target rides with the tree rather than being one label for the whole run
+/// The target is set per tree rather than being one label for the whole run
 /// because a verify spans two independent axes. The kernel-family trees are checked
 /// at the kernel tag, and the `uboot` tree at the u-boot tag. A single target would
 /// have to misreport one of them.

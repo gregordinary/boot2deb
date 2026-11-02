@@ -28,7 +28,7 @@
 //!
 //! This module is the entry point only. It parses the argument tree
 //! ([`crate::args`]), composes the config root, and dispatches to the handler in
-//! [`crate::commands`] that owns each subcommand. Every error surfaces here once, as the process's exit code —
+//! [`crate::commands`] that implements each subcommand. Every error surfaces here once, as the process's exit code —
 //! with one exception, `shell`, whose result is a command's own exit status.
 
 mod args;

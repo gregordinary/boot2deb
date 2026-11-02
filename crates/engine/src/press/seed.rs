@@ -36,11 +36,11 @@ pub const SEED_FILE: &str = "seed.txt";
 /// recognizable rather than `NO NAME`.
 const SEED_LABEL: &str = "B2D-SEED";
 
-/// FAT's epoch floor (1980-01-01T00:00:00Z). A build timestamp below it — a
+/// FAT's minimum timestamp (1980-01-01T00:00:00Z). A build timestamp below it — a
 /// zeroed `SOURCE_DATE_EPOCH`, say — is clamped up, because the format cannot
 /// represent an earlier instant and refusing the whole image over a template
 /// file's mtime would invert the priorities.
-const FAT_EPOCH_FLOOR: i64 = 315_532_800;
+const FAT_EPOCH_MIN: i64 = 315_532_800;
 
 /// The keys a seed can contain. Every field is optional, and the default is the empty
 /// seed the built image ships. Unknown keys in the file are ignored on both
@@ -185,7 +185,7 @@ pub fn partition_image(
     // Floored to FAT's epoch, then to even seconds: the format stores times at a
     // two-second granularity, and ferrosys counts a truncated odd second as a
     // fidelity loss — rounding here keeps `AcceptedLoss::NONE` honest.
-    let time = Timestamp::from_secs(time_secs.max(FAT_EPOCH_FLOOR) & !1);
+    let time = Timestamp::from_secs(time_secs.max(FAT_EPOCH_MIN) & !1);
     let source = TreeBuilder::new().file(
         format!("/{SEED_FILE}").into_bytes(),
         render(keys).into_bytes(),
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(parse(&text), keys);
     }
 
-    /// A pre-1980 build epoch clamps to FAT's floor rather than refusing the
+    /// A pre-1980 build epoch clamps to FAT's minimum rather than refusing the
     /// whole image over a timestamp the format cannot spell — and an odd second
     /// rounds down to the format's two-second grid rather than counting as a
     /// fidelity loss.

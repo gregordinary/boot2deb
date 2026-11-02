@@ -54,7 +54,7 @@ repo_patches = [
     "fix-linux-7.3-build.patch",
 ]
 
-# The local patches, from kmods/aic8800/patches/, applied after radxa's. All three are behaviour
+# The local patches, from kmods/aic8800/patches/, applied after radxa's. All three are behavior
 # changes this image wants, not build fixes -- the build guards all come from radxa's
 # series above.
 #

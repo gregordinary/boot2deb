@@ -189,7 +189,7 @@ fn both_formats_render_from_the_shipped_configuration() {
     std::fs::write(dir.join("spdx.json"), &spdx).expect("write the SPDX document");
     std::fs::write(dir.join("cyclonedx.json"), &cdx).expect("write the CycloneDX document");
 
-    // Both parse back as JSON, and each names the package set — the floor the CI
+    // Both parse back as JSON, and each names the package set — the minimum the CI
     // schema check builds on.
     for (name, text) in [("spdx", &spdx), ("cyclonedx", &cdx)] {
         let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");

@@ -39,7 +39,7 @@ const KEY_DIRS: [&str; 3] = [
 
 /// The files that make a directory in [`KEY_DIRS`] the one `depthcharge-tools` uses:
 /// the keyblock, the private data key, and the public subkey. Only the private key is
-/// read here, because the keyblock rides inside the partition already.
+/// read here, because the keyblock is inside the partition already.
 const KEY_FILES: [&str; 3] = [
     "kernel.keyblock",
     "kernel_data_key.vbprivk",

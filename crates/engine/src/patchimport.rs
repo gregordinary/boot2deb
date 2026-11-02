@@ -4,7 +4,7 @@
 //! comments and layout (`toml_edit`).
 //!
 //! The normalization itself is pure and lives in [`boot2deb_core::mbox`]. The
-//! `git am` dry-run verify reuses [`crate::patches`]. This module owns only the two
+//! `git am` dry-run verify reuses [`crate::patches`]. This module performs only the two
 //! side effects normalization cannot do off-host: the fetch and the manifest edit.
 
 use crate::error::EngineError;

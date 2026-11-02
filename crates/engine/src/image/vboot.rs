@@ -534,7 +534,7 @@ mod tests {
 
     /// Signatures are deterministic, so signing the same contents with the same key must
     /// reproduce futility's bytes exactly. That pins the digest, the padding, and where
-    /// each signature lands.
+    /// each signature is placed.
     #[test]
     fn re_signing_an_unchanged_command_line_reproduces_futilitys_bytes() {
         let mut part = KernelPartition::parse(SIGNED.to_vec()).unwrap();

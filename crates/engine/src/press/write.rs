@@ -87,7 +87,7 @@ impl<R: Read> Read for CountingReader<R> {
 /// progress on `step`.
 ///
 /// `dest` is any writer, in practice the output file `press` creates. The caller
-/// owns durability (`fsync`). This function only moves and measures bytes.
+/// is responsible for durability (`fsync`). This function only moves and measures bytes.
 ///
 /// # Errors
 ///

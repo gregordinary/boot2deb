@@ -33,7 +33,7 @@ flavor           = "mainline"
 # `sources/v<version>-gnu` — that whole ref is what the lock pins and what git
 # resolves. Only `git://` is offered; there is no HTTPS endpoint. That is
 # acceptable here for the same reason the Debian mirror is plain HTTP: integrity
-# rides on the pin, not the transport. `update` resolves the tag once and writes
+# comes from the pin, not the transport. `update` resolves the tag once and writes
 # the commit into the lock, and every build after that fetches *that commit* by
 # sha and would fail if the server answered with anything else.
 source           = { git = "git://linux-libre.fsfla.org/releases.git", ref = "sources/v7.3-gnu" }

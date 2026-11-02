@@ -564,7 +564,7 @@ fn dt_source_dir(build: &ResolvedBuild, tree: &Path) -> PathBuf {
 /// board.
 ///
 /// Copy-into-tree rather than a standalone `dtc` run: a forked board `.dts`'s
-/// `#include "<soc>.dtsi"` then resolves for free, and the DTB rides in the
+/// `#include "<soc>.dtsi"` then resolves for free, and the DTB ships in the
 /// `linux-image` deb with the kernel it was built against.
 ///
 /// A source that would overwrite an existing in-tree file is refused
@@ -703,7 +703,7 @@ fn configure(
         tree,
         arch: &build.kernel_arch,
         // Resolve the config in the same toolchain context the kernel compiles in,
-        // so cross-toolchain-probed symbols (ARM64_BTI/E0PD/…) are settled here and
+        // so cross-toolchain-probed symbols (ARM64_BTI/E0PD/…) are resolved here and
         // `make bindeb-pkg` never prompts via an interactive oldconfig.
         cross_compile: env.cross_compile.as_deref(),
         base_defconfig: &kernel.base_defconfig,

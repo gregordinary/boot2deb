@@ -318,7 +318,7 @@ fn kernel_axis(
         }
         None => {
             // A `--kernel-src` local checkout/URL overrides the configured upstream
-            // for the fetch; the tree still lands at exactly the locked commit.
+            // for the fetch; the tree is still checked out at exactly the locked commit.
             let url = match args.kernel_src.clone() {
                 Some(s) => s,
                 None => pins::kernel_source_url(&kernel.source)?,

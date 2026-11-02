@@ -39,7 +39,7 @@ pub struct ConfigInputs<'a> {
     /// `CROSS_COMPILE=` prefix, so the config is resolved in the **same toolchain
     /// context the kernel compiles in**. `None` on a native build.
     ///
-    /// This is load-bearing for a cross build. Toolchain-probed symbols
+    /// A cross build depends on this. Toolchain-probed symbols
     /// (`ARM64_BTI`, `ARM64_E0PD`, the ARMv8.5 block, …) are gated on `cc-option`
     /// probes, so they resolve per the *target* compiler. Generating with the host
     /// compiler instead leaves them unresolved. `make bindeb-pkg` under the cross
@@ -59,7 +59,7 @@ pub struct ConfigInputs<'a> {
     /// own `conf`, and resolves `cc-option` probes against a compiler. That has to
     /// be the compiler the kernel is then built with. Otherwise the probed symbols
     /// come out different, and `make bindeb-pkg` drops into an interactive
-    /// `oldconfig` on symbols the generated config never settled.
+    /// `oldconfig` on symbols the generated config never resolved.
     ///
     /// Sharing the root is what makes "the same toolchain context" structural rather
     /// than a matter of two call sites agreeing.

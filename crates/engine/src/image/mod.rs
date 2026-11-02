@@ -243,7 +243,7 @@ pub struct ImageIdentity {
     /// The ChromeOS kernel slots' partition GUIDs, in on-disk order. Unused under a
     /// boot method that writes no kernel partition.
     ///
-    /// **Distinct per slot, and that is load-bearing.** depthcharge substitutes the
+    /// **Distinct per slot, and that is essential.** depthcharge substitutes the
     /// booted slot's PARTUUID into `kern_guid=` on the kernel command line. That is
     /// how the running system knows *which* slot it came up from. It is therefore how
     /// it knows which slot to overwrite on the next kernel upgrade. Two slots sharing a
@@ -579,7 +579,7 @@ pub fn build_image(
                 });
             };
             // Rootfs image: GPT + rootfs partition, empty raw gap (bootloader-agnostic).
-            // The seed rides with the rootfs — it is the OS that reads it.
+            // The seed belongs with the rootfs — it is the OS that reads it.
             let rootfs = opts.out_dir.join(format!("{}-rootfs.img", opts.stem));
             assemble_disk(
                 &rootfs,
@@ -1098,7 +1098,7 @@ fn create_sized_image(path: &Path, size: u64) -> Result<(), EngineError> {
 /// the sparse `set_len`.
 /// Write `bytes` into the image at `offset` — the seed partition, whose whole
 /// content is built in memory. Zero runs are written as-is rather than
-/// hole-punched: the partition is 1 MiB, so sparseness buys nothing.
+/// hole-punched: the partition is 1 MiB, so sparseness saves nothing.
 fn splice_bytes(image: &Path, offset: u64, bytes: &[u8]) -> Result<(), EngineError> {
     let mut dst = std::fs::OpenOptions::new()
         .write(true)
@@ -1657,7 +1657,7 @@ mod tests {
         let base_map = walk(baseline);
         let press_map = walk(&pressed_path);
 
-        // The additions landed: contents, modes, synthesized parents.
+        // The additions are in place: contents, modes, synthesized parents.
         let added = &press_map[b"/opt/site/site.conf".as_slice()];
         assert_eq!(added.2.as_deref(), Some(b"site\n".as_slice()));
         assert_eq!(added.0 & 0o7777, 0o644);

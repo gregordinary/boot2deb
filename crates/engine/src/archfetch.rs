@@ -243,7 +243,7 @@ mod tests {
 
     /// A `file://` URL is the build's own local `.deb` pool, and it must keep going
     /// through the library's client rather than through the TLS agent — which cannot
-    /// open a path at all. The delegation is the whole of this type's behaviour for
+    /// open a path at all. The delegation is the whole of this type's behavior for
     /// every scheme but one, so this is the assertion that it is not accidentally
     /// swallowing them.
     #[test]
@@ -293,7 +293,7 @@ mod tests {
     /// The batch a build actually produces: the mirror's packages and a vendor
     /// repository's in one chunk. Partitioning serves them out of the order they were
     /// asked for, and the caller reads the answers by position — so this pins that each
-    /// one lands at its own job's index, and that a body written by one half is not
+    /// one is placed at its own job's index, and that a body written by one half is not
     /// written into another job's sink.
     #[test]
     fn a_mixed_batch_answers_every_job_at_its_own_index() {
@@ -337,7 +337,7 @@ mod tests {
 
     /// More `https://` jobs than [`TLS_AT_ONCE`], so the batch is served by a pool of
     /// workers rather than in a straight line: every job is still answered exactly once,
-    /// which is what a slot handed out with its job buys.
+    /// which is what a slot handed out with its job provides.
     #[test]
     fn every_job_of_an_all_https_batch_is_answered() {
         let urls: Vec<String> = (0..TLS_AT_ONCE + 1)
