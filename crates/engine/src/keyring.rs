@@ -1,5 +1,5 @@
-//! Vendored apt keyring auditing: enumerate an OpenPGP keyring's primary-key
-//! fingerprints and hold them to a checked-in manifest.
+//! Vendored apt keyring auditing: enumerate an OpenPGP keyring's certificates and
+//! hold them to a checked-in manifest.
 //!
 //! A keyring under `blobs/keyrings/` is a *trust anchor*. It decides whose `Release`
 //! signatures the bootstrap accepts. As a binary blob it is also the one vendored
@@ -12,28 +12,30 @@
 //! of text. The trusted set is a list anyone can check against `debian.org` without
 //! trusting this repo.
 //!
-//! Only **primary** keys (packet tag 6) are listed. A subkey cannot be added without
-//! a binding signature from its primary key. `gpgv` verifies that signature during
-//! the bootstrap, and an attacker cannot forge it without the primary secret.
-//! Pinning the primaries therefore pins the whole certificate.
+//! Only **primary** keys are listed. A subkey cannot be added without a binding
+//! signature from its primary key. The bootstrap's verifier checks that signature,
+//! and an attacker cannot forge it without the primary secret. Pinning the primaries
+//! therefore pins the whole certificate.
 //!
-//! Parsing is pure-Rust and deliberately narrow. It walks the packet stream (RFC
-//! 4880 §4.2), takes the v4 public-key packets, and fingerprints each as
-//! `SHA-1(0x99 ‖ len_be16 ‖ body)` (RFC 4880 §12.2). Anything it does not
-//! understand, such as a partial length or an unknown key version, is an error
-//! rather than a skipped packet. A keyring this module cannot fully account for is
-//! therefore never declared verified.
+//! The keyring is read by [`irongall`], the OpenPGP implementation the bootstrap's
+//! own signature verifier is built on. It reads as a sequence of certificates, each
+//! named by its primary key's fingerprint. A certificate irongall refuses, or packet
+//! framing it cannot follow, is an error rather than a skipped certificate. A keyring
+//! this module cannot fully account for is therefore never declared verified.
+//!
+//! A vetted certificate must also hold a key the verifier can use, judged by the
+//! same policy the bootstrap judges a signature under. One that holds none is a
+//! trust anchor that can never vouch for a release. [`verify`] refuses it, rather
+//! than leaving it to fail the first bootstrap that needed it.
 
 use crate::error::EngineError;
-use sha1::{Digest, Sha1};
+use irongall::cert;
+use irongall::policy::Policy;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Extension of the fingerprint manifest that sits beside each vendored keyring.
 const MANIFEST_EXT: &str = "fingerprints";
-
-/// OpenPGP packet tag for a Public-Key (primary) packet.
-const TAG_PUBLIC_KEY: u8 = 6;
 
 /// The manifest path for a keyring: `<keyring>.fingerprints` (replacing `.gpg`).
 pub fn manifest_path(keyring: &Path) -> PathBuf {
@@ -69,13 +71,13 @@ pub fn verify(keyring: &Path) -> Result<Vec<Key>, EngineError> {
         })?;
 
     let bytes = std::fs::read(keyring).map_err(|source| EngineError::io(keyring, source))?;
-    let actual = fingerprints(&bytes).map_err(|reason| EngineError::KeyringMalformed {
+    let actual = certificates(&bytes).map_err(|reason| EngineError::KeyringMalformed {
         keyring: keyring.display().to_string(),
         reason,
     })?;
 
     let expected_set: BTreeSet<&str> = expected.iter().map(|k| k.fingerprint.as_str()).collect();
-    let actual_set: BTreeSet<&str> = actual.iter().map(String::as_str).collect();
+    let actual_set: BTreeSet<&str> = actual.iter().map(|c| c.fingerprint.as_str()).collect();
     if expected_set != actual_set {
         let unexpected: Vec<String> = actual_set
             .difference(&expected_set)
@@ -95,6 +97,23 @@ pub fn verify(keyring: &Path) -> Result<Vec<Key>, EngineError> {
             missing,
         });
     }
+    // Asked only of a keyring that matched, so the certificates named here are the
+    // vetted ones and each carries its manifest label.
+    let unusable: Vec<String> = expected
+        .iter()
+        .filter(|k| {
+            actual
+                .iter()
+                .any(|c| c.fingerprint == k.fingerprint && !c.usable)
+        })
+        .map(Key::to_string)
+        .collect();
+    if !unusable.is_empty() {
+        return Err(EngineError::KeyringUnusable {
+            keyring: keyring.display().to_string(),
+            unusable,
+        });
+    }
     Ok(expected)
 }
 
@@ -103,7 +122,8 @@ pub fn verify(keyring: &Path) -> Result<Vec<Key>, EngineError> {
 /// key is being added, not just 40 hex digits).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
-    /// Uppercase 40-hex v4 fingerprint — the identity actually enforced.
+    /// Uppercase hex fingerprint, 40 digits for a version 4 key and 64 for a version 6
+    /// one — the identity actually enforced.
     pub fingerprint: String,
     /// Human label for review and `doctor` output. Not enforced: it names the key,
     /// it does not authenticate it.
@@ -120,8 +140,9 @@ impl std::fmt::Display for Key {
     }
 }
 
-/// Parse a fingerprint manifest: one key per line as `<40-hex fingerprint>[ label]`,
-/// with `#` comments and blank lines ignored.
+/// Parse a fingerprint manifest: one key per line as `<hex fingerprint>[ label]`, with
+/// `#` comments and blank lines ignored. A fingerprint is 40 hex digits for a version 4
+/// key and 64 for a version 6 one.
 ///
 /// Pure, so the format is testable without a keyring. A duplicate fingerprint is an
 /// error rather than a silently collapsed set. It means the file was edited wrong,
@@ -138,9 +159,12 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Key>, String> {
             Some((f, rest)) => (f, rest.trim()),
             None => (line, ""),
         };
-        if fingerprint.len() != 40 || !fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !matches!(fingerprint.len(), 40 | 64)
+            || !fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             return Err(format!(
-                "line {lineno}: expected a 40-hex-digit v4 fingerprint, found {fingerprint:?}"
+                "line {lineno}: expected a fingerprint of 40 hex digits (a version 4 key) \
+                 or 64 (version 6), found {fingerprint:?}"
             ));
         }
         let fingerprint = fingerprint.to_ascii_uppercase();
@@ -160,151 +184,88 @@ pub fn parse_manifest(text: &str) -> Result<Vec<Key>, String> {
     Ok(keys)
 }
 
-/// Uppercase-hex v4 fingerprints of every **primary** public key in an OpenPGP
-/// keyring, in packet order.
+/// Uppercase-hex fingerprints of every certificate's **primary** key in an OpenPGP
+/// keyring, in keyring order.
 ///
 /// Pure: the whole keyring is one byte slice in, fingerprints out. `Err` carries a
 /// human-readable reason. The caller wraps it with the keyring's path.
 pub fn fingerprints(bytes: &[u8]) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
-    for packet in packets(bytes)? {
-        if packet.tag == TAG_PUBLIC_KEY {
-            out.push(fingerprint_v4(packet.body)?);
-        }
-    }
-    if out.is_empty() {
-        return Err("no public-key packets found — not an OpenPGP keyring?".into());
-    }
-    Ok(out)
+    certificates(bytes).map(|read| read.into_iter().map(|c| c.fingerprint).collect())
 }
 
-/// One OpenPGP packet: its tag and its body, borrowed from the keyring bytes.
-struct Packet<'a> {
-    tag: u8,
-    body: &'a [u8],
+/// One certificate of a keyring, as the audit reads it.
+struct Certificate {
+    /// Its primary key's fingerprint, uppercase hex.
+    fingerprint: String,
+    /// Whether it holds a key, primary or subkey, the bootstrap's verifier can use.
+    usable: bool,
 }
 
-/// Split an OpenPGP message into packets (RFC 4880 §4.2), handling both the old and
-/// new header formats.
+/// Read every certificate in a keyring, failing on the first one irongall refuses.
 ///
-/// Indeterminate and partial body lengths are rejected: they are for streamed literal
-/// data, never appear in a keyring, and admitting them would mean guessing where a
-/// packet ends — in a file whose whole job is to be exact.
-fn packets(bytes: &[u8]) -> Result<Vec<Packet<'_>>, String> {
-    let mut packets = Vec::new();
-    let mut pos = 0usize;
-    while pos < bytes.len() {
-        let header = bytes[pos];
-        if header & 0x80 == 0 {
-            return Err(format!("byte {pos}: not a packet header (high bit clear)"));
-        }
-        pos += 1;
-        let (tag, len) = if header & 0x40 == 0 {
-            // Old format: tag in bits 5-2, length type in bits 1-0.
-            let tag = (header >> 2) & 0x0f;
-            let len = match header & 0x03 {
-                0 => be_uint(bytes, &mut pos, 1)?,
-                1 => be_uint(bytes, &mut pos, 2)?,
-                2 => be_uint(bytes, &mut pos, 4)?,
-                _ => return Err(format!("byte {pos}: indeterminate packet length")),
-            };
-            (tag, len)
-        } else {
-            // New format: tag in bits 5-0, then a variable-length body length.
-            let tag = header & 0x3f;
-            let first = *bytes
-                .get(pos)
-                .ok_or_else(|| format!("byte {pos}: truncated packet length"))?;
-            pos += 1;
-            let len = match first {
-                0..=191 => first as usize,
-                192..=223 => {
-                    let second = *bytes
-                        .get(pos)
-                        .ok_or_else(|| format!("byte {pos}: truncated 2-octet length"))?;
-                    pos += 1;
-                    ((first as usize - 192) << 8) + second as usize + 192
-                }
-                224..=254 => {
-                    return Err(format!("byte {pos}: partial body length"));
-                }
-                255 => be_uint(bytes, &mut pos, 4)?,
-            };
-            (tag, len)
-        };
-        let end = pos
-            .checked_add(len)
-            .filter(|end| *end <= bytes.len())
-            .ok_or_else(|| {
-                format!("byte {pos}: packet claims {len} bytes, past the end of the keyring")
-            })?;
-        packets.push(Packet {
-            tag,
-            body: &bytes[pos..end],
+/// Usability is judged by irongall's default [`Policy`], which is the one the
+/// bootstrap's verifier judges a signature under: RSA from 2048 bits, and Ed25519. It
+/// is a property of the keys alone, not of the time, so a certificate that has since
+/// expired is still usable here; whether it is still in force is the verifier's
+/// question at the moment it verifies.
+fn certificates(bytes: &[u8]) -> Result<Vec<Certificate>, String> {
+    let policy = Policy::new();
+    let mut read = Vec::new();
+    for certificate in cert::certificates(bytes) {
+        let certificate = certificate.map_err(|err| err.to_string())?;
+        let usable = std::iter::once(certificate.primary())
+            .chain(certificate.subkeys().iter().map(|subkey| subkey.key()))
+            .any(|key| policy.accepts_key(key));
+        read.push(Certificate {
+            fingerprint: certificate.primary().fingerprint().to_string(),
+            usable,
         });
-        pos = end;
     }
-    Ok(packets)
-}
-
-/// Read an `n`-byte big-endian unsigned length at `*pos`, advancing it.
-fn be_uint(bytes: &[u8], pos: &mut usize, n: usize) -> Result<usize, String> {
-    let slice = bytes
-        .get(*pos..*pos + n)
-        .ok_or_else(|| format!("byte {pos}: truncated {n}-octet length"))?;
-    *pos += n;
-    Ok(slice.iter().fold(0usize, |acc, b| (acc << 8) | *b as usize))
-}
-
-/// Fingerprint a v4 public-key packet body: `SHA-1(0x99 ‖ len_be16 ‖ body)`
-/// (RFC 4880 §12.2), uppercase hex.
-///
-/// SHA-1 here is a *format constant*, not a security choice: it is how a v4
-/// fingerprint is defined, and the value is compared against a fingerprint the
-/// operator vetted out-of-band rather than used to resist collisions.
-fn fingerprint_v4(body: &[u8]) -> Result<String, String> {
-    match body.first() {
-        Some(4) => {}
-        Some(v) => {
-            return Err(format!(
-                "unsupported public-key packet version {v} (only v4 keys are understood)"
-            ))
-        }
-        None => return Err("empty public-key packet".into()),
+    if read.is_empty() {
+        return Err("no certificates found — not an OpenPGP keyring?".into());
     }
-    let len = u16::try_from(body.len()).map_err(|_| {
-        format!(
-            "public-key packet of {} bytes exceeds v4's 16-bit length",
-            body.len()
-        )
-    })?;
-    let mut hasher = Sha1::new();
-    hasher.update([0x99]);
-    hasher.update(len.to_be_bytes());
-    hasher.update(body);
-    let mut out = String::with_capacity(40);
-    for byte in hasher.finalize() {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02X}");
-    }
-    Ok(out)
+    Ok(read)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A minimal but real v4 RSA public-key packet body, and the fingerprint it must
-    /// produce. Built here rather than read from `blobs/` so the parser is tested
-    /// against a fixed vector that cannot drift when a keyring is refreshed.
-    fn v4_key_body() -> Vec<u8> {
+    /// OpenPGP packet tags the fixtures are built from.
+    const TAG_PUBLIC_KEY: u8 = 6;
+    const TAG_USER_ID: u8 = 13;
+    const TAG_PUBLIC_SUBKEY: u8 = 14;
+
+    /// The public keys of RFC 8032's first two Ed25519 test vectors: published, valid
+    /// points, so a key built on one is a key the verifier can use.
+    const ED25519_A: [u8; 32] = [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07,
+        0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
+        0x51, 0x1a,
+    ];
+    const ED25519_B: [u8; 32] = [
+        0x3d, 0x40, 0x17, 0xc3, 0xe8, 0x43, 0x89, 0x5a, 0x92, 0xb7, 0x0a, 0xa7, 0x4d, 0x1b, 0x7e,
+        0xbc, 0x9c, 0x98, 0x2c, 0xcf, 0x2e, 0xc4, 0x96, 0x8c, 0xc0, 0xcd, 0x55, 0xf1, 0x2a, 0xf4,
+        0x66, 0x0c,
+    ];
+
+    /// A version 4 Ed25519 public-key packet body (RFC 9580 §5.5.2, §5.5.5.9). Built
+    /// here rather than read from `blobs/` so the audit is tested against fixed vectors
+    /// that cannot drift when a keyring is refreshed.
+    fn v4_key_body(point: &[u8; 32]) -> Vec<u8> {
         let mut body = vec![4]; // version
         body.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // creation time
-        body.push(1); // algo: RSA
+        body.push(27); // algorithm: Ed25519
+        body.extend_from_slice(point);
+        body
+    }
 
-        // One 16-bit MPI: bit length, then the big-endian value.
-        body.extend_from_slice(&[0x00, 0x10]);
-        body.extend_from_slice(&[0xC0, 0xFF]);
+    /// A version 4 RSA public-key packet body with a 16-bit modulus: a key irongall
+    /// reads and the verifier's policy refuses, being far under 2048 bits.
+    fn v4_small_rsa_body() -> Vec<u8> {
+        let mut body = vec![4, 0x60, 0x00, 0x00, 0x00, 1]; // version, time, RSA
+        body.extend_from_slice(&[0x00, 0x10, 0xC0, 0xFF]); // n: a 16-bit MPI
+        body.extend_from_slice(&[0x00, 0x11, 0x01, 0x00, 0x01]); // e: 65537
         body
     }
 
@@ -324,25 +285,33 @@ mod tests {
         out
     }
 
+    /// The version 4 fingerprint, computed here from its definition rather than by the
+    /// code under test: SHA-1 over `0x99`, the body's length in two octets, and the
+    /// body (RFC 9580 §5.5.4.2).
+    fn v4_fingerprint(body: &[u8]) -> String {
+        use irongall::hash::{HashFunction as _, Sha1};
+        let mut hash = Sha1::new();
+        hash.update(&[0x99]);
+        hash.update(&u16::try_from(body.len()).unwrap().to_be_bytes());
+        hash.update(body);
+        hash.finalize()
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect()
+    }
+
     #[test]
     fn fingerprint_is_sha1_over_the_prefixed_body() {
-        let body = v4_key_body();
-        // Independently: sha1(0x99 || 0x000c || body) for this 12-byte body.
-        let fpr = fingerprint_v4(&body).unwrap();
-        assert_eq!(fpr.len(), 40);
-        assert!(fpr
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_lowercase()));
-        // Stable across calls and independent of surrounding packets.
+        let body = v4_key_body(&ED25519_A);
         assert_eq!(
             fingerprints(&old_packet(TAG_PUBLIC_KEY, &body)).unwrap(),
-            vec![fpr]
+            vec![v4_fingerprint(&body)]
         );
     }
 
     #[test]
     fn both_header_formats_parse_to_the_same_key() {
-        let body = v4_key_body();
+        let body = v4_key_body(&ED25519_A);
         assert_eq!(
             fingerprints(&old_packet(TAG_PUBLIC_KEY, &body)).unwrap(),
             fingerprints(&new_packet(TAG_PUBLIC_KEY, &body)).unwrap()
@@ -350,27 +319,25 @@ mod tests {
     }
 
     #[test]
-    fn subkeys_and_signatures_are_not_listed() {
-        let body = v4_key_body();
-        let mut keyring = old_packet(TAG_PUBLIC_KEY, &body);
-        keyring.extend(old_packet(13, b"uid")); // User ID
-        keyring.extend(old_packet(2, b"sig")); // Signature
-        keyring.extend(old_packet(14, &body)); // Public-Subkey — bound by the primary
+    fn subkeys_and_user_ids_are_not_listed() {
+        let mut keyring = old_packet(TAG_PUBLIC_KEY, &v4_key_body(&ED25519_A));
+        keyring.extend(old_packet(TAG_USER_ID, b"Test Key"));
+        // Bound by the primary, so pinned through it.
+        keyring.extend(old_packet(TAG_PUBLIC_SUBKEY, &v4_key_body(&ED25519_B)));
         let fprs = fingerprints(&keyring).unwrap();
         assert_eq!(fprs.len(), 1, "only the primary key is pinned");
     }
 
     #[test]
-    fn multiple_primaries_are_listed_in_packet_order() {
-        let mut a = v4_key_body();
-        let mut b = v4_key_body();
-        a.push(0x01);
-        b.push(0x02);
+    fn multiple_primaries_are_listed_in_keyring_order() {
+        let a = v4_key_body(&ED25519_A);
+        let b = v4_key_body(&ED25519_B);
         let mut keyring = old_packet(TAG_PUBLIC_KEY, &a);
         keyring.extend(old_packet(TAG_PUBLIC_KEY, &b));
-        let fprs = fingerprints(&keyring).unwrap();
-        assert_eq!(fprs.len(), 2);
-        assert_ne!(fprs[0], fprs[1]);
+        assert_eq!(
+            fingerprints(&keyring).unwrap(),
+            vec![v4_fingerprint(&a), v4_fingerprint(&b)]
+        );
     }
 
     #[test]
@@ -381,11 +348,15 @@ mod tests {
         assert!(fingerprints(b"not a keyring").is_err());
         assert!(fingerprints(b"").is_err());
         // A v3 key is refused, not skipped.
-        let mut v3 = v4_key_body();
+        let mut v3 = v4_key_body(&ED25519_A);
         v3[0] = 3;
         assert!(fingerprints(&old_packet(TAG_PUBLIC_KEY, &v3)).is_err());
         // A partial body length is refused.
         assert!(fingerprints(&[0xc0 | TAG_PUBLIC_KEY, 224, 0, 0]).is_err());
+        // A refused certificate fails the whole read, though another one reads.
+        let mut keyring = old_packet(TAG_PUBLIC_KEY, &v4_key_body(&ED25519_A));
+        keyring.extend(old_packet(TAG_PUBLIC_KEY, &v3));
+        assert!(fingerprints(&keyring).is_err());
     }
 
     #[test]
@@ -436,9 +407,9 @@ mod tests {
 
     #[test]
     fn verify_accepts_a_keyring_matching_its_manifest() {
-        let body = v4_key_body();
+        let body = v4_key_body(&ED25519_A);
         let bytes = old_packet(TAG_PUBLIC_KEY, &body);
-        let fpr = fingerprint_v4(&body).unwrap();
+        let fpr = v4_fingerprint(&body);
         let (_tmp, keyring) = fixture(&bytes, &format!("{fpr}  Test Key\n"));
         let keys = verify(&keyring).unwrap();
         assert_eq!(keys.len(), 1);
@@ -447,10 +418,9 @@ mod tests {
 
     #[test]
     fn verify_rejects_an_injected_key() {
-        let body = v4_key_body();
-        let mut rogue = v4_key_body();
-        rogue.push(0xff);
-        let fpr = fingerprint_v4(&body).unwrap();
+        let body = v4_key_body(&ED25519_A);
+        let rogue = v4_key_body(&ED25519_B);
+        let fpr = v4_fingerprint(&body);
         let mut bytes = old_packet(TAG_PUBLIC_KEY, &body);
         bytes.extend(old_packet(TAG_PUBLIC_KEY, &rogue));
         let (_tmp, keyring) = fixture(&bytes, &format!("{fpr}  Test Key\n"));
@@ -469,10 +439,9 @@ mod tests {
 
     #[test]
     fn verify_rejects_a_swapped_key() {
-        let body = v4_key_body();
-        let mut swapped = v4_key_body();
-        swapped.push(0xff);
-        let expected = fingerprint_v4(&body).unwrap();
+        let body = v4_key_body(&ED25519_A);
+        let swapped = v4_key_body(&ED25519_B);
+        let expected = v4_fingerprint(&body);
         // The keyring holds a *different* key than the manifest names.
         let (_tmp, keyring) = fixture(
             &old_packet(TAG_PUBLIC_KEY, &swapped),
@@ -495,11 +464,62 @@ mod tests {
         );
     }
 
+    /// A vetted certificate the verifier can do nothing with is refused even though the
+    /// keyring matches its manifest exactly: pinned, it is a trust anchor that would fail
+    /// the first bootstrap it was meant to verify.
+    #[test]
+    fn verify_refuses_a_certificate_no_signature_can_be_verified_with() {
+        let usable = v4_key_body(&ED25519_A);
+        let small = v4_small_rsa_body();
+        let mut bytes = old_packet(TAG_PUBLIC_KEY, &usable);
+        bytes.extend(old_packet(TAG_PUBLIC_KEY, &small));
+        let (_tmp, keyring) = fixture(
+            &bytes,
+            &format!(
+                "{}  Usable Key\n{}  Small Key\n",
+                v4_fingerprint(&usable),
+                v4_fingerprint(&small)
+            ),
+        );
+        let err = verify(&keyring).unwrap_err();
+        let EngineError::KeyringUnusable { unusable, .. } = err else {
+            panic!("expected an unusable keyring, got {err:?}");
+        };
+        assert_eq!(
+            unusable.len(),
+            1,
+            "only the small key is named: {unusable:?}"
+        );
+        assert!(unusable[0].contains("Small Key"), "{unusable:?}");
+    }
+
+    /// A certificate whose primary only certifies is usable through its subkey, which
+    /// is what an archive key that signs with a subkey looks like.
+    #[test]
+    fn a_usable_subkey_makes_its_certificate_usable() {
+        let primary = v4_small_rsa_body();
+        let mut bytes = old_packet(TAG_PUBLIC_KEY, &primary);
+        bytes.extend(old_packet(TAG_PUBLIC_SUBKEY, &v4_key_body(&ED25519_A)));
+        let (_tmp, keyring) = fixture(&bytes, &format!("{}  Key\n", v4_fingerprint(&primary)));
+        assert_eq!(verify(&keyring).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn manifest_accepts_a_version_6_fingerprint() {
+        let v6 = "CB186C4F0609A697E4D52DFA6C722B0C1F1E27C18A56708F6525EC27BAD9ACC9";
+        let keys = parse_manifest(&format!("{v6}  A v6 Key\n")).unwrap();
+        assert_eq!(keys[0].fingerprint, v6);
+    }
+
     #[test]
     fn verify_requires_a_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let keyring = tmp.path().join("test.gpg");
-        std::fs::write(&keyring, old_packet(TAG_PUBLIC_KEY, &v4_key_body())).unwrap();
+        std::fs::write(
+            &keyring,
+            old_packet(TAG_PUBLIC_KEY, &v4_key_body(&ED25519_A)),
+        )
+        .unwrap();
         // No manifest beside it: fail closed rather than pass unchecked.
         assert!(matches!(
             verify(&keyring),

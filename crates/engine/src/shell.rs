@@ -11,8 +11,8 @@
 //! - The same identity map
 //!
 //! Linux side effects, like the rest of the engine. It provisions the root
-//! ([`crate::sandbox`]). It then holds two file descriptors open between the
-//! operator's terminal and the sandbox's own, for as long as the session lasts.
+//! ([`crate::sandbox`]). It then relays the operator's terminal to the sandbox's own
+//! through the sandbox library's [`Relay`], for as long as the session lasts.
 //!
 //! # What "the same root" means, and what it does not
 //!
@@ -48,39 +48,38 @@
 //! `stop_with_caller` stays as the profile sets it, which is what an interactive session
 //! wants anyway: kill boot2deb and the session goes with it.
 //!
-//! # What does not work inside
+//! # The terminal inside
 //!
-//! The pseudoterminal is allocated on the host before the fork, so it has no device node
-//! in the sandbox's own `/dev/pts`. Path resolution for the terminal fails: `tty(1)`,
-//! `who`, and `GPG_TTY` (and so `pinentry`) have no answer. Everything that operates on
-//! the descriptor works normally:
+//! The pseudoterminal is allocated inside the sandbox, from the `/dev/ptmx` of the
+//! profile's managed `/dev`. It therefore has a device node in the sandbox's own
+//! `/dev/pts`, which `tty(1)`, `who` and `GPG_TTY` (and so `pinentry`) name. `isatty`, `tcsetattr`, the
+//! line discipline, the window size, job control, `/dev/tty`, and a nested allocation
+//! for `tmux` or `script` all work as on a console.
 //!
-//! - `isatty` and `tcsetattr`
-//! - The line discipline
-//! - The window size
-//! - Job control
-//! - `/dev/tty`
-//! - Nested allocation for `tmux` or `script`
+//! # Signals and the caller's terminal
+//!
+//! A resize of the operator's window reaches the sandbox's terminal. `SIGINT`,
+//! `SIGTERM`, `SIGHUP` and `SIGQUIT` sent to boot2deb from outside are forwarded to the
+//! session, and a second one kills it. A `SIGTSTP` from outside suspends boot2deb with
+//! the caller's terminal restored, and `fg` re-enters raw mode. A typed `^C` or `^Z` is a
+//! byte like any other, which the sandbox's own line discipline turns into the sandbox's
+//! own signal.
 //!
 //! The user-facing description of the command is the CLI reference page,
 //! `docs/src/reference/cli.md`.
 
 use crate::build::{ffmpeg, kernel, kmod, uboot, userspace};
-use crate::error::EngineError;
+use crate::error::{cage_message, EngineError};
 use crate::event::{EventSink, Step};
 use crate::repo::LocalDistsRepo;
 use crate::sandbox::{BuildRoot, BuildRootSpec, BuildSandbox, PackagingSandbox, SandboxRun};
 use boot2deb_core::lock::Lock;
 use boot2deb_core::ResolvedBuild;
-use ferroday_cage::{Pty, Stdio, Terminal};
-use nix::sys::signal::{SigSet, Signal};
-use nix::sys::signalfd::{SfdFlags, SignalFd};
-use rustix::io::Errno;
-use rustix::termios::{OptionalActions, Termios};
-use std::io::{IsTerminal, Read, Write};
+use ferroday_cage::relay::{install_panic_restore, Relay, RelayError, Signals};
+use ferroday_cage::{Stdio, Terminal};
+use std::io::IsTerminal;
 use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// The command a session runs when the caller names none.
 ///
@@ -535,182 +534,63 @@ fn require_terminal() -> Result<(), EngineError> {
     }
 }
 
-/// Relay the caller's terminal to the sandbox's own until the command exits.
-///
-/// Three concurrent jobs, because all three block: this thread drains the sandbox's
-/// terminal to standard output, one thread carries standard input the other way, and one
-/// follows `SIGWINCH`. The drain is on *this* thread deliberately — the primary's buffer
-/// is a few kilobytes, so a wait that is not draining deadlocks a command that writes
-/// more than that, and draining to end-of-file first means the wait that follows always
-/// terminates.
+/// Relay the caller's terminal to the sandbox's own until the command exits, through
+/// the sandbox library's [`Relay`].
 ///
 /// The caller's terminal is in raw mode for the session: the sandbox's own line
 /// discipline is the one that echoes, edits lines and turns `^C` into a signal, and two
-/// line disciplines in series would do all of it twice. It is restored on every path out,
-/// including a panic, by [`RawMode`]'s drop.
+/// line disciplines in series would do all of it twice. The relay restores it on every
+/// exit it can observe, and the panic hook restores it before a panic message prints.
+///
+/// [`Signals`] is installed here, after the root is provisioned, rather than when the
+/// command starts. Blocking the relayed signals is process-wide and permanent, so
+/// installed earlier it would hold an operator's `^C` through a provisioning that can
+/// take minutes. Nothing boot2deb starts outlives that provisioning: its fetch workers
+/// are joined before it returns. So no thread is left to take a signal the relay
+/// should read.
 fn relay(cage: &ferroday_cage::Cage, context: &str) -> Result<u8, EngineError> {
+    let fail = |err: RelayError| relay_error(context, err);
+    let signals = Signals::install().map_err(fail)?;
+    install_panic_restore();
     let tty = rustix::stdio::stdin();
-    // Armed before the terminal is allocated: it blocks `SIGWINCH` process-wide, and a
-    // resize between the size below and the block would otherwise be a signal delivered
-    // to a process whose default action for it is to ignore it, and so lost.
-    let winch = WinchWatch::arm()?;
     // A dimension this terminal cannot report is left at the library's stated default
     // rather than propagated: zero is what a terminal answers when its size is
     // *unknown*, and passing it on leaves the sandbox with a terminal that answers "no
     // size" to everything that asks.
     let (rows, cols) = window_size(tty).unwrap_or((0, 0));
-    let restore = RawMode::enter(tty)?;
-
     let (mut running, pty) = cage
         .spawn_terminal(&Terminal::new().size(rows, cols))
         .map_err(|source| EngineError::Sandbox {
             context: context.to_string(),
             source,
         })?;
-    let pty = Arc::new(pty);
-    winch.follow(Arc::clone(&pty), tty);
-    relay_input(Arc::clone(&pty), tty);
-
-    let mut source: &Pty = &pty;
-    let mut buf = [0u8; 8192];
-    loop {
-        let read = source
-            .read(&mut buf)
-            .map_err(|source| EngineError::Terminal {
-                context: "read the sandbox's terminal",
-                source,
-            })?;
-        if read == 0 {
-            break;
-        }
-        write_all(rustix::stdio::stdout(), &buf[..read]).map_err(|source| {
-            EngineError::Terminal {
-                context: "write to the terminal",
-                source,
-            }
-        })?;
-    }
-
-    let status = running.wait().map_err(|source| EngineError::Sandbox {
-        context: context.to_string(),
-        source,
-    })?;
-    // Before the caller prints anything of its own, so what it prints is printed to a
-    // terminal in the modes it started in.
-    drop(restore);
+    let status = Relay::new(tty, rustix::stdio::stdout())
+        .raw(true)
+        .run(&mut running, &pty, &signals)
+        .map_err(fail)?
+        .expect("no deadline is set, so the relay always collects the command's exit");
     Ok(status.shell_code())
 }
 
-/// Carry what is typed at the caller's terminal into the sandbox's, on a thread of its
-/// own.
-///
-/// Detached rather than joined: a read blocked on the caller's terminal ends when the
-/// process does, and there is nothing to wait for it to finish — the session's end is
-/// the *command* exiting, not the operator stopping typing. It ends on end-of-file (a
-/// redirected input that ran out) or on the first write the terminal refuses, and in
-/// both cases the session continues, since a command that is no longer being typed at
-/// is still running.
-fn relay_input(pty: Arc<Pty>, tty: BorrowedFd<'static>) {
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            let Ok(read) = read_interruptibly(tty, &mut buf) else {
-                return;
-            };
-            if read == 0 {
-                return;
-            }
-            let mut sink: &Pty = &pty;
-            if sink.write_all(&buf[..read]).is_err() {
-                return;
-            }
-        }
-    });
-}
-
-/// The `SIGWINCH` follow: a `signalfd` the signal is read off, rather than a handler.
-///
-/// A handler would have to reach an `Arc` and issue an `ioctl` from signal context,
-/// where neither is something the standard library promises. Reading the signal off a
-/// descriptor on an ordinary thread makes both ordinary code. `SIGWINCH` is blocked in
-/// [`arm`](Self::arm) so nothing else can take it off the queue first, and a thread
-/// spawned afterwards inherits that mask.
-struct WinchWatch {
-    /// The `signalfd`, readable once per queued `SIGWINCH`.
-    fd: SignalFd,
-}
-
-impl WinchWatch {
-    /// Block `SIGWINCH` and open the descriptor it will be read off.
-    fn arm() -> Result<WinchWatch, EngineError> {
-        let fail = |errno: nix::Error| EngineError::Terminal {
-            context: "watch for terminal resizes",
-            source: errno.into(),
-        };
-        let mut mask = SigSet::empty();
-        mask.add(Signal::SIGWINCH);
-        mask.thread_block().map_err(fail)?;
-        let fd = SignalFd::with_flags(&mask, SfdFlags::SFD_CLOEXEC).map_err(fail)?;
-        Ok(WinchWatch { fd })
-    }
-
-    /// Resize the sandbox's terminal to match `tty` for as long as the process lives.
-    ///
-    /// Detached, like the input relay and for the same reason. A resize that fails is
-    /// dropped: the session is worth more than the ioctl, and the next resize retries it
-    /// from the size the terminal reports then.
-    fn follow(self, pty: Arc<Pty>, tty: BorrowedFd<'static>) {
-        std::thread::spawn(move || loop {
-            // The descriptor blocks, so a read answers with a signal or an error, and
-            // `Ok(None)` (the non-blocking "nothing queued") does not arise.
-            match self.fd.read_signal() {
-                Ok(Some(_)) => {
-                    if let Some((rows, cols)) = window_size(tty) {
-                        let _ = pty.resize(rows, cols);
-                    }
-                }
-                Err(nix::Error::EINTR) => continue,
-                Ok(None) | Err(_) => return,
-            }
-        });
-    }
-}
-
-/// The caller's terminal in raw mode, restored to the modes it had when this drops.
-///
-/// Drop rather than an explicit restore at each exit: a session can end at a `?`, and a
-/// terminal left in raw mode is one the operator's shell no longer echoes into.
-struct RawMode {
-    /// The terminal's descriptor.
-    fd: BorrowedFd<'static>,
-    /// The modes to put back.
-    saved: Termios,
-}
-
-impl RawMode {
-    /// Read `fd`'s modes and put it in raw mode.
-    fn enter(fd: BorrowedFd<'static>) -> Result<RawMode, EngineError> {
-        let fail = |errno: Errno| EngineError::Terminal {
-            context: "put the terminal in raw mode",
-            source: errno.into(),
-        };
-        let saved = rustix::termios::tcgetattr(fd).map_err(fail)?;
-        let mut raw = saved.clone();
-        raw.make_raw();
-        // `TCSADRAIN`, not `TCSAFLUSH`: input already queued when the session starts
-        // is relayed, not discarded. It is input the operator typed *at this
-        // session*, and discarding it loses type-ahead — and loses everything, for a
-        // session driven from a here-document or a pipe, where all of the input can
-        // be queued before the first read.
-        rustix::termios::tcsetattr(fd, OptionalActions::Drain, &raw).map_err(fail)?;
-        Ok(RawMode { fd, saved })
-    }
-}
-
-impl Drop for RawMode {
-    fn drop(&mut self) {
-        // A failure here has no recovery and no reader.
-        let _ = rustix::termios::tcsetattr(self.fd, OptionalActions::Drain, &self.saved);
+/// A relay failure as the engine reports it: the sandbox's own as
+/// [`Sandbox`](EngineError::Sandbox), and the relay's plumbing, the caller's terminal
+/// and the signal descriptor, as [`Terminal`](EngineError::Terminal).
+fn relay_error(context: &str, err: RelayError) -> EngineError {
+    match err {
+        RelayError::Cage(source) => EngineError::Sandbox {
+            context: context.to_string(),
+            source,
+        },
+        RelayError::Io { op, source, .. } => EngineError::Terminal {
+            context: op,
+            source,
+        },
+        // `#[non_exhaustive]`: a failure this release cannot name keeps its whole
+        // rendering rather than being folded into one it is not.
+        other => EngineError::Terminal {
+            context: "relay the session",
+            source: std::io::Error::other(cage_message(&other)),
+        },
     }
 }
 
@@ -721,34 +601,6 @@ fn window_size(fd: BorrowedFd<'_>) -> Option<(u16, u16)> {
     rustix::termios::tcgetwinsize(fd)
         .ok()
         .map(|size| (size.ws_row, size.ws_col))
-}
-
-/// Read from a descriptor, retrying the interruption a signal causes.
-///
-/// The relay's threads sit blocked in `read` for the whole session, which is exactly
-/// where an unhandled `EINTR` would end one early.
-fn read_interruptibly(fd: BorrowedFd<'_>, buf: &mut [u8]) -> std::io::Result<usize> {
-    loop {
-        match rustix::io::read(fd, &mut *buf) {
-            Err(Errno::INTR) => continue,
-            done => return done.map_err(Into::into),
-        }
-    }
-}
-
-/// Write every byte to a descriptor, retrying a short write and an interruption.
-///
-/// Straight to the descriptor rather than through `std::io::stdout()`, whose line
-/// buffering would hold back a prompt that does not end in a newline.
-fn write_all(fd: BorrowedFd<'_>, mut buf: &[u8]) -> std::io::Result<()> {
-    while !buf.is_empty() {
-        match rustix::io::write(fd, buf) {
-            Ok(written) => buf = &buf[written..],
-            Err(Errno::INTR) => continue,
-            Err(errno) => return Err(errno.into()),
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -17,7 +17,6 @@
 #   B2D_SUDOERS                 its sudoers spec, e.g. `NOPASSWD: ALL`
 #   B2D_AUTHORIZED_KEYS         its authorized_keys, one per line; empty for none
 #   B2D_GROUPS                  its supplementary groups, comma-separated; empty for none
-#   B2D_LOCAL_REPO              the build-time local apt source's stem
 #   B2D_INITRAMFS_STUB          the update-initramfs placeholder to remove
 #   B2D_INITRAMFS_STUB_LOG      where the placeholder recorded its calls
 #   B2D_TIMEZONE                the resolved tzdata zone name
@@ -67,19 +66,22 @@ fi
 rm -f /etc/ssh/ssh_host_*
 
 # The same for the machine ID. The image ships /etc/machine-id empty, and systemd
-# fills an empty one at first boot from /var/lib/dbus/machine-id whenever that
-# holds an ID, which dbus's postinst generated during the install. Every board
-# flashed from this image would then boot with the same machine ID. The link makes
-# the two files one, as machine-id(5) describes, so systemd generates a fresh ID
-# and D-Bus reads it too.
+# fills an empty one at first boot from /var/lib/dbus/machine-id whenever that holds
+# an ID, which anything running `dbus-uuidgen --ensure` writes. Every board flashed
+# from this image would then boot with the same machine ID. The link makes the two
+# files one, as machine-id(5) describes, so systemd generates a fresh ID and D-Bus
+# reads it too.
 if [ -d /var/lib/dbus ]; then
     ln -sf /etc/machine-id /var/lib/dbus/machine-id
 fi
 
-# The build-time-only local `.deb` repository: its `file://` temp dir is gone by the
-# time the image runs, so leaving the source would fail every on-device `apt-get
-# update`. The feature repositories stay — those are meant to persist.
-rm -f "/etc/apt/sources.list.d/$B2D_LOCAL_REPO.list"
+# The bootstrap's copy of the archive keyring it verified against. The provisioner
+# writes the keyring boot2deb supplied to this path, which no package ships, for the
+# sources.list it writes; the image's own sources.list replaces that one and trusts
+# the keys the debian-archive-keyring package installs, whose upgrades follow the
+# archive's key rotation. Left in place, the copy is a second Debian keyring that no
+# rotation ever reaches.
+rm -f /usr/share/keyrings/fcage-archive-keyring.gpg
 
 # --- Boot artifacts ----------------------------------------------------------
 #

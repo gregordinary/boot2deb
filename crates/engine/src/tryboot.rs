@@ -30,7 +30,7 @@
 //! flash-plus-serial-console cycle, not a unit test. With KVM on a matching
 //! host it is fast, and `try` uses KVM when `/dev/kvm` is usable.
 
-use crate::error::EngineError;
+use crate::error::{cage_message, EngineError};
 use crate::event::{EventSink, Step, Stream};
 use crate::rootfs::{provisioned_dir, sweep_provisioned, ProvisionedRoot};
 use crate::sandbox::{forward_bootstrap_event, SandboxRun};
@@ -183,7 +183,7 @@ pub fn fixture_kernel(
     provision::ensure(&root, &mut debian.observe(&mut sink)).map_err(|source| {
         EngineError::Bootstrap {
             context: format!("provision the {arch} {} fixture root", spec.suite),
-            message: source.to_string(),
+            message: cage_message(&source),
         }
     })?;
     let _provisioned = ProvisionedRoot::new(root.clone());
@@ -222,7 +222,7 @@ pub fn fixture_kernel(
 /// Recommends are never installed — an initramfs built without it has no rescue shell.
 /// The base stays at the library's `required` floor: this root exists to run one
 /// postinst, not to be a userland anyone works in.
-fn fixture_provisioner(spec: &FixtureSpec, package: &str) -> Result<Debian<'static>, EngineError> {
+fn fixture_provisioner(spec: &FixtureSpec, package: &str) -> Result<Debian, EngineError> {
     let (primary, fallbacks) = spec
         .mirrors
         .split_first()
@@ -253,7 +253,7 @@ fn fixture_provisioner(spec: &FixtureSpec, package: &str) -> Result<Debian<'stat
             spec.arch.debian_arch(),
             spec.suite
         ),
-        message: source.to_string(),
+        message: cage_message(&source),
     })
 }
 

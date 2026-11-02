@@ -263,7 +263,7 @@ pub enum EngineError {
     /// command. Distinct from [`CommandFailed`](Self::CommandFailed), because the
     /// command never ran. The cause is a rejected spec, a namespace/mount setup
     /// failure, or an exec error, rather than running to a non-zero exit.
-    #[error("sandbox failed ({context}): {source}")]
+    #[error("sandbox failed ({context}): {}", cage_message(source))]
     Sandbox {
         /// What the engine was trying to run inside the sandbox.
         context: String,
@@ -457,6 +457,23 @@ pub enum EngineError {
         unexpected: Vec<String>,
         /// Manifest entries (fingerprint and label) absent from the keyring.
         missing: Vec<String>,
+    },
+
+    /// A vetted certificate holds no key the bootstrap's signature verifier can use. Its
+    /// keys are of an algorithm the verifier does not verify with (DSA, ECDSA, Ed448), or
+    /// RSA under 2048 bits. Such a trust anchor can never vouch for a release. A keyring
+    /// that pins one is refused here, not at the first bootstrap it was meant to verify.
+    #[error(
+        "keyring {keyring} pins certificates no signature can be verified with{}\n  \
+         the bootstrap verifies with RSA keys of 2048 bits or more and Ed25519 keys \
+         — see blobs/keyrings/README.md",
+        crate::error::fmt_keys("\n  unusable: ", unusable)
+    )]
+    KeyringUnusable {
+        /// The keyring holding them.
+        keyring: String,
+        /// The manifest entries (fingerprint and label) of each such certificate.
+        unusable: Vec<String>,
     },
 
     /// A checkout resolved to a different commit than the lock pins. The build
@@ -1018,6 +1035,16 @@ impl EngineError {
             source,
         }
     }
+}
+
+/// A sandbox-library error rendered with every cause beneath it, on one line.
+///
+/// ferroday-cage's errors state only their own layer in `Display` and reach the cause
+/// through `source()`, so `to_string()` on one drops the OS error or nested library error
+/// that says what actually failed. boot2deb's messages are read as one line, so text taken
+/// from one of the library's errors goes through this, at the point it becomes text.
+pub(crate) fn cage_message(error: &(dyn std::error::Error + 'static)) -> String {
+    ferroday_cage::ErrorChain::new(error).to_string()
 }
 
 /// Render `" (exit N)"` for the `GitFailed` message, or `""` when signalled.

@@ -112,11 +112,11 @@
 
 use crate::bootstrap::{COMPONENTS, DEFAULT_MIRROR};
 use crate::build;
-use crate::error::EngineError;
+use crate::error::{cage_message, EngineError};
 use crate::event::{Step, Stream};
 use boot2deb_core::provenance::{
     SandboxLandlockFs, SandboxLandlockNet, SandboxMount, SandboxPosture, SandboxProvenance,
-    SandboxRlimit, SandboxStreams,
+    SandboxRlimit, SandboxRunAs, SandboxStreams,
 };
 use ferroday_cage::provision::debian::{Debian, DebianBuilder, DebianEvent, Plan, Repository};
 use ferroday_cage::provision::{self, BuildLayer, Provisioned, Stream as DebianStream};
@@ -644,7 +644,7 @@ impl SandboxBase {
     /// The caller adds what is its own: [`ensure`](Self::ensure) the base package set,
     /// [`build_root`](BuildSandbox::build_root) the base layer, the component's
     /// packages, and any feed-forward pool.
-    fn debian_builder(&self) -> DebianBuilder<'_> {
+    fn debian_builder(&self) -> DebianBuilder {
         let (primary, fallbacks) = self
             .mirrors
             .split_first()
@@ -726,7 +726,7 @@ impl SandboxBase {
             .build()
             .map_err(|source| EngineError::Bootstrap {
                 context: format!("configure the {} {} bootstrap", self.arch, self.suite),
-                message: source.to_string(),
+                message: cage_message(&source),
             })?;
         // A base already standing is checked against the archive before it is reused,
         // and a discard hands back the resolution that justified it.
@@ -752,7 +752,7 @@ impl SandboxBase {
                         "configure the {} {} re-bootstrap from the checked resolution",
                         self.arch, self.suite
                     ),
-                    message: source.to_string(),
+                    message: cage_message(&source),
                 }
             })?;
         }
@@ -774,7 +774,7 @@ impl SandboxBase {
             provision::ensure(&self.rootfs, &mut debian.observe(&mut sink)).map_err(|source| {
                 EngineError::Bootstrap {
                     context: format!("bootstrap the {} {} rootfs", self.arch, self.suite),
-                    message: source.to_string(),
+                    message: cage_message(&source),
                 }
             })?;
         if let Some(plan) = &installed {
@@ -848,7 +848,7 @@ impl SandboxBase {
     fn discard_if_the_archive_moved(
         &self,
         manifest: &Path,
-        debian: &mut Debian<'_>,
+        debian: &mut Debian,
         step: &Step,
     ) -> Result<Option<Plan>, EngineError> {
         if !self.rootfs.is_dir() || !manifest.is_file() {
@@ -859,7 +859,7 @@ impl SandboxBase {
                 "resolve the {} {} base to check it against the archive",
                 self.arch, self.suite
             ),
-            message: source.to_string(),
+            message: cage_message(&source),
         })?;
         let moved = crate::manifest::diverged(manifest, &crate::manifest::packages(&plan))?;
         if moved.is_empty() {
@@ -1024,13 +1024,13 @@ impl BuildSandbox for RootlessSandbox {
                 .build()
                 .map_err(|source| EngineError::Bootstrap {
                     context: format!("configure the {} build pool at {pool}", spec.stage),
-                    message: source.to_string(),
+                    message: cage_message(&source),
                 })?;
             builder = builder.repository(repo);
         }
         let mut debian = builder.build().map_err(|source| EngineError::Bootstrap {
             context: format!("configure the {} build root", spec.stage),
-            message: source.to_string(),
+            message: cage_message(&source),
         })?;
 
         // The increment's own resolution reports the plan it is about to install, the
@@ -1048,7 +1048,7 @@ impl BuildSandbox for RootlessSandbox {
             .stage_layer(&upper)
             .map_err(|source| EngineError::Bootstrap {
                 context: format!("stage the {} build root at {}", spec.stage, upper.display()),
-                message: source.to_string(),
+                message: cage_message(&source),
             })?;
         // The staged tree is checked against its own declared dependencies before any
         // compile runs in it. `stage_layer` installs what the resolver chose, and the
@@ -1320,7 +1320,7 @@ pub fn reclaim_tree(path: &Path, lock: PublicationLock) -> Result<(), EngineErro
         .run()
         .map_err(|source| EngineError::Bootstrap {
             context: format!("remove {}", path.display()),
-            message: source.to_string(),
+            message: cage_message(&source),
         })
 }
 
@@ -1466,6 +1466,11 @@ fn profile() -> ferroday_cage::CageBuilder {
         // — a value only the run sites set is a value [`resolved_inputs`] would report
         // the library's default for.
         .network(Network::Isolated)
+        // Declared for the reason the environment is: left unset, the sandbox's UTS
+        // namespace starts with the build host's own name, which is then what `uname -n`
+        // and `hostname` answer to anything a build runs, and what the record would
+        // carry.
+        .hostname(SANDBOX_HOSTNAME)
         // A build is non-interactive by construction, which is already what the host
         // commands in `crate::build` state; this is the same statement for the
         // sandboxed ones. `/dev/null` gives standard input immediate end-of-file, and
@@ -1757,31 +1762,25 @@ fn project(inputs: ferroday_cage::ResolvedInputs) -> SandboxProvenance {
     }
 }
 
-/// Project the resolved rooting, identity, network, streams, limits and hardening onto
-/// the manifest's `[sandbox]`.
+/// Project the resolved rooting, identity, run-as identity, network, PID namespace,
+/// hostname, streams, limits and hardening onto the manifest's `[sandbox]`.
 ///
-/// Every *enum arm* below names every field of its variant, for the reason
-/// [`project_mount`]'s do: a field the sandbox library adds to a variant is a compile
-/// error here rather than a silent omission from every later manifest. Where a named
-/// field is bound to `_` that is a decision, not an oversight, and each such decision is
-/// the same one — the value is a path the build chose or an id range the host allocated,
-/// so it would make the record a property of the machine. The *kind* is what the record
-/// can state, and it is what a reader can act on: `overlay` versus `plain` is the
-/// difference between a layered build and a flat one whatever the paths were.
+/// The root and the identity map are recorded as their *kind*. Their fields are a path
+/// the build chose or an id range the host allocated, so recording them would make the
+/// record a property of the machine. The kind is what a reader can act on: `overlay`
+/// versus `plain` is the difference between a layered build and a flat one whatever the
+/// paths were.
 ///
-/// That promise covers the variants and not `ResolvedInputs` itself, which is a struct
-/// read field by field — a field added there compiles here and is simply absent from the
-/// manifest until this function reads it. Keeping the two apart is why the sentence
-/// names arms rather than the projection as a whole.
+/// The library's resolved types are `#[non_exhaustive]`, so a field it adds compiles
+/// here unread. What holds this projection to the whole record instead is
+/// `the_projection_decides_every_resolved_key`, which pins every key the library
+/// serializes for the profile boot2deb records. A key the library adds fails it until
+/// this function records the key or the test states why the record leaves it out.
 fn project_posture(inputs: &ferroday_cage::ResolvedInputs) -> SandboxPosture {
     let root = match &inputs.root {
         ResolvedRoot::Host => "host",
-        ResolvedRoot::Plain { path: _ } => "plain",
-        ResolvedRoot::Overlay {
-            lower: _,
-            upper: _,
-            work: _,
-        } => "overlay",
+        ResolvedRoot::Plain { .. } => "plain",
+        ResolvedRoot::Overlay { .. } => "overlay",
         // The enum is `#[non_exhaustive]`, so a rooting mode this release cannot name is
         // still recorded as one it does not know rather than silently rendered as a mode
         // it is not.
@@ -1790,7 +1789,7 @@ fn project_posture(inputs: &ferroday_cage::ResolvedInputs) -> SandboxPosture {
     let identity = match &inputs.identity {
         ResolvedIdentity::Caller => "caller",
         ResolvedIdentity::Single => "single",
-        ResolvedIdentity::Ranged { uid: _, gid: _ } => "ranged",
+        ResolvedIdentity::Ranged { .. } => "ranged",
         _ => "unknown",
     };
     let network = match inputs.network {
@@ -1803,6 +1802,16 @@ fn project_posture(inputs: &ferroday_cage::ResolvedInputs) -> SandboxPosture {
         root: root.to_string(),
         identity: identity.to_string(),
         network: network.to_string(),
+        // The profile declares it, so this is [`SANDBOX_HOSTNAME`] on every build host;
+        // only a hostname that is not UTF-8 could be lossy here, and no declared one is.
+        hostname: inputs.hostname.to_string_lossy().into_owned(),
+        pid_namespace: inputs.pid_namespace,
+        no_new_privileges: inputs.no_new_privileges,
+        run_as: inputs.run_as.as_ref().map(|identity| SandboxRunAs {
+            uid: identity.get_uid(),
+            gid: identity.get_gid(),
+            groups: identity.get_groups().to_vec(),
+        }),
         streams: project_streams(&inputs.streams),
         // Overwritten below when the layer is compiled in; `unavailable` is the honest
         // value when it is not, and it is written either way — an absent key could not
@@ -1821,18 +1830,25 @@ fn project_posture(inputs: &ferroday_cage::ResolvedInputs) -> SandboxPosture {
             .collect(),
         landlock_fs: Vec::new(),
         landlock_net: Vec::new(),
+        landlock_scope: None,
+        landlock_abi: None,
     };
     match &inputs.hardening {
         ResolvedHardening::Unavailable => {}
         ResolvedHardening::Applied {
             landlock_fs,
             landlock_net,
+            landlock_scope,
             seccomp_instructions,
             keep_capabilities,
+            landlock_abi,
+            ..
         } => {
             posture.hardening = "applied".to_string();
             posture.seccomp_instructions = *seccomp_instructions;
             posture.keep_capabilities = keep_capabilities.map(hex_access);
+            posture.landlock_scope = Some(hex_access(*landlock_scope));
+            posture.landlock_abi = *landlock_abi;
             posture.landlock_fs = landlock_fs
                 .iter()
                 .map(|grant| SandboxLandlockFs {
@@ -1892,11 +1908,12 @@ fn hex_access(bits: u64) -> String {
 /// where the mount is established inside the sandbox, `source` always what is exposed
 /// there.
 ///
-/// Each arm names every field of its variant rather than eliding the rest with `..` —
-/// the opposite of [`forward_bootstrap_event`]'s deliberate `..`, and for the opposite
-/// reason. A progress stream may drop a milestone it has no line for; a record whose
-/// value is being complete may not drop an input, so a field added to a variant is a
-/// compile error here rather than a silent omission from every later manifest.
+/// The variants are `#[non_exhaustive]`, so each arm binds what it reads and elides the
+/// rest with `..`. Unlike [`forward_bootstrap_event`], where a progress stream may drop a
+/// milestone it has no line for, a record whose value is being complete may not drop an
+/// input: `the_projection_decides_every_resolved_key` pins every key a mount in the
+/// recorded profile carries, so a field the library adds fails that test rather than
+/// going silently missing from every later manifest.
 fn project_mount(mount: &ResolvedMount) -> SandboxMount {
     let base = |kind: &str| SandboxMount {
         kind: kind.to_string(),
@@ -1908,24 +1925,18 @@ fn project_mount(mount: &ResolvedMount) -> SandboxMount {
         read_only: None,
     };
     match mount {
-        ResolvedMount::Tmpfs {
-            target: _,
-            flags,
-            data,
-        } => SandboxMount {
+        ResolvedMount::Tmpfs { flags, data, .. } => SandboxMount {
             flags: Some(hex_flags(*flags)),
             options: data_string(data),
             ..base("tmpfs")
         },
-        ResolvedMount::Procfs { target: _ } => base("procfs"),
-        ResolvedMount::Devpts { target: _, data } => SandboxMount {
+        ResolvedMount::Procfs { .. } => base("procfs"),
+        ResolvedMount::Devpts { data, .. } => SandboxMount {
             options: data_string(data),
             ..base("devpts")
         },
         ResolvedMount::Bind {
-            source,
-            target: _,
-            read_only,
+            source, read_only, ..
         } => SandboxMount {
             source: Some(source.display().to_string()),
             read_only: Some(*read_only),
@@ -1933,10 +1944,10 @@ fn project_mount(mount: &ResolvedMount) -> SandboxMount {
         },
         ResolvedMount::Raw {
             source,
-            target: _,
             fstype,
             flags,
             data,
+            ..
         } => SandboxMount {
             source: source.as_ref().map(|p| p.display().to_string()),
             fstype: fstype.clone(),
@@ -1946,7 +1957,7 @@ fn project_mount(mount: &ResolvedMount) -> SandboxMount {
         },
         // `get_target()` gives the link itself; the variant's own `target` is what the
         // link points at, which is what this shape calls a source.
-        ResolvedMount::Symlink { path: _, target } => SandboxMount {
+        ResolvedMount::Symlink { target, .. } => SandboxMount {
             source: Some(target.display().to_string()),
             ..base("symlink")
         },
@@ -1984,6 +1995,11 @@ const SANDBOX_ENV: &[(&str, &str)] = &[
     ("TZ", "UTC"),
     ("DEBIAN_FRONTEND", "noninteractive"),
 ];
+
+/// The hostname every sandbox command sees, declared rather than inherited from the build
+/// host. The same name the kernel stage gives `KBUILD_BUILD_HOST`, so a build that stamps
+/// its host stamps the builder's name either way.
+const SANDBOX_HOSTNAME: &str = "boot2deb";
 
 /// Relay one Debian-provisioner [`DebianEvent`] to a [`Step`]: the fetch/resolve/
 /// download/extract milestones as informational log lines, and a configuring
@@ -2196,6 +2212,8 @@ pub(crate) fn packaging_root_for_tests(step: &Step) -> Option<PackagingSandbox> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferroday_cage::RawMount;
+    use std::collections::BTreeSet;
 
     /// **The live proof that a base the archive moved past is not reused.**
     ///
@@ -2434,6 +2452,110 @@ mod tests {
         // each launch, which supersedes this pair at that call site.
         assert_eq!(recorded.posture.streams.stdout, "inherit");
         assert_eq!(recorded.posture.streams.stderr, "inherit");
+        // Declared, so what a build reads back from `uname -n` is the builder's name on
+        // every host rather than whichever machine ran it.
+        assert_eq!(recorded.posture.hostname, SANDBOX_HOSTNAME);
+        assert!(
+            recorded.posture.pid_namespace,
+            "a build's processes are its own"
+        );
+        // uid 0 inside, which `dpkg-buildpackage` requires, and so nothing that would set
+        // the no-new-privileges flag.
+        assert_eq!(recorded.posture.run_as, None);
+        assert!(!recorded.posture.no_new_privileges);
+    }
+
+    /// Every key the sandbox library's resolved record carries for the profile boot2deb
+    /// records is one [`project_posture`] and [`project_mount`] have decided about.
+    ///
+    /// The library's resolved types are `#[non_exhaustive]`, so a field it adds compiles
+    /// in the projection unread and would be silently absent from every later manifest.
+    /// This pins the record's keys instead, read through the library's own serialization
+    /// of it (its `serde` feature, enabled for tests only). A key that appears here fails
+    /// the test until the projection records it, or until this list states why the
+    /// record leaves it out.
+    ///
+    /// Left out by decision, each for the reason the projection's doc gives: the root's
+    /// path, which is the stand-in tree this resolved against, and so a property of the
+    /// machine. `env` is a map read whole, so its variable names are values here rather
+    /// than keys.
+    #[test]
+    fn the_projection_decides_every_resolved_key() {
+        const DECIDED: &[&str] = &[
+            "env",
+            "hardening",
+            "hardening.kind",
+            "hostname",
+            "identity",
+            "identity.kind",
+            "mounts",
+            "mounts[]",
+            "mounts[].data",
+            "mounts[].flags",
+            "mounts[].kind",
+            // A symlink's own path, which the record carries as its `target`.
+            "mounts[].path",
+            "mounts[].read-only",
+            "mounts[].source",
+            "mounts[].target",
+            "network",
+            "no-new-privileges",
+            "pid-namespace",
+            "rlimits",
+            "root",
+            "root.kind",
+            // Left out: a path on the build host. The record carries the kind.
+            "root.path",
+            "run-as",
+            "streams",
+            "streams.stderr",
+            "streams.stdin",
+            "streams.stdout",
+        ];
+
+        fn walk(path: &str, value: &serde_json::Value, keys: &mut BTreeSet<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, inner) in map {
+                        let here = match path {
+                            "" => key.clone(),
+                            _ => format!("{path}.{key}"),
+                        };
+                        keys.insert(here.clone());
+                        if here != "env" {
+                            walk(&here, inner, keys);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        let here = format!("{path}[]");
+                        keys.insert(here.clone());
+                        walk(&here, item, keys);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let scratch = tempfile::tempdir().unwrap();
+        let inputs = baseline(scratch.path())
+            .command("true")
+            .build()
+            .expect("the profile resolves")
+            .resolved_inputs();
+        let mut keys = BTreeSet::new();
+        walk("", &serde_json::to_value(&inputs).unwrap(), &mut keys);
+
+        let decided: BTreeSet<String> = DECIDED.iter().map(|k| k.to_string()).collect();
+        let new: Vec<&String> = keys.difference(&decided).collect();
+        let gone: Vec<&String> = decided.difference(&keys).collect();
+        assert!(
+            new.is_empty() && gone.is_empty(),
+            "the sandbox library's resolved record moved: new keys {new:?} need a \
+             decision in project_posture/project_mount, and keys {gone:?} are no longer \
+             reported"
+        );
     }
 
     /// A tree is reused only for a base it actually is: the package set and the recipe
@@ -3067,15 +3189,34 @@ mod tests {
 
     /// The flat shape carries every kind's parameters: `raw` is the widest, and the one
     /// kind whose source, filesystem type, and data string are each optional.
+    ///
+    /// The library's resolved mounts cannot be constructed outside it, so each case is a
+    /// real cage carrying the raw mount, resolved, and its mount read back by target.
     #[test]
     fn a_raw_mount_projects_its_whole_parameter_set() {
-        let full = project_mount(&ResolvedMount::Raw {
-            source: Some(PathBuf::from("tmpfs")),
-            target: PathBuf::from("/run"),
-            fstype: Some("tmpfs".to_string()),
-            flags: 6,
-            data: Some("mode=0755".to_string()),
-        });
+        let scratch = tempfile::tempdir().unwrap();
+        let resolve = |mount: RawMount| -> SandboxMount {
+            let inputs = baseline(scratch.path())
+                .command("true")
+                .raw_mount(mount)
+                .build()
+                .expect("a cage with one raw mount resolves")
+                .resolved_inputs();
+            let resolved = inputs
+                .mounts
+                .iter()
+                .find(|m| m.get_target() == Path::new("/run"))
+                .expect("the raw mount is in the resolved set");
+            project_mount(resolved)
+        };
+
+        let full = resolve(
+            RawMount::new("/run")
+                .source("tmpfs")
+                .fstype("tmpfs")
+                .flags(6)
+                .data("mode=0755"),
+        );
         assert_eq!(full.kind, "raw");
         assert_eq!(full.target, "/run");
         assert_eq!(full.source.as_deref(), Some("tmpfs"));
@@ -3086,13 +3227,7 @@ mod tests {
 
         // An unset parameter is absent from the record; a zero flag word is not unset,
         // so it is recorded rather than dropped.
-        let bare = project_mount(&ResolvedMount::Raw {
-            source: None,
-            target: PathBuf::from("/run"),
-            fstype: None,
-            flags: 0,
-            data: None,
-        });
+        let bare = resolve(RawMount::new("/run"));
         assert_eq!(bare.source, None);
         assert_eq!(bare.fstype, None);
         assert_eq!(bare.options, None);

@@ -31,7 +31,8 @@ an overlay shipping a copy of *that* is refused as a swap rather than preferred
 ## Fingerprint manifests
 
 Each `<name>.gpg` ships a sibling **`<name>.fingerprints`** listing the primary
-keys it is allowed to contain, one `<40-hex fingerprint>  <uid>` per line. The
+keys it is allowed to contain, one `<fingerprint>  <uid>` per line, the fingerprint
+40 hex digits for a version 4 key and 64 for a version 6 one. The
 build and `doctor` fail closed unless the keyring holds exactly that set.
 
 A keyring is a trust anchor — it decides whose `Release` signatures the bootstrap
@@ -43,13 +44,17 @@ authoritative*: the fingerprints are published upstream, so anyone can check wha
 this repo trusts without trusting this repo.
 
 Only primary keys are listed. A subkey cannot enter a certificate without a
-binding signature from its primary key — which `gpgv` verifies during the
-bootstrap, and which cannot be forged without the primary secret — so pinning the
+binding signature from its primary key — which the bootstrap's signature verifier
+checks, and which cannot be forged without the primary secret — so pinning the
 primaries pins the whole keyring.
 
+Each vetted certificate must also hold a key that verifier can use: an RSA key of
+2048 bits or more, or an Ed25519 key. A certificate holding only DSA, ECDSA or Ed448
+keys, or smaller RSA ones, can never vouch for a release, and the check refuses it.
+
 `boot2deb doctor <target>` prints every trust anchor a build uses and the vetted
-keys in each. The check lives in `engine::keyring`; a shipped keyring that drifts
-from its manifest fails `cargo test`.
+keys in each. The check lives in `engine::keyring`. A shipped keyring that drifts
+from its manifest, or pins a certificate the verifier cannot use, fails `cargo test`.
 
 ## Adding one
 

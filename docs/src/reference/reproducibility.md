@@ -512,6 +512,12 @@ What is recorded, because it genuinely does reach the image:
   states where the three standard streams go, any resource limits in force, and whether
   the library's hardening layer is compiled in.
 
+  It records the hostname the command sees, which boot2deb declares as `boot2deb`. Left
+  to the library, a build would see the build host's own name in `uname -n`, and so would
+  anything it stamps. It also records whether the command has a PID namespace of its own
+  and whether the no-new-privileges flag is set. Any identity the command switches to is
+  recorded too.
+
   `hardening = "unavailable"` is written rather than omitted. An absent key cannot be
   told from one written before the key existed. A provenance record has to be readable
   without knowing which builder wrote it.
@@ -802,17 +808,9 @@ therefore never byte-reproducible, and neither is an output that carries it: the
 its compressed copies, and its file manifest. `reproduce` compares those through the
 file manifests, with the content of `/etc/shadow` set aside.
 
-The package install writes three more files that differ between any two builds. The
-provisioning library, ferroday-cage, performs that install:
-
-- `/var/log/dpkg.log` and `/var/log/alternatives.log` record when each step ran.
-- `/var/cache/ldconfig/aux-cache` records each library's inode and change time.
-
-A fourth differs between builds on different days. The `lastchg` field of each system
-account holds the day the account was created. Maintainer scripts create those
-accounts without `SOURCE_DATE_EPOCH`, and `/etc/shadow-` carries the same field.
-
-These are the library's to fix, and boot2deb has reported them there. A file that two
-tools write has two owners, so boot2deb does not rewrite them. Until the library
-changes, the rootfs tar and the image differ in these files, and `reproduce` reports
-them.
+The package install itself leaves no record of when it ran. The provisioning library,
+ferroday-cage, removes `/var/log/dpkg.log`, `/var/log/alternatives.log` and
+`/var/cache/ldconfig/aux-cache` once its last configure step has run. Every maintainer
+script runs under the lock's `SOURCE_DATE_EPOCH`. The `lastchg` field of each system
+account, in `/etc/shadow` and `/etc/shadow-`, therefore holds the epoch's day rather
+than the day the account was created.

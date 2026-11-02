@@ -24,7 +24,7 @@
 
 use crate::archfetch::ArchiveFetch;
 use crate::bootstrap::components;
-use crate::error::EngineError;
+use crate::error::{cage_message, EngineError};
 use crate::rootfs::{feature_repositories, AptRepo};
 use boot2deb_core::model::ImageBuild;
 use ferroday_cage::provision::debian::{
@@ -71,7 +71,7 @@ fn bootstrap_failure() -> impl Fn(&str) -> Box<dyn Fn(DebianError) -> EngineErro
         let context = context.to_string();
         Box::new(move |e: DebianError| EngineError::Bootstrap {
             context: context.clone(),
-            message: e.to_string(),
+            message: cage_message(&e),
         })
     }
 }
@@ -91,7 +91,7 @@ fn archives<'a>(
     keyring: Option<&Path>,
     apt_sources: &[AptRepo],
     purpose: &str,
-) -> Result<DebianBuilder<'a>, EngineError> {
+) -> Result<DebianBuilder, EngineError> {
     let ImageBuild { build, image } = ib;
     let (primary, fallbacks) = mirrors
         .split_first()
@@ -109,7 +109,7 @@ fn archives<'a>(
         .components(components(image).split(','))
         // The same transport a build uses, so a feature repository this can reach is
         // one the build can reach and vice versa — see [`ArchiveFetch`].
-        .fetcher(Box::new(ArchiveFetch::new()))
+        .fetcher(ArchiveFetch::new())
         .mirror(primary);
     for fallback in fallbacks {
         b = b.mirror_fallback(fallback);

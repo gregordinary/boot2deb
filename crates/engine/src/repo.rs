@@ -15,7 +15,7 @@
 //! provisioner's own index reader. This side therefore needs no external tool, and
 //! the writer and the reader cannot disagree about the layout.
 
-use crate::error::EngineError;
+use crate::error::{cage_message, EngineError};
 use crate::event::Step;
 use ferroday_cage::provision::debian::Pool;
 use std::path::{Path, PathBuf};
@@ -128,7 +128,7 @@ impl LocalDistsRepo {
         }
         let fail = |e: ferroday_cage::provision::debian::DebianError| EngineError::Bootstrap {
             context: format!("publish the local .deb pool at {}", dir.display()),
-            message: e.to_string(),
+            message: cage_message(&e),
         };
         pool.publish(debs).map_err(fail)?;
         let mirror_url = pool.mirror_url().map_err(fail)?;
@@ -143,17 +143,14 @@ impl LocalDistsRepo {
     /// `dists/<suite>/…` and each package's pool `Filename` under. Built for a
     /// [`ferroday_cage`](crate::sandbox) `Repository::builder(...).mirror(...)`.
     ///
-    /// The path is carried **verbatim, not percent-encoded**. The mirror base is
-    /// concatenated with a pool-relative suffix, and the result is handed to
-    /// `HttpFetch`. That strips the `file://` scheme and opens what remains as a
-    /// filesystem path. It does no percent-decoding, so an encoded byte would be
-    /// looked up literally. A build under `/home/me/My Projects/…` would then fail to
-    /// find its own `.deb`s.
-    ///
-    /// The repo dir is boot2deb's own (`<cache>/…`), never attacker-supplied, and
-    /// nothing downstream parses a query or fragment out of it.
-    /// `unencoded_paths_reach_the_provisioners_fetcher` holds this to the
-    /// fetcher's actual behavior rather than to an assumption about URL syntax.
+    /// It is the pool's own URL, percent-encoded. Every byte outside the unreserved set
+    /// and `/` is escaped, so a path holding a space, a `#` or a non-UTF-8 byte names one
+    /// URL. The mirror base is concatenated with a pool-relative suffix and handed to
+    /// `HttpFetch`, which decodes it back to the path. A build under
+    /// `/home/me/My Projects/…` therefore finds its own `.deb`s. Every consumer hands it
+    /// to the provisioner, and nothing in boot2deb opens it as a path itself.
+    /// `escaped_paths_reach_the_provisioners_fetcher` holds this to the fetcher's
+    /// actual behavior rather than to an assumption about URL syntax.
     pub fn file_url(&self) -> &str {
         &self.mirror_url
     }
@@ -348,14 +345,12 @@ mod tests {
     }
 
     #[test]
-    fn unencoded_paths_reach_the_provisioners_fetcher() {
+    fn escaped_paths_reach_the_provisioners_fetcher() {
         // The work dir — and so the repo dir under it — is a user-chosen path, and a
         // space or a `#` in it is ordinary on a desktop. This asserts the whole join
         // through the *real* consumer: the URL is concatenated with a pool-relative
-        // suffix and handed to the provisioner's fetcher, which strips `file://` and
-        // opens the remainder as a path. Percent-encoding the base would turn a
-        // working path into a literal `%20` lookup, so this is what stops that from
-        // ever looking like a fix.
+        // suffix and handed to the provisioner's fetcher, which decodes it back to the
+        // path it opens. Unescaped, the `#` would end the path and start a fragment.
         use ferroday_cage::provision::{Fetch, FetchRequest, HttpFetch};
         let sink = |_: crate::event::Event| {};
         let step = Step::start(&sink, "repo");
@@ -368,8 +363,11 @@ mod tests {
         let repo =
             LocalDistsRepo::assemble(&repo_dir, &[deb], "forky", "arm64", Some(EPOCH), &step)
                 .unwrap();
-        assert!(repo.file_url().contains("My Projects/build #1"));
-        assert!(!repo.file_url().contains('%'));
+        assert!(
+            repo.file_url().contains("My%20Projects/build%20%231"),
+            "{}",
+            repo.file_url()
+        );
 
         let mut fetch = HttpFetch::new();
         for suffix in [

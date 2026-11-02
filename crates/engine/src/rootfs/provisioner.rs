@@ -50,7 +50,7 @@ use super::{
 };
 use crate::archfetch::ArchiveFetch;
 use crate::bootstrap::components;
-use crate::error::EngineError;
+use crate::error::{cage_message, EngineError};
 use crate::event::{EventSink, Step};
 use crate::repo::LocalDistsRepo;
 use crate::rootcache::{self, RootfsStore};
@@ -62,12 +62,12 @@ use ferroday_cage::provision::{self, Export};
 use ferroday_cage::IdentityMap;
 use std::path::{Path, PathBuf};
 
-/// The name of the build's own `.deb` pool as a provisioner [`Repository`], and so
-/// the stem of the `/etc/apt/sources.list.d/<name>.list` entry ferroday-cage writes
-/// for it. This repo is a **build-time-only** trusted `file://` mirror living under a
-/// temp dir that is gone by the time the image runs, so [`CUSTOMIZE`] deletes
-/// its sources entry before export — unlike the feature repositories, whose entries
-/// are meant to persist for on-device updates.
+/// The name of the build's own `.deb` pool as a provisioner [`Repository`].
+///
+/// This repo is a **build-time-only** trusted `file://` mirror living under a temp dir
+/// that is gone by the time the image runs. The provisioner writes no apt source for a
+/// repository whose mirror is a `file://` URL, so the image carries none for it, unlike
+/// the feature repositories, whose entries are meant to persist for on-device updates.
 ///
 /// The pool's own `Release` publishes this as its `Label`, because it *is* that
 /// constant: the sources entry, `apt policy`'s rendering, and a `Pin: release l=…` name
@@ -210,7 +210,7 @@ pub fn build_rootfs(
                 let plan = resolver.observe(&mut sink_fn).resolve().map_err(|e| {
                     EngineError::Bootstrap {
                         context: "resolve the rootfs plan".into(),
-                        message: e.to_string(),
+                        message: cage_message(&e),
                     }
                 })?;
                 drop(resolver);
@@ -225,7 +225,7 @@ pub fn build_rootfs(
                         .to_document()
                         .map_err(|e| EngineError::Bootstrap {
                             context: "render the rootfs plan document".into(),
-                            message: e.to_string(),
+                            message: cage_message(&e),
                         })?;
                 (plan, document)
             }
@@ -304,7 +304,7 @@ pub fn build_rootfs(
         provision::ensure(&rootfs_dir, &mut installer.observe(&mut bootstrap_sink)).map_err(
             |e| EngineError::Bootstrap {
                 context: "provision the rootfs".into(),
-                message: e.to_string(),
+                message: cage_message(&e),
             },
         )?;
         let _provisioned = ProvisionedRoot::new(rootfs_dir.clone());
@@ -359,7 +359,7 @@ fn read_pinned_plan(path: &Path, step: &Step) -> Result<(Plan, String), EngineEr
     let document = std::fs::read_to_string(path).map_err(|s| EngineError::io(path, s))?;
     let plan = Plan::parse_document(&document).map_err(|e| EngineError::PlanDocument {
         path: path.display().to_string(),
-        message: e.to_string(),
+        message: cage_message(&e),
     })?;
     step.log(format!(
         "replaying the pinned plan {} ({} packages, {} archive(s)) — the archive is not consulted",
@@ -385,7 +385,7 @@ pub fn read_plan_record(path: &Path) -> Result<PlanRecord, EngineError> {
     })?;
     let plan = Plan::parse_document(&text).map_err(|e| EngineError::PlanDocument {
         path: path.display().to_string(),
-        message: e.to_string(),
+        message: cage_message(&e),
     })?;
     Ok(PlanRecord {
         sha256: crate::blobs::sha256_hex(&bytes),
@@ -418,7 +418,7 @@ pub fn read_plan_weights(path: &Path) -> Result<PlanWeights, EngineError> {
     let text = std::fs::read_to_string(path).map_err(|s| EngineError::io(path, s))?;
     let plan = Plan::parse_document(&text).map_err(|e| EngineError::PlanDocument {
         path: path.display().to_string(),
-        message: e.to_string(),
+        message: cage_message(&e),
     })?;
     Ok(PlanWeights {
         packages: plan
@@ -620,7 +620,7 @@ fn build_debian(
     deb_cache: &Path,
     preinstall: &Path,
     plan: Option<Plan>,
-) -> Result<Debian<'static>, EngineError> {
+) -> Result<Debian, EngineError> {
     let ImageBuild { build, image } = ib;
     let arch = build.arch.debian_arch();
     let (primary, fallbacks) = opts
@@ -632,12 +632,18 @@ fn build_debian(
         .architecture(arch)
         .components(components(image).split(','))
         .identity_map(IdentityMap::Subordinate)
+        // Every maintainer script runs under the lock's epoch, so the system accounts
+        // the install creates record its day in `/etc/shadow` rather than the day the
+        // bootstrap ran, as the default account [`customize`] creates already does.
+        // An epoch past `i64` is not a time any lock records; saturating is the reading
+        // the tar export's clamp gives it too.
+        .source_date_epoch(i64::try_from(opts.source_date_epoch).unwrap_or(i64::MAX))
         .cache_dir(deb_cache)
         .pre_configure_overlay(preinstall)
         // A feature repository can be published at any URL its vendor chose, and the
         // library's own client speaks no TLS — so the transport is boot2deb's to
         // supply. See [`ArchiveFetch`].
-        .fetcher(Box::new(ArchiveFetch::new()))
+        .fetcher(ArchiveFetch::new())
         .mirror(primary);
     b = match plan {
         Some(plan) => b.plan(plan),
@@ -668,7 +674,7 @@ fn build_debian(
         .build()
         .map_err(|e| EngineError::Bootstrap {
             context: "configure the local .deb repository".into(),
-            message: e.to_string(),
+            message: cage_message(&e),
         })?;
     b = b.repository(local);
     for repo in feature_repos {
@@ -677,7 +683,7 @@ fn build_debian(
 
     b.build().map_err(|e| EngineError::Bootstrap {
         context: format!("configure the {} {} bootstrap", build.arch, image.suite),
-        message: e.to_string(),
+        message: cage_message(&e),
     })
 }
 
@@ -707,7 +713,7 @@ pub(crate) fn feature_repositories(
                 .build()
                 .map_err(|e| EngineError::Bootstrap {
                     context: format!("configure feature repository {}", repo.source.name),
-                    message: e.to_string(),
+                    message: cage_message(&e),
                 })
         })
         .collect()
@@ -841,11 +847,11 @@ fn customize(
     // at an existing path is replaced.
     step.log("laying the customize overlay into the provisioned rootfs");
     let report = provision::CopyIn::new(overlay, rootfs)
-        .map(IdentityMap::Subordinate)
+        .identity_map(IdentityMap::Subordinate)
         .run()
         .map_err(|e| EngineError::Bootstrap {
             context: "lay the customize overlay into the rootfs".into(),
-            message: e.to_string(),
+            message: cage_message(&e),
         })?;
     // A device node or socket the copy could not create is not something these trees
     // hold — they are git-tracked config, and the runtime supplies its own `/dev` — so
@@ -1014,7 +1020,6 @@ fn customize_env(
         // guarantees no entry holds a comma, so the join is unambiguous; empty when
         // the account is to get its login group and nothing else.
         ("B2D_GROUPS".into(), image.groups.join(",")),
-        ("B2D_LOCAL_REPO".into(), LOCAL_REPO_NAME.to_string()),
         (
             "B2D_INITRAMFS_STUB".into(),
             crate::rootfs::INITRAMFS_STUB.to_string(),
@@ -1122,7 +1127,7 @@ fn export_rootfs_tar(
     ));
     let file = std::fs::File::create(tarball).map_err(|s| EngineError::io(tarball, s))?;
     let writer = std::io::BufWriter::new(file);
-    let mut export = Export::new(rootfs).map(IdentityMap::Subordinate);
+    let mut export = Export::new(rootfs).identity_map(IdentityMap::Subordinate);
     // Everything under /dev is left out of the archive: the kernel mounts devtmpfs over
     // /dev at boot, so an image needs the mount point and nothing inside it. The rule
     // lives here rather than in the image formatter because it is a statement about what
@@ -1141,7 +1146,7 @@ fn export_rootfs_tar(
     export = export.clamp_mtime(i64::try_from(source_date_epoch).unwrap_or(i64::MAX));
     export.write_to(writer).map_err(|e| EngineError::Bootstrap {
         context: "export the rootfs tar".into(),
-        message: e.to_string(),
+        message: cage_message(&e),
     })
 }
 
@@ -1505,9 +1510,14 @@ mod tests {
     /// first; this is the backstop at the boundary that writes the file.
     #[test]
     fn a_feature_repository_takes_its_name_verbatim_or_fails() {
-        let tmp = tempfile::tempdir().unwrap();
-        let keyring = tmp.path().join("jellyfin.gpg");
-        std::fs::write(&keyring, b"KEY-ONE").unwrap();
+        // The shipped keyring: the provisioner parses a repository's keyring when it
+        // builds one and refuses a keyring holding no key it can verify with, so the
+        // name is only reached past a real one.
+        let keyring = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .join("blobs/keyrings/jellyfin.gpg");
         let source = AptSource {
             name: "jellyfin".into(),
             uri: "https://repo.jellyfin.org/debian".into(),
@@ -1681,6 +1691,14 @@ mod tests {
         assert!(CUSTOMIZE.contains("ln -sf /etc/machine-id /var/lib/dbus/machine-id"));
     }
 
+    /// The image's apt trusts the keyring the debian-archive-keyring package installs.
+    /// The bootstrap's own copy of the keyring boot2deb supplied is dropped: the image's
+    /// sources.list does not name it, and no package upgrade would ever rotate it.
+    #[test]
+    fn the_customize_program_drops_the_bootstraps_keyring_copy() {
+        assert!(CUSTOMIZE.contains("rm -f /usr/share/keyrings/fcage-archive-keyring.gpg"));
+    }
+
     /// Cage-native, and the account is created *locked*: the per-image password is
     /// spliced into `/etc/shadow` at image assembly, which is what keeps the provisioned
     /// tree cacheable across images built from one build point.
@@ -1704,17 +1722,6 @@ mod tests {
         assert!(
             !CUSTOMIZE.contains("video,render"),
             "the group list is config, not a constant in the script"
-        );
-        // The build-time-only local `.deb` repository's apt source is dropped: its
-        // `file://` temp dir is gone by the time the image runs, so leaving it would
-        // fail every on-device `apt-get update`.
-        assert!(CUSTOMIZE.contains(r#"rm -f "/etc/apt/sources.list.d/$B2D_LOCAL_REPO.list""#));
-        assert_eq!(
-            env_of(
-                &customize_env(DEFAULT_USER, image_of(&rk1()), None, 1_790_347_034),
-                "B2D_LOCAL_REPO"
-            ),
-            "boot2deb-local"
         );
     }
 

@@ -196,10 +196,11 @@ pub struct RootfsOptions<'a> {
     /// [`source_date_epoch`](boot2deb_core::lock::RootfsPin::source_date_epoch).
     ///
     /// It is the ceiling the tar export clamps every member's mtime to, and the time
-    /// the staged overlays are stamped with. The target-side customize step runs under
-    /// it, so what `mkinitramfs` and `useradd` write carries it rather than the wall
-    /// clock. It dates the local `.deb` pool's `Release` too, and it is folded into the
-    /// rootfs cache key.
+    /// the staged overlays are stamped with. The bootstrap's maintainer scripts and the
+    /// target-side customize step both run under it. What the account tools,
+    /// `mkinitramfs` and `useradd` write therefore carries it rather than the wall clock.
+    /// It dates the local `.deb` pool's `Release` too, and it is folded into the rootfs
+    /// cache key.
     pub source_date_epoch: u64,
 }
 

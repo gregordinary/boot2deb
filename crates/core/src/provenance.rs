@@ -247,6 +247,8 @@ pub struct SandboxProvenance {
 ///   `Rules-Requires-Root` handling turns on, and what a file's recorded ownership
 ///   follows from.
 /// - The network is what a reproducibility claim is most often challenged on.
+/// - The hostname is what `uname -n` answers, and a build that stamps its host into
+///   what it produces stamps this.
 /// - A limit a build adapts its parallelism to changes what it produces.
 /// - A seccomp policy changes which syscalls succeed. A configure test that probes one
 ///   reads the refusal as an absent feature, and two builds differ with nothing else to
@@ -260,8 +262,10 @@ pub struct SandboxProvenance {
 /// property of the machine rather than of the builder. That is the same reason the
 /// mount list omits a run's own binds.
 ///
-/// The engine's projection still names every field of every variant. A field the
-/// library adds is therefore a compile error there, rather than a silent omission here.
+/// The engine's projection is held to the sandbox library's whole resolved record by a
+/// test that pins every key the library reports. A key the library adds fails that test
+/// until the projection records it or states why it does not. It is never silently
+/// omitted here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxPosture {
     /// How the command's root filesystem is composed: `host` (no root swap), `plain` (a
@@ -275,6 +279,22 @@ pub struct SandboxPosture {
     /// `host` (the host's own namespace), or `none` (a fresh namespace with no interface
     /// at all, not even loopback).
     pub network: String,
+    /// The hostname the command sees. The profile declares it, so it is the same on
+    /// every build host rather than the name of whichever machine ran the build.
+    pub hostname: String,
+    /// Whether the command runs in a PID namespace of its own. Without one it sees the
+    /// host's processes in `/proc`, and its descendants can outlive it.
+    pub pid_namespace: bool,
+    /// Whether the command runs with the no-new-privileges flag set, under which a
+    /// set-user-ID binary or a file capability grants nothing across `execve`. A build
+    /// step that reaches for `sudo` or a capability-bearing helper behaves differently
+    /// under it.
+    pub no_new_privileges: bool,
+    /// The identity the command switches to before it executes, as ids inside the
+    /// sandbox. Absent where it runs as uid 0 of the sandbox's user namespace, which is
+    /// what `dpkg-buildpackage` requires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<SandboxRunAs>,
     /// Where the command's three standard streams are wired — the profile's plan, which
     /// a capturing launch supersedes on the output pair.
     ///
@@ -316,6 +336,33 @@ pub struct SandboxPosture {
     /// are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub landlock_net: Vec<SandboxLandlockNet>,
+    /// The `LANDLOCK_SCOPE_*` flags the ruleset requests, rendered as
+    /// [`SandboxLandlockFs::access`] is. Absent whenever [`hardening`](Self::hardening)
+    /// is not `applied`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landlock_scope: Option<String>,
+    /// The Landlock ABI the build host's kernel offered. The grants and the scope above
+    /// are requests, which the kernel narrows to this ABI. Two hosts recording the same
+    /// requests can therefore have enforced different postures, and this is what tells
+    /// them apart. Absent where the posture requests nothing of Landlock or the kernel
+    /// offers none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landlock_abi: Option<i32>,
+}
+
+/// The identity a sandboxed build command switches to, for `[sandbox.run_as]`.
+///
+/// Every id is one inside the sandbox's user namespace, which the profile chooses, so
+/// unlike a range map's host extents it is recorded by value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxRunAs {
+    /// The user id the command runs as.
+    pub uid: u32,
+    /// The primary group id.
+    pub gid: u32,
+    /// The supplementary group ids, in the order they are set. Empty where none is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<u32>,
 }
 
 /// Where a sandboxed build command's three standard streams are wired, for
@@ -1981,6 +2028,10 @@ pub(crate) mod tests {
                 root: "plain".into(),
                 identity: "single".into(),
                 network: "isolated".into(),
+                hostname: "boot2deb".into(),
+                pid_namespace: true,
+                no_new_privileges: false,
+                run_as: None,
                 streams: SandboxStreams {
                     stdin: "null".into(),
                     stdout: "inherit".into(),
@@ -1992,6 +2043,8 @@ pub(crate) mod tests {
                 rlimits: Vec::new(),
                 landlock_fs: Vec::new(),
                 landlock_net: Vec::new(),
+                landlock_scope: None,
+                landlock_abi: None,
             },
             env: [
                 ("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"),

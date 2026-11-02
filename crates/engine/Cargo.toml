@@ -21,13 +21,14 @@ thiserror.workspace = true
 # itself (image::vboot). Already enabled in the tree by `rsa`.
 sha2 = { workspace = true, features = ["oid"] }
 # RSASSA-PKCS1-v1_5 signing and verification for the vboot kernel partition a press
-# re-signs under a fresh identity (image::vboot). Pure Rust, RustCrypto, and already
-# in the tree with these default features as `pgp`'s, so it adds no crate to the build.
+# re-signs under a fresh identity (image::vboot). Pure Rust, RustCrypto.
 rsa = "0.9.10"
-# v4 OpenPGP fingerprints (keyring.rs) are SHA-1 by definition of the format
-# (RFC 4880 §12.2) — a format constant, not a security choice. Pure Rust, same
-# RustCrypto family as sha2.
-sha1 = "0.10"
+# Reads the vendored apt keyrings the trust-anchor audit holds to their fingerprint
+# manifests (keyring.rs): their certificates, each primary key's fingerprint, and
+# whether a key is one the bootstrap's signature verifier can use. The same OpenPGP
+# implementation ferroday-cage verifies archive signatures with, so the audit and the
+# verifier read a keyring alike. Safe Rust with no dependencies of its own.
+irongall = "0.1.1"
 # Pure-Rust image assembly: GPT tables, ext4 formatting, and .xz compression — no
 # C deps. lzma-rust2's `optimization` feature (its only `unsafe`) is left off.
 gpt = "4"
@@ -38,10 +39,9 @@ uuid.workspace = true
 # streams a compressed image through it straight onto the target device.
 #
 # Held at the version `ferroday-cage` reads its own `.xz` through, so the graph
-# carries one copy of the format rather than two. 0.20 also carries the encoder fix
-# this crate is the one that needs: an out-of-bounds panic past about 2 GiB through a
-# single stream, which is inside the range an image reaches.
-lzma-rust2 = { version = "0.20", default-features = false, features = ["std", "xz", "encoder"] }
+# carries one copy of the format rather than two. This line's encoder takes a single
+# stream past 2 GiB, which is inside the range an image reaches.
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder"] }
 # `.gz` image compression, for the one consumer that cannot read `.xz`: u-boot's
 # `gzwrite` decompresses gzip only, so an image a board writes to its own disk from
 # the bootloader has to be in that container. `rust_backend` is miniz_oxide — pure
@@ -76,7 +76,7 @@ ferrosys = { version = "0.7", default-features = false, features = ["ext", "tar"
 # `debian` feature adds the in-process archive provisioner that bootstraps the
 # target suite/arch rootfs (pure Rust: tar extraction + OpenPGP release
 # verification, no external binary, no C dep).
-ferroday-cage = { version = "0.4.5", features = ["debian", "subid"] }
+ferroday-cage = { version = "0.5.0", features = ["debian", "subid"] }
 # Randomly-named, fail-if-exists staging dirs for the build's intermediate trees,
 # so a local user cannot pre-create and own one.
 tempfile.workspace = true
@@ -97,13 +97,10 @@ gix = { version = "0.85", default-features = false, features = [
 ] }
 # Safe syscall wrappers for the engine's direct host calls: the `verify-sources` probe's
 # process-group kill, the build's umask, the overlay's symlink-preserving timestamps,
-# and the `shell` session's terminal (raw mode, window size, unbuffered relay I/O).
-# Already in the tree under ferroday-cage and ferrosys with these features on.
+# and the `shell` session's standard streams and their starting window size. The
+# session's relay itself is ferroday-cage's. Already in the tree under ferroday-cage
+# and ferrosys with these features on.
 rustix = { version = "1.1", features = ["fs", "process", "termios", "stdio"] }
-# The `shell` session's `SIGWINCH` follow: blocking the signal and reading it off a
-# `signalfd`, which rustix does not wrap. Only `signal`, whose dependencies are all
-# already in the tree.
-nix = { version = "0.31", default-features = false, features = ["signal"] }
 # Pure-Rust `sha512crypt` for the image's first-boot `/etc/shadow` entry (see the
 # engine's secret module), replacing a shell-out to the host `openssl passwd -6`.
 # Same RustCrypto family as sha2/sha1, and portable: LibreSSL's `openssl passwd`
@@ -112,8 +109,13 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 sha-crypt = "0.6"
 
 [dev-dependencies]
-# NDJSON wire-shape tests for the --json event stream (event.rs).
+# NDJSON wire-shape tests for the --json event stream (event.rs), and the pin of the
+# sandbox library's resolved record (sandbox.rs).
 serde_json.workspace = true
+# The same ferroday-cage with its `serde` feature, for tests only: the sandbox record's
+# completeness test reads every key the library's resolved inputs carry through the
+# library's own serialization of them.
+ferroday-cage = { version = "0.5.0", features = ["serde"] }
 
 [lints]
 workspace = true

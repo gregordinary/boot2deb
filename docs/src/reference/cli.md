@@ -547,9 +547,11 @@ foo` in a script reports what `make` reported. It needs a terminal. `shell` rela
 to a pseudoterminal inside the sandbox, and refuses rather than starting a session with
 nothing on one end.
 
-`tty`, `who`, and `GPG_TTY` have no answer inside, because the terminal is allocated on
-the host and so has no device node in the sandbox. Everything else a terminal does
-works, including full-screen programs, job control, and running `tmux`.
+The terminal is allocated inside the sandbox, so `tty`, `who` and `GPG_TTY` name it.
+Full-screen programs, job control and `tmux` work as on a console. Resizing your
+window resizes the session's. A `^C` you type reaches the program inside. A `SIGINT` or
+`SIGTERM` sent to `boot2deb` from outside ends the session, and a second one kills it.
+Your terminal is restored however the session ends.
 
 If the root has never been provisioned in this work dir, the first `shell` bootstraps
 it. That is the same minutes a first build would spend. Later ones reuse the tree.
