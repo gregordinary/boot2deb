@@ -1,0 +1,13 @@
+# kernels/rk3566-mainline-7.3.toml — mainline 7.3.x for RK3566 boards.
+# The SoC is upstream and this kernel applies no patch series: the tree is built as
+# linux-stable tags it. In 7.3 the RK3566 gets hantro decode (H.264, MPEG-2, VP8) and
+# JPEG encode, the RGA2 and panfrost; its VDPU346 decoder and its NPU have no mainline
+# driver. A board that needs its own series adds it via the device's
+# `device_patch_series`.
+flavor           = "mainline"
+source           = "linux-stable"        # 7.3.x releases live in linux-stable
+track            = "7.3.y"               # the lock pins the exact tag (update --kernel-ref)
+base_defconfig   = "defconfig"           # in-tree arm64 base; fragments merge onto it
+config_fragments = ["base/debian-arm64", "soc/rk3566"]
+patch_series     = []                    # pristine: the tree is built as tagged
+supported_socs   = ["rk3566"]

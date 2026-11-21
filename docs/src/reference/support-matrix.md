@@ -41,6 +41,7 @@ at the end of a build of that recipe.
 | `h96-max-m9/forky` | h96-max-m9 | forky | `rk3576-mainline-7.3` `v7.3.3` | `rk3576-fixes`, `rk3576-npu` `main` (`b1b8d2babd00`) | `rk3576-display` `main` (`b1b8d2babd00`) | rkbin `rk3576_bl31_v1.25.elf` | `aic8800` `main` (`5562c254b023`) | `expected` | 2026-11-20 |
 | `h96-max-m9/media-accel` | h96-max-m9 | forky | `rk3576-mainline-7.3` `v7.3.3` | `rk3576-fixes`, `rk3576-npu`, `rk3576-rga`, `rk3576-media` `main` (`b1b8d2babd00`) | `rk3576-display` `main` (`b1b8d2babd00`) | rkbin `rk3576_bl31_v1.25.elf` | `aic8800` `main` (`5562c254b023`) | `expected` | 2026-11-20 |
 | `h96-max-m9/util` | h96-max-m9 | — | (u-boot only) | none | `h96-max-m9-util` `main` (`0465628c7167`) | rkbin `rk3576_bl31_v1.25.elf` | none | `expected` | 2026-07-22 |
+| `radxa-zero-3e/forky` | radxa-zero-3e | forky | `rk3566-mainline-7.3` `v7.3.5` | none | none | rkbin `rk3568_bl31_v1.46.elf` | none | `experimental` | 2026-11-18 |
 | `rk3576-evb1-v10/forky` | rk3576-evb1-v10 | forky | `rk3576-mainline-7.3` `v7.3.3` | `rk3576-fixes` `main` (`0465628c7167`) | `rk3576-loader` `main` (`0465628c7167`) | rkbin `rk3576_bl31_v1.25.elf` | none | `expected` | 2026-11-07 |
 | `rk3576-generic/loader` | rk3576-generic | — | (u-boot only) | none | `rk3576-loader` `main` (`0465628c7167`) | rkbin `rk3576_bl31_v1.25.elf` | none | `expected` | 2026-07-21 |
 | `rk3576-generic/util` | rk3576-generic | — | (u-boot only) | none | `rk3576-util` `main` (`0465628c7167`) | rkbin `rk3576_bl31_v1.25.elf` | none | `expected` | 2026-07-21 |
@@ -98,6 +99,14 @@ that cannot be checked from the running system.
 - *(board)* Only the blue port beside HDMI provides USB 3.0. It reaches 5 Gbps and holds ~154 MB/s over sustained reads. The black ports never will -- they sit behind an internal USB 2.0 hub, and their SuperSpeed lane reaches no connector.
 - *(board)* A drive in the blue port that enumerates at 480 Mb/s is usually not seated. With the board sitting back from the enclosure's front panel, a plug bottoms out on the case before the connector's recessed SuperSpeed contacts mate. USB 2.0 then works perfectly and SuperSpeed is silent. Push the plug fully home, or reseat the board against the panel.
 - *(board)* There is no SD-card slot: it is depopulated on this box. eMMC and USB are the only storage.
+
+### `radxa-zero-3e`
+
+- *(SoC)* The SoC's main video decoder (VDPU346) has no mainline driver in Linux 7.3. Hardware decode is hantro's: H.264 and MPEG-2 up to 1920x1088 and VP8 up to 4K. HEVC and VP9 decode in software.
+- *(SoC)* The only mainline hardware encoder is JPEG (VEPU121). H.264 and HEVC encode in software.
+- *(SoC)* The NPU has no mainline driver.
+- *(board)* The board boots from microSD only. With no card holding a bootloader, the BootROM falls back to USB maskrom on the Type-C port that powers the board.
+- *(board)* Mainline's device tree describes this board as an RK3566T, so the CPU runs at up to 1.416 GHz and the GPU at up to 700 MHz. Radxa specifies a plain RK3566 at up to 1.6 GHz.
 
 ### `rk3576-evb1-v10`
 

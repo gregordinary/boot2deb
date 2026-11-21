@@ -9,7 +9,7 @@ u-boot × suite × features × layout. Those layers resolve to that point, and o
 lock pins it.
 
 It is a typed, unit-tested Rust workspace, and every axis and layer merge is validated
-before a build runs. It ships recipes for six boards, which are usable images and **worked
+before a build runs. It ships recipes for seven boards, which are usable images and **worked
 examples of unlike hardware**. What makes a Chromebook different from a compute module is
 visible in the config.
 
@@ -63,7 +63,7 @@ output against the original's record. Package churn in a rolling suite is pinned
 
 ## Shipped boards
 
-The six shipped configurations are deliberately unalike. Between them they exercise every
+The seven shipped configurations are deliberately unalike. Between them they exercise every
 axis of the model, so the nearest example to a board you care about is usually one of them.
 
 | Board | SoC / arch | What this example shows |
@@ -73,6 +73,7 @@ axis of the model, so the nearest example to a board you care about is usually o
 | [ASUS Chromebook C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html) | RK3288 / armhf | The opposite extreme: 32-bit, Debian's own kernel, ChromeOS firmware in SPI. It compiles nothing, its lock pins nothing from git, and the deliverable is a vboot-signed kernel in a ChromeOS partition. A/B slots make a bad kernel upgrade cost one reboot |
 | [ASUS C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html) · [Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 / armhf | What a board costs once its family is here: one device file each, no overlay, no kernel, no code. Everything shared lives on the SoC layer |
 | [RK3576 EVB1 v10](https://gregordinary.github.io/boot2deb/boards/rk3576-evb1-v10.html) | RK3576 / arm64 | The reference board beside the retail one, sharing a SoC layer and a kernel while having none of the TV box's peripherals |
+| [Radxa ZERO 3E](https://gregordinary.github.io/boot2deb/boards/radxa-zero-3e.html) | RK3566 / arm64 | A new SoC family as pure config: a SoC layer, a kernel definition that applies no patch series, and a device file, with no code change |
 
 Hardware video transcode is the RK1's headline capability, measured on a boot2deb-built
 image. The `h264_rkmpp` and `hevc_rkmpp` encoders produce correct streams. Hardware decode

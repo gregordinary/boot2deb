@@ -1,0 +1,63 @@
+# devices/radxa-zero-3e.toml — Radxa ZERO 3E (RK3566).
+# Hardware invariants + defaults; a device states only its deltas.
+#
+# A credit-card-sized board: microSD only (no eMMC), one Gigabit Ethernet port (the
+# SoC's GMAC1 with an RTL8211F PHY), micro HDMI, a USB 2.0 OTG Type-C port that is also
+# the power input, and a USB 3.0 host Type-C port. No Wi-Fi; the ZERO 3W is the sibling
+# that has it.
+description             = "Radxa ZERO 3E (RK3566)"
+soc                     = "rk3566"                 # -> arch, dt_dir, rkbin, tfa
+boot_method             = "rockchip-rkbin"         # default within supported_boot_methods
+supported_boot_methods  = ["rockchip-rkbin"]
+
+# Both are upstream. One u-boot defconfig serves the 3W and the 3E: its u-boot.itb
+# contains both boards' device trees, and u-boot tells them apart at boot by the
+# resistor divider it reads on SARADC channel 1. The kernel's DTB is named here, and the
+# loader hands Linux that DTB by name, so Linux gets the 3E's tree whatever u-boot decided.
+uboot_defconfig         = "radxa-zero-3-rk3566_defconfig"
+kernel_dtb              = "rockchip/rk3566-radxa-zero-3e.dtb"
+
+# No board kconfig: the SoC fragment covers every driver the board uses.
+device_config_fragments = []
+
+supported_kernels       = ["rk3566-mainline-7.3"]
+default_kernel          = "rk3566-mainline-7.3"
+
+# The BL31 is its own axis: rkbin's prebuilt one, or Trusted Firmware-A built from the
+# SoC layer's [tfa] source. The board defaults to rkbin, the BL31 the SoC's DDR init is
+# paired with.
+supported_bl31          = ["rkbin", "tfa"]
+default_bl31            = "rkbin"
+
+supported_suites        = ["forky"]
+default_suite           = "forky"
+default_layout          = "combined"               # combined | split
+hostname                = "radxa-zero-3e"
+image_size              = "2G"
+
+# rkbin (BL31 + DDR TPL) is inherited from socs/rk3566.toml. The board's LPDDR4 is one
+# of the SoC default loader's targets, so it overrides no blobs.
+
+# What no build lifts on this board. Rendered in the support matrix and printed at the
+# end of a build.
+caveats = [
+  "The board boots from microSD only. With no card holding a bootloader, the BootROM falls back to USB maskrom on the Type-C port that powers the board.",
+  "Mainline's device tree describes this board as an RK3566T, so the CPU runs at up to 1.416 GHz and the GPU at up to 700 MHz. Radxa specifies a plain RK3566 at up to 1.6 GHz.",
+]
+
+# The GPU is enabled by the board's device tree, not the SoC's, so its checks are here.
+[[expect]]
+check  = "driver-bound"
+device = "fde60000.gpu"
+driver = "panfrost"
+
+# The render node exists on a headless board with no display attached; its absence
+# means the GPU stack is down, not that nothing is plugged in.
+[[expect]]
+check = "devnode"
+path  = "/dev/dri/renderD128"
+
+[[expect]]
+check  = "driver-bound"
+device = "fe010000.ethernet"
+driver = "rk_gmac-dwmac"

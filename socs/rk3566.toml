@@ -1,0 +1,76 @@
+# socs/rk3566.toml — RK3566 SoC invariants shared across RK3566 boards:
+# arch, DT directory, and the rkbin blob defaults.
+#
+# The RK3566 is the RK3568's smaller package: the same CPU, GPU and media blocks, with
+# fewer I/O lanes. Linux describes both from one rk356x-base.dtsi, rkbin pairs the
+# RK3566's DDR init with the RK3568's BL31, and TF-A builds both as PLAT=rk3568.
+description = "Rockchip RK3566 (4x Cortex-A55, Mali-G52 2EE)"
+arch        = "arm64"
+dt_dir      = "rockchip"                 # arch/arm64/boot/dts/<dt_dir>
+
+# The tooling for the video nodes every RK3566 image has: hantro's decoder and JPEG
+# encoder and the RGA2 are V4L2 devices whether or not a media feature is selected, so
+# the tool that inspects them is homed with the SoC.
+#   v4l-utils -- v4l2-ctl and media-ctl.
+# No firmware package: the Mali-G52 is a Bifrost part panfrost drives with no blob, and
+# the SoC's GMAC needs none.
+packages = [
+    "v4l-utils",
+]
+
+# What no build on this silicon lifts. Rendered in the support matrix and printed at the
+# end of a build; the board layer adds what is true of one board rather than the part.
+caveats = [
+  "The SoC's main video decoder (VDPU346) has no mainline driver in Linux 7.3. Hardware decode is hantro's: H.264 and MPEG-2 up to 1920x1088 and VP8 up to 4K. HEVC and VP9 decode in software.",
+  "The only mainline hardware encoder is JPEG (VEPU121). H.264 and HEVC encode in software.",
+  "The NPU has no mainline driver.",
+]
+
+# rkbin defaults for RK3566 boards. The DDR init is the 1056 MHz build Rockchip's own
+# RK3566 loader manifest (RKBOOT/RK3566MINIALL.ini) names, and the one Radxa's packaging
+# and Armbian ship for the RK3566 boards they support; it carries settings for DDR3,
+# DDR4, LPDDR3, LPDDR4 and LPDDR4X, so a board rarely overrides it. The BL31 is the
+# RK3568's, which rkbin's RKTRUST/RK3568TRUST.ini names for both parts. There is no
+# BL32/OP-TEE.
+[rkbin]
+atf = "rk3568_bl31_v1.46.elf"
+tpl = "rk3566_ddr_1056MHz_v1.26.bin"
+
+# The repository the blobs above are fetched from. The lock pins a commit of it and
+# each file's sha256, and the u-boot stage fetches only the named files at that commit.
+# `update` keeps the locked commit while it still contains every named file, and moves
+# to the head of `ref` when the layer names a file it lacks. `boot2deb outdated` lists
+# `dir` for a newer file spelled like each pinned one.
+[rkbin.upstream]
+git = "https://github.com/rockchip-linux/rkbin.git"
+ref = "master"
+dir = "bin/rk35"
+
+# Trusted Firmware-A, the BL31 a board selects with `bl31 = "tfa"` in place of the rkbin
+# blob above. The `tfa` node builds `make PLAT=rk3568 bl31` in the cross root, and u-boot
+# packs the resulting bl31.elf. The platform serves the CPU and GPU clocks Linux asks
+# for over SCMI, which TF-A added for this platform in v2.14. `ref` is the default
+# constraint; the exact commit is pinned in the lock. A board lists `tfa` in
+# `supported_bl31` once it is validated on it. `submodules` names what the BL31 build
+# reads of the tree's submodules: libfdt, from contrib/dtc.
+[tfa]
+git        = "https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git"
+ref        = "v2.16-rc0"
+plat       = "rk3568"
+submodules = ["contrib/dtc"]
+
+# What every booted RK3566 image must have, checked by boot2deb-selftest.
+#
+# hantro's decoder is enabled in the SoC device tree itself, so it binds on every
+# board. The GPU is not: the SoC tree leaves it disabled and a board enables it, so the
+# GPU checks live on the device layer.
+[[expect]]
+check  = "driver-bound"
+device = "fdea0400.video-codec"
+driver = "hantro-vpu"
+
+# A power-domain or bus fault that leaves a block dead while the boot looks clean.
+# Either spelling in the kernel log is a failed boot.
+[[expect]]
+check   = "no-dmesg-match"
+pattern = "SError|Synchronous External Abort"

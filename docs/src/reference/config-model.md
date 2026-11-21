@@ -411,11 +411,11 @@ against the pinned u-boot, and `patch import` names the recipes an import into i
 invalidates. The series' `applies_to_uboot` envelope gates the build the way
 `applies_to_kernel` gates the kernel one.
 
-A board whose u-boot ships pristine simply declares no series. If it lists some and
-wants none for this build, it selects `"none"`, the same sentinel the kernel axis spells
-as `patch_series = "none"`. Either way the build fetches nothing and the lock omits
-`[uboot_patches]` entirely. Declaring series but no default, with none selected, is a
-config error rather than a silent fallback to pristine.
+A board whose u-boot ships pristine simply declares no series, as the Radxa ZERO 3E
+does. If it lists some and wants none for this build, it selects `"none"`, the same
+sentinel the kernel axis spells as `patch_series = "none"`. Either way the build fetches
+nothing and the lock omits `[uboot_patches]` entirely. Declaring series but no default,
+with none selected, is a config error rather than a silent fallback to pristine.
 
 ### A recipe whose deliverable is the bootloader
 

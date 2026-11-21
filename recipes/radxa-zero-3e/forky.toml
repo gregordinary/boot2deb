@@ -1,0 +1,19 @@
+# recipes/radxa-zero-3e/forky.toml — the Radxa ZERO 3E base image on Debian forky.
+# A minimal image: Debian's standard userland, no feature, and the rk3566-mainline-7.3
+# kernel, which applies no patch series. Hantro, the RGA2 and panfrost are in the
+# kernel.
+#
+# u-boot v2026.10 builds from the board's own defconfig, unpatched, with rkbin's DDR
+# init and BL31.
+# Constraints only; the exact resolution is written to the sibling .lock.
+device     = "radxa-zero-3e"
+kernel     = "rk3566-mainline-7.3"       # omit -> device default_kernel
+suite      = "forky"                     # omit -> device default_suite
+features   = []
+layout     = "combined"                  # omit -> device default_layout
+image_size = "2G"
+
+# `experimental` until an image from this pin boots on the board: nothing has.
+[support]
+status = "experimental"
+date   = "2026-11-18"
