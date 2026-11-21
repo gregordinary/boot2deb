@@ -211,7 +211,8 @@ fn read_entries<R: Read + Seek>(
         return Err("entry array fails its CRC32".into());
     }
     let mut entries = Vec::new();
-    for (i, raw) in bytes.chunks_exact(ENTRY_SIZE as usize).enumerate() {
+    let (rows, _) = bytes.as_chunks::<{ ENTRY_SIZE as usize }>();
+    for (i, raw) in rows.iter().enumerate() {
         if raw.iter().all(|&b| b == 0) {
             continue;
         }
@@ -277,8 +278,10 @@ fn guid(b: &[u8]) -> Uuid {
 /// An entry name: UTF-16LE, NUL-terminated within its 72 bytes.
 fn name(b: &[u8]) -> String {
     let units: Vec<u16> = b
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| u16::from_le_bytes(c))
         .take_while(|&u| u != 0)
         .collect();
     String::from_utf16_lossy(&units)
