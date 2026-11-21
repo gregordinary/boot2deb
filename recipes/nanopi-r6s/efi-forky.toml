@@ -1,0 +1,21 @@
+# recipes/nanopi-r6s/efi-forky.toml — the NanoPi R6S base image on Debian forky, booted
+# through UEFI: u-boot's EFI boot method starts GRUB from the image's EFI system
+# partition, at the removable-media path, and GRUB boots the kernel on the rootfs.
+#
+# Every other pin is the forky recipe's: the rk3588-mainline-7.3 kernel with the
+# rk3588-accel series and the accel/full kconfig, u-boot v2026.10 from the board's own
+# defconfig with the RK3588 SPL clock fix, and Trusted Firmware-A as the BL31.
+# Constraints only; the exact resolution is written to the sibling .lock.
+device     = "nanopi-r6s"
+kernel     = "rk3588-mainline-7.3"       # omit -> device default_kernel
+suite      = "forky"                     # omit -> device default_suite
+features   = []
+layout     = "combined"                  # omit -> device default_layout
+loader     = "efi"                       # omit -> the boot method's default_loader (extlinux)
+bl31       = "tfa"                       # omit -> device default_bl31 (rkbin)
+image_size = "2G"
+
+# `experimental` until an image from this pin boots on the board.
+[support]
+status = "experimental"
+date   = "2026-11-21"

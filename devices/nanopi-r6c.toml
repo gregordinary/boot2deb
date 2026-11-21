@@ -1,0 +1,16 @@
+# devices/nanopi-r6c.toml — FriendlyElec NanoPi R6C (RK3588S) router.
+#
+# The R6S's board with a different port fit: one RTL8125B (2.5 GbE) where the R6S has
+# two, and an M.2 M-key slot (NVMe, PCIe 2.0 x1) on the other PCIe lane. The upstream
+# device trees differ in nothing else that Linux reads: rk3588s-nanopi-r6c.dts includes
+# the same rk3588s-nanopi-r6.dtsi and renames the third LED. Its u-boot defconfig adds
+# NVMe, so u-boot reads a disk in the M.2 slot.
+extends         = "nanopi-r6s"
+description     = "FriendlyElec NanoPi R6C (RK3588S) router"
+uboot_defconfig = "nanopi-r6c-rk3588s_defconfig"
+kernel_dtb      = "rockchip/rk3588s-nanopi-r6c.dtb"
+hostname        = "nanopi-r6c"
+
+# Everything else, from the SoC, the u-boot series and the BL31 choice to the kernel
+# set, the suites, the HDMI audio fragment and the caveats, is the R6S's and is
+# inherited.

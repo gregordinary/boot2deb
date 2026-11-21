@@ -9,7 +9,7 @@ u-boot × suite × features × layout. Those layers resolve to that point, and o
 lock pins it.
 
 It is a typed, unit-tested Rust workspace, and every axis and layer merge is validated
-before a build runs. It ships recipes for seven boards, which are usable images and **worked
+before a build runs. It ships recipes for nine boards, which are usable images and **worked
 examples of unlike hardware**. What makes a Chromebook different from a compute module is
 visible in the config.
 
@@ -63,12 +63,13 @@ output against the original's record. Package churn in a rolling suite is pinned
 
 ## Shipped boards
 
-The seven shipped configurations are deliberately unalike. Between them they exercise every
+The nine shipped configurations are deliberately unalike. Between them they exercise every
 axis of the model, so the nearest example to a board you care about is usually one of them.
 
 | Board | SoC / arch | What this example shows |
 | --- | --- | --- |
 | [Turing RK1](https://gregordinary.github.io/boot2deb/boards/turing-rk1.html) | RK3588 / arm64 | The full pipeline: a patched mainline kernel, u-boot written into the disk's raw gap, and an optional Rockchip media userspace (MPP + RGA + ffmpeg-rk) built in a target-arch sandbox |
+| [NanoPi R6S · R6C](https://gregordinary.github.io/boot2deb/boards/nanopi-r6s.html) | RK3588S / arm64 | A second board on the RK1's SoC layer and kernel: a device file and one kconfig line, with the R6C a variant that `extends` it. Its BL31 is Trusted Firmware-A built from source rather than rkbin's blob |
 | [H96 MAX M9](https://gregordinary.github.io/boot2deb/boards/h96-max-m9.html) | RK3576 / arm64 | A board mainline does not know: its device tree ships with the config, its Wi-Fi driver is an out-of-tree `kmods/` layer, and its u-boot is its own axis. Some recipes deliver only a maskrom-streamable bootloader |
 | [ASUS Chromebook C201](https://gregordinary.github.io/boot2deb/boards/asus-c201.html) | RK3288 / armhf | The opposite extreme: 32-bit, Debian's own kernel, ChromeOS firmware in SPI. It compiles nothing, its lock pins nothing from git, and the deliverable is a vboot-signed kernel in a ChromeOS partition. A/B slots make a bad kernel upgrade cost one reboot |
 | [ASUS C100P](https://gregordinary.github.io/boot2deb/boards/asus-c100p.html) · [Chromebit CS10](https://gregordinary.github.io/boot2deb/boards/asus-chromebit-cs10.html) | RK3288 / armhf | What a board costs once its family is here: one device file each, no overlay, no kernel, no code. Everything shared lives on the SoC layer |

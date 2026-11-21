@@ -22,6 +22,7 @@
 # Boards
 
 - [Turing RK1](boards/turing-rk1.md)
+- [NanoPi R6S and R6C](boards/nanopi-r6s.md)
 - [H96 MAX M9](boards/h96-max-m9.md)
 - [Rockchip RK3576 EVB1 v10](boards/rk3576-evb1-v10.md)
 - [Radxa ZERO 3E](boards/radxa-zero-3e.md)

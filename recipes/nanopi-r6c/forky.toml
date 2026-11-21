@@ -1,0 +1,24 @@
+# recipes/nanopi-r6c/forky.toml — the NanoPi R6C base image on Debian forky.
+# A minimal image: Debian's standard userland, no feature, and the
+# rk3588-mainline-7.3 kernel with the rk3588-accel series and the accel/full kconfig.
+# The video, RGA and NPU drivers are in the kernel and the Rockchip media userspace is
+# not in the image.
+#
+# The BL31 is Trusted Firmware-A, built from the SoC layer's [tfa] source, in place
+# of rkbin's prebuilt one. The DDR init stays rkbin's.
+# Constraints only; the exact resolution is written to the sibling .lock.
+device     = "nanopi-r6c"
+kernel     = "rk3588-mainline-7.3"       # omit -> device default_kernel
+suite      = "forky"                     # omit -> device default_suite
+features   = []
+layout     = "combined"                  # omit -> device default_layout
+bl31       = "tfa"                       # omit -> device default_bl31 (rkbin)
+image_size = "2G"
+
+# The pins are nanopi-r6s/forky's, which says what v7.3.4 moves on this image's paths.
+#
+# `experimental` until an image from this pin boots on the board: nothing has, on either
+# BL31.
+[support]
+status = "experimental"
+date   = "2026-11-21"

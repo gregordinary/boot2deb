@@ -1,0 +1,55 @@
+# devices/nanopi-r6s.toml — FriendlyElec NanoPi R6S (RK3588S) router.
+# Hardware invariants + defaults; a device states only its deltas.
+#
+# The RK3588S is the RK3588's smaller package: the same CPU, GPU, NPU, video and RGA
+# blocks, with fewer I/O lanes. Its device trees build on the same rk3588-base.dtsi,
+# so the RK3588 SoC layer, kernel definition and patch series serve it unchanged.
+description             = "FriendlyElec NanoPi R6S (RK3588S) router"
+soc                     = "rk3588"                 # -> arch, dt_dir, modules, rkbin, tfa
+boot_method             = "rockchip-rkbin"         # default within supported_boot_methods
+supported_boot_methods  = ["rockchip-rkbin"]
+
+# Both are upstream: u-boot has the defconfig, and the kernel builds the DTB from its
+# own tree. The board's three ethernet ports are the SoC's GMAC1 (an RTL8211F PHY,
+# 1 GbE) and two RTL8125B controllers on the PCIe 2.0 x1 lanes (2.5 GbE). u-boot gives
+# GMAC1 its MAC address, derived from the SoC's OTP CPU ID, through the device tree's
+# `ethernet0` alias, so the address is stable across boots with no first-boot step.
+# The RTL8125Bs load rtl_nic firmware from firmware-realtek, which the SoC layer
+# installs.
+uboot_defconfig         = "nanopi-r6s-rk3588s_defconfig"
+kernel_dtb              = "rockchip/rk3588s-nanopi-r6s.dtb"
+
+# The board's u-boot is upstream's plus one SoC fix, the `rk3588-uboot-fixes` series.
+# SPL programs SPLL, the clock of the SoC's center interconnect between the bus masters
+# and the DDR controllers, only when a boot device asks the secure clock unit for a
+# clock. The microSD controller does, and the eMMC does not, so without the fix an eMMC
+# boot leaves SPLL at the BootROM's rate. The fix sets it whatever the boot device.
+supported_uboot_series  = ["rk3588-uboot-fixes"]
+default_uboot_series    = "rk3588-uboot-fixes"
+
+# The HDMI audio interface, the one board delta the shared RK3588 kconfig lacks.
+device_config_fragments = ["device/nanopi-r6s"]
+
+supported_kernels       = ["rk3588-mainline-7.3"]
+default_kernel          = "rk3588-mainline-7.3"
+
+# The BL31 is its own axis: rkbin's prebuilt one, or Trusted Firmware-A built from the
+# SoC layer's [tfa] source. The board defaults to rkbin, the BL31 the SoC's DDR init is
+# paired with; the shipped recipe selects tfa.
+supported_bl31          = ["rkbin", "tfa"]
+default_bl31            = "rkbin"
+
+supported_suites        = ["forky"]
+default_suite           = "forky"
+default_layout          = "combined"               # combined | split
+hostname                = "nanopi-r6s"
+image_size              = "2G"
+
+# rkbin (BL31 + DDR TPL) is inherited from socs/rk3588.toml. The board's LPDDR4X is
+# the SoC default loader's target, so it overrides no blobs.
+
+# What no build lifts on this board. Rendered in the support matrix and printed at the
+# end of a build.
+caveats = [
+  "The BootROM reads the eMMC before the microSD slot, so a bootloader on the eMMC (the factory FriendlyWrt has one) boots instead of a card. Boot a card by erasing the eMMC's first 16 MiB, or write the image to the eMMC itself.",
+]
